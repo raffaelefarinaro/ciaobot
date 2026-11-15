@@ -1,14 +1,11 @@
-import { existsSync } from 'node:fs'
 import { expect, test, type Page, type TestInfo } from '@playwright/test'
 import { COMPOSER, openChatDetails, settled } from '../support/app'
 
 /**
  * The needs-you stack's key control, in a real browser.
  *
- * The stack is capped at min(42vh, 380px) and scrolls inside itself. On a
- * phone a sign-in card taller than the cap showed its top only, so Finish
- * sign-in sat under the composer. jsdom cannot measure that cap, so this is a
- * browser spec: it needs the real layout of the stack against the composer.
+ * The generic stack is capped and scrolls inside itself. MCP sign-in lives in
+ * Chat details; its remote callback must remain accessible inside that panel.
  *
  * The page is served on a host name that is not loopback, which is what makes
  * the paste field appear. A session cookie for that host is set on the context;
@@ -17,9 +14,8 @@ import { COMPOSER, openChatDetails, settled } from '../support/app'
 const HOST = 'ciao.test'
 const CHAT_ID = 'alpha-chat-1'
 const CHAT_PATH = `/chat/${CHAT_ID}`
-const HAS_MCP_SIDEBAR = existsSync(new URL('../../src/components/ChatMcpConnections.vue', import.meta.url))
 
-async function openMcpTestSurface(page: Page): Promise<{ root: ReturnType<Page['locator']>; sidebar: boolean }> {
+async function openMcpTestSurface(page: Page): Promise<ReturnType<Page['locator']>> {
   const detailsAside = page.locator('aside').filter({ has: page.getByRole('heading', { name: 'Chat details' }) })
   const hideDetails = detailsAside.getByRole('button', { name: 'Hide chat details' })
   if (!(await detailsAside.isVisible())) {
@@ -29,13 +25,8 @@ async function openMcpTestSurface(page: Page): Promise<{ root: ReturnType<Page['
   }
   await expect(hideDetails).toBeVisible()
   const rail = detailsAside.locator('.chat-mcp-connections')
-  if (HAS_MCP_SIDEBAR) {
-    await expect(rail).toBeVisible()
-    return { root: rail, sidebar: true }
-  }
-  await expect(rail).toHaveCount(0)
-  await hideDetails.click()
-  return { root: page.locator('.chat-column .needs-you-stack'), sidebar: false }
+  await expect(rail).toBeVisible()
+  return rail
 }
 
 test.use({
@@ -66,7 +57,7 @@ async function openOffLoopback(page: Page, session: string): Promise<void> {
   expect(await page.evaluate(() => location.hostname)).toBe(HOST)
 }
 
-/** The sign-in whose card is taller than the stack's cap, as on a phone. */
+/** A remote sign-in with a callback field. */
 const SIGN_IN = {
   kind: 'mcp_auth',
   state: 'waiting',
@@ -79,13 +70,13 @@ const SIGN_IN = {
 }
 
 test.describe('the needs-you stack on a phone', () => {
-  test('an off-loopback sign-in shows Finish sign-in above the composer', async ({ page }, testInfo: TestInfo) => {
+  test('an off-loopback sign-in keeps Finish sign-in within the sidebar', async ({ page }, testInfo: TestInfo) => {
     const session = `nys-primary-${testInfo.workerIndex}`
     await raise(page, session, SIGN_IN)
     await openOffLoopback(page, session)
 
-    const { root, sidebar } = await openMcpTestSurface(page)
-    const stack = sidebar ? root : page.locator('.needs-you-stack')
+    const root = await openMcpTestSurface(page)
+    const stack = root
     const finish = root.locator('.needs-you-card').getByRole('button', { name: 'Finish sign-in' })
     await expect(finish).toBeVisible()
 
@@ -98,13 +89,8 @@ test.describe('the needs-you stack on a phone', () => {
 
     const button = (await finish.boundingBox())!
     expect(button.y).toBeGreaterThanOrEqual(0)
-    if (sidebar) {
-      const rail = (await root.boundingBox())!
-      expect(button.y + button.height).toBeLessThanOrEqual(rail.y + rail.height + 0.5)
-    } else {
-      const composer = (await page.locator(COMPOSER).boundingBox())!
-      expect(button.y + button.height, 'Finish sign-in sits under the composer').toBeLessThanOrEqual(composer.y + 0.5)
-    }
+    const rail = (await root.boundingBox())!
+    expect(button.y + button.height).toBeLessThanOrEqual(rail.y + rail.height + 0.5)
 
     // Nothing covers it: the element at its centre is the button itself.
     const covered = await finish.evaluate(
@@ -114,7 +100,7 @@ test.describe('the needs-you stack on a phone', () => {
     expect(covered).toBe(true)
   })
 
-  test('a device code under a sign-in card is scrolled into view', async ({ page }, testInfo: TestInfo) => {
+  test('a device code under a command card is scrolled into view', async ({ page }, testInfo: TestInfo) => {
     const session = `nys-device-${testInfo.workerIndex}`
     await raise(page, session, { kind: 'command', state: 'open', params: { command: 'echo review-only', note: 'Review this command' } })
     await openOffLoopback(page, session)
@@ -145,5 +131,23 @@ test.describe('the needs-you stack on a phone', () => {
     expect(await page.evaluate(() => window.scrollY)).toBe(beforeScroll)
     expect(await page.evaluate(el => document.activeElement === el, beforeFocus)).toBe(true)
     await beforeFocus.dispose()
+    expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true)
+    await testInfo.attach('phone-generic-stack', { body: await page.screenshot(), contentType: 'image/png' })
+  })
+})
+
+test.describe('the needs-you stack on desktop', () => {
+  test.use({ viewport: { width: 1440, height: 900 }, hasTouch: false, isMobile: false })
+
+  test('keeps a generic command above the composer', async ({ page }, testInfo: TestInfo) => {
+    const session = `nys-desktop-${testInfo.workerIndex}`
+    await raise(page, session, { kind: 'command', state: 'open', params: { command: 'echo review-only', note: 'Review this command' } })
+    await openOffLoopback(page, session)
+    const stack = page.locator('.needs-you-stack')
+    await expect(stack.locator('.needs-you-card')).toBeVisible()
+    const box = (await stack.boundingBox())!
+    const composer = (await page.locator(COMPOSER).boundingBox())!
+    expect(box.y + box.height).toBeLessThanOrEqual(composer.y + 0.5)
+    await testInfo.attach('desktop-generic-stack', { body: await page.screenshot(), contentType: 'image/png' })
   })
 })

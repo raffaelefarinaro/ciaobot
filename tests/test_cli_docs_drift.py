@@ -1,11 +1,12 @@
 """The documented `ciao` command set must match the parsers (#1471).
 
-`ciao-cli/SKILL.md` is the full reference; the core prompt carries a compact
-synopsis of the common commands (#1464). The parsers in `ciao/agent_cli.py` (`ciao <noun> <verb>`) and
-`ciao/cli.py` (top-level commands) are the truth. These tests derive the
-documented set from the skill and compare it to the parsers in both
-directions, so a renamed flag, a verb that never existed or an agent verb nobody
-documented fails here instead of misleading a model.
+The complete `ciao help` reference is the full documentation; the core prompt
+carries a compact synopsis of the common commands (#1464). The parsers in
+`ciao/agent_cli.py` (`ciao <noun> <verb>`) and `ciao/cli.py` (top-level
+commands) are the truth. These tests derive the documented set from the
+complete reference and compare it to the parsers in both directions, so a
+renamed flag, a verb that never existed or an agent verb nobody documented
+fails here instead of misleading a model.
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ from ciao import agent_cli
 from ciao import cli as operator_cli
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = (ROOT / "ciao/stock/skills/ciao-cli/SKILL.md").read_text(encoding="utf-8")
+SKILL = agent_cli._help_text()
 PROMPT = (ROOT / "ciao/system_prompt.md").read_text(encoding="utf-8")
 
 _FLAG = re.compile(r"(?<![\w-])--[a-z][a-z-]*")
@@ -115,7 +116,7 @@ def documented_in_skill(leaves: set[Leaf]) -> Documented:
             continue
         cell = row.group(1)
         leaf = _match_leaf(cell, leaves)
-        assert leaf is not None, f"ciao-cli/SKILL.md documents `{cell}`, which is not a command"
+        assert leaf is not None, f"the complete CLI reference documents `{cell}`, which is not a command"
         every, required = _split_flags(cell[len(" ".join(leaf)):])
         if "...flags" in cell:
             every |= sched_flags
@@ -238,8 +239,8 @@ def test_skill_tables_match_the_parsers() -> None:
     agent, operator = _all_leaves()
     surface = {**agent, **operator}
     documented = documented_in_skill(set(surface))
-    assert drift_problems(documented, surface, where="ciao-cli/SKILL.md") == []
-    assert sorted(set(agent) - set(documented)) == [], "agent verbs missing from ciao-cli/SKILL.md"
+    assert drift_problems(documented, surface, where="complete CLI reference") == []
+    assert sorted(set(agent) - set(documented)) == [], "agent verbs missing from the complete CLI reference"
 
 
 @pytest.mark.parametrize(

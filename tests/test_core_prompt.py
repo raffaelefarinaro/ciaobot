@@ -223,9 +223,9 @@ def test_rules_carry_a_reason_in_the_same_bullet() -> None:
     assert "output lands in transcripts and replies" in bullet("never quote credentials")
     assert "public and permanent" in bullet("Public GitHub issues")
     # Secret handling moves with the webhook procedure, reachable via help.
-    from pathlib import Path
+    from ciao import agent_cli
 
-    reference = (Path(mi.__file__).parent / "stock/skills/ciao-cli/SKILL.md").read_text(encoding="utf-8")
+    reference = agent_cli._help_text()
     assert "never save a copy in notes, memory or source files" in reference
 
 
@@ -281,3 +281,11 @@ def test_disclosed_memory_procedures_remain_available() -> None:
         "`ciao file surface",
     ):
         assert instruction in procedures, instruction
+
+
+def test_system_prompt_points_operator_steps_to_sidebar_terminal() -> None:
+    payload = mi.system_prompt_payload("")
+    assert payload is not None
+    text = payload["append"]
+    for fact in ("Chat details → Open → Terminal", "engine's computer", "cannot drive", "bypass permissions", "dedicated sign-in", "`/mcp`", "navigation", "provider TUI"):
+        assert fact in text

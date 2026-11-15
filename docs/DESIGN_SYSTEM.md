@@ -388,6 +388,10 @@ The existing four TabBar mappings remain unchanged.
 | same | long-content | `foundation-sidebar-row--long-content` |
 | `web/src/components/SidebarListSkeleton.vue` | loading | `foundation-sidebar-list-skeleton--loading` |
 | same | nested | `foundation-sidebar-list-skeleton--nested` |
+| `web/src/components/settings/SettingsSwitch.vue` | default | `settings-switch--on`, `settings-switch--off` |
+| same | disabled | `settings-switch--disabled-on`, `settings-switch--disabled-off` |
+| same | busy | `settings-switch--busy` |
+| same | narrow | `settings-switch--narrow` |
 
 Row stories omit `to`: they show the plain-div appearance, not navigation,
 focus, host controls, clicks, disabled state or every prop combination. Pending
@@ -396,6 +400,14 @@ wrapper with meta. Skeleton loading uses one group of three rows; nested uses
 two groups of two rows and one status announcement. Its composed placeholders
 do not separately mark SidebarRow's placeholder state covered. Other unknown
 or uncovered states stay open; no other skeleton or consumer gains coverage.
+
+SettingsSwitch stories render the controlled production native button; the
+wrapper feeds toggle events back into checked. Busy shows an ellipsis and
+`aria-busy` but remains enabled unless explicitly disabled. Narrow uses a
+maximum 390px container. Keyboard-focus and reduced-motion have no dedicated
+stories. Only the vault-check and restart-resume cards use this shared switch
+so far; their persistence, parent loading fidelity and connected-screen story
+coverage are unchanged. Legacy switch styles remain for unmigrated consumers.
 
 The Node inventory tests reject wrong owners, states and exact ID sets.
 `npm run build-storybook` additionally checks all registry-linked IDs against

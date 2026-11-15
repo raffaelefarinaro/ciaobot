@@ -5,7 +5,7 @@ import {
   PopoverRoot,
   PopoverTrigger,
 } from 'reka-ui'
-import { computed, nextTick, onMounted, ref, useId, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 
 export interface ModelSection {
   key: string
@@ -60,7 +60,7 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<{
   'update:modelValue': [value: string | string[]]
   select: [value: string | string[], sectionKey: string]
-  close: []
+  close: [reason: 'escape' | 'other']
 }>()
 
 const open = ref(false)
@@ -75,6 +75,11 @@ const rootRef = ref<HTMLElement | null>(null)
 const triggerRef = ref<HTMLElement | null>(null)
 const searchRef = ref<HTMLInputElement | null>(null)
 const listRef = ref<HTMLElement | null>(null)
+let preserveFocusOnUnmount = false
+onBeforeUnmount(() => {
+  const active = document.activeElement
+  preserveFocusOnUnmount = !!active && active !== document.body && !rootRef.value?.contains(active)
+})
 
 const effectiveValue = computed<string | string[]>(() => {
   if (props.multiple) return Array.isArray(props.modelValue) ? props.modelValue : []
@@ -155,15 +160,22 @@ function onPopoverOpenChange(nextOpen: boolean): void {
     })
     return
   }
-  close()
+  close('other')
 }
 
-function close() {
+function close(reason: 'escape' | 'other' = 'other') {
   const returnFocus = !props.triggerless ? triggerRef.value : null
+  const active = document.activeElement
+  const shouldReturnFocus = !active || active === document.body || !!rootRef.value?.contains(active)
   open.value = false
   query.value = ''
-  if (returnFocus) nextTick(() => returnFocus.focus())
-  if (props.triggerless) emit('close')
+  if (returnFocus && shouldReturnFocus) nextTick(() => {
+    const current = document.activeElement
+    if (returnFocus.isConnected && (!current || current === document.body || rootRef.value?.contains(current))) {
+      returnFocus.focus()
+    }
+  })
+  if (props.triggerless) emit('close', reason)
 }
 
 function selectModel(model: string, sectionKey: string) {
@@ -181,7 +193,7 @@ function selectModel(model: string, sectionKey: string) {
   } else {
     emit('update:modelValue', model)
     emit('select', model, sectionKey)
-    close()
+    close('other')
   }
 }
 
@@ -236,8 +248,7 @@ function onKeydown(event: KeyboardEvent) {
     // half-finished Settings edits.
     event.preventDefault()
     event.stopPropagation()
-    close()
-    triggerRef.value?.focus()
+    close('escape')
     return
   }
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -290,21 +301,28 @@ function onOpenAutoFocus(event: Event): void {
   focusSearch()
 }
 
+function onCloseAutoFocus(event: Event): void {
+  // Never override focus that has already moved outside the picker.
+  const active = document.activeElement
+  if (preserveFocusOnUnmount || (active && active !== document.body && !rootRef.value?.contains(active))) {
+    event.preventDefault()
+  }
+}
+
 function onEscapeKeyDown(event: KeyboardEvent): void {
   // Claim Escape locally. ChatLayout treats an unclaimed Escape as navigation
   // away from the current pane.
   event.preventDefault()
   event.stopPropagation()
-  close()
+  close('escape')
 }
 
 watch(popoverVisible, (visible) => {
   if (visible) focusSearch()
 })
 
-// Auto-focus the search input and scroll active item into view whenever the
-// filtered list changes while open.
-watch(filteredSections, () => {
+// Search edits retain focus; prop/section changes must not steal footer focus.
+watch(query, () => {
   if (popoverVisible.value) {
     nextTick(() => {
       searchRef.value?.focus()
@@ -365,6 +383,7 @@ onMounted(() => {
         :position-strategy="'fixed'"
         :update-position-strategy="'always'"
         @open-auto-focus="onOpenAutoFocus"
+        @close-auto-focus="onCloseAutoFocus"
         @escape-key-down="onEscapeKeyDown"
       >
         <div
@@ -453,9 +472,9 @@ onMounted(() => {
             No models match "{{ query }}"
           </div>
 
+          </div>
           <div v-if="$slots.footer" class="model-selector__footer">
             <slot name="footer" />
-          </div>
           </div>
         </div>
       </PopoverContent>
@@ -533,7 +552,10 @@ onMounted(() => {
   /* Popper supplies the fixed placement and collision transform. The
      component's own styles only describe the elevated surface. */
   z-index: 300;
-  min-width: 320px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: min(320px, calc(100vw - 24px));
   max-width: min(480px, calc(100vw - 24px));
   max-height: min(420px, calc(100dvh - var(--safe-top) - var(--safe-bottom) - 32px));
   background: var(--bg2);
@@ -546,7 +568,8 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  max-height: inherit;
+  flex: 1 1 auto;
+  overflow: visible;
 }
 
 .model-selector__search-wrap {
@@ -576,6 +599,7 @@ onMounted(() => {
   overflow-y: auto;
   padding: 6px;
   flex: 1 1 auto;
+  min-height: 0;
 }
 
 .model-selector__section {
@@ -755,10 +779,36 @@ onMounted(() => {
 
 .model-selector__footer {
   flex: 0 0 auto;
+  min-height: 0;
+  overflow-y: auto;
   padding: 8px 10px;
   border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
   background: var(--bg2);
   border-radius: 0 0 var(--radius) var(--radius);
+}
+
+@media (max-height: 600px) {
+  .model-selector__footer {
+    flex: 0 1 auto;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: var(--fg2) var(--bg3);
+  }
+
+  .model-selector__footer::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  .model-selector__footer::-webkit-scrollbar-track {
+    background: var(--bg3);
+    border-radius: 999px;
+  }
+
+  .model-selector__footer::-webkit-scrollbar-thumb {
+    background: var(--fg2);
+    border: 2px solid var(--bg3);
+    border-radius: 999px;
+  }
 }
 
 .model-selector__header {

@@ -83,11 +83,12 @@
           class="btn-icon work-inspector-trigger work-inspector-trigger--header"
           :aria-expanded="inspectorOpen"
           :aria-controls="domId('chat-work-rail')"
-          aria-label="Show chat details"
+          :aria-label="detailsTriggerLabel"
           title="Show chat details"
           @click="toggleWorkDetails"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
+          <span v-if="closedMcpProblemCount" class="chat-mcp-indicator" aria-hidden="true"></span>
         </button>
         <!-- Archive is the header's one action, so it gets words, not just a
              glyph. Chat details opens from the info tab and hides from its own heading. -->
@@ -109,6 +110,7 @@
           ref="moreMenu"
           class="chat-more"
           :can-archive="!chat.archived"
+          :mcp-problems="closedMcpProblemCount"
           @details="showDetailsFromMenu"
           @archive="doArchive"
         />
@@ -132,11 +134,12 @@
       class="btn-icon work-inspector-trigger"
       :aria-expanded="false"
       :aria-controls="domId('chat-work-rail')"
-      aria-label="Show chat details"
+      :aria-label="detailsTriggerLabel"
       title="Show chat details"
       @click="toggleWorkDetails"
     >
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
+      <span v-if="closedMcpProblemCount" class="chat-mcp-indicator" aria-hidden="true"></span>
     </button>
     <div
       ref="chatColumnEl"
@@ -897,12 +900,10 @@
       </div>
     </div>
 
-    <!-- Needs-you cards: what this chat is waiting on the user for (an MCP
-         sign-in, ...). Above the queue and the composer. Keyed by id: a
-         replaced action is a new card. The stack folds several untouched
-         sign-ins into one row and caps its height, so the transcript keeps
-         its room. -->
-    <NeedsYouStack :chat-id="chat.chat_id" :actions="needsYouActions" @release-focus="focusComposerAfterCard" />
+    <!-- Needs-you cards: generic actions this chat is waiting on the user for.
+         Kept above the queue and composer, keyed by action id so a replaced
+         action becomes a new card. MCP recovery remains in Chat details. -->
+    <NeedsYouStack :chat-id="chat.chat_id" :actions="needsYouActions" />
 
     <!-- Queued messages (sent while a response was already streaming). -->
     <div v-if="view.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
@@ -1155,6 +1156,7 @@
             @focus="handleInputFocus"
             @click="refreshComposerPickers"
           ></textarea>
+          <p v-if="isMcpToken" :id="domId('mcp-shortcut-hint')" class="hint">{{ mcpUnavailableReason || 'Open MCP connections — no message is sent' }}</p>
           <div
             class="input-actions composer-bar"
             ref="composerBarEl"
@@ -1168,6 +1170,7 @@
             <div class="model-picker-wrap composer-model" ref="modelPickerRef">
               <button
                 type="button"
+                ref="composerModelTrigger"
                 class="model-picker-summary composer-chip"
                 :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${chipModelLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
                 aria-haspopup="listbox"
@@ -1183,14 +1186,14 @@
                 triggerless
                 :model-value="canonicalTier(activeModelId)"
                 :active-models="activeModelHighlights"
-                :sections="chatModelSections"
+                :sections="pickerModelSections"
                 :filter-section="capabilityPickerSection"
                 placeholder="Model"
                 placement="top-start"
                 :labelled-by="isRecoveryPicker ? domId('model-picker-recovery-title') : ''"
                 :described-by="isRecoveryPicker ? domId('model-picker-recovery-note') : ''"
                 @select="selectModel"
-                @close="showModelPicker = false"
+                @close="handleModelPickerClose"
               >
                 <template v-if="isRecoveryPicker" #header>
                   <div class="model-picker-recovery">
@@ -1201,24 +1204,45 @@
                   </div>
                 </template>
                 <template #footer>
-                  <div
-                    v-if="showThinkingLevels"
-                    class="thinking-levels"
-                  >
-                    <span :id="domId('thinking-levels-label')" class="thinking-levels__label">Thinking</span>
-                    <div class="thinking-levels__chips" role="group" :aria-labelledby="domId('thinking-levels-label')">
-                      <button
-                        v-for="level in ['', ...filteredThinkingLevels]"
-                        :key="level"
-                        type="button"
-                        class="thinking-chip"
-                        :class="{ 'thinking-chip--active': thinkingChipLevel === level }"
-                         :aria-pressed="thinkingChipLevel === level"
-                         :disabled="isRecoveryPicker"
-                        @click="selectThinking(level)"
-                      >
-                        {{ level ? level.charAt(0).toUpperCase() + level.slice(1) : 'Auto' }}
-                      </button>
+                  <div class="picker-footer-groups">
+                    <div v-if="showThinkingLevels" class="thinking-levels">
+                      <span :id="domId('thinking-levels-label')" class="thinking-levels__label">Thinking</span>
+                      <div class="thinking-levels__chips" role="group" :aria-labelledby="domId('thinking-levels-label')">
+                        <button
+                          v-for="level in ['', ...filteredThinkingLevels]"
+                          :key="level"
+                          type="button"
+                          class="thinking-chip"
+                          :class="{ 'thinking-chip--active': thinkingChipLevel === level }"
+                          :aria-pressed="thinkingChipLevel === level"
+                          :disabled="isRecoveryPicker || modeWritePending"
+                          @click="selectThinking(level)"
+                        >
+                          {{ level ? level.charAt(0).toUpperCase() + level.slice(1) : 'Auto' }}
+                        </button>
+                      </div>
+                    </div>
+                    <div v-if="!isRecoveryPicker" class="permission-modes">
+                      <span :id="domId('permission-mode-label')" class="thinking-levels__label">Permission mode</span>
+                      <div class="permission-modes__choices" role="group" :aria-labelledby="domId('permission-mode-label')">
+                        <button
+                          v-for="mode in permissionModes"
+                          :key="mode"
+                          type="button"
+                          class="thinking-chip permission-mode"
+                          :class="{ 'thinking-chip--active': chat.mode === mode }"
+                          :aria-pressed="chat.mode === mode"
+                          :disabled="modeWritePending"
+                          @click="selectPermissionMode(mode)"
+                        >
+                          <span>{{ PERMISSION_MODE_COPY[mode].name }}</span>
+                          <span class="permission-mode__description">{{ PERMISSION_MODE_COPY[mode].allows }}</span>
+                          <span v-if="chat.mode === mode" class="permission-mode__check" aria-hidden="true">✓</span>
+                        </button>
+                      </div>
+                      <p v-if="!isBridgeMode(chat.mode)" class="permission-modes__unknown">Current mode is unknown.</p>
+                      <p class="permission-modes__note">Changes apply to subsequent turns, not the reply already running. Already queued or external turns may start before a change is saved.</p>
+                      <p v-if="modeWritePending" class="permission-modes__status" role="status">Saving permission mode… Sending from this composer is paused.</p>
                     </div>
                   </div>
                 </template>
@@ -1240,7 +1264,7 @@
               :stop-errors="store.stopTaskErrors[chat.chat_id]"
               @open-details="openRunDetails"
             />
-            <span v-if="inputText.trim()" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
+            <span v-if="inputText.trim() && !isMcpToken" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
             <button
               v-if="showMoveToBackground"
               ref="moveBtnEl"
@@ -1254,6 +1278,14 @@
               <span class="composer-move-bg-long">Move to background</span>
               <span class="composer-move-bg-short" aria-hidden="true">Background</span>
             </button>
+            <button
+              v-if="view.isStreaming && isMcpToken"
+              type="button"
+              class="btn-small"
+              :aria-label="mcpActionLabel"
+              :aria-describedby="domId('mcp-shortcut-hint')"
+              @click="send"
+            >{{ mcpActionLabel }}</button>
             <!-- While streaming: empty composer → stop; any draft → queue. -->
             <button
               class="send-btn"
@@ -1261,6 +1293,7 @@
               :disabled="!showStopAction && !canSend"
               :title="primaryActionTitle"
               :aria-label="primaryActionLabel"
+              :aria-describedby="isMcpToken && !showStopAction ? domId('mcp-shortcut-hint') : undefined"
               @click="primaryAction"
             >
               <svg v-if="showStopAction" class="stop-icon" width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" /></svg>
@@ -1352,6 +1385,7 @@
       </section>
       <ChatMcpConnections
         v-if="!chat.archived && chatMcpProvider"
+        ref="mcpConnections"
         :chat-id="chat.chat_id"
         :provider="chatMcpProvider"
         :controller="chatMcp"
@@ -1533,6 +1567,7 @@ import { errorNoticePrompt, parseInjectedPrompt, retryScheduledNotice, type Inje
 import { linkifyText } from '../lib/filePaths'
 import { isChatId } from '../lib/chatLinks'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
+import { isBridgeMode, PERMISSION_MODE_COPY, type BridgeMode } from '../lib/permissionModes'
 import { canOfferMoveToBackground, shouldRestoreFocus } from '../lib/moveToBackground'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
@@ -1741,10 +1776,12 @@ const hasComposerContent = computed(() =>
 // Send waits for every upload in flight to settle, so a file is never sent
 // before the server has it.
 const uploadsInFlight = computed(() => uploads.value.length > 0)
-const canSend = computed(() => hasComposerContent.value && !uploadsInFlight.value)
+const isMcpToken = computed(() => inputText.value.trim().toLowerCase() === '/mcp')
+const modeWritePending = computed(() => (store.pendingChatModeWrites[chat.value?.chat_id || ''] || 0) > 0)
+const canSend = computed(() => isMcpToken.value || (!modeWritePending.value && hasComposerContent.value && !uploadsInFlight.value))
 // Empty composer while a turn is in flight → stop; otherwise the same
 // button queues/sends the draft.
-const showStopAction = computed(() => view.isStreaming && !hasComposerContent.value && !uploadsInFlight.value)
+const showStopAction = computed(() => view.isStreaming && (isMcpToken.value || !hasComposerContent.value))
 const moveBtnEl = ref<HTMLButtonElement | null>(null)
 const composerBarEl = ref<HTMLElement | null>(null)
 const movingToBackground = ref(false)
@@ -1782,12 +1819,16 @@ async function moveToBackground() {
 }
 const primaryActionTitle = computed(() => {
   if (showStopAction.value) return 'Stop'
+  if (isMcpToken.value) return mcpActionLabel.value
+  if (modeWritePending.value) return 'Wait for the permission mode to save'
   if (uploadsInFlight.value) return 'Wait for the upload to finish'
   if (view.isStreaming) return 'Queue message (sends when current turn finishes)'
   return 'Send'
 })
 const primaryActionLabel = computed(() => {
   if (showStopAction.value) return 'Stop generation'
+  if (isMcpToken.value) return mcpActionLabel.value
+  if (modeWritePending.value) return 'Wait for the permission mode to save'
   if (uploadsInFlight.value) return 'Wait for the upload to finish'
   if (view.isStreaming) return 'Queue message'
   return 'Send message'
@@ -1815,6 +1856,12 @@ const chatMcpProvider = computed<'claude' | 'opencode' | null>(() => {
   const provider = chat.value?.provider
   return provider === 'claude' || provider === 'opencode' ? provider as 'claude' | 'opencode' : null
 })
+const mcpUnavailableReason = computed(() => {
+  if (!chatMcpProvider.value) return "MCP details are unavailable for this chat's provider."
+  if (!store.projects.find(p => p.project_id === chat.value?.project_id)?.workspace?.trim()) return "This chat's workspace is not available yet. Try again after it loads."
+  return ''
+})
+const mcpActionLabel = computed(() => mcpUnavailableReason.value ? 'Why MCP details are unavailable' : 'Open MCP connections')
 const chatMcp = useChatMcpConnections({
   workspace: () => store.projects.find(p => p.project_id === chat.value?.project_id)?.workspace ?? '',
   provider: () => chat.value?.provider ?? '',
@@ -1857,7 +1904,7 @@ function selectAdjacentChat(direction: -1 | 1): boolean {
 const needsYouActions = computed(() => {
   const current = chat.value
   if (!current || current.archived) return []
-  return (store.chatActions[current.chat_id] ?? []).filter(a => actionCopy(a) !== null)
+  return (store.chatActions[current.chat_id] ?? []).filter(a => a.kind !== 'mcp_auth' && actionCopy(a) !== null)
 })
 
 // A needs-you card that holds the focus and goes away hands it to the
@@ -2324,6 +2371,10 @@ const isWidePane = ref(false)
 const railOpen = ref(!props.filePinned && !chatDetailsClosed())
 const railShown = computed(() => isWidePane.value && railOpen.value)
 const drawerShown = computed(() => !isWidePane.value && inspectorOpen.value)
+const closedMcpProblemCount = computed(() => railShown.value || drawerShown.value ? 0 : chatMcp.problemCount.value)
+const detailsTriggerLabel = computed(() => closedMcpProblemCount.value
+  ? `Show chat details, ${closedMcpProblemCount.value} MCP connections need attention`
+  : 'Show chat details')
 let panelObserver: ResizeObserver | null = null
 onMounted(() => {
   if (typeof ResizeObserver === 'undefined' || !panelEl.value) return
@@ -2355,6 +2406,7 @@ const railRunningEl = ref<HTMLElement | null>(null)
 type DetailsTarget = 'close' | 'running' | 'context' | 'repo' | 'mcp'
 const detailsTarget = ref<DetailsTarget>('close')
 const mcpHeadingPriority = ref(false)
+const mcpConnections = ref<InstanceType<typeof ChatMcpConnections> | null>(null)
 let mcpHeadingEpoch = 0
 function clearMcpHeadingPriority() {
   mcpHeadingEpoch++
@@ -2407,7 +2459,18 @@ function closeDetails() {
   if (!detailsFromMenu) void nextTick(() => inspectorTrigger.value?.focus())
 }
 function toggleWorkDetails() {
-  showDetails()
+  const marked = closedMcpProblemCount.value > 0
+  showDetails(marked ? 'mcp' : 'close')
+  if (marked && !isWidePane.value) {
+    const epoch = mcpHeadingEpoch
+    void nextTick(async () => {
+      await nextTick()
+      if (epoch !== mcpHeadingEpoch || !drawerShown.value) return
+      clearMcpHeadingPriority()
+      await nextTick()
+      mcpConnections.value?.revealDrawerAction()
+    })
+  }
 }
 // The composer bar's activity cluster opens Chat details at Running; a finished
 // run's notice can outlive the section it points at.
@@ -2521,6 +2584,10 @@ let messagesResizeObserver: ResizeObserver | null = null
 const showScrollBtn = computed(() => Boolean(messagesEl.value && view.activeMessages.length > 0 && !isNearBottom.value))
 const showModelPicker = ref(false)
 const modelPickerRef = ref<HTMLElement>()
+const composerModelTrigger = ref<HTMLButtonElement | null>(null)
+const permissionModes: BridgeMode[] = ['normal', 'auto', 'bypass', 'plan']
+let pickerGeneration = 0
+watch(showModelPicker, () => { pickerGeneration += 1 }, { flush: 'sync' })
 
 // Which picker is open. 'normal' is the composer's model chip: a pick there
 // only changes the model. 'recovery' is opened from a failed turn - the
@@ -2565,10 +2632,12 @@ function resetPickerState() {
 }
 
 watch(() => chat.value?.chat_id, () => {
+  pickerGeneration += 1
   resetPickerState()
 })
 
 onBeforeUnmount(() => {
+  pickerGeneration += 1
   resetPickerState()
 })
 
@@ -3356,6 +3425,10 @@ const chatModelSections = computed(() => {
     return section
   })
 })
+const pickerModelSections = computed(() => chatModelSections.value.map(section => ({
+  ...section,
+  disabled: section.disabled || (pickerMode.value === 'normal' && modeWritePending.value),
+})))
 
 // The model id the chat is running on, as stored. A tier alias stays an alias
 // here: the provider resolves it per turn against its own catalog, so there is
@@ -4872,6 +4945,16 @@ function handleInputFocus() {
 
 function send() {
   if (chat.value.archived) return
+  if (isMcpToken.value) {
+    if (mcpUnavailableReason.value) return
+    composer.clearDraft(chat.value.chat_id)
+    slash.dismiss()
+    mentionPicker.dismiss()
+    showDetails('mcp')
+    nextTick(autoResize)
+    return
+  }
+  if (modeWritePending.value) return
   if (uploadsInFlight.value) return
   const text = inputText.value.trim()
   const hasAttachments = view.pendingImages.length > 0 || view.pendingFiles.length > 0
@@ -5225,6 +5308,45 @@ function toggleModelPicker() {
   showModelPicker.value = true
 }
 
+function handleModelPickerClose(reason: 'escape' | 'other') {
+  const chatId = chat.value?.chat_id
+  const mode = pickerMode.value
+  const generation = pickerGeneration
+  const focusedAtClose = document.activeElement
+  const closingPicker = modelPickerRef.value
+  const closingPopover = closingPicker?.querySelector('.model-selector__popover')
+  const focusWasInClosingPicker = !!focusedAtClose
+    && (!!closingPicker?.contains(focusedAtClose) || !!closingPopover?.contains(focusedAtClose))
+  showModelPicker.value = false
+  if (reason !== 'escape' || mode !== 'normal') return
+  void nextTick(() => {
+    const active = document.activeElement
+    const focusStillBelongsToPicker = (focusWasInClosingPicker && active === focusedAtClose)
+      || (!!active && !!closingPicker?.contains(active))
+      || (!!active && !!closingPopover?.contains(active))
+    const focusWasLost = !active || active === document.body
+    if (chat.value?.chat_id === chatId
+      && pickerMode.value === 'normal'
+      && pickerGeneration === generation + 1
+      && (focusStillBelongsToPicker || focusWasLost)
+      && composerModelTrigger.value?.isConnected
+      && !composerModelTrigger.value.disabled) composerModelTrigger.value.focus()
+  })
+}
+
+async function selectPermissionMode(mode: BridgeMode) {
+  const chatId = chat.value?.chat_id
+  if (!chatId || !isBridgeMode(mode) || chat.value.mode === mode || modeWritePending.value) return
+  try {
+    await store.updateChat(chatId, { mode })
+  } catch (e) {
+    store.pushErrorToast(
+      'Could not change permission mode',
+      `${errorMessage(e)} The server may have saved it. Reopen the chat to check.`,
+    )
+  }
+}
+
 function tierAlias(model: string): TierAlias | null {
   const normalized = model.trim().toLowerCase()
   return normalized === 'haiku' || normalized === 'sonnet' || normalized === 'opus' || normalized === 'fable'
@@ -5319,6 +5441,9 @@ async function runRecovery(recovery: RecoveryContext) {
 }
 
 async function selectModel(value: string | string[], sectionKey = '') {
+  if (pickerMode.value === 'normal' && modeWritePending.value) return
+  const intentChatId = chat.value?.chat_id
+  const intentGeneration = pickerGeneration
   // One pick at a time: a second click while the first is still applying
   // must not start a second turn.
   if (modelSelectBusy.value) return
@@ -5431,22 +5556,29 @@ async function selectModel(value: string | string[], sectionKey = '') {
     }
   } finally {
     modelSelectBusy.value = false
-    showModelPicker.value = false
+    if (chat.value?.chat_id === intentChatId && pickerGeneration === intentGeneration) {
+      showModelPicker.value = false
+    }
   }
 }
 
 async function selectThinking(level: string) {
+  const intentChatId = chat.value?.chat_id
+  const intentGeneration = pickerGeneration
   if (pickerMode.value === 'recovery') {
     // A recovery stages the level for the retry: the model that is about to
     // be picked may not support it, and the picker stays open until then.
     stagedThinkingLevel.value = level
     return
   }
+  if (modeWritePending.value) return
   // '' = provider default. Safe mid-chat: it never invalidates the
   // provider session, so no handover is involved.
   try {
     await store.updateChat(chat.value.chat_id, { thinking_level: level })
-    showModelPicker.value = false
+    if (chat.value?.chat_id === intentChatId && pickerGeneration === intentGeneration) {
+      showModelPicker.value = false
+    }
   } catch (e) {
     store.pushErrorToast('Could not change the thinking level', errorMessage(e))
   }
@@ -5751,7 +5883,7 @@ onMounted(() => {
 /* The header's own button rules set `position: relative`, which would let the
    floating trigger's `top` push this one below the header's centre line. */
 .work-inspector-trigger--header {
-  position: static;
+  position: relative;
   top: auto;
   right: auto;
   flex: none;
@@ -5759,6 +5891,17 @@ onMounted(() => {
   border-color: transparent;
   background: transparent;
   color: var(--fg2);
+}
+.work-inspector-trigger .chat-mcp-indicator {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  width: 8px;
+  height: 8px;
+  box-sizing: border-box;
+  border: 1.5px solid var(--accent);
+  transform: rotate(45deg);
+  pointer-events: none;
 }
 .work-inspector-trigger--header:hover {
   color: var(--fg);
@@ -5785,6 +5928,7 @@ onMounted(() => {
   padding: 7px;
   color: var(--fg2);
 }
+.chat-rail--drawer .chat-rail-hide { min-width: var(--touch); min-height: var(--touch); }
 @media (pointer: coarse) {
   .chat-rail-hide { min-width: var(--touch); min-height: var(--touch); }
 }
@@ -8087,6 +8231,57 @@ details[open] > .activity-summary::before {
   justify-content: space-between;
   gap: var(--space-3);
   padding: 2px 4px;
+}
+
+.picker-footer-groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.permission-modes {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.permission-modes__choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.permission-mode {
+  position: relative;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  min-width: 0;
+  min-height: 44px;
+  height: auto;
+  gap: 2px;
+  text-align: left;
+  white-space: normal;
+}
+
+.permission-mode__description,
+.permission-modes__note,
+.permission-modes__unknown,
+.permission-modes__status {
+  margin: 0;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.3;
+}
+
+.permission-mode__check {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+}
+
+.permission-mode:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .thinking-levels__label {

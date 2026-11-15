@@ -11,10 +11,17 @@ on:
 permissions:
   contents: read
 
+# A newer PR head supersedes its older run. Develop push runs are never
+# cancelled: each merge retains its platform acceptance evidence.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Linux is the gate every PR waits on, split into two parallel jobs:
 # `linux-server` (mypy, pytest -n auto, package smoke) and `linux-web` (vitest
 # and the PWA build). A develop PR whose diff changes `web/` also waits on
-# `linux-e2e`, which builds and tests this checkout in Chromium. The detector
+# `linux-e2e`, which builds and tests this checkout in Chromium alongside the
+# unit/build job, after the fast `web-scope` detector. The detector
 # uses the PR's base/head commits and full history from the merge checkout.
 # `linux-server-latest-python` runs the same backend gates
 # on the newest Python `requires-python` admits (3.14); it runs on every PR in
@@ -27,7 +34,8 @@ permissions:
 # coverage remains on those runs; web changes in develop PRs are also covered
 # before merge by `linux-e2e`.
 #
-# `windows` follows the same split. On a develop PR it runs only the fast
+# `windows` is the stable required summary of parallel `windows-backend` and
+# `windows-web` jobs. On a develop PR the backend runs only the fast
 # gates — every module imports and `mypy ciao` passes natively on win32, which
 # is where POSIX-only calls get caught — in about two minutes. The Windows
 # pytest and vitest suites and the install.ps1 checks take over a quarter of an
@@ -69,9 +77,8 @@ jobs:
     - name: Linux backend tests
       run: pytest -n auto tests/
 
-  # The package smoke installs the wheel and serves the packaged PWA, so it
-  # runs here, after the build has written ciao/web/static.
-  linux-web:
+  # Detection is independent of unit/build work so Chromium starts immediately.
+  web-scope:
     outputs:
       web_changed: ${{ steps.web-changes.outputs.web_changed }}
     runs-on: ubuntu-24.04
@@ -79,15 +86,6 @@ jobs:
     - uses: actions/checkout@v7
       with:
         fetch-depth: 0
-    - uses: actions/setup-python@v7
-      with:
-        python-version: '3.12'
-        cache: 'pip'
-    - uses: actions/setup-node@v7
-      with:
-        node-version: '22'
-        cache: 'npm'
-        cache-dependency-path: web/package-lock.json
     - name: Detect web changes
       id: web-changes
       if: github.event_name == 'pull_request' && github.base_ref == 'develop'
@@ -114,6 +112,21 @@ jobs:
         else
           printf 'web_changed=false\n' >> "$GITHUB_OUTPUT"
         fi
+
+  # Package smoke needs the PWA built here; e2e builds its own tested bundle.
+  linux-web:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-python@v7
+      with:
+        python-version: '3.12'
+        cache: 'pip'
+    - uses: actions/setup-node@v7
+      with:
+        node-version: '22'
+        cache: 'npm'
+        cache-dependency-path: web/package-lock.json
     - name: Install frontend dependencies
       working-directory: web
       run: npm ci
@@ -129,23 +142,32 @@ jobs:
       run: ciao package-smoke --skip-frontend
 
   linux-e2e:
-    needs: linux-web
-    if: github.event_name == 'pull_request' && github.base_ref == 'develop' && needs.linux-web.outputs.web_changed == 'true'
+    needs: web-scope
+    if: ${{ always() && github.event_name == 'pull_request' && github.base_ref == 'develop' }}
     runs-on: ubuntu-24.04
     steps:
+    - name: Require successful web scope detection
+      env:
+        SCOPE_RESULT: ${{ needs.web-scope.result }}
+      run: test "$SCOPE_RESULT" = success
     - uses: actions/checkout@v7
+      if: needs.web-scope.outputs.web_changed == 'true'
     - uses: actions/setup-node@v7
+      if: needs.web-scope.outputs.web_changed == 'true'
       with:
         node-version: '22'
         cache: 'npm'
         cache-dependency-path: web/package-lock.json
     - name: Install frontend dependencies
+      if: needs.web-scope.outputs.web_changed == 'true'
       working-directory: web
       run: npm ci
     - name: Install Chromium
+      if: needs.web-scope.outputs.web_changed == 'true'
       working-directory: web
       run: npx playwright install --with-deps chromium
     - name: Run browser suite
+      if: needs.web-scope.outputs.web_changed == 'true'
       working-directory: web
       run: npm run test:e2e
     - name: Upload Playwright traces
@@ -157,7 +179,7 @@ jobs:
         retention-days: 7
         if-no-files-found: ignore
 
-  windows:
+  windows-backend:
     runs-on: windows-latest
     # A normal run takes about 16 minutes. A step that waits on input it will
     # never get (a fresh install.ps1 serving the setup wizard) must not hold
@@ -230,14 +252,6 @@ jobs:
       run: |
         set -o pipefail
         python -m pytest -n auto -q -rfE --durations=30 tests/ 2>&1 | tee windows-pytest.txt
-    - name: Windows frontend tests
-      if: ${{ !cancelled() && env.WINDOWS_FULL == 'true' }}
-      working-directory: web
-      env:
-        NO_COLOR: '1'
-      run: |
-        set -o pipefail
-        { npm ci && npm test; } 2>&1 | tee ../windows-vitest.txt
     # The install.ps1 steps below stay advisory: they record what the runner
     # did, and a hosted runner with no interactive logon is not a verdict on
     # the installer (see the end-to-end step).
@@ -443,7 +457,7 @@ jobs:
           # not where a measurement belongs.
           grep -hE 'UserWarning: #1721 ' windows-terminal.txt 2>/dev/null | sed -E 's/^.*UserWarning: //' | sed 's/^/- /' || true
           echo "- pytest: $(tail -1 windows-pytest.txt 2>/dev/null)"
-          echo "- npm test: $(grep -E '^ *(Test Files|Tests) ' windows-vitest.txt 2>/dev/null | tr -s ' ' | paste -sd ';' -)"
+          echo "- npm test: see the parallel windows-web job and windows-web-results artifact"
           echo "- install.ps1: $(grep -E 'exit ' windows-install-ps1.txt 2>/dev/null | paste -sd ';' -)"
           echo "- install.ps1 end-to-end: $(grep -oE '^(installed|task existed after install|uninstalled|task gone after uninstall): (yes|no)' windows-install-e2e.txt 2>/dev/null | paste -sd',' - | sed -E 's#,#, #g')"
           echo
@@ -468,6 +482,58 @@ jobs:
         path: windows-*.txt
         retention-days: 14
         if-no-files-found: ignore
+
+  windows-web:
+    if: github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-full')
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-node@v7
+      with:
+        node-version: '22'
+        cache: 'npm'
+        cache-dependency-path: web/package-lock.json
+    - name: Windows frontend tests
+      working-directory: web
+      shell: bash
+      env:
+        NO_COLOR: '1'
+      run: |
+        set -o pipefail
+        { npm ci && npm test; } 2>&1 | tee ../windows-vitest.txt
+    - name: Upload frontend results
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: windows-web-results
+        path: windows-vitest.txt
+        retention-days: 14
+        if-no-files-found: ignore
+
+  # Keep the existing required status name. Skips are accepted only when the
+  # event genuinely excludes the full frontend run; failure/cancellation block.
+  windows:
+    needs: [windows-backend, windows-web]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+    - name: Require every applicable Windows gate
+      shell: python
+      env:
+        BACKEND: ${{ needs.windows-backend.result }}
+        FRONTEND: ${{ needs.windows-web.result }}
+        FULL: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-full') }}
+      run: |
+        import os
+        import sys
+        if os.environ["FULL"] not in {"true", "false"}:
+            sys.exit("Invalid full-Windows scope")
+        if os.environ["BACKEND"] != "success":
+            sys.exit("Windows backend checks did not succeed")
+        expected = "success" if os.environ["FULL"] == "true" else "skipped"
+        if os.environ["FRONTEND"] != expected:
+            sys.exit("Windows frontend checks did not reach the required outcome")
 
   test:
     # Engine-only coverage that only the real platform can give. This job runs

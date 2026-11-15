@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
-import { nextTick } from 'vue'
+import { defineComponent, nextTick, ref } from 'vue'
 import ModelSelector, { type ModelSection } from '../ModelSelector.vue'
 
 beforeEach(() => {
@@ -68,6 +68,25 @@ describe('ModelSelector', () => {
 
   afterEach(() => {
     document.body.innerHTML = ''
+  })
+
+  it.each([false, true])('preserves newly moved focus when an open selector is removed (triggerless=%s)', async (triggerless) => {
+    const key = ref(0)
+    const Host = defineComponent({
+      components: { ModelSelector },
+      setup: () => ({ key, triggerless, sections: SECTIONS }),
+      template: '<div><textarea /><ModelSelector v-if="!triggerless || !key" :key="key" :sections="sections" :triggerless="triggerless" /></div>',
+    })
+    const wrapper = mount(Host, { attachTo: document.body })
+    if (!triggerless) await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+    wrapper.get<HTMLInputElement>('.model-selector__search').element.focus()
+    key.value++
+    const prompt = wrapper.get<HTMLTextAreaElement>('textarea').element
+    prompt.focus()
+    await flushPromises()
+    expect(document.activeElement).toBe(prompt)
+    wrapper.unmount()
   })
 
   it('exposes the full trigger label as a title, since the label ellipsizes', () => {
@@ -199,6 +218,40 @@ describe('ModelSelector', () => {
     expect(document.activeElement).toBe(trigger.element)
   })
 
+  it('keeps focus on a focusable outside click target', async () => {
+    const wrapper = mountSelector()
+    const outside = document.createElement('textarea')
+    document.body.appendChild(outside)
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    outside.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }))
+    outside.focus() // The browser's pointerdown default action.
+    await flushPromises()
+
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
+    expect(document.activeElement).toBe(outside)
+    wrapper.unmount()
+    outside.remove()
+  })
+
+  it.each([false, true])('does not restore focus over a navigation destination after selection (deferred=%s)', async (deferred) => {
+    const destination = document.createElement('button')
+    document.body.appendChild(destination)
+    const wrapper = mountSelector({ onSelect: () => {
+      if (deferred) nextTick(() => destination.focus())
+      else destination.focus()
+    } })
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+    await wrapper.get('.model-selector__item').trigger('click')
+    await flushPromises()
+
+    expect(document.activeElement).toBe(destination)
+    wrapper.unmount()
+    destination.remove()
+  })
+
   it('supports keyboard navigation and Enter selection without a pointer', async () => {
     const wrapper = mountSelector()
     await wrapper.find('.model-selector__trigger').trigger('click')
@@ -227,6 +280,24 @@ describe('ModelSelector', () => {
 
     expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
     expect(document.activeElement).toBe(trigger.element)
+  })
+
+  it('does not restore the trigger when focus moves elsewhere after Escape', async () => {
+    const outside = document.createElement('textarea')
+    document.body.appendChild(outside)
+    const wrapper = mountSelector()
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    const search = wrapper.get<HTMLInputElement>('.model-selector__search')
+    search.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    outside.focus()
+    await flushPromises()
+
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
+    expect(document.activeElement).toBe(outside)
+    wrapper.unmount()
+    outside.remove()
   })
 
   it('renders disabled sections with hint', async () => {
@@ -280,7 +351,70 @@ describe('ModelSelector', () => {
     await wrapper.find('.model-selector__search').trigger('keydown', { key: 'Escape' })
     await flushPromises()
 
-    expect(wrapper.emitted('close')).toEqual([[]])
+    expect(wrapper.emitted('close')).toEqual([['escape']])
+  })
+
+  it('keeps footer controls outside the listbox and keyboard operable', async () => {
+    const wrapper = mountSelector({ triggerless: true }, { footer: '<button class="footer-action">Continue</button>' })
+    await flushPromises()
+    const button = wrapper.get<HTMLButtonElement>('.footer-action')
+    expect(button.element.closest('[role="listbox"]')).toBeNull()
+    button.element.focus()
+    await button.trigger('keydown', { key: ' ' })
+    expect(wrapper.emitted('select')).toBeUndefined()
+    await button.trigger('keydown', { key: 'Enter' })
+    expect(wrapper.emitted('select')).toBeUndefined()
+  })
+
+  it('preserves model arrow selection and Escape with a footer', async () => {
+    const wrapper = mountSelector({ triggerless: true }, { footer: '<button class="footer-action">Continue</button>' })
+    await flushPromises()
+    const search = wrapper.get<HTMLInputElement>('.model-selector__search')
+    search.element.focus()
+    await search.trigger('keydown', { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(wrapper.get('.model-selector__item').element)
+    await wrapper.get('.model-selector__item').trigger('keydown', { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(wrapper.findAll('.model-selector__item')[1].element)
+    await wrapper.get('.model-selector__list').trigger('keydown', { key: 'Escape' })
+    expect(wrapper.emitted('close')).toEqual([['escape']])
+
+    const selected = mountSelector({ triggerless: true })
+    await flushPromises()
+    await selected.get('.model-selector__item').trigger('click')
+    expect(selected.emitted('close')).toEqual([['other']])
+  })
+
+  it('section disabled changes do not steal footer focus', async () => {
+    const wrapper = mountSelector({ triggerless: true }, { footer: '<button class="footer-action">Continue</button>' })
+    await flushPromises()
+    const button = wrapper.get<HTMLButtonElement>('.footer-action')
+    button.element.focus()
+    await wrapper.setProps({ sections: [{ ...SECTIONS[0], disabled: true }] })
+    await nextTick()
+    expect(document.activeElement).toBe(button.element)
+    expect(wrapper.get('.model-selector__item').attributes('disabled')).toBeDefined()
+    await wrapper.setProps({ sections: [{ ...SECTIONS[0], label: 'Updated' }] })
+    await nextTick()
+    expect(document.activeElement).toBe(button.element)
+  })
+
+  it('opening and changing the search query retain search behavior', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView')
+    const scrollIntoView = vi.fn()
+    HTMLElement.prototype.scrollIntoView = scrollIntoView
+    const wrapper = mountSelector({ triggerless: true, modelValue: 'sonnet' })
+    await flushPromises()
+    const search = wrapper.get<HTMLInputElement>('.model-selector__search')
+    expect(document.activeElement).toBe(search.element)
+    expect(scrollIntoView).toHaveBeenCalled()
+    await search.setValue('glm')
+    await flushPromises()
+    expect(wrapper.findAll('.model-selector__item')).toHaveLength(1)
+    expect(document.activeElement).toBe(search.element)
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+    if (descriptor) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', descriptor)
+    else delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView
   })
 
   // The chat's recovery picker carries its heading and its warning in the

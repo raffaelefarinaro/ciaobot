@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 import threading
 import time
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 
 import pytest
 import httpx
+import ciao.mcp_server as mcp_server
 from starlette.applications import Starlette
 from starlette.routing import Route
 
@@ -169,17 +171,20 @@ def _domain_fixture() -> tuple[CiaoControlPlane, AgentPrincipal, asyncio.Task[No
         running_turn_index=0,
     )
 
-    class Manager:
-        _streaming = SimpleNamespace(drive_task=lambda chat_id, current: driver if current is stream else None)
+    projects = {"project": project}
+    chats = {"chat": chat}
+    streams = {"chat": stream}
+    drivers = {"chat": driver}
 
+    class Manager:
         def get_chat(self, chat_id):
-            return chat if chat_id == "chat" else None
+            return chats.get(chat_id)
 
         def get_project(self, project_id):
-            return project if project_id == "project" else None
+            return projects.get(project_id)
 
         def get_active_stream(self, chat_id):
-            return stream if chat_id == "chat" else None
+            return streams.get(chat_id)
 
         def _agent_root_for_chat(self, _chat_id):
             return Path("/tmp")
@@ -202,8 +207,21 @@ def _domain_fixture() -> tuple[CiaoControlPlane, AgentPrincipal, asyncio.Task[No
     cp = object.__new__(CiaoControlPlane)
     cp.config = SimpleNamespace()
     cp.pcm = Manager()
+    cp.pcm._streaming = SimpleNamespace(
+        drive_task=lambda chat_id, current:
+        drivers.get(chat_id) if streams.get(chat_id) is current else None
+    )
     cp.app_settings = SimpleNamespace(settings=SimpleNamespace(verify_vault_answers=True))
     cp._managed_recall_attempts = __import__("weakref").WeakSet()
+    cp._managed_recall_tasks = set()
+    cp._managed_recall_admissions = __import__("collections").deque()
+    cp._fixture_stream = stream
+    cp._fixture_chat = chat
+    cp._fixture_project = project
+    cp._fixture_chats = chats
+    cp._fixture_projects = projects
+    cp._fixture_streams = streams
+    cp._fixture_drivers = drivers
     cp._ENGINE_HELPER_KINDS = CiaoControlPlane._ENGINE_HELPER_KINDS
     cp._vault_root = lambda _principal: Path("/tmp/vault")
     principal = AgentPrincipal(
@@ -211,6 +229,32 @@ def _domain_fixture() -> tuple[CiaoControlPlane, AgentPrincipal, asyncio.Task[No
         workspace="personal", provider="claude",
     )
     return cp, principal, turn, driver
+
+
+def _add_domain_caller(
+    cp: CiaoControlPlane, chat_id: str, workspace: str, provider: str,
+) -> tuple[AgentPrincipal, asyncio.Task[None], asyncio.Task[None]]:
+    turn = asyncio.create_task(asyncio.Event().wait())
+    driver = asyncio.create_task(asyncio.Event().wait())
+    project_id = f"project-{chat_id}"
+    project = SimpleNamespace(project_id=project_id, workspace=workspace, kind="project")
+    chat = SimpleNamespace(
+        chat_id=chat_id, project_id=project_id, provider=provider, model="sonnet",
+        helper={}, user_turn_count=1,
+    )
+    stream = SimpleNamespace(
+        background=False, done=False, user_stopped=False, turn_task=turn,
+        running_turn_index=0,
+    )
+    cp._fixture_projects[project_id] = project
+    cp._fixture_chats[chat_id] = chat
+    cp._fixture_streams[chat_id] = stream
+    cp._fixture_drivers[chat_id] = driver
+    principal = AgentPrincipal(
+        token_id=f"token-{chat_id}", chat_id=chat_id, project_id=project_id,
+        workspace=workspace, provider=provider,
+    )
+    return principal, turn, driver
 
 
 @pytest.mark.asyncio
@@ -244,6 +288,10 @@ async def test_enabled_recall_requires_live_authorization_factory(monkeypatch) -
         vault_verification, "verify_recall_claims",
         lambda *_args, **_kwargs: pytest.fail("authorization must precede checker"),
     )
+    monkeypatch.setattr(
+        control_plane, "_managed_recall_now",
+        lambda: pytest.fail("initial authorization refusal must precede aggregate admission"),
+    )
     try:
         for factory in (None, lambda: None, lambda: SimpleNamespace(is_active=lambda: False)):
             with pytest.raises(ControlPlaneError) as refused:
@@ -251,6 +299,9 @@ async def test_enabled_recall_requires_live_authorization_factory(monkeypatch) -
                     principal, claims_json=_claims(), authorization_factory=factory
                 )
             assert refused.value.code == "unauthorized"
+            assert turn not in cp._managed_recall_attempts
+            assert not cp._managed_recall_admissions
+            assert not cp._managed_recall_tasks
     finally:
         turn.cancel()
         driver.cancel()
@@ -290,6 +341,7 @@ async def test_empty_claims_use_task_free_common_finalization_and_revoke_safely(
     app = Starlette(routes=[Route("/agent/v1/{op}", agent_dispatch_endpoint, methods=["POST"])])
     app.state.mcp_service = service
     monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
+    monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_k: "haiku")
     monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_k: "haiku")
     monkeypatch.setattr(
         vault_verification, "verify_recall_claims",
@@ -446,7 +498,6 @@ async def test_real_route_timeout_exit_revalidates_owner_and_authorization(
     app.state.mcp_service = service
     monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
     monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_k: "haiku")
-
     async def checker(*_args, **_kwargs):
         return {
             "status": "checked",
@@ -545,6 +596,18 @@ async def test_real_route_checked_candidate_revocation_at_cleanup_and_preflight(
     app.state.mcp_service = service
     monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
     monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_k: "haiku")
+    original_create_task = asyncio.create_task
+    owned_tasks: dict[str, asyncio.Task[Any]] = {}
+
+    def capture_owned_task(coro, *args, **kwargs):
+        task = original_create_task(coro, *args, **kwargs)
+        if coro.cr_code.co_name == "checker":
+            owned_tasks["checker"] = task
+        elif coro.cr_code.co_name == "wait_invalid":
+            owned_tasks["watcher"] = task
+        return task
+
+    monkeypatch.setattr(asyncio, "create_task", capture_owned_task)
 
     async def checker(*_args, **_kwargs):
         return {
@@ -604,7 +667,14 @@ async def test_real_route_checked_candidate_revocation_at_cleanup_and_preflight(
         }
         assert "claims" not in response.json()
         assert "must be withheld" not in response.text
-        assert all(task.done() for task in settled)
+        assert set(owned_tasks) == {"checker", "watcher"}
+        checker_task, watcher_task = owned_tasks["checker"], owned_tasks["watcher"]
+        assert checker_task in settled and watcher_task in settled
+        assert checker_task.done() and watcher_task.done()
+        assert len(settled) == 2
+        assert not cp._managed_recall_tasks
+        assert len(cp._managed_recall_admissions) == 1
+        assert turn in cp._managed_recall_attempts
         assert not turn.cancelled() and not driver.cancelled()
     finally:
         turn.cancel()
@@ -1669,6 +1739,1155 @@ async def test_engine_helpers_are_refused(helper_kind, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_aggregate_busy_refusal_refunds_pass_reservation(monkeypatch) -> None:
+    cp, principal, turn, driver = _domain_fixture()
+    monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
+    order = []
+    monkeypatch.setattr(
+        control_plane, "_managed_recall_now",
+        lambda: (order.append("clock"), 100.0)[1],
+    )
+    cp._managed_recall_tasks.update({
+        asyncio.create_task(asyncio.Event().wait())
+        for _ in range(control_plane.MANAGED_RECALL_MAX_IN_FLIGHT)
+    })
+    calls, auth_calls, watcher_calls = [], [], []
+
+    class Authorization:
+        def is_active(self):
+            order.append("authorization")
+            auth_calls.append(True)
+            return True
+
+        async def wait_invalid(self):
+            watcher_calls.append(True)
+            await asyncio.Event().wait()
+
+    async def checker(*_args, **_kwargs):
+        calls.append(True)
+        return {
+            "status": "unavailable", "claims": [],
+            "coverage": {"truncated": False, "omitted_sources": []},
+        }
+
+    monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_k: "haiku")
+    monkeypatch.setattr(vault_verification, "verify_recall_claims", checker)
+    try:
+        with pytest.raises(ControlPlaneError) as refused:
+            await cp.vault_recall_check(
+                principal, claims_json=_claims(),
+                authorization_factory=Authorization,
+            )
+        assert refused.value.code == "recall_check_busy"
+        assert str(refused.value) == "Managed recall checking is busy."
+        assert refused.value.retryable is False
+        assert order == ["authorization", "authorization", "clock"]
+        assert len(auth_calls) == 2
+        assert not watcher_calls
+        assert turn not in cp._managed_recall_attempts
+        assert not calls
+        assert not cp._managed_recall_admissions
+        blockers = tuple(cp._managed_recall_tasks)
+        for task in blockers:
+            task.cancel()
+        await asyncio.gather(*blockers, return_exceptions=True)
+        cp._managed_recall_tasks.clear()
+        assert (await cp.vault_recall_check(
+            principal, claims_json=_claims(),
+            authorization_factory=_authorization_factory(),
+        ))["data"]["status"] == "unavailable"
+        assert calls == [True]
+        with pytest.raises(ControlPlaneError) as spent:
+            await cp.vault_recall_check(
+                principal, claims_json=_claims(),
+                authorization_factory=_authorization_factory(),
+            )
+        assert spent.value.code == "recall_check_budget_exhausted"
+    finally:
+        for task in cp._managed_recall_tasks:
+            task.cancel()
+        turn.cancel()
+        driver.cancel()
+        await asyncio.gather(turn, driver, *cp._managed_recall_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_aggregate_attempt_window_boundary(monkeypatch) -> None:
+    cp, principal, turn, driver = _domain_fixture()
+    monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
+    monkeypatch.setattr(control_plane, "_managed_recall_now", lambda: 100.0)
+    monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_k: "haiku")
+    calls = []
+
+    async def checker(*_args, **_kwargs):
+        calls.append(True)
+        return {"status": "unavailable", "claims": [],
+                "coverage": {"truncated": False, "omitted_sources": []}}
+
+    monkeypatch.setattr(vault_verification, "verify_recall_claims", checker)
+    try:
+        for index in range(12):
+            if index:
+                next_turn = asyncio.create_task(asyncio.Event().wait())
+                cp._fixture_stream.turn_task = next_turn
+                turn.cancel()
+                await asyncio.gather(turn, return_exceptions=True)
+                turn = next_turn
+            await cp.vault_recall_check(
+                principal, claims_json=_claims(),
+                authorization_factory=_authorization_factory(),
+            )
+        assert len(calls) == 12
+        next_turn = asyncio.create_task(asyncio.Event().wait())
+        cp._fixture_stream.turn_task = next_turn
+        turn.cancel()
+        await asyncio.gather(turn, return_exceptions=True)
+        turn = next_turn
+        monkeypatch.setattr(control_plane, "_managed_recall_now", lambda: 159.999)
+        with pytest.raises(ControlPlaneError) as refused:
+            await cp.vault_recall_check(
+                principal, claims_json=_claims(),
+                authorization_factory=_authorization_factory(),
+            )
+        assert refused.value.code == "recall_check_rate_limited"
+        assert str(refused.value) == "Managed recall checking attempt limit reached."
+        assert refused.value.retryable is False
+        assert len(cp._managed_recall_admissions) == 12
+        monkeypatch.setattr(control_plane, "_managed_recall_now", lambda: 160.0)
+        await cp.vault_recall_check(
+            principal, claims_json=_claims(),
+            authorization_factory=_authorization_factory(),
+        )
+        assert len(calls) == 13
+        assert list(cp._managed_recall_admissions) == [160.0]
+    finally:
+        turn.cancel()
+        driver.cancel()
+        await asyncio.gather(turn, driver, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_aggregate_refusal_preserves_unused_per_pass_attempt(monkeypatch) -> None:
+    cp, principal, turn, driver = _domain_fixture()
+    monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
+    monkeypatch.setattr(control_plane, "MANAGED_RECALL_MAX_ADMISSIONS", 1)
+    order = []
+    monkeypatch.setattr(
+        control_plane, "_managed_recall_now",
+        lambda: (order.append("clock"), 100.0)[1],
+    )
+    cp._managed_recall_admissions.append(100.0)
+    auth_checks, checker_calls, watcher_calls = [], [], []
+
+    class Authorization:
+        def is_active(self):
+            order.append("authorization")
+            auth_checks.append(True)
+            return True
+
+        async def wait_invalid(self):
+            watcher_calls.append(True)
+            await asyncio.Event().wait()
+
+    async def unavailable(*_args, **_kwargs):
+        checker_calls.append(True)
+        return {"status": "unavailable", "claims": [],
+                "coverage": {"truncated": False, "omitted_sources": []}}
+
+    monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_k: "haiku")
+    monkeypatch.setattr(vault_verification, "verify_recall_claims", unavailable)
+    try:
+        with pytest.raises(ControlPlaneError) as refused:
+            await cp.vault_recall_check(
+                principal, claims_json=_claims(), authorization_factory=lambda: Authorization(),
+            )
+        assert refused.value.code == "recall_check_rate_limited"
+        assert str(refused.value) == "Managed recall checking attempt limit reached."
+        assert refused.value.retryable is False
+        assert auth_checks == [True, True]
+        assert order == ["authorization", "authorization", "clock"]
+        assert turn not in cp._managed_recall_attempts
+        assert list(cp._managed_recall_admissions) == [100.0]
+        assert not cp._managed_recall_tasks
+        assert not checker_calls and not watcher_calls
+        cp._managed_recall_admissions.clear()
+        assert (await cp.vault_recall_check(
+            principal, claims_json=_claims(), authorization_factory=lambda: Authorization(),
+        ))["data"]["status"] == "unavailable"
+        with pytest.raises(ControlPlaneError) as spent:
+            await cp.vault_recall_check(
+                principal, claims_json=_claims(), authorization_factory=lambda: Authorization(),
+            )
+        assert spent.value.code == "recall_check_budget_exhausted"
+    finally:
+        turn.cancel()
+        driver.cancel()
+        await asyncio.gather(turn, driver, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome",
+    ["checker_exception", "unavailable", "request_cancellation", "deadline",
+     "owner_completion", "authorization_invalidation", "malformed_result"],
+)
+async def test_aggregate_admitted_failures_are_not_refunded(monkeypatch, outcome) -> None:
+    cp, principal, turn, driver = _domain_fixture()
+    monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
+    monkeypatch.setattr(control_plane, "MANAGED_RECALL_MAX_ADMISSIONS", 1)
+    monkeypatch.setattr(control_plane, "_managed_recall_now", lambda: 100.0)
+    monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_k: "haiku")
+    entered, invalidated = asyncio.Event(), asyncio.Event()
+    active = [True]
+
+    class Authorization:
+        def is_active(self):
+            return active[0]
+
+        async def wait_invalid(self):
+            await invalidated.wait()
+
+    async def checker(*_args, **_kwargs):
+        entered.set()
+        if outcome in {"request_cancellation", "deadline", "owner_completion", "authorization_invalidation"}:
+            await asyncio.Event().wait()
+        if outcome == "checker_exception":
+            raise RuntimeError("PRIVATE_ADMITTED_FAILURE")
+        if outcome == "malformed_result":
+            return {"unexpected": "PRIVATE_ADMITTED_FAILURE"}
+        return {"status": "unavailable", "claims": [],
+                "coverage": {"truncated": False, "omitted_sources": []}}
+
+    monkeypatch.setattr(vault_verification, "verify_recall_claims", checker)
+    timeout_contexts = []
+    if outcome == "deadline":
+        real_timeout = asyncio.timeout
+
+        class CoordinatedTimeout:
+            def __init__(self):
+                self.task = None
+                self.expired = False
+
+            async def __aenter__(self):
+                self.task = asyncio.current_task()
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                if self.expired and exc_type is asyncio.CancelledError:
+                    assert self.task is not None
+                    self.task.uncancel()
+                    raise TimeoutError
+                return False
+
+            def expire(self):
+                self.expired = True
+                assert self.task is not None
+                self.task.cancel()
+
+        def timeout_factory(seconds):
+            if seconds == control_plane.MANAGED_RECALL_OPERATION_TIMEOUT_S:
+                context = CoordinatedTimeout()
+                timeout_contexts.append(context)
+                return context
+            return real_timeout(seconds)
+
+        monkeypatch.setattr(control_plane.asyncio, "timeout", timeout_factory)
+    operation = asyncio.create_task(cp.vault_recall_check(
+        principal, claims_json=_claims(), authorization_factory=lambda: Authorization(),
+    ))
+    next_turn = None
+    try:
+        if outcome in {"request_cancellation", "deadline", "owner_completion", "authorization_invalidation"}:
+            await asyncio.wait_for(entered.wait(), 1)
+            if outcome == "request_cancellation":
+                operation.cancel()
+            elif outcome == "deadline":
+                assert len(timeout_contexts) == 1
+                timeout_contexts[0].expire()
+            elif outcome == "owner_completion":
+                turn.cancel()
+            elif outcome == "authorization_invalidation":
+                active[0] = False
+                invalidated.set()
+        result = await asyncio.gather(operation, return_exceptions=True)
+        assert len(cp._managed_recall_admissions) == 1
+        assert turn in cp._managed_recall_attempts
+        next_turn = asyncio.create_task(asyncio.Event().wait())
+        cp._fixture_stream.turn_task = next_turn
+        with pytest.raises(ControlPlaneError) as limited:
+            await cp.vault_recall_check(
+                principal, claims_json=_claims(), authorization_factory=_authorization_factory(),
+            )
+        assert limited.value.code == "recall_check_rate_limited"
+        assert len(cp._managed_recall_admissions) == 1
+        terminal = result[0]
+        if outcome == "unavailable":
+            assert terminal["data"]["status"] == "unavailable"
+        elif outcome == "request_cancellation":
+            assert isinstance(terminal, asyncio.CancelledError)
+        else:
+            assert isinstance(terminal, ControlPlaneError)
+            expected_code = {
+                "checker_exception": "unavailable",
+                "deadline": "recall_check_timeout",
+                "owner_completion": "recall_check_stale",
+                "authorization_invalidation": "unauthorized",
+                "malformed_result": "unavailable",
+            }[outcome]
+            assert terminal.code == expected_code
+    finally:
+        for task in (operation, turn, driver, next_turn):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            operation, turn, driver,
+            *(task for task in (next_turn,) if task is not None),
+            return_exceptions=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_aggregate_completed_task_is_pruned_before_admission(monkeypatch) -> None:
+    cp, principal, turn, driver = _domain_fixture()
+    monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
+    monkeypatch.setattr(control_plane, "MANAGED_RECALL_MAX_IN_FLIGHT", 1)
+    completed = asyncio.create_task(asyncio.sleep(0))
+    await completed
+    cp._managed_recall_tasks.add(completed)
+    monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_k: "haiku")
+
+    async def checker(*_args, **_kwargs):
+        return {"status": "unavailable", "claims": [],
+                "coverage": {"truncated": False, "omitted_sources": []}}
+
+    monkeypatch.setattr(vault_verification, "verify_recall_claims", checker)
+    try:
+        assert (await cp.vault_recall_check(
+            principal, claims_json=_claims(),
+            authorization_factory=_authorization_factory(),
+        ))["data"]["status"] == "unavailable"
+        assert completed not in cp._managed_recall_tasks
+    finally:
+        turn.cancel()
+        driver.cancel()
+        await asyncio.gather(turn, driver, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_aggregate_concurrency_shared_across_workspaces_and_providers(monkeypatch) -> None:
+    cp, _p0, turn0, driver0 = _domain_fixture()
+    p1, turn1, driver1 = _add_domain_caller(cp, "chat-work", "work", "opencode")
+    p2, turn2, driver2 = _add_domain_caller(cp, "chat-team", "team", "claude")
+    monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
+    monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_k: "haiku")
+    entered = []
+    both_entered = asyncio.Event()
+    release = {"opencode": asyncio.Event(), "claude": asyncio.Event()}
+
+    async def checker(*_args, **kwargs):
+        provider = kwargs["provider"]
+        entered.append(provider)
+        if len(entered) == 2:
+            both_entered.set()
+        await release[provider].wait()
+        return {"status": "unavailable", "claims": [],
+                "coverage": {"truncated": False, "omitted_sources": []}}
+
+    monkeypatch.setattr(vault_verification, "verify_recall_claims", checker)
+    first = asyncio.create_task(cp.vault_recall_check(
+        p1, claims_json=_claims(), authorization_factory=_authorization_factory(),
+    ))
+    second = asyncio.create_task(cp.vault_recall_check(
+        p2, claims_json=_claims(), authorization_factory=_authorization_factory(),
+    ))
+    extra_tasks: tuple[asyncio.Task[Any], ...] = ()
+    try:
+        await asyncio.wait_for(both_entered.wait(), 1)
+        third, turn3, driver3 = _add_domain_caller(cp, "chat-third", "personal", "opencode")
+        extra_tasks = (turn3, driver3)
+        with pytest.raises(ControlPlaneError) as busy:
+            await cp.vault_recall_check(
+                third, claims_json=_claims(), authorization_factory=_authorization_factory(),
+            )
+        assert busy.value.code == "recall_check_busy"
+        assert str(busy.value) == "Managed recall checking is busy."
+        assert busy.value.retryable is False
+        assert entered == ["opencode", "claude"]
+        release["opencode"].set()
+        await first
+        assert not second.done()
+        assert len(cp._managed_recall_admissions) == 2
+        assert (await cp.vault_recall_check(
+            third, claims_json=_claims(), authorization_factory=_authorization_factory(),
+        ))["data"]["status"] == "unavailable"
+        assert entered == ["opencode", "claude", "opencode"]
+        release["claude"].set()
+        await second
+    finally:
+        for event in release.values():
+            event.set()
+        for task in (first, second, turn0, driver0, turn1, driver1, turn2, driver2, *extra_tasks):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(
+            first, second, turn0, driver0, turn1, driver1, turn2, driver2,
+            *extra_tasks, return_exceptions=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_aggregate_slot_held_until_checker_cleanup_finishes(monkeypatch) -> None:
+    cp, principal, turn, driver = _domain_fixture()
+    second, turn2, driver2 = _add_domain_caller(cp, "chat-two", "work", "opencode")
+    third, turn3, driver3 = _add_domain_caller(cp, "chat-three", "team", "claude")
+    monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
+    monkeypatch.setattr(control_plane, "MANAGED_RECALL_MAX_IN_FLIGHT", 1)
+    monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_k: "haiku")
+    cleanup_entered, release_cleanup = asyncio.Event(), asyncio.Event()
+    watcher_started, watcher_cancelled = asyncio.Event(), asyncio.Event()
+
+    class Authorization:
+        def is_active(self):
+            return True
+
+        async def wait_invalid(self):
+            watcher_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                watcher_cancelled.set()
+                raise
+
+    async def checker(*_args, **_kwargs):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cleanup_entered.set()
+            await release_cleanup.wait()
+            raise
+
+    monkeypatch.setattr(vault_verification, "verify_recall_claims", checker)
+    operation = asyncio.create_task(cp.vault_recall_check(
+        principal, claims_json=_claims(), authorization_factory=lambda: Authorization(),
+    ))
+    try:
+        await asyncio.sleep(0)
+        operation.cancel()
+        await asyncio.wait_for(cleanup_entered.wait(), 1)
+        await asyncio.wait_for(watcher_started.wait(), 1)
+        assert not turn.cancelled() and not driver.cancelled()
+        with pytest.raises(ControlPlaneError) as busy:
+            await cp.vault_recall_check(
+                second, claims_json=_claims(), authorization_factory=_authorization_factory(),
+            )
+        assert busy.value.code == "recall_check_busy"
+        operation.cancel()
+        await asyncio.sleep(0)
+        assert not operation.done()
+        release_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+        assert watcher_cancelled.is_set()
+
+        async def unavailable(*_args, **_kwargs):
+            return {"status": "unavailable", "claims": [],
+                    "coverage": {"truncated": False, "omitted_sources": []}}
+
+        monkeypatch.setattr(vault_verification, "verify_recall_claims", unavailable)
+        await cp.vault_recall_check(
+            third, claims_json=_claims(), authorization_factory=_authorization_factory(),
+        )
+        assert not turn.cancelled() and not driver.cancelled()
+    finally:
+        release_cleanup.set()
+        for task in (operation, turn, driver, turn2, driver2, turn3, driver3):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(operation, turn, driver, turn2, driver2, turn3, driver3, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_immediate_authorization_failure_keeps_pass_reservation(monkeypatch) -> None:
+    cp, principal, turn, driver = _domain_fixture()
+    monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
+    monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_k: "haiku")
+    checks = []
+
+    class Authorization:
+        def is_active(self):
+            checks.append(True)
+            return len(checks) == 1
+
+        async def wait_invalid(self):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        vault_verification, "verify_recall_claims",
+        lambda *_a, **_k: pytest.fail("immediate authorization must precede checker"),
+    )
+    try:
+        with pytest.raises(ControlPlaneError) as refused:
+            await cp.vault_recall_check(
+                principal, claims_json=_claims(), authorization_factory=lambda: Authorization(),
+            )
+        assert refused.value.code == "unauthorized"
+        assert turn in cp._managed_recall_attempts
+        assert not cp._managed_recall_admissions
+        assert not cp._managed_recall_tasks
+        with pytest.raises(ControlPlaneError) as spent:
+            await cp.vault_recall_check(
+                principal, claims_json=_claims(),
+                authorization_factory=_authorization_factory(),
+            )
+        assert spent.value.code == "recall_check_budget_exhausted"
+    finally:
+        turn.cancel()
+        driver.cancel()
+        await asyncio.gather(turn, driver, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["false", "raises"])
+@pytest.mark.parametrize("aggregate", ["available", "busy", "rate_limited"])
+async def test_immediate_authorization_failure_preserves_original_pass_charge(
+    monkeypatch, failure, aggregate,
+) -> None:
+    cp, principal, turn, driver = _domain_fixture()
+    monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
+    monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_k: "haiku")
+    if aggregate == "busy":
+        monkeypatch.setattr(control_plane, "MANAGED_RECALL_MAX_IN_FLIGHT", 1)
+        pending = asyncio.create_task(asyncio.Event().wait())
+        cp._managed_recall_tasks.add(pending)
+    elif aggregate == "rate_limited":
+        monkeypatch.setattr(control_plane, "MANAGED_RECALL_MAX_ADMISSIONS", 1)
+        cp._managed_recall_admissions.append(100.0)
+    monkeypatch.setattr(
+        control_plane, "_managed_recall_now",
+        lambda: pytest.fail("immediate authorization failure must precede aggregate clock"),
+    )
+    calls, watcher_calls = [], []
+
+    class Authorization:
+        def is_active(self):
+            calls.append(True)
+            if len(calls) == 1:
+                return True
+            if failure == "raises":
+                raise RuntimeError("PRIVATE_IMMEDIATE_AUTH_SENTINEL")
+            return False
+
+        async def wait_invalid(self):
+            watcher_calls.append(True)
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        vault_verification, "verify_recall_claims",
+        lambda *_a, **_k: pytest.fail("checker must not start"),
+    )
+    try:
+        with pytest.raises(ControlPlaneError) as refused:
+            await cp.vault_recall_check(
+                principal, claims_json=_claims(), authorization_factory=lambda: Authorization(),
+            )
+        assert refused.value.code == ("unavailable" if failure == "raises" else "unauthorized")
+        assert "PRIVATE_IMMEDIATE_AUTH_SENTINEL" not in str(refused.value)
+        assert turn in cp._managed_recall_attempts
+        assert len(calls) == 2
+        assert not watcher_calls
+        assert len(cp._managed_recall_tasks) == (1 if aggregate == "busy" else 0)
+        assert list(cp._managed_recall_admissions) == ([100.0] if aggregate == "rate_limited" else [])
+        with pytest.raises(ControlPlaneError) as spent:
+            await cp.vault_recall_check(
+                principal, claims_json=_claims(),
+                authorization_factory=_authorization_factory(),
+            )
+        assert spent.value.code == "recall_check_budget_exhausted"
+    finally:
+        if aggregate == "busy":
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        turn.cancel()
+        driver.cancel()
+        await asyncio.gather(turn, driver, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["missing_factory", "false", "raises"])
+@pytest.mark.parametrize("aggregate", ["available", "busy", "rate_limited"])
+async def test_initial_authorization_failure_preserves_original_uncharged_pass(
+    monkeypatch, failure, aggregate,
+) -> None:
+    cp, principal, turn, driver = _domain_fixture()
+    monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
+    pending = []
+    if aggregate == "busy":
+        monkeypatch.setattr(control_plane, "MANAGED_RECALL_MAX_IN_FLIGHT", 2)
+        pending = [asyncio.create_task(asyncio.Event().wait()) for _ in range(2)]
+        cp._managed_recall_tasks.update(pending)
+    elif aggregate == "rate_limited":
+        monkeypatch.setattr(control_plane, "MANAGED_RECALL_MAX_ADMISSIONS", 1)
+        cp._managed_recall_admissions.append(100.0)
+    monkeypatch.setattr(
+        control_plane, "_managed_recall_now",
+        lambda: pytest.fail("initial authorization failure must precede aggregate clock"),
+    )
+    calls = []
+
+    class Authorization:
+        def is_active(self):
+            calls.append(True)
+            if failure == "raises":
+                raise RuntimeError("PRIVATE_INITIAL_AUTH_SENTINEL")
+            return False
+
+        async def wait_invalid(self):
+            pytest.fail("initial authorization refusal must not create watcher")
+
+    factory = None if failure == "missing_factory" else lambda: Authorization()
+    try:
+        with pytest.raises(ControlPlaneError) as refused:
+            await cp.vault_recall_check(
+                principal, claims_json=_claims(), authorization_factory=factory,
+            )
+        assert refused.value.code == ("unavailable" if failure == "raises" else "unauthorized")
+        assert "PRIVATE_INITIAL_AUTH_SENTINEL" not in str(refused.value)
+        assert turn not in cp._managed_recall_attempts
+        assert not calls if failure == "missing_factory" else len(calls) == 1
+        assert list(cp._managed_recall_admissions) == ([100.0] if aggregate == "rate_limited" else [])
+        assert cp._managed_recall_tasks == set(pending)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        cp._managed_recall_admissions.clear()
+        cp._managed_recall_tasks.clear()
+        monkeypatch.setattr(control_plane, "MANAGED_RECALL_MAX_IN_FLIGHT", 2)
+        monkeypatch.setattr(control_plane, "MANAGED_RECALL_MAX_ADMISSIONS", 12)
+        monkeypatch.setattr(control_plane, "_managed_recall_now", lambda: 100.0)
+        monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_k: "haiku")
+
+        async def unavailable(*_args, **_kwargs):
+            return {"status": "unavailable", "claims": [],
+                    "coverage": {"truncated": False, "omitted_sources": []}}
+
+        monkeypatch.setattr(vault_verification, "verify_recall_claims", unavailable)
+        assert (await cp.vault_recall_check(
+            principal, claims_json=_claims(), authorization_factory=_authorization_factory(),
+        ))["data"]["status"] == "unavailable"
+        with pytest.raises(ControlPlaneError) as spent:
+            await cp.vault_recall_check(
+                principal, claims_json=_claims(), authorization_factory=_authorization_factory(),
+            )
+        assert spent.value.code == "recall_check_budget_exhausted"
+    finally:
+        for task in pending:
+            task.cancel()
+        turn.cancel()
+        driver.cancel()
+        await asyncio.gather(*pending, turn, driver, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case", ["inactive", "invalid_json", "opt_out", "wrong_scope", "helper", "empty_claims"],
+)
+async def test_aggregate_pre_admission_refusals_and_empty_claims_do_not_charge(
+    monkeypatch, case,
+) -> None:
+    cp, principal, turn, driver = _domain_fixture()
+    monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", case != "inactive")
+    monkeypatch.setattr(control_plane, "_managed_recall_now",
+                        lambda: pytest.fail("pre-admission case reached aggregate gate"))
+    checker_calls = []
+    monkeypatch.setattr(vault_verification, "verify_recall_claims",
+                        lambda *_a, **_k: checker_calls.append(True))
+    if case == "opt_out":
+        cp.app_settings.settings.verify_vault_answers = False
+    elif case == "wrong_scope":
+        cp._fixture_stream.background = True
+    elif case == "helper":
+        cp._fixture_chat.helper = {"kind": "proposal"}
+    try:
+        if case == "empty_claims":
+            monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_k: "haiku")
+            result = await cp.vault_recall_check(
+                principal, claims_json="[]", authorization_factory=_authorization_factory(),
+            )
+            assert result["data"]["status"] == "not_applicable"
+        else:
+            raw = "not-json" if case == "invalid_json" else _claims()
+            with pytest.raises(ControlPlaneError):
+                await cp.vault_recall_check(
+                    principal, claims_json=raw,
+                    authorization_factory=_authorization_factory(),
+                )
+        assert turn not in cp._managed_recall_attempts
+        assert not cp._managed_recall_tasks and not cp._managed_recall_admissions
+        assert not checker_calls
+    finally:
+        turn.cancel()
+        driver.cancel()
+        await asyncio.gather(turn, driver, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_aggregate_admission_preserves_single_finalization(monkeypatch) -> None:
+    cp, principal, turn, driver = _domain_fixture()
+    monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
+    events = []
+
+    def resolve_model(*_args, **_kwargs):
+        events.append("routing")
+        return "haiku"
+
+    monkeypatch.setattr(insights, "resolve_helper_model", resolve_model)
+    monkeypatch.setattr(control_plane, "_managed_recall_now", lambda: 100.0)
+    real_timeout = asyncio.timeout
+
+    class ObservedTimeout:
+        def __init__(self, seconds):
+            self.context = real_timeout(seconds)
+
+        async def __aenter__(self):
+            return await self.context.__aenter__()
+
+        async def __aexit__(self, *args):
+            events.append("timeout_exit")
+            return await self.context.__aexit__(*args)
+
+    monkeypatch.setattr(control_plane.asyncio, "timeout", ObservedTimeout)
+    blockers = {
+        asyncio.create_task(asyncio.Event().wait())
+        for _ in range(control_plane.MANAGED_RECALL_MAX_IN_FLIGHT)
+    }
+    cp._managed_recall_tasks.update(blockers)
+    cp._managed_recall_admissions.extend([100.0] * control_plane.MANAGED_RECALL_MAX_ADMISSIONS)
+    auth_calls = []
+
+    class Authorization:
+        def is_active(self):
+            events.append("authorization")
+            auth_calls.append(True)
+            return True
+
+        async def wait_invalid(self):
+            await asyncio.Event().wait()
+
+    finalizations = []
+    original_ok = control_plane._ok
+
+    def observe_ok(value):
+        finalizations.append(value)
+        return original_ok(value)
+
+    monkeypatch.setattr(control_plane, "_ok", observe_ok)
+    for name in ("get_chat", "get_project", "get_active_stream"):
+        original = getattr(cp.pcm, name)
+
+        def observed(*args, _name=name, _original=original, **kwargs):
+            events.append(_name)
+            return _original(*args, **kwargs)
+
+        setattr(cp.pcm, name, observed)
+    original_root = cp._vault_root
+    cp._vault_root = lambda *args, **kwargs: (events.append("vault_root"), original_root(*args, **kwargs))[1]
+    original_agent_root = cp.pcm._agent_root_for_chat
+
+    def observed_agent_root(*args, **kwargs):
+        events.append("agent_root")
+        return original_agent_root(*args, **kwargs)
+
+    cp.pcm._agent_root_for_chat = observed_agent_root
+    real_dumps = json.dumps
+
+    def observe_preflight(*args, **kwargs):
+        if args and isinstance(args[0], dict) and set(args[0]) == {"status", "claims", "coverage"}:
+            events.append("json_preflight")
+        return real_dumps(*args, **kwargs)
+
+    monkeypatch.setattr(control_plane.json, "dumps", observe_preflight)
+    try:
+        result = await cp.vault_recall_check(
+            principal, claims_json="[]", authorization_factory=Authorization,
+        )
+        assert result["data"]["status"] == "not_applicable"
+        assert len(finalizations) == 1
+        assert len(auth_calls) >= 2
+        assert len(cp._managed_recall_tasks) == control_plane.MANAGED_RECALL_MAX_IN_FLIGHT
+        assert len(cp._managed_recall_admissions) == control_plane.MANAGED_RECALL_MAX_ADMISSIONS
+        assert turn not in cp._managed_recall_attempts
+        exit_index = events.index("timeout_exit")
+        post_timeout_events = events[exit_index + 1:]
+        assert "get_chat" in post_timeout_events
+        assert "get_project" in post_timeout_events
+        assert "get_active_stream" in post_timeout_events
+        assert "routing" in post_timeout_events
+        assert "vault_root" in post_timeout_events
+        assert "agent_root" in post_timeout_events
+        assert "json_preflight" in post_timeout_events
+        assert post_timeout_events[-1] == "authorization"
+        for task in blockers:
+            task.cancel()
+        await asyncio.gather(*blockers, return_exceptions=True)
+        cp._managed_recall_tasks.clear()
+        cp._managed_recall_admissions.clear()
+        finalizations.clear()
+
+        async def checked(*_args, **_kwargs):
+            return {
+                "status": "checked",
+                "claims": [{
+                    "id": "claim_1", "status": "supported",
+                    "sources": [], "reason": "verified",
+                }],
+                "coverage": {"truncated": False, "omitted_sources": []},
+            }
+
+        monkeypatch.setattr(vault_verification, "verify_recall_claims", checked)
+        result = await cp.vault_recall_check(
+            principal, claims_json=_claims(), authorization_factory=Authorization,
+        )
+        assert result["data"]["status"] == "checked"
+        assert len(finalizations) == 1
+    finally:
+        for task in (*blockers, turn, driver):
+            task.cancel()
+        await asyncio.gather(*blockers, turn, driver, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("start_failure", ["checker", "watcher"])
+async def test_aggregate_task_start_failure_settles_owned_work(
+    monkeypatch, start_failure, caplog,
+) -> None:
+    cp, principal, turn, driver = _domain_fixture()
+    monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
+    monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_k: "haiku")
+    original_create_task = asyncio.create_task
+    captured_coroutines = []
+    created_tasks = []
+    settled_tasks = []
+    checker_registered_before_watcher_failure = []
+
+    async def verify_recall_claims(*_args, **_kwargs):
+        await asyncio.Event().wait()
+        return {"status": "unavailable", "claims": [],
+                "coverage": {"truncated": False, "omitted_sources": []}}
+
+    class Authorization:
+        def is_active(self):
+            return True
+
+        async def wait_invalid(self):
+            await asyncio.Event().wait()
+
+    def create_task(coro, *args, **kwargs):
+        name = coro.cr_code.co_name
+        if name == "verify_recall_claims":
+            captured_coroutines.append(coro)
+            if start_failure == "checker":
+                raise RuntimeError("PRIVATE_CREATE_SENTINEL")
+        if name == "wait_invalid":
+            captured_coroutines.append(coro)
+            if start_failure == "watcher":
+                checker_registered_before_watcher_failure.append(
+                    created_tasks[0] in cp._managed_recall_tasks
+                )
+                raise RuntimeError("PRIVATE_CREATE_SENTINEL")
+        task = original_create_task(coro, *args, **kwargs)
+        created_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(asyncio, "create_task", create_task)
+    monkeypatch.setattr(vault_verification, "verify_recall_claims", verify_recall_claims)
+    real_settle = control_plane._settle_managed_recall_tasks
+
+    async def observe_settle(*tasks, **kwargs):
+        result = await real_settle(*tasks, **kwargs)
+        settled_tasks.extend(task for task in tasks if task is not None)
+        return result
+
+    monkeypatch.setattr(control_plane, "_settle_managed_recall_tasks", observe_settle)
+    try:
+        with pytest.raises(ControlPlaneError) as refused:
+            await cp.vault_recall_check(
+                principal, claims_json=_claims(), authorization_factory=Authorization,
+            )
+        assert refused.value.code == "unavailable"
+        assert "PRIVATE_CREATE_SENTINEL" not in str(refused.value)
+        assert "PRIVATE_CREATE_SENTINEL" not in caplog.text
+        assert turn in cp._managed_recall_attempts
+        assert len(cp._managed_recall_admissions) == 1
+        assert captured_coroutines[-1].cr_frame is None
+        if start_failure == "checker":
+            assert not created_tasks
+        else:
+            assert created_tasks[0].done()
+            assert created_tasks[0].cancelled()
+            assert created_tasks[0] not in cp._managed_recall_tasks
+            assert checker_registered_before_watcher_failure == [True]
+            assert created_tasks[0] in settled_tasks
+            assert not turn.cancelled() and not driver.cancelled()
+        with pytest.raises(ControlPlaneError) as spent:
+            await cp.vault_recall_check(
+                principal, claims_json=_claims(),
+                authorization_factory=_authorization_factory(),
+            )
+        assert spent.value.code == "recall_check_budget_exhausted"
+    finally:
+        monkeypatch.setattr(asyncio, "create_task", original_create_task)
+        turn.cancel()
+        driver.cancel()
+        await asyncio.gather(turn, driver, *created_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("denial", "code", "message"),
+    [
+        ("busy", "recall_check_busy", "Managed recall checking is busy."),
+        (
+            "rate_limited", "recall_check_rate_limited",
+            "Managed recall checking attempt limit reached.",
+        ),
+    ],
+)
+async def test_aggregate_refusals_use_trusted_private_route_envelopes(
+    monkeypatch, tmp_path, caplog, denial, code, message,
+) -> None:
+    cp, _principal, turn, driver = _domain_fixture()
+    # The standard request identifier may coincidentally contain the private
+    # admission count's digits; it is not an admission-count disclosure.
+    private_chat_id = "chat_PRIVATE_8f3212"
+    private_project_id = "project_PRIVATE_8f32c1"
+    private_workspace = "workspace_PRIVATE_8f32c1"
+    cp._fixture_chats.pop("chat")
+    cp._fixture_projects.pop("project")
+    cp._fixture_streams.pop("chat")
+    cp._fixture_drivers.pop("chat")
+    cp._fixture_chat.chat_id = private_chat_id
+    cp._fixture_chat.project_id = private_project_id
+    cp._fixture_project.project_id = private_project_id
+    cp._fixture_project.workspace = private_workspace
+    cp._fixture_chats[private_chat_id] = cp._fixture_chat
+    cp._fixture_projects[private_project_id] = cp._fixture_project
+    cp._fixture_streams[private_chat_id] = cp._fixture_stream
+    cp._fixture_drivers[private_chat_id] = driver
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    service = CiaoMcpService(SimpleNamespace(state_path=runtime / "state.json", pwa_port=18443))
+    service.bind(cp)
+    token, telemetry_principal = service.registry.issue(
+        chat_id=private_chat_id, project_id=private_project_id,
+        workspace=private_workspace, provider="claude",
+    )
+    app = Starlette(routes=[Route("/agent/v1/{op}", agent_dispatch_endpoint, methods=["POST"])])
+    app.state.mcp_service = service
+    # Isolate the telemetry clock so asyncio and pytest keep real time.
+    perf_counter_values = iter((10.0, 10.037))
+    monkeypatch.setattr(
+        mcp_server, "time", SimpleNamespace(
+            perf_counter=lambda: next(perf_counter_values), time=time.time,
+        ),
+    )
+    monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
+    monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_k: "haiku")
+    private_count = 12
+    private_timestamp = 1_700_123_456.789
+    private_path = str(tmp_path / "PRIVATE_VAULT_PATH_8f32c1")
+    cp._vault_root = lambda _principal: Path(private_path)
+    private_tasks = []
+    if denial == "busy":
+        monkeypatch.setattr(control_plane, "MANAGED_RECALL_MAX_IN_FLIGHT", 1)
+        task = asyncio.create_task(asyncio.Event().wait(), name=private_chat_id)
+        cp._managed_recall_tasks.add(task)
+        private_tasks.append(task)
+    else:
+        cp._managed_recall_admissions.extend(
+            private_timestamp - index * 0.01 for index in range(private_count)
+        )
+        monkeypatch.setattr(control_plane, "MANAGED_RECALL_MAX_ADMISSIONS", private_count)
+        monkeypatch.setattr(control_plane, "_managed_recall_now", lambda: private_timestamp)
+    monkeypatch.setattr(
+        vault_verification, "verify_recall_claims",
+        lambda *_a, **_k: pytest.fail("aggregate refusal must not start checker"),
+    )
+    try:
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50127))
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://127.0.0.1:18443",
+        ) as client:
+            response = await client.post(
+                "/agent/v1/vault_recall_check",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"claims_json": _claims()},
+            )
+        assert response.status_code == 422
+        assert response.json()["error"] == {
+            "code": code, "message": message, "retryable": False,
+        }, response.text
+        assert cp._managed_recall_tasks == set(private_tasks)
+        assert not turn in cp._managed_recall_attempts
+        telemetry = (
+            service._telemetry_path.read_text(encoding="utf-8")
+            if service._telemetry_path.exists() else ""
+        )
+        private_observations = "\n".join((response.text, service._last_error, caplog.text))
+        for private_value in (
+            private_chat_id, private_project_id, private_workspace,
+            str(private_count), f"{private_timestamp:.3f}", private_path,
+        ):
+            assert private_value not in private_observations
+        # Shared telemetry intentionally retains its standard chat_id
+        # attribution; denial records must not add recall payload or private
+        # state such as claims, notes, paths, admission counts, or timestamps.
+        telemetry_records = [json.loads(line) for line in telemetry.splitlines()]
+        assert telemetry_records
+        assert all(record.get("chat_id") == private_chat_id for record in telemetry_records)
+        expected_telemetry_fields = {
+            "timestamp", "surface", "tool", "token_id", "chat_id",
+            "provider", "status", "error_code", "duration_ms",
+        }
+        for record in telemetry_records:
+            assert set(record) == expected_telemetry_fields
+            assert record["surface"] == "cli"
+            assert record["tool"] == "vault_recall_check"
+            assert record["provider"] == "claude"
+            assert record["status"] == "error"
+            assert record["error_code"] == code
+            assert record["token_id"] == telemetry_principal.token_id
+            assert record["chat_id"] == private_chat_id
+            assert record["duration_ms"] == 37
+            assert record["duration_ms"] != private_count
+            timestamp = datetime.fromisoformat(record["timestamp"])
+            assert timestamp.tzinfo is not None
+            # The private admission-window clock must never be recorded as telemetry.
+            assert record["timestamp"] != private_timestamp
+            assert timestamp.timestamp() != private_timestamp
+        for private_value in (
+            private_project_id, private_workspace, private_path, "claim_1",
+        ):
+            assert private_value not in telemetry
+    finally:
+        for task in private_tasks:
+            task.cancel()
+        turn.cancel()
+        driver.cancel()
+        await asyncio.gather(*private_tasks, turn, driver, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_seam", ["second_clock", "checker_task_start"])
+async def test_real_route_private_aggregate_admission_failures(
+    monkeypatch, tmp_path, caplog, failure_seam,
+) -> None:
+    cp, _principal, turn, driver = _domain_fixture()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    service = CiaoMcpService(SimpleNamespace(state_path=runtime / "state.json", pwa_port=18443))
+    service.bind(cp)
+    token, _ = service.registry.issue(
+        chat_id="chat", project_id="project", workspace="personal", provider="claude",
+    )
+    app = Starlette(routes=[Route("/agent/v1/{op}", agent_dispatch_endpoint, methods=["POST"])])
+    app.state.mcp_service = service
+    monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
+    monkeypatch.setattr(insights, "resolve_helper_model", lambda *_a, **_k: "haiku")
+    sentinel = f"PRIVATE_{failure_seam.upper()}_SENTINEL"
+    created_coroutines = []
+    prepared_coroutines = []
+    original_create_task = asyncio.create_task
+
+    async def checker_body():
+        return {"status": "unavailable", "claims": [],
+                "coverage": {"truncated": False, "omitted_sources": []}}
+
+    def verify_recall_claims(*_args, **_kwargs):
+        coro = checker_body()
+        prepared_coroutines.append(coro)
+        return coro
+
+    monkeypatch.setattr(vault_verification, "verify_recall_claims", verify_recall_claims)
+    if failure_seam == "second_clock":
+        clock_calls = []
+
+        def clock():
+            clock_calls.append(True)
+            if len(clock_calls) == 2:
+                raise RuntimeError(sentinel)
+            return 100.0
+
+        monkeypatch.setattr(control_plane, "_managed_recall_now", clock)
+    else:
+        monkeypatch.setattr(control_plane, "_managed_recall_now", lambda: 100.0)
+
+        def fail_checker_start(coro, *args, **kwargs):
+            if coro.cr_code.co_name == "checker_body":
+                created_coroutines.append(coro)
+                raise RuntimeError(sentinel)
+            return original_create_task(coro, *args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_task", fail_checker_start)
+    try:
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50129))
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://127.0.0.1:18443",
+        ) as client:
+            response = await client.post(
+                "/agent/v1/vault_recall_check",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"claims_json": _claims()},
+            )
+        assert response.status_code == 422
+        assert response.json() == {
+            "ok": False,
+            "error": {
+                "code": "unavailable", "message": "The recall check is unavailable.",
+                "retryable": False,
+            },
+        }
+        assert sentinel not in response.text
+        assert sentinel not in service._last_error
+        assert sentinel not in caplog.text
+        telemetry = service._telemetry_path.read_text(encoding="utf-8")
+        assert sentinel not in telemetry
+        assert not cp._managed_recall_tasks
+        assert turn in cp._managed_recall_attempts
+        assert len(cp._managed_recall_admissions) == (0 if failure_seam == "second_clock" else 1)
+        assert all(coro.cr_frame is None for coro in prepared_coroutines)
+        if failure_seam == "second_clock":
+            assert not prepared_coroutines
+        else:
+            assert len(prepared_coroutines) == 1
+        for private_detail in ("chat", "project", "personal", "100.0", "/tmp"):
+            assert private_detail not in response.text
+    finally:
+        monkeypatch.setattr(asyncio, "create_task", original_create_task)
+        turn.cancel()
+        driver.cancel()
+        await asyncio.gather(turn, driver, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_new_control_plane_has_empty_aggregate_state() -> None:
+    first = CiaoControlPlane(SimpleNamespace(), project_chat_manager=SimpleNamespace(),
+                             schedule_manager=SimpleNamespace())
+    second = CiaoControlPlane(SimpleNamespace(), project_chat_manager=SimpleNamespace(),
+                              schedule_manager=SimpleNamespace())
+    held = asyncio.create_task(asyncio.Event().wait())
+    try:
+        first._managed_recall_tasks.add(held)
+        first._managed_recall_admissions.append(100.0)
+        first._managed_recall_attempts.add(held)
+        assert not second._managed_recall_tasks
+        assert not second._managed_recall_admissions
+        assert not second._managed_recall_attempts
+    finally:
+        held.cancel()
+        await asyncio.gather(held, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_empty_claims_do_not_reserve_budget_or_invoke_checker(monkeypatch) -> None:
     cp, principal, turn, driver = _domain_fixture()
     monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
@@ -2179,6 +3398,7 @@ async def test_helper_failure_is_private_and_consumes_pass_budget(monkeypatch, t
     try:
         result = await cp.vault_recall_check(principal, claims_json=_claims(), authorization_factory=_authorization_factory())
         assert result["data"]["status"] == "unavailable"
+        assert len(cp._managed_recall_admissions) == 1
         assert "PRIVATE_HELPER_SENTINEL" not in caplog.text
         with pytest.raises(ControlPlaneError) as exhausted:
             await cp.vault_recall_check(principal, claims_json=_claims(), authorization_factory=_authorization_factory())

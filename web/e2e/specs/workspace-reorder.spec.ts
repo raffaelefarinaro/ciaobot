@@ -40,7 +40,12 @@ test.describe('workspace reorder', () => {
 
     expect(await switcherOrder(page)).toEqual(['Beta', 'Alpha', 'Gamma'])
     // The digits are inert inside Settings, so press them from Home.
-    await boot(page, '/')
+    // Reordering can change which workspace is active on a fresh load. Set a
+    // known starting workspace so both shortcut assertions prove a transition.
+    await boot(page, '/', '.workspace-scope-trigger')
+    await activeWorkspaceButton(page).click()
+    await page.getByRole('menuitem', { name: 'Alpha' }).click()
+    await expect(activeWorkspaceButton(page)).toContainText('Alpha')
     await page.keyboard.press('1')
     await expect(activeWorkspaceButton(page)).toContainText('Beta')
     await page.keyboard.press('2')

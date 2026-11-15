@@ -206,6 +206,19 @@ if sys.platform == "win32":
             """After the leader has exited: end whatever it left in the tree."""
             self.kill()
 
+        def kill_checked(self) -> None:
+            self.kill()
+
+        def close_checked(self) -> None:
+            if self._job is not None:
+                if not _CloseHandle(self._job):
+                    raise OSError("Could not close process tree handle")
+                self._job = None
+
+        def detach_job_handle(self) -> int | None:
+            handle, self._job = self._job, None
+            return handle
+
         def close(self) -> None:
             """Stop tracking the tree; the processes keep running."""
             if self._job is not None:
@@ -264,6 +277,15 @@ else:
 
         def close(self) -> None:
             """Stop tracking the tree; nothing to release on POSIX."""
+
+        def kill_checked(self) -> None:
+            self.kill()
+
+        def close_checked(self) -> None:
+            pass
+
+        def detach_job_handle(self) -> int | None:
+            return None
 
 
 def _reap_process(process: subprocess.Popen[bytes]) -> None:
