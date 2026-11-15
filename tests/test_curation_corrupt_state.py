@@ -176,18 +176,18 @@ def test_deeply_nested_json_is_a_controlled_state_error(tmp_path: Path) -> None:
 def test_duplicate_state_error_does_not_include_contents_or_parser_error(
     tmp_path: Path,
 ) -> None:
-    secret = "private-marker-that-must-not-leak"
+    marker = "curation-state-content-marker"
     path = cr.state_path(tmp_path / "vault")
     path.parent.mkdir(parents=True)
     path.write_text(
-        f'{{"version":1,"done_keys":{{}},"lease":{{}},"last_run":{{}},"x":"{secret}",',
+        f'{{"version":1,"done_keys":{{}},"lease":{{}},"last_run":{{}},"x":"{marker}",',
         encoding="utf-8",
     )
 
     with pytest.raises(cr.CurationStateError) as raised:
         cr.load_state(path.parent.parent)
 
-    assert secret not in str(raised.value)
+    assert marker not in str(raised.value)
     assert "JSONDecodeError" not in str(raised.value)
 
 
