@@ -88,7 +88,7 @@ function legacyCopy(text: string): boolean {
   }
 }
 
-export async function writeClipboard(text: string): Promise<boolean> {
+export async function writeClipboard(text: string, isCurrent?: () => boolean): Promise<boolean> {
   try {
     if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(text)
@@ -96,6 +96,7 @@ export async function writeClipboard(text: string): Promise<boolean> {
     }
   } catch {
     // Permission denied or an insecure context — fall through to the legacy path.
+    if (isCurrent && !isCurrent()) return false
   }
   return legacyCopy(text)
 }
