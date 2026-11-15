@@ -69,8 +69,8 @@ jobs:
           py="$RUNNER_TEMP/engine-check/bin/python"
           ws="$GITHUB_WORKSPACE"
           host_archive="$RUNNER_TEMP/server-host-build/ciaobot-server-host-macos-universal-v1.tar.gz"
-          # The three installers are listed by the exact files the Attach step uploads (#2483): install.sh is the copy Prepare release assets made, and the other two are uploaded from scripts/ verbatim.
-          (cd "$RUNNER_TEMP" && "$py" -m ciao.release_manifest build --version "$version" --out "$ws/ciaobot-engine-manifest.json" --server-host "$host_archive" --installer "$ws/install.sh" --installer "$ws/scripts/install-engine.sh" --installer "$ws/scripts/install.ps1" "$ws"/dist/ciaobot-*.whl)
+          # The two installers are listed by the exact files the Attach step uploads (#2483): install.sh is the copy Prepare release assets made, and install-engine.sh is uploaded from scripts/ verbatim.
+          (cd "$RUNNER_TEMP" && "$py" -m ciao.release_manifest build --version "$version" --out "$ws/ciaobot-engine-manifest.json" --server-host "$host_archive" --installer "$ws/install.sh" --installer "$ws/scripts/install-engine.sh" "$ws"/dist/ciaobot-*.whl)
           # The manifest is signed by the same minisign key the installer
           # embeds, but the signer must not live under desktop/ any more or
           # #579b would break the release. `signer sign <path>` needs no Tauri
@@ -85,8 +85,8 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          # Exactly seven engine assets: the macOS installer under both names,
-          # the Windows installer, the wheel, the signed manifest beside it, and
+          # Exactly six engine assets: the macOS installer under both names,
+          # the wheel, the signed manifest beside it, and
           # the universal server host archive the manifest authenticates (#1022).
           # Still no app archive, no latest.json feed, no verifier and no
           # bundled runtime (#653).
@@ -94,21 +94,19 @@ jobs:
           gh release upload "$TAG" \
             install.sh \
             scripts/install-engine.sh \
-            scripts/install.ps1 \
             dist/ciaobot-*.whl \
             ciaobot-engine-manifest.json \
             ciaobot-engine-manifest.json.sig \
             "$host_archive" \
             --clobber
           # The transition release hands the engine over by downloading
-          # install-engine.sh at its own tag (#604), a first-time macOS user
-          # runs install.sh, and a Windows user runs install.ps1; every name
+          # install-engine.sh at its own tag (#604) and a first-time macOS user
+          # runs install.sh; every name
           # has to be on the release or a documented install path is dead.
           # Checked here, where the tag is still known.
           assets="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
           grep -qx install.sh <<<"$assets"
           grep -qx install-engine.sh <<<"$assets"
-          grep -qx install.ps1 <<<"$assets"
           grep -qx ciaobot-server-host-macos-universal-v1.tar.gz <<<"$assets"
           # A client authenticates install.sh from the signed manifest (#2483),
           # so the installers now on the release - not the local copies - have
@@ -118,14 +116,12 @@ jobs:
           gh release download "$TAG" --dir "$uploaded" \
             --pattern install.sh \
             --pattern install-engine.sh \
-            --pattern install.ps1 \
             --pattern ciaobot-engine-manifest.json \
             --pattern ciaobot-engine-manifest.json.sig
           (cd "$RUNNER_TEMP" && "$RUNNER_TEMP/engine-check/bin/python" -m ciao.release_manifest verify \
             "$uploaded/ciaobot-engine-manifest.json" "$uploaded/ciaobot-engine-manifest.json.sig" \
             --asset "$uploaded/install.sh" \
-            --asset "$uploaded/install-engine.sh" \
-            --asset "$uploaded/install.ps1")
+            --asset "$uploaded/install-engine.sh")
 
   release-smoke:
     needs: build-engine

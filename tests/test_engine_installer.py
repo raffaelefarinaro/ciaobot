@@ -152,15 +152,13 @@ def _host_manifest_bytes(
 
 
 def _installer_manifest_bytes(tmp_path: Path) -> bytes:
-    """A schema-1 manifest naming the wheel and the three installer scripts (#2483)."""
+    """A schema-1 manifest naming the wheel and the two installer scripts (#2483)."""
     installers = tmp_path / "installers"
     installers.mkdir()
     sh = installers / "install.sh"
     sh.write_bytes(b"#!/bin/sh\necho sh\n")
     engine_sh = installers / "install-engine.sh"
     engine_sh.write_bytes(b"#!/bin/sh\necho engine\n")
-    ps1 = installers / "install.ps1"
-    ps1.write_bytes(b"Write-Host ps1\n")
     return json.dumps(
         build_manifest(
             VERSION,
@@ -168,7 +166,6 @@ def _installer_manifest_bytes(tmp_path: Path) -> bytes:
                 # The installers come first, so the wheel is found by kind, not position.
                 installer_artifact_entry(sh),
                 installer_artifact_entry(engine_sh),
-                installer_artifact_entry(ps1),
                 {
                     "filename": WHEEL_NAME,
                     "kind": "wheel",

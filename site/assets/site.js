@@ -1,11 +1,10 @@
 // One install action per platform. macOS offers the native client and the engine
-// command; Windows has its PowerShell command; Linux links to its admin guide.
+// command; Linux links to its admin guide.
 (function () {
   document.querySelectorAll('[data-install]').forEach(function (box) {
     var select = box.querySelector('[data-install-os]');
     var code = box.querySelector('code');
     var label = box.querySelector('[data-install-label]');
-    var note = box.querySelector('[data-install-note]');
     var commandBox = box.querySelector('[data-install-command]');
     var guide = box.querySelector('[data-install-guide]');
     var macClient = box.querySelector('[data-mac-client]');
@@ -21,7 +20,6 @@
       code.textContent = command;
       if (label) label.textContent = option.dataset.label;
       if (commandBox) commandBox.hidden = !command;
-      if (note) note.hidden = platform !== 'windows';
       if (macClient) macClient.hidden = platform !== 'mac';
       if (macNote) macNote.hidden = platform !== 'mac';
       if (guide) {
@@ -32,8 +30,7 @@
 
     var ua = navigator.userAgentData;
     var platform = (ua && ua.platform) || navigator.platform || navigator.userAgent || '';
-    if (/win/i.test(platform)) select.value = 'windows';
-    else if (/linux/i.test(platform) && !/android/i.test(navigator.userAgent)) select.value = 'linux';
+    if (/linux/i.test(platform) && !/android/i.test(navigator.userAgent)) select.value = 'linux';
     select.addEventListener('change', show);
     select.closest('.install-os').hidden = false;
     show();

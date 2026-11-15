@@ -14,7 +14,7 @@ develop_json() {
 {
   "required_status_checks": {
     "strict": false,
-    "contexts": ["linux-server", "linux-web", "linux-e2e", "windows"]
+    "contexts": ["linux-server", "linux-web", "linux-e2e"]
   },
   "enforce_admins": false,
   "required_pull_request_reviews": null,
@@ -25,14 +25,14 @@ develop_json() {
 JSON
 }
 
-# main: release PRs only, and they run the full matrix (Windows suites and the
-# macOS job), so every check is required, for admins too.
+# main: release PRs only, and they run the full matrix (Python 3.14 backend
+# gates and the macOS job), so every check is required, for admins too.
 main_json() {
   cat <<'JSON'
 {
   "required_status_checks": {
     "strict": false,
-    "contexts": ["linux-server", "linux-web", "windows", "test"]
+    "contexts": ["linux-server", "linux-web", "linux-server-latest-python", "test"]
   },
   "enforce_admins": true,
   "required_pull_request_reviews": {

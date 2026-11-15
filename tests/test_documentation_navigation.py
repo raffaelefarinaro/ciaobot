@@ -110,24 +110,25 @@ def test_home_and_readme_share_the_primary_slogan() -> None:
     assert f"**{slogan}**" in readme
 
 
-def test_site_install_picker_offers_all_platforms() -> None:
-    # macOS offers the native client plus the engine one-liner, Windows has its
-    # PowerShell one-liner, and Linux opens its dedicated administrator guide.
+def test_site_install_picker_offers_macos_and_linux() -> None:
+    # macOS offers the native client plus the engine one-liner, and Linux opens
+    # its dedicated administrator guide.
     mac = "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh"
-    windows = "irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex"
     linux = "https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md"
     for relative in ("site/index.html", "site/guide.html"):
         text = (ROOT / relative).read_text(encoding="utf-8")
         assert "data-install" in text and "data-install-os" in text, relative
-        assert f'data-cmd="{mac}"' in text and f'data-cmd="{windows}"' in text, relative
+        assert f'data-cmd="{mac}"' in text, relative
+        assert "install.ps1" not in text, relative
+        assert 'value="windows"' not in text, relative
+        assert "docs/WINDOWS.md" not in text, relative
         assert f'<code id="install-cmd">{mac}</code>' in text, relative
         assert f'data-url="{linux}"' in text and ">Linux</option>" in text, relative
         assert "data-mac-client" in text and "ciaobot-mac/releases" in text, relative
-        assert "Windows (preview)" not in text and "Windows is a preview" not in text, relative
         noscript = text.split("<noscript>", 1)[1]
-        assert windows in noscript and linux in noscript, relative
-        assert "docs/WINDOWS.md" in text, relative
+        assert linux in noscript, relative
     script = (ROOT / "site/assets/site.js").read_text(encoding="utf-8")
     assert "[data-install-os]" in script and "option.dataset.cmd" in script
     assert "option.dataset.url" in script and "data-install-guide" in script
     assert "ciaobot-mac/releases?per_page=20" in script and "browser_download_url" in script
+    assert "'windows'" not in script
