@@ -6186,10 +6186,13 @@ def _proposal_needle(args: argparse.Namespace) -> str | None:
 
 def _handover_accept_budget(vault: Path, queue: Path) -> str:
     """``""`` while this curation run may still accept, else why not."""
-    from ciao.curation_run import active_lease
+    from ciao.curation_run import CurationStateError, active_lease
     from ciao.proposal_predictions import HANDOVER_ACCEPT_CAP, count_agent_accepts_since
 
-    lease = active_lease(vault)
+    try:
+        lease = active_lease(vault)
+    except CurationStateError:
+        return "curation state is uncertain; handover is refused"
     if lease is None:
         return "accepting needs a live curation run (take the lease with curation-begin)"
     try:
@@ -6241,6 +6244,7 @@ def _handover_gate(
     workspace: Path, name: str | None, queue: Path, bullet: Any, verdict: str
 ) -> str:
     """``""`` when the run may act on *bullet* with *verdict*, else why not."""
+    from ciao.curation_run import CurationStateError, active_lease
     from ciao.proposal_predictions import (
         REGION_KINDS,
         handover_allows,
@@ -6256,6 +6260,10 @@ def _handover_gate(
     trusted = trusted_registry(name, queue.parent.parent)
     if trusted is None:
         return "the installed engine does not register this workspace at this vault"
+    try:
+        active_lease(queue.parent.parent)
+    except CurationStateError:
+        return "curation state is uncertain; handover is refused"
     registered = trusted.workspace(name or "")
     handover = registered.memory_handover if registered is not None else "off"
     if not handover_allows(handover, verdict):
@@ -6381,7 +6389,13 @@ def _curation_plan_command(args: argparse.Namespace) -> int:
     Read-only on purpose: the plan is also how a human (or a test) checks what
     the nightly run would do without taking the lease away from it.
     """
-    payload, _ = _curation_plan(args)
+    from ciao.curation_run import CurationStateError
+
+    try:
+        payload, _ = _curation_plan(args)
+    except CurationStateError as exc:
+        print(f"curation state error: {exc}", file=sys.stderr)
+        return 1
     _print_curation(payload, as_json=args.json)
     return 0
 
@@ -6392,7 +6406,7 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     An empty worklist releases the lease again before returning: a quiet night
     must not hold the lease until the TTL expires.
     """
-    from ciao.curation_run import CurationBusy, begin_run, end_run, holder_is_live
+    from ciao.curation_run import CurationBusy, CurationStateError, begin_run, end_run, holder_is_live
 
     _workspace, vault, _guide, budget, registry_root, _name = _curation_context(args)
     try:
@@ -6400,6 +6414,9 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     except CurationBusy as exc:
         print(f"curation is already running: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
+    except CurationStateError as exc:
+        print(f"curation state error: {exc}", file=sys.stderr)
+        return 1
 
     from ciao.curation_run import _category_cluster_items
     from ciao.entity_types import load_entity_types
@@ -6407,9 +6424,13 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
     categories = tuple(
         _category_cluster_items(vault, registry=load_entity_types(registry_root))
     )
-    payload, _worklist = _curation_plan(
-        args, category_items=categories, category_generation_attempted=True
-    )
+    try:
+        payload, _worklist = _curation_plan(
+            args, category_items=categories, category_generation_attempted=True
+        )
+    except CurationStateError as exc:
+        print(f"curation state error: {exc}", file=sys.stderr)
+        return 1
     payload["lease"] = lease.as_dict()
     if payload.get("empty"):
         try:
@@ -6417,10 +6438,19 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
         except CurationBusy as exc:
             print(f"curation lease lost: {exc}", file=sys.stderr)
             return CURATION_BUSY_EXIT
+        except CurationStateError as exc:
+            print(f"curation state error: {exc}", file=sys.stderr)
+            return 1
         payload["lease"] = {}
-    elif not holder_is_live(vault, holder=lease.holder):
-        print("curation lease lost while building the worklist", file=sys.stderr)
-        return CURATION_BUSY_EXIT
+    else:
+        try:
+            is_live = holder_is_live(vault, holder=lease.holder)
+        except CurationStateError as exc:
+            print(f"curation state error: {exc}", file=sys.stderr)
+            return 1
+        if not is_live:
+            print("curation lease lost while building the worklist", file=sys.stderr)
+            return CURATION_BUSY_EXIT
     _print_curation(payload, as_json=args.json)
     return 0
 
@@ -6447,7 +6477,7 @@ def _curation_holder(args: argparse.Namespace) -> str:
 
 def _curation_progress_command(args: argparse.Namespace) -> int:
     """Record finished worklist keys and renew the lease."""
-    from ciao.curation_run import CurationBusy, record_done
+    from ciao.curation_run import CurationBusy, CurationStateError, record_done
 
     _workspace, vault, _guide, budget, _registry_root, _name = _curation_context(args)
     holder = _curation_holder(args)
@@ -6462,6 +6492,9 @@ def _curation_progress_command(args: argparse.Namespace) -> int:
     except CurationBusy as exc:
         print(f"curation lease lost: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
+    except CurationStateError as exc:
+        print(f"curation state error: {exc}", file=sys.stderr)
+        return 1
     payload = {"recorded": len(keys), "newly_done": added}
     if args.json:
         json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
@@ -6480,13 +6513,17 @@ def _curation_end_command(args: argparse.Namespace) -> int:
     show for it. `end_run` does the stamping, so it happens only for the run
     that still owns the lease.
     """
-    from ciao.curation_run import CurationBusy, end_run
+    from ciao.curation_run import CurationBusy, CurationStateError, end_run
 
     _workspace, vault, _guide, _budget, _registry_root, _name = _curation_context(args)
     holder = _curation_holder(args)
     if not holder:
         return 2
-    payload, worklist = _curation_plan(args)
+    try:
+        payload, worklist = _curation_plan(args)
+    except CurationStateError as exc:
+        print(f"curation state error: {exc}", file=sys.stderr)
+        return 1
     live_keys = frozenset(key for item in worklist.items for key in item.keys)
     deferred = int(payload.get("deferred_count", 0))
     try:
@@ -6510,6 +6547,9 @@ def _curation_end_command(args: argparse.Namespace) -> int:
     except CurationBusy as exc:
         print(f"curation lease lost: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
+    except CurationStateError as exc:
+        print(f"curation state error: {exc}", file=sys.stderr)
+        return 1
     summary.update(
         counts_complete=False,
         remaining_observed_count=int(payload["remaining_observed_count"]),
