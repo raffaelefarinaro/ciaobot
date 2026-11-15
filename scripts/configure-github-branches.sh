@@ -7,6 +7,7 @@ repo="${1:-raffaelefarinaro/ciaobot}"
 
 # develop: the checks a develop PR runs (the macOS `test` job does not run
 # there). `linux-e2e` is skipped for PRs whose diff does not change `web/`.
+# `mac-app` runs only its scope check on PRs whose diff does not change `mac/`.
 # Admins stay exempt so release-on-main.yml can merge its
 # sync-develop PR with `gh pr merge --admin`.
 develop_json() {
@@ -14,7 +15,7 @@ develop_json() {
 {
   "required_status_checks": {
     "strict": false,
-    "contexts": ["linux-server", "linux-web", "linux-e2e"]
+    "contexts": ["linux-server", "linux-web", "linux-e2e", "mac-app"]
   },
   "enforce_admins": false,
   "required_pull_request_reviews": null,
@@ -32,7 +33,7 @@ main_json() {
 {
   "required_status_checks": {
     "strict": false,
-    "contexts": ["linux-server", "linux-web", "linux-server-latest-python", "test"]
+    "contexts": ["linux-server", "linux-web", "linux-server-latest-python", "test", "mac-app"]
   },
   "enforce_admins": true,
   "required_pull_request_reviews": {

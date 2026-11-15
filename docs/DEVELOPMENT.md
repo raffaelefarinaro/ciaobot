@@ -1077,8 +1077,12 @@ while the server is running, because the live schedule store may be writing it.
   full macOS `test` job (coverage, browser tests, and the engine wheel this
   branch would publish, installed into a throwaway venv and cold-started — the
   launchd, installer, engine-update and migration coverage — about 18 minutes)
-  runs on release PRs and manual full runs, not ordinary develop PRs. Nothing builds the app any more, so
-  there is no diff for it to react to. Web changes in develop PRs get the
+  runs on release PRs and manual full runs, not ordinary develop PRs. The Swift
+  Mac app in `mac/` is built by its own `mac-app` job (`swift test`,
+  `swift build`, `scripts/build-app.sh`, the asset test and a plist lint on
+  `macos-15`), which runs on develop PRs whose three-dot diff changes `mac/`
+  (decided by the fast `mac-scope` detector) and on every release PR and manual
+  run; other develop PRs run only its scope check, on Linux. Web changes in develop PRs get the
   Linux browser check before merge; the macOS browser run is the release PR.
   The stable required `windows` check aggregates independent
   `windows-backend` and `windows-web` jobs (`windows-latest`).
@@ -1088,7 +1092,7 @@ while the server is running, because the live schedule store may be writing it.
   execute `pytest -n auto --durations=30 tests/` while the frontend runs
   `npm test` in parallel. Ordinary develop PRs skip both Windows jobs. A full Windows or macOS failure
   therefore surfaces on the release PR, and `/ciao-release` merges into
-  `main` only when that PR's `windows` and `test` checks are green.
+  `main` only when that PR's `windows`, `test` and `mac-app` checks are green.
   The summary fails if any applicable job fails, is cancelled, or unexpectedly
   skips; a full run requires both jobs to succeed. Every backend gate runs even after an earlier one
   failed, the job summary lists the counts and the failing tests by name, and
@@ -1270,9 +1274,12 @@ One-time GitHub setup for a fresh clone or repo admin:
 When run by an admin, the script sets `develop` as the default branch and
 applies protection to both branches. The checked-in declaration adds
 `linux-e2e` to develop's required contexts; GitHub skips that job on develop
-PRs without a `web/` change. Admins remain exempt on `develop` so the
+PRs without a `web/` change. `mac-app` is required on both branches the same
+way: it passes after the scope check on PRs that do not change `mac/`, and
+activating it live is the same separate admin action, after it has reported on
+a PR. Admins remain exempt on `develop` so the
 post-release sync PR can merge. `main` continues to require `linux-server`,
-`linux-web`, `windows` and macOS `test`, including for admins.
+`linux-web`, `windows`, macOS `test` and `mac-app`, including for admins.
 This source change does not update live branch protection: activating the new
 required context needs separate maintainer approval and an admin action after
 the workflow is present and `linux-e2e` has reported on a PR.

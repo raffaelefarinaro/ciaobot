@@ -606,6 +606,137 @@ def test_web_change_detector_fails_for_disconnected_commits(tmp_path: Path) -> N
     assert not output.exists() or "web_changed=" not in output.read_text(encoding="utf-8")
 
 
+def _mac_changes_script() -> str:
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
+    ).read_text(encoding="utf-8")
+    step = workflow.split("    - name: Detect mac changes", 1)[1]
+    run = step.split("      run: |\n", 1)[1]
+    lines: list[str] = []
+    for line in run.splitlines():
+        if line.startswith("        "):
+            lines.append(line[8:])
+        elif not line.strip():
+            lines.append("")
+        else:
+            break
+    return "\n".join(lines)
+
+
+def _run_mac_detector(
+    repo: Path, output: Path, base_sha: str | None, head_sha: str | None
+) -> subprocess.CompletedProcess[str]:
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "GITHUB_OUTPUT": str(output),
+    }
+    if base_sha is not None:
+        env["PR_BASE_SHA"] = base_sha
+    if head_sha is not None:
+        env["PR_HEAD_SHA"] = head_sha
+    return subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c", _mac_changes_script()],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.skipif(
+    shutil.which("bash") is None,
+    reason="the detector runs on GitHub's Linux bash runner",
+)
+@pytest.mark.parametrize(
+    ("change", "expected"),
+    [
+        ("add", "true"),
+        ("modify", "true"),
+        ("delete", "true"),
+        ("rename_out", "true"),
+        ("rename_in", "true"),
+        ("engine_colors", "true"),
+        ("web", "false"),
+        ("native", "false"),
+        ("prefix", "false"),
+    ],
+)
+def test_mac_change_detector_uses_pr_three_dot_diff(
+    tmp_path: Path, change: str, expected: str
+) -> None:
+    repo = tmp_path / "repo"
+    _init_git(repo)
+    seed = {
+        "mac/a.swift": "a",
+        "outside/a.swift": "o",
+        "mac-other/a.swift": "p",
+        "native/a.swift": "n",
+        "web/src/lib/other.ts": "w",
+        "web/src/lib/workspaceColors.ts": "c",
+    }
+    for name, content in seed.items():
+        _commit_file(repo, name, content, f"seed {name}")
+    base = _git(repo, "rev-parse", "HEAD")
+    if change == "add":
+        head = _commit_file(repo, "mac/new.swift", "new", "add mac file")
+    elif change == "modify":
+        head = _commit_file(repo, "mac/a.swift", "changed", "modify mac file")
+    elif change == "delete":
+        _git(repo, "rm", "mac/a.swift")
+        _git(repo, "commit", "-qm", "delete mac file")
+        head = _git(repo, "rev-parse", "HEAD")
+    elif change == "rename_out":
+        _git(repo, "mv", "mac/a.swift", "outside/renamed.swift")
+        _git(repo, "commit", "-qm", "move file out of mac")
+        head = _git(repo, "rev-parse", "HEAD")
+    elif change == "rename_in":
+        _git(repo, "mv", "outside/a.swift", "mac/renamed.swift")
+        _git(repo, "commit", "-qm", "move file into mac")
+        head = _git(repo, "rev-parse", "HEAD")
+    elif change == "engine_colors":
+        head = _commit_file(
+            repo, "web/src/lib/workspaceColors.ts", "changed", "engine colours"
+        )
+    elif change == "web":
+        head = _commit_file(repo, "web/src/lib/other.ts", "changed", "other web file")
+    elif change == "native":
+        head = _commit_file(repo, "native/a.swift", "changed", "native change")
+    else:
+        head = _commit_file(repo, "mac-other/change.swift", "x", "prefix change")
+
+    output = tmp_path / "github-output"
+    result = _run_mac_detector(repo, output, base, head)
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8") == f"mac_changed={expected}\n"
+
+
+@pytest.mark.skipif(
+    shutil.which("bash") is None,
+    reason="the detector runs on GitHub's Linux bash runner",
+)
+@pytest.mark.parametrize("side", ["PR_BASE_SHA", "PR_HEAD_SHA"])
+@pytest.mark.parametrize(
+    "value",
+    [None, "a1b2c3d", "g" * 40, "$(touch sentinel)"],
+)
+def test_mac_change_detector_rejects_invalid_sha_inputs(
+    tmp_path: Path, side: str, value: str | None
+) -> None:
+    repo = tmp_path / "repo"
+    _init_git(repo)
+    commit = _commit_file(repo, "README.md", "seed", "seed")
+    base, head = commit, commit
+    if side == "PR_BASE_SHA":
+        base = value
+    else:
+        head = value
+    output = tmp_path / "github-output"
+    result = _run_mac_detector(repo, output, base, head)
+    assert result.returncode != 0
+    assert not output.exists() or "mac_changed=" not in output.read_text(encoding="utf-8")
+    assert not (repo / "sentinel").exists()
+
+
 def test_develop_web_prs_run_linux_e2e() -> None:
     workflow = (
         Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
@@ -648,10 +779,10 @@ def test_branch_protection_declares_conditional_linux_e2e_for_develop() -> None:
     assert len(blocks) == 2
     develop, main = (json.loads(block) for block in blocks)
     assert develop["required_status_checks"]["contexts"] == [
-        "linux-server", "linux-web", "linux-e2e"
+        "linux-server", "linux-web", "linux-e2e", "mac-app"
     ]
     assert main["required_status_checks"]["contexts"] == [
-        "linux-server", "linux-web", "linux-server-latest-python", "test"
+        "linux-server", "linux-web", "linux-server-latest-python", "test", "mac-app"
     ]
     assert develop["enforce_admins"] is False
     assert main["enforce_admins"] is True

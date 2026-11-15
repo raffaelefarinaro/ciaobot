@@ -21,6 +21,9 @@ concurrency:
 # `linux-e2e`, which builds and tests this checkout in Chromium alongside the
 # unit/build job, after the fast `web-scope` detector. The detector
 # uses the PR's base/head commits and full history from the merge checkout.
+# `mac-app` builds and tests the Swift Mac app in `mac/` on macOS 15; on
+# develop PRs only when the diff changes `mac/` or the engine colour table
+# it pins (the `mac-scope` detector), and always on release PRs and manual runs.
 # `linux-server-latest-python` runs the same backend gates
 # on the newest Python `requires-python` admits (3.14) on release and manual
 # runs; it is a required check on main. `test` is the macOS job —
@@ -166,6 +169,90 @@ jobs:
         path: web/test-results/
         retention-days: 7
         if-no-files-found: ignore
+
+  # Detection is separate so a develop PR that does not touch mac/ never
+  # waits for a macOS runner. Release PRs and manual runs always build it.
+  mac-scope:
+    outputs:
+      mac_changed: ${{ steps.mac-changes.outputs.mac_changed || steps.mac-full.outputs.mac_changed }}
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - name: Detect mac changes
+      id: mac-changes
+      if: github.event_name == 'pull_request' && github.base_ref == 'develop'
+      shell: bash
+      env:
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        set -euo pipefail
+        for name in PR_BASE_SHA PR_HEAD_SHA; do
+          value="${!name:-}"
+          if [[ ! "$value" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::${name} must be a full 40-character commit SHA" >&2
+            exit 1
+          fi
+          if ! git cat-file -e "${value}^{commit}"; then
+            echo "::error::${name} is unavailable as a commit in this checkout" >&2
+            exit 1
+          fi
+        done
+        mac_paths="$(git diff --no-renames --name-only "${PR_BASE_SHA}...${PR_HEAD_SHA}" -- mac/ web/src/lib/workspaceColors.ts)"
+        if [[ -n "$mac_paths" ]]; then
+          printf 'mac_changed=true\n' >> "$GITHUB_OUTPUT"
+        else
+          printf 'mac_changed=false\n' >> "$GITHUB_OUTPUT"
+        fi
+    - name: Release and manual runs always build the Mac app
+      id: mac-full
+      if: ${{ !(github.event_name == 'pull_request' && github.base_ref == 'develop') }}
+      run: printf 'mac_changed=true\n' >> "$GITHUB_OUTPUT"
+
+  # Stable required check. Without a mac/ change it runs only the scope
+  # check, on Linux, so it never queues for a macOS runner.
+  mac-app:
+    needs: mac-scope
+    if: ${{ !cancelled() }}
+    runs-on: ${{ needs.mac-scope.outputs.mac_changed == 'true' && 'macos-15' || 'ubuntu-24.04' }}
+    timeout-minutes: 30
+    steps:
+    - name: Require successful mac scope detection
+      env:
+        SCOPE_RESULT: ${{ needs.mac-scope.result }}
+      run: test "$SCOPE_RESULT" = success
+    - uses: actions/checkout@v7
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      with:
+        persist-credentials: false
+    - name: Toolchain
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      working-directory: mac
+      run: |
+        xcodebuild -version
+        swift --version
+    - name: Swift tests
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      working-directory: mac
+      run: swift test
+    - name: Swift build
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      working-directory: mac
+      run: swift build
+    - name: Build local app bundle
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      working-directory: mac
+      run: scripts/build-app.sh
+    - name: Verify packaged assets and icon
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      working-directory: mac
+      run: swift test --filter AppAssetsTests
+    - name: Validate bundle metadata
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      working-directory: mac
+      run: plutil -lint .build/Ciaobot.app/Contents/Info.plist
 
   test:
     # Engine-only coverage that only the real platform can give. This job runs

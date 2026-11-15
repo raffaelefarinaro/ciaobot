@@ -29,6 +29,8 @@ Sibling skills this one calls into, rather than restating:
 catalog and `docs/UPKEEP.md` current — run those on their own cadence, not
 here. Read each at the point it is needed.
 
+The Mac app in `mac/` is released separately with **`/release-mac`** (`skills/release-mac/`); this skill never builds, signs or publishes it.
+
 Everything runs in **this checkout, in one session**. There is no worktree, no
 external tree, and no separate reviewer process. If you find yourself wanting a
 worktree, you are about to make a change, and changes do not belong here.
@@ -75,8 +77,8 @@ dirty tree stops the cut (`--apply` refuses — see traps).
 Develop PRs run Linux gates; Python 3.14 and macOS coverage runs
 on the release PR. Inspect nightly CI for known failures, but an older green
 SHA is not proof of this candidate. Step 6 merges only when the release PR's
-required checks, including `linux-server-latest-python` (Python 3.14) and
-`test`, are green.
+required checks, including `linux-server-latest-python` (Python 3.14),
+`test` and `mac-app`, are green.
 
 **Decide scope with the user.** Run `gh pr list --state open` and
 `gh issue list --state open` on `raffaelefarinaro/ciaobot`, show the result, and
@@ -305,7 +307,7 @@ Once the release PR is open, give its diff one more read before merging — the
 not in the Step 3 review. Prefer `/code-review --comment` on the open PR so
 findings land as inline comments.
 
-1. CI must be green (`mergeStateStatus` CLEAN), including `linux-server-latest-python` and `test`.
+1. CI must be green (`mergeStateStatus` CLEAN), including `linux-server-latest-python`, `test` and `mac-app`.
 2. Merge into `main`. This runs `.github/workflows/release-on-main.yml`, which
    creates the `vX.Y.Z` tag and GitHub release using `RELEASE_PAT` (a plain
    `GITHUB_TOKEN` release would **not** fire `release: published`).
