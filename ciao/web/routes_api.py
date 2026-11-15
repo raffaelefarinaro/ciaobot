@@ -8286,11 +8286,11 @@ def _forbidden_host(request: Request) -> JSONResponse | None:
 
 
 async def _drain_owner(request: Request) -> str | None:
-    """The ``owner`` an update's drain carries, or None for a manual caller.
+    """The ``owner`` a drain request carries, or None when it names none.
 
-    The body is optional and has always been empty, so a missing, empty or
-    malformed document is "no owner" rather than a refusal: an older updater
-    must keep working exactly as it did.
+    A drain belongs to exactly one operation, so both drain routes refuse a
+    request that names no owner (an older, ownerless client must upgrade).
+    A missing, empty or malformed document is "no owner".
     """
     try:
         body = await request.json()
@@ -8311,9 +8311,11 @@ async def admin_drain(request: Request) -> JSONResponse:
     come back in the same response the engine already publishes, so the caller
     does not have to make a second request to find out what it is waiting for.
 
-    An optional ``{"owner": "<operation id>"}`` body names the operation the
-    drain belongs to, which is what lets only that owner cancel it. Without one
-    the drain is the manual drain it has always been.
+    A ``{"owner": "<operation id>"}`` body is required: it names the operation
+    the drain belongs to, which is what lets only that owner poll or cancel it.
+    A request without one is a 400, and one naming another owner while a drain
+    is held is a 409. The answer carries ``schedule_work_count``, the scheduled
+    work still running; a caller treats a missing count as "not idle".
 
     Refused while a Settings restart is already draining: that restart owns the
     same flag, and taking it over would let the update's cancel reopen
@@ -8327,11 +8329,21 @@ async def admin_drain(request: Request) -> JSONResponse:
     if pcm is None:
         return JSONResponse({"error": "drain unavailable"}, status_code=503)
     owner = await _drain_owner(request)
+    if owner is None:
+        return JSONResponse({"error": "drain owner required"}, status_code=400)
     if pcm.restart_draining and not getattr(request.app.state, "update_drain_active", False):
         return JSONResponse({"error": "a restart is already draining"}, status_code=409)
+    claimed_owner = str(getattr(pcm, "drain_owner", "") or "")
+    if pcm.restart_draining and claimed_owner and claimed_owner != owner:
+        return JSONResponse({"error": "drain owned by another operation"}, status_code=409)
     request.app.state.update_drain_active = True
-    pcm.begin_restart_drain(owner or "")
-    return JSONResponse({"draining": True, "active_chat_ids": pcm.active_chat_ids()})
+    pcm.begin_restart_drain(owner)
+    answer: dict[str, Any] = {"draining": True, "active_chat_ids": pcm.active_chat_ids()}
+    schedules = getattr(request.app.state, "schedule_manager", None)
+    if schedules is not None:
+        # Omitted without a manager: clients read a missing count as "not idle".
+        answer["schedule_work_count"] = schedules.work_count()
+    return JSONResponse(answer)
 
 
 async def admin_drain_cancel(request: Request) -> JSONResponse:
@@ -8354,11 +8366,12 @@ async def admin_drain_cancel(request: Request) -> JSONResponse:
     if pcm is None:
         return JSONResponse({"error": "drain unavailable"}, status_code=503)
     owner = await _drain_owner(request)
+    if owner is None:
+        return JSONResponse({"error": "drain owner required"}, status_code=400)
     if not getattr(request.app.state, "update_drain_active", False):
         return JSONResponse({"draining": pcm.restart_draining})
-    # An owned claim is not reopened by an ownerless caller: a bodyless cancel
-    # is how the manual path cancels its own drain, and during a claimed update
-    # it is exactly the steal the owner token exists to refuse.
+    # Only the owner reopens its drain: a cancel naming another owner is the
+    # steal the owner token exists to refuse.
     claimed_owner = str(getattr(pcm, "drain_owner", "") or "")
     if claimed_owner and owner != claimed_owner:
         return JSONResponse(

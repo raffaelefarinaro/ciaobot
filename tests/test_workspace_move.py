@@ -435,6 +435,14 @@ class _Service:
         pass
 
 
+class _Posts(list):
+    """The URLs posted, with the request bodies alongside."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.bodies: list[dict[str, Any] | None] = []
+
+
 def _run(
     tmp_path: Path,
     host: _Host,
@@ -454,14 +462,16 @@ def _run(
     state.mkdir()
     service = service_type(tmp_path / "definition", source)
     op = workspace_move.MoveOperation("op1", "queued", str(source), str(target), "", "", port=8443)
-    posts: list[str] = []
+    posts = _Posts()
+    bodies = posts.bodies
     clock = iter(range(0, 100_000, 10))
 
-    def post(url: str) -> dict[str, Any]:
+    def post(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         posts.append(url)
+        bodies.append(body)
         if post_override is not None:
             return post_override(url)
-        return {"active_chat_ids": [] if drained else ["busy"]}
+        return {"active_chat_ids": [] if drained else ["busy"], "schedule_work_count": 0}
 
     def get(url: str) -> dict[str, Any] | None:
         if get_override is not None:
@@ -520,7 +530,7 @@ def test_protected_destination_probe_denial_does_not_drain_or_stop(
         host=host,
         service=service,
         get=lambda _url: {"overall_ready": True},
-        post=lambda _url: {"active_chat_ids": []},
+        post=lambda _url, _body=None: {"active_chat_ids": [], "schedule_work_count": 0},
         sleep=lambda _seconds: None,
         clock=lambda: 0.0,
         platform="darwin",
@@ -559,7 +569,7 @@ def test_destination_probe_eacces_is_not_recorded_as_privacy_denial(
         host=host,
         service=service,
         get=lambda _url: {"overall_ready": True},
-        post=lambda _url: {"active_chat_ids": []},
+        post=lambda _url, _body=None: {"active_chat_ids": [], "schedule_work_count": 0},
         sleep=lambda _seconds: None,
         clock=lambda: 0.0,
         platform="darwin",
@@ -1427,3 +1437,25 @@ def test_status_reports_cloud_sync_warning(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setattr(workspace_move, "default_state_dir", lambda: tmp_path / "state")
     status = _client(tmp_path, peer="127.0.0.1").get("/api/workspace-move").json()
     assert status["cloud_sync_warning"] == ""
+
+
+def test_every_drain_request_names_the_move_as_its_owner(tmp_path: Path) -> None:
+    result, _service, posts = _run(tmp_path, _Host(), drained=False)
+
+    assert result.phase == "failed"  # never drained, so the cancel was sent too
+    assert posts and all(body == {"owner": "move-op1"} for body in posts.bodies)
+    assert posts[-1].endswith("/api/admin/drain/cancel")
+
+
+def test_an_engine_that_does_not_report_scheduled_work_is_not_treated_as_idle(
+    tmp_path: Path,
+) -> None:
+    host = _Host()
+    result, _service, posts = _run(
+        tmp_path, host, post_override=lambda url: {"active_chat_ids": []}
+    )
+
+    assert result.phase == "failed"
+    assert "does not report scheduled work" in result.error
+    assert posts[-1].endswith("/api/admin/drain/cancel")
+    assert not host.stopped if hasattr(host, "stopped") else True

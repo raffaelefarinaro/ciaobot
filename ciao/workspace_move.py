@@ -121,7 +121,7 @@ _PRE_MOVE_PHASES = frozenset({"queued", "draining", "stopping"})
 _LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 GetJson = Callable[[str], "dict[str, Any] | None"]
-PostJson = Callable[[str], "dict[str, Any]"]
+PostJson = Callable[[str, "dict[str, Any] | None"], "dict[str, Any]"]
 Sleep = Callable[[float], None]
 Clock = Callable[[], float]
 
@@ -1291,11 +1291,28 @@ def _get_json(url: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _post_json(url: str) -> dict[str, Any]:
-    request = urllib.request.Request(url, method="POST", data=b"")
+def _post_json(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    data = b"" if body is None else json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(url, method="POST", data=data)
     with _LOCAL_OPENER.open(request, timeout=_DRAIN_REQUEST_TIMEOUT) as response:
         parsed: Any = json.loads(response.read().decode("utf-8"))
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _schedule_work_idle(body: dict[str, Any]) -> bool:
+    """True when the drain answer reports no scheduled work.
+
+    An engine that does not report ``schedule_work_count`` predates it and
+    cannot say whether scheduled work is running, so that is a refusal, never
+    "idle": update that engine from Settings first.
+    """
+    count = body.get("schedule_work_count")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise MoveError(
+            "the running engine does not report scheduled work, so it cannot be "
+            "drained safely from here; update it from Settings, then move again"
+        )
+    return count == 0
 
 
 def _no_answer(step: str) -> str:
@@ -1315,10 +1332,14 @@ def _http_error_detail(exc: urllib.error.HTTPError) -> str:
     return f": {error}" if isinstance(error, str) else ""
 
 
-def _drain_request(post: PostJson, url: str, step: str) -> dict[str, Any]:
-    """POST one drain-handshake request, failing with a reason that names ``step``."""
+def _drain_request(post: PostJson, url: str, step: str, owner: str) -> dict[str, Any]:
+    """POST one drain-handshake request, failing with a reason that names ``step``.
+
+    ``owner`` is this move's operation id; the engine refuses a drain request
+    that names none.
+    """
     try:
-        return post(url)
+        return post(url, {"owner": owner})
     except urllib.error.HTTPError as exc:
         raise MoveError(
             f"the running engine refused the {step} (HTTP {exc.code}{_http_error_detail(exc)})"
@@ -1454,6 +1475,7 @@ def run_move(
     """Perform ``op``: the detached half. Returns the final record."""
     source, target = Path(op.source), Path(op.target)
     base = f"http://localhost:{op.port or host.engine_port()}"
+    owner = f"move-{op.id}"
     backup = state_dir / f"{DEFINITION_BACKUP_PREFIX}-{op.id}"
 
     def advance(phase: str, error: str = "") -> None:
@@ -1506,7 +1528,7 @@ def run_move(
     def reopen() -> str:
         """Re-admit turns. ``""`` on success, else why the cancel did not land."""
         try:
-            _drain_request(post, f"{base}/api/admin/drain/cancel", "drain cancel")
+            _drain_request(post, f"{base}/api/admin/drain/cancel", "drain cancel", owner)
         except Exception as exc:  # noqa: BLE001 — best effort; never raises
             return str(exc) or exc.__class__.__name__
         return ""
@@ -1528,8 +1550,8 @@ def run_move(
         deadline = clock() + _DRAIN_TIMEOUT
         idle = 0
         while idle < _IDLE_POLLS_REQUIRED:
-            body = _drain_request(post, f"{base}/api/admin/drain", "drain status poll")
-            idle = 0 if body.get("active_chat_ids") else idle + 1
+            body = _drain_request(post, f"{base}/api/admin/drain", "drain status poll", owner)
+            idle = 0 if body.get("active_chat_ids") or not _schedule_work_idle(body) else idle + 1
             if idle >= _IDLE_POLLS_REQUIRED:
                 break
             if clock() >= deadline:

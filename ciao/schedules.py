@@ -1050,8 +1050,12 @@ def settle_retrying_runs(store: "ScheduleStore", chat_id: str, status: str) -> b
     for entry in store.list_entries():
         if entry.last_run_chat_id != chat_id or entry.last_status != RUN_STATUS_RETRYING:
             continue
+        base = dataclasses.replace(entry)
         if stamp_run_outcome(entry, entry.last_dispatch_id, status):
-            store.replace(entry)
+            try:
+                store.replace(entry, base=base)
+            except ScheduleNotFound:
+                continue
             changed = True
     return changed
 
@@ -1075,13 +1079,17 @@ def settle_runs_for_archived_chat(store: "ScheduleStore", chat_id: str) -> bool:
     for entry in store.list_entries():
         if entry.last_run_chat_id != chat_id:
             continue
+        base = dataclasses.replace(entry)
         if entry.last_status in CHAT_ATTENTION_RUN_STATUSES:
             entry.last_status = "ok"
         elif entry.last_status == RUN_STATUS_RETRYING:
             entry.last_status = "error"
         else:
             continue
-        store.replace(entry)
+        try:
+            store.replace(entry, base=base)
+        except ScheduleNotFound:
+            continue
         changed = True
     return changed
 
@@ -2416,12 +2424,33 @@ class ScheduleManager:
         if self._loop_task is None:
             self._loop_task = asyncio.create_task(self._loop(), name="schedule-loop")
 
-    async def stop(self) -> None:
+    async def stop(self, *, settle_timeout: float = 30.0) -> int:
+        """Stop the loop, then cancel and join every tracked run task.
+
+        Returns how many run tasks had **not** settled by ``settle_timeout``.
+        Cancelling a task is a request, not proof that its work ended, so a
+        task that is still running keeps its ``_inflight`` / claimed-chat marks:
+        a caller must treat a non-zero count as "scheduled work may still be
+        running" and not as an idle engine.
+        """
         if self._loop_task is not None:
             self._loop_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._loop_task
             self._loop_task = None
+        pending = [task for task in self._run_tasks if not task.done()]
+        for task in pending:
+            task.cancel()
+        unsettled = 0
+        if pending:
+            _done, still = await asyncio.wait(pending, timeout=settle_timeout)
+            unsettled = len(still)
+            if unsettled:
+                logger.warning(
+                    "%d scheduled run task(s) had not settled %.0fs after cancellation",
+                    unsettled, settle_timeout,
+                )
+        return unsettled
 
     def list_entries(self, *, chat_id: int | None = None) -> list[ScheduleEntry]:
         return self._store.list_entries(chat_id=chat_id)
@@ -2631,6 +2660,17 @@ class ScheduleManager:
             "error": "a server update is pending; retry after the restart",
         }
 
+    def work_count(self) -> int:
+        """How much scheduled work is running or about to start.
+
+        Counts in-flight runs, chats claimed for a dispatch that has not
+        streamed yet, and tracked tasks that are still alive. A drain polls it
+        next to the active chats: it is non-zero while a command-only run, or a
+        dispatch between its claim and its first stream, has no chat to show.
+        """
+        live_tasks = sum(1 for task in self._run_tasks if not task.done())
+        return len(self._inflight) + len(self._claimed_chats) + live_tasks
+
     def update_idle_reasons(self) -> list[str]:
         """What a restart would interrupt here, empty when nothing is running.
 
@@ -2742,6 +2782,20 @@ class ScheduleManager:
             return True
         return self._chat_dispatchable(entry)
 
+    def _persist(self, entry: ScheduleEntry, base: ScheduleEntry) -> bool:
+        """Write only what changed on ``entry`` since ``base`` onto the current row.
+
+        ``base`` is the row as this code read it, taken before any mutation.
+        Another writer's edit to a different field is kept, and a row deleted
+        meanwhile is not brought back: returns False then, so callers that go on
+        to delete a one-shot or publish a result can tell.
+        """
+        try:
+            self._store.replace(entry, base=base)
+        except ScheduleNotFound:
+            return False
+        return True
+
     def _stamp_interval_status(self, entry: ScheduleEntry, status: str) -> None:
         """Record a non-firing outcome, writing only when it actually changed.
 
@@ -2750,16 +2804,21 @@ class ScheduleManager:
         """
         if entry.last_status == status:
             return
+        base = dataclasses.replace(entry)
         entry.last_status = status
-        self._store.replace(entry)
+        self._persist(entry, base)
 
-    def _disable_interval(self, entry: ScheduleEntry, reason: str) -> None:
+    def _disable_interval(
+        self, entry: ScheduleEntry, reason: str, *, base: ScheduleEntry | None = None
+    ) -> None:
         logger.warning(
             "Interval schedule %s: %s; disabling it", entry.schedule_id, reason
         )
+        if base is None:
+            base = dataclasses.replace(entry)
         entry.enabled = False
         entry.last_status = "missing-chat"
-        self._store.replace(entry)
+        self._persist(entry, base)
 
     async def _fire_interval(self, entry: ScheduleEntry, now: datetime) -> str | None:
         """Start one interval run. Returns the target chat id, or None.
@@ -2773,6 +2832,9 @@ class ScheduleManager:
             # Deferred, not skipped: nothing is stamped and the entry stays due,
             # so the run happens after admission reopens.
             return None
+        # As read, before prepare_chat may re-point the binding: the scoped
+        # write persists that re-home and nothing else.
+        base = dataclasses.replace(entry)
         _, model, mode, provider = (
             self._resolve_target(entry)
             if self._resolve_target is not None
@@ -2786,7 +2848,7 @@ class ScheduleManager:
         refusal = self._refused_target(entry)
         if refusal:
             # The entry is disabled rather than left to fail every tick.
-            self._disable_interval(entry, refusal)
+            self._disable_interval(entry, refusal, base=base)
             return None
         try:
             chat_id = self._prepare_run_chat(entry, model, mode, provider)
@@ -2794,10 +2856,10 @@ class ScheduleManager:
             # The target could not be prepared — the app refuses to run in its
             # own memory machinery, the project is gone, the model is unknown.
             # The entry is disabled rather than left to fail every tick.
-            self._disable_interval(entry, str(exc))
+            self._disable_interval(entry, str(exc), base=base)
             return None
         if chat_id is None and not entry.command:
-            self._disable_interval(entry, "no chat left to dispatch into")
+            self._disable_interval(entry, "no chat left to dispatch into", base=base)
             return None
         # Stamp before dispatching: the interval is measured from this value, so
         # a crash mid-run must not leave the entry due again immediately.
@@ -2809,7 +2871,9 @@ class ScheduleManager:
         # returns None for them), so the id carries no occurrence — it is here
         # purely so a superseded run cannot write its status over a newer one.
         dispatch_id = self._begin_dispatch(entry, now, slot_day="")
-        self._store.replace(entry)
+        if not self._persist(entry, base):
+            # Deleted since it was read: nothing may start for a row that is gone.
+            return None
         self._dispatched_ids.add(entry.schedule_id)
         self._inflight.add(entry.schedule_id)
         if chat_id:
@@ -2868,19 +2932,22 @@ class ScheduleManager:
         latest = self._store.get(entry.schedule_id)
         if latest is None:
             return
+        latest_base = dataclasses.replace(latest)
         if not dispatch_is_current(latest, dispatch_id):
             # A newer dispatch owns the entry's run state now. Record whatever
             # this run's outcome says about its *own* occurrence (nothing, for
             # an interval entry — it has no slot) and leave the fields that
             # describe the latest run to the dispatch that is now the latest.
             if stamp_run_outcome(latest, dispatch_id, status):
-                self._store.replace(latest)
+                self._persist(latest, latest_base)
             return
         if status == "missing-chat" and entry.command:
             # A command printed output but the dispatcher found no chat to
             # report it into. A prompt entry with no chat is disabled in
             # _fire_interval; a command entry only learns this here.
-            self._disable_interval(latest, "no chat left to dispatch into")
+            self._disable_interval(
+                latest, "no chat left to dispatch into", base=latest_base
+            )
         latest.last_status = status
         rehomed = bool(entry.web_chat_id) and entry.web_chat_id != bound_before
         if rehomed and latest.web_chat_id == bound_before:
@@ -2893,7 +2960,7 @@ class ScheduleManager:
             latest.web_chat_id = entry.web_chat_id
         if chat_id:
             latest.last_run_chat_id = chat_id
-        self._store.replace(latest)
+        self._persist(latest, latest_base)
 
     async def _tick_interval(self, entry: ScheduleEntry, now: datetime) -> None:
         if self._admission_refuses():
@@ -2935,6 +3002,9 @@ class ScheduleManager:
                 "chat_id": entry.web_chat_id or "",
             }
         chat_id = await self._fire_interval(entry, now or _now_utc())
+        if self._store.get(entry.schedule_id) is None:
+            # Deleted while the run was being started: nothing started.
+            return {**result, "status": "refused", "error": "the schedule was deleted"}
         if chat_id is None and not entry.command:
             return {**result, "status": "missing-chat"}
         return {**result, "status": "started", "chat_id": chat_id or ""}
@@ -2957,6 +3027,7 @@ class ScheduleManager:
         entry = self._store.get(schedule_id)
         if entry is None:
             raise ValueError(f"Schedule '{schedule_id}' not found.")
+        base = dataclasses.replace(entry)
         if self._admission_refuses():
             return self._deferred_result(entry)
         # Asked before the dispatch: a command entry is never prepared here,
@@ -3004,8 +3075,8 @@ class ScheduleManager:
         # already started.
         entry.last_status = "running"
         if entry.frequency == "once":
-            self._store.replace(entry)
-            self._store.delete(entry.schedule_id)
+            if self._persist(entry, base):
+                self._store.delete(entry.schedule_id)
         result: dict = {
             "schedule_id": schedule_id,
             "archive_policy": entry.archive_policy,
@@ -3017,7 +3088,7 @@ class ScheduleManager:
         # For non-"once" entries, persist the stamp now. ("once" already
         # replaced above; replace-then-delete to leave a clean store.)
         if entry.frequency != "once":
-            self._store.replace(entry)
+            self._persist(entry, base)
         return result
 
     def _record_first_seen(self, now: datetime) -> None:
@@ -3040,6 +3111,7 @@ class ScheduleManager:
         current = now or _now_utc()
         self._record_first_seen(current)
         for entry in self._store.list_entries():
+            base = dataclasses.replace(entry)
             # Manual and disabled schedules never auto-fire.
             if entry.frequency == "manual" or not entry.enabled:
                 continue
@@ -3091,7 +3163,7 @@ class ScheduleManager:
                 )
                 if entry.last_status != "error":
                     entry.last_status = "error"
-                    self._store.replace(entry)
+                    self._persist(entry, base)
                 continue
             # A command entry is never prepared here, so the refusal has to be
             # asked for: the dispatch's own check runs after this entry has
@@ -3104,7 +3176,7 @@ class ScheduleManager:
                 )
                 if entry.last_status != "error":
                     entry.last_status = "error"
-                    self._store.replace(entry)
+                    self._persist(entry, base)
                 continue
             # The slot being served is the one this tick matched, whatever the
             # clock says by the time the run ends: a 23:55 daily dispatched at
@@ -3127,8 +3199,8 @@ class ScheduleManager:
                 entry.last_triggered_on = "done"
                 entry.last_dispatched_at = localized.isoformat(timespec="seconds")
                 entry.last_status = "running"
-                self._store.replace(entry)
-                self._store.delete(entry.schedule_id)
+                if self._persist(entry, base):
+                    self._store.delete(entry.schedule_id)
             else:
                 entry.last_triggered_on = current_day
                 entry.last_dispatched_at = localized.isoformat(timespec="seconds")
@@ -3139,7 +3211,7 @@ class ScheduleManager:
                 # that never reports back is still recognisable as interrupted
                 # after a restart (issue #486).
                 entry.last_status = "running"
-                self._store.replace(entry)
+                self._persist(entry, base)
 
     def reconcile_interrupted_runs(self) -> list[str]:
         """Record as failed any run that was still in flight when the process
@@ -3162,12 +3234,13 @@ class ScheduleManager:
         """
         repaired: list[str] = []
         for entry in self._store.list_entries():
+            base = dataclasses.replace(entry)
             if entry.last_status != "running":
                 continue
             if entry.schedule_id in self._dispatched_ids:
                 continue
             entry.last_status = "error"
-            self._store.replace(entry)
+            self._persist(entry, base)
             repaired.append(entry.schedule_id)
             logger.info(
                 "Schedule %s: run interrupted before it finished (dispatched %s); "
@@ -3238,6 +3311,7 @@ class ScheduleManager:
         self._record_first_seen(current)
         fired: list[str] = []
         for entry in self._store.list_entries():
+            base = dataclasses.replace(entry)
             # Manual and disabled schedules never auto-fire.
             if entry.frequency == "manual" or not entry.enabled:
                 continue
@@ -3311,7 +3385,7 @@ class ScheduleManager:
                 # Spend this slot's one automatic recovery, whatever the run
                 # goes on to do.
                 entry.last_recovered_on = expected_day
-            self._store.replace(entry)
+            self._persist(entry, base)
             fired.append(entry.schedule_id)
         return fired
 
