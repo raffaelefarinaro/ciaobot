@@ -66,7 +66,7 @@ class _FakeControlPlane:
         self.schedule_values = values
         return {"ok": True, "data": values}
 
-    def schedule_update(self, _principal, schedule_id, **changes) -> dict:
+    def schedule_update(self, _principal, schedule_id, *, revision=None, **changes) -> dict:
         self.schedule_updates.append((schedule_id, changes))
         return {"ok": True, "data": {"schedule_id": schedule_id, **changes}}
 

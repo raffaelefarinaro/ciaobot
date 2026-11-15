@@ -108,6 +108,7 @@ from ciao.schedules import (
     DEFAULT_TIMEZONE,
     FREQUENCIES,
     INTERVAL_FREQUENCY,
+    ScheduleConflict,
     ScheduleEntry,
     ScheduleNotFound,
     ScheduleStoreCorrupt,
@@ -6240,11 +6241,18 @@ def _enrich_schedule(
     return entry_dict
 
 
+_SCHEDULE_CONFLICT = {
+    "error": "schedule changed since you read it; reload and retry",
+    "code": "schedule_conflict",
+}
+
+
 async def list_schedules(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
     pcm = request.app.state.project_chat_manager
-    schedules = sm.list_entries()
-    return JSONResponse([_enrich_schedule(s, pcm) for s in schedules])
+    return JSONResponse(
+        [{**_enrich_schedule(s, pcm), "revision": revision} for s, revision in sm.snapshot()]
+    )
 
 
 def _schedule_target_refusal(
@@ -6409,7 +6417,11 @@ async def create_schedule(request: Request) -> JSONResponse:
     if stamp_fallback_project(entry, pcm):
         sm.replace(entry)
     publish_automations_changed(pcm)
-    return JSONResponse(_enrich_schedule(entry, pcm), status_code=201)
+    current = sm.get_with_revision(entry.schedule_id)
+    created, revision = current if current is not None else (entry, None)
+    return JSONResponse(
+        {**_enrich_schedule(created, pcm), "revision": revision}, status_code=201
+    )
 
 
 async def run_schedule_now(request: Request) -> JSONResponse:
@@ -6481,7 +6493,12 @@ async def schedule_detail(request: Request) -> JSONResponse:
     if request.method == "DELETE":
         sm = request.app.state.schedule_manager
         try:
-            ok = sm.delete(schedule_id)
+            ok = sm.delete(
+                schedule_id,
+                expected_revision=request.query_params.get("revision"),
+            )
+        except ScheduleConflict:
+            return JSONResponse(_SCHEDULE_CONFLICT, status_code=409)
         except ScheduleStoreCorrupt:
             return JSONResponse(
                 {"error": "schedule store is unreadable; nothing was changed"}, status_code=503
@@ -6503,6 +6520,11 @@ async def schedule_detail(request: Request) -> JSONResponse:
         return JSONResponse({"error": "request body must be valid JSON"}, status_code=400)
     if not isinstance(body, dict):
         return JSONResponse({"error": "request body must be an object"}, status_code=400)
+    # Optional precondition: the `revision` the caller read. Taken out of the
+    # body first so the field loop and the system-row normalizer never see it.
+    expected_revision = body.pop("revision", None)
+    if expected_revision is not None and not isinstance(expected_revision, str):
+        return JSONResponse({"error": "revision must be a string"}, status_code=400)
     # The target this update asks for, checked before anything is written: the
     # app will not run a routine in the Memory project or inside a pass, and a
     # half-applied update would leave the entry pointing somewhere else. An
@@ -6623,7 +6645,10 @@ async def schedule_detail(request: Request) -> JSONResponse:
             entry,
             timing_fields=frozenset(timing_fields) if entry.scope == "system" else frozenset(),
             base=base,
+            expected_revision=expected_revision,
         )
+    except ScheduleConflict:
+        return JSONResponse(_SCHEDULE_CONFLICT, status_code=409)
     except ScheduleNotFound:
         return JSONResponse({"error": "not found"}, status_code=404)
     except ScheduleStoreCorrupt:
@@ -6638,10 +6663,11 @@ async def schedule_detail(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=400)
     pcm = request.app.state.project_chat_manager
     publish_automations_changed(pcm)
-    reread = store.get(schedule_id)
-    if reread is None:
+    current = store.get_with_revision(schedule_id)
+    if current is None:
         return JSONResponse({"error": "schedule disappeared after update"}, status_code=500)
-    return JSONResponse(_enrich_schedule(reread, pcm))
+    reread, revision = current
+    return JSONResponse({**_enrich_schedule(reread, pcm), "revision": revision})
 
 
 # ── Models ───────────────────────────────────────────────────────────────

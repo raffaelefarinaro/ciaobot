@@ -20,11 +20,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import hashlib
 import json
 import logging
 import os
 import re
 import threading
+import time
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -1193,6 +1195,47 @@ class ScheduleEntry:
     removable: bool = True
 
 
+# Stored beside a row's own fields (inside the system overlay for a system
+# routine). Not a ``ScheduleEntry`` field, so it never reaches API payloads
+# except through :meth:`ScheduleStore.revision`.
+_REV_KEY = "_rev"
+# Fields the scheduler stamps while it runs. They are not editable content: a
+# dispatch must not invalidate the revision an editor is holding.
+RUN_STATE_FIELDS = frozenset({
+    "last_triggered_on",
+    "last_dispatched_at",
+    "last_run_chat_id",
+    "last_status",
+    "last_recovered_on",
+    "last_dispatch_id",
+    "last_completed_on",
+})
+
+
+# Not user content: ``created_at`` is a system row's read-time first-seen
+# fallback until the scheduler stamps it, and the rest are derived flags.
+_DIGEST_EXCLUDED = RUN_STATE_FIELDS | {"created_at", "scope", "editable", "removable"}
+
+
+def _editable_digest(entry: "ScheduleEntry") -> str:
+    content = {k: v for k, v in asdict(entry).items() if k not in _DIGEST_EXCLUDED}
+    raw = json.dumps(content, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _rev_value(raw: object) -> int:
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0 else 0
+
+
+def _revision_token(rev: int, entry: "ScheduleEntry") -> str:
+    return f"{rev}-{_editable_digest(entry)}"
+
+
+def _fresh_epoch() -> int:
+    """A rev no earlier incarnation of the same id can have held."""
+    return time.time_ns()
+
+
 class ScheduleStoreCorrupt(RuntimeError):
     """A schedule store file is unreadable, so a write must not replace it.
 
@@ -1200,6 +1243,10 @@ class ScheduleStoreCorrupt(RuntimeError):
     would otherwise persist an empty store over data an operator may still be
     able to repair.
     """
+
+
+class ScheduleConflict(RuntimeError):
+    """The caller's revision no longer matches the row; nothing was written."""
 
 
 class ScheduleNotFound(LookupError):
@@ -1378,7 +1425,9 @@ class ScheduleStore:
         with self._txn():
             data = self._load_for_write()
             normalize_auto_archive(entry)
-            data.setdefault("schedules", []).append(self._serialize_entry(entry))
+            row = self._serialize_entry(entry)
+            row[_REV_KEY] = 0
+            data.setdefault("schedules", []).append(row)
             self._save(data)
         return entry
 
@@ -1389,6 +1438,7 @@ class ScheduleStore:
         timing_fields: frozenset[str] = frozenset(),
         base: ScheduleEntry | None = None,
         authorize: Callable[[ScheduleEntry], None] | None = None,
+        expected_revision: str | None = None,
     ) -> None:
         """Persist ``entry``.
 
@@ -1399,10 +1449,17 @@ class ScheduleStore:
         meanwhile raises :class:`ScheduleNotFound` instead of coming back, and
         unknown stored keys survive. Two edits to the same field still resolve
         last-writer-wins. ``authorize`` runs on the current row before anything
-        is written and may raise to refuse.
+        is written and may raise to refuse. ``expected_revision`` (an opaque token
+        from :meth:`revision`) is checked after ``authorize``, on the current row,
+        and a mismatch raises :class:`ScheduleConflict` before anything changes.
         """
         if base is None:
-            self._replace_whole(entry, timing_fields=timing_fields, authorize=authorize)
+            self._replace_whole(
+                entry,
+                timing_fields=timing_fields,
+                authorize=authorize,
+                expected_revision=expected_revision,
+            )
             return
         with self._txn():
             if entry.scope == "system":
@@ -1411,6 +1468,7 @@ class ScheduleStore:
                     raise ScheduleNotFound(entry.schedule_id)
                 if authorize is not None:
                     authorize(current)
+                self._check_revision(current, expected_revision)
                 merged = self._merge_changes(current, base, entry)
                 self._finalize_entry(merged)
                 self._replace_system_state(
@@ -1425,15 +1483,73 @@ class ScheduleStore:
                 current = self._entry_from_item(item)
                 if authorize is not None:
                     authorize(current)
+                self._check_revision(current, expected_revision, item=item)
                 merged = self._merge_changes(current, base, entry)
                 self._finalize_entry(merged)
                 before, after = asdict(current), asdict(merged)
                 updated = dict(item)
                 updated.update({k: v for k, v in after.items() if before.get(k) != v})
+                if _editable_digest(current) != _editable_digest(merged):
+                    updated[_REV_KEY] = _rev_value(item.get(_REV_KEY)) + 1
                 items[index] = updated
                 self._save(data)
                 return
             raise ScheduleNotFound(entry.schedule_id)
+
+    def _stored_rev(self, entry: ScheduleEntry, item: dict | None = None) -> int:
+        if entry.scope == "system":
+            state = self._load_system_state()
+            overlay = self._system_overlay(
+                state, entry.schedule_id, system_base_id(entry.schedule_id)
+            )
+            return _rev_value(overlay.get(_REV_KEY))
+        if item is None:
+            item = next(
+                (i for i in self._runtime_items() if i.get("schedule_id") == entry.schedule_id),
+                {},
+            )
+        return _rev_value(item.get(_REV_KEY))
+
+    def revision(self, schedule_id: str) -> str | None:
+        """Opaque token for the row's editable content, or None when absent.
+
+        It combines the content digest with a stored counter that every editable
+        change (and every restore, via a fresh epoch) advances, so an edit that
+        is later reverted, or a row deleted and restored, yields a different
+        token. Run-state stamps do not move it. A caller that holds a token and
+        passes it as ``expected_revision`` is refused with
+        :class:`ScheduleConflict` if anything editable changed since. Restoring
+        an old ``schedules.json`` by hand can revive an old token: that needs
+        independently durable history and is not detected.
+        """
+        with self._lock:
+            entry = self.get(schedule_id)
+            return None if entry is None else _revision_token(self._stored_rev(entry), entry)
+
+    def snapshot(self) -> list[tuple[ScheduleEntry, str]]:
+        """Every listed row with its revision, read as one consistent snapshot.
+
+        Taken under the writer lock so a row and the token shown with it always
+        describe the same committed state, even against another process.
+        """
+        with self._txn():
+            return [(e, _revision_token(self._stored_rev(e), e)) for e in self.list_entries()]
+
+    def get_with_revision(self, schedule_id: str) -> tuple[ScheduleEntry, str] | None:
+        """One row and its revision from the same committed state."""
+        with self._txn():
+            entry = self.get(schedule_id)
+            if entry is None:
+                return None
+            return entry, _revision_token(self._stored_rev(entry), entry)
+
+    def _check_revision(
+        self, current: ScheduleEntry, expected: str | None, *, item: dict | None = None
+    ) -> None:
+        if expected is None:
+            return
+        if _revision_token(self._stored_rev(current, item), current) != expected:
+            raise ScheduleConflict(current.schedule_id)
 
     @staticmethod
     def _merge_changes(
@@ -1460,14 +1576,17 @@ class ScheduleStore:
         *,
         timing_fields: frozenset[str],
         authorize: Callable[[ScheduleEntry], None] | None,
+        expected_revision: str | None = None,
     ) -> None:
         self._finalize_entry(entry)
         with self._txn():
-            if authorize is not None:
+            if authorize is not None or expected_revision is not None:
                 current = self.get(entry.schedule_id)
                 if current is None:
                     raise ScheduleNotFound(entry.schedule_id)
-                authorize(current)
+                if authorize is not None:
+                    authorize(current)
+                self._check_revision(current, expected_revision)
             if entry.scope == "system":
                 self._replace_system_state(entry, timing_fields=timing_fields)
                 return
@@ -1475,10 +1594,19 @@ class ScheduleStore:
             items = data.setdefault("schedules", [])
             for index, item in enumerate(items):
                 if item.get("schedule_id") == entry.schedule_id:
-                    items[index] = self._serialize_entry(entry)
+                    row = self._serialize_entry(entry)
+                    rev = _rev_value(item.get(_REV_KEY))
+                    stored = self._entry_from_item(item)
+                    normalize_auto_archive(stored)
+                    if _editable_digest(stored) != _editable_digest(entry):
+                        rev += 1
+                    row[_REV_KEY] = rev
+                    items[index] = row
                     self._save(data)
                     return
-            items.append(self._serialize_entry(entry))
+            row = self._serialize_entry(entry)
+            row[_REV_KEY] = _fresh_epoch()
+            items.append(row)
             self._save(data)
 
     def delete(
@@ -1486,6 +1614,7 @@ class ScheduleStore:
         schedule_id: str,
         *,
         authorize: Callable[[ScheduleEntry], None] | None = None,
+        expected_revision: str | None = None,
     ) -> bool:
         with self._txn():
             entry = self.get(schedule_id)
@@ -1494,6 +1623,7 @@ class ScheduleStore:
                     authorize(entry)
                 if entry.scope == "system":
                     return False
+                self._check_revision(entry, expected_revision)
             data = self._load_for_write()
             if (
                 entry is None
@@ -1555,7 +1685,7 @@ class ScheduleStore:
                 schedule_id = str(item.get("schedule_id") or "")
                 if not schedule_id or schedule_id in present:
                     continue
-                current.append(dict(item))
+                current.append({**dict(item), _REV_KEY: _fresh_epoch()})
                 present.add(schedule_id)
                 added += 1
             if added:
@@ -1584,6 +1714,7 @@ class ScheduleStore:
                     and item.get("workspace") == old
                 ):
                     item["workspace"] = new
+                    item[_REV_KEY] = _rev_value(item.get(_REV_KEY)) + 1
                     dirty = True
                     renamed += 1
             if dirty:
@@ -1597,6 +1728,7 @@ class ScheduleStore:
                 if separator and row_workspace == old:
                     moved_overlay = dict(overlay)
                     moved_overlay["workspace"] = new
+                    moved_overlay[_REV_KEY] = _rev_value(moved_overlay.get(_REV_KEY)) + 1
                     rebuilt[system_schedule_id(base, new)] = moved_overlay
                     relocated += 1
                 else:
@@ -1963,9 +2095,12 @@ class ScheduleStore:
             # every inherited field across or a disabled routine comes back
             # enabled and its last-run stamps are lost.
             inherited = state.get(system_base_id(entry.schedule_id), {})
-            for field in SYSTEM_STATE_FIELDS | {SYSTEM_FIRST_SEEN_KEY}:
+            for field in SYSTEM_STATE_FIELDS | {SYSTEM_FIRST_SEEN_KEY, _REV_KEY}:
                 if field in inherited:
                     current[field] = inherited[field]
+            # First materialization of this key: start from a fresh epoch so a
+            # key that is later removed and re-added cannot repeat a token.
+            current.setdefault(_REV_KEY, _fresh_epoch())
         for field in SYSTEM_STATE_FIELDS:
             if field in SYSTEM_TIMING_FIELDS:
                 if field in timing_fields or getattr(entry, field) != getattr(previous, field):
@@ -1979,6 +2114,11 @@ class ScheduleStore:
                 continue
             current[field] = getattr(entry, field)
         current.setdefault(SYSTEM_FIRST_SEEN_KEY, entry.created_at)
+        if any(
+            getattr(entry, f) != getattr(previous, f)
+            for f in SYSTEM_STATE_FIELDS - RUN_STATE_FIELDS
+        ):
+            current[_REV_KEY] = _rev_value(current.get(_REV_KEY)) + 1
         self._save_system_state(state)
 
     def _serialize_entry(self, entry: ScheduleEntry) -> dict:
@@ -2213,8 +2353,11 @@ class ScheduleManager:
         schedule_id: str,
         *,
         authorize: Callable[[ScheduleEntry], None] | None = None,
+        expected_revision: str | None = None,
     ) -> bool:
-        return self._store.delete(schedule_id, authorize=authorize)
+        return self._store.delete(
+            schedule_id, authorize=authorize, expected_revision=expected_revision
+        )
 
     def take_user_items(self, predicate: Callable[[dict], bool]) -> list[dict]:
         """See :meth:`ScheduleStore.take_user_items`."""
@@ -2231,11 +2374,22 @@ class ScheduleManager:
         timing_fields: frozenset[str] = frozenset(),
         base: ScheduleEntry | None = None,
         authorize: Callable[[ScheduleEntry], None] | None = None,
+        expected_revision: str | None = None,
     ) -> None:
         """Persist a validated schedule update through the public manager API."""
         self._store.replace(
-            entry, timing_fields=timing_fields, base=base, authorize=authorize
+            entry,
+            timing_fields=timing_fields,
+            base=base,
+            authorize=authorize,
+            expected_revision=expected_revision,
         )
+
+    def snapshot(self) -> list[tuple[ScheduleEntry, str]]:
+        return self._store.snapshot()
+
+    def get_with_revision(self, schedule_id: str) -> tuple[ScheduleEntry, str] | None:
+        return self._store.get_with_revision(schedule_id)
 
     def _prepare_run_chat(
         self, entry: ScheduleEntry, model: str, mode: BridgeMode, provider: str

@@ -553,3 +553,44 @@ def test_patch_stores_a_full_day_name_as_three_letters(client: TestClient) -> No
     stored = client.app.state.schedule_manager._store.get(created["schedule_id"])
     assert stored is not None
     assert stored.days_of_week == ["sat", "sun"]
+
+
+# ── revision precondition (#3068) ────────────────────────────────────────
+
+
+def test_responses_carry_a_revision_and_stale_patch_conflicts(client: TestClient) -> None:
+    created = _create_interval(client)
+    sid, first = created["schedule_id"], created["revision"]
+    assert first
+    assert {s["schedule_id"]: s["revision"] for s in client.get("/api/schedules").json()}[sid] == first
+    ok = client.patch(f"/api/schedules/{sid}", json={"title": "one", "revision": first})
+    assert ok.status_code == 200
+    second = ok.json()["revision"]
+    assert second != first
+    stale = client.patch(f"/api/schedules/{sid}", json={"title": "two", "revision": first})
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "schedule_conflict"
+    assert "title" not in stale.json()
+    after = client.get("/api/schedules").json()
+    assert next(s for s in after if s["schedule_id"] == sid)["title"] == "one"
+
+
+def test_patch_without_revision_stays_compatible(client: TestClient) -> None:
+    sid = _create_interval(client)["schedule_id"]
+    assert client.patch(f"/api/schedules/{sid}", json={"title": "x"}).status_code == 200
+
+
+def test_patch_rejects_a_non_string_revision(client: TestClient) -> None:
+    sid = _create_interval(client)["schedule_id"]
+    resp = client.patch(f"/api/schedules/{sid}", json={"title": "x", "revision": 3})
+    assert resp.status_code == 400
+
+
+def test_delete_with_stale_revision_conflicts_and_keeps_the_row(client: TestClient) -> None:
+    created = _create_interval(client)
+    sid, first = created["schedule_id"], created["revision"]
+    client.patch(f"/api/schedules/{sid}", json={"title": "moved on"})
+    assert client.delete(f"/api/schedules/{sid}?revision={first}").status_code == 409
+    assert any(s["schedule_id"] == sid for s in client.get("/api/schedules").json())
+    current = next(s for s in client.get("/api/schedules").json() if s["schedule_id"] == sid)["revision"]
+    assert client.delete(f"/api/schedules/{sid}?revision={current}").json() == {"ok": True}

@@ -475,3 +475,40 @@ describe('task store schedule loading', () => {
     expect(store.schedules.map(item => item.schedule_id)).toEqual(['two'])
   })
 })
+
+describe('schedule revision precondition (#3068)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  it('sends the cached revision on update and delete', async () => {
+    const store = useTaskStore()
+    store.schedules = [{ schedule_id: 's', model: 'old', revision: '3-abc' } as Schedule]
+    vi.mocked(api.patch).mockResolvedValueOnce({ schedule_id: 's', model: 'new', revision: '4-def' } as Schedule)
+    await store.updateSchedule('s', { model: 'new' })
+    expect(api.patch).toHaveBeenCalledWith('/api/schedules/s', { model: 'new', revision: '3-abc' })
+    expect(store.schedules[0].revision).toBe('4-def')
+    vi.mocked(api.del).mockResolvedValueOnce(undefined as never)
+    await store.deleteSchedule('s')
+    expect(api.del).toHaveBeenCalledWith('/api/schedules/s?revision=4-def')
+  })
+
+  it('leaves the body alone when no revision is cached', async () => {
+    const store = useTaskStore()
+    store.schedules = [{ schedule_id: 's', model: 'old' } as Schedule]
+    vi.mocked(api.patch).mockResolvedValueOnce({ schedule_id: 's', model: 'new' } as Schedule)
+    await store.updateSchedule('s', { model: 'new' })
+    expect(api.patch).toHaveBeenCalledWith('/api/schedules/s', { model: 'new' })
+  })
+
+  it('reloads the rows and rethrows on a 409', async () => {
+    const store = useTaskStore()
+    store.schedules = [{ schedule_id: 's', title: 'old', revision: '1-a' } as Schedule]
+    vi.mocked(api.patch).mockRejectedValueOnce(Object.assign(new Error('changed'), { status: 409 }))
+    get.mockResolvedValueOnce([{ schedule_id: 's', title: 'theirs', revision: '2-b' } as Schedule])
+    await expect(store.updateSchedule('s', { title: 'mine' })).rejects.toThrow('changed')
+    expect(store.schedules[0].title).toBe('theirs')
+    expect(store.updatingSchedules.has('s')).toBe(false)
+  })
+})
