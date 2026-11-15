@@ -124,3 +124,47 @@ def test_system_revision_follows_effective_state_and_survives_inheritance(tmp_pa
     current.enabled = system.enabled
     with pytest.raises(ScheduleConflict):
         store.replace(current, base=base, expected_revision=stale)
+
+
+def test_empty_revision_is_a_mismatch_not_no_precondition(tmp_path: Path) -> None:
+    store = ScheduleStore(tmp_path)
+    entry = _create(store)
+    with pytest.raises(ScheduleConflict):
+        store.delete(entry.schedule_id, expected_revision="")
+    assert store.get(entry.schedule_id) is not None
+
+
+def test_snapshot_pairs_each_row_with_its_own_revision(tmp_path: Path) -> None:
+    store = ScheduleStore(tmp_path)
+    a, b = _create(store, title="a"), _create(store, title="b")
+    pairs = {e.schedule_id: r for e, r in store.snapshot()}
+    assert pairs == {a.schedule_id: store.revision(a.schedule_id), b.schedule_id: store.revision(b.schedule_id)}
+    got = store.get_with_revision(a.schedule_id)
+    assert got is not None and got[1] == pairs[a.schedule_id]
+    assert store.get_with_revision("missing") is None
+
+
+def test_unmaterialized_system_row_token_survives_first_seen_stamp(tmp_path: Path) -> None:
+    from datetime import datetime
+
+    store = ScheduleStore(tmp_path, include_system=True)
+    system = next(e for e in store.list_entries() if e.scope == "system")
+    token = store.revision(system.schedule_id)
+    store.record_system_first_seen(datetime.now())
+    assert store.revision(system.schedule_id) == token
+    current = store.get(system.schedule_id)
+    assert current is not None
+    base = dataclasses.replace(current)
+    current.enabled = not current.enabled
+    store.replace(current, base=base, expected_revision=token)
+
+
+def test_whole_row_replace_does_not_bump_for_a_normalization_only_difference(tmp_path: Path) -> None:
+    store = ScheduleStore(tmp_path)
+    entry = _create(store)
+    token = store.revision(entry.schedule_id)
+    current = store.get(entry.schedule_id)
+    assert current is not None
+    current.last_status = "ok"
+    store.replace(current)
+    assert store.revision(entry.schedule_id) == token

@@ -103,11 +103,12 @@ class _Store:
         self.replaced.append(entry)
         self.entries = [entry]
 
-    def revision(self, schedule_id: str) -> str:
-        return "0-test"
+    def get_with_revision(self, schedule_id: str):
+        entry = next((e for e in self.entries if e.schedule_id == schedule_id), None)
+        return None if entry is None else (entry, "0-test")
 
-    def revisions(self) -> dict[str, str]:
-        return {e.schedule_id: "0-test" for e in self.entries}
+    def snapshot(self):
+        return [(e, "0-test") for e in self.entries]
 
 
 @pytest.fixture

@@ -6248,10 +6248,8 @@ _SCHEDULE_CONFLICT = {
 async def list_schedules(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
     pcm = request.app.state.project_chat_manager
-    schedules = sm.list_entries()
-    revisions = sm.revisions()
     return JSONResponse(
-        [{**_enrich_schedule(s, pcm), "revision": revisions.get(s.schedule_id)} for s in schedules]
+        [{**_enrich_schedule(s, pcm), "revision": revision} for s, revision in sm.snapshot()]
     )
 
 
@@ -6417,9 +6415,10 @@ async def create_schedule(request: Request) -> JSONResponse:
     if stamp_fallback_project(entry, pcm):
         sm.replace(entry)
     publish_automations_changed(pcm)
+    current = sm.get_with_revision(entry.schedule_id)
+    created, revision = current if current is not None else (entry, None)
     return JSONResponse(
-        {**_enrich_schedule(entry, pcm), "revision": sm.revision(entry.schedule_id)},
-        status_code=201,
+        {**_enrich_schedule(created, pcm), "revision": revision}, status_code=201
     )
 
 
@@ -6494,7 +6493,7 @@ async def schedule_detail(request: Request) -> JSONResponse:
         try:
             ok = sm.delete(
                 schedule_id,
-                expected_revision=request.query_params.get("revision") or None,
+                expected_revision=request.query_params.get("revision"),
             )
         except ScheduleConflict:
             return JSONResponse(_SCHEDULE_CONFLICT, status_code=409)
@@ -6644,7 +6643,7 @@ async def schedule_detail(request: Request) -> JSONResponse:
             entry,
             timing_fields=frozenset(timing_fields) if entry.scope == "system" else frozenset(),
             base=base,
-            expected_revision=expected_revision or None,
+            expected_revision=expected_revision,
         )
     except ScheduleConflict:
         return JSONResponse(_SCHEDULE_CONFLICT, status_code=409)
@@ -6662,12 +6661,11 @@ async def schedule_detail(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=400)
     pcm = request.app.state.project_chat_manager
     publish_automations_changed(pcm)
-    reread = store.get(schedule_id)
-    if reread is None:
+    current = store.get_with_revision(schedule_id)
+    if current is None:
         return JSONResponse({"error": "schedule disappeared after update"}, status_code=500)
-    return JSONResponse(
-        {**_enrich_schedule(reread, pcm), "revision": store.revision(schedule_id)}
-    )
+    reread, revision = current
+    return JSONResponse({**_enrich_schedule(reread, pcm), "revision": revision})
 
 
 # ── Models ───────────────────────────────────────────────────────────────

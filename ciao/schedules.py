@@ -1212,8 +1212,13 @@ RUN_STATE_FIELDS = frozenset({
 })
 
 
+# Not user content: ``created_at`` is a system row's read-time first-seen
+# fallback until the scheduler stamps it, and the rest are derived flags.
+_DIGEST_EXCLUDED = RUN_STATE_FIELDS | {"created_at", "scope", "editable", "removable"}
+
+
 def _editable_digest(entry: "ScheduleEntry") -> str:
-    content = {k: v for k, v in asdict(entry).items() if k not in RUN_STATE_FIELDS}
+    content = {k: v for k, v in asdict(entry).items() if k not in _DIGEST_EXCLUDED}
     raw = json.dumps(content, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
@@ -1521,19 +1526,22 @@ class ScheduleStore:
             entry = self.get(schedule_id)
             return None if entry is None else _revision_token(self._stored_rev(entry), entry)
 
-    def revisions(self) -> dict[str, str]:
-        """``revision`` for every listed row, from one read of each store."""
-        with self._lock:
-            raw = {
-                str(i.get("schedule_id")): i for i in self._runtime_items()
-            }
-            return {
-                e.schedule_id: _revision_token(
-                    self._stored_rev(e, raw.get(e.schedule_id) if e.scope != "system" else None),
-                    e,
-                )
-                for e in self.list_entries()
-            }
+    def snapshot(self) -> list[tuple[ScheduleEntry, str]]:
+        """Every listed row with its revision, read as one consistent snapshot.
+
+        Taken under the writer lock so a row and the token shown with it always
+        describe the same committed state, even against another process.
+        """
+        with self._txn():
+            return [(e, _revision_token(self._stored_rev(e), e)) for e in self.list_entries()]
+
+    def get_with_revision(self, schedule_id: str) -> tuple[ScheduleEntry, str] | None:
+        """One row and its revision from the same committed state."""
+        with self._txn():
+            entry = self.get(schedule_id)
+            if entry is None:
+                return None
+            return entry, _revision_token(self._stored_rev(entry), entry)
 
     def _check_revision(
         self, current: ScheduleEntry, expected: str | None, *, item: dict | None = None
@@ -1588,7 +1596,9 @@ class ScheduleStore:
                 if item.get("schedule_id") == entry.schedule_id:
                     row = self._serialize_entry(entry)
                     rev = _rev_value(item.get(_REV_KEY))
-                    if _editable_digest(self._entry_from_item(item)) != _editable_digest(entry):
+                    stored = self._entry_from_item(item)
+                    normalize_auto_archive(stored)
+                    if _editable_digest(stored) != _editable_digest(entry):
                         rev += 1
                     row[_REV_KEY] = rev
                     items[index] = row
@@ -2088,6 +2098,9 @@ class ScheduleStore:
             for field in SYSTEM_STATE_FIELDS | {SYSTEM_FIRST_SEEN_KEY, _REV_KEY}:
                 if field in inherited:
                     current[field] = inherited[field]
+            # First materialization of this key: start from a fresh epoch so a
+            # key that is later removed and re-added cannot repeat a token.
+            current.setdefault(_REV_KEY, _fresh_epoch())
         for field in SYSTEM_STATE_FIELDS:
             if field in SYSTEM_TIMING_FIELDS:
                 if field in timing_fields or getattr(entry, field) != getattr(previous, field):
@@ -2372,11 +2385,11 @@ class ScheduleManager:
             expected_revision=expected_revision,
         )
 
-    def revision(self, schedule_id: str) -> str | None:
-        return self._store.revision(schedule_id)
+    def snapshot(self) -> list[tuple[ScheduleEntry, str]]:
+        return self._store.snapshot()
 
-    def revisions(self) -> dict[str, str]:
-        return self._store.revisions()
+    def get_with_revision(self, schedule_id: str) -> tuple[ScheduleEntry, str] | None:
+        return self._store.get_with_revision(schedule_id)
 
     def _prepare_run_chat(
         self, entry: ScheduleEntry, model: str, mode: BridgeMode, provider: str
