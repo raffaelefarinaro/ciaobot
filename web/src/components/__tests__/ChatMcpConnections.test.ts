@@ -9,6 +9,7 @@ import ChatPanel from '../ChatPanel.vue'
 import NeedsYouCard from '../NeedsYouCard.vue'
 import * as loopback from '../../lib/loopback'
 import { useProjectStore } from '../../stores/projects'
+import { useTerminalStore } from '../../stores/terminal'
 import type { ChatInfo, ProjectInfo } from '../../lib/types'
 import type { ChatAction, McpNativeServer, McpStatus } from '../../lib/types'
 
@@ -45,6 +46,84 @@ describe('useChatMcpConnections observer', () => {
     return controller
   }
   afterEach(() => { observers.splice(0).forEach(wrapper => wrapper.unmount()); piniaInstances.splice(0).forEach(disposePinia); get.mockReset(); post.mockReset(); vi.restoreAllMocks(); vi.useRealTimers(); vi.unstubAllGlobals() })
+
+  it.each(['claude', 'opencode'] as const)('%s manual copy recovery never replaces managed Sign in', async provider => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    get.mockResolvedValue(status([server({ connections: [{ chat_id: 'chat-a', state: 'needs_auth' }] })], 'work', provider))
+    let controller!: ReturnType<typeof useChatMcpConnections>
+    const wrapper = mount(defineComponent({ setup() {
+      controller = useChatMcpConnections({ workspace: () => 'work', provider: () => provider, chatId: () => 'chat-a', actions: () => [], archived: () => false })
+      return () => h(ChatMcpConnections, { chatId: 'chat-a', provider, controller })
+    } }), { global: { plugins: [pinia] } })
+    await flushPromises()
+    expect(wrapper.get('.chat-mcp-sign-in').text()).toBe('Sign in')
+    expect(wrapper.get('.terminal-recovery').text()).toContain('Terminal recovery')
+    expect(wrapper.findAll('.terminal-recovery code').map(code => code.text())).toEqual([
+      `cd${provider} mcp list`, `cd${provider} mcp ${provider === 'claude' ? 'login' : 'auth'} linear`,
+    ])
+    expect(wrapper.html().indexOf('chat-mcp-sign-in')).toBeLessThan(wrapper.html().indexOf('terminal-recovery'))
+    wrapper.unmount()
+  })
+
+  it.each(['claude', 'opencode'] as const)('%s recovery requires matching trustworthy inventory', async provider => {
+    for (const scenario of ['other-workspace', 'unavailable', 'unknown', 'blocked', 'claudeai', 'bad-name', 'no-shell', 'action-only', 'local']) {
+      const pinia = createPinia()
+      setActivePinia(pinia)
+      const native = server({
+        name: scenario === 'bad-name' ? 'bad;touch' : 'linear',
+        allowed: scenario === 'blocked' ? false : true,
+        scope: scenario === 'claudeai' ? 'claudeai' : 'project',
+        kind: scenario === 'local' ? 'stdio' : 'remote',
+      })
+      const snapshot = status(scenario === 'action-only' ? [] : [native], scenario === 'other-workspace' ? 'other' : 'work', provider)
+      if (scenario === 'unavailable') snapshot.providers[0]!.available = false
+      if (scenario === 'unknown') snapshot.providers[0]!.inventory_state = 'unknown'
+      if (scenario === 'no-shell') snapshot.shell = undefined as never
+      get.mockResolvedValue(snapshot)
+      const actions = scenario === 'action-only' ? [{ ...action('waiting'), params: { provider, server: 'linear' } }] : []
+      let controller!: ReturnType<typeof useChatMcpConnections>
+      const wrapper = mount(defineComponent({ setup() {
+        controller = useChatMcpConnections({ workspace: () => 'work', provider: () => provider, chatId: () => 'chat-a', actions: () => actions, archived: () => false })
+        return () => h(ChatMcpConnections, { chatId: 'chat-a', provider, controller })
+      } }), { global: { plugins: [pinia] } })
+      await flushPromises()
+      if (scenario === 'local') expect(wrapper.findAll('.terminal-recovery code')).toHaveLength(1)
+      else expect(wrapper.find('.terminal-recovery').exists(), scenario).toBe(false)
+      wrapper.unmount()
+    }
+  })
+
+  it('real managed helper opens only its existing session, and a missing helper does nothing', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const store = useProjectStore()
+    const terminal = useTerminalStore()
+    const open = vi.spyOn(terminal, 'open').mockResolvedValue(undefined)
+    const select = vi.spyOn(terminal, 'selectSession').mockReturnValue(true)
+    const create = vi.spyOn(terminal, 'createSession')
+    const send = vi.spyOn(terminal, 'sendInput')
+    const clipboard = vi.fn()
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: clipboard } })
+    const current = { ...action('waiting'), params: { provider: 'claude', server: 'linear', session_id: 'helper-id' } }
+    store.chatActions['chat-a'] = [current]
+    get.mockResolvedValue(status([server()]))
+    let controller!: ReturnType<typeof useChatMcpConnections>
+    const wrapper = mount(defineComponent({ setup() {
+      controller = useChatMcpConnections({ workspace: () => 'work', provider: () => 'claude', chatId: () => 'chat-a', actions: () => store.chatActions['chat-a'] ?? [], archived: () => false })
+      return () => h(ChatMcpConnections, { chatId: 'chat-a', provider: 'claude', controller })
+    } }), { global: { plugins: [pinia] } })
+    await flushPromises()
+    await wrapper.findAll('.needs-you-card button').find(b => b.text() === 'Show sign-in terminal')!.trigger('click')
+    await flushPromises()
+    expect(open).toHaveBeenCalledWith({ chatId: 'chat-a' }, { ensureSession: false })
+    expect(select).toHaveBeenCalledWith('helper-id')
+    store.chatActions['chat-a'] = [{ ...current, params: { provider: 'claude', server: 'linear' } }]
+    await nextTick()
+    expect(wrapper.text()).not.toContain('Show sign-in terminal')
+    expect(create).not.toHaveBeenCalled(); expect(send).not.toHaveBeenCalled(); expect(clipboard).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
 
   it.each(['claude', 'opencode'] as const)('%s closes placeholder and shows error for creation and start refusals', async provider => {
     for (const refusal of ['create', 'start']) {

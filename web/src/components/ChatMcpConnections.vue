@@ -6,6 +6,7 @@ import { mcpServerName } from '../lib/chatActions'
 import type { ChatAction } from '../lib/types'
 import { useProjectStore } from '../stores/projects'
 import NeedsYouCard from './NeedsYouCard.vue'
+import ChatMcpTerminalRecovery from './ChatMcpTerminalRecovery.vue'
 
 const props = defineProps<{
   chatId: string
@@ -98,6 +99,10 @@ watch(() => rows.value.map(row => [row.name, row.action?.id] as const), async (n
         <NeedsYouCard v-if="selectedAction(row) && row.enabled !== false" :key="selectedAction(row)!.id" :chat-id="chatId" :action="selectedAction(row)!" />
         <button v-else-if="canStart(row)" type="button" class="btn-small btn-primary chat-mcp-sign-in" :disabled="mcpAuthBusy(chatId, provider, row.name)" @click="signIn(row)">Sign in</button>
         <p v-if="selectedAction(row)?.state === 'failed' && !row.error" class="chat-mcp-error">Connection failed. Check the provider settings.</p>
+        <ChatMcpTerminalRecovery
+          v-if="row.server && controller.status.value && controller.validated.value && !controller.error.value && inventoryAvailable && controller.status.value.workspace === controller.requestedWorkspace.value"
+          :chat-id="chatId" :provider="provider" :server="row.server" :status="controller.status.value"
+        />
       </div>
     </div>
     <p v-if="notice" class="chat-mcp-feedback" role="status">{{ notice }}</p>
@@ -119,6 +124,7 @@ watch(() => rows.value.map(row => [row.name, row.action?.id] as const), async (n
 .chat-mcp-error { color: var(--error); }
 .chat-mcp-row :deep(.needs-you-card) { grid-column: 1 / -1; }
 .chat-mcp-sign-in { grid-column: 1 / -1; min-height: 44px; }
+.chat-mcp-row :deep(.terminal-recovery) { grid-column: 1 / -1; }
 .chat-mcp-heading:focus { outline: 2px solid var(--accent); outline-offset: 3px; }
 @media (pointer: coarse) { .chat-mcp-refresh, .chat-mcp-settings, .chat-mcp-sign-in { min-height: 44px; } }
 </style>

@@ -127,21 +127,27 @@ class MemoryStorage {
 interface MountOptions {
   /** Overrides for the panel's chat (a locked bucket, an archived chat, ...). */
   chat?: Partial<ChatInfo>
+  chatId?: string
+  pinia?: ReturnType<typeof createPinia>
 }
 
 async function mountPanel(options: MountOptions = {}): Promise<{
   wrapper: VueWrapper
   store: ReturnType<typeof useProjectStore>
   sendMessage: ReturnType<typeof vi.spyOn>
+  pinia: ReturnType<typeof createPinia>
 }> {
-  const pinia = createPinia()
+  const pinia = options.pinia || createPinia()
   setActivePinia(pinia)
   const store = useProjectStore()
-  store.projects = [makeProject()]
-  store.chats = [makeChat('chat-1', options.chat)]
-  store.activeChatId = 'chat-1'
-  store.messages = { 'chat-1': [] }
-  store.bootstrapped = true
+  const chatId = options.chatId || 'chat-1'
+  if (!options.pinia) {
+    store.projects = [makeProject()]
+    store.chats = [makeChat(chatId, options.chat)]
+    store.activeChatId = chatId
+    store.messages = { [chatId]: [] }
+    store.bootstrapped = true
+  }
 
   const taskStore = useTaskStore()
   vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
@@ -154,7 +160,7 @@ async function mountPanel(options: MountOptions = {}): Promise<{
 
   const sendMessage = vi.spyOn(store, 'sendMessage')
   const wrapper = shallowMount(ChatPanel, {
-      props: { chatId: 'chat-1' },
+      props: { chatId },
     global: {
       plugins: [pinia],
       stubs: {
@@ -173,7 +179,7 @@ async function mountPanel(options: MountOptions = {}): Promise<{
     },
   })
   await flushPromises()
-  return { wrapper, store, sendMessage }
+  return { wrapper, store, sendMessage, pinia }
 }
 
 function verifyCurrentFailure(store: ReturnType<typeof useProjectStore>) {
@@ -1588,6 +1594,410 @@ describe('ChatPanel recovery model picker', () => {
 
     expect(updateChat).toHaveBeenCalledWith('chat-1', { thinking_level: 'high' })
     wrapper.unmount()
+  })
+
+  it('shows confirmed permission modes and exact engine mappings', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    const updateChat = vi.spyOn(store, 'updateChat').mockImplementation(async (_chatId, updates) => {
+      Object.assign(store.chats[0], updates)
+    })
+    const handover = vi.spyOn(store, 'handoverChat')
+    await openComposerPicker(wrapper)
+    for (const [name, description] of [
+      ['Manual', 'ask for every action'],
+      ['Auto', 'allow safe work, ask on risky'],
+      ['Bypass', 'allow everything'],
+      ['Plan', 'read and propose only, change nothing'],
+    ]) {
+      expect(wrapper.text()).toContain(name)
+      expect(wrapper.text()).toContain(description)
+    }
+    expect(wrapper.findAll('.permission-mode[aria-pressed="true"]').map(button => button.text())).toHaveLength(1)
+    for (const [name, value] of [['Auto', 'auto'], ['Bypass', 'bypass'], ['Plan', 'plan'], ['Manual', 'normal']]) {
+      await wrapper.findAll('.permission-mode').find(button => button.text().includes(name))!.trigger('click')
+      await flushPromises()
+      expect(updateChat).toHaveBeenLastCalledWith('chat-1', { mode: value })
+    }
+    expect(updateChat).toHaveBeenCalledTimes(4)
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(handover).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('keeps a pending mode unconfirmed and reports a failed write', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    let rejectWrite!: (error: Error) => void
+    vi.spyOn(api, 'patch').mockReturnValue(new Promise((_, reject) => { rejectWrite = reject }) as never)
+    sendMessage.mockResolvedValue()
+    store.pendingImages = ['staged.png']
+    await wrapper.get('.chat-input').setValue('keep this draft')
+    await openComposerPicker(wrapper)
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    expect(store.pendingChatModeWrites['chat-1']).toBe(1)
+    expect(wrapper.text()).toContain('Saving permission mode… Sending from this composer is paused.')
+    expect(wrapper.findAll('.permission-mode[aria-pressed="true"]').map(button => button.text()).join()).toContain('Manual')
+    expect(wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    expect(wrapper.findAll('.thinking-chip').filter(button => ['Auto', 'Low', 'Medium', 'High'].includes(button.text())).every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    rejectWrite(new Error('connection lost'))
+    await flushPromises()
+    expect(store.pendingChatModeWrites['chat-1']).toBeUndefined()
+    expect(store.toasts.at(-1)).toMatchObject({
+      title: 'Could not change permission mode',
+      body: 'connection lost The server may have saved it. Reopen the chat to check.',
+    })
+    expect(wrapper.get<HTMLTextAreaElement>('.chat-input').element.value).toBe('keep this draft')
+    expect(store.pendingImages).toEqual(['staged.png'])
+    expect(sendMessage).not.toHaveBeenCalled()
+    await wrapper.get('.send-btn').trigger('click')
+    expect(sendMessage).toHaveBeenCalledWith('chat-1', 'keep this draft', undefined, expect.any(Function))
+    wrapper.unmount()
+  })
+
+  it('unknown mode selects no option', async () => {
+    const { wrapper } = await mountPanel({ chat: { mode: 'future-mode' } })
+    await openComposerPicker(wrapper)
+    expect(wrapper.text()).toContain('Current mode is unknown.')
+    expect(wrapper.findAll('.permission-mode[aria-pressed="true"]')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('blocks button and keyboard composer sends while mode is pending but not Stop', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    let resolveWrite!: (chat: ChatInfo) => void
+    vi.spyOn(api, 'patch').mockReturnValue(new Promise(resolve => { resolveWrite = resolve }) as never)
+    await openComposerPicker(wrapper)
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    const textarea = wrapper.get<HTMLTextAreaElement>('.chat-input')
+    await textarea.setValue('preserved draft')
+    await wrapper.get('.send-btn').trigger('click')
+    await textarea.trigger('keydown', { key: 'Enter', ctrlKey: true })
+    const panel = wrapper.vm as unknown as { handleSendShortcut: () => boolean }
+    expect(panel.handleSendShortcut()).toBe(false)
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(textarea.element.value).toBe('preserved draft')
+    expect(wrapper.get('.send-btn').attributes('title')).toBe('Wait for the permission mode to save')
+    resolveWrite({ ...store.chats[0], mode: 'auto' })
+    await flushPromises()
+    await wrapper.get('.send-btn').trigger('click')
+    expect(sendMessage).toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('keeps Stop available during a pending mode write', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    store.streaming['chat-1'] = true
+    store.pendingChatModeWrites['chat-1'] = 1
+    const stopChat = vi.spyOn(store, 'stopChat').mockResolvedValue(undefined as never)
+    await flushPromises()
+    const send = wrapper.get<HTMLButtonElement>('.send-btn')
+    expect(send.attributes('disabled')).toBeUndefined()
+    expect(send.attributes('aria-label')).toBe('Stop generation')
+    await send.trigger('click')
+    expect(stopChat).toHaveBeenCalledWith('chat-1')
+    expect(sendMessage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('mcp shortcut remains available while a mode write is pending', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    let resolveWrite!: (chat: ChatInfo) => void
+    vi.spyOn(api, 'patch').mockReturnValue(new Promise(resolve => { resolveWrite = resolve }) as never)
+    await openComposerPicker(wrapper)
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    const textarea = wrapper.get<HTMLTextAreaElement>('.chat-input')
+    await textarea.setValue('/mcp')
+    await wrapper.get('.send-btn').trigger('click')
+    expect((wrapper.vm as unknown as { detailsTarget: string }).detailsTarget).toBe('mcp')
+    expect(sendMessage).not.toHaveBeenCalled()
+    resolveWrite({ ...store.chats[0], mode: 'auto' })
+    await flushPromises()
+    wrapper.unmount()
+  })
+
+  it('recovery remains usable while a mode write is pending', async () => {
+    const { wrapper, store } = await mountPanel()
+    failWithUnsupportedModel(store)
+    await flushPromises()
+    let resolveModeWrite!: (chat: ChatInfo) => void
+    const patch = vi.spyOn(api, 'patch').mockReturnValue(new Promise(resolve => { resolveModeWrite = resolve }) as never)
+    await openComposerPicker(wrapper)
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    expect(store.pendingChatModeWrites['chat-1']).toBe(1)
+    const continueRecovery = vi.spyOn(store, 'continueRecovery').mockResolvedValue(undefined as never)
+    const switchModel = wrapper.findAll('.retry-btn').find(button => button.text() === 'Switch model')
+    expect(switchModel).toBeTruthy()
+    await switchModel!.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.permission-modes').exists()).toBe(false)
+    expect(wrapper.findAll('.thinking-chip').some(button => button.attributes('disabled') !== undefined)).toBe(true)
+    await pickModel(wrapper, 'sonnet')
+    expect(continueRecovery).toHaveBeenCalled()
+    expect(patch).toHaveBeenCalledTimes(1)
+    resolveModeWrite({ ...store.chats[0], mode: 'auto' })
+    await flushPromises()
+    expect(store.pendingChatModeWrites['chat-1']).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('mode write follows its chat across A B A and two panels', async () => {
+    const { wrapper, store, pinia } = await mountPanel()
+    store.chats.push(makeChat('chat-2'))
+    store.messages['chat-2'] = []
+    const secondPanel = await mountPanel({ pinia, chatId: 'chat-1' })
+    let resolveChatA!: (chat: ChatInfo) => void
+    const patch = vi.spyOn(api, 'patch').mockImplementation((path: string, body?: unknown) => {
+      if (path === '/api/chats/chat-1') {
+        return new Promise(resolve => { resolveChatA = resolve }) as never
+      }
+      return Promise.resolve({ ...makeChat('chat-2'), ...(body as Partial<ChatInfo>) }) as never
+    })
+    await openComposerPicker(wrapper)
+    await openComposerPicker(secondPanel.wrapper)
+    expect(secondPanel.wrapper.findAll('.permission-mode')).toHaveLength(4)
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    expect(patch).toHaveBeenCalledTimes(1)
+    expect(patch).toHaveBeenCalledWith('/api/chats/chat-1', { mode: 'auto' })
+    expect(store.pendingChatModeWrites['chat-1']).toBe(1)
+    expect(wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    expect(secondPanel.wrapper.findAll('.permission-mode')).toHaveLength(4)
+    expect(secondPanel.wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    await secondPanel.wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    expect(patch).toHaveBeenCalledTimes(1)
+    await wrapper.setProps({ chatId: 'chat-2' })
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    expect(patch).toHaveBeenCalledWith('/api/chats/chat-2', { mode: 'auto' })
+    expect(store.chats.find(chat => chat.chat_id === 'chat-2')?.mode).toBe('auto')
+    await wrapper.setProps({ chatId: 'chat-1' })
+    expect(wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    resolveChatA({ ...makeChat('chat-1'), mode: 'auto' })
+    await flushPromises()
+    expect(store.pendingChatModeWrites['chat-1']).toBeUndefined()
+    expect(store.chats.find(chat => chat.chat_id === 'chat-1')?.mode).toBe('auto')
+    expect(secondPanel.wrapper.findAll('.permission-mode')).toHaveLength(4)
+    expect(secondPanel.wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') === undefined)).toBe(true)
+    expect(picker(wrapper).exists()).toBe(true)
+    expect(wrapper.get('.model-picker-wrap.composer-model .composer-chip').attributes('aria-expanded')).toBe('true')
+    secondPanel.wrapper.unmount()
+    wrapper.unmount()
+  })
+
+  it('keeps an unmounted panel mode write tracked until its API response settles', async () => {
+    const { wrapper, store, pinia } = await mountPanel()
+    const secondPanel = await mountPanel({ pinia, chatId: 'chat-1' })
+    let resolveModeWrite!: (chat: ChatInfo) => void
+    const patch = vi.spyOn(api, 'patch').mockReturnValue(new Promise(resolve => { resolveModeWrite = resolve }) as never)
+    await openComposerPicker(wrapper)
+    await openComposerPicker(secondPanel.wrapper)
+    expect(secondPanel.wrapper.findAll('.permission-mode')).toHaveLength(4)
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    expect(store.pendingChatModeWrites['chat-1']).toBe(1)
+    wrapper.unmount()
+    expect(secondPanel.wrapper.findAll('.permission-mode')).toHaveLength(4)
+    expect(secondPanel.wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    resolveModeWrite({ ...store.chats[0], mode: 'auto' })
+    await flushPromises()
+    expect(store.pendingChatModeWrites['chat-1']).toBeUndefined()
+    expect(store.chats[0].mode).toBe('auto')
+    expect(patch).toHaveBeenCalledTimes(1)
+    expect(secondPanel.wrapper.findAll('.permission-mode')).toHaveLength(4)
+    expect(secondPanel.wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') === undefined)).toBe(true)
+    secondPanel.wrapper.unmount()
+  })
+
+  it('thinking completion cannot close a reopened or different chat picker', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.chats.push(makeChat('chat-2'))
+    store.messages['chat-2'] = []
+    let resolveThinking!: (chat: ChatInfo) => void
+    let serverChat = { ...store.chats[0] }
+    const patch = vi.spyOn(api, 'patch').mockImplementation((_path: string, body?: unknown) => {
+      const updates = body as Partial<ChatInfo>
+      if (updates.thinking_level !== undefined) {
+        return new Promise(resolve => { resolveThinking = resolve }) as never
+      }
+      serverChat = { ...serverChat, ...updates }
+      return Promise.resolve(serverChat) as never
+    })
+    await openComposerPicker(wrapper)
+    await wrapper.findAll('.thinking-chip').find(button => button.text() === 'High')!.trigger('click')
+    await flushPromises()
+    expect(patch).toHaveBeenCalledWith('/api/chats/chat-1', { thinking_level: 'high' })
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    expect(store.pendingChatModeWrites['chat-1']).toBe(1)
+    expect(patch).toHaveBeenCalledTimes(1)
+    picker(wrapper).vm.$emit('close', 'other')
+    await wrapper.get('.model-picker-wrap.composer-model .composer-chip').trigger('click')
+    await wrapper.setProps({ chatId: 'chat-2' })
+    await wrapper.setProps({ chatId: 'chat-1' })
+    serverChat = { ...makeChat('chat-1'), thinking_level: 'high' }
+    resolveThinking(serverChat)
+    await flushPromises()
+    expect(patch).toHaveBeenCalledTimes(2)
+    expect(picker(wrapper).exists()).toBe(true)
+    expect(wrapper.get('.model-picker-wrap.composer-model .composer-chip').attributes('aria-expanded')).toBe('true')
+    expect(store.chats.find(chat => chat.chat_id === 'chat-1')).toMatchObject({
+      thinking_level: 'high',
+      mode: 'auto',
+    })
+    wrapper.unmount()
+  })
+
+  it('handover completion cannot close a reopened picker', async () => {
+    const { wrapper, store } = await mountPanel({ chat: { session_id: 'sess-1' } })
+    store.chats.push(makeChat('chat-2'))
+    store.messages['chat-2'] = []
+    let resolveHandover!: (value: unknown) => void
+    const post = vi.spyOn(api, 'post').mockReturnValue(new Promise(resolve => { resolveHandover = resolve }) as never)
+    let serverChat = { ...store.chats[0] }
+    const patch = vi.spyOn(api, 'patch').mockImplementation(async (_path: string, body?: unknown) => {
+      serverChat = { ...serverChat, ...(body as Partial<ChatInfo>) }
+      return serverChat as never
+    })
+    await openComposerPicker(wrapper)
+    picker(wrapper).vm.$emit('select', 'openai/gpt-5.6', 'opencode')
+    await flushPromises()
+    expect(post).toHaveBeenCalledWith('/api/chats/chat-1/handover', expect.objectContaining({
+      provider: 'opencode',
+      model: 'openai/gpt-5.6',
+    }))
+    picker(wrapper).vm.$emit('close', 'other')
+    await wrapper.get('.model-picker-wrap.composer-model .composer-chip').trigger('click')
+    await wrapper.setProps({ chatId: 'chat-2' })
+    await wrapper.setProps({ chatId: 'chat-1' })
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    expect(store.pendingChatModeWrites['chat-1']).toBe(1)
+    expect(patch).not.toHaveBeenCalled()
+    serverChat = { ...store.chats[0], provider: 'opencode', model: 'openai/gpt-5.6' }
+    resolveHandover(serverChat)
+    await flushPromises()
+    expect(patch).toHaveBeenCalledWith('/api/chats/chat-1', { mode: 'auto' })
+    expect(picker(wrapper).exists()).toBe(true)
+    expect(wrapper.get('.model-picker-wrap.composer-model .composer-chip').attributes('aria-expanded')).toBe('true')
+    expect(store.chats.find(chat => chat.chat_id === 'chat-1')).toMatchObject({
+      provider: 'opencode',
+      model: 'openai/gpt-5.6',
+      mode: 'auto',
+    })
+    wrapper.unmount()
+  })
+
+  it('handover failure cannot close a reopened picker', async () => {
+    const { wrapper, store } = await mountPanel({ chat: { session_id: 'sess-1' } })
+    store.chats.push(makeChat('chat-2'))
+    store.messages['chat-2'] = []
+    let rejectHandover!: (error: Error) => void
+    const post = vi.spyOn(api, 'post').mockReturnValue(new Promise((_, reject) => { rejectHandover = reject }) as never)
+    await openComposerPicker(wrapper)
+    picker(wrapper).vm.$emit('select', 'openai/gpt-5.6', 'opencode')
+    await flushPromises()
+    expect(post).toHaveBeenCalledTimes(1)
+    picker(wrapper).vm.$emit('close', 'other')
+    await wrapper.get('.model-picker-wrap.composer-model .composer-chip').trigger('click')
+    await wrapper.setProps({ chatId: 'chat-2' })
+    await wrapper.setProps({ chatId: 'chat-1' })
+    rejectHandover(new Error('network failure'))
+    await flushPromises()
+    expect(picker(wrapper).exists()).toBe(true)
+    expect(wrapper.get('.model-picker-wrap.composer-model .composer-chip').attributes('aria-expanded')).toBe('true')
+    expect(store.toasts.at(-1)?.body).toContain('network failure')
+    wrapper.unmount()
+  })
+
+  it('streaming explains subsequent turns and the queued-turn limitation', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    store.streaming['chat-1'] = true
+    const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
+    await openComposerPicker(wrapper)
+    expect(wrapper.text()).toContain('Changes apply to subsequent turns, not the reply already running. Already queued or external turns may start before a change is saved.')
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    expect(updateChat).toHaveBeenCalledTimes(1)
+    expect(sendMessage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('restores focus only to the initiating normal composer trigger on Escape', async () => {
+    const { wrapper } = await mountPanel()
+    document.body.appendChild(wrapper.element)
+    await openComposerPicker(wrapper)
+    const trigger = wrapper.get<HTMLButtonElement>('.model-picker-wrap.composer-model .composer-chip')
+    const child = picker(wrapper)
+    child.vm.$emit('close', 'escape')
+    await flushPromises()
+    expect(document.activeElement).toBe(trigger.element)
+
+    await openComposerPicker(wrapper)
+    const textarea = wrapper.get<HTMLTextAreaElement>('.chat-input')
+    textarea.element.focus()
+    picker(wrapper).vm.$emit('close', 'other')
+    await flushPromises()
+    expect(document.activeElement).not.toBe(trigger.element)
+
+    await openComposerPicker(wrapper)
+    picker(wrapper).vm.$emit('close', 'escape')
+    trigger.element.click()
+    textarea.element.focus()
+    await flushPromises()
+    expect(document.activeElement).toBe(textarea.element)
+    wrapper.unmount()
+  })
+
+  it('does not steal focus from a textarea focused after Escape before nextTick', async () => {
+    const { wrapper } = await mountPanel()
+    document.body.appendChild(wrapper.element)
+    await openComposerPicker(wrapper)
+    const textarea = wrapper.get<HTMLTextAreaElement>('.chat-input')
+
+    picker(wrapper).vm.$emit('close', 'escape')
+    textarea.element.focus()
+    await flushPromises()
+
+    expect(document.activeElement).toBe(textarea.element)
+    wrapper.unmount()
+  })
+
+  it('does not restore composer focus when Escape starts with focus outside the picker', async () => {
+    const { wrapper } = await mountPanel()
+    document.body.appendChild(wrapper.element)
+    await openComposerPicker(wrapper)
+    const textarea = wrapper.get<HTMLTextAreaElement>('.chat-input')
+    textarea.element.focus()
+
+    picker(wrapper).vm.$emit('close', 'escape')
+    await flushPromises()
+
+    expect(document.activeElement).toBe(textarea.element)
+    wrapper.unmount()
+  })
+
+  it('does not restore composer focus on recovery Escape or unmount', async () => {
+    const { wrapper, store } = await mountPanel()
+    document.body.appendChild(wrapper.element)
+    failWithUnsupportedModel(store)
+    await flushPromises()
+    await openErrorRecovery(wrapper)
+    const trigger = wrapper.get<HTMLButtonElement>('.model-picker-wrap.composer-model .composer-chip')
+    const textarea = wrapper.get<HTMLTextAreaElement>('.chat-input')
+    textarea.element.focus()
+    picker(wrapper).vm.$emit('close', 'escape')
+    await flushPromises()
+    expect(document.activeElement).toBe(textarea.element)
+
+    await openComposerPicker(wrapper)
+    picker(wrapper).vm.$emit('close', 'escape')
+    wrapper.unmount()
+    await flushPromises()
+    expect(trigger.element.isConnected).toBe(false)
   })
 })
 

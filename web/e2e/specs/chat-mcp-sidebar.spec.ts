@@ -6,6 +6,154 @@ const shortcutScreenshots = `${process.env.HOME}/repos/ciaobot/.loop-engineering
 const cutoverScreenshots = `${process.env.HOME}/repos/ciaobot/.loop-engineering/2026-11-13-mcp-sidebar-plan/state/screenshots-2974`
 test.use({ launchOptions: { args: ['--host-resolver-rules=MAP ciao.test 127.0.0.1'] } })
 
+test('copy-only terminal recovery preserves existing shell input and requires a separate terminal action', async ({ page }, testInfo) => {
+  await isolate(page, 'mcp-copy-only')
+  const writes = observeApiWrites(page)
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+      writeText: async (text: string) => { (window as Window & { copied?: string }).copied = text },
+    } })
+  })
+  await page.route('**/api/mcp/status*', route => route.fulfill({ json: {
+    workspace: 'alpha', agent_root: '/synthetic/alpha', shell: { kind: 'posix', cd_prefix: "cd -- '/synthetic/it'\\''s' && " },
+    providers: [{ provider: 'claude', available: true, inventory_state: 'loaded', servers: [{
+      name: 'linear', scope: 'project', source: 'settings', kind: 'remote', enabled: true, allowed: true,
+      connections: [{ chat_id: 'alpha-chat-1', state: 'needs_auth' }],
+    }] }],
+  } }))
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await boot(page, '/chat/alpha-chat-1')
+  await settled(page.locator('.chat-layout'))
+  if (!(await page.locator('.chat-rail').isVisible())) await openChatDetails(page)
+  await page.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
+  const pane = page.locator('.terminal-pane')
+  await expect(pane.locator('.tp-surface textarea')).toBeEditable()
+  await pane.locator('.tp-surface').click()
+  await page.keyboard.type('ssh remote-host')
+  const terminal = async () => {
+    const body = await (await page.request.get('/__fixture__/terminal')).json() as { sessions: Array<{ session_id: string; pending: string }> }
+    return body.sessions.map(({ session_id, pending }) => ({ session_id, pending }))
+  }
+  await expect.poll(async () => (await terminal())[0]?.pending).toBe('ssh remote-host')
+  const before = await terminal()
+  const selected = await pane.getByRole('tab', { selected: true }).getAttribute('title')
+  await pane.getByRole('button', { name: 'Close' }).click()
+  const section = page.locator('.chat-mcp-connections')
+  const recovery = section.locator('.terminal-recovery')
+  await recovery.locator('summary').click()
+  const expected = "cd -- '/synthetic/it'\\''s' && claude mcp login linear"
+  await expect(recovery.locator('code').nth(1)).toHaveText(expected)
+  const start = writes.length
+  await recovery.getByRole('button', { name: 'Copy' }).nth(1).click()
+  await expect.poll(() => page.evaluate(() => (window as Window & { copied?: string }).copied)).toBe(expected)
+  await expect(recovery.getByRole('status')).toContainText('Copied.')
+  expect(await terminal()).toEqual(before)
+  expect(writes.slice(start)).toEqual([])
+  await page.screenshot({ path: testInfo.outputPath('mcp-recovery-desktop.png'), animations: 'disabled' })
+  await page.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
+  await expect(pane).toBeVisible()
+  await expect(pane.getByRole('tab', { selected: true })).toHaveAttribute('title', selected!)
+  expect(await terminal()).toEqual(before)
+  await pane.getByRole('button', { name: 'Close' }).click()
+  const helper = await page.request.post('/__fixture__/chat-action', { data: {
+    chat_id: 'alpha-chat-1', kind: 'mcp_auth', state: 'waiting',
+    params: { provider: 'claude', server: 'linear', session_id: before[0]!.session_id },
+  } })
+  expect(helper.ok()).toBe(true)
+  const show = section.getByRole('button', { name: 'Show sign-in terminal' })
+  await expect(show).toBeVisible()
+  const helperStart = writes.length
+  await show.click()
+  await expect(pane).toBeVisible()
+  await expect(pane.getByRole('tab', { selected: true })).toHaveAttribute('title', selected!)
+  expect(await terminal()).toEqual(before)
+  expect(writes.slice(helperStart).filter(write => write.path.startsWith('/api/terminal/'))).toEqual([])
+})
+
+test('copy-only terminal recovery keeps preview on clipboard failure', async ({ page }) => {
+  await isolate(page, 'mcp-copy-failure')
+  const writes = observeApiWrites(page)
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async () => { throw new Error('denied') } } })
+    document.execCommand = () => false
+  })
+  await page.route('**/api/mcp/status*', route => route.fulfill({ json: {
+    workspace: 'alpha', agent_root: '/synthetic/alpha', shell: { kind: 'posix', cd_prefix: 'cd /synthetic/alpha && ' },
+    providers: [{ provider: 'claude', available: true, inventory_state: 'loaded', servers: [{
+      name: 'linear', scope: 'project', source: 'settings', kind: 'http', allowed: true, connections: [],
+    }] }],
+  } }))
+  await boot(page, '/chat/alpha-chat-1')
+  if (!(await page.locator('.chat-rail').isVisible())) await openChatDetails(page)
+  const recovery = page.locator('.terminal-recovery')
+  await recovery.locator('summary').click()
+  const start = writes.length
+  await recovery.getByRole('button', { name: 'Copy' }).first().click()
+  await expect(recovery.getByRole('status')).toContainText('copy it by hand')
+  await expect(recovery.locator('code').first()).toHaveText('cd /synthetic/alpha && claude mcp list')
+  expect(writes.slice(start)).toEqual([])
+  expect((await (await page.request.get('/__fixture__/terminal')).json()).sessions).toEqual([])
+})
+
+test('copy-only terminal recovery leaves workspace choice to the user', async ({ page }) => {
+  await isolate(page, 'mcp-copy-workspace-choice')
+  expect((await page.request.post('/__fixture__/terminal-repo', { data: { chat_id: 'alpha-chat-1' } })).ok()).toBe(true)
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async () => {} } })
+  })
+  await page.route('**/api/mcp/status*', route => route.fulfill({ json: {
+    workspace: 'alpha', agent_root: '/synthetic/alpha', shell: { kind: 'posix', cd_prefix: 'cd /synthetic/alpha && ' },
+    providers: [{ provider: 'claude', available: true, inventory_state: 'loaded', servers: [{
+      name: 'linear', scope: 'project', source: 'settings', kind: 'remote', allowed: true, connections: [],
+    }] }],
+  } }))
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await boot(page, '/chat/alpha-chat-1')
+  await settled(page.locator('.chat-layout'))
+  if (!(await page.locator('.chat-rail').isVisible())) await openChatDetails(page)
+  const recovery = page.locator('.terminal-recovery')
+  await recovery.locator('summary').click()
+  await recovery.getByRole('button', { name: 'Copy' }).first().click()
+  expect((await (await page.request.get('/__fixture__/terminal')).json()).sessions).toEqual([])
+  await page.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
+  const pane = page.locator('.terminal-pane')
+  const chooser = pane.getByRole('group', { name: 'Where to open the shell' })
+  await expect(chooser).toBeVisible()
+  await expect(pane.getByRole('tab')).toHaveCount(0)
+  await chooser.getByRole('button', { name: /Workspace/ }).click()
+  await expect(pane.getByRole('tab')).toHaveCount(1)
+  expect((await (await page.request.get('/__fixture__/terminal')).json()).sessions[0].pending).toBe('')
+})
+
+test.describe('copy-only terminal recovery on a phone', () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true })
+  test('disclosure and copy are reachable with touch', async ({ page }, testInfo) => {
+    await isolate(page, 'mcp-copy-phone')
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async () => {} } })
+    })
+    await page.route('**/api/mcp/status*', route => route.fulfill({ json: {
+      workspace: 'alpha', agent_root: '/synthetic/alpha', shell: { kind: 'posix', cd_prefix: 'cd /synthetic/alpha && ' },
+      providers: [{ provider: 'claude', available: true, inventory_state: 'loaded', servers: [{
+        name: 'linear', scope: 'project', source: 'settings', kind: 'remote', allowed: true, connections: [],
+      }] }],
+    } }))
+    await boot(page, '/chat/alpha-chat-1')
+    await openChatDetails(page)
+    const recovery = page.locator('.chat-rail--drawer .terminal-recovery')
+    await recovery.locator('summary').click()
+    const copy = recovery.getByRole('button', { name: 'Copy' }).first()
+    await copy.scrollIntoViewIfNeeded()
+    const box = (await copy.boundingBox())!
+    expect(box.width).toBeGreaterThanOrEqual(44)
+    expect(box.height).toBeGreaterThanOrEqual(44)
+    await copy.click()
+    await expect(recovery.getByRole('status')).toContainText('Copied.')
+    expect((await horizontalOverflow(page)).overflow).toBeLessThanOrEqual(0)
+    await page.screenshot({ path: testInfo.outputPath('mcp-recovery-phone.png'), animations: 'disabled' })
+  })
+})
+
 async function shortcutFixture(page: Page) {
   const frames: string[] = []
   let state = 'needs_auth'
@@ -46,6 +194,48 @@ function expectOnlyRecoveryWrites(writes: ReturnType<typeof observeApiWrites>, i
   ])
 }
 
+async function hideDesktopRail(page: Page, afterInitialCheck?: (visible: boolean) => Promise<void>) {
+  const rail = page.locator('.chat-rail')
+  const visible = await rail.isVisible()
+  await afterInitialCheck?.(visible)
+  if (!visible) await expect(rail).toBeVisible()
+  await page.getByRole('button', { name: 'Hide chat details' }).click()
+}
+
+test('desktop rail can mount after the composer is ready', async ({ page }) => {
+  await isolate(page, 'rail-observer-order')
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.addInitScript(() => {
+    localStorage.removeItem('ciao:chat-details-closed')
+    const NativeObserver = window.ResizeObserver
+    const pending: Array<() => void> = []
+    let held = true
+    window.ResizeObserver = class extends NativeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        super((entries, observer) => {
+          if (held && entries.some(entry => entry.target.classList.contains('chat-panel'))) {
+            pending.push(() => callback(entries, observer))
+            Object.assign(window, { railObserverWidth: entries[0]?.contentRect.width })
+          } else {
+            callback(entries, observer)
+          }
+        })
+      }
+    }
+    Object.assign(window, { releaseRailObserver: () => { held = false; for (const deliver of pending) deliver() } })
+  })
+  await boot(page, '/chat/alpha-chat-1', 'textarea.chat-input')
+  const rail = page.locator('.chat-rail')
+  await expect.poll(() => page.evaluate(() => (window as unknown as { railObserverWidth?: number }).railObserverWidth)).toBeGreaterThan(940)
+  await expect(rail).toHaveCount(0)
+  await hideDesktopRail(page, async visible => {
+    expect(visible).toBe(false)
+    await page.evaluate(() => (window as unknown as { releaseRailObserver: () => void }).releaseRailObserver())
+    await expect(rail).toBeVisible()
+  })
+  await expect(rail).toHaveCount(0)
+})
+
 test('atomic attention cutover keeps MCP recovery in details without chat attention', async ({ page }) => {
   await isolate(page, 'mcp-atomic-cutover')
   await page.context().addCookies([{ name: 'e2e_session', value: 'mcp-atomic-cutover', domain: 'ciao.test', path: '/' }])
@@ -63,7 +253,7 @@ test('atomic attention cutover keeps MCP recovery in details without chat attent
   })
   await boot(page, `${origin}/chat/alpha-chat-1`, 'textarea.chat-input')
   const rail = page.locator('.chat-rail')
-  if (await rail.isVisible()) await page.getByRole('button', { name: 'Hide chat details' }).click()
+  await hideDesktopRail(page)
   await expect(rail).toHaveCount(0)
   const beforeCount = await bellCount(page)
   const dialog = await openInbox(page)
