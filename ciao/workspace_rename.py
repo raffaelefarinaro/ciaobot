@@ -211,6 +211,13 @@ def rename_workspace(
             if callable(save):
                 save(reason="workspace_rename")
         schedules.rename_workspace(old, new)
+        # What the rename itself left on disk: a rollback restores the pre-rename
+        # bytes only while the files still read exactly like this, and otherwise
+        # moves just the renamed rows back.
+        snapshot["schedule_written"] = _read_bytes_if_present(snapshot.get("schedule_path"))
+        snapshot["system_state_written"] = _read_bytes_if_present(snapshot.get("system_state_path"))
+        snapshot["schedule_store"] = schedules
+        snapshot["rename_pair"] = (old, new)
         webhooks.rename_workspace(old, new)
         imports.rename_workspace(old, new)
     except Exception:
@@ -422,10 +429,44 @@ def _restore_snapshot_files(snapshot: dict[str, Any]) -> None:
     _restore_onboarding_receipt(snapshot)
     _restore_logged("import batches", snapshot.get("import_bytes"), snapshot)
     _restore_logged("webhook triggers", snapshot.get("webhook_bytes"), snapshot)
-    _restore_logged("schedules", snapshot.get("schedule_bytes"), snapshot)
-    _restore_logged(
-        "system schedule state", snapshot.get("system_state_bytes"), snapshot
-    )
+    _restore_schedule_files(snapshot)
+
+
+def _restore_schedule_files(snapshot: dict[str, Any]) -> None:
+    """Undo the schedule store's part of a failed rename.
+
+    Exact restore while nothing else has written the files since the rename;
+    once something has, only the renamed rows move back, so an unrelated edit
+    is never discarded. A rename that failed before the schedule step has no
+    ``schedule_written`` and restores nothing here.
+    """
+    store = snapshot.get("schedule_store")
+    pair = snapshot.get("rename_pair")
+    if store is None or pair is None:
+        return
+    paths = (snapshot.get("schedule_path"), snapshot.get("system_state_path"))
+    written = (snapshot.get("schedule_written"), snapshot.get("system_state_written"))
+    originals = (snapshot.get("schedule_bytes"), snapshot.get("system_state_bytes"))
+    from ciao.schedules import schedule_store_lock  # noqa: PLC0415
+
+    try:
+        with schedule_store_lock(Path(paths[0]).parent if isinstance(paths[0], Path) else Path(".")):
+            untouched = all(
+                _read_bytes_if_present(path) == wrote
+                for path, wrote in zip(paths, written)
+                if isinstance(path, Path)
+            )
+            if untouched:
+                _restore_logged("schedules", originals[0], snapshot)
+                _restore_logged("system schedule state", originals[1], snapshot)
+            else:
+                store.revert_rename(
+                    pair[0], pair[1],
+                    original_schedules=originals[0],
+                    original_state=originals[1],
+                )
+    except Exception:
+        logger.exception("Could not restore schedules after a failed workspace rename")
 
 
 def _onboarding_revision(path: Path) -> int | None:

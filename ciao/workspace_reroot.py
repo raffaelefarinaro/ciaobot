@@ -39,6 +39,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 from ciao.git_proc import EXACT_BYTES
+from ciao.schedules import bump_row_revision, schedule_store_lock
 from ciao.workspace_guide import (
     GUIDE_NAME,
     LEGACY_GUIDE_NAME,
@@ -607,6 +608,7 @@ def apply(
     registry_before: list[dict[str, Any]] | None = None
     schedule_path = _schedule_store_path(runtime_root)
     schedule_before: bytes | None = None
+    schedule_written: bytes | None = None
     schedule_captured = False
     schedule_rewrites: list[dict[str, str]] = []
     # Hoisted beside it: what this run CREATED, which the unwind removes too -
@@ -665,12 +667,16 @@ def apply(
         # Prompts can carry explicit paths to the files moved above. Validate
         # and prepare the raw store before writing it so malformed runtime state
         # refuses within this same migration transaction.
-        schedule_path, schedule_before, schedule_store, schedule_rewrites = (
-            _prepare_schedule_prompt_rewrites(runtime_root, result.moves)
-        )
-        schedule_captured = True
-        if schedule_rewrites and schedule_store is not None:
-            _write_schedule_store(schedule_path, schedule_store)
+        # Read, rewrite and write under the store's writer lock, so no other
+        # writer's edit lands between the read and the replace of the file.
+        with schedule_store_lock(runtime_root):
+            schedule_path, schedule_before, schedule_store, schedule_rewrites = (
+                _prepare_schedule_prompt_rewrites(runtime_root, result.moves)
+            )
+            schedule_captured = True
+            if schedule_rewrites and schedule_store is not None:
+                _write_schedule_store(schedule_path, schedule_store)
+                schedule_written = schedule_path.read_bytes()
         payload["schedule_prompt_rewrites"] = schedule_rewrites
 
         vault_destinations = {m.workspace: m.destination for m in result.moves if m.workspace}
@@ -772,11 +778,13 @@ def apply(
                 )
         if schedule_captured:
             try:
-                _restore_schedule_bytes(schedule_path, schedule_before)
+                _rollback_schedule_prompts(
+                    runtime_root, schedule_before, schedule_written, schedule_rewrites
+                )
             except Exception as restore_exc:  # noqa: BLE001 - surfaced, never swallowed
                 refusals.append(
                     "the schedule store could not be restored either "
-                    f"({restore_exc}); restore its pre-migration bytes before starting the app"
+                    f"({restore_exc}); restore its pre-migration prompts before starting the app"
                 )
         # A failed receipt write can leave half a file at the path; nothing
         # short of a completed migration may sit there gating the next start.
@@ -980,10 +988,11 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
         _write_registry(runtime_root, before)
 
     if schedule_restore is not None:
-        schedule_path, restored_store = schedule_restore
         try:
-            _write_schedule_store(schedule_path, restored_store)
-        except OSError as exc:
+            _apply_schedule_prompt_restore(
+                runtime_root, receipt.get("schedule_prompt_rewrites")
+            )
+        except (OSError, ValueError) as exc:
             return {
                 "status": "failed",
                 "reason": f"could not restore schedule prompts; migration receipt retained: {exc}",
@@ -1302,6 +1311,7 @@ def _prepare_schedule_prompt_rewrites(
             changed_ids.add(schedule_id)
             rewrites.append({"schedule_id": schedule_id, "before": before, "after": after})
             row["prompt"] = after
+            bump_row_revision(row)
     duplicate_ids = [schedule_id for schedule_id in changed_ids if all_id_counts[schedule_id] != 1]
     if duplicate_ids:
         raise ValueError(
@@ -1309,6 +1319,60 @@ def _prepare_schedule_prompt_rewrites(
             + ", ".join(sorted(duplicate_ids))
         )
     return path, original, store, rewrites
+
+
+def _rollback_schedule_prompts(
+    runtime_root: Path,
+    before: bytes | None,
+    written: bytes | None,
+    rewrites: list[dict[str, str]],
+) -> None:
+    """Undo this run's prompt rewrites without overwriting an intervening edit.
+
+    If the store still holds exactly the bytes this run wrote, the original
+    bytes go back. If anything changed it since, only the rewritten prompts
+    that still read as this run left them are restored, row by row, and every
+    other change stays.
+    """
+    if not rewrites:
+        return
+    with schedule_store_lock(runtime_root):
+        path = _schedule_store_path(runtime_root)
+        if written is not None and path.exists() and path.read_bytes() == written:
+            _restore_schedule_bytes(path, before)
+            return
+        _path, _original, store = _read_schedule_store(runtime_root)
+        if store is None:
+            return
+        by_id: dict[str, list[dict[str, Any]]] = {}
+        for row in store["schedules"]:
+            if isinstance(row.get("schedule_id"), str):
+                by_id.setdefault(row["schedule_id"], []).append(row)
+        changed = False
+        for record in rewrites:
+            rows = by_id.get(record["schedule_id"], [])
+            if len(rows) == 1 and rows[0].get("prompt") == record["after"]:
+                rows[0]["prompt"] = record["before"]
+                bump_row_revision(rows[0])
+                changed = True
+        if changed:
+            _write_schedule_store(path, store)
+
+
+def _apply_schedule_prompt_restore(runtime_root: Path, records: Any) -> None:
+    """Restore the recorded prompts onto the store as it is right now."""
+    if not records:
+        return
+    with schedule_store_lock(runtime_root):
+        path, restored = _prepare_schedule_prompt_restore(runtime_root, records) or (None, None)
+        if path is None or restored is None:
+            return
+        for row in restored["schedules"]:
+            if isinstance(row, dict) and row.get("scope") != "system":
+                for record in records:
+                    if row.get("schedule_id") == record["schedule_id"] and row.get("prompt") == record["before"]:
+                        bump_row_revision(row)
+        _write_schedule_store(path, restored)
 
 
 def _prepare_schedule_prompt_restore(

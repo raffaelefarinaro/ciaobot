@@ -32,7 +32,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from importlib import resources
 from pathlib import Path
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Callable, Coroutine, Protocol, cast
 from zoneinfo import ZoneInfo
 
@@ -439,8 +439,15 @@ def migrate_loops(runtime_root: Path) -> int:
             # already renamed aside. An imported loop is a user schedule.
             scope="user",
         )
-        store.replace(entry)
-        imported += 1
+        try:
+            added = store.add_if_absent(entry)
+        except ScheduleStoreCorrupt:
+            logger.exception(
+                "schedules.json is unreadable; leaving %s in place", source.name
+            )
+            return imported
+        if added:
+            imported += 1
 
     try:
         source.replace(source.with_name("loops.json.migrated"))
@@ -1308,6 +1315,54 @@ def _root_lock(runtime_root: Path) -> _RootLock:
         return lock
 
 
+def schedule_store_lock(runtime_root: Path):
+    """The store's writer lock, for callers that edit ``schedules.json`` raw.
+
+    Same shared in-process lock plus the ``schedules.lock`` sidecar every
+    ``ScheduleStore`` write takes, reentrant with them. Hold it only around a
+    short read-modify-write of the files, never across an await or an
+    external operation.
+    """
+    return _root_lock(runtime_root).hold()
+
+
+def _original_user_ids(raw: bytes | None, workspace: str) -> set[str]:
+    if raw is None:
+        return set()
+    try:
+        rows = json.loads(raw.decode("utf-8")).get("schedules", [])
+    except (ValueError, AttributeError):
+        return set()
+    return {
+        str(row["schedule_id"])
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("scope") != "system"
+        and row.get("workspace") == workspace
+        and row.get("schedule_id")
+    }
+
+
+def _original_overlay_bases(raw: bytes | None, workspace: str) -> set[str]:
+    if raw is None:
+        return set()
+    try:
+        overlays = json.loads(raw.decode("utf-8")).get("schedules", {})
+    except (ValueError, AttributeError):
+        return set()
+    bases: set[str] = set()
+    for key in overlays if isinstance(overlays, dict) else ():
+        base, separator, row_workspace = str(key).partition(SYSTEM_ID_SEPARATOR)
+        if separator and row_workspace == workspace:
+            bases.add(base)
+    return bases
+
+
+def bump_row_revision(row: dict) -> None:
+    """Advance a raw user row's revision counter after an editable change."""
+    row[_REV_KEY] = _rev_value(row.get(_REV_KEY)) + 1
+
+
 class ScheduleStore:
     """JSON-backed storage for user schedules plus packaged system schedules."""
 
@@ -1638,6 +1693,99 @@ class ScheduleStore:
                 return False
             self._save(data)
             return True
+
+    def update_fields(
+        self,
+        schedule_id: str,
+        changes: Mapping[str, Any],
+        *,
+        only_if: Callable[[ScheduleEntry], bool] | None = None,
+    ) -> bool:
+        """Set just ``changes`` on the *current* row, under the writer lock.
+
+        ``only_if`` is checked on the freshly read row, so a guard such as "the
+        field is still blank" or "this dispatch still owns the row" holds at
+        write time. Returns False, writing nothing, when the row is gone or the
+        guard refuses: a row deleted meanwhile is never resurrected and another
+        writer's edit to any other field is kept.
+        """
+        with self._txn():
+            current = self.get(schedule_id)
+            if current is None or (only_if is not None and not only_if(current)):
+                return False
+            updated = dataclasses.replace(current, **changes)
+            try:
+                self.replace(updated, base=current)
+            except ScheduleNotFound:
+                return False
+            return True
+
+    def add_if_absent(self, entry: ScheduleEntry) -> bool:
+        """Insert a user row unless its id exists; check and insert are one step."""
+        self._finalize_entry(entry)
+        with self._txn():
+            data = self._load_for_write()
+            items = data.setdefault("schedules", [])
+            if any(isinstance(i, dict) and i.get("schedule_id") == entry.schedule_id for i in items):
+                return False
+            row = self._serialize_entry(entry)
+            row[_REV_KEY] = 0
+            items.append(row)
+            self._save(data)
+            return True
+
+    def ensure_store(self) -> None:
+        """Create an empty ``schedules.json`` if none exists; never touches one."""
+        with self._txn():
+            if not self._path.exists():
+                self._save({"schedules": []})
+
+    def revert_rename(
+        self,
+        old: str,
+        new: str,
+        *,
+        original_schedules: bytes | None,
+        original_state: bytes | None,
+    ) -> None:
+        """Undo :meth:`rename_workspace` for the rows it moved, keeping later edits.
+
+        ``original_*`` are the files' bytes from before the rename. Only rows
+        that were filed under ``old`` then, and sit under ``new`` now, move
+        back; a row that was already under ``new`` stays. Every other field of
+        a row, and every row added since, is left as it is now.
+        """
+        with self._txn():
+            moved_ids = _original_user_ids(original_schedules, old)
+            if moved_ids:
+                data = self._load_for_write()
+                dirty = False
+                for item in data.get("schedules", []):
+                    if (
+                        isinstance(item, dict)
+                        and item.get("schedule_id") in moved_ids
+                        and item.get("workspace") == new
+                    ):
+                        item["workspace"] = old
+                        bump_row_revision(item)
+                        dirty = True
+                if dirty:
+                    self._save(data)
+            moved_keys = _original_overlay_bases(original_state, old)
+            if moved_keys:
+                state = self._load_system_state(strict=True)
+                changed = False
+                for base in moved_keys:
+                    new_key = system_schedule_id(base, new)
+                    old_key = system_schedule_id(base, old)
+                    if new_key in state and old_key not in state:
+                        overlay = dict(state.pop(new_key))
+                        overlay["workspace"] = old
+                        overlay[_REV_KEY] = _rev_value(overlay.get(_REV_KEY)) + 1
+                        state[old_key] = overlay
+                        changed = True
+                if changed:
+                    self._save_system_state(state)
 
     def take_user_items(self, predicate: Callable[[dict], bool]) -> list[dict]:
         """Remove the user schedules ``predicate`` selects and return them raw.
@@ -2312,9 +2460,14 @@ class ScheduleManager:
             name = resolve_name(entry.web_project_id)
             if not name:
                 continue
-            entry.web_project_name = name
-            self.replace(entry)
-            stamped += 1
+            project_id = entry.web_project_id
+            if self._store.update_fields(
+                entry.schedule_id,
+                {"web_project_name": name},
+                only_if=lambda cur: not cur.web_project_name
+                and cur.web_project_id == project_id,
+            ):
+                stamped += 1
         if stamped:
             logger.info("Recorded the target project name on %d schedule(s)", stamped)
         return stamped
@@ -2342,8 +2495,15 @@ class ScheduleManager:
             if not entry.web_chat_id:
                 continue
             if stamp_fallback_project(entry, pcm):
-                self.replace(entry)
-                stamped += 1
+                chat_id = entry.web_chat_id
+                if self._store.update_fields(
+                    entry.schedule_id,
+                    {"fallback_project_id": entry.fallback_project_id},
+                    only_if=lambda cur: not cur.fallback_project_id
+                    and not cur.web_project_id
+                    and cur.web_chat_id == chat_id,
+                ):
+                    stamped += 1
         if stamped:
             logger.info("Recorded the re-home fallback on %d schedule(s)", stamped)
         return stamped

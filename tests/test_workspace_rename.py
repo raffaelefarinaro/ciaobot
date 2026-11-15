@@ -731,3 +731,42 @@ async def test_rename_evicts_cached_providers_of_the_renamed_workspace(
     assert manager._providers[other_chat] is other_provider
     assert manager._chats[renamed_chat].project_id == _general_id(manager, "santo")
 
+
+
+def test_rollback_keeps_a_schedule_edit_made_after_the_rename_wrote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Undoing a failed rename must not discard an unrelated schedule edit."""
+    config = _shared_config(tmp_path, ["personal", "work"])
+    config.persist_workspace_registry()
+    projects = _Projects()
+    _seed_all(config, tmp_path, projects)
+    schedules, webhooks, imports = _stores(config, tmp_path)
+    target = schedules.create(
+        daily_time_utc="09:00", prompt="p", model="m", mode="auto", chat_id=1,
+        workspace="personal", title="t",
+    )
+
+    original = WebhookStore.rename_workspace
+
+    def _edit_then_fail(self: WebhookStore, old: str, new: str) -> int:
+        original(self, old, new)
+        schedules.update_fields(target.schedule_id, {"title": "edited meanwhile"})
+        raise OSError("disk full")
+
+    monkeypatch.setattr(WebhookStore, "rename_workspace", _edit_then_fail)
+    with pytest.raises(OSError, match="disk full"):
+        rename_workspace(
+            config,
+            old="personal",
+            new="santo",
+            projects=projects,
+            schedules=schedules,
+            webhooks=webhooks,
+            imports=imports,
+        )
+
+    row = schedules.get(target.schedule_id)
+    assert row is not None
+    assert row.workspace == "personal"
+    assert row.title == "edited meanwhile"

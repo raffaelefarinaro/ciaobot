@@ -1739,11 +1739,12 @@ def setup_workspace(
                     f"{sync_result.memory_error}"
                 )
 
+    from ciao.schedules import ScheduleStore  # noqa: PLC0415
+
     runtime_schedules = root / ".runtime" / "schedules.json"
-    _write_if_missing(
-        runtime_schedules,
-        json.dumps({"schedules": []}, indent=2) + "\n",
-    )
+    # Under the store's writer lock, so a store another process created a
+    # moment ago is never replaced by this empty one.
+    ScheduleStore(root / ".runtime").ensure_store()
     written.append(runtime_schedules)
 
     # First-run wizard names the user's first logical workspace. Writing a

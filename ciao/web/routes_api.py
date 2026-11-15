@@ -6389,29 +6389,34 @@ async def create_schedule(request: Request) -> JSONResponse:
             else None
         )
         workspace = getattr(chat_project, "workspace", "") or ""
-    entry = sm.create(
-        daily_time_utc=body.get("time") or "",
-        prompt=body["prompt"],
-        model=model,
-        provider=provider,
-        mode=mode,
-        chat_id=body.get("chat_id", 0),
-        timezone_name=body.get("timezone", DEFAULT_TIMEZONE),
-        days_of_week=days_of_week,
-        thread_id=body.get("thread_id"),
-        frequency=frequency,
-        interval_minutes=interval_minutes,
-        day_of_month=body.get("day_of_month"),
-        run_at_date=run_at_date,
-        web_chat_id=web_chat_id,
-        web_project_id=web_project_id,
-        web_project_name=target_project.name if target_project else "",
-        archive_policy=archive_policy,
-        workspace=workspace if workspace in known_workspaces else "",
-        title=str(body.get("title", "")).strip(),
-        description=str(body.get("description", "")).strip(),
-        command=command,
-    )
+    try:
+        entry = sm.create(
+            daily_time_utc=body.get("time") or "",
+            prompt=body["prompt"],
+            model=model,
+            provider=provider,
+            mode=mode,
+            chat_id=body.get("chat_id", 0),
+            timezone_name=body.get("timezone", DEFAULT_TIMEZONE),
+            days_of_week=days_of_week,
+            thread_id=body.get("thread_id"),
+            frequency=frequency,
+            interval_minutes=interval_minutes,
+            day_of_month=body.get("day_of_month"),
+            run_at_date=run_at_date,
+            web_chat_id=web_chat_id,
+            web_project_id=web_project_id,
+            web_project_name=target_project.name if target_project else "",
+            archive_policy=archive_policy,
+            workspace=workspace if workspace in known_workspaces else "",
+            title=str(body.get("title", "")).strip(),
+            description=str(body.get("description", "")).strip(),
+            command=command,
+        )
+    except ScheduleStoreCorrupt:
+        return JSONResponse(
+            {"error": "schedule store is unreadable; nothing was changed"}, status_code=503
+        )
     # Records where a chat-bound entry re-homes once its chat is deleted; must
     # be captured while that chat still exists. See stamp_fallback_project.
     if stamp_fallback_project(entry, pcm):
