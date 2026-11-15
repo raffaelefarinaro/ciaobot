@@ -86,8 +86,7 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   (natively win32, so a POSIX-only call such as `os.getuid` or `signal.SIGHUP`
   outside a platform branch fails it). The Windows `pytest` and `npm test`
   suites and the macOS job (browser tests and an engine cold-start) run on
-  release PRs into `main`. A develop PR labelled `windows-full` also runs the
-  Windows suites. A green develop PR is not proof the release PR's Windows or
+  release PRs into `main`. A green develop PR is not proof the release PR's Windows or
   macOS jobs will pass. Windows backend and frontend suites run
   in parallel jobs; the stable required `windows` summary requires every
   applicable job to succeed (a full run cannot pass on a skipped suite).
@@ -190,9 +189,8 @@ this file; the gates are the ones under Verification.
   waiting for full-platform CI between them. A known red on a required develop
   check stops the queue; fix it before merging more. The Windows pytest and
   vitest suites and the macOS job run on the release PR into `main`, not on
-  the push to `develop`. A develop PR whose diff touches path handling, the
-  filesystem, subprocesses or Windows code still takes the `windows-full`
-  label so those Windows suites run on that PR. Installer, migration, service,
+  the push to `develop`, so Windows-only breakage in path, filesystem or
+  subprocess code surfaces on the release PR. Installer, migration, service,
   provider lifecycle, auth/security and CI/release work still gets the ship
   fan-out and a PR-scoped security review before merge. Preserve disjoint
   clean PR heads rather than syncing and restarting CI merely because
@@ -215,10 +213,7 @@ this file; the gates are the ones under Verification.
   job. Those run on the release PR into `main`, and `/ciao-release` merges
   only when that PR's `windows` and `test` checks are green. If a required
   develop check is already red, open a `bug` issue naming the failing tests
-  and the merge that broke them, and fix it before merging more. Before
-  queuing a PR whose diff touches path handling, the filesystem, subprocesses
-  or Windows code, add the `windows-full` label and push once, so the full
-  Windows suites run on that PR.
+  and the merge that broke them, and fix it before merging more.
 - Hands-on device testing (a real Windows or macOS install) is for diffs that
   touch the installers (`scripts/install*.sh`, `scripts/install.ps1`), the
   service or scheduled-task code, engine update/migration, or `desktop/`.

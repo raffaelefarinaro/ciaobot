@@ -40,7 +40,7 @@ concurrency:
 # on win32, which is where POSIX-only calls get caught — in about two minutes.
 # The Windows pytest and vitest suites and the install.ps1 checks take over a
 # quarter of an hour on a hosted runner, so they run on release PRs into main
-# and on a develop PR labelled `windows-full`. /ciao-release merges into main
+# only. /ciao-release merges into main
 # only when that release PR's full Windows and macOS jobs are green.
 jobs:
   linux-server:
@@ -186,8 +186,8 @@ jobs:
     # the runner for GitHub's six-hour default.
     timeout-minutes: 45
     env:
-      # 'true' on release PRs into main and develop PRs labelled windows-full; 'false' on develop pushes and other develop PRs.
-      WINDOWS_FULL: ${{ github.event_name == 'pull_request' && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-full')) }}
+      # 'true' on release PRs into main; 'false' on develop pushes and develop PRs.
+      WINDOWS_FULL: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}
     defaults:
       run:
         shell: bash
@@ -448,7 +448,7 @@ jobs:
         {
           echo "### Windows (#696)"
           echo
-          [ "$WINDOWS_FULL" = true ] || echo "Develop PR: imports, mypy and the ConPTY terminal tests only; the suites run after merge."
+          [ "$WINDOWS_FULL" = true ] || echo "Develop PR: imports, mypy and the ConPTY terminal tests only; the suites run on the release PR."
           echo "- imports: $(tail -1 windows-imports.txt 2>/dev/null)"
           echo "- mypy: $(tail -1 windows-mypy.txt 2>/dev/null)"
           echo "- ConPTY terminal: $(tail -1 windows-terminal.txt 2>/dev/null)"
@@ -484,7 +484,7 @@ jobs:
         if-no-files-found: ignore
 
   windows-web:
-    if: github.event_name == 'pull_request' && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-full'))
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -523,7 +523,7 @@ jobs:
       env:
         BACKEND: ${{ needs.windows-backend.result }}
         FRONTEND: ${{ needs.windows-web.result }}
-        FULL: ${{ github.event_name == 'pull_request' && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-full')) }}
+        FULL: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}
       run: |
         import os
         import sys

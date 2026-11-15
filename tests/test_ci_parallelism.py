@@ -27,7 +27,7 @@ def test_windows_suites_run_independently_and_summary_fails_closed() -> None:
     assert "shell: python" in summary
     assert 'os.environ["BACKEND"]' in summary
     assert 'os.environ["FRONTEND"]' in summary
-    assert "windows-full" in frontend and "windows-full" in summary
+    assert "github.base_ref == 'main'" in frontend and "github.base_ref == 'main'" in summary
     assert "continue-on-error" not in summary
 
 

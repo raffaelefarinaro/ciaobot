@@ -1086,13 +1086,10 @@ while the server is running, because the live schedule store may be writing it.
   `windows-backend` and `windows-web` jobs (`windows-latest`).
   The backend runs on every PR and push, imports every `ciao` module and runs `mypy ciao`
   (natively win32). Its job-level `WINDOWS_FULL` flag is true on release PRs
-  into `main` and on a develop PR labelled `windows-full`. Those runs also
+  into `main` only. Those runs also
   execute `pytest -n auto --durations=30 tests/` while the frontend runs
-  `npm test` in parallel. A develop push and an unlabelled develop PR skip
-  them and wait about 2 minutes. Use `windows-full` for path, filesystem,
-  process or installer changes. The label is read from the event, so add it
-  and then push (an empty commit is enough) — re-running a job replays the
-  old event and does not see a new label. A full Windows or macOS failure
+  `npm test` in parallel. A develop push and any develop PR skip
+  them and wait about 2 minutes. A full Windows or macOS failure
   therefore surfaces on the release PR, and `/ciao-release` merges into
   `main` only when that PR's `windows` and `test` checks are green.
   The summary fails if any applicable job fails, is cancelled, or unexpectedly
