@@ -240,7 +240,7 @@ async def _run_opencode_oneshot(
                 AgentRequest(
                     prompt=prompt,
                     model=model,
-                    mode="plan",
+                    mode="auto",
                     provider="opencode",
                     extra_env=env or {},
                 ),

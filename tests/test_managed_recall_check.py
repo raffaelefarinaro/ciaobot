@@ -21,6 +21,7 @@ from ciao.control_plane import AgentPrincipal, CiaoControlPlane, ControlPlaneErr
 from ciao.mcp_server import AgentSessionRegistry, CiaoMcpService
 from ciao.models import ResultEvent
 from ciao.config import CiaoConfig
+from ciao.app_settings import AppSettingsStore
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
@@ -258,7 +259,7 @@ def _add_domain_caller(
 
 
 @pytest.mark.asyncio
-async def test_inactive_and_opted_out_do_no_work(monkeypatch) -> None:
+async def test_inactive_and_opted_out_do_no_work(monkeypatch, tmp_path: Path) -> None:
     cp, principal, turn, driver = _domain_fixture()
     try:
         monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", False)
@@ -266,7 +267,10 @@ async def test_inactive_and_opted_out_do_no_work(monkeypatch) -> None:
             await cp.vault_recall_check(principal, claims_json=_claims(), authorization_factory=_authorization_factory())
         assert inactive.value.code == "feature_inactive"
         monkeypatch.setattr(control_plane, "MANAGED_RECALL_CHECK_ENABLED", True)
-        cp.app_settings.settings.verify_vault_answers = False
+        settings_file = tmp_path / "settings.json"
+        stored_settings = AppSettingsStore(settings_file)
+        stored_settings.update({"verify_vault_answers": False})
+        cp.app_settings = AppSettingsStore(settings_file)
         with pytest.raises(ControlPlaneError) as disabled:
             await cp.vault_recall_check(principal, claims_json=_claims(), authorization_factory=_authorization_factory())
         assert disabled.value.code == "verification_disabled"
@@ -278,6 +282,10 @@ async def test_inactive_and_opted_out_do_no_work(monkeypatch) -> None:
         turn.cancel()
         driver.cancel()
         await asyncio.gather(turn, driver, return_exceptions=True)
+
+
+def test_managed_recall_check_ships_enabled_by_default() -> None:
+    assert control_plane.MANAGED_RECALL_CHECK_ENABLED is True
 
 
 @pytest.mark.asyncio

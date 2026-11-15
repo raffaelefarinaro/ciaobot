@@ -7,6 +7,45 @@ from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 import ciao.providers.oneshot as oneshot
 
 
+@pytest.mark.asyncio
+async def test_opencode_oneshot_uses_build_with_deny_all_permissions(
+    monkeypatch, tmp_path
+) -> None:
+    from ciao.models import ResultEvent
+    from ciao.providers.opencode import OpencodeProvider
+
+    captured: dict = {}
+
+    async def fake_run(self, request, on_handle):
+        captured["request"] = request
+        captured["settings"] = self._session_settings(request)
+        captured["tools_enabled"] = self._tools_enabled
+        captured["calls"] = captured.get("calls", 0) + 1
+        yield ResultEvent(type="result", result="ok")
+
+    async def fake_delete(self):
+        pass
+
+    async def fake_disconnect(self):
+        pass
+
+    monkeypatch.setattr(OpencodeProvider, "run_streaming", fake_run)
+    monkeypatch.setattr(OpencodeProvider, "delete_current_session", fake_delete)
+    monkeypatch.setattr(OpencodeProvider, "disconnect", fake_disconnect)
+
+    assert await oneshot._run_opencode_oneshot(
+        "prompt", system_prompt="system", model="model", env=None, cwd=tmp_path
+    ) == "ok"
+    request = captured["request"]
+    agent, permissions = captured["settings"]
+    assert request.mode == "auto"
+    assert agent == "build"
+    assert permissions == [{"action": "*", "resource": "*", "effect": "deny"}]
+    assert captured["tools_enabled"] is False
+    assert captured["calls"] == 1
+    assert request.mode != "plan"
+
+
 def _fake_query(captured: dict):
     async def fake_query(*, prompt: str, options):
         captured["model"] = options.model
@@ -283,8 +322,9 @@ async def test_run_oneshot_dispatches_to_opencode(monkeypatch, tmp_path) -> None
     assert captured["developer_instructions"] == "Reply with only the title."
     assert captured["request"].provider == "opencode"
     assert captured["request"].model == "anthropic/claude-haiku-4.5"
-    # A one-shot must not be able to write.
-    assert captured["request"].mode == "plan"
+    # Build avoids the Plan plugin; the explicit deny-all rules still disable
+    # every tool, including writes.
+    assert captured["request"].mode == "auto"
     assert captured["workspace_root"] != tmp_path.resolve()
     assert not captured["workspace_root"].exists()
     assert captured["tools_enabled"] is False
@@ -344,4 +384,3 @@ async def test_run_oneshot_rejects_unknown_provider() -> None:
         await oneshot.run_oneshot(
             "hi", system_prompt="s", model="haiku", provider="nope"
         )
-

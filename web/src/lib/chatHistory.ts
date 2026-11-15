@@ -471,7 +471,7 @@ export function dropSupersededLiveTail(
         if (row.usage) carried.usage = row.usage
         if (row.effective_model) carried.effective_model = row.effective_model
         if (row.quota) carried.quota = row.quota
-        // A vault check that landed live on the streamed row before reconcile.
+        // A legacy verdict that landed live on the streamed row before reconcile.
         if (row.verification) carried.verification = row.verification
         changed = true
         continue
