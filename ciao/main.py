@@ -719,12 +719,14 @@ async def _run_server_locked(
 
     app_settings = AppSettingsStore(config.state_path.parent / "app_settings.json")
     app_settings.import_legacy_env(getattr(config, "legacy_env_settings", {}))
+    bootstrap_port = config.pwa_port
     app_settings.apply_to_config(config)
     if installer_bootstrap:
         # Stored settings must not move an installer bootstrap off loopback or
         # into dev mode; this applies to this process only and is never saved.
+        # The port is the bootstrap's own PWA_PORT (see from_env), not a stored setting.
         config.pwa_host = "127.0.0.1"
-        config.pwa_port = 8443
+        config.pwa_port = bootstrap_port
         config.dev_mode = False
         config.app_repo = None
 

@@ -175,6 +175,32 @@ def test_installer_config_ignores_dotenv_cwd_discovery_and_redirect_environment(
     assert config.vault_root == root / "memory-vault"
 
 
+def test_installer_bootstrap_serves_on_its_own_pwa_port(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    root = home / ".ciao" / "installer-bootstrap"
+    root.mkdir(parents=True)
+    (root / ".env").write_text("PWA_PORT=8444\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PWA_PORT", "9999")  # the process environment must not win
+    monkeypatch.chdir(tmp_path)
+
+    config = CiaoConfig.from_env(installer_bootstrap=True)
+
+    assert config.pwa_port == 8444
+
+
+def test_installer_bootstrap_rejects_a_non_numeric_pwa_port(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    root = home / ".ciao" / "installer-bootstrap"
+    root.mkdir(parents=True)
+    (root / ".env").write_text("PWA_PORT=eighty\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValueError, match="not a port number"):
+        CiaoConfig.from_env(installer_bootstrap=True)
+
+
 def test_installer_bootstrap_rejects_symlinked_scratch_paths(tmp_path: Path, monkeypatch) -> None:
     home = tmp_path / "home"
     root = home / ".ciao" / "installer-bootstrap"
