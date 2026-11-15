@@ -809,7 +809,7 @@ def test_develop_prs_run_linux_split_and_only_fast_windows_gates() -> None:
     # A develop PR waits on the two parallel Linux jobs, conditional Linux
     # browser coverage for web changes, and the Windows import/win32 mypy
     # gates. The Windows suites take over a quarter hour, so they run on
-    # release PRs into main and on a develop PR labelled windows-full.
+    # release PRs into main only.
     workflow = (
         Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
     ).read_text(encoding="utf-8")
@@ -826,7 +826,7 @@ def test_develop_prs_run_linux_split_and_only_fast_windows_gates() -> None:
 
     windows = by_name["windows-backend"]
     assert (
-        "WINDOWS_FULL: ${{ github.event_name == 'pull_request' && (github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-full')) }}"
+        "WINDOWS_FULL: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}"
         in windows
     )
     steps = dict(re.findall(r"(?ms)^    - name: ([^\n]+)\n(.*?)(?=^    - |\Z)", windows))
@@ -842,20 +842,19 @@ def test_develop_prs_run_linux_split_and_only_fast_windows_gates() -> None:
     ):
         assert full in steps[name], f"{name!r} is not gated on WINDOWS_FULL"
     assert "Windows frontend tests" in by_name["windows-web"]
-    assert "windows-full" in by_name["windows-web"]
+    assert "github.base_ref == 'main'" in by_name["windows-web"]
 
 
-def test_windows_full_label_opts_a_develop_pr_in() -> None:
-    # #2360: a develop PR labelled windows-full runs the full Windows suites.
-    # The label is read from the event payload, so the pull_request trigger
-    # must keep no `types:` filter: a `labeled` type would rerun all of CI on
-    # every label change.
+def test_develop_prs_do_not_opt_into_the_full_windows_suites() -> None:
+    # Only release PRs into main run the full Windows suites; there is no label.
+    # The pull_request trigger keeps no `types:` filter, so no label change
+    # reruns CI.
     workflow = (
         Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
     ).read_text(encoding="utf-8")
+    assert "windows-full" not in workflow
     on_block = workflow.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
-    pull_request_block = on_block.split("  pull_request:", 1)[1]
-    assert "types:" not in pull_request_block
+    assert "types:" not in on_block.split("  pull_request:", 1)[1]
 
     jobs = re.split(r"(?m)^  (?=[a-z-]+:\n)", workflow.split("\njobs:\n", 1)[1])
     by_name = {job.split(":", 1)[0]: job for job in jobs if job.strip()}
@@ -865,10 +864,7 @@ def test_windows_full_label_opts_a_develop_pr_in() -> None:
         if line.strip().startswith("WINDOWS_FULL:")
     ]
     assert len(windows_full) == 1
-    assert (
-        "contains(github.event.pull_request.labels.*.name, 'windows-full')"
-        in windows_full[0]
-    )
+    assert "github.base_ref == 'main'" in windows_full[0]
 
 
 def _rehearsal_workflow() -> str:
