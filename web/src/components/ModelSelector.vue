@@ -60,7 +60,7 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<{
   'update:modelValue': [value: string | string[]]
   select: [value: string | string[], sectionKey: string]
-  close: []
+  close: [reason: 'escape' | 'other']
 }>()
 
 const open = ref(false)
@@ -160,10 +160,10 @@ function onPopoverOpenChange(nextOpen: boolean): void {
     })
     return
   }
-  close()
+  close('other')
 }
 
-function close() {
+function close(reason: 'escape' | 'other' = 'other') {
   const returnFocus = !props.triggerless ? triggerRef.value : null
   const active = document.activeElement
   const shouldReturnFocus = !active || active === document.body || !!rootRef.value?.contains(active)
@@ -175,7 +175,7 @@ function close() {
       returnFocus.focus()
     }
   })
-  if (props.triggerless) emit('close')
+  if (props.triggerless) emit('close', reason)
 }
 
 function selectModel(model: string, sectionKey: string) {
@@ -193,7 +193,7 @@ function selectModel(model: string, sectionKey: string) {
   } else {
     emit('update:modelValue', model)
     emit('select', model, sectionKey)
-    close()
+    close('other')
   }
 }
 
@@ -248,8 +248,7 @@ function onKeydown(event: KeyboardEvent) {
     // half-finished Settings edits.
     event.preventDefault()
     event.stopPropagation()
-    close()
-    triggerRef.value?.focus()
+    close('escape')
     return
   }
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -315,16 +314,15 @@ function onEscapeKeyDown(event: KeyboardEvent): void {
   // away from the current pane.
   event.preventDefault()
   event.stopPropagation()
-  close()
+  close('escape')
 }
 
 watch(popoverVisible, (visible) => {
   if (visible) focusSearch()
 })
 
-// Auto-focus the search input and scroll active item into view whenever the
-// filtered list changes while open.
-watch(filteredSections, () => {
+// Search edits retain focus; prop/section changes must not steal footer focus.
+watch(query, () => {
   if (popoverVisible.value) {
     nextTick(() => {
       searchRef.value?.focus()
@@ -474,9 +472,9 @@ onMounted(() => {
             No models match "{{ query }}"
           </div>
 
+          </div>
           <div v-if="$slots.footer" class="model-selector__footer">
             <slot name="footer" />
-          </div>
           </div>
         </div>
       </PopoverContent>
@@ -554,7 +552,10 @@ onMounted(() => {
   /* Popper supplies the fixed placement and collision transform. The
      component's own styles only describe the elevated surface. */
   z-index: 300;
-  min-width: 320px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: min(320px, calc(100vw - 24px));
   max-width: min(480px, calc(100vw - 24px));
   max-height: min(420px, calc(100dvh - var(--safe-top) - var(--safe-bottom) - 32px));
   background: var(--bg2);
@@ -567,7 +568,8 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  max-height: inherit;
+  flex: 1 1 auto;
+  overflow: visible;
 }
 
 .model-selector__search-wrap {
@@ -597,6 +599,7 @@ onMounted(() => {
   overflow-y: auto;
   padding: 6px;
   flex: 1 1 auto;
+  min-height: 0;
 }
 
 .model-selector__section {
@@ -776,10 +779,36 @@ onMounted(() => {
 
 .model-selector__footer {
   flex: 0 0 auto;
+  min-height: 0;
+  overflow-y: auto;
   padding: 8px 10px;
   border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
   background: var(--bg2);
   border-radius: 0 0 var(--radius) var(--radius);
+}
+
+@media (max-height: 600px) {
+  .model-selector__footer {
+    flex: 0 1 auto;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: var(--fg2) var(--bg3);
+  }
+
+  .model-selector__footer::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  .model-selector__footer::-webkit-scrollbar-track {
+    background: var(--bg3);
+    border-radius: 999px;
+  }
+
+  .model-selector__footer::-webkit-scrollbar-thumb {
+    background: var(--fg2);
+    border: 2px solid var(--bg3);
+    border-radius: 999px;
+  }
 }
 
 .model-selector__header {

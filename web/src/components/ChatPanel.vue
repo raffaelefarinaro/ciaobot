@@ -899,12 +899,10 @@
       </div>
     </div>
 
-    <!-- Needs-you cards: what this chat is waiting on the user for (an MCP
-         sign-in, ...). Above the queue and the composer. Keyed by id: a
-         replaced action is a new card. The stack folds several untouched
-         sign-ins into one row and caps its height, so the transcript keeps
-         its room. -->
-    <NeedsYouStack :chat-id="chat.chat_id" :actions="needsYouActions" @release-focus="focusComposerAfterCard" />
+    <!-- Needs-you cards: generic actions this chat is waiting on the user for.
+         Kept above the queue and composer, keyed by action id so a replaced
+         action becomes a new card. MCP recovery remains in Chat details. -->
+    <NeedsYouStack :chat-id="chat.chat_id" :actions="needsYouActions" />
 
     <!-- Queued messages (sent while a response was already streaming). -->
     <div v-if="view.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
@@ -1171,6 +1169,7 @@
             <div class="model-picker-wrap composer-model" ref="modelPickerRef">
               <button
                 type="button"
+                ref="composerModelTrigger"
                 class="model-picker-summary composer-chip"
                 :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${chipModelLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
                 aria-haspopup="listbox"
@@ -1186,14 +1185,14 @@
                 triggerless
                 :model-value="canonicalTier(activeModelId)"
                 :active-models="activeModelHighlights"
-                :sections="chatModelSections"
+                :sections="pickerModelSections"
                 :filter-section="capabilityPickerSection"
                 placeholder="Model"
                 placement="top-start"
                 :labelled-by="isRecoveryPicker ? domId('model-picker-recovery-title') : ''"
                 :described-by="isRecoveryPicker ? domId('model-picker-recovery-note') : ''"
                 @select="selectModel"
-                @close="showModelPicker = false"
+                @close="handleModelPickerClose"
               >
                 <template v-if="isRecoveryPicker" #header>
                   <div class="model-picker-recovery">
@@ -1204,24 +1203,45 @@
                   </div>
                 </template>
                 <template #footer>
-                  <div
-                    v-if="showThinkingLevels"
-                    class="thinking-levels"
-                  >
-                    <span :id="domId('thinking-levels-label')" class="thinking-levels__label">Thinking</span>
-                    <div class="thinking-levels__chips" role="group" :aria-labelledby="domId('thinking-levels-label')">
-                      <button
-                        v-for="level in ['', ...filteredThinkingLevels]"
-                        :key="level"
-                        type="button"
-                        class="thinking-chip"
-                        :class="{ 'thinking-chip--active': thinkingChipLevel === level }"
-                         :aria-pressed="thinkingChipLevel === level"
-                         :disabled="isRecoveryPicker"
-                        @click="selectThinking(level)"
-                      >
-                        {{ level ? level.charAt(0).toUpperCase() + level.slice(1) : 'Auto' }}
-                      </button>
+                  <div class="picker-footer-groups">
+                    <div v-if="showThinkingLevels" class="thinking-levels">
+                      <span :id="domId('thinking-levels-label')" class="thinking-levels__label">Thinking</span>
+                      <div class="thinking-levels__chips" role="group" :aria-labelledby="domId('thinking-levels-label')">
+                        <button
+                          v-for="level in ['', ...filteredThinkingLevels]"
+                          :key="level"
+                          type="button"
+                          class="thinking-chip"
+                          :class="{ 'thinking-chip--active': thinkingChipLevel === level }"
+                          :aria-pressed="thinkingChipLevel === level"
+                          :disabled="isRecoveryPicker || modeWritePending"
+                          @click="selectThinking(level)"
+                        >
+                          {{ level ? level.charAt(0).toUpperCase() + level.slice(1) : 'Auto' }}
+                        </button>
+                      </div>
+                    </div>
+                    <div v-if="!isRecoveryPicker" class="permission-modes">
+                      <span :id="domId('permission-mode-label')" class="thinking-levels__label">Permission mode</span>
+                      <div class="permission-modes__choices" role="group" :aria-labelledby="domId('permission-mode-label')">
+                        <button
+                          v-for="mode in permissionModes"
+                          :key="mode"
+                          type="button"
+                          class="thinking-chip permission-mode"
+                          :class="{ 'thinking-chip--active': chat.mode === mode }"
+                          :aria-pressed="chat.mode === mode"
+                          :disabled="modeWritePending"
+                          @click="selectPermissionMode(mode)"
+                        >
+                          <span>{{ PERMISSION_MODE_COPY[mode].name }}</span>
+                          <span class="permission-mode__description">{{ PERMISSION_MODE_COPY[mode].allows }}</span>
+                          <span v-if="chat.mode === mode" class="permission-mode__check" aria-hidden="true">✓</span>
+                        </button>
+                      </div>
+                      <p v-if="!isBridgeMode(chat.mode)" class="permission-modes__unknown">Current mode is unknown.</p>
+                      <p class="permission-modes__note">Changes apply to subsequent turns, not the reply already running. Already queued or external turns may start before a change is saved.</p>
+                      <p v-if="modeWritePending" class="permission-modes__status" role="status">Saving permission mode… Sending from this composer is paused.</p>
                     </div>
                   </div>
                 </template>
@@ -1545,6 +1565,7 @@ import { errorNoticePrompt, parseInjectedPrompt, retryScheduledNotice, type Inje
 import { linkifyText } from '../lib/filePaths'
 import { isChatId } from '../lib/chatLinks'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
+import { isBridgeMode, PERMISSION_MODE_COPY, type BridgeMode } from '../lib/permissionModes'
 import { canOfferMoveToBackground, shouldRestoreFocus } from '../lib/moveToBackground'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
@@ -1754,7 +1775,8 @@ const hasComposerContent = computed(() =>
 // before the server has it.
 const uploadsInFlight = computed(() => uploads.value.length > 0)
 const isMcpToken = computed(() => inputText.value.trim().toLowerCase() === '/mcp')
-const canSend = computed(() => isMcpToken.value || (hasComposerContent.value && !uploadsInFlight.value))
+const modeWritePending = computed(() => (store.pendingChatModeWrites[chat.value?.chat_id || ''] || 0) > 0)
+const canSend = computed(() => isMcpToken.value || (!modeWritePending.value && hasComposerContent.value && !uploadsInFlight.value))
 // Empty composer while a turn is in flight → stop; otherwise the same
 // button queues/sends the draft.
 const showStopAction = computed(() => view.isStreaming && (isMcpToken.value || !hasComposerContent.value))
@@ -1796,6 +1818,7 @@ async function moveToBackground() {
 const primaryActionTitle = computed(() => {
   if (showStopAction.value) return 'Stop'
   if (isMcpToken.value) return mcpActionLabel.value
+  if (modeWritePending.value) return 'Wait for the permission mode to save'
   if (uploadsInFlight.value) return 'Wait for the upload to finish'
   if (view.isStreaming) return 'Queue message (sends when current turn finishes)'
   return 'Send'
@@ -1803,6 +1826,7 @@ const primaryActionTitle = computed(() => {
 const primaryActionLabel = computed(() => {
   if (showStopAction.value) return 'Stop generation'
   if (isMcpToken.value) return mcpActionLabel.value
+  if (modeWritePending.value) return 'Wait for the permission mode to save'
   if (uploadsInFlight.value) return 'Wait for the upload to finish'
   if (view.isStreaming) return 'Queue message'
   return 'Send message'
@@ -2442,7 +2466,7 @@ function toggleWorkDetails() {
       if (epoch !== mcpHeadingEpoch || !drawerShown.value) return
       clearMcpHeadingPriority()
       await nextTick()
-      mcpConnections.value?.revealDrawerAction()
+      mcpConnections.value?.revealDrawerAction(true)
     })
   }
 }
@@ -2558,6 +2582,10 @@ let messagesResizeObserver: ResizeObserver | null = null
 const showScrollBtn = computed(() => Boolean(messagesEl.value && view.activeMessages.length > 0 && !isNearBottom.value))
 const showModelPicker = ref(false)
 const modelPickerRef = ref<HTMLElement>()
+const composerModelTrigger = ref<HTMLButtonElement | null>(null)
+const permissionModes: BridgeMode[] = ['normal', 'auto', 'bypass', 'plan']
+let pickerGeneration = 0
+watch(showModelPicker, () => { pickerGeneration += 1 }, { flush: 'sync' })
 
 // Which picker is open. 'normal' is the composer's model chip: a pick there
 // only changes the model. 'recovery' is opened from a failed turn - the
@@ -2602,10 +2630,12 @@ function resetPickerState() {
 }
 
 watch(() => chat.value?.chat_id, () => {
+  pickerGeneration += 1
   resetPickerState()
 })
 
 onBeforeUnmount(() => {
+  pickerGeneration += 1
   resetPickerState()
 })
 
@@ -3393,6 +3423,10 @@ const chatModelSections = computed(() => {
     return section
   })
 })
+const pickerModelSections = computed(() => chatModelSections.value.map(section => ({
+  ...section,
+  disabled: section.disabled || (pickerMode.value === 'normal' && modeWritePending.value),
+})))
 
 // The model id the chat is running on, as stored. A tier alias stays an alias
 // here: the provider resolves it per turn against its own catalog, so there is
@@ -4918,6 +4952,7 @@ function send() {
     nextTick(autoResize)
     return
   }
+  if (modeWritePending.value) return
   if (uploadsInFlight.value) return
   const text = inputText.value.trim()
   const hasAttachments = view.pendingImages.length > 0 || view.pendingFiles.length > 0
@@ -5271,6 +5306,45 @@ function toggleModelPicker() {
   showModelPicker.value = true
 }
 
+function handleModelPickerClose(reason: 'escape' | 'other') {
+  const chatId = chat.value?.chat_id
+  const mode = pickerMode.value
+  const generation = pickerGeneration
+  const focusedAtClose = document.activeElement
+  const closingPicker = modelPickerRef.value
+  const closingPopover = closingPicker?.querySelector('.model-selector__popover')
+  const focusWasInClosingPicker = !!focusedAtClose
+    && (!!closingPicker?.contains(focusedAtClose) || !!closingPopover?.contains(focusedAtClose))
+  showModelPicker.value = false
+  if (reason !== 'escape' || mode !== 'normal') return
+  void nextTick(() => {
+    const active = document.activeElement
+    const focusStillBelongsToPicker = (focusWasInClosingPicker && active === focusedAtClose)
+      || (!!active && !!closingPicker?.contains(active))
+      || (!!active && !!closingPopover?.contains(active))
+    const focusWasLost = !active || active === document.body
+    if (chat.value?.chat_id === chatId
+      && pickerMode.value === 'normal'
+      && pickerGeneration === generation + 1
+      && (focusStillBelongsToPicker || focusWasLost)
+      && composerModelTrigger.value?.isConnected
+      && !composerModelTrigger.value.disabled) composerModelTrigger.value.focus()
+  })
+}
+
+async function selectPermissionMode(mode: BridgeMode) {
+  const chatId = chat.value?.chat_id
+  if (!chatId || !isBridgeMode(mode) || chat.value.mode === mode || modeWritePending.value) return
+  try {
+    await store.updateChat(chatId, { mode })
+  } catch (e) {
+    store.pushErrorToast(
+      'Could not change permission mode',
+      `${errorMessage(e)} The server may have saved it. Reopen the chat to check.`,
+    )
+  }
+}
+
 function tierAlias(model: string): TierAlias | null {
   const normalized = model.trim().toLowerCase()
   return normalized === 'haiku' || normalized === 'sonnet' || normalized === 'opus' || normalized === 'fable'
@@ -5365,6 +5439,9 @@ async function runRecovery(recovery: RecoveryContext) {
 }
 
 async function selectModel(value: string | string[], sectionKey = '') {
+  if (pickerMode.value === 'normal' && modeWritePending.value) return
+  const intentChatId = chat.value?.chat_id
+  const intentGeneration = pickerGeneration
   // One pick at a time: a second click while the first is still applying
   // must not start a second turn.
   if (modelSelectBusy.value) return
@@ -5477,22 +5554,29 @@ async function selectModel(value: string | string[], sectionKey = '') {
     }
   } finally {
     modelSelectBusy.value = false
-    showModelPicker.value = false
+    if (chat.value?.chat_id === intentChatId && pickerGeneration === intentGeneration) {
+      showModelPicker.value = false
+    }
   }
 }
 
 async function selectThinking(level: string) {
+  const intentChatId = chat.value?.chat_id
+  const intentGeneration = pickerGeneration
   if (pickerMode.value === 'recovery') {
     // A recovery stages the level for the retry: the model that is about to
     // be picked may not support it, and the picker stays open until then.
     stagedThinkingLevel.value = level
     return
   }
+  if (modeWritePending.value) return
   // '' = provider default. Safe mid-chat: it never invalidates the
   // provider session, so no handover is involved.
   try {
     await store.updateChat(chat.value.chat_id, { thinking_level: level })
-    showModelPicker.value = false
+    if (chat.value?.chat_id === intentChatId && pickerGeneration === intentGeneration) {
+      showModelPicker.value = false
+    }
   } catch (e) {
     store.pushErrorToast('Could not change the thinking level', errorMessage(e))
   }
@@ -8145,6 +8229,57 @@ details[open] > .activity-summary::before {
   justify-content: space-between;
   gap: var(--space-3);
   padding: 2px 4px;
+}
+
+.picker-footer-groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.permission-modes {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.permission-modes__choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.permission-mode {
+  position: relative;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  min-width: 0;
+  min-height: 44px;
+  height: auto;
+  gap: 2px;
+  text-align: left;
+  white-space: normal;
+}
+
+.permission-mode__description,
+.permission-modes__note,
+.permission-modes__unknown,
+.permission-modes__status {
+  margin: 0;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.3;
+}
+
+.permission-mode__check {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+}
+
+.permission-mode:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .thinking-levels__label {

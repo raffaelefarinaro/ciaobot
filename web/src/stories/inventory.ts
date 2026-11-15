@@ -13,6 +13,23 @@ export interface InventoryFilters { query: string; family: string; coverage: 'al
 // Ownership is deliberately explicit: adding a production SFC requires its own row.
 export const inventory: InventoryEntry[] = [
   {
+    id: 'components-chat-mcp-terminal-recovery',
+    name: 'ChatMcpTerminalRecovery',
+    family: 'Chat, messages, composer, activity and context',
+    kind: 'component',
+    owner: { path: 'web/src/components/ChatMcpTerminalRecovery.vue', anchor: '<template>' },
+    sources: ['web/src/lib/shellQuote.ts', 'web/src/lib/codeCopy.ts'],
+    consumers: ['web/src/components/ChatMcpConnections.vue'],
+    variants: ['list', 'manual sign-in'],
+    variantNotes: 'Copy-only recovery in ChatMcpConnections; no terminal operation is initiated.',
+    states: [
+      { name: 'closed', coverage: 'uncovered', storyIds: [], note: 'Eligible recovery starts closed; no story exists.' },
+      { name: 'commands and copy result', coverage: 'uncovered', storyIds: [], note: 'Command previews and clipboard outcomes have no stories.' },
+    ],
+    loading: { status: 'none', detail: 'No fetch; clipboard writes have a local busy state.' },
+    migration: { status: 'unassessed', note: 'Inventory admission does not approve a design migration.' },
+  },
+  {
     id: 'components-settings-settings-switch',
     name: 'SettingsSwitch',
     family: 'Settings',
