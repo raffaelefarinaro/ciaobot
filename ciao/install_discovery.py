@@ -4,9 +4,7 @@ A bare-shell invocation (`ciao health get` from any directory) has no
 ``CIAO_WORKSPACE``, so ``ciao.config.installed_workspace_env`` has to find the
 install the operator actually has rather than manufacture a bootstrap workspace
 beside it. Before this module that question was answered by the macOS
-LaunchAgent alone, which on Windows meant the engine's own logon task was
-ignored and the bare shell fell back to the cwd. Linux reads the root-owned
-systemd unit the installer wrote.
+LaunchAgent alone. Linux reads the root-owned systemd unit the installer wrote.
 
 This is the one answer to that question, and both branches are read-only: they
 read the service definition the engine wrote and mint nothing. A definition
@@ -41,36 +39,18 @@ def discover_workspace(base: Mapping[str, str]) -> Path | None:
     """The installed workspace this shell should use, or ``None`` if there is none.
 
     ``base`` is the caller's environment; the macOS branch needs it because the
-    LaunchAgent's plist falls back to ``CIAO_WORKSPACE`` from it. The Windows
-    branch reads the task definition the engine wrote and never consults the
-    shell environment: the installed workspace is recorded there, and a live
-    ``schtasks`` query would be a second source of truth this read-only seam does
-    not need.
-
-    The dispatch is platform-aware: on Windows the engine's own logon task is
-    the install record, so it is read first; on Linux it is the systemd unit,
-    trusted only when root-owned and not group- or world-writable, and never the
-    shell environment. Everywhere else — and on Windows
-    when no task was found — the macOS LaunchAgent read runs, which is the
-    behaviour-before-this-seam call every platform made and the call the
-    existing tests patch. On a real Windows machine there is no plist, so that
-    read yields no workspace and the `is_dir()` guard leaves the mapping
-    unchanged: no fallback install is invented.
+    LaunchAgent's plist falls back to ``CIAO_WORKSPACE`` from it. On Linux the
+    root-owned systemd unit is read first, trusted only when root-owned and not
+    group- or world-writable, and never the shell environment. Everywhere else,
+    and on Linux when no unit was found, the macOS LaunchAgent read runs, which
+    is the call the existing tests patch.
     """
-    if _platform() == "win32":
-        discovered = _discover_windows()
-        if discovered is not None:
-            return discovered
-        # Fall through rather than return None: the macOS read is the one the
-        # seam must preserve on every platform, and on Windows it simply finds
-        # no plist. Returning early here would bypass the patch target the
-        # existing discovery tests install and break them on the Windows job.
-    elif _platform().startswith("linux"):
+    if _platform().startswith("linux"):
         discovered = _discover_linux()
         if discovered is not None:
             return discovered
-        # Same fall-through as Windows: a bare shell as another user, or an
-        # install with no unit, keeps the behaviour it had before this branch.
+        # Fall through: a bare shell as another user, or an install with no
+        # unit, keeps the behaviour it had before this branch.
     return _discover_macos(base)
 
 
@@ -86,18 +66,6 @@ def _discover_macos(base: Mapping[str, str]) -> Path | None:
     if not discovered or not discovered.workspace:
         return None
     workspace = Path(discovered.workspace)
-    return workspace if workspace.is_dir() else None
-
-
-def _discover_windows() -> Path | None:
-    # Imported here for symmetry with the macOS branch and to keep this module
-    # importable without pulling in the Task Scheduler surface.
-    from ciao import windows_service
-
-    definition = windows_service.live_task_dir() / windows_service.TASK_FILE_NAME
-    workspace = windows_service.task_workspace(definition)
-    if workspace is None:
-        return None
     return workspace if workspace.is_dir() else None
 
 
@@ -196,7 +164,7 @@ def _strict_set_up_workspace(root: Path) -> bool:
 def require_fresh_installer_entry(*, environ: Mapping[str, str], cwd: Path) -> None:
     """Raise unless installer bootstrap is demonstrably safe. Read-only."""
     platform = _platform()
-    if platform not in ("darwin", "win32"):
+    if platform != "darwin":
         raise InstallerEntryRefused(f"Installer bootstrap is unsupported on {platform}")
     if any(environ.get(key, "").strip() for key in (
         "CIAO_WORKSPACE", "CIAO_WORKSPACES", "CIAO_RUNTIME_ROOT", "CIAO_MEMORY_DIR",
@@ -209,18 +177,11 @@ def require_fresh_installer_entry(*, environ: Mapping[str, str], cwd: Path) -> N
     if _strict_set_up_workspace(home_root):
         raise InstallerEntryRefused("Default Ciaobot workspace already exists")
     try:
-        if platform == "darwin":
-            from ciao import macos_service
-            definition = macos_service.live_launch_agents_dir() / f"{macos_service.SERVER_LABEL}.plist"
-            if _strict_exists(definition):
-                raise InstallerEntryRefused("Live LaunchAgent definition already exists")
-            registered = macos_service.server_job_registered()
-        else:
-            from ciao import windows_service
-            definition = windows_service.live_task_dir() / windows_service.TASK_FILE_NAME
-            if _strict_exists(definition):
-                raise InstallerEntryRefused("Live scheduled-task definition already exists")
-            registered = windows_service.engine_task_registered()
+        from ciao import macos_service
+        definition = macos_service.live_launch_agents_dir() / f"{macos_service.SERVER_LABEL}.plist"
+        if _strict_exists(definition):
+            raise InstallerEntryRefused("Live LaunchAgent definition already exists")
+        registered = macos_service.server_job_registered()
         if registered:
             raise InstallerEntryRefused("Engine service is already registered")
     except InstallerEntryRefused:
@@ -244,7 +205,7 @@ class NativeInstallState(str, Enum):
       launchd override is set, or a workspace has a complete setup (a regular
       workspace-registry file, or the legacy configured env).
     - ``partial``: installation evidence without a complete setup — a receipt,
-      the uv tool directory, the ``ciao`` shim (``ciao.exe`` on Windows), a
+      the uv tool directory, the ``ciao`` shim, a
       setup marker, a server host,
       a leftover migration artifact, an interrupted host-upgrade journal, or an
       interrupted handoff result.
@@ -298,10 +259,6 @@ _REDIRECT_VARIABLES = (
 
 _UV_TOOL_NAME = "ciaobot"
 _SHIM_NAME = "ciao"
-#: uv and pip write the console script as ``ciao.exe`` on Windows. The
-#: extensionless ``ciao`` is the POSIX entry point, not a runnable Windows shim,
-#: so it is not install evidence there.
-_WINDOWS_SHIM_NAME = "ciao.exe"
 
 
 def _require_sound_ancestry(path: Path) -> None:
@@ -608,10 +565,9 @@ def _owned_private_lock(status: os.stat_result) -> bool:
 
     The probe is only meaningful on the installer's own file: another owner or a
     group/other bit means the answer could be someone else's, so it is
-    ambiguous rather than evidence. Windows has no ``st_uid``/mode contract in
-    the same sense, so the ownership half is asked only where it exists.
+    ambiguous rather than evidence.
     """
-    if hasattr(os, "getuid") and status.st_uid != os.getuid():
+    if status.st_uid != os.getuid():
         return False
     return stat.S_IMODE(status.st_mode) & 0o077 == 0
 
@@ -711,7 +667,7 @@ def _host_upgrade_evidence(platform: str, unknown: bool, partial: bool) -> tuple
 
     ``server_host_install`` owns both paths (``~/.local/state/ciaobot/
     server-host-upgrade.json`` and ``.lock``) and is macOS-only, so neither is
-    read on Windows. A journal means a host swap is in flight or was
+    read on any other platform. A journal means a host swap is in flight or was
     interrupted; it is install evidence (partial), and it is never deleted or
     rolled back here — that is the operator's explicit recovery through
     ``server-host-install transaction-status`` / ``rollback-upgrade``. A journal
@@ -751,9 +707,7 @@ def _native_marker_state(
 ) -> NativeInstallState | None:
     """Partial or unknown evidence that is not a workspace.
 
-    The shim marker is the platform's own entry-point name: ``ciao.exe`` on
-    Windows, where uv and pip write the console script with that extension,
-    and ``ciao`` everywhere else.
+    The shim marker is the ``ciao`` entry point.
     """
     from ciao import install_receipt, installer_handoff
 
@@ -762,7 +716,7 @@ def _native_marker_state(
 
     markers = [
         tool_dir / _UV_TOOL_NAME,
-        bin_dir / (_WINDOWS_SHIM_NAME if platform == "win32" else _SHIM_NAME),
+        bin_dir / _SHIM_NAME,
         installer_handoff.result_path(),
     ]
     if platform == "darwin":
@@ -860,7 +814,7 @@ def classify_native_install(
     to write anything.
     """
     platform = _platform()
-    if platform not in ("darwin", "win32"):
+    if platform != "darwin":
         return NativeInstallState.unknown
 
     configured = False
@@ -893,35 +847,25 @@ def classify_native_install(
             partial = True
 
     try:
-        if platform == "darwin":
-            from ciao import macos_service
+        from ciao import macos_service
 
-            agents = macos_service.live_launch_agents_dir()
-            if _strict_presence(agents / f"{macos_service.SERVER_LABEL}.plist"):
-                configured = True
-            if _strict_presence(agents / f"{macos_service.LEGACY_MENUBAR_LABEL}.plist"):
-                partial = True
-            # The qualified probe: presence is configured evidence, and
-            # uncertainty (a failed, unqualified or other-domain answer) is
-            # unknown, never fresh. The unqualified `launchctl list` cannot
-            # prove absence and is not asked here.
-            if not macos_service.server_job_absent():
-                configured = True
-            elif macos_service.launchd_override_disabled():
-                # An explicit override is the operator's existing service
-                # configuration, so a label that launchd will not start is not
-                # a fresh install even though no job is loaded. Fresh activation
-                # refuses it for the same reason; it never clears the override.
-                configured = True
-        else:
-            from ciao import windows_service
-
-            if _strict_presence(
-                windows_service.live_task_dir() / windows_service.TASK_FILE_NAME
-            ):
-                configured = True
-            if windows_service.engine_task_registered():
-                configured = True
+        agents = macos_service.live_launch_agents_dir()
+        if _strict_presence(agents / f"{macos_service.SERVER_LABEL}.plist"):
+            configured = True
+        if _strict_presence(agents / f"{macos_service.LEGACY_MENUBAR_LABEL}.plist"):
+            partial = True
+        # The qualified probe: presence is configured evidence, and
+        # uncertainty (a failed, unqualified or other-domain answer) is
+        # unknown, never fresh. The unqualified `launchctl list` cannot
+        # prove absence and is not asked here.
+        if not macos_service.server_job_absent():
+            configured = True
+        elif macos_service.launchd_override_disabled():
+            # An explicit override is the operator's existing service
+            # configuration, so a label that launchd will not start is not
+            # a fresh install even though no job is loaded. Fresh activation
+            # refuses it for the same reason; it never clears the override.
+            configured = True
     except Exception:  # noqa: BLE001 - a failed or uncertain probe is unknown
         unknown = True
 

@@ -17,7 +17,7 @@ from starlette.middleware import Middleware
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao import cli, installer_handoff, macos_service, service_backend, windows_service
+from ciao import cli, installer_handoff, macos_service, service_backend
 from ciao.config import CiaoConfig
 from ciao.os_support.private import is_private
 from ciao.web.auth import AuthMiddleware
@@ -25,14 +25,12 @@ from ciao.web.routes_api import setup_finish_endpoint
 
 
 SUPPORTED = pytest.mark.skipif(
-    sys.platform not in ("darwin", "win32"),
-    reason="the installer bootstrap supports macOS and Windows only",
+    sys.platform != "darwin",
+    reason="the installer bootstrap supports macOS only",
 )
 
 
 def _definition_name() -> str:
-    if sys.platform == "win32":
-        return windows_service.TASK_FILE_NAME
     return f"{macos_service.SERVER_LABEL}.plist"
 
 
@@ -60,22 +58,11 @@ class _Backend:
 
 def _plist_definition(live: Path, workspace: Path) -> Path:
     live.mkdir(parents=True, exist_ok=True)
-    if sys.platform == "win32":
-        definition = live / windows_service.TASK_FILE_NAME
-        definition.write_text(
-            windows_service.render_task_xml(python=_windows_python(), workspace=str(workspace), user="DESKTOP-1\\me"),
-            encoding="utf-16",
-        )
-        return definition
     definition = live / f"{macos_service.SERVER_LABEL}.plist"
     definition.write_bytes(
         plistlib.dumps({"EnvironmentVariables": {"CIAO_WORKSPACE": str(workspace)}})
     )
     return definition
-
-
-def _windows_python() -> str:
-    return str(Path(sys.executable))
 
 
 def _recordable(
@@ -226,12 +213,12 @@ def test_oversized_result_never_activates(monkeypatch, tmp_path) -> None:
 
 
 @SUPPORTED
-def test_result_for_another_platform_never_activates(monkeypatch, tmp_path) -> None:
+def test_activation_refuses_an_unsupported_backend(monkeypatch, tmp_path) -> None:
     backend, workspace, definition, run_id = _recordable(monkeypatch, tmp_path)
     _record(backend, workspace, definition, run_id)
-    other = _Backend("windows" if backend.name == "macos" else "macos", backend.live)
+    other = _Backend("linux", backend.live)
     monkeypatch.setattr(service_backend, "current_backend", lambda: other)
-    with pytest.raises(installer_handoff.HandoffError, match="was written for"):
+    with pytest.raises(installer_handoff.HandoffError, match="unsupported on linux"):
         installer_handoff.activate(run_id=run_id, is_set_up=lambda _ws: True)
     assert other.loaded == []
 
@@ -242,7 +229,7 @@ def test_definition_outside_the_live_directory_never_activates(
 ) -> None:
     backend, workspace, definition, run_id = _recordable(monkeypatch, tmp_path)
     _record(backend, workspace, definition, run_id)
-    assert backend.name in ("macos", "windows")
+    assert backend.name == "macos"
     backend.live = tmp_path / "elsewhere"
     _plist_definition(backend.live, workspace)
     with pytest.raises(installer_handoff.HandoffError, match="not the live one"):
@@ -324,13 +311,7 @@ def _finish_client(tmp_path: Path, *, run_id: str):
 
 
 def _fake_engine_python(tmp_path: Path) -> str:
-    if sys.platform != "win32":
-        return "/opt/ciao/bin/python"
-    bin_dir = tmp_path / "fake-python"
-    bin_dir.mkdir(exist_ok=True)
-    for name in ("python.exe", "pythonw.exe"):
-        (bin_dir / name).write_bytes(b"")
-    return str(bin_dir / "python.exe")
+    return "/opt/ciao/bin/python"
 
 
 @SUPPORTED
@@ -393,7 +374,6 @@ def test_installer_finish_refuses_to_stay_running(monkeypatch, tmp_path) -> None
 
 
 @SUPPORTED
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits only")
 def test_world_readable_result_never_activates(monkeypatch, tmp_path) -> None:
     backend, workspace, definition, run_id = _recordable(monkeypatch, tmp_path)
     path = _record(backend, workspace, definition, run_id)
@@ -434,7 +414,6 @@ def test_duplicate_fields_never_activate(monkeypatch, tmp_path) -> None:
 
 
 @SUPPORTED
-@pytest.mark.skipif(sys.platform == "win32", reason="the plist is the POSIX definition")
 def test_relative_definition_workspace_never_activates(monkeypatch, tmp_path) -> None:
     backend, workspace, definition, run_id = _recordable(monkeypatch, tmp_path)
     _record(backend, workspace, definition, run_id)
@@ -491,8 +470,8 @@ def test_a_predictable_temporary_path_cannot_redirect_the_write(
 
 
 @SUPPORTED
-def test_windows_activation_requires_a_private_result(monkeypatch, tmp_path) -> None:
-    """The DACL gate is asked on every platform, not just where mode bits exist."""
+def test_activation_requires_a_private_result(monkeypatch, tmp_path) -> None:
+    """The privacy gate is asked through `is_private`, not only through mode bits."""
     backend, workspace, definition, run_id = _recordable(monkeypatch, tmp_path)
     _record(backend, workspace, definition, run_id)
     monkeypatch.setattr(installer_handoff, "is_private", lambda _path: False)
@@ -533,13 +512,13 @@ def test_service_manager_value_error_is_reported(monkeypatch, tmp_path) -> None:
 
 @SUPPORTED
 def test_unrelated_definition_errors_are_not_swallowed(monkeypatch, tmp_path) -> None:
-    """A programming error in the task parser surfaces as itself."""
-    definition = tmp_path / "task.xml"
-    definition.write_text("<Task/>", encoding="utf-8")
+    """A programming error in the plist parser surfaces as itself."""
+    definition = tmp_path / "server.plist"
+    definition.write_bytes(b"not a plist")
 
     def explode(_definition):
         raise TypeError("bug")
 
-    monkeypatch.setattr(windows_service, "task_workspace", explode)
+    monkeypatch.setattr(plistlib, "load", explode)
     with pytest.raises(TypeError, match="bug"):
-        installer_handoff._definition_workspace("windows", definition)
+        installer_handoff._definition_workspace("macos", definition)

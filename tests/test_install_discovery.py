@@ -4,15 +4,12 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from pathlib import Path
 
 import pytest
 
 from ciao import install_discovery, linux_service
 from ciao.linux_service import render_service
-
-posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX ownership and modes")
 
 
 def _trusted_unit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workspace: Path) -> Path:
@@ -30,7 +27,6 @@ def _trusted_unit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workspace: Pa
     return unit
 
 
-@posix_only
 def test_linux_branch_reads_the_unit(tmp_path, monkeypatch):
     install = tmp_path / "install"
     install.mkdir()
@@ -39,7 +35,6 @@ def test_linux_branch_reads_the_unit(tmp_path, monkeypatch):
     assert install_discovery.discover_workspace({}) == install
 
 
-@posix_only
 def test_linux_branch_ignores_the_shell_environment(tmp_path, monkeypatch):
     install = tmp_path / "install"
     other = tmp_path / "other"
@@ -50,8 +45,7 @@ def test_linux_branch_ignores_the_shell_environment(tmp_path, monkeypatch):
     assert install_discovery.discover_workspace({"CIAO_WORKSPACE": str(other)}) == install
 
 
-@posix_only
-@pytest.mark.skipif(sys.platform != "win32" and os.geteuid() == 0, reason="root reads any directory")
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
 def test_linux_branch_falls_through_when_the_workspace_is_unreadable(tmp_path, monkeypatch):
     install = tmp_path / "install"
     install.mkdir()
@@ -70,7 +64,6 @@ def test_linux_branch_missing_unit_falls_through(tmp_path, monkeypatch):
     assert install_discovery.discover_workspace({}) is None
 
 
-@posix_only
 def test_trusted_registry_on_linux(tmp_path, monkeypatch):
     install = tmp_path / "install"
     vault = install / "personal" / "memory-vault"

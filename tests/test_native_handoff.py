@@ -15,9 +15,7 @@ path until #2340. These tests pin the separate native module:
 * the schema-2 result is read by the shared bounded descriptor reader, with its
   owner-only mode checked on the opened descriptor, and activation's default
   completed-workspace check cannot block on a FIFO `.env`;
-* native Windows is refused explicitly: task XML carries no port and the legacy
-  registration path can replace an intervening task, so it cannot bind the same
-  facts or promise fresh-only registration;
+* every backend other than macOS is refused before a result is recorded, read or activated;
 * a schema-1 result is refused by the native reader and a schema-2 result by the
   legacy reader.
 """
@@ -34,7 +32,6 @@ import sys
 import threading
 import uuid
 from pathlib import Path
-from xml.etree import ElementTree
 
 import pytest
 
@@ -45,7 +42,6 @@ from ciao import (
     native_handoff,
     server_host,
     service_backend,
-    windows_service,
 )
 from ciao.config import CiaoConfig
 from ciao.os_support import private as private_module
@@ -56,8 +52,7 @@ from ciao.os_support.private import is_private, open_private
 #: The native path implements the macOS backend only
 #: (``native_handoff.NATIVE_BACKENDS``): recording binds a launchd plist, an
 #: absolute POSIX program and an absolute POSIX interpreter that exists, and
-#: activation bootstraps that job. Windows keeps the legacy installer, so these
-#: tests do not run there. The explicit Windows refusals below are deliberately
+#: activation bootstraps that job. The unsupported-backend refusals below are
 #: unmarked and run on every platform.
 DARWIN_ONLY = pytest.mark.skipif(
     sys.platform != "darwin",
@@ -126,30 +121,6 @@ def _definition(live: Path, workspace: Path) -> Path:
     return definition
 
 
-def _windows_task(*, extra_action: str = "", extra_trigger: str = "") -> str:
-    """The legacy task template, optionally with a second action or trigger."""
-    xml = windows_service.render_task_xml(
-        python="C:\\Python312\\pythonw.exe",
-        workspace="C:\\Ciaobot",
-        user="DESKTOP-1\\me",
-    )
-    if extra_action:
-        xml = xml.replace(
-            "    </Exec>\n",
-            "    </Exec>\n" + extra_action + "\n",
-            1,
-        )
-    if extra_trigger:
-        xml = xml.replace(
-            "  </Triggers>\n",
-            extra_trigger + "\n  </Triggers>\n",
-            1,
-        )
-    assert extra_action in xml or not extra_action
-    assert extra_trigger in xml or not extra_trigger
-    return xml
-
-
 def _digest(definition: Path) -> str:
     return hashlib.sha256(definition.read_bytes()).hexdigest()
 
@@ -211,8 +182,7 @@ def _schema_2_document(
 
     Used by the reader tests. Recording itself is macOS-only — it rejects any
     program that is not an existing, absolute POSIX path — but what a *reader*
-    does with a document is platform-neutral. Writing the document directly is
-    the seam that keeps those tests running on Windows.
+    does with a document is platform-neutral.
     """
     identity = {"device": 0, "inode": 0, "size": 0, "mtime_ns": 0}
     return {
@@ -239,7 +209,7 @@ def _write_result_document(
 
     The chain is prepared the way the native parent prepares it before a
     bootstrap child starts, so the reader's own chain check judges the same
-    private directory on POSIX and on Windows (a protected DACL there).
+    private directory.
     """
     _home(monkeypatch, tmp_path)
     native_handoff.prepare_bootstrap_scratch()
@@ -326,9 +296,8 @@ def test_the_native_record_creates_a_private_scratch_chain(monkeypatch, tmp_path
     scratch = path.parent
     assert path == installer_handoff.result_path()
     assert is_private(scratch)
-    if os.name == "posix":
-        assert stat.S_IMODE(scratch.stat().st_mode) == 0o700
-        assert stat.S_IMODE(scratch.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(scratch.stat().st_mode) == 0o700
+    assert stat.S_IMODE(scratch.parent.stat().st_mode) == 0o700
     assert list(scratch.glob("*.tmp")) == []
 
 
@@ -351,17 +320,15 @@ def test_the_parent_prepares_the_scratch_before_the_bootstrap_config_creates_it(
     home = Path.home()
     scratch = native_handoff.prepare_bootstrap_scratch()
     assert scratch == home / ".ciao" / "installer-bootstrap"
-    if os.name == "posix":
-        assert stat.S_IMODE((home / ".ciao").stat().st_mode) == 0o700
-        assert stat.S_IMODE(scratch.stat().st_mode) == 0o700
+    assert stat.S_IMODE((home / ".ciao").stat().st_mode) == 0o700
+    assert stat.S_IMODE(scratch.stat().st_mode) == 0o700
 
     config = CiaoConfig.from_env(installer_bootstrap=True)
     assert config.workspace_root == scratch
     assert config.bootstrap_mode is True
-    if os.name == "posix":
-        assert stat.S_IMODE(scratch.stat().st_mode) == 0o700, (
-            "the child's exist_ok mkdir must not alter the prepared chain"
-        )
+    assert stat.S_IMODE(scratch.stat().st_mode) == 0o700, (
+        "the child's exist_ok mkdir must not alter the prepared chain"
+    )
     assert (scratch / "launcher").is_dir()
     assert (scratch / "runtime").is_dir()
 
@@ -370,7 +337,6 @@ def test_the_parent_prepares_the_scratch_before_the_bootstrap_config_creates_it(
     assert json.loads(path.read_text(encoding="utf-8"))["run_id"] == run_id
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits")
 @DARWIN_ONLY
 def test_preparing_refuses_a_preexisting_0755_scratch_without_chmodding_it(
     monkeypatch, tmp_path
@@ -386,7 +352,6 @@ def test_preparing_refuses_a_preexisting_0755_scratch_without_chmodding_it(
     assert stat.S_IMODE(scratch.stat().st_mode) == 0o755
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits")
 @DARWIN_ONLY
 def test_preparing_accepts_a_shared_0755_ciao_directory_and_creates_the_leaf(
     monkeypatch, tmp_path
@@ -402,7 +367,6 @@ def test_preparing_accepts_a_shared_0755_ciao_directory_and_creates_the_leaf(
     assert stat.S_IMODE(scratch.stat().st_mode) == 0o700
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits")
 @DARWIN_ONLY
 def test_the_bootstrap_config_running_first_makes_preparation_refuse_the_chain(
     monkeypatch, tmp_path
@@ -437,7 +401,6 @@ def test_a_home_directory_that_cannot_be_resolved_is_a_native_refusal(
         native_handoff.result_path()
 
 
-@pytest.mark.skipif(os.name != "posix", reason="symlink semantics")
 @DARWIN_ONLY
 def test_recording_refuses_a_symlinked_scratch_parent(monkeypatch, tmp_path) -> None:
     backend, workspace, definition, run_id = _recordable(monkeypatch, tmp_path)
@@ -451,7 +414,6 @@ def test_recording_refuses_a_symlinked_scratch_parent(monkeypatch, tmp_path) -> 
     assert not native_handoff.result_path().exists()
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits")
 @DARWIN_ONLY
 def test_recording_refuses_a_world_writable_scratch_without_chmod(
     monkeypatch, tmp_path
@@ -467,7 +429,6 @@ def test_recording_refuses_a_world_writable_scratch_without_chmod(
     assert not native_handoff.result_path().exists()
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits")
 @DARWIN_ONLY
 def test_recording_leaves_an_existing_shared_ciao_directory_unchanged(
     monkeypatch, tmp_path
@@ -483,7 +444,6 @@ def test_recording_leaves_an_existing_shared_ciao_directory_unchanged(
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
 
 
-@pytest.mark.skipif(os.name != "posix", reason="effective uid is POSIX")
 @DARWIN_ONLY
 def test_recording_refuses_a_scratch_owner_that_is_not_the_effective_user(
     monkeypatch, tmp_path
@@ -544,107 +504,23 @@ def test_a_collision_on_the_temporary_name_is_not_deleted(
     assert not target.exists()
 
 
-def _windows_backend(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> tuple[_Backend, Path, Path, str]:
-    """A Windows backend and the task XML setup would have written."""
-    _home(monkeypatch, tmp_path)
-    backend = _Backend("windows", tmp_path / "live")
-    backend.live.mkdir(parents=True)
-    monkeypatch.setattr(service_backend, "current_backend", lambda: backend)
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    definition = backend.live / windows_service.TASK_FILE_NAME
-    definition.write_text(
-        windows_service.render_task_xml(
-            python="C:\\Python312\\pythonw.exe",
-            workspace="C:\\Ciaobot",
-            user="DESKTOP-1\\me",
-        ),
-        encoding="utf-16",
-    )
-    return backend, workspace, definition, str(uuid.uuid4())
-
-
-def _refuse_windows_record(
-    backend: _Backend,
-    workspace: Path,
-    definition: Path,
-    run_id: str,
+def test_the_native_handoff_refuses_an_unsupported_backend_before_a_result(
+    monkeypatch, tmp_path
 ) -> None:
-    with pytest.raises(native_handoff.NativeHandoffError, match="does not implement Windows"):
+    backend, workspace, definition, run_id = _recordable(monkeypatch, tmp_path)
+    backend.name = "linux"
+    with pytest.raises(native_handoff.NativeHandoffError, match="does not support linux"):
         _record(backend, workspace, definition, run_id)
     assert not native_handoff.result_path().exists()
 
 
-def test_the_native_handoff_refuses_a_well_formed_windows_task(
+def test_native_activation_refuses_an_unsupported_backend_before_reading_a_result(
     monkeypatch, tmp_path
 ) -> None:
-    backend, workspace, definition, run_id = _windows_backend(monkeypatch, tmp_path)
-    _refuse_windows_record(backend, workspace, definition, run_id)
+    backend, _workspace, _definition, run_id = _recordable(monkeypatch, tmp_path)
+    backend.name = "linux"
 
-
-def test_a_windows_task_with_a_second_action_is_refused_before_a_result(
-    monkeypatch, tmp_path
-) -> None:
-    """A second ``Exec`` would launch a second program; the native path refuses.
-
-    Windows task XML carries no port and its registration path forces an
-    overwrite, so the native module cannot bind the same facts as macOS. It
-    refuses every Windows task, including one carrying an extra action, before
-    a result is written. Re-enabling Windows requires exact action semantics.
-    """
-    backend, workspace, definition, run_id = _windows_backend(monkeypatch, tmp_path)
-    definition.write_text(
-        _windows_task(
-            extra_action=(
-                "    <Exec>\n"
-                "      <Command>C:\\attacker\\payload.exe</Command>\n"
-                "      <Arguments>--exfiltrate</Arguments>\n"
-                "    </Exec>"
-            )
-        ),
-        encoding="utf-16",
-    )
-    namespace = windows_service.TASK_NS
-    root = ElementTree.fromstring(definition.read_text(encoding="utf-16"))
-    assert len(root.findall(f"{namespace}Actions/{namespace}Exec")) == 2
-    _refuse_windows_record(backend, workspace, definition, run_id)
-
-
-def test_a_windows_task_with_a_second_trigger_is_refused_before_a_result(
-    monkeypatch, tmp_path
-) -> None:
-    """A second trigger changes when the engine runs, not just how it starts."""
-    backend, workspace, definition, run_id = _windows_backend(monkeypatch, tmp_path)
-    definition.write_text(
-        _windows_task(
-            extra_trigger=(
-                "    <TimeTrigger>\n"
-                "      <Repetition>\n"
-                "        <Interval>PT1M</Interval>\n"
-                "      </Repetition>\n"
-                "      <StartBoundary>2026-01-01T00:00:00</StartBoundary>\n"
-                "      <Enabled>true</Enabled>\n"
-                "    </TimeTrigger>"
-            )
-        ),
-        encoding="utf-16",
-    )
-    namespace = windows_service.TASK_NS
-    root = ElementTree.fromstring(definition.read_text(encoding="utf-16"))
-    triggers = root.find(f"{namespace}Triggers")
-    assert triggers is not None
-    assert len(list(triggers)) == 2
-    _refuse_windows_record(backend, workspace, definition, run_id)
-
-
-def test_native_activation_refuses_windows_before_reading_a_result(
-    monkeypatch, tmp_path
-) -> None:
-    backend, _workspace, _definition, run_id = _windows_backend(monkeypatch, tmp_path)
-
-    with pytest.raises(native_handoff.NativeHandoffError, match="does not implement Windows"):
+    with pytest.raises(native_handoff.NativeHandoffError, match="does not support linux"):
         native_handoff.activate(run_id=run_id, is_set_up=lambda _ws: True)
 
     assert backend.loaded == []
@@ -663,7 +539,7 @@ def test_the_legacy_reader_refuses_a_schema_2_result(monkeypatch, tmp_path) -> N
         installer_handoff.read_result(expected_run_id=run_id)
 
 
-def test_the_native_reader_refuses_a_windows_result(monkeypatch, tmp_path) -> None:
+def test_the_native_reader_refuses_an_unsupported_backend_result(monkeypatch, tmp_path) -> None:
     _backend, workspace, definition, run_id = _recordable(monkeypatch, tmp_path)
     _write_result_document(
         monkeypatch,
@@ -672,11 +548,11 @@ def test_the_native_reader_refuses_a_windows_result(monkeypatch, tmp_path) -> No
             run_id=run_id,
             workspace=workspace,
             definition=definition,
-            backend="windows",
+            backend="linux",
         ),
     )
 
-    with pytest.raises(native_handoff.NativeHandoffError, match="does not implement Windows"):
+    with pytest.raises(native_handoff.NativeHandoffError, match="does not support linux"):
         native_handoff.read_result(expected_run_id=run_id)
 
 
@@ -897,12 +773,10 @@ def test_the_native_reader_refuses_a_non_private_result(monkeypatch, tmp_path) -
     path = _record(backend, workspace, definition, run_id)
     text = path.read_text(encoding="utf-8")
     # A fresh name inherits the directory's permissions (0644 here) instead of
-    # the owner-only mode open_private created; chmod alone would not loosen a
-    # Windows DACL, so it could not express this on every platform.
+    # the owner-only mode open_private created.
     path.unlink()
     path.write_text(text, encoding="utf-8")
-    if os.name == "posix":
-        path.chmod(0o644)
+    path.chmod(0o644)
 
     with pytest.raises(native_handoff.NativeHandoffError, match="owner-only"):
         native_handoff.read_result(expected_run_id=run_id)
@@ -932,7 +806,6 @@ def test_the_native_reader_refuses_a_result_whose_acl_grants_access(
         )
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits are the swap")
 @DARWIN_ONLY
 def test_the_native_reader_checks_privacy_on_the_opened_descriptor(
     monkeypatch, tmp_path
@@ -985,7 +858,6 @@ def test_the_native_reader_refuses_a_fifo_result_promptly(monkeypatch, tmp_path)
         _within(5.0, lambda: native_handoff.read_result(expected_run_id=run_id))
 
 
-@pytest.mark.skipif(os.name != "posix", reason="symlink semantics")
 @DARWIN_ONLY
 def test_the_native_reader_refuses_a_symlinked_result(monkeypatch, tmp_path) -> None:
     backend, workspace, definition, run_id = _recordable(monkeypatch, tmp_path)
