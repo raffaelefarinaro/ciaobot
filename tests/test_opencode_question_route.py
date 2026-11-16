@@ -8,7 +8,7 @@ from starlette.applications import Starlette
 from starlette.routing import WebSocketRoute
 from starlette.testclient import TestClient
 
-from ciao.providers.opencode import QuestionResponseResult
+from ciao.providers.base import QuestionResponseResult
 from ciao.web.routes_chat import ws_chat
 from itsdangerous import URLSafeTimedSerializer
 from tests.session import signed_in

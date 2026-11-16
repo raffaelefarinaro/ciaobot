@@ -61,6 +61,20 @@ class ProviderCapabilities:
     schedule_unattended: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class QuestionResponseResult:
+    """Outcome of one native-form reply/cancel operation."""
+
+    ok: bool
+    error: str = ""
+    retryable: bool = True
+    delivered_as_message: bool = False
+    expired: bool = False
+    # The request was already answered (another tab won, or V2 returned 409):
+    # nothing was applied for this reply; the caller should clear its card.
+    already_resolved: bool = False
+
+
 # Outcome of a "move to background" request (#1413).
 MoveToBackgroundOutcome = Literal["moved", "nothing", "unsupported", "not_running", "failed"]
 

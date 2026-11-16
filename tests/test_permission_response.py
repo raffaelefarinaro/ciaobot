@@ -11,6 +11,8 @@ PermissionGate:
 from __future__ import annotations
 
 import asyncio
+import ast
+from dataclasses import MISSING, FrozenInstanceError, fields
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,9 +22,86 @@ import pytest
 from ciao.config import CiaoConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
-from ciao.providers.opencode import OpencodeProvider, QuestionResponseResult
+from ciao.providers.opencode import OpencodeProvider
+from ciao.providers.base import QuestionResponseResult
 from ciao.web.chat_streaming import ChatStream
 from ciao.web.project_chats import ProjectChatManager
+
+
+def test_question_response_result_preserves_dataclass_contract() -> None:
+    result_fields = fields(QuestionResponseResult)
+    assert [item.name for item in result_fields] == [
+        "ok", "error", "retryable", "delivered_as_message", "expired",
+        "already_resolved",
+    ]
+    assert result_fields[0].default is MISSING
+    assert [item.default for item in result_fields[1:]] == [
+        "", True, False, False, False,
+    ]
+    assert (
+        QuestionResponseResult(True).ok,
+        QuestionResponseResult(True).error,
+        QuestionResponseResult(True).retryable,
+        QuestionResponseResult(True).delivered_as_message,
+        QuestionResponseResult(True).expired,
+        QuestionResponseResult(True).already_resolved,
+    ) == (True, "", True, False, False, False)
+    positional = QuestionResponseResult(False, "retry", False, True, True, True)
+    assert (
+        positional.ok,
+        positional.error,
+        positional.retryable,
+        positional.delivered_as_message,
+        positional.expired,
+        positional.already_resolved,
+    ) == (False, "retry", False, True, True, True)
+    assert positional == QuestionResponseResult(
+        ok=False, error="retry", retryable=False, delivered_as_message=True,
+        expired=True, already_resolved=True,
+    )
+    with pytest.raises(TypeError):
+        QuestionResponseResult()  # type: ignore[call-arg]
+
+
+def test_question_response_result_remains_frozen_and_slotted() -> None:
+    result = QuestionResponseResult(True)
+    assert not hasattr(result, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        result.ok = False  # type: ignore[misc]
+    assert result == QuestionResponseResult(True)
+
+
+def test_question_response_result_has_one_shared_owner() -> None:
+    from ciao.providers import base, opencode
+    from ciao.web import chat_streaming, project_chats
+
+    canonical = base.QuestionResponseResult
+    assert canonical.__module__ == "ciao.providers.base"
+    assert opencode.QuestionResponseResult is canonical
+    assert chat_streaming.QuestionResponseResult is canonical
+    assert project_chats.QuestionResponseResult is canonical
+
+    root = Path(__file__).resolve().parents[1]
+    definitions: list[str] = []
+    wrong_imports: list[str] = []
+    for source_path in (*root.joinpath("ciao").rglob("*.py"), *root.joinpath("tests").rglob("*.py")):
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == "QuestionResponseResult":
+                definitions.append(source_path.relative_to(root).as_posix())
+            if isinstance(node, ast.ImportFrom):
+                imports_result = any(
+                    alias.name in {"QuestionResponseResult", "*"}
+                    for alias in node.names
+                )
+                if imports_result and (
+                    node.module != "ciao.providers.base"
+                    or node.level != 0
+                    or any(alias.name == "*" for alias in node.names)
+                ):
+                    wrong_imports.append(source_path.relative_to(root).as_posix())
+    assert definitions == ["ciao/providers/base.py"]
+    assert wrong_imports == []
 
 
 def _make_manager(tmp_path: Path) -> ProjectChatManager:
