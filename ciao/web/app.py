@@ -289,8 +289,6 @@ class CacheControlStaticFiles(StaticFiles):
     """StaticFiles subclass that sets long-term caching for hashed assets."""
 
     def file_response(self, full_path, stat_result, scope, status_code=200) -> Response:
-        # Starlette guesses from the module-level mimetypes table, which on
-        # Windows reads the registry; see ciao.os_support.media_types.
         response = FileResponse(
             full_path,
             status_code=status_code,

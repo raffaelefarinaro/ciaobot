@@ -1,9 +1,4 @@
-"""ciao.os_support.locks keeps flock semantics on POSIX and Windows.
-
-The behavioural tests run on every OS the CI matrix covers, so each platform's
-implementation is exercised where it runs; the flag test pins the POSIX branch
-to the exact ``flock`` calls the call sites made before the module existed.
-"""
+"""ciao.os_support.locks keeps flock semantics."""
 
 from __future__ import annotations
 
@@ -121,7 +116,6 @@ def test_the_lock_excludes_another_process(tmp_path: Path) -> None:
             child.wait()
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the POSIX branch is not defined on Windows")
 def test_posix_makes_the_same_flock_calls_as_before(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

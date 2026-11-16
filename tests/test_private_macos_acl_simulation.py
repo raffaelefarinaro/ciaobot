@@ -24,10 +24,6 @@ from tests.macos_acl_simulation import _MACOS_ACL_SYMBOLS, install_hermetic_maco
 
 ROOT = Path(__file__).resolve().parent.parent
 
-requires_posix = pytest.mark.skipif(
-    os.name != "posix", reason="the simulated host installer is a POSIX path"
-)
-
 #: A stand-in libc with no macOS ACL calls, for a child that models Darwin.
 _NO_NATIVE_ACL = """
 class _NoAcl:
@@ -196,7 +192,6 @@ def _run(
     )
 
 
-@requires_posix
 def test_a_simulated_darwin_import_needs_no_native_acl() -> None:
     """A spoofed platform flag must not make an import reach for macOS symbols."""
     child = _run(_IMPORT_ONLY_CHILD)
@@ -204,7 +199,6 @@ def test_a_simulated_darwin_import_needs_no_native_acl() -> None:
     assert child.stdout.strip() == "darwin-branch"
 
 
-@requires_posix
 def test_a_missing_native_acl_fails_the_strict_check_closed(tmp_path: Path) -> None:
     """No macOS ACL API means "could not inspect", never "no ACL"."""
     child = _run(_MISSING_API_CHILD, str(tmp_path / "secret"))
@@ -212,7 +206,6 @@ def test_a_missing_native_acl_fails_the_strict_check_closed(tmp_path: Path) -> N
     assert child.stdout.strip() == "refused"
 
 
-@requires_posix
 def test_the_simulated_mac_harness_injects_the_acl_answer(tmp_path: Path) -> None:
     """A non-Mac host without the API gets the injected answer, both ways."""
     child = _run(_INJECTED_CHILD, str(tmp_path / "secret"))
@@ -220,7 +213,6 @@ def test_the_simulated_mac_harness_injects_the_acl_answer(tmp_path: Path) -> Non
     assert child.stdout.strip() == "injected"
 
 
-@requires_posix
 def test_native_handoff_scratch_refuses_a_missing_native_acl(tmp_path: Path) -> None:
     """The scratch chain check must not skip the ACL question."""
     home = tmp_path / "home"
@@ -232,7 +224,6 @@ def test_native_handoff_scratch_refuses_a_missing_native_acl(tmp_path: Path) -> 
     assert not (home / ".ciao").exists(), "it refused instead of creating the chain"
 
 
-@requires_posix
 def test_read_bounded_file_refuses_a_missing_native_acl(tmp_path: Path) -> None:
     """The owner-strict reader must not return bytes it could not verify."""
     path = tmp_path / "handoff.json"
@@ -244,7 +235,6 @@ def test_read_bounded_file_refuses_a_missing_native_acl(tmp_path: Path) -> None:
     assert "Could not inspect" in child.stdout
 
 
-@requires_posix
 def test_the_harness_does_not_override_a_present_native_acl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -257,7 +247,6 @@ def test_the_harness_does_not_override_a_present_native_acl(
     assert private._acl_grants_another_account is before
 
 
-@requires_posix
 def test_the_harness_never_overrides_a_real_mac(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -271,7 +260,6 @@ def test_the_harness_never_overrides_a_real_mac(
     assert private._acl_grants_another_account is before
 
 
-@requires_posix
 def test_the_harness_injects_on_a_non_mac_without_a_native_acl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -289,7 +277,6 @@ def test_the_harness_injects_on_a_non_mac_without_a_native_acl(
     assert private._acl_grants_another_account(0) is True
 
 
-@requires_posix
 def test_an_injected_acl_answer_does_not_bypass_the_mode_and_owner_rules(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
