@@ -188,9 +188,9 @@ from ciao.models import (
 )
 from ciao.os_support.files import open_fd
 from ciao.os_support.locks import lock_exclusive, unlock
+from ciao import provider_registry
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
 from ciao.providers.base import BaseProvider, MoveToBackgroundOutcome, QuestionResponseResult
-from ciao.providers.claude import get_session_info
 from ciao.providers.opencode import OpencodeProvider
 from ciao.rate_limits import RateLimitStore, default_store_path
 from ciao.schedules import (
@@ -10987,37 +10987,38 @@ class ProjectChatManager:
     async def _native_chat_title(self, chat: ChatInfo) -> str | None:
         """Read the provider's own session title for a chat.
 
-        Returns None when the provider has not yet produced a real title —
-        including its placeholder default (e.g. opencode's ``New session -
-        <timestamp>``) — so the caller keeps polling until the generated
-        title lands instead of accepting the placeholder as final.
+        Candidates come from the chat's own adapter through the shared
+        `BaseProvider.native_title_candidates` contract, in provider
+        preference order; each is validated here with `_real_title`, so a
+        contaminated candidate keeps losing to a clean one. Returns None when
+        the provider has not yet produced a real title — including its
+        placeholder default (e.g. opencode's ``New session - <timestamp>``) —
+        so the caller keeps polling until the generated title lands instead
+        of accepting the placeholder as final.
         """
         provider = getattr(chat, "provider", "claude")
-        # The chat's OWN agent root, not the install root. Both readers below
-        # are root-scoped - Claude Code keys sessions by directory, and
-        # `read_thread` caches on `(workspace_root, session_id)` - and the
-        # provider that created the session was handed the agent root by
-        # `_agent_root_for_chat`. Reading from `workspace_root` therefore looked
-        # up a directory the session was never written under, so after the
-        # re-rooting every chat outside the primary workspace found no native
-        # title and sat on the deterministic fallback (or "New Chat" when the
-        # prompt yielded none) forever.
+        # The chat's OWN agent root, not the install root. Every adapter's
+        # candidate read is root-scoped - Claude Code keys sessions by
+        # directory, and `read_thread` caches on `(workspace_root, session_id)`
+        # - and the provider that created the session was handed the agent
+        # root by `_agent_root_for_chat`. Reading from `workspace_root`
+        # therefore looked up a directory the session was never written under,
+        # so after the re-rooting every chat outside the primary workspace
+        # found no native title and sat on the deterministic fallback (or "New
+        # Chat" when the prompt yielded none) forever.
         workspace = self._agent_root_for_chat(chat.chat_id)
         try:
-            if provider == "opencode":
-                thread = await OpencodeProvider.read_thread(workspace, chat.session_id)
-                info = thread.get("info") if isinstance(thread, dict) else None
-                title = str(info.get("title") or "") if isinstance(info, dict) else ""
-                return chat_service._real_title(title)
-            if provider != "claude":
+            descriptor = provider_registry.get(provider)
+            if descriptor is None:
                 return None
-            # Claude Code: custom title wins, else the AI-generated title.
-            session_info = get_session_info(chat.session_id, directory=str(workspace))
-            if session_info is None:
-                return None
-            custom_title = (session_info.custom_title or "").strip()
-            summary = (session_info.summary or "").strip()
-            return chat_service._real_title(custom_title) or chat_service._real_title(summary)
+            candidates = await descriptor.factory().native_title_candidates(
+                workspace, chat.session_id
+            )
+            for candidate in candidates:
+                title = chat_service._real_title(candidate)
+                if title is not None:
+                    return title
+            return None
         except Exception:
             logger.info("Native title read failed for %s", chat.chat_id, exc_info=True)
             return None
