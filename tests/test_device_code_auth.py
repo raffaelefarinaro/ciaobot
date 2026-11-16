@@ -170,36 +170,6 @@ async def test_unresolvable_tool_cannot_run(
 
 
 @pytest.mark.asyncio
-async def test_unrelated_interpreter_is_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        device_code_auth, "resolve_command", lambda name: [str(Path("C:/Python/python.exe"))]
-    )
-    terminals = FakeDeviceTerminals()
-    pcm = FakePcm(_action("az"))
-
-    await DeviceCodeFlow().start(_ctx(pcm, terminals, tmp_path), pcm.action, {})
-
-    assert pcm.last[2] == device_code_auth.CANNOT_RUN.format(tool="az")
-    assert terminals.created == []
-
-
-@pytest.mark.asyncio
-async def test_node_wrapped_script_is_accepted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    prefix = [str(Path("C:/node.exe")), str(Path("C:/npm/gh.js"))]
-    monkeypatch.setattr(device_code_auth, "resolve_command", lambda name: list(prefix))
-    terminals = FakeDeviceTerminals()
-    pcm = FakePcm(_action("gh"))
-
-    await DeviceCodeFlow().start(_ctx(pcm, terminals, tmp_path), pcm.action, {})
-
-    assert terminals.created[0][3][:2] == prefix
-
-
-@pytest.mark.asyncio
 async def test_no_terminal_manager_or_folder_fails(tmp_path: Path, resolved: None) -> None:
     pcm = FakePcm(_action("gh"))
     await DeviceCodeFlow().start(_ctx(pcm, None, tmp_path), pcm.action, {})

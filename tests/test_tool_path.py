@@ -1,17 +1,14 @@
 """ciao.tool_path merges the terminal PATH with the process one.
 
-The platform half — what "the terminal's PATH" is, the login-shell probe on
-POSIX, the registry read on Windows, PATHEXT and the npm shims — is
-``ciao.os_support.tool_path`` and is tested in ``tests/test_os_support_tool_path.py``.
-What is left here is the merge and the two lookups built on it, and those are
-the same on every OS.
+The login-shell probe is ``ciao.os_support.tool_path`` and is tested in
+``tests/test_os_support_tool_path.py``. What is left here is the merge and the
+two lookups built on it.
 """
 
 from __future__ import annotations
 
 import os
 import stat
-import sys
 from pathlib import Path
 
 from ciao import tool_path
@@ -26,11 +23,6 @@ def _clear_cache():
     tool_path.clear_terminal_path_cache()
 
 
-def _tool_name(name: str) -> str:
-    """The file a PATH search on this OS would find for a bare ``name``."""
-    return f"{name}.exe" if sys.platform == "win32" else name
-
-
 def _same_file(found: str, expected: Path) -> bool:
     """A resolved path equals the file, whatever case its suffix came back in."""
     return os.path.normcase(found) == os.path.normcase(str(expected))
@@ -40,7 +32,7 @@ def test_resolve_tool_finds_binary_on_login_shell_path(tmp_path, monkeypatch):
     _clear_cache()
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    fake = bin_dir / _tool_name("gws")
+    fake = bin_dir / "gws"
     fake.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
 
@@ -101,7 +93,7 @@ def test_resolve_on_terminal_path_ignores_the_fallback_dirs(tmp_path, monkeypatc
     _clear_cache()
     fallback = tmp_path / "local-bin"
     fallback.mkdir()
-    fake = fallback / _tool_name("claude")
+    fake = fallback / "claude"
     fake.write_text("#!/bin/sh\n", encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
 
