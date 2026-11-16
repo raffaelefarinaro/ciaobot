@@ -56,7 +56,7 @@
     <section id="where">
       <h2>Where it runs</h2>
       <p>The panel is not a shell that lives in the browser. It is a process on the computer Ciaobot runs on, started by the engine, with the account the engine runs as. What you see in the panel is the bytes that process writes, sent to your browser as they arrive.</p>
-      <p>The shell it starts is the engine account's login shell on macOS and Linux, and PowerShell on Windows.</p>
+      <p>The shell it starts is <code>$SHELL</code>, or <code>/bin/sh</code> if unset, as an interactive login shell in a real pty.</p>
       <div class="note"><strong>It is not sandboxed, and it is not confined to your notes folder.</strong> Whatever the engine's account can read, the terminal can read, and the workspace's <strong>File access</strong> setting does not apply to it. <a href="features.html#file-access">How file access works →</a></div>
       <p>That matters most on a shared or rented machine, where the engine runs as the service's own account. Treat the terminal panel as a full shell on that machine, and treat anyone who can sign in to Ciaobot on this engine as someone who can open it.</p>
     </section>

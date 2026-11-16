@@ -5,7 +5,7 @@ description: Convert Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and 
 
 # Convert Documents to Markdown
 
-Use the local Python binding, not a shell converter. Run it with `python3` (`python` on Windows); anydoc ships in the engine environment, which Ciaobot puts first on the agent's PATH. If `import anydoc` fails, say the converter is unavailable and stop; do not install packages.
+Use the local Python binding, not a shell converter. Run it with `python3`; anydoc ships in the engine environment, which Ciaobot puts first on the agent's PATH. If `import anydoc` fails, say the converter is unavailable and stop; do not install packages.
 
 ```python
 import anydoc

@@ -10,7 +10,7 @@ earlier probe in `experiments/macos-permission-identity` did not:
 This directory builds a small native accessory app, ad-hoc signs it, and runs
 fixed read-only child probes under it. It is **not** a production launcher, a
 daemon, an IPC listener, or an arbitrary-command service. It touches no installer,
-service, update path, PWA, existing bundle, or Windows code, and it changes no
+service, update path, PWA or existing bundle, and it changes no
 permissions and no TCC database. It never launches the app or requests a grant on
 its own; a human does that.
 
@@ -43,7 +43,7 @@ so a shallow checkout needs that commit available before building.
 - No paid developer account, third-party dependency, or environment variable.
 - The repository's Git history (for the historical icon).
 
-`build.py` and `child_probe.py` are import-safe on Linux and Windows; only the
+`build.py` and `child_probe.py` are import-safe on Linux; only the
 macOS-only subprocesses are gated behind the platform check.
 
 ## Build

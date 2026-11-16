@@ -44,18 +44,15 @@ ciao run
 
 `python -m ciao <command>` runs the same CLI as the `ciao` console script, from any interpreter that has the package installed.
 
-`ciao setup` is idempotent and defers Git history unless explicitly requested with `--initialize-git`. That option creates local history and an initial commit of nonignored workspace and external-vault contents; it configures no remote and uploads nothing. `--yes` is not Git consent. Existing repositories still receive missing ignore guards. It writes the initial `.env` (including the selected port), seeds stock workspace files, copies the editable `AGENTS.md` workspace guide (both providers discover it natively; nothing writes a `CLAUDE.md` any more) and copies `CIAO_CUSTOMIZATION.md`. On macOS it also renders the server plist under `~/Library/LaunchAgents/` and removes retired launcher bundles. Existing custom `AGENTS.md` files and configuration values are preserved. By default setup does not load launchd; add `--load-launchd` on macOS to run `launchctl`. On Windows the same flag renders the Task Scheduler XML under `%LOCALAPPDATA%\Ciaobot\service` and registers it, so `--load-launchd` now means macOS **or** Windows. Linux setup creates no desktop/service files unless an explicit `--launch-agents-dir` requests an offline plist export. See [Linux hosting](LINUX.md) for systemd and HTTPS deployment.
+`ciao setup` is idempotent and defers Git history unless explicitly requested with `--initialize-git`. That option creates local history and an initial commit of nonignored workspace and external-vault contents; it configures no remote and uploads nothing. `--yes` is not Git consent. Existing repositories still receive missing ignore guards. It writes the initial `.env` (including the selected port), seeds stock workspace files, copies the editable `AGENTS.md` workspace guide (both providers discover it natively; nothing writes a `CLAUDE.md` any more) and copies `CIAO_CUSTOMIZATION.md`. On macOS it also renders the server plist under `~/Library/LaunchAgents/` and removes retired launcher bundles. Existing custom `AGENTS.md` files and configuration values are preserved. By default setup does not load launchd; add `--load-launchd` on macOS to run `launchctl`. Linux setup creates no desktop/service files unless an explicit `--launch-agents-dir` requests an offline plist export. See [Linux hosting](LINUX.md) for systemd and HTTPS deployment.
 
 Onboarding lifecycle is recorded separately in the owner-private `.runtime/onboarding.json` receipt; it is not the provisioning timestamp or welcome-password flag. A fresh supported setup starts `in_progress`; an existing receipt is always preserved. Receipt-less established installs are marked `legacy_exempt`, based on setup registry/legacy workspace evidence or durable runtime state—not notes-folder contents, unrelated `.env` files, or bootstrap auth/lock files. Startup creates a pending receipt for a fresh configured install before importing legacy workspace configuration. Invalid existing receipts fail closed and are never overwritten.
 A genuinely new install also writes `backup_enabled: false` into its app settings before the engine starts: adopting a folder that already sits inside a repository with an `origin` must not begin unattended commits or uploads. Existing installs, explicit choices and unreadable settings files are left untouched, and local history (`--initialize-git`) is not consent to backup. An operator turns backup on later from Settings → Memory (the backup settings route) or by running the guided backup setup, both of which are explicit actions.
 
-`ciao service status|start|stop|restart` drives that background service on both
-platforms: the LaunchAgent on macOS, the per-user logon task on Windows. `start
---workspace <dir>` registers a service that is not installed yet, and refuses to
+`ciao service status|start|stop|restart` drives that background service on
+macOS (the LaunchAgent). `start --workspace <dir>` registers a service that is not installed yet, and refuses to
 repoint one that already serves a different workspace; use `ciao setup --workspace
-<dir> --load-launchd --yes` to repoint it. The macOS
-desktop-shell actions (`login`, `migrate`, `migration-classify`, `rollback`) and
-`update-engine` are not available on Windows and say so; `stop` and `restart`
+<dir> --load-launchd --yes` to repoint it. `stop` and `restart`
 refuse while a chat would be interrupted (working, or holding an open question/approval card) unless `--force` is given.
 
 `ciao service start` on macOS reports two different things, and its exit code
@@ -153,7 +150,7 @@ No manual step is needed; `ensure-deps.sh` handles both. If you set up the venv 
 
 Installer bootstrap is guarded by a read-only freshness check before setup:
 it refuses when an existing workspace, live service definition, or registered
-macOS LaunchAgent/Windows scheduled task is found, and also refuses if the
+macOS LaunchAgent is found, and also refuses if the
 service query cannot verify absence. Export-directory overrides do not affect
 the live service paths checked by this guard.
 
@@ -233,44 +230,7 @@ page and stale external link already names — is the **engine** installer, so a
 first-time user gets the engine and nobody can install the app.
 `install-engine.sh` is published as the same bytes under the other name the
 already-merged transition release's hand-over fetched (#604); the app
-installer is not published under any name. `install.ps1` is the sixth asset: the
-Windows 11 installer (#853). It embeds the same manifest verifier as
-`install-engine.sh` (a test keeps the two copies byte-identical) and runs it
-under `uv run --python 3.13`; then it does everything `install-engine.sh` does
-after the engine lands, so a Windows install is the same verified engine,
-running. It verifies the signed manifest and the wheel digest before anything is
-installed, refuses to overwrite a `ciao` it did not install, and re-running it
-over its own engine is a repair rather than a refusal. It then installs the
-wheel with `uv tool install --force --link-mode copy` (copy, not uv's default
-hard link into its cache, which another venv on the machine can lock and so
-make uninstall and rollback fail), writes the install receipt
-(`%USERPROFILE%\.local\state\ciaobot\install-receipt.json`, backend
-`windows-task`, label `\Ciaobot\Engine`, written by `ciao.install_receipt`
-itself so the schema stays in Python), puts `ciao.exe`'s directory on the
-**user** `PATH` through the registry (raw, `DoNotExpandEnvironmentNames`, keeping
-the existing `REG_EXPAND_SZ`, so a `%VAR%` entry is not frozen — the same rule
-`ciao setup`'s own PATH hint follows), creates the workspace
-(`%USERPROFILE%\Ciaobot`, or `-Workspace DIR`), registers the logon task with
-`ciao setup --load-launchd` (writing
-`%LOCALAPPDATA%\Ciaobot\service\Ciaobot-Engine.xml`), starts it with
-`ciao service start`, waits up to 60 s for `http://localhost:$PWA_PORT/api/startup-status`,
-and prints the one-time sign-in URL, opening it only when the console is
-interactive. `-NoStart` omits `--load-launchd` and everything after it (no task,
-no start, no URL). Updating an install that is already there is **not** covered
-yet — re-running repairs a half-finished one, and any failure undoes exactly
-the steps that run performed, newest first, through one `Undo-Install` function
-that `-Uninstall` also uses; the workspace is never removed, and a rollback that
-cannot finish says which step is left with the command that finishes it.
-`-Uninstall` downloads nothing and verifies no manifest: it stops and
-unregisters the task, deletes its XML, uninstalls the uv tool, deletes the
-receipt, removes the `PATH` entry **only** if this installer added it (recorded
-in `%LOCALAPPDATA%\Ciaobot\install-state.json`, the two facts nothing else
-keeps) and the tool bin directory is empty (a shared uv tools directory can
-keep it on `PATH`), leaves `uv` in place, and prints where the workspace was
-kept. The `windows` CI job's advisory install.ps1 steps run the file under both
-PowerShell hosts with `-DryRun` against a generated fixture, and then run a real end-to-end
-install/`-Uninstall`/`-NoStart` against a wheel built from the branch, printing
-whether the task existed after each.
+installer is not published under any name.
 
 The retired app installer is no longer in the tree. A DMG is intentionally
 not built or attached to releases. The release workflow generates the public
@@ -315,9 +275,7 @@ docs/REMOTE_BOUNDARY.md) do, through the explicit `NativeBootstrapContext` descr
 below. The native coordinator's `read_result` and `activate` consume the handoff. Its result additionally records the
 definition's sha256, the program the definition actually executes and the
 interpreter it runs with both device/inode/size/mtime identities, and the
-definition's environment. The native path implements macOS only: a Windows
-backend is refused explicitly before a result is read or written, and the
-legacy Windows installer path is unchanged. The definition is the authority: a
+definition's environment. The native path implements macOS only. The definition is the authority: a
 direct `ciao` console is a script whose program is the script and whose
 interpreter is the absolute Python on its shebang. `resolve_console_interpreter`
 accepts only that one absolute, Python-named form and refuses `env`, relative,
@@ -372,11 +330,7 @@ it to run-bound evidence. The legacy
 bytes it digested. The launchctl absence
 and disabled-listing shapes were recorded from read-only probes on one current
 macOS and fail closed, but have not been validated across the supported macOS
-releases; #2340 must do that before wiring activation. There is no native
-Windows loader: task XML carries no port and the legacy registration path
-forces an overwrite, so a Windows record or activation fails closed rather than
-falling back to the legacy backend loader, and the legacy Windows installer is
-unchanged.
+releases; #2340 must do that before wiring activation.
 
 A schema-1 result is refused by the native reader and a schema-2 result by the
 legacy reader. The stat identities are evidence, not a security guarantee: a
@@ -783,7 +737,7 @@ uses for its run lock.
 
 Shipped in engine v1.8.0. v1.8.1 is the first release whose native install completes on a fresh Mac ([#2477](https://github.com/raffaelefarinaro/ciaobot/pull/2477)), so the native-install contract floor is `version >= 1.8.1`. A client reads it from the signed manifest's `version` field, which `verify_manifest` requires to equal `tag` without its `v`. There is no separate contract-version field. A release whose coordinator the shell cannot speak to fails with `invalid_arguments` (`NATIVE_COORDINATOR_PROTOCOL` mismatch).
 
-Authenticating `install.sh`. uv's digest table does not authenticate `install.sh`; the signed manifest does. From the first engine release after v1.8.1, the manifest lists each installer script `.github/workflows/publish.yml` uploads as an artifact of kind `installer`: `install.sh` and `install-engine.sh` (platform `macos`, the same bytes; `install.sh` is copied verbatim from `scripts/install-engine.sh`) and `install.ps1` (platform `windows`). Each entry has `filename`, `sha256` and `size`, hashed from the exact file uploaded. After the upload, the publish job re-downloads those installers and fails unless `python -m ciao.release_manifest verify --asset` matches each one. Releases up to and including v1.8.1 carry no installer entry. A client checks `install.sh` like this, and runs it only if every step passes:
+Authenticating `install.sh`. uv's digest table does not authenticate `install.sh`; the signed manifest does. From the first engine release after v1.8.1, the manifest lists each installer script `.github/workflows/publish.yml` uploads as an artifact of kind `installer`: `install.sh` and `install-engine.sh` (platform `macos`, the same bytes; `install.sh` is copied verbatim from `scripts/install-engine.sh`). Each entry has `filename`, `sha256` and `size`, hashed from the exact file uploaded. After the upload, the publish job re-downloads those installers and fails unless `python -m ciao.release_manifest verify --asset` matches each one. Releases up to and including v1.8.1 carry no installer entry. A client checks `install.sh` like this, and runs it only if every step passes:
 
 1. Resolve the latest release tag once (`GET https://api.github.com/repos/raffaelefarinaro/ciaobot/releases/latest`, field `tag_name`). Download every file below from `https://github.com/raffaelefarinaro/ciaobot/releases/download/<tag>/`. Do not use `/releases/latest/download/`, which can point at a different release between two downloads. A missing manifest, `.sig` or `install.sh` on the resolved tag, or any failed check below, means refuse and stop; never fall back to an older release or a pinned digest (a just-published release has no assets until `publish.yml` has attached them, so a 404 must fail closed).
 2. Download `ciaobot-engine-manifest.json` and `ciaobot-engine-manifest.json.sig` from that tag.
@@ -1073,179 +1027,32 @@ while the server is running, because the live schedule store may be writing it.
   `linux-playwright-traces` when Playwright produced traces.
   `linux-server-latest-python` repeats the `linux-server` gates on
   Python 3.14, the newest interpreter `requires-python` admits, on release PRs
-  and manual full runs. The required `windows` summary also checks its result. The
+  and manual full runs. The checked-in `scripts/configure-github-branches.sh`
+  declares it a required check on `main`. The
   full macOS `test` job (coverage, browser tests, and the engine wheel this
   branch would publish, installed into a throwaway venv and cold-started — the
   launchd, installer, engine-update and migration coverage — about 18 minutes)
   runs on release PRs and manual full runs, not ordinary develop PRs. The Swift
   Mac app in `mac/` is built by its own `mac-app` job (`swift test`,
   `swift build`, `scripts/build-app.sh`, the asset test and a plist lint on
-  `macos-15`), which runs on develop PRs whose three-dot diff changes `mac/`
-  (decided by the fast `mac-scope` detector) and on every release PR and manual
+  `macos-15`), which runs on develop PRs whose three-dot diff changes `mac/` or
+  `web/src/lib/workspaceColors.ts`, the engine colour table it pins (decided by
+  the fast `mac-scope` detector), and on every release PR and manual
   run; other develop PRs run only its scope check, on Linux. Web changes in develop PRs get the
   Linux browser check before merge; the macOS browser run is the release PR.
-  The stable required `windows` check aggregates independent
-  `windows-backend` and `windows-web` jobs (`windows-latest`).
-  The backend imports every `ciao` module and runs `mypy ciao` natively on win32.
-  It and the full suite run on release PRs, manual runs, and develop PRs labelled
-  `windows-full`. Those runs also
-  execute `pytest -n auto --durations=30 tests/` while the frontend runs
-  `npm test` in parallel. Ordinary develop PRs skip both Windows jobs. A full Windows or macOS failure
-  therefore surfaces on the release PR, and `/ciao-release` merges into
-  `main` only when that PR's `windows`, `test` and `mac-app` checks are green.
-  The summary fails if any applicable job fails, is cancelled, or unexpectedly
-  skips; a full run requires both jobs to succeed. Every backend gate runs even after an earlier one
-  failed, the job summary lists the counts and the failing tests by name, and
-  the full logs are in `windows-results` and `windows-web-results` artifacts. Its install.ps1 steps
-  (full runs only) (dry runs under both PowerShell hosts, the analyzer, and a
-  real end-to-end install and `-Uninstall`) stay advisory: a hosted runner has
-  no interactive logon, so a task that does not start there is a datum, not a
-  verdict. Known flaky Windows tests are listed in #696's C9 tracking comment.
+  A full macOS or Python 3.14 failure therefore surfaces on the release PR, and `/ciao-release` merges into
+  `main` only when that PR's `linux-server-latest-python`, `test` and `mac-app` checks are green.
   Superseded PR runs are cancelled by PR number; manual full runs are independent.
   A nightly dispatcher starts full CI on the current `develop` at 02:23 UTC.
   GitHub requires both workflow files on its default branch (`main`) before
   nightly or manual dispatch becomes available, so this starts after release.
-  Until then, use a `windows-full` PR for early Windows checks and a release PR
-  for full platform checks. Adding a label needs a subsequent push to refresh CI.
-  The runner is elevated and has uv and Git's `usr\bin` on `PATH`; a
-  contributor's Windows account usually has neither the symlink privilege nor
-  the coreutils. Without Developer Mode, a test that creates a symlink of its
-  own is skipped ("cannot create a symlink here", `tests/conftest.py`) rather
-  than failing with WinError 1314, so a local run reports more skips than CI; a
-  symlink the engine itself makes still fails, since the engine must not need
-  one on Windows. The suite also points `LOCALAPPDATA` at each test's home, so a
-  machine with Ciaobot installed does not hand its real logon-task workspace to
-  config-discovery tests.
-  One step runs on every Windows job:
-  `Windows ConPTY terminal tests`, which is `pytest -q -rfE
-  tests/test_os_terminal_windows.py` with a 15-minute bound, so a test that
-  hangs on a pipe fails the job instead of holding the runner. The native
-  Windows terminal (`ciao/os_support/terminal_windows.py`, a ConPTY driven
-  through `ctypes`) can only be proved on Windows — a POSIX run exercises
-  the ordering of the native calls with a fake, never the pseudoconsole
-  itself — so the real tests run there before the change is merged rather
-  than after it. The step runs on the `windows-latest` image; as of
-  2026-10-21 that is Windows Server 2025, whose `ClosePseudoConsole` returns
-  immediately (11 24H2 and later). The fake covers the orderings that also
-  work on the older versions, where that call waits for the clients to
-  disconnect: the output pipe is closed before the pseudoconsole, on the
-  normal close and on the failed-spawn rollback alike, and the reader is
-  stopped and joined before the pipe goes. The fake's `ClosePseudoConsole`
-  blocks until the output pipe is closed, exactly as those versions do, so
-  an order that would deadlock there fails the fake too; a read on a pipe
-  whose write end is open blocks as well, so the rollback is pinned to
-  close the pipe and never read from it. What only Windows can answer is
-  whether a pseudoconsole really carries the shell's output, the interrupt
-  and the resize: the real tests wait for text the shell has to compute from
-  code points, so a terminal that only echoed the command back cannot pass
-  them. Their input lines end with a bare `\r`: PowerShell reads CR as Enter
-  while LF means "insert a newline" in its line editor, so a `\r\n` leaves a
-  `>>` continuation line open and the next command joins that block instead
-  of running — which is exactly what made the Ctrl-C case look like a dead
-  terminal on the first native run.
-  What a `0x03` byte does inside a pseudoconsole is decided by the console
-  host and by the operating system, not by the adapter, and the chain is
-  worth writing down before anyone tries to fix the interrupt from this
-  side. It has four links.
-
-  1. **The host decodes the byte.** The host reads the input pipe, matches
-     the ETX while it decodes that stream and synthesises a Ctrl+C key
-     event; with the console's input mode off `ENABLE_PROCESSED_INPUT` the
-     byte stays in the console's input queue as an ordinary character.
-  2. **The host raises the event.** The `CTRL_C_EVENT` is raised **only
-     when the console's input mode has `ENABLE_PROCESSED_INPUT` set**. The
-     input mode belongs to the *client*: the console host never writes it,
-     the only writer is the client's own `SetConsoleMode`, and the
-     `CreatePseudoConsole` flags (`PSEUDOCONSOLE_INHERIT_CURSOR`,
-     `PSEUDOCONSOLE_AMBIGUOUS_IS_WIDE`, `PSEUDOCONSOLE_GLYPH_WIDTH_*`) do
-     not touch it. There is no adapter-side way to write it either: the
-     pseudoconsole's input handle on the client side is the *pipe* the
-     client writes to, `SetConsoleMode` refuses a pipe, and the public
-     ConPTY API (`conpty-static.h`) exposes no way to reach the console's
-     input mode — Windows Terminal's own ConPTY client
-     (`src/cascadia/TerminalConnection/ConptyConnection.cpp`) makes no
-     console-mode call at all.
-  3. **The operating system delivers the event, to the console host's
-     process group.** Microsoft's own summary of the mechanism says "In
-     order for Ctrl-C to work, thus, the pseudoconsole process must be in
-     the same process group as the processes you are trying to control",
-     and a child created with `CREATE_NEW_PROCESS_GROUP` is guaranteed
-     never to receive it.
-  4. **The operating system skips a process that ignores Ctrl+C.** The
-     "ignore Ctrl+C" attribute is set with
-     `SetConsoleCtrlHandler(NULL, TRUE)`, cleared with
-     `SetConsoleCtrlHandler(NULL, FALSE)`, and — Microsoft's own words —
-     "this attribute of ignoring or processing CTRL+C is **inherited by
-     child processes**". A process that has it set is not delivered to at
-     all: no handler runs, no read is aborted, and the process is not even
-     terminated by the default handler. Nothing inside the shell can undo
-     it, because the attribute belongs to the process and is read by the
-     operating system.
-
-  The `?9001h` sequence the host emits at start-up is a request *from* the
-  host *to* the terminal, and the key records it asks for are decoded by
-  the same state machine and dispatched through the same gate, so the
-  handshake cannot change the interrupt either.
-
-  What the measurements decided. The first one
-  (`tests/test_os_terminal_windows.py::test_the_console_state_behind_the_interrupt_is_measured`)
-  measured link 2 from inside the pseudoconsole: the input mode is on and
-  the shell's input is the console's own, at the prompt and while a program
-  runs, so the gate is open. (Its "running program" is a nested shell,
-  which handles Ctrl+C itself and cancels it, so it cannot tell "the event
-  was never delivered" from "the program swallowed it".) The second
-  (`tests/test_os_terminal_windows.py::test_the_interrupt_is_measured_against_the_console_host`)
-  measured links 3 and 4 together: a reader inside the pseudoconsole
-  registers a `Console.CancelKeyPress` handler and then reads one key, so
-  the log says whether the byte arrived as an ordinary character (the host
-  raised nothing), whether the read was aborted and the handler did not
-  run (the host raised the event and the operating system did not deliver
-  it), or whether the handler ran (the event was raised and delivered) —
-  and it measures the raw ETX next to the win32-input-mode key record the
-  host asks for, so the encoding is ruled in or out in the same run. The
-  numbers were: the raw ETX never arrived as a character and never ran the
-  handler, while the win32 key record arrived as text — so the host
-  consumed the ETX and turned it into the control event, and the *delivery*
-  was where the chain stopped. The third measurement
-  (`tests/test_os_terminal_windows.py::test_the_ignore_ctrl_c_attribute_decides_whether_the_event_is_delivered`)
-  isolated link 4: the same reader, with the "ignore Ctrl+C" attribute
-  put in a known state. With the attribute set the event does not arrive;
-  with it cleared it does. The attribute was the blocker, and the engine
-  had inherited it from whatever started it (a POSIX-flavoured shell sets
-  it, so that its own Ctrl+C arrives as a signal rather than as a console
-  control event).
-
-  The fix follows from that: the shell is started by a **helper**
-  (`ciao/os_support/terminal_child_windows.py`), a fresh `-I -S` process
-  that is attached to the pseudoconsole, clears the attribute in itself
-  (`SetConsoleCtrlHandler(NULL, FALSE)`) and then creates the shell, so the
-  shell inherits the cleared state. The engine's own attribute is never
-  touched — clearing it in the engine would change how the engine itself
-  answers a Ctrl+C — and the helper swallows the control event it shares
-  with the shell, so it outlives the interrupt it hands on. The byte the
-  user typed is still `0x03` and `write()` is unchanged; what changed is the
-  attribute the shell inherits.
-
-  How the helper reaches the pseudoconsole is worth writing down, because
-  the obvious way round does not work. The pseudoconsole's handle is not an
-  ordinary kernel handle: `SetHandleInformation` on it fails with "the
-  handle is invalid", so it cannot be made inheritable and cannot be
-  handed to a child as an inherited handle. A child is attached to a
-  pseudoconsole the other way round — `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`
-  in the process attribute list — and that is what the adapter does for
-  the helper. The shell then reaches the pseudoconsole the ordinary way: a
-  process attached to a console passes that console on to its children, so
-  the shell, created by the helper without `CREATE_NEW_CONSOLE` and without
-  `DETACHED_PROCESS`, inherits the helper's console, which is the
-  pseudoconsole. No handle is inherited by anybody, and the helper's own
-  standard handles are the console's — so it prints nothing, ever: a
-  failure is a status, and only a status.
+  Until then, use a release PR for full platform checks.
   The `discover-agents` workflow (`.github/workflows/discover-agents.yml`, manual
   plus weekly, never on a PR) records where Claude Code and OpenCode keep their
-  files (#696, D-04). On `macos-latest` and `windows-latest` it installs both
+  files (#696, D-04). On `macos-latest` it installs both
   tools, runs one tiny real turn each in three workspaces whose paths contain a
-  space, a dot and an underscore, and uploads `agent-discovery-macos` and
-  `agent-discovery-windows` (new-file list, Claude project folder to workspace
+  space, a dot and an underscore, and uploads `agent-discovery-macos`
+  (new-file list, Claude project folder to workspace
   map, tool locations, turn logs). The Claude turns need the `ANTHROPIC_API_KEY`
   repository secret and are skipped without it; OpenCode uses the free
   `opencode/big-pickle` model. Run it with `gh workflow run discover-agents.yml`
@@ -1263,7 +1070,7 @@ scripts/prepare-release --apply --create-pr --ready
   checks, and opens a PR into `main`. Use
   `--bump minor` or `--version X.Y.Z` when needed.
 
-- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA and the engine wheel, verifies the wheel in a clean environment, signs the engine manifest with the release minisign key (`ciaobot-engine-manifest.json` + `.sig`, gated by `ciao.release_manifest verify`), which lists the wheel, the server host archive and the three installer scripts (kind `installer`), and attaches seven engine assets: `install.sh`, `install-engine.sh`, `install.ps1`, the wheel, the manifest, its signature, and the universal server host archive the manifest authenticates (`ciaobot-server-host-macos-universal-v1.tar.gz`, built by `scripts/build-server-host.py`; see `docs/SERVER_HOST_RELEASE.md`). After the upload it re-downloads the manifest, its signature and the three installers from the release and fails unless `ciao.release_manifest verify --asset` matches each installer to its signed entry. Since #653 it publishes no app, no `latest.json` feed, no native verifier and no bundled runtime, and its signer is `@tauri-apps/cli` run standalone, so it never depended on the now-deleted `desktop/` tree. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`. The signed (Developer ID, notarized) host is rehearsed only by the separate, manually dispatched, protected `.github/workflows/server-host-signing-rehearsal.yml`, which uploads no release asset, needs operator-provisioned credentials (a Developer ID certificate and a notarization-capable App Store Connect API key) and is not part of `publish.yml`; see `docs/SERVER_HOST_RELEASE.md`.
+- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA and the engine wheel, verifies the wheel in a clean environment, signs the engine manifest with the release minisign key (`ciaobot-engine-manifest.json` + `.sig`, gated by `ciao.release_manifest verify`), which lists the wheel, the server host archive and the two installer scripts (kind `installer`), and attaches six engine assets: `install.sh`, `install-engine.sh`, the wheel, the manifest, its signature, and the universal server host archive the manifest authenticates (`ciaobot-server-host-macos-universal-v1.tar.gz`, built by `scripts/build-server-host.py`; see `docs/SERVER_HOST_RELEASE.md`). After the upload it re-downloads the manifest, its signature and the two installers from the release and fails unless `ciao.release_manifest verify --asset` matches each installer to its signed entry. Since #653 it publishes no app, no `latest.json` feed, no native verifier and no bundled runtime, and its signer is `@tauri-apps/cli` run standalone, so it never depended on the now-deleted `desktop/` tree. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`. The signed (Developer ID, notarized) host is rehearsed only by the separate, manually dispatched, protected `.github/workflows/server-host-signing-rehearsal.yml`, which uploads no release asset, needs operator-provisioned credentials (a Developer ID certificate and a notarization-capable App Store Connect API key) and is not part of `publish.yml`; see `docs/SERVER_HOST_RELEASE.md`.
 
 One-time GitHub setup for a fresh clone or repo admin:
 
@@ -1275,11 +1082,13 @@ When run by an admin, the script sets `develop` as the default branch and
 applies protection to both branches. The checked-in declaration adds
 `linux-e2e` to develop's required contexts; GitHub skips that job on develop
 PRs without a `web/` change. `mac-app` is required on both branches the same
-way: it passes after the scope check on PRs that do not change `mac/`, and
+way: it passes after the scope check on PRs that do not change `mac/` or
+`web/src/lib/workspaceColors.ts`, and
 activating it live is the same separate admin action, after it has reported on
 a PR. Admins remain exempt on `develop` so the
-post-release sync PR can merge. `main` continues to require `linux-server`,
-`linux-web`, `windows`, macOS `test` and `mac-app`, including for admins.
+post-release sync PR can merge. The checked-in script continues to declare
+`linux-server`, `linux-web`, `linux-server-latest-python`, macOS `test` and
+`mac-app` required on `main`, including for admins.
 This source change does not update live branch protection: activating the new
 required context needs separate maintainer approval and an admin action after
 the workflow is present and `linux-e2e` has reported on a PR.
@@ -1865,7 +1674,7 @@ published, with writes only under `<runtime>/migration/`; if adoption cannot
 write, the legacy receipt keeps its old meaning. A vault replaced at the same
 path *before* adoption inherits the legacy receipt, which is the accepted
 trust-on-first-use limit. Replacement is detected whenever the new directory has
-a different inode: always on APFS and NTFS, and on any filesystem when the
+a different inode: always on APFS, and on any filesystem when the
 original was renamed away, but not on ext4 or tmpfs after a plain delete and
 `mkdir` that reuses the inode number, and not where inodes are `null`. Two
 runtimes operating on one vault at the same instant are not serialized, because
@@ -3112,7 +2921,7 @@ against a fake manager over a temp packaged root.
 - **Avoid destructive git** (force push, hard reset on shared branches) unless explicitly asked.
 - **Use the branch model in `CONTRIBUTING.md`.** Day-to-day PRs target `develop`; release PRs target `main`.
 - **Write tests** for new Python behavior; add to `tests/`. PWA changes verify via `npm run build` typecheck at minimum.
-- **Name the encoding.** Every text `open()`, `read_text()`, `write_text()`, `os.fdopen()` and every `subprocess` call that decodes (`text=True`) passes `encoding="utf-8"` — with `errors="replace"` only for tool output that is displayed or logged, never for output that is parsed. Windows' default is the ANSI code page, not UTF-8, and nothing may rely on Python's UTF-8 mode. `tests/test_explicit_encoding.py` fails on a new call without one.
+- **Name the encoding.** Every text `open()`, `read_text()`, `write_text()`, `os.fdopen()` and every `subprocess` call that decodes (`text=True`) passes `encoding="utf-8"` — with `errors="replace"` only for tool output that is displayed or logged, never for output that is parsed. The locale's default encoding is not guaranteed to be UTF-8, and nothing may rely on Python's UTF-8 mode. `tests/test_explicit_encoding.py` fails on a new call without one.
 - **Verify UI accessibility.** For PWA layout changes, check keyboard operation, visible focus, browser zoom, and 44px mobile targets at a narrow-phone viewport in addition to the build.
 - Keyboard shortcut changes also need coverage for shared `/ws/events` updates, custom-binding conflicts, IME composition, picker precedence, and Enter behavior on touch layouts.
 
