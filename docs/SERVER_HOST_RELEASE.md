@@ -135,11 +135,11 @@ Python:
 2. writes the manifest with `--server-host` pointing at the verified archive,
    keeping the same release signing key and the `ciao.release_manifest verify`
    gate;
-3. attaches the host archive as the seventh release asset and asserts the exact
+3. attaches the host archive as the sixth release asset and asserts the exact
    name is present while the tag is still known.
 
-The release now carries seven assets: `install.sh`, `install-engine.sh`,
-`install.ps1`, the wheel, the manifest, its signature, and the host archive. It
+The release now carries six assets: `install.sh`, `install-engine.sh`, the
+wheel, the manifest, its signature, and the host archive. It
 adds no app archive, no `latest.json` feed, no verifier and no bundled runtime,
 and it introduces no new secret, codesign identity, notarization step or
 environment knob. The CI-only configuration described below belongs to the

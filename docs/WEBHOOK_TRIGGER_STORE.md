@@ -144,8 +144,8 @@ rather than an optional argument.
 
 ## Privacy and durability on disk
 
-The file and its advisory lock are created owner-private — `0o600` on POSIX, a
-protected DACL on Windows, through `ciao.os_support.private` — and the mode of
+The file and its advisory lock are created owner-private — `0o600`, through
+`ciao.os_support.private` — and the mode of
 the file being replaced is deliberately not carried over, so a store left
 readable by anything else is tightened by the next write rather than preserved.
 
@@ -158,16 +158,14 @@ clients that take it, and it does not stop a local process that writes the file
 without taking it.
 
 A write is serialized to a unique sibling temp created by `mkstemp_private`,
-flushed and fsynced, then moved into place with one `os.replace` (retried on
-Windows). A reader sees the old document or the new one, never half of either,
+flushed and fsynced, then moved into place with one `os.replace`. A reader sees the old document or the new one, never half of either,
 and only that call's temp is cleaned up afterwards. If creating, writing or
 replacing fails, the previous document stands and the call raises — a freshly
 minted secret is never handed back as usable when it was not stored.
 
 The store file and the lock file are both refused if the file itself is a link, if
 the path contains a `.` or `..` component, or if it names no file, and the open
-itself does not follow a link (`O_NOFOLLOW` on POSIX,
-`FILE_FLAG_OPEN_REPARSE_POINT` on Windows). Only the final component is checked
+itself does not follow a link (`O_NOFOLLOW`). Only the final component is checked
 for being a link: a link in a parent directory is a layout choice, not a
 threat to this store — macOS resolves `/var` to `/private/var` on every install.
 

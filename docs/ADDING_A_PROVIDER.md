@@ -165,11 +165,11 @@ A working adapter is not the whole change. These name the two providers
 in user-facing text:
 
 - `INTEGRATIONS.md` install and login.
-- `docs/WINDOWS.md`, `docs/LINUX.md`, and the provider cards in
+- `docs/LINUX.md` and the provider cards in
   `site/guide.html`.
 - The stock `ciao-capabilities` skill.
 - `.github/workflows/discover-agents.yml`, which installs both CLIs and
-  runs one real turn on macOS and Windows. A third CLI belongs there
+  runs one real turn on macOS. A third CLI belongs there
   once it is supported, not before.
 
 `docs/UPKEEP.md` has the OpenCode 2.x contract. A new provider with a

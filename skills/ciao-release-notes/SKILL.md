@@ -58,7 +58,7 @@ GitHub Desktop, Obsidian):
    Tests belong in the PRs, not here.
 4. **Heads up only when action is needed** — a changed default, something that
    now refuses to run until configured, a setting that moved, a removal. Say
-   what changed, who it affects (macOS / Linux / Windows), and the exact fix.
+   what changed, who it affects (macOS / Linux), and the exact fix.
 5. **New features** are capabilities a user did not have. **Improvements** are
    things they already had that now work better or differently.
    An improvement that changes behaviour a user relied on also goes in
@@ -72,7 +72,7 @@ GitHub Desktop, Obsidian):
 8. **Group, don't enumerate.** Five PRs that together make the task board better
    are one or two lines, not five.
 9. **Platform tags** in parentheses only when an item is platform-specific:
-   "(Linux)", "(Windows)".
+   "(macOS)", "(Linux)".
 10. **Order by how many users it touches**, most first, within each section.
 11. **Plain words, present tense, no hype, no emoji.** British/American mix is
     fine; consistency within a release is not optional.

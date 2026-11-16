@@ -22,10 +22,9 @@ sound?", and no consumer should be able to answer it for itself, differently.
 
 **Syntax is not identity.** `parse_service_command` accepts a hosted command
 whose executable is named `Ciaobot Server` even when no such file exists. The
-host parser is pure and cross-platform, so it runs in the Windows job; its
+host parser is pure and cross-platform, so it runs on Linux CI too; its
 argument paths are parsed with `PurePosixPath` so macOS argv fixtures parse
-identically off macOS, and it deliberately refuses a backslash because the same
-string names different files on POSIX and Windows.
+identically off macOS, and it deliberately refuses a backslash.
 
 **Identity is not ownership.** `inspect_host_bundle` returns a `HostOwnership`
 snapshot for any correctly built bundle that satisfies the selected policy —
@@ -276,8 +275,7 @@ named `Ciaobot Server.app`, and extra or missing top-level fields, and an
 `executable_sha256` that differs from the executable's `bundle_files` digest.
 Values are never coerced. On macOS it additionally requires the record's owner to
 be this uid and its mode to grant nothing to group or other; that check sits
-inside a `sys.platform == "darwin"` branch, so mypy on Windows does not see
-`os.getuid`.
+inside a `sys.platform == "darwin"` branch.
 
 The schema selects the policy before any other field is read, and the two cannot
 be mixed:

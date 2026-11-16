@@ -122,7 +122,7 @@
     <section id="files">
       <h2>Which files the agent can reach</h2>
       <p><strong>Workspace only</strong> confines the agent's file tools and its shell to that workspace on macOS and Linux, plus the system folders a command needs to run. The home folder is explicitly denied, and the rest — the interpreter, Node, the <code>gh</code> configuration — is granted read-only one path at a time. <strong>Whole machine</strong> lets the agent read whatever your user account can read.</p>
-      <p>Windows has no equivalent sandbox, so Ciaobot uses <em>Whole machine</em> there. On Linux the sandbox is bubblewrap, and Ubuntu 23.10 and later need a one-time AppArmor profile; without it Ciaobot says so and asks you to switch to whole machine, instead of running unsandboxed without saying so.</p>
+      <p>On Linux the sandbox is bubblewrap, and Ubuntu 23.10 and later need a one-time AppArmor profile; without it Ciaobot says so and asks you to switch to whole machine, instead of running unsandboxed without saying so.</p>
       <p><strong>Where to set it:</strong> the workspace's settings, under <em>File access</em>. <a href="features.html#file-access">The feature page has the same two options →</a></p>
     </section>
 
@@ -173,7 +173,6 @@
         <li><strong>Your own account.</strong> Ciaobot runs as you, with the access you have. A bug, a malicious skill or a shell command can reach what your user account can reach, including provider credentials. Disk encryption, screen lock and OS permissions are yours to set.</li>
         <li><strong>What you install into it.</strong> A skill, plugin, MCP server or shell command you add runs with the same access. Ciaobot confines the agent's file tools; it does not sandbox an extension you chose to install.</li>
         <li><strong>A model's judgement.</strong> The rules decide whether an action is allowed, not whether it is a good idea. The assistant can be wrong, and the memory pass can file something you would not have.</li>
-        <li><strong>Windows.</strong> There is no workspace sandbox there, so Ciaobot runs with <em>Whole machine</em> file access.</li>
         <li><strong>The network.</strong> File access does not limit network requests, and the terminal panel is your own shell, outside the agent's sandbox entirely.</li>
       </ul>
       <p>If you find something that does not match this page, it is a bug in one of the two. Suspected vulnerabilities are best reported privately; the <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/SECURITY.md">security policy</a> says how.</p>
