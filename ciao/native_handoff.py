@@ -67,12 +67,8 @@ spawning that child — not before the preflight, and not to repair an existing
 installation. The native coordinator (``ciao.native_installer``) calls it before
 its first mutation.
 
-The native path implements macOS only. Windows remains on the legacy
-installer: its task XML carries no port, and its only registration call uses
-``schtasks /Create /F``, which can replace an intervening task. This module
-cannot bind the port from the task bytes or promise fresh-only registration
-without changing that legacy path, so a native Windows record or activation is
-refused explicitly instead of claiming support it cannot back.
+The native path implements macOS only. Any other service backend is refused
+before a result is recorded, read or activated.
 
 Five limits are real and are not hidden:
 
@@ -132,10 +128,7 @@ from ciao.os_support.definition import (
 from ciao.os_support.private import (
     descriptor_acl_grants_another_account,
     is_owned_descriptor,
-    is_owned_path,
     is_private_descriptor_strict,
-    is_private_strict,
-    make_private_dir,
     open_private,
 )
 
@@ -145,10 +138,7 @@ SCHEMA_VERSION = 2
 #: The native result is larger than the legacy one because it carries the
 #: digest, both file identities and the environment. It stays bounded.
 MAX_RESULT_BYTES = 32 * 1024
-#: The native handoff currently exists for macOS only. Windows task XML has no
-#: port and its registration path forces an overwrite, so it cannot bind the
-#: same facts or guarantee fresh-only activation; the legacy installer remains
-#: the Windows path until a native loader exists (#2340).
+#: The native handoff exists for macOS only.
 NATIVE_BACKENDS = ("macos",)
 _DEFINITION_DIGEST = re.compile(r"[0-9a-f]{64}")
 #: The host's own parser accepts only these interpreter basenames. A direct
@@ -330,11 +320,8 @@ def _require_private_component(path: Path, *, label: str, leaf: bool, create: bo
     code is supposed to refuse. A missing directory is created ``0o700`` and
     then checked through an opened, no-follow descriptor; the inode compared is
     the one that was inspected, which narrows (but cannot close) a same-UID
-    replacement race. On Windows, where the native path is refused before
-    recording anyway, a freshly created directory is given its protected DACL
-    and the leaf is judged from its owner and DACL instead of POSIX mode bits.
+    replacement race.
     """
-    created = False
     try:
         status = os.lstat(path)
     except FileNotFoundError:
@@ -342,20 +329,12 @@ def _require_private_component(path: Path, *, label: str, leaf: bool, create: bo
             raise NativeHandoffError(f"{label} is missing: {path}") from None
         try:
             os.mkdir(path, 0o700)
-            created = True
         except FileExistsError:
             pass  # a concurrent setup created it; it is judged below
         except OSError as exc:
             raise NativeHandoffError(
                 f"Could not create {label} {path}: {exc}"
             ) from exc
-        if created and os.name == "nt":
-            try:
-                make_private_dir(path)
-            except OSError as exc:
-                raise NativeHandoffError(
-                    f"Could not make {label} private {path}: {exc}"
-                ) from exc
         try:
             status = os.lstat(path)
         except OSError as exc:
@@ -368,23 +347,6 @@ def _require_private_component(path: Path, *, label: str, leaf: bool, create: bo
         raise NativeHandoffError(f"{label} is a symlink: {path}")
     if not stat.S_ISDIR(status.st_mode):
         raise NativeHandoffError(f"{label} is not a directory: {path}")
-    if os.name == "nt":
-        try:
-            owned = is_owned_path(path)
-            private = is_private_strict(path) if leaf else True
-        except OSError as exc:
-            raise NativeHandoffError(
-                f"Could not inspect {label} {path}: {exc}"
-            ) from exc
-        if not owned:
-            raise NativeHandoffError(
-                f"{label} is not owned by the current user: {path}"
-            )
-        if not private:
-            raise NativeHandoffError(
-                f"{label} is not owner-only: {path}"
-            )
-        return
     descriptor = _open_directory_no_follow(path)
     try:
         opened = os.fstat(descriptor)
@@ -534,17 +496,7 @@ def _no_duplicate_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 def _require_native_backend(name: str) -> None:
-    """Refuse a backend this native module cannot verify end to end.
-
-    Windows is named separately because it is a supported *legacy* backend: the
-    native path is not silently unavailable there, it is deliberately absent
-    until a loader can bind the task bytes, the port and fresh-only registration.
-    """
-    if name == "windows":
-        raise NativeHandoffError(
-            "the native installer handoff does not implement Windows; Windows "
-            "remains on the legacy installer handoff"
-        )
+    """Refuse a backend this native module cannot verify end to end."""
     if name not in NATIVE_BACKENDS:
         raise NativeHandoffError(
             f"the native installer handoff does not support {name}"
@@ -590,9 +542,9 @@ def _read_definition(definition: Path) -> DefinitionRead:
 def _absolute_program(value: object, *, label: str) -> str:
     """An absolute POSIX program path, compared exactly as written.
 
-    The native path implements macOS only, so a Windows-spelled path is refused
-    here rather than recorded and discovered at activation on a host where it
-    names nothing.
+    The native path implements macOS only, so a non-POSIX path is refused here
+    rather than recorded and discovered at activation on a host where it names
+    nothing.
     """
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
         raise NativeHandoffError(f"{label} is not a usable program path")
@@ -1576,9 +1528,8 @@ def activate(
     that is proven absent and refuses a disabled override; a service that
     appeared after setup is refused, not unloaded or replaced.
 
-    The native path implements macOS only. A result for any other backend,
-    Windows included, is refused before it is read: this module has no loader
-    that can bind a Windows task's semantics or promise fresh-only registration.
+    The native path implements macOS only. A result for any other backend is
+    refused before it is read.
 
     The stat identities narrow the window; they do not authenticate the bytes.
     A same-UID writer can rewrite a file in place to the same size and restore

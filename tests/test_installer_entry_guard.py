@@ -3,11 +3,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
-import sys
 
 import pytest
 
-from ciao import install_discovery, macos_service, windows_service
+from ciao import install_discovery, macos_service
 
 
 def _fresh(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, platform: str = "darwin") -> tuple[dict[str, str], Path]:
@@ -17,7 +16,6 @@ def _fresh(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, platform: str = "dar
     monkeypatch.setattr(install_discovery, "_platform", lambda: platform)
     monkeypatch.setattr(install_discovery, "_discover_macos", lambda base: None)
     monkeypatch.setattr(macos_service, "server_job_registered", lambda: False)
-    monkeypatch.setattr(windows_service, "engine_task_registered", lambda: False)
     return {}, home
 
 
@@ -147,25 +145,6 @@ def test_unreadable_registry_directory_refuses_instead_of_reporting_absent(
         _restore(runtime)
 
 
-@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
-                    reason="root ignores directory permissions")
-def test_unreadable_task_directory_refuses_instead_of_reporting_absent(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    env, _ = _fresh(monkeypatch, tmp_path, platform="win32")
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
-    service = windows_service.live_task_dir()
-    service.mkdir(parents=True)
-    (service / windows_service.TASK_FILE_NAME).write_text("bad")
-    _deny(service)
-    try:
-        with pytest.raises(install_discovery.InstallerEntryRefused):
-            install_discovery.require_fresh_installer_entry(environ=env, cwd=tmp_path)
-    finally:
-        _restore(service)
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="chmod cannot deny reads on Windows")
 def test_unreadable_dotenv_is_not_silently_absent_for_the_strict_helper(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -184,12 +163,10 @@ def test_unreadable_dotenv_is_not_silently_absent_for_the_strict_helper(
             _restore(dotenv)
 
 
-def test_unreadable_task_query_refuses_bootstrap(monkeypatch, tmp_path):
-    env, _ = _fresh(monkeypatch, tmp_path, platform="win32")
-
-    def no_output():
-        raise windows_service.WindowsServiceError("Scheduled task query returned no output")
-
-    monkeypatch.setattr(windows_service, "engine_task_registered", no_output)
-    with pytest.raises(install_discovery.InstallerEntryRefused):
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_a_platform_other_than_macos_refuses_bootstrap(monkeypatch, tmp_path, platform):
+    env, _ = _fresh(monkeypatch, tmp_path, platform=platform)
+    with pytest.raises(
+        install_discovery.InstallerEntryRefused, match=f"unsupported on {platform}"
+    ):
         install_discovery.require_fresh_installer_entry(environ=env, cwd=tmp_path)

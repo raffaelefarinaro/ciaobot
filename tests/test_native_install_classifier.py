@@ -30,21 +30,9 @@ from ciao import (
     install_receipt,
     macos_service,
     server_host_install,
-    windows_service,
 )
 from ciao.os_support.files import open_fd
 from ciao.os_support.locks import lock_exclusive, unlock
-
-#: The durable host-upgrade lock is a Darwin fact: the installer writes it
-#: ``0600`` and the probe judges that mode before it takes a non-blocking
-#: ``flock``. Windows has neither bit, so a case that models the lock's mode or
-#: its lock state is a POSIX assertion and is not made there.
-POSIX_MODES = pytest.mark.skipif(
-    os.name != "posix", reason="POSIX file modes and flock on the host-upgrade lock"
-)
-#: Creating a symlink on Windows needs a privilege the default account does not
-#: have, so a test whose subject is link semantics is not asserted there.
-SYMLINK_ONLY = pytest.mark.skipif(os.name != "posix", reason="symlink semantics")
 
 
 def _home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
@@ -70,23 +58,6 @@ def _world(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path,
         macos_service, "launchd_override_disabled", lambda **_kwargs: False
     )
     return cwd, tool_dir, bin_dir
-
-
-def _windows_world(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> tuple[Path, Path, Path, Path]:
-    """Isolate the classifier and answer a fresh, quiet Windows machine."""
-    _home(monkeypatch, tmp_path)
-    cwd = tmp_path / "cwd"
-    cwd.mkdir()
-    tool_dir = tmp_path / "uv-tools"
-    bin_dir = tmp_path / "bin"
-    task_dir = tmp_path / "tasks"
-    task_dir.mkdir()
-    monkeypatch.setattr(install_discovery, "_platform", lambda: "win32")
-    monkeypatch.setattr(windows_service, "live_task_dir", lambda: task_dir)
-    monkeypatch.setattr(windows_service, "engine_task_registered", lambda: False)
-    return cwd, tool_dir, bin_dir, task_dir
 
 
 def _classify(cwd: Path, tool_dir: Path, bin_dir: Path, *, environ=None, suggestion=None):
@@ -233,7 +204,6 @@ def test_a_completed_workspace_is_configured(monkeypatch, tmp_path) -> None:
 
 
 @pytest.mark.parametrize("case", ["dangling-symlink", "symlink-to-file"])
-@pytest.mark.skipif(os.name != "posix", reason="symlink semantics")
 def test_a_symlinked_workspace_registry_is_unknown(
     monkeypatch, tmp_path, case: str
 ) -> None:
@@ -340,9 +310,9 @@ def test_a_host_upgrade_journal_is_partial_evidence(monkeypatch, tmp_path) -> No
         "non-empty",
         "directory",
         "hardlink",
-        pytest.param("empty", marks=POSIX_MODES),
-        pytest.param("group-writable", marks=POSIX_MODES),
-        pytest.param("symlink", marks=SYMLINK_ONLY),
+        "empty",
+        "group-writable",
+        "symlink",
     ],
 )
 def test_a_lock_is_not_partial_evidence_and_an_ambiguous_one_is_unknown(
@@ -385,7 +355,6 @@ def test_a_lock_is_not_partial_evidence_and_an_ambiguous_one_is_unknown(
     assert _classify(cwd, tool_dir, bin_dir) is expected
 
 
-@POSIX_MODES
 def test_a_held_lock_is_concurrent_and_unknown(monkeypatch, tmp_path) -> None:
     """A held lock is a host mutation in flight; a native install must refuse."""
 
@@ -410,7 +379,6 @@ def test_a_held_lock_is_concurrent_and_unknown(monkeypatch, tmp_path) -> None:
         os.close(descriptor)
 
 
-@POSIX_MODES
 def test_the_lock_probe_leaves_an_idle_lock_released_and_unmodified(
     monkeypatch, tmp_path
 ) -> None:
@@ -448,7 +416,6 @@ def test_the_scan_never_creates_the_state_directory(monkeypatch, tmp_path) -> No
     assert _snapshot(tmp_path) == before
 
 
-@SYMLINK_ONLY
 def test_a_lock_under_a_dangling_symlink_is_unknown(monkeypatch, tmp_path) -> None:
     cwd, tool_dir, bin_dir = _world(monkeypatch, tmp_path)
     state = server_host_install.upgrade_lock_path().parent
@@ -479,9 +446,8 @@ def test_a_real_uv_tool_layout_is_partial(monkeypatch, tmp_path) -> None:
     tool_dir = home / ".local" / "share" / "uv" / "tools"
     bin_dir = home / ".local" / "bin"
     (tool_dir / "ciaobot").mkdir(parents=True)
-    # A uv shim is a link to the tool environment's entry point on Unix and a
-    # copied launcher on Windows; the classifier reads the name, so a regular
-    # file models both without needing link privileges.
+    # A uv shim is a link to the tool environment's entry point; the classifier
+    # reads the name, so a regular file models it.
     bin_dir.mkdir(parents=True)
     (bin_dir / "ciao").write_text("#!/bin/sh\n", encoding="utf-8")
 
@@ -613,7 +579,6 @@ def test_a_hard_linked_receipt_is_unknown(monkeypatch, tmp_path) -> None:
     assert _classify(cwd, tool_dir, bin_dir) is install_discovery.NativeInstallState.unknown
 
 
-@pytest.mark.skipif(os.name != "posix", reason="symlink and permission semantics")
 def test_a_symlinked_env_is_unknown(monkeypatch, tmp_path) -> None:
     """The native reader does not follow a link where the workspace env belongs."""
 
@@ -625,10 +590,7 @@ def test_a_symlinked_env_is_unknown(monkeypatch, tmp_path) -> None:
     assert _classify(cwd, tool_dir, bin_dir) is install_discovery.NativeInstallState.unknown
 
 
-@pytest.mark.skipif(
-    os.name != "posix" or os.geteuid() == 0,
-    reason="needs POSIX permissions and a non-root user",
-)
+@pytest.mark.skipif(os.geteuid() == 0, reason="needs a non-root user")
 def test_an_unreadable_env_is_unknown(monkeypatch, tmp_path) -> None:
     cwd, tool_dir, bin_dir = _world(monkeypatch, tmp_path)
     env_path = cwd / ".env"
@@ -658,7 +620,6 @@ def test_a_replaced_env_is_unknown(monkeypatch, tmp_path) -> None:
     assert _classify(cwd, tool_dir, bin_dir) is install_discovery.NativeInstallState.unknown
 
 
-@pytest.mark.skipif(os.name != "posix", reason="symlink semantics")
 def test_a_symlinked_state_directory_is_unknown(monkeypatch, tmp_path) -> None:
     """The receipt, migration, journal and lock all live under one state dir.
 
@@ -802,7 +763,6 @@ def test_a_non_directory_workspace_is_unknown(monkeypatch, tmp_path) -> None:
     assert _classify(cwd, tool_dir, bin_dir) is install_discovery.NativeInstallState.unknown
 
 
-@SYMLINK_ONLY
 def test_a_dangling_symlink_ancestor_is_not_absence(monkeypatch, tmp_path) -> None:
     cwd, tool_dir, bin_dir = _world(monkeypatch, tmp_path)
     suggestion = tmp_path / "gone" / "workspace"
@@ -814,57 +774,15 @@ def test_a_dangling_symlink_ancestor_is_not_absence(monkeypatch, tmp_path) -> No
     )
 
 
-def test_windows_a_task_definition_is_configured(monkeypatch, tmp_path) -> None:
-    cwd, tool_dir, bin_dir, task_dir = _windows_world(monkeypatch, tmp_path)
-    (task_dir / windows_service.TASK_FILE_NAME).write_text("task", encoding="utf-8")
-
-    assert _classify(cwd, tool_dir, bin_dir) is install_discovery.NativeInstallState.configured
-
-
-def test_windows_a_registered_task_is_configured(monkeypatch, tmp_path) -> None:
-    cwd, tool_dir, bin_dir, _task_dir = _windows_world(monkeypatch, tmp_path)
-    monkeypatch.setattr(windows_service, "engine_task_registered", lambda: True)
-
-    assert _classify(cwd, tool_dir, bin_dir) is install_discovery.NativeInstallState.configured
-
-
-def test_windows_a_failed_task_query_is_unknown(monkeypatch, tmp_path) -> None:
-    cwd, tool_dir, bin_dir, _task_dir = _windows_world(monkeypatch, tmp_path)
-
-    def unavailable():
-        raise windows_service.WindowsServiceError("schtasks did not answer")
-
-    monkeypatch.setattr(windows_service, "engine_task_registered", unavailable)
-
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_a_platform_other_than_macos_is_unknown(monkeypatch, tmp_path, platform) -> None:
+    cwd, tool_dir, bin_dir = _world(monkeypatch, tmp_path)
+    monkeypatch.setattr(install_discovery, "_platform", lambda: platform)
     assert _classify(cwd, tool_dir, bin_dir) is install_discovery.NativeInstallState.unknown
 
 
-def test_windows_ignores_the_macos_only_host_upgrade_state(monkeypatch, tmp_path) -> None:
-    """``server_host_install`` is macOS-only; its state is not Windows evidence."""
-
-    cwd, tool_dir, bin_dir, _task_dir = _windows_world(monkeypatch, tmp_path)
-    _write_host_journal()
-
-    assert _classify(cwd, tool_dir, bin_dir) is install_discovery.NativeInstallState.fresh
-
-
-def test_windows_the_shim_marker_is_ciao_exe(monkeypatch, tmp_path) -> None:
-    """uv and pip write the Windows console script as ``ciao.exe``.
-
-    The extensionless ``ciao`` is the POSIX entry point; on Windows it is not
-    the installed shim, so it is not install evidence, while a shim-only
-    install (``ciao.exe`` and nothing else) is partial.
-    """
-
-    cwd, tool_dir, bin_dir, _task_dir = _windows_world(monkeypatch, tmp_path)
+def test_a_ciao_exe_is_not_install_evidence(monkeypatch, tmp_path) -> None:
+    cwd, tool_dir, bin_dir = _world(monkeypatch, tmp_path)
     bin_dir.mkdir(parents=True)
-    (bin_dir / "ciao").write_text("#!/bin/sh\n", encoding="utf-8")
-
-    assert _classify(cwd, tool_dir, bin_dir) is install_discovery.NativeInstallState.fresh
-
     (bin_dir / "ciao.exe").write_bytes(b"MZ")
-
-    assert (
-        _classify(cwd, tool_dir, bin_dir)
-        is install_discovery.NativeInstallState.partial
-    )
+    assert _classify(cwd, tool_dir, bin_dir) is install_discovery.NativeInstallState.fresh

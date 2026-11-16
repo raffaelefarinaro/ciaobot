@@ -30,7 +30,7 @@ from ciao.os_support.private import is_private, open_private
 SCHEMA_VERSION = 1
 FILENAME = "handoff.json"
 MAX_RESULT_BYTES = 8 * 1024
-SUPPORTED_BACKENDS = ("macos", "windows")
+SUPPORTED_BACKENDS = ("macos",)
 
 
 class HandoffError(RuntimeError):
@@ -57,10 +57,8 @@ def result_path() -> Path:
 
 
 def _definition_name(backend_name: str) -> str:
-    from ciao import macos_service, windows_service
+    from ciao import macos_service
 
-    if backend_name == "windows":
-        return windows_service.TASK_FILE_NAME
     return f"{macos_service.SERVER_LABEL}.plist"
 
 
@@ -282,17 +280,12 @@ def _definition_workspace(backend_name: str, definition: Path) -> Path:
     import plistlib
     from xml.parsers.expat import ExpatError
 
-    from ciao import windows_service
-
     try:
-        if backend_name == "windows":
-            workspace = windows_service.task_workspace(definition)
-        else:
-            with definition.open("rb") as handle:
-                data = plistlib.load(handle)
-            environment = data.get("EnvironmentVariables") if isinstance(data, dict) else None
-            raw = environment.get("CIAO_WORKSPACE") if isinstance(environment, dict) else None
-            workspace = Path(str(raw)) if raw else None
+        with definition.open("rb") as handle:
+            data = plistlib.load(handle)
+        environment = data.get("EnvironmentVariables") if isinstance(data, dict) else None
+        raw = environment.get("CIAO_WORKSPACE") if isinstance(environment, dict) else None
+        workspace = Path(str(raw)) if raw else None
     except (
         OSError,
         ValueError,
