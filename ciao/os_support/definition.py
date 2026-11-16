@@ -1,19 +1,13 @@
 """One strict, bounded read of a service definition or native state file.
 
 Both the native installer handoff and the service manager's fresh-activation
-path must hash *exactly* the bytes a launchd or Task Scheduler job will read.
+path must hash *exactly* the bytes a launchd job will read.
 The native handoff also reads its own result and the workspace ``.env`` that
 proves a completed setup; each of those used to be a ``Path.read_text`` (or a
 near-identical copy of this read), which is how one of them ended up unbounded
-and able to block on a FIFO. Keeping the one implementation here means binary
-mode, the byte count and the inode/mtime rechecks cannot drift between callers.
-
-Windows is the reason ``O_BINARY`` is explicit even though the module also runs
-on POSIX. A service definition is UTF-16 XML or an ASCII plist, and Windows'
-text mode treats a ``Ctrl-Z`` byte as end-of-file and rewrites CRLF; either
-would make the digest or the parsed bytes describe something other than the
-file launchd or Task Scheduler sees. ``O_BINARY`` is absent on POSIX, where the
-read is already binary.
+and able to block on a FIFO. Keeping the one implementation here means the
+no-follow open, the byte count and the inode/mtime rechecks cannot drift
+between callers.
 """
 
 from __future__ import annotations
@@ -44,12 +38,11 @@ class DefinitionRead:
 
 
 def _open_flags() -> int:
-    """The binary, no-follow, non-blocking read flags this platform provides."""
+    """The no-follow, non-blocking read flags this platform provides."""
     return (
         os.O_RDONLY
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_NONBLOCK", 0)
-        | getattr(os, "O_BINARY", 0)
     )
 
 

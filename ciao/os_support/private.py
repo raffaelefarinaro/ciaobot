@@ -1,4 +1,4 @@
-"""Owner-only files and directories on every OS.
+"""Owner-only files and directories.
 
 ``make_private`` / ``make_private_dir`` restrict a path to its owner, and
 ``is_private`` answers whether a path is restricted that way. ``is_private_descriptor``
@@ -26,34 +26,17 @@ ACL is a native dependency: if the macOS ACL API is unavailable the strict
 verifiers raise ``OSError`` rather than answering "no extended ACL", so their
 callers refuse the file instead of treating an unverified ACL as permission.
 Linux POSIX ACLs (``system.posix_acl_access``) are *not* inspected; the strict
-verifier there checks owner and mode only. On Windows strict additionally
-requires the file's owner SID to be the current account and its DACL to be
-protected against inheritance, in addition to the legacy ACE checks.
+verifier there checks owner and mode only.
 
 ``is_owned_descriptor`` and ``descriptor_acl_grants_another_account`` expose
 those two pieces for callers that need a different mode rule (for example an
 ancestor directory that must be owned and not group/other-writable but is not
 itself ``0o700``).
 
-Windows has no mode bits (``os.chmod`` only toggles the read-only flag), so
-"private" is a protected DACL that grants full control to the current user
-and to SYSTEM and to nobody else, with no inherited entries. A directory's
-two entries are inheritable, so files created in it later are private
-without being touched. The DACL is set through ``SetNamedSecurityInfoW``
-rather than ``SetSecurityInfo`` on a descriptor: a CRT descriptor is opened
-without ``WRITE_DAC``, and the path form opens its own handle with it.
-Failing to set it raises ``OSError``: a file that cannot be made private
-must not be written as if it had been.
-
 ``open_private`` opens a descriptor, creating the file private when it does
 not exist yet; an existing file keeps its permissions. POSIX is ``open_fd``
-with ``O_CREAT`` and mode ``0o600``, as before. Windows passes the protected
-DACL to ``CreateFileW`` as the new file's security descriptor
-(``files.create_fd``), so the file is private from the instant it exists:
-there is no moment in which another account could open a handle to it, and
-Windows checks access only when a handle is opened. ``mkstemp_private`` is
-``tempfile.mkstemp`` on POSIX and the same create on Windows, for the
-temp-then-``os.replace`` writes of secrets.
+with ``O_CREAT`` and mode ``0o600``, as before. ``mkstemp_private`` is
+``tempfile.mkstemp``, for the temp-then-``os.replace`` writes of secrets.
 
 ``make_private`` stays for directories and for tightening a file that already
 exists (the POSIX ``chmod`` repair); a new secret is created through
@@ -61,9 +44,7 @@ exists (the POSIX ``chmod`` repair); a new secret is created through
 
 ``carry_mode`` is the temp-file-then-``os.replace`` half: it gives a temp the
 permissions of the file it is about to replace. POSIX applies the caller's
-mode with ``fchmod``, as before. On Windows the temp already inherits the
-directory's ACL, which is what the original had, unless the original was made
-private; then the temp is made private too.
+mode with ``fchmod``, as before.
 """
 
 from __future__ import annotations
@@ -76,663 +57,246 @@ from typing import Any
 
 from ciao.os_support.files import open_fd
 
-if sys.platform == "win32":
+if sys.platform == "darwin":
     import ctypes
     import errno
-    import msvcrt
-    import secrets
-    from ctypes import wintypes
 
-    from ciao.os_support.files import create_fd
-    from ciao.os_support.users import current_user_sid
+    _ACL_TYPE_EXTENDED = 0x100
+    _ACL_FIRST_ENTRY = 0
+    _ACL_NEXT_ENTRY = -1
+    _ACL_EXTENDED_ALLOW = 1
+    _ACL_EXTENDED_DENY = 2
+    _ACL_GUID_SIZE = 16
 
-    _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    def _bind(libc: Any, name: str, argtypes: list[Any], restype: Any) -> Any:
+        """``libc``'s ``name``, or ``OSError`` if this host has no such call.
 
-    _SE_FILE_OBJECT = 1
-    _OWNER_SECURITY_INFORMATION = 0x1
-    _DACL_SECURITY_INFORMATION = 0x4
-    _PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
-    _ACL_REVISION = 2
-    _ACL_HEADER_SIZE = 8  # sizeof(ACL)
-    _ACCESS_ALLOWED_ACE_TYPE = 0
-    _ACCESS_DENIED_ACE_TYPE = 1
-    _INHERIT_ONLY_ACE = 0x8
-    _SECURITY_DESCRIPTOR_REVISION = 1
-    _SECURITY_DESCRIPTOR_MIN_LENGTH = 64  # 40 on x64; generous is harmless
-    _SE_DACL_PROTECTED = 0x1000
-    _OBJECT_INHERIT_ACE = 0x1
-    _CONTAINER_INHERIT_ACE = 0x2
-    _FILE_ALL_ACCESS = 0x1F01FF
-    _WIN_LOCAL_SYSTEM_SID = 22
-    _SECURITY_MAX_SID_SIZE = 68
+        The error is an ``OSError`` because every caller already turns one
+        into "could not inspect" rather than into a private verdict: a
+        missing ACL API must fail the check closed, never answer "no ACL".
+        """
+        try:
+            function = getattr(libc, name)
+        except AttributeError as exc:
+            raise OSError(
+                errno.ENOSYS,
+                f"the native ACL API is unavailable: libc has no {name}",
+            ) from exc
+        function.argtypes = argtypes
+        function.restype = restype
+        return function
 
-    class _AceHeader(ctypes.Structure):
-        _fields_ = [
-            ("AceType", wintypes.BYTE),
-            ("AceFlags", wintypes.BYTE),
-            ("AceSize", wintypes.WORD),
-        ]
+    class _MacosAcl:
+        """libc's extended-ACL calls, bound on the first strict check.
 
-    class _AccessAllowedAce(ctypes.Structure):
-        # SidStart is the first DWORD of the SID, which runs past the struct.
-        _fields_ = [
-            ("Header", _AceHeader),
-            ("Mask", wintypes.DWORD),
-            ("SidStart", wintypes.DWORD),
-        ]
-
-    class _AclSizeInformation(ctypes.Structure):
-        _fields_ = [
-            ("AceCount", wintypes.DWORD),
-            ("AclBytesInUse", wintypes.DWORD),
-            ("AclBytesFree", wintypes.DWORD),
-        ]
-
-    _PSID = ctypes.c_void_p
-    _PACL = ctypes.c_void_p
-    _PSECURITY_DESCRIPTOR = ctypes.c_void_p
-
-    def _declare(dll: Any, name: str, restype: Any, *argtypes: Any) -> Any:
-        func = getattr(dll, name)
-        func.argtypes = list(argtypes)
-        func.restype = restype
-        return func
-
-    _LocalFree = _declare(_kernel32, "LocalFree", ctypes.c_void_p, ctypes.c_void_p)
-    _CreateWellKnownSid = _declare(
-        _advapi32, "CreateWellKnownSid", wintypes.BOOL,
-        ctypes.c_int, _PSID, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD),
-    )
-    _EqualSid = _declare(_advapi32, "EqualSid", wintypes.BOOL, _PSID, _PSID)
-    _InitializeAcl = _declare(
-        _advapi32, "InitializeAcl", wintypes.BOOL, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD
-    )
-    _AddAccessAllowedAceEx = _declare(
-        _advapi32, "AddAccessAllowedAceEx", wintypes.BOOL,
-        ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, _PSID,
-    )
-    _GetAclInformation = _declare(
-        _advapi32, "GetAclInformation", wintypes.BOOL,
-        _PACL, ctypes.c_void_p, wintypes.DWORD, ctypes.c_int,
-    )
-    _GetAce = _declare(
-        _advapi32, "GetAce", wintypes.BOOL, _PACL, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)
-    )
-    _SetNamedSecurityInfoW = _declare(
-        _advapi32, "SetNamedSecurityInfoW", wintypes.DWORD,
-        wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD, _PSID, _PSID, _PACL, _PACL,
-    )
-    _GetNamedSecurityInfoW = _declare(
-        _advapi32, "GetNamedSecurityInfoW", wintypes.DWORD,
-        wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD,
-        ctypes.POINTER(_PSID), ctypes.POINTER(_PSID), ctypes.POINTER(_PACL),
-        ctypes.POINTER(_PACL), ctypes.POINTER(_PSECURITY_DESCRIPTOR),
-    )
-    _GetSecurityInfo = _declare(
-        _advapi32, "GetSecurityInfo", wintypes.DWORD,
-        wintypes.HANDLE, ctypes.c_int, wintypes.DWORD,
-        ctypes.POINTER(_PSID), ctypes.POINTER(_PSID), ctypes.POINTER(_PACL),
-        ctypes.POINTER(_PACL), ctypes.POINTER(_PSECURITY_DESCRIPTOR),
-    )
-    _InitializeSecurityDescriptor = _declare(
-        _advapi32, "InitializeSecurityDescriptor", wintypes.BOOL, ctypes.c_void_p, wintypes.DWORD
-    )
-    _SetSecurityDescriptorDacl = _declare(
-        _advapi32, "SetSecurityDescriptorDacl", wintypes.BOOL,
-        ctypes.c_void_p, wintypes.BOOL, ctypes.c_void_p, wintypes.BOOL,
-    )
-    _GetSecurityDescriptorControl = _declare(
-        _advapi32, "GetSecurityDescriptorControl", wintypes.BOOL,
-        _PSECURITY_DESCRIPTOR, ctypes.POINTER(wintypes.WORD), ctypes.POINTER(wintypes.DWORD),
-    )
-    _SetSecurityDescriptorControl = _declare(
-        _advapi32, "SetSecurityDescriptorControl", wintypes.BOOL,
-        ctypes.c_void_p, wintypes.WORD, wintypes.WORD,
-    )
-    _ACL_SIZE_INFORMATION_CLASS = 2
-
-    class _SecurityAttributes(ctypes.Structure):
-        _fields_ = [
-            ("nLength", wintypes.DWORD),
-            ("lpSecurityDescriptor", ctypes.c_void_p),
-            ("bInheritHandle", wintypes.BOOL),
-        ]
-
-    def _check(ok: object) -> None:
-        if not ok:
-            raise ctypes.WinError(ctypes.get_last_error())
-
-    def _address(pointer: ctypes.c_void_p) -> int:
-        if not pointer.value:
-            raise OSError("Windows security API returned a null pointer")
-        return pointer.value
-
-    def _system_sid() -> bytes:
-        buffer = ctypes.create_string_buffer(_SECURITY_MAX_SID_SIZE)
-        size = wintypes.DWORD(_SECURITY_MAX_SID_SIZE)
-        _check(_CreateWellKnownSid(_WIN_LOCAL_SYSTEM_SID, None, buffer, ctypes.byref(size)))
-        return buffer.raw[: size.value]
-
-    _owner_sids: tuple[bytes, bytes] | None = None
-
-    def _allowed_sids() -> tuple[bytes, bytes]:
-        global _owner_sids
-        if _owner_sids is None:
-            _owner_sids = (current_user_sid(), _system_sid())
-        return _owner_sids
-
-    def _private_acl(ace_flags: int) -> Any:
-        """An ACL granting full control to the user and SYSTEM, and to nobody else."""
-        sids = [ctypes.create_string_buffer(sid, len(sid)) for sid in _allowed_sids()]
-        size = _ACL_HEADER_SIZE + sum(
-            ctypes.sizeof(_AccessAllowedAce) - ctypes.sizeof(wintypes.DWORD) + len(sid.raw)
-            for sid in sids
-        )
-        acl = ctypes.create_string_buffer(size)
-        _check(_InitializeAcl(acl, size, _ACL_REVISION))
-        for sid in sids:
-            _check(_AddAccessAllowedAceEx(acl, _ACL_REVISION, ace_flags, _FILE_ALL_ACCESS, sid))
-        return acl
-
-    class _PrivateCreate:
-        """``SECURITY_ATTRIBUTES`` for a new owner-only file, and the buffers it points into."""
+        Binding is deferred so importing this module never requires the
+        macOS ACL API. A test that models Darwin on another host imports
+        cleanly and replaces :func:`_acl_grants_another_account` with a
+        hermetic reader (see ``tests/macos_acl_simulation.py``); on a real
+        Mac the first strict check binds the real calls, and a missing call
+        raises ``OSError`` so that check fails closed.
+        """
 
         def __init__(self) -> None:
-            self.acl = _private_acl(0)
-            self.descriptor = ctypes.create_string_buffer(_SECURITY_DESCRIPTOR_MIN_LENGTH)
-            _check(_InitializeSecurityDescriptor(self.descriptor, _SECURITY_DESCRIPTOR_REVISION))
-            _check(_SetSecurityDescriptorDacl(self.descriptor, True, self.acl, False))
-            _check(
-                _SetSecurityDescriptorControl(
-                    self.descriptor, _SE_DACL_PROTECTED, _SE_DACL_PROTECTED
-                )
+            libc = ctypes.CDLL(None, use_errno=True)
+            self.get_fd_np = _bind(
+                libc, "acl_get_fd_np", [ctypes.c_int, ctypes.c_int], ctypes.c_void_p
             )
-            self.attributes = _SecurityAttributes(
-                ctypes.sizeof(_SecurityAttributes),
-                ctypes.cast(self.descriptor, ctypes.c_void_p),
-                False,
+            self.get_entry = _bind(
+                libc,
+                "acl_get_entry",
+                [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)],
+                ctypes.c_int,
+            )
+            self.get_tag_type = _bind(
+                libc,
+                "acl_get_tag_type",
+                [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)],
+                ctypes.c_int,
+            )
+            self.get_qualifier = _bind(
+                libc, "acl_get_qualifier", [ctypes.c_void_p], ctypes.c_void_p
+            )
+            self.free = _bind(libc, "acl_free", [ctypes.c_void_p], ctypes.c_int)
+            self.uid_to_uuid = _bind(
+                libc,
+                "mbr_uid_to_uuid",
+                [ctypes.c_uint, ctypes.POINTER(ctypes.c_ubyte * _ACL_GUID_SIZE)],
+                ctypes.c_int,
             )
 
-    def _protect(path: str | os.PathLike[str], ace_flags: int) -> None:
-        acl = _private_acl(ace_flags)
-        error = _SetNamedSecurityInfoW(
-            os.fspath(path),
-            _SE_FILE_OBJECT,
-            _DACL_SECURITY_INFORMATION | _PROTECTED_DACL_SECURITY_INFORMATION,
-            None,
-            None,
-            ctypes.cast(acl, ctypes.c_void_p),
-            None,
-        )
-        if error:
-            raise ctypes.WinError(error)
+    _macos_acl: _MacosAcl | None = None
 
-    def make_private(path: str | os.PathLike[str]) -> None:
-        """Restrict a file to its owner; see the module docstring."""
-        _protect(path, 0)
+    def _macos_acl_calls() -> _MacosAcl:
+        """The bound ACL calls, or ``OSError`` if this host has no ACL API."""
+        global _macos_acl
+        if _macos_acl is None:
+            _macos_acl = _MacosAcl()
+        return _macos_acl
 
-    def make_private_dir(path: str | os.PathLike[str]) -> None:
-        """Restrict a directory, and what is created in it, to its owner."""
-        _protect(path, _OBJECT_INHERIT_ACE | _CONTAINER_INHERIT_ACE)
+    def _effective_user_guid(acl: _MacosAcl) -> bytes:
+        guid = (ctypes.c_ubyte * _ACL_GUID_SIZE)()
+        if acl.uid_to_uuid(os.geteuid(), ctypes.byref(guid)) != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        return bytes(guid)
 
-    def _dacl_grants_owner_only(dacl: ctypes.c_void_p, *, is_dir: bool) -> bool:
-        """Whether this DACL grants nothing to anyone but the user and SYSTEM."""
-        if not dacl.value:
-            return False  # a NULL DACL grants everyone everything
-        info = _AclSizeInformation()
-        _check(
-            _GetAclInformation(
-                dacl, ctypes.byref(info), ctypes.sizeof(info), _ACL_SIZE_INFORMATION_CLASS
-            )
-        )
-        allowed = [ctypes.create_string_buffer(sid, len(sid)) for sid in _allowed_sids()]
-        for index in range(info.AceCount):
-            ace = ctypes.c_void_p()
-            _check(_GetAce(dacl, index, ctypes.byref(ace)))
-            entry = _AccessAllowedAce.from_address(_address(ace))
-            if entry.Header.AceType == _ACCESS_DENIED_ACE_TYPE:
-                continue  # a deny entry only takes access away
-            if entry.Header.AceType != _ACCESS_ALLOWED_ACE_TYPE:
-                return False  # a type that may grant, to a principal not read here
-            if entry.Header.AceFlags & _INHERIT_ONLY_ACE and not is_dir:
-                continue  # applies to children only, and a file has none
-            sid = _address(ace) + _AccessAllowedAce.SidStart.offset
-            if not any(_EqualSid(sid, known) for known in allowed):
+    def _acl_grants_another_account(fd: int) -> bool:
+        """Whether the extended ACL allows any principal but the effective user.
+
+        A deny entry takes access away and is ignored; every allow entry
+        naming another principal is a grant. An unrecognised tag is refused
+        because it may grant. No extended ACL at all is the common case and
+        is not an error.
+
+        This is the native seam: a test that models macOS on a host without
+        these calls replaces it with a hermetic answer instead of letting
+        the host's libc decide.
+        """
+        acl_api = _macos_acl_calls()
+        acl = acl_api.get_fd_np(fd, _ACL_TYPE_EXTENDED)
+        if not acl:
+            error = ctypes.get_errno()
+            if error == errno.ENOENT:
                 return False
-        return True
-
-    def is_private(path: str | os.PathLike[str]) -> bool:
-        """Whether the DACL grants nothing to anyone but the user and SYSTEM.
-
-        Only a deny entry can be passed over: every other entry type (object,
-        callback and compound allows included) may grant access, so one naming
-        anyone else makes the path not private. An inherit-only entry does not
-        apply to a file itself, but on a directory it is what the directory's
-        new children get, so there it counts too.
-        """
-        is_dir = os.path.isdir(path)
-        dacl = _PACL()
-        descriptor = _PSECURITY_DESCRIPTOR()
-        error = _GetNamedSecurityInfoW(
-            os.fspath(path), _SE_FILE_OBJECT, _DACL_SECURITY_INFORMATION,
-            None, None, ctypes.byref(dacl), None, ctypes.byref(descriptor),
-        )
-        if error:
-            raise ctypes.WinError(error)
+            raise OSError(error, os.strerror(error))
         try:
-            return _dacl_grants_owner_only(dacl, is_dir=is_dir)
+            owner = _effective_user_guid(acl_api)
+            entry = ctypes.c_void_p()
+            selector = _ACL_FIRST_ENTRY
+            while True:
+                if acl_api.get_entry(acl, selector, ctypes.byref(entry)) != 0:
+                    error = ctypes.get_errno()
+                    if error == errno.EINVAL:
+                        return False  # no more entries
+                    raise OSError(error, os.strerror(error))
+                selector = _ACL_NEXT_ENTRY
+                tag = ctypes.c_int()
+                if acl_api.get_tag_type(entry, ctypes.byref(tag)) != 0:
+                    error = ctypes.get_errno()
+                    raise OSError(error, os.strerror(error))
+                if tag.value == _ACL_EXTENDED_DENY:
+                    continue
+                if tag.value != _ACL_EXTENDED_ALLOW:
+                    return True
+                qualifier = acl_api.get_qualifier(entry)
+                if not qualifier:
+                    error = ctypes.get_errno()
+                    raise OSError(error, os.strerror(error))
+                try:
+                    if ctypes.string_at(qualifier, _ACL_GUID_SIZE) != owner:
+                        return True
+                finally:
+                    acl_api.free(qualifier)
         finally:
-            _LocalFree(descriptor)
-
-    def is_private_descriptor(fd: int) -> bool:
-        """Whether the already-open file is owner-only.
-
-        The DACL is read from the handle, not the pathname, so a path swapped
-        after the caller's checks cannot be what is judged. This is the
-        descriptor-bound sibling of :func:`is_private`.
-        """
-        is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
-        dacl = _PACL()
-        descriptor = _PSECURITY_DESCRIPTOR()
-        error = _GetSecurityInfo(
-            msvcrt.get_osfhandle(fd), _SE_FILE_OBJECT, _DACL_SECURITY_INFORMATION,
-            None, None, ctypes.byref(dacl), None, ctypes.byref(descriptor),
-        )
-        if error:
-            raise ctypes.WinError(error)
-        try:
-            return _dacl_grants_owner_only(dacl, is_dir=is_dir)
-        finally:
-            _LocalFree(descriptor)
-
-    def is_owned_descriptor(fd: int) -> bool:
-        """Whether the already-open file is owned by the current account."""
-        owner = _PSID()
-        descriptor = _PSECURITY_DESCRIPTOR()
-        error = _GetSecurityInfo(
-            msvcrt.get_osfhandle(fd), _SE_FILE_OBJECT, _OWNER_SECURITY_INFORMATION,
-            ctypes.byref(owner), None, None, None, ctypes.byref(descriptor),
-        )
-        if error:
-            raise ctypes.WinError(error)
-        try:
-            expected = current_user_sid()
-            return bool(
-                _EqualSid(
-                    _address(owner),
-                    ctypes.create_string_buffer(expected, len(expected)),
-                )
-            )
-        finally:
-            _LocalFree(descriptor)
-
-    def is_owned_path(path: str | os.PathLike[str]) -> bool:
-        """Whether the named file is owned by the current account."""
-        return _named_owner_is_current_user(path)
-
-    def descriptor_acl_grants_another_account(fd: int) -> bool:
-        """Windows has no separate extended ACL beyond the DACL already checked."""
-        return False
-
-    def _security_descriptor_is_protected(descriptor: ctypes.c_void_p) -> bool:
-        _address(descriptor)
-        control = wintypes.WORD()
-        revision = wintypes.DWORD()
-        _check(_GetSecurityDescriptorControl(descriptor, ctypes.byref(control), ctypes.byref(revision)))
-        return bool(control.value & _SE_DACL_PROTECTED)
-
-    def _descriptor_dacl_is_protected(fd: int) -> bool:
-        dacl = _PACL()
-        descriptor = _PSECURITY_DESCRIPTOR()
-        error = _GetSecurityInfo(
-            msvcrt.get_osfhandle(fd), _SE_FILE_OBJECT, _DACL_SECURITY_INFORMATION,
-            None, None, ctypes.byref(dacl), None, ctypes.byref(descriptor),
-        )
-        try:
-            if error:
-                raise ctypes.WinError(error)
-            return _security_descriptor_is_protected(descriptor)
-        finally:
-            if descriptor.value:
-                _LocalFree(descriptor)
-
-    def _named_dacl_is_protected(path: str | os.PathLike[str]) -> bool:
-        dacl = _PACL()
-        descriptor = _PSECURITY_DESCRIPTOR()
-        error = _GetNamedSecurityInfoW(
-            os.fspath(path), _SE_FILE_OBJECT, _DACL_SECURITY_INFORMATION,
-            None, None, ctypes.byref(dacl), None, ctypes.byref(descriptor),
-        )
-        try:
-            if error:
-                raise ctypes.WinError(error)
-            return _security_descriptor_is_protected(descriptor)
-        finally:
-            if descriptor.value:
-                _LocalFree(descriptor)
-
-    def is_private_descriptor_strict(fd: int) -> bool:
-        """Whether the open file is this account's, with a protected owner-only DACL."""
-        return (is_owned_descriptor(fd) and is_private_descriptor(fd)
-                and _descriptor_dacl_is_protected(fd))
-
-    def is_private_strict(path: str | os.PathLike[str]) -> bool:
-        """Path-bound strict variant of :func:`is_private_descriptor_strict`.
-
-        A same-UID writer can replace the path after or between checks; prefer
-        the descriptor form for anything that is then read or written.
-        """
-        return (is_private(path) and _named_owner_is_current_user(path)
-                and _named_dacl_is_protected(path))
-
-    def _named_owner_is_current_user(path: str | os.PathLike[str]) -> bool:
-        owner = _PSID()
-        descriptor = _PSECURITY_DESCRIPTOR()
-        error = _GetNamedSecurityInfoW(
-            os.fspath(path), _SE_FILE_OBJECT, _OWNER_SECURITY_INFORMATION,
-            ctypes.byref(owner), None, None, None, ctypes.byref(descriptor),
-        )
-        if error:
-            raise ctypes.WinError(error)
-        try:
-            expected = current_user_sid()
-            return bool(
-                _EqualSid(
-                    _address(owner),
-                    ctypes.create_string_buffer(expected, len(expected)),
-                )
-            )
-        finally:
-            _LocalFree(descriptor)
-
-    def open_private(
-        path: str | os.PathLike[str],
-        flags: int,
-        mode: int = 0o600,
-        *,
-        follow_symlinks: bool = True,
-    ) -> int:
-        """``open_fd`` that creates ``path`` private; see the module docstring."""
-        create = _PrivateCreate()
-        return create_fd(
-            path,
-            flags | os.O_CREAT,
-            mode,
-            follow_symlinks=follow_symlinks,
-            security_attributes=create.attributes,
-        )
-
-    def mkstemp_private(
-        *, dir: str | os.PathLike[str], prefix: str = "tmp", suffix: str = ""
-    ) -> tuple[int, str]:
-        """``tempfile.mkstemp``, created private; see the module docstring."""
-        create = _PrivateCreate()
-        folder = os.path.abspath(dir)
-        for _ in range(tempfile.TMP_MAX):
-            name = os.path.join(folder, f"{prefix}{secrets.token_hex(4)}{suffix}")
-            try:
-                fd = create_fd(
-                    name,
-                    os.O_RDWR | os.O_CREAT | os.O_EXCL,
-                    0o600,
-                    follow_symlinks=False,
-                    security_attributes=create.attributes,
-                )
-            except FileExistsError:
-                continue
-            return fd, name
-        raise FileExistsError(errno.EEXIST, "no usable temporary file name found", folder)
-
-    def carry_mode(
-        fd: int, mode: int, *, temp: str | os.PathLike[str], original: str | os.PathLike[str]
-    ) -> None:
-        """Give ``temp`` the permissions of ``original``; see the module docstring."""
-        if os.path.exists(original) and is_private(original):
-            make_private(temp)
+            acl_api.free(acl)
 
 else:
 
-    if sys.platform == "darwin":
-        import ctypes
-        import errno
+    def _acl_grants_another_account(fd: int) -> bool:
+        """Linux POSIX ACLs are not inspected; see the module docstring."""
+        return False
 
-        _ACL_TYPE_EXTENDED = 0x100
-        _ACL_FIRST_ENTRY = 0
-        _ACL_NEXT_ENTRY = -1
-        _ACL_EXTENDED_ALLOW = 1
-        _ACL_EXTENDED_DENY = 2
-        _ACL_GUID_SIZE = 16
+def is_owned_descriptor(fd: int) -> bool:
+    """Whether the already-open file is owned by the effective uid."""
+    return os.fstat(fd).st_uid == os.geteuid()
 
-        def _bind(libc: Any, name: str, argtypes: list[Any], restype: Any) -> Any:
-            """``libc``'s ``name``, or ``OSError`` if this host has no such call.
+def is_owned_path(path: str | os.PathLike[str]) -> bool:
+    """Whether the named file is owned by the effective uid."""
+    return os.lstat(path).st_uid == os.geteuid()
 
-            The error is an ``OSError`` because every caller already turns one
-            into "could not inspect" rather than into a private verdict: a
-            missing ACL API must fail the check closed, never answer "no ACL".
-            """
-            try:
-                function = getattr(libc, name)
-            except AttributeError as exc:
-                raise OSError(
-                    errno.ENOSYS,
-                    f"the native ACL API is unavailable: libc has no {name}",
-                ) from exc
-            function.argtypes = argtypes
-            function.restype = restype
-            return function
+def descriptor_acl_grants_another_account(fd: int) -> bool:
+    """Whether the descriptor's platform ACL allows anyone but this user.
 
-        class _MacosAcl:
-            """libc's extended-ACL calls, bound on the first strict check.
+    macOS reads the extended ACL. Other POSIX systems answer ``False``;
+    their POSIX ACLs are not inspected (see the module docstring). On macOS
+    an unavailable ACL API raises ``OSError`` instead of answering ``False``:
+    callers must treat that as "could not inspect" and refuse the path.
+    """
+    return _acl_grants_another_account(fd)
 
-            Binding is deferred so importing this module never requires the
-            macOS ACL API. A test that models Darwin on another host imports
-            cleanly and replaces :func:`_acl_grants_another_account` with a
-            hermetic reader (see ``tests/macos_acl_simulation.py``); on a real
-            Mac the first strict check binds the real calls, and a missing call
-            raises ``OSError`` so that check fails closed.
-            """
+def is_private_descriptor_strict(fd: int) -> bool:
+    """Whether the open file belongs to this user and is privately accessible.
 
-            def __init__(self) -> None:
-                libc = ctypes.CDLL(None, use_errno=True)
-                self.get_fd_np = _bind(
-                    libc, "acl_get_fd_np", [ctypes.c_int, ctypes.c_int], ctypes.c_void_p
-                )
-                self.get_entry = _bind(
-                    libc,
-                    "acl_get_entry",
-                    [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)],
-                    ctypes.c_int,
-                )
-                self.get_tag_type = _bind(
-                    libc,
-                    "acl_get_tag_type",
-                    [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)],
-                    ctypes.c_int,
-                )
-                self.get_qualifier = _bind(
-                    libc, "acl_get_qualifier", [ctypes.c_void_p], ctypes.c_void_p
-                )
-                self.free = _bind(libc, "acl_free", [ctypes.c_void_p], ctypes.c_int)
-                self.uid_to_uuid = _bind(
-                    libc,
-                    "mbr_uid_to_uuid",
-                    [ctypes.c_uint, ctypes.POINTER(ctypes.c_ubyte * _ACL_GUID_SIZE)],
-                    ctypes.c_int,
-                )
+    It is ``0o600`` (or ``0o700`` for a directory), owned by the effective
+    uid, and — on macOS — carries no extended ACL allow entry for another
+    principal. Read from the descriptor, so it describes the inode the
+    caller opened. An unavailable native ACL API raises ``OSError`` rather
+    than passing the file as private.
+    """
+    st = os.fstat(fd)
+    if st.st_uid != os.geteuid():
+        return False
+    if not is_private_descriptor(fd):
+        return False
+    return not _acl_grants_another_account(fd)
 
-        _macos_acl: _MacosAcl | None = None
+def is_private_strict(path: str | os.PathLike[str]) -> bool:
+    """Path-bound strict variant of :func:`is_private_descriptor_strict`.
 
-        def _macos_acl_calls() -> _MacosAcl:
-            """The bound ACL calls, or ``OSError`` if this host has no ACL API."""
-            global _macos_acl
-            if _macos_acl is None:
-                _macos_acl = _MacosAcl()
-            return _macos_acl
+    The final component is opened with ``O_NOFOLLOW`` but a same-UID writer
+    can still replace it after the check; prefer the descriptor form for
+    anything that is then read or written.
 
-        def _effective_user_guid(acl: _MacosAcl) -> bytes:
-            guid = (ctypes.c_ubyte * _ACL_GUID_SIZE)()
-            if acl.uid_to_uuid(os.geteuid(), ctypes.byref(guid)) != 0:
-                error = ctypes.get_errno()
-                raise OSError(error, os.strerror(error))
-            return bytes(guid)
+    The open is non-blocking where the platform has it. A FIFO whose mode
+    looks private is still not a file the caller can read as state, but
+    opening it read-only without ``O_NONBLOCK`` waits for a writer forever;
+    the mode/owner answer for the inode is unchanged, and a caller that
+    needs a regular file checks that itself.
+    """
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    if stat.S_ISDIR(os.lstat(path).st_mode):
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        return is_private_descriptor_strict(descriptor)
+    finally:
+        os.close(descriptor)
 
-        def _acl_grants_another_account(fd: int) -> bool:
-            """Whether the extended ACL allows any principal but the effective user.
+def make_private(path: str | os.PathLike[str]) -> None:
+    """Restrict a file to its owner; see the module docstring."""
+    os.chmod(path, 0o600)
 
-            A deny entry takes access away and is ignored; every allow entry
-            naming another principal is a grant. An unrecognised tag is refused
-            because it may grant. No extended ACL at all is the common case and
-            is not an error.
+def make_private_dir(path: str | os.PathLike[str]) -> None:
+    """Restrict a directory, and what is created in it, to its owner."""
+    os.chmod(path, 0o700)
 
-            This is the native seam: a test that models macOS on a host without
-            these calls replaces it with a hermetic answer instead of letting
-            the host's libc decide.
-            """
-            acl_api = _macos_acl_calls()
-            acl = acl_api.get_fd_np(fd, _ACL_TYPE_EXTENDED)
-            if not acl:
-                error = ctypes.get_errno()
-                if error == errno.ENOENT:
-                    return False
-                raise OSError(error, os.strerror(error))
-            try:
-                owner = _effective_user_guid(acl_api)
-                entry = ctypes.c_void_p()
-                selector = _ACL_FIRST_ENTRY
-                while True:
-                    if acl_api.get_entry(acl, selector, ctypes.byref(entry)) != 0:
-                        error = ctypes.get_errno()
-                        if error == errno.EINVAL:
-                            return False  # no more entries
-                        raise OSError(error, os.strerror(error))
-                    selector = _ACL_NEXT_ENTRY
-                    tag = ctypes.c_int()
-                    if acl_api.get_tag_type(entry, ctypes.byref(tag)) != 0:
-                        error = ctypes.get_errno()
-                        raise OSError(error, os.strerror(error))
-                    if tag.value == _ACL_EXTENDED_DENY:
-                        continue
-                    if tag.value != _ACL_EXTENDED_ALLOW:
-                        return True
-                    qualifier = acl_api.get_qualifier(entry)
-                    if not qualifier:
-                        error = ctypes.get_errno()
-                        raise OSError(error, os.strerror(error))
-                    try:
-                        if ctypes.string_at(qualifier, _ACL_GUID_SIZE) != owner:
-                            return True
-                    finally:
-                        acl_api.free(qualifier)
-            finally:
-                acl_api.free(acl)
+def is_private(path: str | os.PathLike[str]) -> bool:
+    """Whether ``path`` is ``0o600`` (a file) or ``0o700`` (a directory)."""
+    st = os.stat(path)
+    return stat.S_IMODE(st.st_mode) == (0o700 if stat.S_ISDIR(st.st_mode) else 0o600)
 
-    else:
+def is_private_descriptor(fd: int) -> bool:
+    """Whether the already-open file is ``0o600`` (or ``0o700`` if a directory).
 
-        def _acl_grants_another_account(fd: int) -> bool:
-            """Linux POSIX ACLs are not inspected; see the module docstring."""
-            return False
+    Read from the descriptor, not the pathname, so a path swapped after the
+    caller's checks cannot be what is judged.
+    """
+    st = os.fstat(fd)
+    return stat.S_IMODE(st.st_mode) == (0o700 if stat.S_ISDIR(st.st_mode) else 0o600)
 
-    def is_owned_descriptor(fd: int) -> bool:
-        """Whether the already-open file is owned by the effective uid."""
-        return os.fstat(fd).st_uid == os.geteuid()
+def open_private(
+    path: str | os.PathLike[str],
+    flags: int,
+    mode: int = 0o600,
+    *,
+    follow_symlinks: bool = True,
+) -> int:
+    """``open_fd`` that creates ``path`` private; see the module docstring."""
+    return open_fd(path, flags | os.O_CREAT, mode, follow_symlinks=follow_symlinks)
 
-    def is_owned_path(path: str | os.PathLike[str]) -> bool:
-        """Whether the named file is owned by the effective uid."""
-        return os.lstat(path).st_uid == os.geteuid()
+def mkstemp_private(
+    *, dir: str | os.PathLike[str], prefix: str = "tmp", suffix: str = ""
+) -> tuple[int, str]:
+    """``tempfile.mkstemp``, created private; see the module docstring."""
+    return tempfile.mkstemp(dir=dir, prefix=prefix, suffix=suffix)
 
-    def descriptor_acl_grants_another_account(fd: int) -> bool:
-        """Whether the descriptor's platform ACL allows anyone but this user.
-
-        macOS reads the extended ACL. Other POSIX systems answer ``False``;
-        their POSIX ACLs are not inspected (see the module docstring). On macOS
-        an unavailable ACL API raises ``OSError`` instead of answering ``False``:
-        callers must treat that as "could not inspect" and refuse the path.
-        """
-        return _acl_grants_another_account(fd)
-
-    def is_private_descriptor_strict(fd: int) -> bool:
-        """Whether the open file belongs to this user and is privately accessible.
-
-        It is ``0o600`` (or ``0o700`` for a directory), owned by the effective
-        uid, and — on macOS — carries no extended ACL allow entry for another
-        principal. Read from the descriptor, so it describes the inode the
-        caller opened. An unavailable native ACL API raises ``OSError`` rather
-        than passing the file as private.
-        """
-        st = os.fstat(fd)
-        if st.st_uid != os.geteuid():
-            return False
-        if not is_private_descriptor(fd):
-            return False
-        return not _acl_grants_another_account(fd)
-
-    def is_private_strict(path: str | os.PathLike[str]) -> bool:
-        """Path-bound strict variant of :func:`is_private_descriptor_strict`.
-
-        The final component is opened with ``O_NOFOLLOW`` but a same-UID writer
-        can still replace it after the check; prefer the descriptor form for
-        anything that is then read or written.
-
-        The open is non-blocking where the platform has it. A FIFO whose mode
-        looks private is still not a file the caller can read as state, but
-        opening it read-only without ``O_NONBLOCK`` waits for a writer forever;
-        the mode/owner answer for the inode is unchanged, and a caller that
-        needs a regular file checks that itself.
-        """
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_NONBLOCK", 0)
-        )
-        if stat.S_ISDIR(os.lstat(path).st_mode):
-            flags |= getattr(os, "O_DIRECTORY", 0)
-        descriptor = os.open(path, flags)
-        try:
-            return is_private_descriptor_strict(descriptor)
-        finally:
-            os.close(descriptor)
-
-    def make_private(path: str | os.PathLike[str]) -> None:
-        """Restrict a file to its owner; see the module docstring."""
-        os.chmod(path, 0o600)
-
-    def make_private_dir(path: str | os.PathLike[str]) -> None:
-        """Restrict a directory, and what is created in it, to its owner."""
-        os.chmod(path, 0o700)
-
-    def is_private(path: str | os.PathLike[str]) -> bool:
-        """Whether ``path`` is ``0o600`` (a file) or ``0o700`` (a directory)."""
-        st = os.stat(path)
-        return stat.S_IMODE(st.st_mode) == (0o700 if stat.S_ISDIR(st.st_mode) else 0o600)
-
-    def is_private_descriptor(fd: int) -> bool:
-        """Whether the already-open file is ``0o600`` (or ``0o700`` if a directory).
-
-        Read from the descriptor, not the pathname, so a path swapped after the
-        caller's checks cannot be what is judged.
-        """
-        st = os.fstat(fd)
-        return stat.S_IMODE(st.st_mode) == (0o700 if stat.S_ISDIR(st.st_mode) else 0o600)
-
-    def open_private(
-        path: str | os.PathLike[str],
-        flags: int,
-        mode: int = 0o600,
-        *,
-        follow_symlinks: bool = True,
-    ) -> int:
-        """``open_fd`` that creates ``path`` private; see the module docstring."""
-        return open_fd(path, flags | os.O_CREAT, mode, follow_symlinks=follow_symlinks)
-
-    def mkstemp_private(
-        *, dir: str | os.PathLike[str], prefix: str = "tmp", suffix: str = ""
-    ) -> tuple[int, str]:
-        """``tempfile.mkstemp``, created private; see the module docstring."""
-        return tempfile.mkstemp(dir=dir, prefix=prefix, suffix=suffix)
-
-    def carry_mode(
-        fd: int, mode: int, *, temp: str | os.PathLike[str], original: str | os.PathLike[str]
-    ) -> None:
-        """Give ``temp`` the permissions of ``original``; see the module docstring."""
-        os.fchmod(fd, mode)
+def carry_mode(
+    fd: int, mode: int, *, temp: str | os.PathLike[str], original: str | os.PathLike[str]
+) -> None:
+    """Give ``temp`` the permissions of ``original``; see the module docstring."""
+    os.fchmod(fd, mode)
