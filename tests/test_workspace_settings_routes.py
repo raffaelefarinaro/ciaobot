@@ -241,11 +241,11 @@ def test_startup_exception_chain_never_leaks_in_response_or_logs(
             if cleanup_fails:
                 raise raw_cleanup
 
-        def kill_checked(self):
+        def kill(self):
             if cleanup_fails:
                 raise raw_cleanup
 
-        def close_checked(self):
+        def close(self):
             pass
 
     class Client:

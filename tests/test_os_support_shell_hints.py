@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ciao.os_support.shell_hints import path_hint, path_hint_note
+from ciao.os_support.shell_hints import path_hint
 
 
 def test_posix_session_hint_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -58,7 +58,3 @@ def test_posix_persist_outside_home_is_not_collapsed(
     assert path_hint("/opt/tools/bin", persist=True) == (
         """echo 'export PATH="/opt/tools/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc"""
     )
-
-
-def test_note_is_empty() -> None:
-    assert path_hint_note() == ""

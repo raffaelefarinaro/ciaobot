@@ -36,8 +36,3 @@ def path_hint(directory: str, *, persist: bool) -> str:
     # ~/.bashrc, which would fix only the shell the user is sitting in.
     rc = "~/.bash_profile" if shell == "bash" else "~/.zshrc"
     return f"""echo 'export PATH="{target}:$PATH"' >> {rc} && source {rc}"""
-
-
-def path_hint_note() -> str:
-    """Extra line that belongs under ``path_hint``; there is none, so always ""."""
-    return ""

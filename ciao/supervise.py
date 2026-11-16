@@ -112,9 +112,6 @@ def supervise(
     # Signal handlers only run in the main thread; a caller on another thread
     # gets the relaunch loop without the stop forwarding.
     stop_signals: list[int] = [signal.SIGTERM, signal.SIGINT]
-    sigbreak = getattr(signal, "SIGBREAK", None)
-    if sigbreak is not None:
-        stop_signals.append(sigbreak)
     previous: dict[int, Any] = {}
     if threading.current_thread() is threading.main_thread():
         for sig in stop_signals:

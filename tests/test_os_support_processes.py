@@ -21,18 +21,6 @@ import pytest
 from ciao.os_support.processes import ProcessTree, tree_spawn_options
 
 
-def test_checked_startup_tree_cleanup(monkeypatch):
-    tree = ProcessTree.__new__(ProcessTree)
-    tree.pid = 123
-    tree._group = False
-    calls = []
-    monkeypatch.setattr(os, "kill", lambda pid, sig: calls.append((pid, sig)))
-    tree.kill_checked()
-    tree.close_checked()
-    assert calls == [(123, signal.SIGKILL)]
-    assert tree.detach_job_handle() is None
-
-
 _GRANDCHILD = textwrap.dedent(
     """
     import sys, time

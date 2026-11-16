@@ -38,7 +38,6 @@ from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir, hosted_service_python, load_server_plist
 from ciao.jsonio import write_private_text
 from ciao.os_support.private import make_private, open_private
-from ciao.os_support.console import use_utf8_stdio
 from ciao.git_proc import EXACT_BYTES
 from ciao.os_support.shell_hints import path_hint
 from ciao.os_support.tool_path import dedupe_path
@@ -10232,7 +10231,6 @@ RUNTIME_STATE_UNREADABLE_EXIT = 77
 
 
 def main(argv: list[str] | None = None) -> int:
-    use_utf8_stdio()
     os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
     os.environ.setdefault("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
     argv_list = list(sys.argv[1:] if argv is None else argv)

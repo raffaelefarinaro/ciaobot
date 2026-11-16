@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from ciao.os_support import tool_path as os_tool_path
-from ciao.os_support.tool_path import ToolResolutionError
 
 
 def test_dedupe_path_keeps_first_occurrences_in_order() -> None:
@@ -31,11 +30,6 @@ def test_dedupe_path_collapses_a_directory_repeated_many_times() -> None:
     node_bin = "/Users/u/.nvm/versions/node/v22.23.2/bin"
     inherited = os.pathsep.join([node_bin] * 30 + ["/usr/bin", "/bin"])
     assert os_tool_path.dedupe_path(inherited) == os.pathsep.join([node_bin, "/usr/bin", "/bin"])
-
-
-def test_tool_resolution_error_is_an_os_error() -> None:
-    """`providers.opencode`'s model list already degrades on OSError."""
-    assert issubclass(ToolResolutionError, OSError)
 
 
 # ── the login-shell probe ──

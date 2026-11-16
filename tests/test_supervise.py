@@ -103,6 +103,44 @@ def test_zero_exit_is_returned_without_relaunch(tmp_path: Path) -> None:
     assert slept == []
 
 
+def test_only_sigterm_and_sigint_are_installed_and_restored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A host exposing SIGBREAK must not add a third stop signal: the POSIX
+    stops are SIGTERM and SIGINT, each restored when supervise returns."""
+    synthetic_sigbreak = 9999
+    installed: list[tuple[int, object]] = []
+
+    monkeypatch.setattr(
+        supervise_module.signal, "SIGBREAK", synthetic_sigbreak, raising=False
+    )
+    monkeypatch.setattr(
+        supervise_module.signal, "getsignal", lambda signum: signum + 1000
+    )
+
+    def fake_signal(signum: int, handler: object) -> None:
+        installed.append((signum, handler))
+
+    monkeypatch.setattr(supervise_module.signal, "signal", fake_signal)
+    monkeypatch.setattr(supervise_module, "check_workspace_access", lambda: None)
+
+    code = supervise(child_argv=_counter_child(tmp_path, 0))
+
+    assert code == 0
+    assert _launches(tmp_path) == 1
+    assert [signum for signum, _ in installed] == [
+        signal.SIGTERM,
+        signal.SIGINT,
+        signal.SIGTERM,
+        signal.SIGINT,
+    ]
+    first, second, restored_first, restored_second = installed
+    assert callable(first[1]) and callable(second[1])
+    assert restored_first[1] == signal.SIGTERM + 1000
+    assert restored_second[1] == signal.SIGINT + 1000
+    assert synthetic_sigbreak not in [signum for signum, _ in installed]
+
+
 def test_crash_loop_backs_off(tmp_path: Path) -> None:
     """Past CRASH_LOOP_MAX_RESTARTS consecutive restart exits each wait, doubling."""
     slept, sleep = _recording_sleep()

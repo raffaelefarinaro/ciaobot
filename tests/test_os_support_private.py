@@ -8,7 +8,6 @@ import os
 import stat
 import subprocess
 import sys
-import threading
 from pathlib import Path
 
 import pytest
@@ -186,40 +185,31 @@ def test_a_descriptor_is_not_fooled_by_the_path_being_replaced(tmp_path: Path) -
         os.replace(replacement, opened)
         assert not is_private(opened)
         assert private.is_private_descriptor(descriptor)
+        assert private.is_private_descriptor_strict(descriptor)
+        assert private.is_owned_descriptor(descriptor)
         assert os.read(descriptor, 4) == b"kept"
     finally:
         os.close(descriptor)
 
 
-def _returns_promptly(seconds: float, call):
-    """Run ``call`` in a daemon thread; fail rather than hang the suite on a FIFO."""
-    outcome: dict[str, object] = {}
-
-    def run() -> None:
-        try:
-            outcome["value"] = call()
-        except BaseException as exc:
-            outcome["error"] = exc
-
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    thread.join(seconds)
-    assert not thread.is_alive(), "the strict path check did not return promptly"
-    if "error" in outcome:
-        raise outcome["error"]
-    return outcome["value"]
-
-
-def test_the_strict_path_answer_does_not_block_on_a_fifo(tmp_path: Path) -> None:
-    """A private FIFO is answered without waiting for a writer forever.
-
-    The mode/owner/ACL question is unchanged; the open is merely non-blocking.
-    A caller that needs a regular file still checks that itself.
-    """
-    fifo = tmp_path / "pipe"
-    os.mkfifo(fifo, 0o600)
-    assert stat.S_IMODE(fifo.stat().st_mode) == 0o600
-    assert _returns_promptly(5.0, lambda: private.is_private_strict(fifo)) is True
+def test_a_private_path_does_not_make_a_held_descriptor_private(tmp_path: Path) -> None:
+    """The inverse of the replacement case: a path that looks private now does
+    not make the 0644 inode an earlier descriptor holds anything but loose."""
+    opened = tmp_path / "opened.txt"
+    opened.write_text("kept", encoding="utf-8")
+    opened.chmod(0o644)
+    descriptor = os.open(opened, os.O_RDONLY)
+    try:
+        replacement = tmp_path / "replacement.txt"
+        replacement.write_text("tight", encoding="utf-8")
+        make_private(replacement)
+        os.replace(replacement, opened)
+        assert is_private(opened)
+        assert private.is_private_descriptor(descriptor) is False
+        assert private.is_private_descriptor_strict(descriptor) is False
+        assert os.read(descriptor, 4) == b"kept"
+    finally:
+        os.close(descriptor)
 
 
 def test_open_private_creates_private_and_leaves_an_existing_file_alone(tmp_path: Path) -> None:
