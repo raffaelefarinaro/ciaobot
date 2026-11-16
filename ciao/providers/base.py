@@ -341,6 +341,41 @@ class BaseProvider(ABC):
         """Discard any provider-side connection state."""
 
     @property
+    def can_drain(self) -> bool:
+        """True when the adapter permits a between-turn reader right now.
+
+        Dynamic eligibility, not a static capability or a generic
+        connectivity probe: OpenCode also requires a session and outstanding
+        background work, Claude additionally requires a connected client.
+        Eligibility stays independent of ``cli_connected`` and of the
+        capabilities; the host decides whether to start a reader.
+        """
+        return False
+
+    @property
+    def cli_connected(self) -> bool:
+        """True while this adapter's persistent CLI subprocess owner is alive.
+
+        Asymmetric no-owner semantics: an adapter that tracks no long-lived
+        subprocess inherits True, so only an owner an adapter actually keeps
+        reports a loss. The answer says nothing about any server being
+        reachable — OpenCode reports no owner, not server liveness.
+        """
+        return True
+
+    async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
+        """Yield between-turn provider events until cancelled.
+
+        Adapters without a between-turn reader inherit this empty generator,
+        so calling it does no construction, startup, foreground-stream or
+        other work. An adapter with a reader overrides it; the caller owns
+        exclusivity and must cancel a running drain and await its full
+        unwind — cancellation alone does not establish exclusive ownership.
+        """
+        return
+        yield  # unreachable: gives this body a yield so calling it builds an async generator
+
+    @property
     def background_work_outstanding(self) -> bool:
         """True while background work this provider's process owns is running."""
         return False

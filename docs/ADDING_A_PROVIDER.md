@@ -37,9 +37,15 @@ These read the registry and pick up a new id with no further edit:
 
 ## The turn contract
 
-Implement `ciao.providers.base.BaseProvider`. The chat manager also calls
-the methods in the second table through `getattr`. A missing method is a
-silent no-op for that feature, not a startup error.
+Implement `ciao.providers.base.BaseProvider`. The drain and connection
+operations the service dispatches — `can_drain`, `cli_connected`,
+`drain_events` — are concrete optional defaults on the base, so a minimal
+adapter implementing only `run_streaming` satisfies that contract. A
+missing override for any other row below still degrades to that row's
+base default, an unsupported-feature answer or a silent skip — check each
+row's last column before assuming one fits. Provider-specific manager
+access that remains duck-typed or id-branched is in the skip list below
+and is separate work, not something this table has finished.
 
 ### Inbound: `AgentRequest`
 
@@ -85,7 +91,9 @@ set and nothing else.
 | `has_question_request`, `question_request_session` | Native-form ownership and child-session selection. | Defaults to false/empty values. |
 | `respond_permission` | The approval card; return `QuestionResponseResult` after acknowledgement. | Explicit nonretryable unsupported result. Claude adapts its local `PermissionGate` boolean at this boundary. |
 | `respond_question` | A native question card; return `QuestionResponseResult` after acknowledgement. | Explicit nonretryable unsupported result. |
-| `can_drain` / `drain_events` | Claude and OpenCode, between turns, so a background agent or shell can wake the parent. | OpenCode reports `can_drain` true only while a live server has background shells or subagents outstanding. |
+| `can_drain` | The between-turns drain scheduler in `ciao/web/chat_streaming.py`: true only when the adapter permits a between-turn reader right now. | Defaults to `False`, and eligibility is dynamic, not a static capability: OpenCode reports true only with a live server, a session and outstanding background work, Claude additionally requires a connected client. The service forwards `drain_events` without re-checking this. |
+| `cli_connected` | `_cli_owner_alive` in the chat manager, for the orphan-CLI-task wake sweep. | Defaults to `True`: an adapter that keeps no long-lived subprocess reports no owner loss. A service holding no provider instance reports `False`. OpenCode inherits this default — inherited `True` says nothing about whether a server is running. |
+| `drain_events` | Claude and OpenCode, between turns, so a background agent or shell can wake the parent. | Defaults to an empty async generator with no side effects. The service forwards events unchanged — identity, order, exceptions and cancellation. Before starting another stream reader or a foreground turn, the caller cancels the running drain and awaits its full unwind; not every current host path is audited to enforce that obligation. |
 | `read_thread` | OpenCode transcript history and transcript replay. Claude history uses its own SDK/JSONL helpers instead. Session reclaim no longer routes through this row. | See the skip list below. |
 | `native_title_candidates(workspace_root, session_id)` (classmethod) | `ProjectChatManager._native_chat_title`, tier 1 of the auto-title poll. | On `BaseProvider` the default returns `()` — no native title for that provider. |
 | `delete_session(workspace_root, session_id)` (classmethod) | `ProjectChatManager._reclaim_provider_sessions_async`, the delete/archive/reset cleanup. | On `BaseProvider` the default returns `None` — an adapter inheriting it intentionally does no reclaim, and the host stays quiet. |
