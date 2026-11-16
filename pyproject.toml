@@ -48,9 +48,6 @@ dependencies = [
   # release is already resolved in uv.lock (via pip-audit -> rich), so this
   # only promotes it to a direct requirement for wheel installs.
   "markdown-it-py==4.3.0",
-  # Windows has no system tz database, so without this `zoneinfo.ZoneInfo`
-  # (schedules, operator actions) cannot find any zone, not even UTC.
-  "tzdata; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
