@@ -41,14 +41,16 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ciao import cli_envelopes, subagent_tracking
+from ciao.tool_summary import (
+    opencode_file_touches,
+    summarize_claude_tool_input,
+    summarize_opencode_tool_input,
+)
 from ciao.background_notice import format_finished_runs
 from ciao.models import ChatContext
-from ciao.providers.claude import _summarize_tool_input
 from ciao.providers.opencode import (
     OpencodeProvider,
     native_wake_run,
-    _file_touches as _opencode_file_touches,
-    _summarize_tool_input as _summarize_opencode_tool_input,
 )
 from ciao.rate_limits import is_rate_limit_telemetry
 from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
@@ -257,7 +259,7 @@ def _extract_assistant_blocks(
             tinput = block.get("input") or {}
             if not isinstance(tinput, dict):
                 tinput = {}
-            summary = _summarize_tool_input(name, tinput)
+            summary = summarize_claude_tool_input(name, tinput)
             touches = normalize_file_touch_paths(
                 extract_file_touches(name, tinput),
                 workspace_root,
@@ -892,7 +894,7 @@ def _render_opencode_thread(
                 state = state if isinstance(state, dict) else {}
                 raw_input = state.get("input")
                 touches = normalize_file_touch_paths(
-                    _opencode_file_touches(tool, raw_input) or [],
+                    opencode_file_touches(tool, raw_input) or [],
                     workspace_root,
                     agent_root=agent_root,
                 )
@@ -913,7 +915,7 @@ def _render_opencode_thread(
                             "tool": tool,
                         })
                     continue
-                summary = _summarize_opencode_tool_input(tool, raw_input)
+                summary = summarize_opencode_tool_input(tool, raw_input)
                 line = f"{_tool_icon(tool)} {tool}"
                 if summary:
                     line += f" {summary}"

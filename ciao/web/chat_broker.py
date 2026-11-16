@@ -381,7 +381,7 @@ def extract_file_touches(tool_name: str, tool_input: object) -> list[dict]:
       the path out of ``file_path``, ``path``, or ``notebook_path``
       (NotebookEdit). For shell tools we parse ``command``.
     - ``str``: the live stream summary produced by
-      ``_summarize_tool_input`` in ``ciao/providers/claude.py``. For the
+      ``summarize_claude_tool_input`` in ``ciao/tool_summary.py``. For the
       dedicated file-touch tools it already collapses the dict into the path
       string itself. For Bash the summary is often a description, so callers
       that have the raw input should prefer

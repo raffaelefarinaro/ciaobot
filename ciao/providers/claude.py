@@ -61,6 +61,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import TERMINAL_TASK_STATUSES, HookContext, HookInput, HookJSONOutput, PermissionMode, SandboxSettings, SystemPromptPreset
 
+from ciao.tool_summary import summarize_claude_tool_input
 from ciao.fs_sandbox import (
     CLAUDE_FILE_TOOL_PATH_KEYS,
     claude_file_tool_guard,
@@ -414,88 +415,6 @@ def _route_cli_stderr(line: str) -> None:
         logger.debug("claude-cli stderr (benign): %s", stripped)
         return
     logger.warning("claude-cli stderr: %s", stripped)
-
-
-def _summarize_tool_input(name: str, tool_input: dict) -> str:
-    """Extract the most relevant piece from tool input for display."""
-    if not tool_input:
-        return ""
-    # File operations
-    if name in ("Read", "read"):
-        path: str = tool_input.get("file_path", "")
-        return path
-    if name in ("Edit", "edit"):
-        path = tool_input.get("file_path") or tool_input.get("path") or ""
-        return path
-    if name in ("Write", "write"):
-        path = tool_input.get("file_path") or tool_input.get("path") or ""
-        return path
-    # Search
-    if name in ("Grep", "grep"):
-        pattern: str = tool_input.get("pattern", "")
-        path = tool_input.get("path", "")
-        return f'"{pattern}"' + (f" in {path}" if path else "")
-    if name in ("Glob", "glob"):
-        pattern = tool_input.get("pattern", "")
-        path = tool_input.get("path", "")
-        return pattern + (f" in {path}" if path else "")
-    # Shell
-    if name in ("Bash", "bash"):
-        cmd: str = tool_input.get("command", "")
-        desc: str = tool_input.get("description", "")
-        if desc:
-            return desc
-        # Truncate long commands
-        return cmd[:120] + ("..." if len(cmd) > 120 else "")
-    # Agents
-    if name in ("Agent", "agent"):
-        desc = tool_input.get("description", "")
-        subtype: str = tool_input.get("subagent_type", "")
-        if subtype and desc:
-            return f"[{subtype}] {desc}"
-        return desc or subtype
-    # Tasks
-    if name in ("TaskCreate",):
-        return cast(str, tool_input.get("subject", ""))
-    if name in ("TaskUpdate",):
-        tid = tool_input.get("taskId", "")
-        status = tool_input.get("status", "")
-        return f"#{tid} → {status}" if status else f"#{tid}"
-    # Skills
-    if name in ("Skill",):
-        return cast(str, tool_input.get("skill", ""))
-    # Interactive question prompt. Headless CLI auto-cancels with empty
-    # answers, so the PWA needs the full questions payload to render its
-    # own picker. Returning the JSON here keeps every downstream consumer
-    # (live stream, /messages replay, schedule logs) on one source of truth.
-    if name in ("AskUserQuestion",):
-        questions = tool_input.get("questions")
-        if questions:
-            try:
-                return json.dumps({"questions": questions}, ensure_ascii=False, default=str)
-            except (TypeError, ValueError):
-                return ""
-        return ""
-    # Web
-    if name in ("WebSearch",):
-        return cast(str, tool_input.get("query", ""))
-    if name in ("WebFetch",):
-        return cast(str, tool_input.get("url", ""))[:100]
-    # Notebook
-    if name in ("NotebookEdit",):
-        return cast(str, tool_input.get("cell_id", ""))
-    # MCP tools (tool name contains __)
-    if "__" in name:
-        # Try to find the most interesting field
-        for key in ("query", "text", "message", "url", "path", "name", "title"):
-            val = tool_input.get(key, "")
-            if val:
-                return str(val)[:100]
-    # Fallback: first string value
-    for val in tool_input.values():
-        if isinstance(val, str) and val:
-            return val[:100]
-    return ""
 
 
 _BRIDGE_TO_SDK_MODE: dict[BridgeMode, PermissionMode] = {
@@ -2156,7 +2075,7 @@ class ClaudeProvider(BaseSDKProvider):
                     # the PWA Outputs chips.
                     from ciao.web.chat_broker import extract_file_touches
                     touches = extract_file_touches(block.name, raw_input)
-                    summary = _summarize_tool_input(block.name, raw_input)
+                    summary = summarize_claude_tool_input(block.name, raw_input)
                     input_chars, surface = tool_call_facts(block.name, raw_input)
                     events.append(ToolUseEvent(
                         type="assistant",
