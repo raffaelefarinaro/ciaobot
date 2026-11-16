@@ -78,12 +78,6 @@ class _HostileStr(str):
         raise AssertionError("a string subclass hash must not run")
 
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="the native installer is a macOS path; Windows keeps the legacy installer",
-)
-
-
 def _writer(**kwargs: object) -> tuple[EventWriter, int]:
     """A writer on a fresh pipe, plus the read end to inspect its bytes."""
     read_fd, write_fd = os.pipe()
@@ -1313,20 +1307,6 @@ def test_invalid_run_id_is_refused_before_creating_anything(tmp_path: Path) -> N
             _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=bad)
             == "invalid_run_id"
         )
-    assert list(state.iterdir()) == []
-
-
-def test_the_lock_refuses_a_non_native_platform(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    state = _state_dir(tmp_path)
-    prepared = _prepared(state)
-    monkeypatch.setattr(native.sys, "platform", "win32")
-    assert (
-        _lock_reason(NativeRunLock.acquire, prepared, run_id=RUN_ID)
-        == "unsupported_platform"
-    )
-    prepared.close()
     assert list(state.iterdir()) == []
 
 

@@ -29,7 +29,6 @@ import json
 import math
 import os
 import re
-import sys
 import time
 import uuid
 import warnings
@@ -64,7 +63,6 @@ from claude_agent_sdk.types import TERMINAL_TASK_STATUSES, HookContext, HookInpu
 
 from ciao.fs_sandbox import (
     CLAUDE_FILE_TOOL_PATH_KEYS,
-    FsSandboxUnavailable,
     claude_file_tool_guard,
     claude_sandbox_settings,
 )
@@ -359,9 +357,7 @@ def get_bundled_claude_path() -> str | None:
     try:
         import claude_agent_sdk
         from pathlib import Path
-        import platform
-        cli_name = "claude.exe" if platform.system() == "Windows" else "claude"
-        bundled_path = Path(claude_agent_sdk.__file__).parent / "_bundled" / cli_name
+        bundled_path = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
         if bundled_path.exists() and bundled_path.is_file():
             return str(bundled_path)
     except Exception:
@@ -1091,11 +1087,6 @@ class ClaudeProvider(BaseSDKProvider):
         cli_env = dict(request.extra_env or {})
         self._claudeai_expected = cli_env.get("ENABLE_CLAUDEAI_MCP_SERVERS") != "false"
         if request.agent_fs_scope == "workspace":
-            if sys.platform == "win32":
-                raise FsSandboxUnavailable(
-                    "workspace filesystem sandbox is not available on Windows; "
-                    "set the workspace to whole machine"
-                )
             roots = [Path(root) for root in request.agent_roots]
             sandbox_dict: dict[str, Any] | None = claude_sandbox_settings(
                 scope=request.agent_fs_scope,

@@ -97,9 +97,7 @@ stderr, so events and
 diagnostics never share one stream. ``after_phase`` pre-sets the last phase
 already announced by the shell, so the writer refuses to re-emit it. It accepts
 any writable descriptor the platform can write to, including pipes and sockets;
-it never requires a regular file. The native path is macOS-only: on Windows the constructor refuses
-rather than pretend a descriptor protocol the legacy installer does not
-implement.
+it never requires a regular file. The native path is macOS-only.
 
 The run-bound lock lives in :mod:`ciao.native_lock`.
 
@@ -293,10 +291,6 @@ def _sigpipe_is_ignored() -> bool:
     changes that disposition, blocks the signal, or consumes a pending one; it
     only reads it. A different or unreadable disposition is a refusal.
     """
-    if sys.platform == "win32":
-        # Windows has no SIGPIPE; the constructor refuses the descriptor path
-        # separately rather than pretending this protocol exists there.
-        return True
     if _SIGPIPE is None:
         return False
     try:
@@ -349,8 +343,6 @@ def _loopback_origin(port: object) -> str:
 
 def _descriptor_flags(fd: int) -> int:
     """The current file-status flags, or ``invalid_fd`` if it is not usable."""
-    if sys.platform == "win32":  # pragma: no cover - the native path is macOS
-        raise EventError("invalid_fd")
     import fcntl
 
     try:
@@ -360,8 +352,6 @@ def _descriptor_flags(fd: int) -> int:
 
 
 def _set_descriptor_flags(fd: int, flags: int) -> None:
-    if sys.platform == "win32":  # pragma: no cover - the native path is macOS
-        raise EventError("invalid_fd")
     import fcntl
 
     try:
@@ -976,9 +966,6 @@ _HOST_VERIFICATION: Final[frozenset[str]] = frozenset(
         UNSUPPORTED_SCHEMA,
     }
 )
-# Windows has no SIGKILL/getpgid/killpg. The native coordinator refuses before
-# it spawns anything there; these aliases keep the module importable and make
-# the POSIX-only child cleanup fail closed if a caller reaches it.
 _SIGKILL: Final[int | None] = getattr(signal, "SIGKILL", None)
 _GETPGID: Final[Callable[[int], int] | None] = getattr(os, "getpgid", None)
 _KILLPG: Final[Callable[[int, int], None] | None] = getattr(os, "killpg", None)
@@ -1796,8 +1783,6 @@ def _require_bootstrap_absent(path: Path, reason: str) -> None:
 
 def _descriptor_access_mode(fd: int) -> int:
     """The descriptor's access mode (``O_RDONLY``, ``O_WRONLY`` or ``O_RDWR``)."""
-    if sys.platform == "win32":  # pragma: no cover - the native path is macOS
-        raise NativeBootstrapError("invalid_context")
     import fcntl
 
     try:
@@ -2386,15 +2371,11 @@ def _is_dropped(name: str) -> bool:
 
 
 def _uid() -> int:
-    if sys.platform == "win32":
-        raise NativeCoordinatorError("unsupported_platform", "unknown_state")
     return os.getuid()
 
 
 def _passwd_home() -> Path:
     """The account home from the passwd database, never from ``$HOME``."""
-    if sys.platform == "win32":
-        raise NativeCoordinatorError("unsupported_platform", "unknown_state")
     import pwd
 
     try:
@@ -2582,8 +2563,6 @@ def _verified_copy(
     ``digest``. The copy is then re-hashed against the same digest. Only the copy
     is used after this.
     """
-    if sys.platform == "win32":
-        raise NativeCoordinatorError("unsupported_platform", "unknown_state")
     invalid = NativeCoordinatorError("invalid_artifacts", "invalid_arguments")
     try:
         fd = os.open(source, os.O_RDONLY | _O_NOFOLLOW)
@@ -3311,10 +3290,7 @@ class _HandoverArgumentParser(argparse.ArgumentParser):
 
 
 def _cancel_signal_numbers() -> tuple[int, ...]:
-    numbers = [signal.SIGINT, signal.SIGTERM]
-    if sys.platform != "win32":
-        numbers.append(signal.SIGHUP)
-    return tuple(numbers)
+    return (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
 def main(argv: list[str] | None = None) -> int:

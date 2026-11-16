@@ -25,12 +25,6 @@ from tests.test_native_installer import (
     _state_dir,
 )
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="the native installer is a macOS path; Windows keeps the legacy installer",
-)
-
-
 def test_acquire_rebinds_the_prepared_descriptor(tmp_path: Path) -> None:
     state = _state_dir(tmp_path)
     prepared = native_lock.prepare_native_state_dir(state, trusted_root=tmp_path)
@@ -287,24 +281,6 @@ def test_inspect_reports_identity_only_from_the_validated_read(
     assert status == native_lock.NativeLockStatus(
         "busy", RUN_ID, os.getpid(), True
     )
-
-
-# Item 2: Windows never probes a pid.
-def test_inspect_refuses_on_win32_without_probing_a_pid(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    state = _state_dir(tmp_path)
-    _make_lock_dir(state, RUN_ID)
-
-    def no_probe(pid: int, sig: int) -> None:
-        raise AssertionError("os.kill must not run on win32")
-
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(os, "kill", no_probe)
-
-    status = native_lock.inspect_native_lock(state)
-
-    assert status == native_lock.NativeLockStatus("unsafe", None, None, None)
 
 
 # Item 4: hostile shapes, each with its actual expected state.

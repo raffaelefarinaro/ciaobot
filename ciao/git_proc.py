@@ -12,9 +12,9 @@ read ends never close and the transport is never torn down. Against an
 unreachable remote the then-30s backup loop exhausted a 256-fd launchd limit
 in about an hour, after which every subprocess spawn failed with EMFILE.
 
-The fix is to put git in its own process tree (``tree_spawn_options``: a
-process group on POSIX, a Job Object on Windows) so the tree kill takes the
-grandchild with it, then await the child and close the transport explicitly.
+The fix is to put git in its own process tree (``tree_spawn_options``: its own
+process group) so the tree kill takes the grandchild with it, then await the
+child and close the transport explicitly.
 The new session also means git has no controlling terminal; both callers are
 server-side background paths with no TTY to prompt on anyway, and a
 credential prompt there already failed rather than blocked.

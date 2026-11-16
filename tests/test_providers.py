@@ -1514,7 +1514,6 @@ def test_turn_model_falls_back_to_model_usage_without_a_main_call() -> None:
 async def test_claude_workspace_scope_sets_sandbox_and_roots(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    # The sandbox is POSIX-only; Windows refuses workspace scope (its own test).
     monkeypatch.setattr(sys, "platform", "darwin")
     captured = {}
 
@@ -1675,7 +1674,6 @@ async def test_claude_workspace_scope_hands_the_read_only_grant_to_the_guard(
 async def test_claude_workspace_scope_keeps_vault_inside_agent_root_out_of_add_dirs(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    # The sandbox is POSIX-only; Windows refuses workspace scope (its own test).
     monkeypatch.setattr(sys, "platform", "darwin")
     captured = {}
 
@@ -1842,37 +1840,9 @@ async def test_claude_machine_scope_omits_sandbox(tmp_path: Path, monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_claude_workspace_scope_refuses_on_windows(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    constructed = []
-
-    class FakeClient:
-        def __init__(self, options):
-            constructed.append(options)
-
-    provider = ClaudeProvider(tmp_path)
-    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
-    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
-    monkeypatch.setattr(sys, "platform", "win32")
-    request = AgentRequest(
-        prompt="test",
-        model="sonnet",
-        mode="auto",
-        agent_fs_scope="workspace",
-        agent_roots=(str(tmp_path / "agent"),),
-    )
-
-    with pytest.raises(FsSandboxUnavailable):
-        await provider._ensure_connected(request)
-    assert constructed == []
-
-
-@pytest.mark.asyncio
 async def test_claude_scope_change_reconnects_live_process(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    # The sandbox is POSIX-only; Windows refuses workspace scope (its own test).
     monkeypatch.setattr(sys, "platform", "darwin")
     from ciao.models import provider_reuse_key
 

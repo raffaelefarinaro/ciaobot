@@ -54,7 +54,6 @@ import errno
 import json
 import os
 import stat
-import sys
 import threading
 import uuid
 from dataclasses import dataclass
@@ -286,8 +285,6 @@ def prepare_native_state_dir(
     component is checked, but that is evidence, not proof of exclusive
     ownership.
     """
-    if sys.platform == "win32":
-        raise NativeLockError("unsupported_platform")
     target = Path(state_dir)
     try:
         root = Path.home() if trusted_root is None else Path(trusted_root)
@@ -696,8 +693,6 @@ class NativeRunLock:
         ``state`` is the handle :func:`prepare_native_state_dir` returned. It is
         consumed here: its held descriptor is re-bound, never reopened by path.
         """
-        if sys.platform == "win32":
-            raise NativeLockError("unsupported_platform")
         if not isinstance(state, NativeStateDir):
             raise NativeLockError("state_dir_unsafe")
         canonical = _canonical_lock_run_id(run_id)
@@ -1191,9 +1186,6 @@ def _pid_alive(pid: int) -> bool | None:
 def inspect_native_lock(state_dir: Path) -> NativeLockStatus:
     """Report the run lock under ``state_dir``; never create, repair, adopt or delete.
 
-    Windows has no supported liveness probe here, so every answer there is
-    ``unsafe`` without touching the filesystem or any pid.
-
     The state directory's final components are opened no-follow with the same
     private, descriptor-relative checks acquisition uses, and the lock is
     classified by the same reasons. Unlike acquisition, this does not walk the
@@ -1203,8 +1195,6 @@ def inspect_native_lock(state_dir: Path) -> NativeLockStatus:
     alive. Nothing is raised for any state of the filesystem: a directory that
     cannot be opened safely is ``unsafe``.
     """
-    if sys.platform == "win32":
-        return NativeLockStatus("unsafe", None, None, None)
     try:
         os.lstat(state_dir)
     except FileNotFoundError:

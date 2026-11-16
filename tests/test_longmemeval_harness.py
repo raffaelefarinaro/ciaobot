@@ -330,11 +330,6 @@ def test_stratified_sample_matches_published_sizes() -> None:
     assert [entry["question_id"] for entry in other] != ids
 
 
-#: The operator commands below are POSIX shell (`cat`, `printf`, `VAR=value cmd`).
-posix_shell = pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell commands")
-
-
-@posix_shell
 def test_qa_row_uses_the_answer_and_judge_prompts(tmp_path: Path) -> None:
     answer_cmd = (
         "grep -q 'Answer (step by step):' {prompt_file} && "
@@ -365,7 +360,6 @@ def test_qa_row_uses_the_answer_and_judge_prompts(tmp_path: Path) -> None:
     assert row["latency_ms"]["judge"] is not None
 
 
-@posix_shell
 def test_failed_answer_is_counted_and_not_judged(tmp_path: Path) -> None:
     row = HARNESS.run_question(
         DATASET[0],
@@ -443,7 +437,6 @@ def _stable(row: dict) -> dict:
     return row
 
 
-@posix_shell
 def test_raw_rows_match_the_pre_curated_golden(tmp_path: Path) -> None:
     """Raw ingest writes exactly what the harness wrote before curated ingest.
 
@@ -476,7 +469,6 @@ def test_raw_rows_match_the_pre_curated_golden(tmp_path: Path) -> None:
     assert rows == golden
 
 
-@posix_shell
 def test_raw_cli_has_no_curated_output(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -528,7 +520,6 @@ def live_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return live
 
 
-@posix_shell
 def test_curated_ingest_answers_from_what_the_memory_pass_kept(
     tmp_path: Path, live_install: Path
 ) -> None:
@@ -595,7 +586,6 @@ def test_curated_ingest_answers_from_what_the_memory_pass_kept(
     assert "Logs/Chats/" in log
 
 
-@posix_shell
 @pytest.mark.parametrize(
     ("proposals", "accepted", "dropped", "pending", "memory_entries", "retained"),
     [
@@ -637,7 +627,6 @@ def test_curated_proposal_modes_are_explicit(
     assert "retrieved_note_paths" in row
 
 
-@posix_shell
 def test_abstention_has_no_evidence_to_retain(tmp_path: Path) -> None:
     """An `_abs` question is never scored for retained evidence, gold ids or not."""
     entry = {**DATASET[2], "answer_session_ids": ["real-0"]}
@@ -655,7 +644,6 @@ def test_abstention_has_no_evidence_to_retain(tmp_path: Path) -> None:
     assert row["curation"]["evidence_in_context"] is None
 
 
-@posix_shell
 def test_timed_out_extractor_is_killed_with_its_children(tmp_path: Path) -> None:
     pidfile = tmp_path / "child.pid"
     started = time.perf_counter()
@@ -699,7 +687,6 @@ def test_curated_refuses_a_temp_dir_under_a_guide(tmp_path: Path) -> None:
         )
 
 
-@posix_shell
 def test_failed_memory_pass_makes_the_question_incomplete(tmp_path: Path) -> None:
     row = HARNESS.run_question(
         DATASET[0],
@@ -739,7 +726,6 @@ def test_cli_curated_needs_explicit_flags(tmp_path: Path) -> None:
         HARNESS.main([*base, "--proposals", "drop"])
 
 
-@posix_shell
 def test_cli_curated_retrieval_only_end_to_end(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -58,12 +58,6 @@ _EXE_REL = f"Contents/MacOS/{EXECUTABLE_NAME}"
 _ICON_REL = f"Contents/Resources/{ICON_NAME}"
 _CODESIGN_REL = "Contents/_CodeSignature/CodeResources"
 
-# The uid/mode half of the record reader is darwin-only in production; these
-# tests mock ``sys.platform`` and so cannot run on a native Windows interpreter.
-requires_posix_uid = pytest.mark.skipif(
-    sys.platform == "win32", reason="mocking darwin needs a POSIX uid"
-)
-
 HAS_TOOLS = (
     sys.platform == "darwin"
     and shutil.which("xcrun") is not None
@@ -362,7 +356,6 @@ def _install_production_host(
     return archive, entry
 
 
-@requires_posix_uid
 def test_signed_install_uses_manifest_revision_and_expected_team(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -409,7 +402,6 @@ def test_signed_install_uses_manifest_revision_and_expected_team(
     assert not fresh_target.exists()
 
 
-@requires_posix_uid
 def test_signed_entry_revision_without_its_policy_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -438,7 +430,6 @@ def test_signed_entry_revision_without_its_policy_is_refused(
         assert not record.exists()
 
 
-@requires_posix_uid
 def test_legacy_four_to_signed_requires_deferred_transaction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -499,7 +490,6 @@ def test_legacy_four_to_signed_requires_deferred_transaction(
     assert status["owner_alive"] is True
 
 
-@requires_posix_uid
 def test_signed_current_host_is_noop_across_release_rebuilds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -546,7 +536,6 @@ def test_signed_current_host_is_noop_across_release_rebuilds(
     assert not server_host_install.transaction_status()["pending"]
 
 
-@requires_posix_uid
 def test_signed_host_refuses_team_rotation_and_legacy_downgrade(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -641,7 +630,6 @@ def test_signature_rejection_is_never_a_warn_and_continue_code(
     assert "warning:" in capsys.readouterr().err
 
 
-@requires_posix_uid
 def test_wrapped_record_restore_failure_keeps_backup_and_reports_both_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -780,7 +768,6 @@ def test_verify_host_archive_rejects_malformed_entries(
     assert caught.value.code == server_host_install.ARCHIVE_MISMATCH
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
 def test_verify_host_archive_rejects_a_symlink(tmp_path: Path) -> None:
     archive, _bundle, entry = _fixture(tmp_path)
     link = tmp_path / SERVER_HOST_FILENAME
@@ -915,7 +902,6 @@ def test_extract_host_archive_rejects_a_non_archive(tmp_path: Path) -> None:
 # ── the atomic install, the record and the refusals ─────────────────────────
 
 
-@requires_posix_uid
 def test_install_writes_the_bundle_and_the_private_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -944,7 +930,6 @@ def test_install_writes_the_bundle_and_the_private_record(
     assert any(command[1] == "--verify" for command in runner.commands)
 
 
-@requires_posix_uid
 def test_install_is_a_noop_when_the_same_host_is_already_verified(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -970,7 +955,6 @@ def test_install_is_a_noop_when_the_same_host_is_already_verified(
     assert record.read_bytes() == record_bytes
 
 
-@requires_posix_uid
 def test_require_absent_refuses_a_current_host_and_never_returns_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1021,7 +1005,6 @@ def test_require_absent_refuses_a_current_host_and_never_returns_it(
     assert first.bundle_path == os.path.realpath(target)
 
 
-@requires_posix_uid
 def test_require_absent_refuses_an_orphan_record_and_preserves_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1052,7 +1035,6 @@ def test_require_absent_refuses_an_orphan_record_and_preserves_it(
     assert record.read_bytes() == record_bytes
 
 
-@requires_posix_uid
 def test_require_absent_rechecks_a_record_that_appears_while_staging(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1089,7 +1071,6 @@ def test_require_absent_rechecks_a_record_that_appears_while_staging(
     assert sorted(item.name for item in target.parent.iterdir()) == []
 
 
-@requires_posix_uid
 def test_require_absent_refuses_an_unsafe_bundle_or_record_link(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1134,7 +1115,6 @@ def test_require_absent_refuses_an_unsafe_bundle_or_record_link(
     assert not os.path.lexists(target)
 
 
-@requires_posix_uid
 def test_require_absent_refuses_deferred_upgrade_flags_before_any_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1156,7 +1136,6 @@ def test_require_absent_refuses_deferred_upgrade_flags_before_any_work(
     assert caught.value.code == server_host_install.INSTALL_FAILED
 
 
-@requires_posix_uid
 def test_install_refuses_a_foreign_bundle_without_touching_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1179,7 +1158,6 @@ def test_install_refuses_a_foreign_bundle_without_touching_it(
     assert runner.commands == []
 
 
-@requires_posix_uid
 def test_install_refuses_a_revision_one_host_without_touching_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1217,7 +1195,6 @@ def test_install_refuses_a_revision_one_host_without_touching_it(
     assert runner.commands == []
 
 
-@requires_posix_uid
 @pytest.mark.parametrize("revision", [2, 3])
 def test_install_replaces_a_superseded_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, revision: int
@@ -1251,7 +1228,6 @@ def test_install_replaces_a_superseded_host(
     assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
 
 
-@requires_posix_uid
 def test_install_restores_the_superseded_host_when_the_replacement_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1302,7 +1278,6 @@ def test_install_restores_the_superseded_host_when_the_replacement_fails(
     assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
 
 
-@requires_posix_uid
 def test_a_failed_rollback_names_where_the_superseded_host_is(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1355,7 +1330,6 @@ def test_a_failed_rollback_names_where_the_superseded_host_is(
     assert not target.exists() or not (target / _EXE_REL).exists()
 
 
-@requires_posix_uid
 def test_install_refuses_a_host_it_cannot_prove_it_owns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1406,8 +1380,6 @@ def test_install_refuses_a_host_it_cannot_prove_it_owns(
     assert runner.commands == []
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
-@requires_posix_uid
 def test_install_refuses_a_symlinked_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1429,7 +1401,6 @@ def test_install_refuses_a_symlinked_target(
     assert target.is_symlink()
 
 
-@requires_posix_uid
 def test_install_refuses_a_tampered_archive_and_leaves_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1455,7 +1426,6 @@ def test_install_refuses_a_tampered_archive_and_leaves_nothing(
     assert not target.exists()
 
 
-@requires_posix_uid
 def test_install_refuses_a_foreign_bundle_inside_the_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1488,7 +1458,6 @@ def test_install_refuses_a_foreign_bundle_inside_the_archive(
     )
 
 
-@requires_posix_uid
 def test_install_refuses_a_failing_signature_probe_and_leaves_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1508,7 +1477,6 @@ def test_install_refuses_a_failing_signature_probe_and_leaves_nothing(
     assert not target.exists()
 
 
-@requires_posix_uid
 def test_install_refuses_a_relative_or_misnamed_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1536,7 +1504,7 @@ def test_install_refuses_a_relative_or_misnamed_target(
     assert caught.value.code == server_host_install.INSTALL_FAILED
 
 
-@pytest.mark.parametrize("platform_name", ["linux", "win32"])
+@pytest.mark.parametrize("platform_name", ["linux"])
 def test_install_refuses_a_non_macos_platform_before_anything(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform_name: str
 ) -> None:
@@ -1556,7 +1524,6 @@ def test_install_refuses_a_non_macos_platform_before_anything(
     assert not target.exists()
 
 
-@requires_posix_uid
 def test_a_failed_record_write_leaves_no_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1586,7 +1553,6 @@ def test_a_failed_record_write_leaves_no_bundle(
     assert not record.exists()
 
 
-@requires_posix_uid
 def test_a_failed_final_verification_leaves_neither_bundle_nor_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1615,7 +1581,6 @@ def test_a_failed_final_verification_leaves_neither_bundle_nor_record(
     assert not record.exists()
 
 
-@requires_posix_uid
 def test_the_record_is_written_before_the_rename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1642,7 +1607,6 @@ def test_the_record_is_written_before_the_rename(
     assert seen["record_before_rename"] is True
 
 
-@requires_posix_uid
 def test_a_concurrent_creation_is_host_exists_and_keeps_the_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1684,7 +1648,6 @@ def test_a_concurrent_creation_is_host_exists_and_keeps_the_record(
     ) == read_host_ownership(record)
 
 
-@requires_posix_uid
 def test_an_eexist_rename_is_host_exists_not_install_failed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1716,7 +1679,6 @@ def test_an_eexist_rename_is_host_exists_not_install_failed(
     assert record.exists()
 
 
-@requires_posix_uid
 def test_a_non_eexist_rename_failure_is_install_failed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1804,7 +1766,6 @@ os._exit(71)
 """
 
 
-@requires_posix_uid
 def test_a_kill_after_the_rename_leaves_a_verified_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1859,7 +1820,6 @@ def test_a_kill_after_the_rename_leaves_a_verified_host(
 # ── the record reader sees exactly what was written ──────────────────────────
 
 
-@requires_posix_uid
 def test_record_written_by_install_round_trips(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2023,7 +1983,6 @@ def _host_entry(**overrides: Any) -> dict[str, Any]:
     return entry
 
 
-@requires_posix_uid
 def test_install_cli_installs_the_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2075,7 +2034,6 @@ def test_install_cli_installs_the_host(
     assert target.is_dir()
 
 
-@requires_posix_uid
 def test_install_cli_exits_3_for_a_host_it_cannot_prove_it_owns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2115,7 +2073,6 @@ def test_install_cli_exits_3_for_a_host_it_cannot_prove_it_owns(
     assert not record.exists()
 
 
-@requires_posix_uid
 def test_install_cli_exits_1_for_an_archive_that_does_not_match(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2148,7 +2105,6 @@ def test_install_cli_exits_1_for_an_archive_that_does_not_match(
     assert not os.path.lexists(target)
 
 
-@requires_posix_uid
 @pytest.mark.parametrize(
     "code",
     [
@@ -2195,7 +2151,6 @@ def test_install_cli_warns_and_exits_3_for_a_non_release_refusal(
     assert "warning:" in capsys.readouterr().err
 
 
-@requires_posix_uid
 def test_install_cli_is_fatal_for_an_archive_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2338,7 +2293,6 @@ def test_real_build_killed_after_the_rename_is_verified_next_run(
     assert bundle.stat().st_ino == inode
 
 
-@requires_posix_uid
 def test_require_absent_keeps_the_record_it_wrote_if_a_bundle_wins_the_rename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2387,7 +2341,6 @@ def test_require_absent_keeps_the_record_it_wrote_if_a_bundle_wins_the_rename(
     ]
 
 
-@requires_posix_uid
 def test_require_absent_does_not_delete_a_record_replaced_during_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2425,7 +2378,6 @@ def test_require_absent_does_not_delete_a_record_replaced_during_cleanup(
     assert not os.path.lexists(target)
 
 
-@requires_posix_uid
 def test_require_absent_does_not_delete_a_bundle_replaced_during_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2464,7 +2416,6 @@ def test_require_absent_does_not_delete_a_bundle_replaced_during_cleanup(
     assert record.is_file()
 
 
-@requires_posix_uid
 def test_require_absent_rollback_renames_then_removes_only_its_own_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2532,7 +2483,6 @@ def test_require_absent_rollback_renames_then_removes_only_its_own_bundle(
     assert target not in removed
 
 
-@requires_posix_uid
 def test_require_absent_rollback_keeps_a_substitute_swapped_in_before_the_move(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2587,7 +2537,6 @@ def test_require_absent_rollback_keeps_a_substitute_swapped_in_before_the_move(
     assert not target.exists()
 
 
-@requires_posix_uid
 def test_require_absent_rollback_keeps_the_bundle_when_the_move_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2628,7 +2577,6 @@ def test_require_absent_rollback_keeps_the_bundle_when_the_move_fails(
     assert target.is_dir()
 
 
-@requires_posix_uid
 def test_require_absent_rollback_keeps_an_unexaminable_moved_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2677,7 +2625,6 @@ def test_require_absent_rollback_keeps_an_unexaminable_moved_bundle(
     assert kept[0].is_dir()
 
 
-@requires_posix_uid
 def test_require_absent_rollback_reports_a_partial_removal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2726,7 +2673,6 @@ def test_require_absent_rollback_reports_a_partial_removal(
     assert kept[0].is_dir()
 
 
-@requires_posix_uid
 def test_require_absent_fresh_surface_checks_run_three_times_in_order(
     home_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2775,7 +2721,6 @@ def test_fresh_surface_rejects_an_unknown_moment(
         )
 
 
-@requires_posix_uid
 def test_require_absent_rejects_dotdot_dot_and_relative_paths_before_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2804,7 +2749,6 @@ def test_require_absent_rejects_dotdot_dot_and_relative_paths_before_mutation(
         assert not os.path.lexists(tmp_path / "Applications")
 
 
-@requires_posix_uid
 def test_require_absent_rejects_a_record_inside_the_bundle_before_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2829,7 +2773,6 @@ def test_require_absent_rejects_a_record_inside_the_bundle_before_mutation(
     assert not os.path.lexists(record)
 
 
-@requires_posix_uid
 def test_require_absent_rejects_symlinked_bundle_or_record_parent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2877,7 +2820,6 @@ def test_require_absent_rejects_symlinked_bundle_or_record_parent(
     assert not os.path.lexists(apps / APP_NAME)
 
 
-@requires_posix_uid
 def test_require_absent_leaves_preexisting_directory_modes_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2926,7 +2868,6 @@ def test_require_absent_leaves_preexisting_directory_modes_untouched(
     assert record.is_file()
 
 
-@requires_posix_uid
 def test_require_absent_rechecks_a_bundle_that_arrives_while_staging(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2958,7 +2899,6 @@ def test_require_absent_rechecks_a_bundle_that_arrives_while_staging(
     assert not os.path.lexists(record)
 
 
-@requires_posix_uid
 def test_require_absent_rechecks_a_journal_that_arrives_while_staging(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3001,7 +2941,6 @@ def _upgrade_state() -> Path:
     return state
 
 
-@requires_posix_uid
 def test_fresh_upgrade_lock_refuses_an_existing_nonprivate_file_without_chmod(
     home_dir: Path,
 ) -> None:
@@ -3023,7 +2962,6 @@ def test_fresh_upgrade_lock_refuses_an_existing_nonprivate_file_without_chmod(
     assert lock.stat().st_nlink == 1
 
 
-@requires_posix_uid
 def test_fresh_upgrade_lock_refuses_an_existing_hard_link_without_chmod(
     home_dir: Path,
 ) -> None:
@@ -3045,7 +2983,6 @@ def test_fresh_upgrade_lock_refuses_an_existing_hard_link_without_chmod(
     assert stat.S_IMODE(alias.stat().st_mode) == 0o600
 
 
-@requires_posix_uid
 def test_fresh_upgrade_lock_creates_exactly_0600_even_under_a_hostile_umask(
     home_dir: Path,
 ) -> None:
@@ -3061,7 +2998,6 @@ def test_fresh_upgrade_lock_creates_exactly_0600_even_under_a_hostile_umask(
         os.umask(previous)
 
 
-@requires_posix_uid
 def test_fresh_upgrade_lock_refuses_acl_or_unavailable_acl_without_chmod(
     home_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3101,7 +3037,6 @@ def test_fresh_upgrade_lock_refuses_acl_or_unavailable_acl_without_chmod(
     assert lock.stat().st_ino == inode
 
 
-@requires_posix_uid
 def test_fresh_upgrade_lock_busy_refusal_preserves_mode(home_dir: Path) -> None:
     _upgrade_state()
     lock = server_host_install.upgrade_lock_path()
@@ -3120,7 +3055,6 @@ def test_fresh_upgrade_lock_busy_refusal_preserves_mode(home_dir: Path) -> None:
         os.close(holder)
 
 
-@requires_posix_uid
 def test_require_absent_refuses_group_writable_owner_ancestry_without_chmod(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3152,7 +3086,6 @@ def test_require_absent_refuses_group_writable_owner_ancestry_without_chmod(
     assert not os.path.lexists(record)
 
 
-@requires_posix_uid
 def test_require_absent_refuses_a_foreign_acl_or_missing_acl_api_without_chmod(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3280,7 +3213,6 @@ def test_require_absent_refuses_a_real_macos_acl_grant_without_chmod(
         )
 
 
-@requires_posix_uid
 def test_fresh_upgrade_lock_refuses_a_name_swapped_after_open(
     home_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3336,7 +3268,6 @@ def test_fresh_upgrade_lock_refuses_a_real_macos_acl_grant_without_chmod(
         )
 
 
-@requires_posix_uid
 def test_require_absent_creates_missing_private_components_under_umask_002(
     tmp_path: Path, home_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3383,7 +3314,6 @@ def test_require_absent_creates_missing_private_components_under_umask_002(
     assert stat.S_IMODE(home_dir.stat().st_mode) == home_mode
 
 
-@requires_posix_uid
 def test_require_absent_leaves_legitimate_0755_parents_unchanged(
     tmp_path: Path, home_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3420,7 +3350,6 @@ def test_require_absent_leaves_legitimate_0755_parents_unchanged(
     assert stat.S_IMODE((local / "state" / "ciaobot").stat().st_mode) == 0o700
 
 
-@requires_posix_uid
 def test_require_absent_refuses_unsafe_parents_before_any_host_or_lock(
     tmp_path: Path, home_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3453,7 +3382,6 @@ def test_require_absent_refuses_unsafe_parents_before_any_host_or_lock(
     assert runner.commands == []
 
 
-@requires_posix_uid
 @pytest.mark.skipif(
     hasattr(os, "geteuid") and os.geteuid() == 0,
     reason="root can open a 0000 directory",
@@ -3636,7 +3564,7 @@ def _canonical_file(directory: Path, name: str) -> Path:
     return Path(os.path.realpath(path))
 
 
-@pytest.mark.parametrize("platform_name", ["darwin", "linux", "win32"])
+@pytest.mark.parametrize("platform_name", ["darwin", "linux"])
 @pytest.mark.parametrize(
     "bad_pid", [2**32 + os.getpid(), 0, -1, True], ids=["overflow", "zero", "neg", "bool"]
 )
@@ -3770,7 +3698,6 @@ def test_different_file_at_a_different_path_is_a_mismatch(
     assert caught.value.code == server_host_install.EXECUTABLE_MISMATCH
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
 def test_a_symlinked_expected_path_is_refused(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -3790,7 +3717,6 @@ def test_a_symlinked_expected_path_is_refused(
     )
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
 def test_a_symlinked_parent_directory_is_accepted(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

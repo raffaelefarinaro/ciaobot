@@ -107,9 +107,6 @@ async def test_startup_cleanup_error_has_no_exception_chain(monkeypatch, tmp_pat
         def close_checked(self):
             raise OSError("cleanup-secret")
 
-        def detach_job_handle(self):
-            return None
-
     server = mod._EphemeralServer(tmp_path)
 
     async def fail():
@@ -654,9 +651,6 @@ async def test_cancellation_during_failing_spawn_has_no_raw_context(monkeypatch,
 async def test_exited_posix_leader_is_not_signalled(tmp_path):
     import ciao.providers.opencode as mod
 
-    if mod.sys.platform == "win32":
-        pytest.skip("POSIX-specific behavior")
-
     class Process:
         returncode = 0
 
@@ -679,9 +673,6 @@ async def test_exited_posix_leader_is_not_signalled(tmp_path):
 @pytest.mark.asyncio
 async def test_posix_missing_leader_requires_confirmed_exit(tmp_path):
     import ciao.providers.opencode as mod
-    if mod.sys.platform == "win32":
-        pytest.skip("POSIX-specific behavior")
-
     class Process:
         returncode = None
 
@@ -704,8 +695,6 @@ async def test_posix_missing_leader_requires_confirmed_exit(tmp_path):
 @pytest.mark.parametrize("failure", ["kill", "wait"])
 async def test_posix_kill_and_reap_failure_quarantine(monkeypatch, tmp_path, failure):
     import ciao.providers.opencode as mod
-    if mod.sys.platform == "win32":
-        pytest.skip("POSIX-specific behavior")
     monkeypatch.setattr(mod, "_SHUTDOWN_TIMEOUT", 0.01)
     calls = []
 
@@ -748,8 +737,6 @@ async def test_posix_kill_and_reap_failure_quarantine(monkeypatch, tmp_path, fai
 async def test_startup_cleanup_failure_quarantines_only_uncertain_tree(tmp_path, failure):
     import ciao.providers.opencode as mod
 
-    if mod.sys.platform == "win32":
-        pytest.skip("POSIX termination behavior")
     calls = []
 
     class Process:
@@ -795,50 +782,6 @@ async def test_startup_cleanup_failure_quarantines_only_uncertain_tree(tmp_path,
         with mod._SERVER_START_GUARD:
             state = mod._SERVER_START_LOCKS.get(str(tmp_path.resolve()))
         assert (state is not None and state.quarantined) == (failure in {"terminate", "wait"})
-    finally:
-        with mod._SERVER_START_GUARD:
-            mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
-
-
-@pytest.mark.asyncio
-async def test_windows_checked_failure_retains_job_handle(monkeypatch, tmp_path):
-    from types import SimpleNamespace
-    import ciao.providers.opencode as mod
-
-    calls = []
-    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform="win32"))
-
-    class Process:
-        returncode = 0
-
-        async def wait(self):
-            calls.append("wait")
-            return 0
-
-    class Tree:
-        def kill_checked(self):
-            calls.append("kill")
-            raise OSError("kill-secret")
-
-        def close_checked(self):
-            calls.append("close")
-            raise OSError("close-secret")
-
-        def detach_job_handle(self):
-            calls.append("detach")
-            return 123456
-
-    try:
-        assert await mod._startup_cleanup(tmp_path, Process(), Tree())
-        assert calls == ["kill", "wait", "close", "detach"]
-        with mod._SERVER_START_GUARD:
-            state = mod._SERVER_START_LOCKS[str(tmp_path.resolve())]
-            assert state.quarantined and state.retained_job_handles == [123456]
-        with pytest.raises(mod.SanitizedStartupError, match="quarantined"):
-            async with mod._server_start_lock(tmp_path):
-                pytest.fail("quarantined root entered")
-        async with mod._server_start_lock(tmp_path / "different"):
-            pass
     finally:
         with mod._SERVER_START_GUARD:
             mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
@@ -907,7 +850,7 @@ async def test_chat_immediate_post_spawn_failure_is_cleaned(monkeypatch, tmp_pat
         with pytest.raises(mod.SanitizedStartupError, match="failed") as error:
             await provider._ensure_server_locked(Request())
         assert "wait" in calls and "close" in calls
-        assert ("kill" if mod.sys.platform == "win32" else "terminate") in calls
+        assert "terminate" in calls
         assert provider._process is None and provider._tree is None
         assert (str(tmp_path.resolve()) in mod._SERVER_START_LOCKS) is cleanup_fails
         if cleanup_fails:
@@ -1603,7 +1546,7 @@ async def test_startup_queue_fifo_and_cancelled_waiter(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("termination_fails", [False, True])
-@pytest.mark.parametrize("platform", ["linux", "win32"])
+@pytest.mark.parametrize("platform", ["linux"])
 async def test_real_enter_cleanup_precedes_waiter_and_quarantines(monkeypatch, tmp_path, termination_fails, platform):
     from types import SimpleNamespace
     import ciao.providers.opencode as mod
@@ -1687,7 +1630,7 @@ async def test_real_enter_cleanup_precedes_waiter_and_quarantines(monkeypatch, t
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("platform", ["linux", "win32"])
+@pytest.mark.parametrize("platform", ["linux"])
 async def test_cancelled_spawn_is_owned_until_child_is_reaped(monkeypatch, tmp_path, platform):
     from types import SimpleNamespace
     import ciao.providers.opencode as mod
@@ -1746,7 +1689,7 @@ async def test_cancelled_spawn_is_owned_until_child_is_reaped(monkeypatch, tmp_p
         await asyncio.wait_for(cleanup.wait(), 2)
         owner.cancel()
         await asyncio.sleep(0.1)
-        assert calls == ["spawn", "kill" if platform == "win32" else "terminate"]
+        assert calls == ["spawn", "terminate"]
         allow_cleanup.set()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(owner, 2)
@@ -1762,7 +1705,7 @@ async def test_cancelled_spawn_is_owned_until_child_is_reaped(monkeypatch, tmp_p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("platform,kill_fails,quarantined", [
-    ("linux", False, False), ("linux", True, True), ("win32", False, True),
+    ("linux", False, False), ("linux", True, True),
 ])
 async def test_tree_construction_failure_quarantines_uncertain_spawn(
     monkeypatch, tmp_path, platform, kill_fails, quarantined
@@ -1895,9 +1838,7 @@ async def test_unsuccessful_ephemeral_enter_cleans_before_next_start(monkeypatch
         assert calls.index("tree-closed") < calls.index("next")
         assert calls.index("tree-closed") < calls.index("spawn", 1)
         if outcome != "exited":
-            assert ("kill" if mod.sys.platform == "win32" else "terminate") in calls
-        elif mod.sys.platform == "win32":
-            assert "kill" in calls
+            assert "terminate" in calls
         assert "client-closed" in calls
     finally:
         release.set()
@@ -1929,7 +1870,7 @@ async def test_ephemeral_missing_or_broken_binary_never_spawns(monkeypatch, tmp_
 
 
 @pytest.mark.parametrize("termination_fails", [False, True])
-@pytest.mark.parametrize("platform", ["linux", "win32"])
+@pytest.mark.parametrize("platform", ["linux"])
 def test_real_enter_cleanup_blocks_other_loop_and_quarantines(monkeypatch, tmp_path, termination_fails, platform):
     import threading
     from types import SimpleNamespace
@@ -2012,7 +1953,7 @@ def test_real_enter_cleanup_blocks_other_loop_and_quarantines(monkeypatch, tmp_p
             mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
 
 
-@pytest.mark.parametrize("platform", ["linux", "win32"])
+@pytest.mark.parametrize("platform", ["linux"])
 @pytest.mark.parametrize("failure", ["none", "stop", "wait"])
 @pytest.mark.parametrize("stage", ["spawn", "health"])
 def test_cross_loop_cancelled_owner_drains_cleanup_before_waiter(
@@ -5008,16 +4949,13 @@ class _NoOpTree:
     def close_checked(self) -> None:
         pass
 
-    def detach_job_handle(self) -> None:
-        return None
-
 
 def _no_op_trees(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setattr("ciao.providers.opencode.ProcessTree", _NoOpTree)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("platform", ["linux", "win32"])
+@pytest.mark.parametrize("platform", ["linux"])
 async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch, platform):
     """A server we could not validate must not outlive the attempt."""
     from types import SimpleNamespace
@@ -5070,7 +5008,7 @@ async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch, p
     with pytest.raises(RuntimeError, match="OpenCode startup failed"):
         await provider._ensure_server(Request())  # type: ignore[arg-type]
 
-    assert terminated == ["kill" if platform == "win32" else "terminate"]
+    assert terminated == ["terminate"]
     assert provider._process is None
     assert provider._client is None
     FakeProcess.returncode = None
@@ -5742,8 +5680,7 @@ def test_bounded_auth_probe_cleanup_failures(monkeypatch):
             raise OSError("injected")
 
     monkeypatch.setattr(proc, "ProcessTree", CloseFailure)
-    if sys.platform != "win32":
-        monkeypatch.setattr(proc.os, "killpg", lambda *args: signals.append("killpg"))
+    monkeypatch.setattr(proc.os, "killpg", lambda *args: signals.append("killpg"))
     assert proc.bounded_output(
         [sys.executable, "-c", "print('ok')"], timeout=3, max_stdout=100
     ) is None
@@ -6985,8 +6922,6 @@ def test_opencode_install_command_matches_installer_to_platform(monkeypatch):
 
     monkeypatch.setattr(sys, "platform", "darwin")
     assert "opencode.ai/v2/install" in mod.opencode_install_command()
-    monkeypatch.setattr(sys, "platform", "win32")
-    assert mod.opencode_install_command() == "npm install -g @opencode/cli"
 
 
 def test_login_status_reports_a_missing_binary_as_an_install_step(
@@ -7019,23 +6954,11 @@ def test_login_status_reports_a_missing_binary_as_an_install_step(
     assert "not installed" in row["detail"]
 
 
-def test_the_opencode_path_line_is_only_offered_for_the_curl_installer(monkeypatch):
-    """npm's shim and Homebrew bins are already searched, so only the curl
-    installer's ``~/.opencode/bin`` needs a PATH line — and Windows, where the
-    row offers npm, needs none at all.
-
-    The POSIX line is built with ``Path``, so it is asserted on a POSIX host
-    only. Monkeypatching ``sys.platform`` to Darwin on Windows still joins
-    with backslashes.
-    """
-    import sys
-
+def test_the_opencode_path_line_is_only_offered_for_the_curl_installer():
+    """npm's shim and Homebrew bins are already searched, so only the curl installer's ``~/.opencode/bin`` needs a PATH line."""
     from ciao.providers import opencode as mod
 
-    if sys.platform != "win32":
-        assert ".opencode/bin" in mod.opencode_path_hint()
-    monkeypatch.setattr(sys, "platform", "win32")
-    assert mod.opencode_path_hint() == ""
+    assert ".opencode/bin" in mod.opencode_path_hint()
 
 
 def test_login_status_reports_a_broken_wrapper_as_broken_not_missing(

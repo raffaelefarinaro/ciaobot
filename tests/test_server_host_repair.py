@@ -47,7 +47,6 @@ from tests.test_server_host_install import (
     _signed_fixture,
     _target,
     _write_superseded_record,
-    requires_posix_uid,
 )
 
 # The stapled ticket a candidate built for the other Developer ID team carries.
@@ -119,7 +118,6 @@ def _foreign_record(record: Path, tmp_path: Path) -> bytes:
     return record.read_bytes()
 
 
-@requires_posix_uid
 def test_repair_keeps_a_current_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -142,7 +140,6 @@ def test_repair_keeps_a_current_host(
     assert record.read_bytes() == record_before
 
 
-@requires_posix_uid
 def test_repair_installs_an_absent_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -160,7 +157,6 @@ def test_repair_installs_an_absent_host(
     ) == snapshot
 
 
-@requires_posix_uid
 def test_repair_installs_over_an_orphan_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -180,7 +176,6 @@ def test_repair_installs_over_an_orphan_record(
     assert read_host_ownership(record) == snapshot
 
 
-@requires_posix_uid
 def test_repair_replaces_a_superseded_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -203,7 +198,6 @@ def test_repair_replaces_a_superseded_host(
     assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
 
 
-@requires_posix_uid
 def test_repair_replaces_a_host_it_cannot_prove(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -226,7 +220,6 @@ def test_repair_replaces_a_host_it_cannot_prove(
     assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
 
 
-@requires_posix_uid
 def test_repair_replaces_a_legacy_host_when_the_release_is_signed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -250,7 +243,6 @@ def test_repair_replaces_a_legacy_host_when_the_release_is_signed(
     assert not server_host_install.upgrade_journal_path().exists()
 
 
-@requires_posix_uid
 def test_repair_restores_an_unproven_host_and_its_record_when_the_swap_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -290,7 +282,6 @@ def test_repair_restores_an_unproven_host_and_its_record_when_the_swap_fails(
     assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
 
 
-@requires_posix_uid
 def test_repair_restores_absence_of_a_record_when_the_swap_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -327,8 +318,6 @@ def test_repair_restores_absence_of_a_record_when_the_swap_fails(
     assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
-@requires_posix_uid
 def test_repair_refuses_a_symlinked_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -353,7 +342,6 @@ def test_repair_refuses_a_symlinked_target(
     assert (bundle / _EXE_REL).read_bytes() == b"universal-host-binary"
 
 
-@requires_posix_uid
 def test_repair_refuses_a_tampered_archive_and_touches_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -383,7 +371,6 @@ def test_repair_refuses_a_tampered_archive_and_touches_nothing(
     assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
 
 
-@requires_posix_uid
 def test_install_server_host_still_refuses_an_unproven_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -407,7 +394,6 @@ def test_install_server_host_still_refuses_an_unproven_host(
     assert (target / "marker").read_bytes() == marker
 
 
-@requires_posix_uid
 def test_repair_replaces_an_unprovable_host_with_a_loose_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -431,7 +417,6 @@ def test_repair_replaces_an_unprovable_host_with_a_loose_record(
     assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
 
 
-@requires_posix_uid
 def test_repair_restores_a_loose_record_when_the_swap_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -471,7 +456,6 @@ def test_repair_restores_a_loose_record_when_the_swap_fails(
     assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
 
 
-@requires_posix_uid
 def test_repair_refuses_an_unfinished_journal_and_touches_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -515,8 +499,6 @@ def test_repair_refuses_an_unfinished_journal_and_touches_nothing(
     assert journal.read_bytes() == journal_before
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
-@requires_posix_uid
 def test_repair_refuses_a_symlinked_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -553,7 +535,6 @@ def test_repair_refuses_a_symlinked_record(
     assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
 
 
-@requires_posix_uid
 def test_repair_replaces_a_policy_refused_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -610,7 +591,6 @@ def test_repair_replaces_a_policy_refused_host(
     assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
 
 
-@requires_posix_uid
 def test_repair_restores_the_record_when_the_record_write_fails_late(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -654,7 +634,6 @@ def test_repair_restores_the_record_when_the_record_write_fails_late(
     assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
 
 
-@requires_posix_uid
 def test_repair_refuses_a_signed_host_when_the_release_is_legacy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -759,7 +738,6 @@ def test_is_adhoc_signed_reads_only_a_verified_adhoc_display(
     assert server_host.is_adhoc_signed(tmp_path / APP_NAME, runner=runner) is want
 
 
-@requires_posix_uid
 def test_repair_refuses_a_recordless_signed_host_when_the_release_is_legacy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -796,7 +774,6 @@ def test_repair_refuses_a_recordless_signed_host_when_the_release_is_legacy(
     assert not server_host_install.upgrade_journal_path().exists()
 
 
-@requires_posix_uid
 def test_repair_refuses_an_unproven_host_whose_signature_cannot_be_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

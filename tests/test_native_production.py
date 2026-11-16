@@ -49,11 +49,6 @@ from tests.test_native_installer import (
     _record_path,
 )
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="the native coordinator is macOS-only; its POSIX helpers are not on Windows",
-)
-
 ROOT = Path(__file__).resolve().parents[1]
 
 #: Host variables a child must never see: each one redirects tools, indexes,

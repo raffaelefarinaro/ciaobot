@@ -728,10 +728,7 @@ async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
     """Kill an extractor and everything it started, then reap it."""
     if proc.returncode is None:
         try:
-            if hasattr(os, "killpg"):
-                os.killpg(proc.pid, signal.SIGKILL)
-            else:  # pragma: no cover - Windows has no process groups to signal
-                proc.kill()
+            os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
     await proc.wait()

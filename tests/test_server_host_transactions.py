@@ -37,11 +37,6 @@ from tests.test_server_host_install import (
     _write_superseded_record,
 )
 
-requires_posix_uid = pytest.mark.skipif(
-    sys.platform == "win32", reason="the host installer is a POSIX/macOS path"
-)
-
-
 # ── helpers ─────────────────────────────────────────────────────────────────
 
 
@@ -110,7 +105,6 @@ def _finished_process_pid() -> int:
 # ── the before-images ───────────────────────────────────────────────────────
 
 
-@requires_posix_uid
 def test_before_images_are_private_exact_and_retained_until_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -171,7 +165,6 @@ def test_before_images_are_private_exact_and_retained_until_commit(
 # ── commit ──────────────────────────────────────────────────────────────────
 
 
-@requires_posix_uid
 def test_commit_requires_nonce_and_verified_installed_signed_pair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -247,7 +240,6 @@ def test_commit_requires_nonce_and_verified_installed_signed_pair(
 # ── rollback ────────────────────────────────────────────────────────────────
 
 
-@requires_posix_uid
 @pytest.mark.parametrize("revision", [2, 3, server_host.HOST_REVISION])
 def test_rollback_restores_exact_old_pair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, revision: int
@@ -477,7 +469,6 @@ def _kill_at(tmp_path: Path, trigger: str, when: str) -> None:
     assert child.returncode == 0, child.stderr
 
 
-@requires_posix_uid
 @pytest.mark.parametrize("trigger, when, recorded", SEAMS)
 def test_kill_recovery_at_each_durable_phase(
     tmp_path: Path,
@@ -521,7 +512,6 @@ def test_kill_recovery_at_each_durable_phase(
     assert not server_host_install.transaction_status()["pending"]
 
 
-@requires_posix_uid
 def test_install_refuses_an_abandoned_operation_until_it_is_rolled_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -563,7 +553,6 @@ def test_install_refuses_an_abandoned_operation_until_it_is_rolled_back(
     assert status["owner_pid"] == os.getpid()
 
 
-@requires_posix_uid
 def test_a_status_race_where_the_owner_dies_still_refuses_the_install(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -600,7 +589,6 @@ def test_a_status_race_where_the_owner_dies_still_refuses_the_install(
     assert server_host_install._read_upgrade_journal().operation == operation
 
 
-@requires_posix_uid
 def test_the_status_race_between_two_installers_still_refuses(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -644,7 +632,6 @@ def test_the_status_race_between_two_installers_still_refuses(
 
 @pytest.mark.parametrize("target", ["retained", "canonical"])
 @pytest.mark.parametrize("substitute", ["different", "byte-identical"])
-@requires_posix_uid
 def test_a_swap_between_verification_and_the_move_deletes_neither_image(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str, substitute: str
 ) -> None:
@@ -710,7 +697,6 @@ def test_a_swap_between_verification_and_the_move_deletes_neither_image(
     assert server_host_install.transaction_status()["pending"] is True
 
 
-@requires_posix_uid
 def test_unsafe_terminal_cleanup_targets_are_refused_before_anything_is_deleted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -787,7 +773,6 @@ def test_unsafe_terminal_cleanup_targets_are_refused_before_anything_is_deleted(
     assert (outside / "keep").read_text(encoding="utf-8") == "not ours"
 
 
-@requires_posix_uid
 def test_the_journal_unlink_is_bound_to_the_journal_that_was_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -815,7 +800,6 @@ def test_the_journal_unlink_is_bound_to_the_journal_that_was_read(
     assert _journal_path().exists()
 
 
-@requires_posix_uid
 def test_a_real_interrupted_terminal_cleanup_is_settled_by_the_next_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -866,7 +850,6 @@ def test_a_real_interrupted_terminal_cleanup_is_settled_by_the_next_run(
     )
 
 
-@requires_posix_uid
 def test_a_partially_drained_terminal_cleanup_resumes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -915,7 +898,6 @@ def test_a_partially_drained_terminal_cleanup_resumes(
     assert _record_path().read_bytes() == committed_record
 
 
-@requires_posix_uid
 def test_a_byte_identical_substitute_of_the_backup_is_refused_in_terminal_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -977,7 +959,6 @@ def test_a_byte_identical_substitute_of_the_backup_is_refused_in_terminal_cleanu
     assert _tree(_bundle_path()) == committed
 
 
-@requires_posix_uid
 def test_a_regular_file_at_the_deletion_seam_is_refused_not_unlinked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1008,7 +989,6 @@ def test_a_regular_file_at_the_deletion_seam_is_refused_not_unlinked(
     assert substitute.read_text(encoding="utf-8") == "not a directory"
 
 
-@requires_posix_uid
 def test_a_directory_swapped_at_the_deletion_seam_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1069,7 +1049,6 @@ def test_a_directory_swapped_at_the_deletion_seam_is_refused(
     assert _tree(_bundle_path()) == committed
 
 
-@requires_posix_uid
 def test_the_journal_identity_comes_from_the_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1110,7 +1089,6 @@ def test_the_journal_identity_comes_from_the_write(
     assert json.loads(_journal_path().read_text(encoding="utf-8"))["owner_pid"] == 1
 
 
-@requires_posix_uid
 def test_rollback_restores_a_non_canonical_record_byte_for_byte(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1137,7 +1115,6 @@ def test_rollback_restores_a_non_canonical_record_byte_for_byte(
     assert not server_host_install.transaction_status()["pending"]
 
 
-@requires_posix_uid
 @pytest.mark.parametrize("command", ["commit", "rollback"])
 def test_a_kill_after_a_terminal_phase_is_settled_by_the_next_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
@@ -1213,7 +1190,6 @@ def test_a_kill_after_a_terminal_phase_is_settled_by_the_next_run(
     assert not backup.exists()
 
 
-@requires_posix_uid
 def test_a_settled_journal_that_cannot_be_cleaned_blocks_the_next_install(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1275,7 +1251,6 @@ def test_a_settled_journal_that_cannot_be_cleaned_blocks_the_next_install(
     assert server_host_install.transaction_status() == {"pending": False}
 
 
-@requires_posix_uid
 def test_the_upgrade_lock_is_held_by_a_real_process(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1323,7 +1298,6 @@ def test_the_upgrade_lock_is_held_by_a_real_process(
 # ── untrusted state ─────────────────────────────────────────────────────────
 
 
-@requires_posix_uid
 def test_corrupt_foreign_or_unsafe_journal_never_mutates_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1424,7 +1398,6 @@ def test_corrupt_foreign_or_unsafe_journal_never_mutates_target(
     assert _record_path().read_bytes() == record_before
 
 
-@requires_posix_uid
 def test_an_unrelated_target_is_never_deleted_by_a_rollback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1454,7 +1427,6 @@ def test_an_unrelated_target_is_never_deleted_by_a_rollback(
 # ── one operation, one owner ────────────────────────────────────────────────
 
 
-@requires_posix_uid
 def test_second_installer_cannot_mutate_unfinished_operation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1509,7 +1481,6 @@ def test_second_installer_cannot_mutate_unfinished_operation(
     assert _record_path().read_bytes() == record_before
 
 
-@requires_posix_uid
 def test_failed_rollback_retains_recoverable_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1551,7 +1522,6 @@ def test_failed_rollback_retains_recoverable_paths(
     assert server_host.verify_owned_host(_bundle_path(), runner=_SignedRunner())
 
 
-@requires_posix_uid
 def test_status_is_exactly_pending_false_without_a_journal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1562,7 +1532,6 @@ def test_status_is_exactly_pending_false_without_a_journal(
 # ── the native fresh-install refusal (#2340) ────────────────────────────────
 
 
-@requires_posix_uid
 @pytest.mark.parametrize("phase", ["installed", "committed"])
 def test_require_absent_refuses_any_journal_without_finishing_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str

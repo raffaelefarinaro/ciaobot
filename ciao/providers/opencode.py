@@ -262,11 +262,8 @@ _SHUTDOWN_TIMEOUT = 5.0
 async def _stop_server(process: asyncio.subprocess.Process, tree: ProcessTree) -> None:
     """Stop an ``opencode serve`` and everything it started, politely first.
 
-    The tree, not the one process: on Windows the process we spawned is the npm
-    shim's ``cmd.exe``, whose ``opencode.exe`` child is the actual server and
-    outlived a kill aimed at the shim alone. Same order as before: ask, wait
-    ``_SHUTDOWN_TIMEOUT``, then kill. A leader that already exited may have
-    left its tree behind, so that is still ended (``kill_descendants``).
+    Ask, wait ``_SHUTDOWN_TIMEOUT``, then kill. A leader that already exited may
+    have left its tree behind, so that is still ended (``kill_descendants``).
     """
     try:
         if process.returncode is not None:
@@ -337,9 +334,8 @@ async def _spawn_server(
 ) -> tuple[asyncio.subprocess.Process, ProcessTree]:
     """``create_subprocess_exec`` as a tree that dies with the engine.
 
-    ``dies_with_engine``: on POSIX the server stays in the engine's process
-    group, as it always has, so launchd's group kill on an engine crash still
-    reaches it; on Windows its Job Object ends the tree when the engine exits.
+    ``dies_with_engine``: the server stays in the engine's process group, as it
+    always has, so launchd's group kill on an engine crash still reaches it.
     """
     options: dict[str, Any] = {**tree_spawn_options(dies_with_engine=True), **kwargs}
     process = await asyncio.create_subprocess_exec(*argv, **options)
@@ -352,9 +348,6 @@ async def _spawn_server(
                 process.kill()
             await asyncio.wait_for(process.wait(), _SHUTDOWN_TIMEOUT)
         except BaseException:
-            raise _UncertainSpawn() from exc
-        if sys.platform == "win32":
-            # Without a Job, stopping the leader cannot establish tree cleanup.
             raise _UncertainSpawn() from exc
         raise
     return process, tree
@@ -416,16 +409,7 @@ async def _startup_cleanup(
             uncertain = True
         else:
             try:
-                if sys.platform == "win32":
-                    try:
-                        tree.kill_checked()
-                    except BaseException:
-                        uncertain = True
-                    try:
-                        await asyncio.wait_for(process.wait(), _SHUTDOWN_TIMEOUT)
-                    except BaseException:
-                        uncertain = True
-                elif process.returncode is None:
+                if process.returncode is None:
                     missing = False
                     try:
                         tree.terminate()
@@ -461,9 +445,6 @@ async def _startup_cleanup(
                     tree.close_checked()
                 except BaseException:
                     uncertain = True
-                    handle = tree.detach_job_handle()
-                    if handle is not None:
-                        _quarantine_startup(root, handle)
     if reader is not None:
         try:
             reader.cancel()
@@ -536,7 +517,6 @@ class _StartupState:
     owner_loop: weakref.ReferenceType[asyncio.AbstractEventLoop] | None = None
     waiters: deque[object] = field(default_factory=deque)
     quarantined: bool = False
-    retained_job_handles: list[int] = field(default_factory=list)
 
 
 _SERVER_START_GUARD = threading.Lock()
@@ -656,10 +636,6 @@ def opencode_install_command() -> str:
     Homebrew's bins too, so any of the three documented installers is picked up
     on the next status refresh.
     """
-    if sys.platform == "win32":
-        # The POSIX one-liner is a bash script; npm's global shim is the
-        # documented Windows path and needs no extra shell.
-        return "npm install -g @opencode/cli"
     return "curl -fsSL https://opencode.ai/v2/install | bash"
 
 
@@ -667,11 +643,8 @@ def opencode_path_hint() -> str:
     """PATH line for the curl installer's directory, or "" when none is needed.
 
     Only that installer drops the binary somewhere no default PATH carries; the
-    npm shim and Homebrew already install into directories Ciaobot searches, and
-    a new Windows logon's PATH already holds npm's global dir.
+    npm shim and Homebrew already install into directories Ciaobot searches.
     """
-    if sys.platform == "win32":
-        return ""
     from ciao.os_support.shell_hints import path_hint
 
     return path_hint(str(Path.home() / ".opencode" / "bin"), persist=True)
@@ -745,12 +718,10 @@ async def _server_start_lock(workspace_root: Path) -> AsyncGenerator[None, None]
                     del _SERVER_START_LOCKS[key]
 
 
-def _quarantine_startup(workspace_root: Path, handle: int | None = None) -> None:
+def _quarantine_startup(workspace_root: Path) -> None:
     with _SERVER_START_GUARD:
         state = _SERVER_START_LOCKS.setdefault(str(workspace_root.resolve()), _StartupState())
         state.quarantined = True
-        if handle is not None:
-            state.retained_job_handles.append(handle)
 
 
 def _catalog_lock(workspace_root: Path) -> asyncio.Lock:

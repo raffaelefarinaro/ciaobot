@@ -848,16 +848,12 @@ def _getuid() -> int:
 def _pid_alive(pid: int) -> bool:
     """Whether ``pid`` names a process that could still be the journal's owner.
 
-    A permission error, an unsupported platform or any unexpected failure is
+    A permission error or any unexpected failure is
     conservatively *live*: the answer authorizes a mutation, so "could not tell"
     must never read as "it is gone".
     """
     if pid <= 0:
         return False
-    if sys.platform == "win32":
-        # No macOS install path runs here, and Windows' ``os.kill`` has no
-        # signal-0 probe; never authorize a mutation from this platform.
-        return True
     try:
         os.kill(pid, 0)
     except OSError as exc:
