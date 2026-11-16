@@ -292,6 +292,18 @@ class BaseProvider(ABC):
         """
         return ()
 
+    @classmethod
+    async def delete_session(
+        cls, workspace_root: Path, session_id: str
+    ) -> bool | None:
+        """Reclaim a persisted session; False requests a cleanup warning.
+
+        True is affirmative confirmation. None supplies no confirmation signal:
+        an unsupported adapter or a best-effort cleanup with adapter-owned
+        diagnostics. It is not a claim that anything was deleted.
+        """
+        return None
+
     @abstractmethod
     def run_streaming(
         self,

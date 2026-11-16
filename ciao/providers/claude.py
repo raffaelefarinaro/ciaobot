@@ -57,6 +57,7 @@ from claude_agent_sdk import (
     TaskUpdatedMessage,
     ToolUseBlock,
     UserMessage,
+    delete_session as sdk_delete_session,
     get_session_info,
 )
 from claude_agent_sdk.types import TERMINAL_TASK_STATUSES, HookContext, HookInput, HookJSONOutput, PermissionMode, SandboxSettings, SystemPromptPreset
@@ -601,6 +602,26 @@ class ClaudeProvider(BaseSDKProvider):
             (info.custom_title or "").strip(),
             (info.summary or "").strip(),
         )
+
+    @classmethod
+    async def delete_session(
+        cls, workspace_root: Path, session_id: str
+    ) -> bool | None:
+        """Delete the SDK JSONL blob; no confirmation signal either way.
+
+        The host treats None as adapter-owned diagnostics, so missing
+        sessions and SDK-rejected ids stay quiet while I/O failures keep the
+        established error log.
+        """
+        if not session_id:
+            return None
+        try:
+            sdk_delete_session(session_id, directory=str(workspace_root))
+        except (FileNotFoundError, ValueError):
+            pass
+        except Exception:  # noqa: BLE001 — SDK may raise I/O errors
+            logger.exception("delete_session failed for %s", session_id)
+        return None
 
     def __init__(self, workspace_root: Path, *, config: object | None = None) -> None:
         super().__init__(workspace_root, config=config)

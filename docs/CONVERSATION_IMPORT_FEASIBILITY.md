@@ -765,15 +765,25 @@ does not re-derive it from the diff.
 **Why matching `session_id` alone is not sufficient.** Two observed facts
 about the reclaim path, both read from `ciao/web/project_chats.py`:
 
-* **Reclaim is fail-open.** `_archive_chat_unlocked` and `delete_chat` both
-  schedule `_reclaim_provider_sessions_async`, which calls
-  `delete_sdk_session_blob` (Claude's JSONL blob) or
-  `OpencodeProvider.delete_thread` (`DELETE /api/session/{id}`) and **logs and
-  continues** when the provider is unavailable. A session that should have been
-  reclaimed can still be on disk, so "the chat is archived, therefore the file
-  is gone" is not an assumption an importer may make. The vault markdown
-  transcript is the durable record of an archived chat; it is not the absence
-  of a session file.
+* **Reclaim is fail-open.** `_archive_chat_unlocked` awaits
+  `_reclaim_provider_sessions_async` inline before it marks the row archived,
+  while `delete_chat` and reset schedule it through
+  `_schedule_provider_cleanup` behind the provider disconnect. The reclaimer
+  dispatches the shared stateless adapter-class `delete_session` operation —
+  resolved through the provider registry for the chat's own provider, with no
+  live provider held — and keeps going when the provider is unavailable: an
+  adapter failure is logged and the remaining sessions are still attempted,
+  but quiet outcomes leave no trace. The operation returns `True`, `False` or
+  `None`: only a literal `False` draws the host's cleanup-warning log, and
+  `None` is a missing confirmation signal, not a claim that anything was
+  deleted. An adapter inheriting the unsupported default returns `None` for
+  every session — those sessions are quietly left behind with no log entry —
+  and Claude's adapter likewise supplies no confirmation in any outcome,
+  logging only its own SDK I/O failures. A session that should have been
+  reclaimed can therefore still be on disk, so "the chat is archived,
+  therefore the file is gone" is not an assumption an importer may make. The
+  vault markdown transcript is the durable record of an archived chat; it is
+  not the absence of a session file.
 * **The idle sweep deletes nothing.** `reap_idle_providers` only *disconnects*
   a provider idle past `_PROVIDER_IDLE_TIMEOUT_SECONDS` (900 s): "Only the
   provider is released. The chat row, its `session_id` and its transcript are

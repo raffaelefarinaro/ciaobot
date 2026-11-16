@@ -5209,7 +5209,7 @@ class OpencodeProvider(BaseSDKProvider):
         return result
 
     @classmethod
-    async def delete_thread(cls, workspace_root: Path, session_id: str) -> bool:
+    async def delete_session(cls, workspace_root: Path, session_id: str) -> bool:
         async with _EphemeralServer(workspace_root) as client:
             if client is None or not session_id:
                 return False
