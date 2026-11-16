@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from ciao.models import ResultEvent
-from ciao.providers.opencode import QuestionResponseResult
+from ciao.providers.base import QuestionResponseResult
 from ciao.web.chat_streaming import ChatStream
 from ciao.web.project_chats import ProjectChatManager
 from tests.test_project_chat_persistence import _make_manager

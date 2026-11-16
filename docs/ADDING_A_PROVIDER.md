@@ -86,6 +86,12 @@ set and nothing else.
 | `can_drain` / `drain_events` | Claude and OpenCode, between turns, so a background agent or shell can wake the parent. | OpenCode reports `can_drain` true only while a live server has background shells or subagents outstanding. |
 | `read_thread` / `delete_thread` | OpenCode titles and session reclaim. Claude uses its own JSONL helpers instead. | See the skip list below. |
 
+The existing native reply path shares `ciao.providers.base.QuestionResponseResult`
+as its acknowledgement value. It requires `ok`; `error` defaults to `""`,
+`retryable` to `True`, and `delivered_as_message`, `expired`, and
+`already_resolved` to `False`. Claude's local boolean permission gate and
+provider-specific manager dispatch remain unchanged.
+
 Declare `capabilities = ProviderCapabilities(...)` honestly.
 `capabilities_for` serves it on `/api/models`. The PWA type says the UI
 gates on these flags. The Vue app does not read them yet, so a flag alone

@@ -43,7 +43,7 @@ from ciao.models import (
 )
 from ciao.provider_service import ProviderService, capabilities_for
 from ciao.providers.connect_errors import annotate_reauth
-from ciao.providers.opencode import QuestionResponseResult
+from ciao.providers.base import QuestionResponseResult
 from ciao.sessions import StateStore
 from ciao.transcripts import (
     FinalAnswerTracker,

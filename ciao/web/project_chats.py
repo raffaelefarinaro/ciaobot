@@ -190,12 +190,9 @@ from ciao.models import (
 from ciao.os_support.files import open_fd
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
-from ciao.providers.base import MoveToBackgroundOutcome
+from ciao.providers.base import MoveToBackgroundOutcome, QuestionResponseResult
 from ciao.providers.claude import get_session_info
-from ciao.providers.opencode import (
-    OpencodeProvider,
-    QuestionResponseResult,
-)
+from ciao.providers.opencode import OpencodeProvider
 from ciao.rate_limits import RateLimitStore, default_store_path
 from ciao.schedules import (
     ScheduleEntry,

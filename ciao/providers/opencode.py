@@ -88,6 +88,7 @@ from ciao.providers.base import (
     BaseSDKProvider,
     MoveToBackgroundOutcome,
     ProviderCapabilities,
+    QuestionResponseResult,
     build_prompt,
     build_runtime_context,
     prepend_stable_context,
@@ -1569,20 +1570,6 @@ class _PendingRequest:
     tool_use_id: str = ""
     question_ids: tuple[str, ...] = ()
     question_fields: dict[str, dict[str, Any]] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class QuestionResponseResult:
-    """Outcome of one native-form reply/cancel operation."""
-
-    ok: bool
-    error: str = ""
-    retryable: bool = True
-    delivered_as_message: bool = False
-    expired: bool = False
-    # The request was already answered (another tab won, or V2 returned 409):
-    # nothing was applied for this reply; the caller should clear its card.
-    already_resolved: bool = False
 
 
 class _FormValidationError(ValueError):
