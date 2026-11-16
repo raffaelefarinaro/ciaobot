@@ -59,6 +59,29 @@ def rewrite_tar(payload: bytes, mutate) -> bytes:
     return gzip.compress(bytes(raw))
 
 
+def rechecksum_at(raw: bytearray, offset: int) -> None:
+    """Recompute the ustar checksum for the 512-byte header starting at `offset`."""
+    header = bytearray(raw[offset:offset + 512])
+    rechecksum(header)
+    raw[offset:offset + 512] = header
+
+
+def header_offsets(raw, name: bytes) -> list[int]:
+    """Absolute offsets of every 512-byte header whose full name field equals `name`."""
+    return [
+        offset for offset in range(0, len(raw), 512)
+        if raw[offset:offset + 100] == name + b"\0" * (100 - len(name))
+    ]
+
+
+def _set_field(raw: bytearray, offset: int, width: int, effective: bytes, suffix: bytes) -> None:
+    """Overwrite one exact-width ustar string field in place and re-checksum its header."""
+    padding = b"\0" * (width - len(effective) - len(suffix) - 1)
+    assert len(effective) + len(suffix) + 1 <= width
+    raw[offset:offset + width] = effective + b"\0" + suffix + padding
+    rechecksum_at(raw, offset - offset % 512)
+
+
 def invoke(tmp_path: Path, payload: bytes, *, sha: str | None = None, size: int | None = None):
     tmp_path.mkdir(parents=True, exist_ok=True)
     source = tmp_path / "artifact.tgz"
@@ -73,6 +96,16 @@ def invoke(tmp_path: Path, payload: bytes, *, sha: str | None = None, size: int 
         size=len(payload) if size is None else size,
     )
     return destination
+
+
+def assert_rejection_is_isolated(base: Path, payload: bytes) -> None:
+    """Integration-rejection hygiene: source, outside sentinel and run-owned
+    scratch are untouched, and nothing was published at the destination."""
+    assert (base / "artifact.tgz").read_bytes() == payload
+    assert (base / "outside-sentinel").read_text() == "keep"
+    parent = base / "private"
+    assert not list(parent.glob(".engine-artifact-*"))
+    assert not (parent / "out").exists()
 
 
 def test_valid_prefix_extracts_files_and_internal_aliases(tmp_path):
@@ -91,6 +124,699 @@ def test_valid_prefix_extracts_files_and_internal_aliases(tmp_path):
     assert (result / "lib/site.py").stat().st_mode & 0o777 == 0o644
     assert (result / "bin/python3.12").stat().st_mode & 0o777 == 0o755
     assert (result / "bin").stat().st_mode & 0o777 == 0o755
+
+
+@pytest.mark.parametrize(
+    ("field", "offset", "width", "owner", "entries", "expected"),
+    [
+        ("name", 0, 100, None, [("python/a", b"ok", "file")], "a"),
+        ("prefix", 345, 155, None, [("a", b"ok", "file")], "a"),
+        ("linkname", 157, 100, b"python/alias", [
+            ("python/target", b"ok", "file"),
+            ("python/alias", b"target", "symlink"),
+        ], "alias"),
+    ],
+)
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        b"stale",
+        b"../outside",
+        b"\xff\xfe",
+        pytest.param(b"back\\slash", id="backslash"),
+        pytest.param(b"ctl\x01\x7f\x1f", id="control"),
+    ],
+)
+def test_ustar_first_nul_suffix_compatibility(
+    tmp_path, field, offset, width, owner, entries, expected, suffix
+):
+    payload = archive(entries)
+    effective = {"name": b"python/a", "prefix": b"python", "linkname": b"target"}[field]
+
+    def mutate(raw):
+        base = 0 if owner is None else header_offsets(raw, owner)[0]
+        _set_field(raw, base + offset, width, effective, suffix)
+
+    payload = rewrite_tar(payload, mutate)
+    result = invoke(tmp_path, payload)
+    if field == "linkname":
+        assert os.readlink(result / "alias") == "target"
+        assert (result / "target").read_bytes() == b"ok"
+    else:
+        assert (result / expected).read_bytes() == b"ok"
+    # Suffix bytes never create a path or alias of their own.
+    names = sorted(str(path.relative_to(result)) for path in result.rglob("*"))
+    assert names == (["alias", "target"] if field == "linkname" else ["a"])
+
+
+@pytest.mark.parametrize("field", ["prefix", "linkname"])
+@pytest.mark.parametrize(
+    "suffix",
+    [b"stale", b"\xff\xfe", b"back\\slash\x03"],
+    ids=["ascii", "invalid-utf8", "backslash-control"],
+)
+def test_multibyte_effective_prefix_and_link_target_with_stale_suffix(tmp_path, field, suffix):
+    if field == "prefix":
+        effective = "python/\u00e9dir".encode()
+        payload = archive([("a", b"ok", "file")])
+        payload = _with_field_suffix(payload, 345, 155, effective, suffix)
+        result = invoke(tmp_path, payload)
+        assert (result / "\u00e9dir" / "a").read_bytes() == b"ok"
+        names = sorted(str(path.relative_to(result)) for path in result.rglob("*"))
+        assert names == ["\u00e9dir", "\u00e9dir/a"]
+    else:
+        effective = "lib/\u00e9.py".encode()
+        payload = archive([
+            ("python/lib/\u00e9.py", b"ok", "file"),
+            ("python/alias", effective, "symlink"),
+        ])
+        payload = rewrite_tar(payload, lambda raw: _set_field(
+            raw, header_offsets(raw, b"python/alias")[0] + 157, 100, effective, suffix
+        ))
+        result = invoke(tmp_path, payload)
+        assert (result / "lib" / "\u00e9.py").read_bytes() == b"ok"
+        assert os.readlink(result / "alias") == "lib/\u00e9.py"
+        names = sorted(str(path.relative_to(result)) for path in result.rglob("*"))
+        assert names == ["alias", "lib", "lib/\u00e9.py"]
+
+
+def test_accepted_stale_suffixes_leave_no_diagnostics_or_extra_paths(tmp_path):
+    payload = _with_field_suffix(
+        archive([("python/a", b"x", "file")]), 0, 100, b"python/a", b"back\\slash\x01\x1f"
+    )
+    source = tmp_path / "artifact.tgz"
+    source.write_bytes(payload)
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    result = subprocess.run(
+        [sys.executable, str(MODULE_PATH), "--archive", str(source), "--destination",
+         str(parent / "out"), "--sha256", hashlib.sha256(payload).hexdigest(),
+         "--size", str(len(payload))],
+        capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode == 0
+    assert result.stderr == "" and result.stdout == ""
+    names = sorted(str(path.relative_to(parent / "out")) for path in (parent / "out").rglob("*"))
+    assert names == ["a"]
+
+
+def _with_field_suffix(payload, offset, width, effective, suffix=b"stale"):
+    """Rewrite one ustar string field at absolute `offset` and re-checksum the header that holds it."""
+    def mutate(raw):
+        _set_field(raw, offset, width, effective, suffix)
+    return rewrite_tar(payload, mutate)
+
+
+def test_effective_ustar_values_agree_at_manifest_write_seam(tmp_path, monkeypatch):
+    raw = bytearray(gzip.decompress(typed_archive([
+        ("python/lib/é.py", b"ok", tarfile.REGTYPE, 0o644),
+        ("python/alias", "lib/é.py".encode(), tarfile.SYMTYPE, 0o777),
+        ("python/prefixdir/", b"", tarfile.DIRTYPE, 0o755),
+        ("python/prefixdir/prefixed", b"ok", tarfile.REGTYPE, 0o644),
+    ])))
+    alias_header, dir_header, prefixed_header = (
+        header_offsets(raw, name)[0]
+        for name in (b"python/alias", b"python/prefixdir/", b"python/prefixdir/prefixed")
+    )
+    # A valid first-NUL suffix in the name and link fields, plus a prefix-encoded
+    # member and an explicit trailing-slash directory carrying the same stale tails.
+    _set_field(raw, 0, 100, "python/lib/é.py".encode(), b"stale")
+    _set_field(raw, alias_header + 157, 100, "lib/é.py".encode(), b"../outside")
+    _set_field(raw, dir_header, 100, b"python/prefixdir/", b"stale")
+    _set_field(raw, prefixed_header, 100, b"prefixed", b"stale")
+    _set_field(raw, prefixed_header + 345, 155, b"python/prefixdir", b"stale")
+    payload = gzip.compress(bytes(raw))
+    captured_fields, captured_decodes, captured_records, writes = [], [], [], []
+    original_field, original_write = engine_artifact._field, engine_artifact._write_tree
+
+    def observe_field(value, limit):
+        result = original_field(value, limit)
+        # Production `_field` per header: raw field bytes and the decoded value
+        # preflight actually used, paired later with the member's TarInfo.
+        captured_fields.append((bytes(value), result))
+        captured_decodes.append(result)
+        return result
+
+    def observe_write(root, records, destination):
+        captured_records.extend(records)
+        writes.append(True)
+        return original_write(root, records, destination)
+
+    monkeypatch.setattr(engine_artifact, "_field", observe_field)
+    monkeypatch.setattr(engine_artifact, "_write_tree", observe_write)
+    result = invoke(tmp_path, payload)
+    assert "python/lib/é.py" in captured_decodes
+    assert "lib/é.py" in captured_decodes
+    assert "python/prefixdir/" in captured_decodes
+    assert "python/prefixdir" in captured_decodes
+    assert "prefixed" in captured_decodes
+    assert writes == [True]
+    file_record = next(record for record in captured_records if record[2].isfile())
+    link_record = next(record for record in captured_records if record[2].issym())
+    prefix_record = next(
+        record for record in captured_records if record[2].name == "python/prefixdir/prefixed"
+    )
+    dir_record = next(record for record in captured_records if record[2].isdir())
+    assert "/".join(file_record[0]) == file_record[2].name == "python/lib/é.py"
+    assert link_record[2].linkname == link_record[1].target == "lib/é.py"
+    assert "/".join(prefix_record[0]) == prefix_record[2].name == "python/prefixdir/prefixed"
+    # Directory members keep the trailing slash in TarInfo; the comparison applies
+    # the helper's own directory normalization instead of raw concatenation.
+    assert "/".join(dir_record[0]) == dir_record[2].name.rstrip("/") == "python/prefixdir"
+
+    # Direct per-header pairing: preflight runs one name and one prefix decode
+    # per header (plus a link decode for symlinks), in archive order, so each
+    # record captured at write maps onto the production `_field` values for its
+    # own header. Join and compare exactly what the helper, stdlib TarInfo and
+    # the manifest records agree on at that seam.
+    cursor = 0
+    for parts, node, info in captured_records:
+        (name_raw, name_dec), (prefix_raw, prefix_dec) = captured_fields[cursor:cursor + 2]
+        cursor += 2
+        full = f"{prefix_dec}/{name_dec}" if prefix_dec else name_dec
+        if info.isdir():
+            # The trailing slash is part of the directory member's name field;
+            # the manifest normalizes both sides with rstrip("/") before walking.
+            assert full.rstrip("/") == info.name.rstrip("/") == "/".join(parts)
+            assert not info.issym()
+        else:
+            assert full == info.name == "/".join(parts)
+        if info.issym():
+            (link_raw, link_dec) = captured_fields[cursor]
+            cursor += 1
+            assert link_dec == info.linkname == node.target
+    assert cursor == len(captured_fields)  # every decode mapped to a member
+
+    assert (result / "lib/é.py").read_bytes() == b"ok"
+    assert os.readlink(result / "alias") == "lib/é.py"
+    assert (result / "prefixdir/prefixed").read_bytes() == b"ok"
+    assert captured_records
+
+
+def test_duplicate_effective_names_with_different_suffixes_refused_before_write(tmp_path, monkeypatch):
+    sentinel = tmp_path / "outside-sentinel"
+    sentinel.write_text("keep")
+    raw = bytearray(gzip.decompress(archive([
+        ("python/a", b"x", "file"), ("python/a", b"y", "file")
+    ])))
+    for offset, tail in ((0, b"first"), (1024, b"second")):
+        header = bytearray(raw[offset:offset + 512])
+        header[:100] = b"python/a\0" + tail + bytes(100 - 8 - 1 - len(tail))
+        rechecksum(header)
+        raw[offset:offset + 512] = header
+    payload = gzip.compress(bytes(raw))
+    parser, writes = [], []
+    original_write, real_open = engine_artifact._write_tree, engine_artifact.tarfile.open
+
+    def observe_write(*args):
+        writes.append(args)
+        return original_write(*args)
+
+    def observe_open(*args, **kwargs):
+        parser.append(args)
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(engine_artifact, "_write_tree", observe_write)
+    monkeypatch.setattr(engine_artifact.tarfile, "open", observe_open)
+    with pytest.raises(engine_artifact.ArtifactError):
+        invoke(tmp_path, payload)
+    assert len(parser) == 1  # both members pass preflight; the manifest refuses the duplicate
+    assert writes == []
+    assert_rejection_is_isolated(tmp_path, payload)
+    monkeypatch.undo()
+
+    # The same effective path through different encodings: a stale-suffixed
+    # prefix ("python" + "a") against an unprefixed stale-suffixed name. Raw
+    # tails cannot distinguish the duplicate; preflight passes and the
+    # canonical duplicate is refused at the manifest seam before any write.
+    raw = bytearray(gzip.decompress(archive([
+        ("python/holder-a", b"k", "file"), ("python/holder-b", b"k", "file")
+    ])))
+    prefix_header = header_offsets(raw, b"python/holder-a")[0]
+    name_header = header_offsets(raw, b"python/holder-b")[0]
+    _set_field(raw, prefix_header, 100, b"a", b"first")
+    _set_field(raw, prefix_header + 345, 155, b"python", b"first")
+    _set_field(raw, name_header, 100, b"python/a", b"second")
+    payload = gzip.compress(bytes(raw))
+    parser, writes = [], []
+    monkeypatch.setattr(engine_artifact, "_write_tree", observe_write)
+    monkeypatch.setattr(engine_artifact.tarfile, "open", observe_open)
+    with pytest.raises(engine_artifact.ArtifactError):
+        invoke(tmp_path, payload)
+    assert len(parser) == 1
+    assert writes == []
+    assert_rejection_is_isolated(tmp_path, payload)
+
+
+@pytest.mark.parametrize(
+    ("first", "last"),
+    [(b"python/A", b"python/a"), ("python/café".encode(), "python/cafe\u0301".encode())],
+    ids=["casefold-ancestor", "nfc-ancestor"],
+)
+def test_implicit_ancestor_alias_collisions_with_stale_tails_refused_before_write(
+    tmp_path, monkeypatch, first, last
+):
+    # The members' ancestor components canonically collide while their leaf
+    # names and stale post-NUL tails all differ: only normalization can
+    # identify the implicit-ancestor alias, before any leaf duplicate arises.
+    raw = bytearray(gzip.decompress(archive([
+        ("python/zfirst/a", b"x", "file"), ("python/zlast/b", b"y", "file")
+    ])))
+    first_header = header_offsets(raw, b"python/zfirst/a")[0]
+    last_header = header_offsets(raw, b"python/zlast/b")[0]
+    _set_field(raw, first_header, 100, first + b"/a", b"t1")
+    _set_field(raw, last_header, 100, last + b"/b", b"t2")
+    payload = gzip.compress(bytes(raw))
+    sentinel = tmp_path / "outside-sentinel"
+    sentinel.write_text("keep")
+    parser, writes = [], []
+    original_write, real_open = engine_artifact._write_tree, engine_artifact.tarfile.open
+
+    def observe_write(*args):
+        writes.append(args)
+        return original_write(*args)
+
+    def observe_open(*args, **kwargs):
+        parser.append(args)
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(engine_artifact, "_write_tree", observe_write)
+    monkeypatch.setattr(engine_artifact.tarfile, "open", observe_open)
+    with pytest.raises(engine_artifact.ArtifactError):
+        invoke(tmp_path, gzip.compress(bytes(raw)))
+    assert len(parser) == 1
+    assert writes == []
+    assert_rejection_is_isolated(tmp_path, payload)
+
+
+@pytest.mark.parametrize(
+    ("first", "last"),
+    [(b"python/A", b"python/a"), ("python/café".encode(), "python/cafe\u0301".encode())],
+    ids=["casefold", "nfc"],
+)
+def test_alias_collisions_cannot_be_distinguished_by_stale_tails(tmp_path, monkeypatch, first, last):
+    raw = bytearray(gzip.decompress(archive([
+        ("python/zfirst", b"k", "file"), ("python/zlast", b"k", "file")
+    ])))
+    first_header = header_offsets(raw, b"python/zfirst")[0]
+    last_header = header_offsets(raw, b"python/zlast")[0]
+    _set_field(raw, first_header, 100, first, b"x")
+    _set_field(raw, last_header, 100, last, b"y")
+    payload = gzip.compress(bytes(raw))
+    sentinel = tmp_path / "outside-sentinel"
+    sentinel.write_text("keep")
+    parser, writes = [], []
+    original_write, real_open = engine_artifact._write_tree, engine_artifact.tarfile.open
+
+    def observe_write(*args):
+        writes.append(args)
+        return original_write(*args)
+
+    def observe_open(*args, **kwargs):
+        parser.append(args)
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(engine_artifact, "_write_tree", observe_write)
+    monkeypatch.setattr(engine_artifact.tarfile, "open", observe_open)
+    with pytest.raises(engine_artifact.ArtifactError):
+        invoke(tmp_path, payload)
+    assert len(parser) == 1
+    assert writes == []
+    assert_rejection_is_isolated(tmp_path, payload)
+
+
+def test_full_width_ustar_fields_extract_and_no_nul_is_significant(tmp_path):
+    name = b"a" * 100
+    prefix = b"python/" + b"p" * 148
+    # A 100-byte name and 155-byte prefix make a legal 256-byte combined path.
+    payload = archive([("python/a", b"ok", "file")])
+    raw = bytearray(gzip.decompress(payload))
+    raw[:100] = name
+    raw[345:500] = prefix
+    rechecksum(raw)
+    destination = invoke(tmp_path / "full", gzip.compress(bytes(raw)))
+    assert (destination / Path(prefix.decode().removeprefix("python/")) / name.decode()).read_bytes() == b"ok"
+
+    with pytest.raises(engine_artifact.ArtifactError):
+        engine_artifact._field(b"\0" + b"x" * 100, 100)
+
+
+def test_full_width_existing_relative_link_target_extracts_intact(tmp_path):
+    long_name = b"T" * 100
+    raw = bytearray(gzip.decompress(typed_archive([
+        ("python/" + long_name.decode(), b"x", tarfile.REGTYPE, 0o644),
+        ("python/alias", long_name, tarfile.SYMTYPE, 0o777),
+    ])))
+    target_header = header_offsets(raw, long_name)[0]
+    alias_header = header_offsets(raw, b"python/alias")[0]
+    # Fixture sanity: the long member is encoded with a "python" prefix and a
+    # full-width name, and the alias link field is a full-width value with no NUL.
+    assert raw[target_header + 345:target_header + 500] == b"python" + b"\0" * (155 - 6)
+    assert raw[alias_header + 157:alias_header + 257] == long_name
+    # A full-width no-NUL field decodes without truncation: the final byte is data.
+    assert engine_artifact._field(long_name, 100) == "T" * 100
+    assert engine_artifact._field(b"python" + b"p" * 149, 155) == "python" + "p" * 149
+    raw_path = tmp_path / "ustar.tar"
+    raw_path.write_bytes(bytes(raw))
+    engine_artifact._preflight(raw_path)
+    result = invoke(tmp_path, gzip.compress(bytes(raw)))
+    assert (result / long_name.decode()).read_bytes() == b"x"
+    assert os.readlink(result / "alias") == long_name.decode()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "parser_runs"),
+    [
+        ("name", b"python/" + b"a" * 90 + b"/..", False),
+        ("name", b"python/" + b"a" * 92 + b"\xff", False),
+        ("prefix", b"python/../" + b"p" * 145, False),
+        ("prefix", b"python/" + b"p" * 147 + b"\xff", False),
+        ("link", b"t" * 99 + b"\xff", False),
+        ("link", b"/" + b"t" * 99, True),
+        ("link", b"t" * 97 + b"a\\b", True),
+        ("link", b"t" * 99 + b"\x01", True),
+    ],
+    ids=["name-path", "name-utf8", "prefix-path", "prefix-utf8",
+         "link-utf8", "link-absolute", "link-backslash", "link-control"],
+)
+def test_full_width_no_nul_strings_reject_syntax_and_invalid_utf8(
+    tmp_path, monkeypatch, field, value, parser_runs
+):
+    if field == "link":
+        raw = bytearray(gzip.decompress(typed_archive([
+            ("python/target", b"x", tarfile.REGTYPE, 0o644),
+            ("python/alias", b"target", tarfile.SYMTYPE, 0o777),
+        ])))
+        base = header_offsets(raw, b"python/alias")[0]
+        raw[base + 157:base + 257] = value
+    else:
+        raw = bytearray(gzip.decompress(archive([("python/a", b"x", "file")])))
+        base = 0
+        raw[0 if field == "name" else 345:(100 if field == "name" else 500)] = value
+    rechecksum_at(raw, base)
+    payload = gzip.compress(bytes(raw))
+    sentinel = tmp_path / "outside-sentinel"
+    sentinel.write_text("keep")
+    parser, writes = [], []
+    original_write, real_open = engine_artifact._write_tree, engine_artifact.tarfile.open
+
+    def observe_write(*args):
+        writes.append(args)
+        return original_write(*args)
+
+    def observe_open(*args, **kwargs):
+        parser.append(args)
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(engine_artifact, "_write_tree", observe_write)
+    monkeypatch.setattr(engine_artifact.tarfile, "open", observe_open)
+    with pytest.raises(engine_artifact.ArtifactError):
+        invoke(tmp_path, payload)
+    assert writes == []
+    if parser_runs:
+        assert len(parser) == 1
+    else:
+        assert parser == []
+    assert_rejection_is_isolated(tmp_path, payload)
+
+
+@pytest.mark.parametrize("field,offset,width", [("name", 0, 100), ("prefix", 345, 155), ("link", 157, 100)])
+def test_invalid_utf8_before_nul_and_no_nul_reject_before_parser(tmp_path, monkeypatch, field, offset, width):
+    source = archive([("python/a", b"x", "file")])
+    if field == "link":
+        source = typed_archive([
+            ("python/target", b"x", tarfile.REGTYPE, 0o644),
+            ("python/alias", b"target", tarfile.SYMTYPE, 0o777),
+        ])
+        offset += 1024
+    for invalid, tail in (
+        (b"\xff", b"\xc3\xa9"),
+        (b"\xc3", b"\xc3\xa9"),
+        # A truncated byte before the NUL plus its continuation after it is not
+        # a valid é split across the NUL boundary: preflight must reject.
+        (b"\xc3", b"\xa9"),
+    ):
+        payload = _with_field_suffix(source, offset, width, invalid, tail)
+        case_dir = tmp_path / f"{field}-{invalid.hex()}-{len(tail)}"
+        case_dir.mkdir(parents=True)
+        (case_dir / "outside-sentinel").write_text("keep")
+        parsed = []
+        monkeypatch.setattr(engine_artifact.tarfile, "open", lambda *a, **k: parsed.append(a))
+        with pytest.raises(engine_artifact.ArtifactError):
+            invoke(case_dir, payload)
+        assert parsed == []
+        assert_rejection_is_isolated(case_dir, payload)
+
+
+@pytest.mark.parametrize(
+    ("bad", "parser_runs"),
+    [
+        (b"", False),
+        (b"/escape", False),
+        (b"python/../escape", False),
+        (b"other/file", True),
+        (b"python\\escape", False),
+        (b"python/bad\nname", False),
+    ],
+    ids=["empty", "absolute", "traversal", "foreign-root", "backslash", "control"],
+)
+def test_hostile_effective_paths_with_suffixes_still_refuse(tmp_path, monkeypatch, bad, parser_runs):
+    payload = _with_field_suffix(archive([("python/a", b"x", "file")]), 0, 100, bad)
+    sentinel = tmp_path / "outside-sentinel"
+    sentinel.write_text("keep")
+    parser, writes = [], []
+    original_write, real_open = engine_artifact._write_tree, engine_artifact.tarfile.open
+
+    def observe_write(*args):
+        writes.append(args)
+        return original_write(*args)
+
+    def observe_open(*args, **kwargs):
+        parser.append(args)
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(engine_artifact, "_write_tree", observe_write)
+    monkeypatch.setattr(engine_artifact.tarfile, "open", observe_open)
+    with pytest.raises(engine_artifact.ArtifactError):
+        invoke(tmp_path, payload)
+    if parser_runs:
+        # "other/file" passes preflight path validation and is refused by the
+        # manifest's foreign-root rule instead.
+        assert len(parser) == 1
+    else:
+        # Preflight path validation is the acting seam: zero parser calls.
+        assert parser == []
+    assert writes == []
+    assert_rejection_is_isolated(tmp_path, payload)
+
+
+@pytest.mark.parametrize("prefix", [b"/outside", b"python/.."])
+def test_hostile_effective_prefixes_with_safe_name_and_suffix_still_refuse(tmp_path, monkeypatch, prefix):
+    payload = _with_field_suffix(archive([("python/a", b"x", "file")]), 345, 155, prefix)
+    sentinel = tmp_path / "outside-sentinel"
+    sentinel.write_text("keep")
+    writes, parser = [], []
+    original_write, real_open = engine_artifact._write_tree, engine_artifact.tarfile.open
+
+    def observe_write(*args):
+        writes.append(args)
+        return original_write(*args)
+
+    def observe_open(*args, **kwargs):
+        parser.append(args)
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(engine_artifact, "_write_tree", observe_write)
+    monkeypatch.setattr(engine_artifact.tarfile, "open", observe_open)
+    with pytest.raises(engine_artifact.ArtifactError):
+        invoke(tmp_path, payload)
+    assert writes == []
+    assert parser == []  # the combined name/prefix path fails preflight validation
+    assert_rejection_is_isolated(tmp_path, payload)
+
+
+@pytest.mark.parametrize("target", [b"/outside", b"../../outside", b"missing"])
+def test_hostile_effective_links_with_suffixes_still_refuse(tmp_path, monkeypatch, target):
+    raw = bytearray(gzip.decompress(typed_archive([
+        ("python/target", b"x", tarfile.REGTYPE, 0o644),
+        ("python/alias", target, tarfile.SYMTYPE, 0o777),
+    ])))
+    alias_header = header_offsets(raw, b"python/alias")[0]
+    _set_field(raw, alias_header + 157, 100, target, b"stale")
+    payload = gzip.compress(bytes(raw))
+    sentinel = tmp_path / "outside-sentinel"
+    sentinel.write_text("keep")
+    source = tmp_path / "artifact.tgz"
+    source.write_bytes(payload)
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    parser, writes = [], []
+    original_write, real_open = engine_artifact._write_tree, engine_artifact.tarfile.open
+
+    def observe_write(*args):
+        writes.append(args)
+        return original_write(*args)
+
+    def observe_open(*args, **kwargs):
+        parser.append(args)
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(engine_artifact, "_write_tree", observe_write)
+    monkeypatch.setattr(engine_artifact.tarfile, "open", observe_open)
+    with pytest.raises(engine_artifact.ArtifactError):
+        engine_artifact.verify_and_extract(
+            source, parent / "out", sha256=hashlib.sha256(payload).hexdigest(), size=len(payload)
+        )
+    assert writes == []
+    assert len(parser) == 1  # preflight accepted the stale suffix; link policy refuses before writes
+    assert_rejection_is_isolated(tmp_path, payload)
+
+
+@pytest.mark.parametrize("field,offset,width", [("name", 0, 100), ("prefix", 345, 155), ("link", 157, 100)])
+def test_utf8_is_strict_before_nul_only(tmp_path, monkeypatch, field, offset, width):
+    payload = archive([("python/a", b"x", "file")])
+    if field == "link":
+        payload = typed_archive([("python/a", b".", tarfile.SYMTYPE, 0o777)])
+    effective = b"python/\xc3\xa9" if field == "name" else (b"python" if field == "prefix" else b".")
+    accepted = _with_field_suffix(payload, offset, width, effective, b"\xff")
+    invoke(tmp_path / "accepted", accepted)
+    invalid = _with_field_suffix(payload, offset, width, b"\xff", b"\xc3\xa9")
+    rejected_dir = tmp_path / "rejected"
+    rejected_dir.mkdir(parents=True)
+    (rejected_dir / "outside-sentinel").write_text("keep")
+    parsed = []
+    monkeypatch.setattr(engine_artifact.tarfile, "open", lambda *a, **k: parsed.append(a))
+    with pytest.raises(engine_artifact.ArtifactError):
+        invoke(rejected_dir, invalid)
+    assert parsed == []
+    assert_rejection_is_isolated(rejected_dir, invalid)
+
+
+def test_suffix_bytes_remain_covered_by_header_checksum(tmp_path, monkeypatch):
+    valid = _with_field_suffix(archive([("python/a", b"x", "file")]), 0, 100, b"python/a")
+    modified = rewrite_tar(valid, lambda raw: raw.__setitem__(9, ord("X")))
+    bad_dir = tmp_path / "bad"
+    bad_dir.mkdir(parents=True)
+    (bad_dir / "outside-sentinel").write_text("keep")
+    parsed = []
+    monkeypatch.setattr(engine_artifact.tarfile, "open", lambda *a, **k: parsed.append(a))
+    with pytest.raises(engine_artifact.ArtifactError):
+        invoke(bad_dir, modified)
+    assert parsed == []
+    assert_rejection_is_isolated(bad_dir, modified)
+    monkeypatch.undo()
+    assert (invoke(tmp_path / "good", valid) / "a").read_bytes() == b"x"
+    # Recalculating the checksum over the exact same modified suffix byte is
+    # again accepted: only the checksum mismatch is invalid.
+    repaired = rewrite_tar(valid, lambda raw: (raw.__setitem__(9, ord("X")), rechecksum(raw)))
+    assert (invoke(tmp_path / "repaired", repaired) / "a").read_bytes() == b"x"
+
+
+def test_empty_effective_prefix_ignores_suffix_instead_of_adding_path(tmp_path):
+    payload = archive([("python/a", b"x", "file")])
+    payload = _with_field_suffix(payload, 345, 155, b"", b"python")
+    assert (invoke(tmp_path, payload) / "a").read_bytes() == b"x"
+    assert not (tmp_path / "private/out/python").exists()
+
+
+@pytest.mark.parametrize("effective", [b"", b"/outside", b"../../outside", b"missing", b"other"])
+def test_hostile_effective_links_with_suffixes_refuse_before_write(tmp_path, monkeypatch, effective):
+    entries = [
+        ("python/target", b"x", "file"),
+        ("python/alias", b"target", "symlink"),
+    ]
+    if effective == b"other":
+        entries = [("python/alias", b"other", "symlink"), ("python/other", b"alias", "symlink")]
+    raw = bytearray(gzip.decompress(archive(entries)))
+    alias_header = header_offsets(raw, b"python/alias")[0]
+    _set_field(raw, alias_header + 157, 100, effective, b"ignored")
+    payload = gzip.compress(bytes(raw))
+    sentinel = tmp_path / "outside-sentinel"
+    sentinel.write_text("keep")
+    parser, writes = [], []
+    original_write, real_open = engine_artifact._write_tree, engine_artifact.tarfile.open
+
+    def observe_write(*args):
+        writes.append(args)
+        return original_write(*args)
+
+    def observe_open(*args, **kwargs):
+        parser.append(args)
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(engine_artifact, "_write_tree", observe_write)
+    monkeypatch.setattr(engine_artifact.tarfile, "open", observe_open)
+    with pytest.raises(engine_artifact.ArtifactError):
+        invoke(tmp_path, payload)
+    assert writes == []
+    if effective == b"":
+        # The empty effective link itself fails before the tar parser runs.
+        assert parser == []
+    else:
+        # Manifest/link resolution rejects after a full preflight pass.
+        assert len(parser) == 1
+    assert_rejection_is_isolated(tmp_path, payload)
+
+
+@pytest.mark.parametrize(
+    ("entries", "attacker", "target"),
+    [
+        (
+            [("python/a/up", b"..", "symlink"), ("python/link", b"a/up/../outside", "symlink")],
+            b"python/link", b"a/up/../outside",
+        ),
+        (
+            [("python/file", b"x", "file"), ("python/alias", b"file/child", "symlink")],
+            b"python/alias", b"file/child",
+        ),
+        (
+            [("python/link", b"real", "symlink"), ("python/link/payload", b"x", "file")],
+            b"python/link", b"real",
+        ),
+    ],
+    ids=["intermediate-escape", "file-as-ancestor", "link-write-through"],
+)
+def test_hostile_link_structures_with_stale_suffixes_refused_before_write(
+    tmp_path, monkeypatch, entries, attacker, target
+):
+    raw = bytearray(gzip.decompress(archive(entries)))
+    owner = header_offsets(raw, attacker)[0]
+    _set_field(raw, owner + 157, 100, target, b"stale")
+    payload = gzip.compress(bytes(raw))
+    sentinel = tmp_path / "outside-sentinel"
+    sentinel.write_text("keep")
+    source = tmp_path / "artifact.tgz"
+    source.write_bytes(payload)
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    parser, writes = [], []
+    original_write, real_open = engine_artifact._write_tree, engine_artifact.tarfile.open
+
+    def observe_write(*args):
+        writes.append(args)
+        return original_write(*args)
+
+    def observe_open(*args, **kwargs):
+        parser.append(args)
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(engine_artifact, "_write_tree", observe_write)
+    monkeypatch.setattr(engine_artifact.tarfile, "open", observe_open)
+    with pytest.raises(engine_artifact.ArtifactError):
+        engine_artifact.verify_and_extract(
+            source, parent / "out", sha256=hashlib.sha256(payload).hexdigest(), size=len(payload)
+        )
+    assert writes == []
+    assert len(parser) == 1  # refused at the manifest/link-resolution seam, not by preflight
+    assert_rejection_is_isolated(tmp_path, payload)
+
+
+@pytest.mark.parametrize("width", [100, 155], ids=["name-or-link", "prefix"])
+def test_overwidth_field_rejected_even_when_first_byte_is_nul(width):
+    with pytest.raises(engine_artifact.ArtifactError):
+        engine_artifact._field(b"\0" + b"x" * width, width)
+    with pytest.raises(engine_artifact.ArtifactError):
+        engine_artifact._field(b"x" * (width + 1), width)
 
 
 @pytest.mark.parametrize("case", ["short", "long", "digest"])

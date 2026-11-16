@@ -129,9 +129,14 @@ def _read_tar_header(stream):
 
 def _field(raw: bytes, limit: int) -> str:
     _require(len(raw) <= limit)
+    # Deliberate non-POSIX padding compatibility: the reviewed producer leaves
+    # stale bytes past the first NUL in the ustar string fields. stdlib tarfile
+    # also reads its value from the bytes before the first NUL, so only that
+    # effective value is decoded (strict UTF-8); suffix bytes stay opaque,
+    # never enter diagnostics, and remain covered by the header checksum in
+    # _preflight.
     if b"\0" in raw:
-        value, padding = raw.split(b"\0", 1)
-        _require(not any(padding))
+        value = raw.split(b"\0", 1)[0]
     else:
         value = raw
     try:
