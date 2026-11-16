@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "upstream": "astral-sh/python-build-standalone",
+  "release": "20261110",
+  "python_version": "3.12.16",
+  "target": "aarch64-apple-darwin",
+  "flavor": "install_only",
+  "filename": "cpython-3.12.16+20261110-aarch64-apple-darwin-install_only.tar.gz",
+  "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261110/cpython-3.12.16%2B20261110-aarch64-apple-darwin-install_only.tar.gz",
+  "size": 25371130,
+  "sha256": "e956e60bc9465d577ef8062059aa05cd3a2665b4b8678a2ed24e432368330b8f",
+  "checksum_url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261110/SHA256SUMS",
+  "release_metadata_url": "https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20261110",
+  "archive_root": "python/",
+  "minimum_macos": "13.0",
+  "provenance": {
+    "official_metadata_review": "coordinator comparison recorded in #3128 planning evidence",
+    "source_revision": null,
+    "source_revision_status": "not recorded in supplied review evidence"
+  },
+  "license": {
+    "member": "python/lib/python3.12/LICENSE.txt",
+    "size": 13936,
+    "sha256": "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf"
+  }
+}
