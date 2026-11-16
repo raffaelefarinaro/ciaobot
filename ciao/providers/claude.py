@@ -95,6 +95,7 @@ from ciao.providers.base import (
     ActiveHandle,
     BaseSDKProvider,
     ProviderCapabilities,
+    QuestionResponseResult,
     build_claude_message_stream,
     build_prompt,
     rate_limit_quota_payload,
@@ -736,8 +737,20 @@ class ClaudeProvider(BaseSDKProvider):
 
     @property
     def permission_gate(self) -> PermissionGate:
-        """Expose the gate so route handlers can deliver user replies."""
+        """Expose the gate for local notification refiring."""
         return self._permission_gate
+
+    def has_permission_request(self, request_id: str, session_id: str = "") -> bool:
+        return self._permission_gate.has_pending(request_id)
+
+    async def respond_permission(
+        self, request_id: str, approved: bool, reason: str = "", *,
+        session_id: str = "",
+    ) -> QuestionResponseResult:
+        matched = self._permission_gate.answer(
+            request_id, approved=approved, reason=reason
+        )
+        return QuestionResponseResult(True, already_resolved=not matched)
 
     @property
     def current_session_id(self) -> str | None:

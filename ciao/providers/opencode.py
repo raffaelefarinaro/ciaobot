@@ -2105,6 +2105,10 @@ class OpencodeProvider(BaseSDKProvider):
     def current_session_id(self) -> str | None:
         return self._session_id or None
 
+    @property
+    def response_session_id(self) -> str:
+        return self._session_id or ""
+
     async def read_mcp_status(self) -> dict[str, str]:
         """Read MCP connection states from this already-running V2 server.
 
@@ -3639,11 +3643,11 @@ class OpencodeProvider(BaseSDKProvider):
             response.status_code >= 500 or response.status_code in {408, 429},
         )
 
-    async def send_permission_response(
+    async def respond_permission(
         self,
         request_id: str,
         approved: bool,
-        message: str = "",
+        reason: str = "",
         *,
         session_id: str = "",
     ) -> QuestionResponseResult:
@@ -3669,7 +3673,7 @@ class OpencodeProvider(BaseSDKProvider):
         result = QuestionResponseResult(False, "Permission reply was interrupted", True)
         try:
             result = await self._reply_permission(
-                pending, "once" if approved else "reject", message
+                pending, "once" if approved else "reject", reason
             )
         finally:
             self._permission_inflight.pop(request_id, None)
@@ -3738,7 +3742,7 @@ class OpencodeProvider(BaseSDKProvider):
             response.status_code >= 500 or response.status_code in {408, 429},
         )
 
-    async def send_question_response(
+    async def respond_question(
         self,
         request_id: str,
         answers: Mapping[str, Sequence[str]],

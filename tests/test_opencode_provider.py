@@ -2241,6 +2241,15 @@ def _provider(tmp_path: Path) -> OpencodeProvider:
     return OpencodeProvider(tmp_path)
 
 
+def test_response_session_id_tracks_only_opencode_scoped_session(tmp_path: Path) -> None:
+    provider = _provider(tmp_path)
+    assert provider.response_session_id == ""
+    provider._session_id = "ses_1"
+    assert provider.response_session_id == "ses_1"
+    provider._session_id = "ses_2"
+    assert provider.response_session_id == "ses_2"
+
+
 def test_resolve_opencode_binary_honors_exported_path(tmp_path, monkeypatch):
     binary = tmp_path / "opencode"
     binary.write_text("#!/bin/sh\n")
@@ -3344,7 +3353,7 @@ async def test_permission_reply_rejects_a_different_session(tmp_path):
     provider, client = _armed_provider(tmp_path)
     _convert(provider, "permission.asked", LIVE_PERMISSION)
 
-    result = await provider.send_permission_response(
+    result = await provider.respond_permission(
         "per_live1", True, session_id="ses_other"
     )
 
@@ -3468,7 +3477,7 @@ async def test_form_reply_rejects_a_different_session(tmp_path):
         }},
     )
 
-    result = await provider.send_question_response(
+    result = await provider.respond_question(
         "frm_session", {"value": ["ok"]}, session_id="ses_other"
     )
 
@@ -3510,7 +3519,7 @@ async def test_form_reply_honors_conditions_and_external_fields(tmp_path):
             ],
         }},
     )
-    result = await provider.send_question_response(
+    result = await provider.respond_question(
         "frm_typed",
         {"enabled": ["Yes"], "details": ["only when enabled"], "external": ["Done"]},
     )
@@ -3539,7 +3548,7 @@ async def test_form_reply_prefers_an_exact_wire_value_over_a_label_collision(tmp
         }},
     )
 
-    result = await provider.send_question_response(
+    result = await provider.respond_question(
         "frm_collision", {"choice": ["1"]}
     )
 
@@ -3564,7 +3573,7 @@ async def test_required_invalid_form_input_stays_pending(tmp_path):
             }],
         }},
     )
-    result = await provider.send_question_response("frm_invalid", {"count": ["many"]})
+    result = await provider.respond_question("frm_invalid", {"count": ["many"]})
     assert result.ok is False
     assert client.calls == []
     assert "frm_invalid" in provider._question_requests
@@ -3585,13 +3594,13 @@ def test_unknown_events_are_ignored(tmp_path):
 
 @pytest.mark.asyncio
 async def test_permission_reply_for_an_unknown_request_is_refused(tmp_path):
-    result = await _provider(tmp_path).send_permission_response("nope", True)
+    result = await _provider(tmp_path).respond_permission("nope", True)
     assert result.ok is False
 
 
 @pytest.mark.asyncio
 async def test_question_reply_for_an_already_settled_request_is_idempotent(tmp_path):
-    result = await _provider(tmp_path).send_question_response("nope", {})
+    result = await _provider(tmp_path).respond_question("nope", {})
     assert result.ok is True
     assert result.already_resolved is True
 
@@ -3780,7 +3789,7 @@ async def test_permission_reply_sends_v2_feedback_message(tmp_path):
     provider, client = _armed_provider(tmp_path)
     _convert(provider, "permission.asked", LIVE_PERMISSION)
 
-    result = await provider.send_permission_response(
+    result = await provider.respond_permission(
         "per_live1", False, "Do not push yet"
     )
 
@@ -3797,7 +3806,7 @@ async def test_failed_permission_reply_keeps_request_for_retry(tmp_path):
     _convert(provider, "permission.asked", LIVE_PERMISSION)
     client.status_code = 500
 
-    result = await provider.send_permission_response("per_live1", True)
+    result = await provider.respond_permission("per_live1", True)
     assert result.ok is False
     assert result.retryable is True
 
@@ -3817,7 +3826,7 @@ async def test_failed_form_reply_keeps_request_for_retry(tmp_path):
     )
     client.status_code = 500
 
-    result = await provider.send_question_response("frm_retry", {"q": ["answer"]})
+    result = await provider.respond_question("frm_retry", {"q": ["answer"]})
     assert result.ok is False
     assert result.retryable is True
 
@@ -3830,7 +3839,7 @@ async def test_permission_reply_404_is_reported_as_no_longer_active(tmp_path):
     _convert(provider, "permission.asked", LIVE_PERMISSION)
     client.status_code = 404
 
-    result = await provider.send_permission_response("per_live1", True)
+    result = await provider.respond_permission("per_live1", True)
 
     assert result.ok is False
     assert result.retryable is False
@@ -3846,8 +3855,8 @@ async def test_concurrent_permission_replies_post_once(tmp_path):
     _convert(provider, "permission.asked", LIVE_PERMISSION)
 
     a, b = await asyncio.gather(
-        provider.send_permission_response("per_live1", True),
-        provider.send_permission_response("per_live1", False),
+        provider.respond_permission("per_live1", True),
+        provider.respond_permission("per_live1", False),
     )
 
     assert len(client.calls) == 1
@@ -3866,8 +3875,8 @@ async def test_concurrent_permission_reply_shares_a_retryable_failure(tmp_path):
     _convert(provider, "permission.asked", LIVE_PERMISSION)
 
     a, b = await asyncio.gather(
-        provider.send_permission_response("per_live1", True),
-        provider.send_permission_response("per_live1", False),
+        provider.respond_permission("per_live1", True),
+        provider.respond_permission("per_live1", False),
     )
 
     assert len(client.calls) == 1
@@ -3883,7 +3892,7 @@ async def test_permission_reply_409_is_already_resolved(tmp_path):
     _convert(provider, "permission.asked", LIVE_PERMISSION)
     client.status_code = 409
 
-    result = await provider.send_permission_response("per_live1", False)
+    result = await provider.respond_permission("per_live1", False)
 
     assert result.ok
     assert result.already_resolved
@@ -3901,9 +3910,9 @@ async def test_cancelled_permission_reply_releases_the_waiter(tmp_path):
     provider._client = _HangingClient()  # type: ignore[assignment]
     _convert(provider, "permission.asked", LIVE_PERMISSION)
 
-    winner = asyncio.create_task(provider.send_permission_response("per_live1", True))
+    winner = asyncio.create_task(provider.respond_permission("per_live1", True))
     await asyncio.sleep(0)
-    loser = asyncio.create_task(provider.send_permission_response("per_live1", False))
+    loser = asyncio.create_task(provider.respond_permission("per_live1", False))
     await asyncio.sleep(0)
     winner.cancel()
     result = await asyncio.wait_for(loser, 1)
@@ -3927,7 +3936,7 @@ async def test_form_reply_404_is_reported_as_no_longer_active(tmp_path):
     )
     client.status_code = 404
 
-    result = await provider.send_question_response("frm_gone", {"q": ["answer"]})
+    result = await provider.respond_question("frm_gone", {"q": ["answer"]})
 
     assert result.ok is False
     assert result.retryable is False
@@ -3954,8 +3963,8 @@ async def test_concurrent_form_replies_post_once(tmp_path):
     provider, client = _race_provider(tmp_path)
 
     a, b = await asyncio.gather(
-        provider.send_question_response("frm_race", {"q": ["a"]}),
-        provider.send_question_response("frm_race", {"q": ["b"]}),
+        provider.respond_question("frm_race", {"q": ["a"]}),
+        provider.respond_question("frm_race", {"q": ["b"]}),
     )
 
     assert client.calls == [
@@ -3972,8 +3981,8 @@ async def test_concurrent_form_reply_and_cancel_make_one_call(tmp_path):
     provider, client = _race_provider(tmp_path)
 
     reply, cancel = await asyncio.gather(
-        provider.send_question_response("frm_race", {"q": ["a"]}),
-        provider.send_question_response("frm_race", {}, cancel=True),
+        provider.respond_question("frm_race", {"q": ["a"]}),
+        provider.respond_question("frm_race", {}, cancel=True),
     )
 
     assert client.calls == [
@@ -3988,8 +3997,8 @@ async def test_concurrent_form_cancel_and_reply_make_one_call(tmp_path):
     provider, client = _race_provider(tmp_path)
 
     cancel, reply = await asyncio.gather(
-        provider.send_question_response("frm_race", {}, cancel=True),
-        provider.send_question_response("frm_race", {"q": ["a"]}),
+        provider.respond_question("frm_race", {}, cancel=True),
+        provider.respond_question("frm_race", {"q": ["a"]}),
     )
 
     assert client.calls == [("/api/session/ses_1/form/frm_race", {})]
@@ -4002,8 +4011,8 @@ async def test_concurrent_form_reply_shares_a_retryable_failure(tmp_path):
     provider, client = _race_provider(tmp_path, status_code=500)
 
     reply, cancel = await asyncio.gather(
-        provider.send_question_response("frm_race", {"q": ["a"]}),
-        provider.send_question_response("frm_race", {}, cancel=True),
+        provider.respond_question("frm_race", {"q": ["a"]}),
+        provider.respond_question("frm_race", {}, cancel=True),
     )
 
     assert len(client.calls) == 1
@@ -4017,7 +4026,7 @@ async def test_concurrent_form_reply_shares_a_retryable_failure(tmp_path):
 async def test_form_reply_409_is_already_resolved(tmp_path):
     provider, _client = _race_provider(tmp_path, status_code=409)
 
-    result = await provider.send_question_response("frm_race", {"q": ["a"]})
+    result = await provider.respond_question("frm_race", {"q": ["a"]})
 
     assert result.ok is True
     assert result.already_resolved is True
@@ -4028,7 +4037,7 @@ async def test_form_reply_409_is_already_resolved(tmp_path):
 async def test_form_cancel_409_is_already_resolved(tmp_path):
     provider, _client = _race_provider(tmp_path, status_code=409)
 
-    result = await provider.send_question_response("frm_race", {}, cancel=True)
+    result = await provider.respond_question("frm_race", {}, cancel=True)
 
     assert result.ok is True
     assert result.already_resolved is True
@@ -4048,11 +4057,11 @@ async def test_cancelled_form_reply_releases_the_waiter(tmp_path):
     _convert(provider, "form.created", _RACE_FORM)
 
     winner = asyncio.create_task(
-        provider.send_question_response("frm_race", {"q": ["a"]})
+        provider.respond_question("frm_race", {"q": ["a"]})
     )
     await asyncio.sleep(0)
     loser = asyncio.create_task(
-        provider.send_question_response("frm_race", {}, cancel=True)
+        provider.respond_question("frm_race", {}, cancel=True)
     )
     await asyncio.sleep(0)
     winner.cancel()
@@ -4087,7 +4096,7 @@ async def test_form_reply_uses_field_keys_and_option_values(tmp_path):
         }},
     )
 
-    result = await provider.send_question_response(
+    result = await provider.respond_question(
         "frm_order", {"second": ["B"], "first": ["A"]}
     )
     assert result.ok is True
@@ -4113,7 +4122,7 @@ async def test_empty_form_reply_is_not_cancellation(tmp_path):
         }},
     )
 
-    result = await provider.send_question_response("frm_empty", {})
+    result = await provider.respond_question("frm_empty", {})
     assert result.ok is True
     assert client.calls == [(
         "/api/session/ses_1/form/frm_empty/reply", {"answer": {}}
@@ -4132,7 +4141,7 @@ async def test_explicit_form_cancel_uses_delete(tmp_path):
         }},
     )
 
-    result = await provider.send_question_response("frm_cancel", {}, cancel=True)
+    result = await provider.respond_question("frm_cancel", {}, cancel=True)
     assert result.ok is True
     assert client.calls == [("/api/session/ses_1/form/frm_cancel", {})]
 
