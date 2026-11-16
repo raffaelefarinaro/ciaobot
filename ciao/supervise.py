@@ -8,8 +8,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Sequence
-from pathlib import Path
-from typing import IO, Any
+from typing import Any
 
 from ciao.config import RESTART_EXIT_CODE
 from ciao.os_support.processes import ProcessTree, tree_spawn_options
@@ -26,20 +25,6 @@ STOP_GRACE_S = 30.0              # after forwarding a stop, kill the tree if the
 def default_child_argv(extra_args: Sequence[str] = ()) -> list[str]:
     """argv for the engine child: works without the console-script shim."""
     return [sys.executable, "-m", "ciao.cli", "run", "--supervised", *extra_args]
-
-
-def _ensure_stdio(log_dir: Path) -> tuple[IO[str] | None, IO[str] | None]:
-    """Under pythonw.exe stdout/stderr are None. Redirect to the runtime logs.
-
-    Returns the opened files (to close) or (None, None) when stdio exists.
-    """
-    if sys.stderr is not None:
-        return None, None
-    log_dir.mkdir(parents=True, exist_ok=True)
-    out = open(log_dir / "ciao.stdout.log", "a", encoding="utf-8", newline="", buffering=1)
-    err = open(log_dir / "ciao.stderr.log", "a", encoding="utf-8", newline="", buffering=1)
-    sys.stdout, sys.stderr = out, err
-    return out, err
 
 
 def backoff_delay(consecutive_restarts: int) -> float:
@@ -82,18 +67,9 @@ def supervise(
     """
     denied = check_workspace_access()
     if denied is not None:
-        if sys.stderr is not None:
-            print(denied, file=sys.stderr, flush=True)
+        print(denied, file=sys.stderr, flush=True)
         return ACCESS_DENIED_EXIT
     stop = threading.Event()
-    # The task action is `pythonw.exe`, which has no console: sys.stderr is
-    # None there and everything the child writes would go nowhere. The log files
-    # are the same ones the macOS plist redirects to.
-    saved_stdio = (sys.stdout, sys.stderr)
-    out, err = _ensure_stdio(Path.cwd() / ".runtime")
-    child_stdio: dict[str, Any] = (
-        {} if out is None or err is None else {"stdout": out, "stderr": err}
-    )
     tree: ProcessTree | None = None
     running: subprocess.Popen[Any] | None = None
     timer: threading.Timer | None = None
@@ -152,14 +128,13 @@ def supervise(
                 return 130
             started = clock()
             proc = subprocess.Popen(
-                argv, **tree_spawn_options(dies_with_engine=True), **child_stdio
+                argv, **tree_spawn_options(dies_with_engine=True)
             )
             running = proc
             try:
                 tree = ProcessTree(proc.pid, dies_with_engine=True)
             except BaseException:
-                # The child is live but untracked (on Windows the job object can
-                # fail to open or to take it): kill it here rather than leave the
+                # The child is live but untracked: kill it here rather than leave the
                 # engine running with no supervisor in front of it.
                 proc.kill()
                 proc.wait()
@@ -222,14 +197,6 @@ def supervise(
                 print(f"Backing off {delay:g}s before relaunching.", file=sys.stderr, flush=True)
                 wait(delay)
     finally:
-        if out is not None:
-            # The handles are about to close, so the module-level streams have to
-            # go back to what they were: ciao.cli keeps writing to sys.stderr after
-            # supervise returns, and a closed file would raise on the first write.
-            sys.stdout, sys.stderr = saved_stdio
-        for handle in (out, err):
-            if handle is not None:
-                handle.close()
         if timer is not None:
             timer.cancel()
         for sig, handler in previous.items():

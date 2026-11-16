@@ -10,10 +10,7 @@ opencode and the agent CLI transport) and on the one-shot env builder.
 The engine directory is ``sysconfig.get_path("scripts")``, deliberately not the
 resolved interpreter path: a venv's ``bin/python`` symlinks to the base
 interpreter, and resolving it names the base interpreter's bin dir — where no
-``ciao`` entry point lives. It is also not always ``Path(sys.executable).parent``:
-on a global Windows install the interpreter sits in ``...\\x64\\`` while the
-console script is written to the sibling ``...\\Scripts\\``. ``ciao/cli.py``
-documents the same rule.
+``ciao`` entry point lives.
 """
 
 from __future__ import annotations
@@ -45,8 +42,7 @@ def _make_manager(tmp_path: Path, *, gws_profile: str = "") -> ProjectChatManage
         state_path=runtime / "state.json",
         media_root=runtime / "media",
         # These tests check the turn env, not the sandbox: whole-machine scope
-        # keeps the spawn unwrapped on every platform (Linux CI has no bwrap,
-        # Windows has no sandbox).
+        # keeps the spawn unwrapped on every platform (Linux CI has no bwrap).
         workspaces={
             "personal": WorkspaceConfig(
                 name="personal",
@@ -78,15 +74,12 @@ def _chat_extra_env(
 
 
 def test_engine_bin_dir_is_the_script_dir_not_the_resolved_base() -> None:
-    """Guard the venv-symlink trap and the global-Windows split.
+    """Guard the venv-symlink trap.
 
-    The directory is the scripts dir, not ``Path(sys.executable).parent``: a
-    global Windows install keeps the interpreter in ``...\\x64\\`` and writes the
-    ``ciao`` console script to the sibling ``...\\Scripts\\``. And it is not the
-    ``.resolve()``d base interpreter's dir either: a venv's ``bin/python``
-    symlinks to the base interpreter, and that base dir holds no ``ciao`` entry
-    point. ``sysconfig.get_path("scripts")`` is venv-aware and does not resolve
-    symlinks, so both rules hold at once.
+    And it is not the ``.resolve()``d base interpreter's dir either: a venv's
+    ``bin/python`` symlinks to the base interpreter, and that base dir holds no
+    ``ciao`` entry point. ``sysconfig.get_path("scripts")`` is venv-aware and
+    does not resolve symlinks, so both rules hold at once.
     """
     engine = Path(engine_bin_dir())
     assert engine == Path(sysconfig.get_path("scripts"))
@@ -105,7 +98,7 @@ def test_the_engine_bin_dir_holds_the_entry_point_when_it_exists() -> None:
     interpreter this skips rather than asserting a shape the machine does not
     have, which is the very case the CI background test now covers.
     """
-    engine_ciao = Path(engine_bin_dir()) / ("ciao.exe" if sys.platform == "win32" else "ciao")
+    engine_ciao = Path(engine_bin_dir()) / "ciao"
     if not engine_ciao.exists():
         pytest.skip("no ciao entry point beside the test interpreter")
     assert shutil.which("ciao", path=engine_bin_dir()) is not None
@@ -191,15 +184,13 @@ def test_engine_ciao_resolves_first_despite_a_decoy_on_the_inherited_path(
 
     The decoy stands in for ``~/.local/bin/ciao`` pointing at an older install.
     """
-    engine_ciao = Path(engine_bin_dir()) / (
-        "ciao.exe" if sys.platform == "win32" else "ciao"
-    )
+    engine_ciao = Path(engine_bin_dir()) / "ciao"
     if not engine_ciao.exists():
         pytest.skip("no ciao entry point beside the test interpreter")
 
     decoy_dir = tmp_path / "stale-bin"
     decoy_dir.mkdir()
-    decoy = decoy_dir / ("ciao.exe" if sys.platform == "win32" else "ciao")
+    decoy = decoy_dir / "ciao"
     decoy.write_text("#!/bin/sh\necho 1.0.1\n")
     monkeypatch.setenv("PATH", os.pathsep.join([str(decoy_dir), "/user/bin"]))
 

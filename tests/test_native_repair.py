@@ -54,12 +54,6 @@ from tests.test_server_host_install import (
     _SignedRunner,
     _fixture,
     _signed_fixture,
-    requires_posix_uid,
-)
-
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="native repair is a macOS path; Windows keeps the legacy installer",
 )
 
 
@@ -2522,7 +2516,6 @@ def test_dead_event_channel_yields_event_channel_failed(tmp_path: Path) -> None:
     assert "bootstrap" not in calls
 
 
-@requires_posix_uid
 @pytest.mark.parametrize(
     ("case", "want"),
     [("signed_to_legacy", "unknown_state"), ("other_team", HostPlan.replace)],
@@ -2581,7 +2574,6 @@ def test_plan_host_policy_refusals_with_the_real_classifier(
     assert _tree(home) == before
 
 
-@requires_posix_uid
 @pytest.mark.parametrize(
     ("installed", "want"),
     [("signed", "unknown_state"), ("adhoc", HostPlan.replace)],

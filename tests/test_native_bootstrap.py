@@ -45,10 +45,6 @@ from ciao.web.app import create_app
 from ciao.web.auth import AuthMiddleware
 from ciao.web.routes_api import setup_finish_endpoint
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32", reason="the native bootstrap child is macOS-only"
-)
-
 _LOOPBACK_PEER = ("127.0.0.1", 50000)
 
 
@@ -341,14 +337,14 @@ def test_capture_refuses_a_non_macos_backend(
     _read_fd, write_fd = notification_pipe
     monkeypatch.setattr(native_installer, "_bootstrap_platform", lambda: "darwin")
 
-    class _Windows:
-        name = "windows"
+    class _Linux:
+        name = "linux"
 
         def live_agents_dir(self) -> Path:
             return isolated_home
 
     monkeypatch.setattr(
-        "ciao.service_backend.current_backend", lambda: _Windows()
+        "ciao.service_backend.current_backend", lambda: _Linux()
     )
     with pytest.raises(NativeBootstrapError, match="unsupported_backend"):
         NativeBootstrapContext.capture(
