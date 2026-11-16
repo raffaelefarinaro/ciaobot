@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 from types import SimpleNamespace
 
+from ciao.providers import claude as claude_adapter
+from ciao.providers.base import BaseProvider
 from ciao.web.project_chats import ProjectChatManager
 
 
@@ -112,7 +114,7 @@ async def test_native_title_claude_rejects_leaked_context_capsule(monkeypatch) -
         custom_title = "[CIAO_CONTEXT_BEGIN]\n[Chat ID: \"chat-1\"]\n[CIAO_CONTEXT_END]\n\nWhat's the weather?"
         summary = "Claude Summary"
 
-    monkeypatch.setattr(pc, "get_session_info", lambda _sid, directory=None: FakeInfo())
+    monkeypatch.setattr(claude_adapter, "get_session_info", lambda _sid, directory=None: FakeInfo())
     assert await manager._native_chat_title(manager._chats["chat-1"]) == "Claude Summary"
 
 
@@ -127,7 +129,7 @@ async def test_native_title_claude_rejects_leaked_context_capsule_in_both(monkey
         custom_title = leaked
         summary = leaked
 
-    monkeypatch.setattr(pc, "get_session_info", lambda _sid, directory=None: FakeInfo())
+    monkeypatch.setattr(claude_adapter, "get_session_info", lambda _sid, directory=None: FakeInfo())
     assert await manager._native_chat_title(manager._chats["chat-1"]) is None
 
 
@@ -141,7 +143,7 @@ async def test_native_title_claude(monkeypatch) -> None:
         custom_title = "Claude AI Title"
         summary = "Claude Summary"
 
-    monkeypatch.setattr(pc, "get_session_info", lambda _sid, directory=None: FakeInfo())
+    monkeypatch.setattr(claude_adapter, "get_session_info", lambda _sid, directory=None: FakeInfo())
     assert await manager._native_chat_title(manager._chats["chat-1"]) == "Claude AI Title"
 
 
@@ -155,7 +157,7 @@ async def test_native_title_claude_falls_back_to_summary(monkeypatch) -> None:
         custom_title = None
         summary = "Claude Summary"
 
-    monkeypatch.setattr(pc, "get_session_info", lambda _sid, directory=None: FakeInfo())
+    monkeypatch.setattr(claude_adapter, "get_session_info", lambda _sid, directory=None: FakeInfo())
     assert await manager._native_chat_title(manager._chats["chat-1"]) == "Claude Summary"
 
 
@@ -164,7 +166,7 @@ async def test_native_title_claude_missing(monkeypatch) -> None:
     from ciao.web import project_chats as pc
 
     manager = _manager(chats={"chat-1": _chat(provider="claude")})
-    monkeypatch.setattr(pc, "get_session_info", lambda _sid, directory=None: None)
+    monkeypatch.setattr(claude_adapter, "get_session_info", lambda _sid, directory=None: None)
     assert await manager._native_chat_title(manager._chats["chat-1"]) is None
 
 
@@ -507,7 +509,7 @@ async def test_native_title_reads_the_chats_own_agent_root(monkeypatch) -> None:
         # Only the chat's own root holds the session.
         return FakeInfo() if directory == "/roots/work" else None
 
-    monkeypatch.setattr(pc, "get_session_info", fake_get_session_info)
+    monkeypatch.setattr(claude_adapter, "get_session_info", fake_get_session_info)
 
     manager = _manager(
         config=_config({"personal": "/roots/personal", "work": "/roots/work"}),
@@ -545,6 +547,494 @@ async def test_native_title_opencode_also_reads_the_chats_agent_root(monkeypatch
     assert seen == ["/roots/work"]
 
 
+# ── Shared native-title contract (adapter level) ─────────────────────────
+#
+# Native titles read through `BaseProvider.native_title_candidates` on the
+# adapter class: ordered candidate titles in provider-preference order, `()`
+# when the provider has none. The host keeps all validation (see the
+# `_real_title` oracles above); the adapter only knows its own storage.
+
+
+@pytest.mark.asyncio
+async def test_base_provider_native_title_default_without_construction() -> None:
+    """The optional contract's default is () and must never build a provider."""
+    from pathlib import Path
+
+    from ciao.providers.base import BaseProvider
+
+    entries: list[str] = []
+
+    class MinimalProvider(BaseProvider):
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("native_title_candidates must not construct a provider")
+
+        def run_streaming(self, request, register_handle):
+            entries.append("run_streaming")
+            return
+            yield  # pragma: no cover - empty async generator
+
+    assert await MinimalProvider.native_title_candidates(Path("/ws"), "sess-1") == ()
+    assert entries == []
+    assert MinimalProvider.capabilities == BaseProvider.capabilities
+
+
+@pytest.mark.asyncio
+async def test_claude_native_title_candidates_extraction_matrix(monkeypatch) -> None:
+    """Claude returns (custom_title, summary) stripped, in that order, or ()."""
+    from pathlib import Path
+
+    from ciao.providers import claude as claude_adapter
+    from ciao.providers.claude import ClaudeProvider
+
+    calls: list[tuple[str, str]] = []
+
+    class Info:
+        custom_title: str | None
+        summary: str | None
+
+    def reader(sid, directory=None):
+        calls.append((sid, str(directory)))
+        return reader.info
+
+    reader.info = Info()
+    reader.info.custom_title = "  Claude Custom  "
+    reader.info.summary = "  Claude Summary  "
+    monkeypatch.setattr(claude_adapter, "get_session_info", reader)
+
+    root = Path("/roots/work")
+    assert await ClaudeProvider.native_title_candidates(root, "sess-1") == (
+        "Claude Custom",
+        "Claude Summary",
+    )
+    # Exactly one read, with the exact session id and the stringified root.
+    assert calls == [("sess-1", str(root))]
+
+    reader.info = Info()
+    reader.info.custom_title = None
+    reader.info.summary = None
+    assert await ClaudeProvider.native_title_candidates(root, "sess-1") == ("", "")
+
+    reader.info = None
+    assert await ClaudeProvider.native_title_candidates(root, "sess-1") == ()
+
+
+@pytest.mark.asyncio
+async def test_claude_native_title_candidates_propagates_sdk_errors(monkeypatch) -> None:
+    """SDK reader failures propagate to the manager's failure boundary."""
+    from pathlib import Path
+
+    from ciao.providers import claude as claude_adapter
+    from ciao.providers.claude import ClaudeProvider
+
+    def exploding_reader(_sid, directory=None):
+        raise RuntimeError("claude cli missing")
+
+    monkeypatch.setattr(claude_adapter, "get_session_info", exploding_reader)
+    with pytest.raises(RuntimeError, match="claude cli missing"):
+        await ClaudeProvider.native_title_candidates(Path("/ws"), "sess-1")
+
+
+@pytest.mark.asyncio
+async def test_opencode_native_title_candidates_extraction_matrix(monkeypatch) -> None:
+    """OpenCode forwards the exact read_thread args and extracts the old title."""
+    from pathlib import Path
+
+    from ciao.providers.opencode import OpencodeProvider
+
+    calls: list[tuple[Path, str]] = []
+
+    async def fake_read_thread(workspace_root, session_id):
+        calls.append((workspace_root, session_id))
+        return fake_read_thread.thread
+
+    fake_read_thread.thread = {}
+    monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
+
+    root = Path("/roots/work")
+    cases = [
+        # Real thread with a dict info and a title.
+        ({"info": {"title": "How hash tables work"}, "messages": []}, ("How hash tables work",)),
+        # Empty info dict, missing info key, non-dict thread, non-dict info.
+        ({"info": {}, "messages": []}, ("",)),
+        ({"messages": []}, ("",)),
+        ("not a thread", ("",)),
+        ({"info": "weird", "messages": []}, ("",)),
+        # Falsey title values keep the old `str(... or "")` shape.
+        ({"info": {"title": ""}}, ("",)),
+        ({"info": {"title": None}}, ("",)),
+        # A non-string truthy title is stringified exactly as before.
+        ({"info": {"title": 12345}}, ("12345",)),
+    ]
+    for thread, expected in cases:
+        fake_read_thread.thread = thread
+        assert await OpencodeProvider.native_title_candidates(root, "sess-1") == expected
+    assert calls == [(root, "sess-1")] * len(cases)
+
+
+# ── Manager dispatch through the provider registry ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_registered_third_adapter_supplies_native_title(monkeypatch) -> None:
+    """A registered non-builtin adapter feeds candidates through the same seam.
+
+    `auto_title_if_default` hands the chat's own agent root to the adapter
+    through the provider registry and validates the ordered candidates at the
+    shared `_real_title` seam; it reads no native storage, constructs no
+    provider, and never reaches the one-shot titler. The one-shot spy
+    records instead of raising: a raise would land in `_llm_chat_title`'s
+    `except Exception` and could not fail the test.
+    """
+    from ciao import provider_registry
+    from ciao.web import project_chats as pc
+
+    reads: list[tuple[str, str]] = []
+    oneshot_calls: list[int] = []
+    title_calls: list[str] = []
+
+    class ThirdProvider(BaseProvider):
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("native title reads must not construct a provider")
+
+        def run_streaming(self, request, register_handle):
+            raise AssertionError("run_streaming must not be entered")
+            yield  # pragma: no cover
+
+        @classmethod
+        async def native_title_candidates(cls, workspace_root, session_id):
+            reads.append((str(workspace_root), session_id))
+            return (
+                "",
+                "New session - temporary",
+                "[CIAO_CONTEXT_BEGIN] private",
+                "  Clean summary  ",
+                "Later title",
+            )
+
+    class Descriptor:
+        def factory(self):
+            return ThirdProvider
+
+    monkeypatch.setattr(
+        provider_registry, "get", lambda pid: Descriptor() if pid == "synth" else None
+    )
+
+    async def recording_oneshot(*_args, **_kwargs):
+        oneshot_calls.append(1)
+        return ""
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", recording_oneshot)
+
+    real_real_title = pc.chat_service._real_title
+
+    def spying_real_title(title):
+        title_calls.append(title)
+        return real_real_title(title)
+
+    monkeypatch.setattr(pc.chat_service, "_real_title", spying_real_title)
+
+    manager = _manager(
+        config=_config({"personal": "/roots/personal", "work": "/roots/work"}),
+        chats={"chat-1": _chat(provider="synth")},
+        projects={
+            "project-1": SimpleNamespace(project_id="project-1", workspace="work")
+        },
+    )
+    result = await manager.auto_title_if_default("chat-1", "hello")
+    assert result == "Clean summary"
+    assert manager._chats["chat-1"].title == "Clean summary"
+    # The adapter saw the chat's OWN agent root, not the install root.
+    assert reads == [("/roots/work", "sess-1")]
+    assert oneshot_calls == []
+    # Candidates reach the rejection seam in order; the first clean one wins
+    # and the later title is never examined.
+    assert title_calls == [
+        "",
+        "New session - temporary",
+        "[CIAO_CONTEXT_BEGIN] private",
+        "  Clean summary  ",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unsupported_adapter_returns_none_without_construction(monkeypatch) -> None:
+    """An adapter that inherits the contract default yields no title, never a build.
+
+    Factory access is recorded and observed: spies that raised here would be
+    swallowed by the manager's `except Exception` and could not fail the test.
+    """
+    from ciao import provider_registry
+
+    factory_calls: list[int] = []
+    built: list[str] = []
+
+    class DefaultProvider(BaseProvider):
+        def __init__(self, *args, **kwargs):
+            built.append("constructed")
+
+        def run_streaming(self, request, register_handle):
+            raise AssertionError("run_streaming must not be entered")
+            yield  # pragma: no cover
+
+    class Descriptor:
+        def factory(self):
+            factory_calls.append(1)
+            return DefaultProvider
+
+    monkeypatch.setattr(
+        provider_registry, "get", lambda pid: Descriptor() if pid == "synth" else None
+    )
+    manager = _manager(chats={"chat-1": _chat(provider="synth")})
+    assert await manager._native_chat_title(manager._chats["chat-1"]) is None
+    # The registry resolved the adapter class exactly once; the read never
+    # constructed it.
+    assert factory_calls == [1]
+    assert built == []
+
+
+@pytest.mark.asyncio
+async def test_unregistered_provider_id_returns_none_without_any_read(monkeypatch) -> None:
+    """An id with no descriptor returns None with no factory or storage access.
+
+    Every spy records and is asserted after the call rather than raising: a
+    raise would land inside the manager's `except Exception` and could not
+    fail the test. The registry seam is watched at three levels so any
+    fallback factory resolution is caught — id lookups (`get`), a
+    `require`-based fallback, and `.factory()` itself on any registered
+    descriptor however it was obtained.
+    """
+    from ciao import provider_registry
+    from ciao.providers.opencode import OpencodeProvider
+
+    get_calls: list[str] = []
+    require_calls: list[str] = []
+    factory_calls: list[str] = []
+    read_calls: list[int] = []
+    info_calls: list[int] = []
+
+    real_get = provider_registry.get
+    real_require = provider_registry.require
+    real_factory = provider_registry.ProviderDescriptor.factory
+
+    def spying_get(provider):
+        get_calls.append(provider)
+        return real_get(provider)
+
+    def spying_require(provider):
+        require_calls.append(provider)
+        return real_require(provider)
+
+    def spying_factory(descriptor_self):
+        factory_calls.append(descriptor_self.id)
+        return real_factory(descriptor_self)
+
+    async def recording_read(_workspace_root, _session_id):
+        read_calls.append(1)
+
+    def recording_info(_sid, directory=None):
+        info_calls.append(1)
+
+    monkeypatch.setattr(provider_registry, "get", spying_get)
+    monkeypatch.setattr(provider_registry, "require", spying_require)
+    monkeypatch.setattr(provider_registry.ProviderDescriptor, "factory", spying_factory)
+    monkeypatch.setattr(OpencodeProvider, "read_thread", recording_read)
+    monkeypatch.setattr(claude_adapter, "get_session_info", recording_info)
+    manager = _manager(chats={"chat-1": _chat(provider="elsewhere")})
+    assert await manager._native_chat_title(manager._chats["chat-1"]) is None
+    # One registry lookup, no descriptor, therefore no `require` fallback and
+    # no `.factory()` on any registered descriptor — and no storage read.
+    assert get_calls == ["elsewhere"]
+    assert require_calls == []
+    assert factory_calls == []
+    assert read_calls == []
+    assert info_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_read_failure_keeps_failure_log(monkeypatch, caplog) -> None:
+    """Adapter failures degrade to None behind the manager's failure log."""
+    import logging
+
+    from ciao import provider_registry
+
+    built: list[str] = []
+
+    class ExplodingProvider(BaseProvider):
+        def __init__(self, *args, **kwargs):
+            built.append("constructed")
+
+        def run_streaming(self, request, register_handle):
+            raise AssertionError("must not stream")
+            yield  # pragma: no cover
+
+        @classmethod
+        async def native_title_candidates(cls, workspace_root, session_id):
+            raise RuntimeError("adapter storage unreadable")
+
+    class Descriptor:
+        def factory(self):
+            return ExplodingProvider
+
+    monkeypatch.setattr(
+        provider_registry, "get", lambda pid: Descriptor() if pid == "synth" else None
+    )
+    manager = _manager(chats={"chat-1": _chat(provider="synth")})
+    with caplog.at_level(logging.INFO, logger="ciao.web.project_chats"):
+        assert await manager._native_chat_title(manager._chats["chat-1"]) is None
+    assert built == []
+    # The chat id, not any candidate text, is what fails into the log.
+    records = [
+        r
+        for r in caplog.records
+        if r.getMessage() == "Native title read failed for chat-1"
+    ]
+    assert records
+    assert records[0].exc_info is not None
+
+
+@pytest.mark.asyncio
+async def test_factory_resolution_failure_keeps_failure_log(monkeypatch, caplog) -> None:
+    """A broken factory import also lands behind the same failure boundary."""
+    import logging
+
+    from ciao import provider_registry
+
+    class Descriptor:
+        def factory(self):
+            raise RuntimeError("factory import cannot resolve")
+
+    monkeypatch.setattr(
+        provider_registry, "get", lambda pid: Descriptor() if pid == "synth" else None
+    )
+    manager = _manager(chats={"chat-1": _chat(provider="synth")})
+    with caplog.at_level(logging.INFO, logger="ciao.web.project_chats"):
+        assert await manager._native_chat_title(manager._chats["chat-1"]) is None
+    records = [
+        r
+        for r in caplog.records
+        if r.getMessage() == "Native title read failed for chat-1"
+    ]
+    assert records
+    assert records[0].exc_info is not None
+
+
+@pytest.mark.asyncio
+async def test_native_title_cancellation_propagates(monkeypatch) -> None:
+    """Cancellation must not be converted into a missing title."""
+    import asyncio
+
+    from ciao import provider_registry
+
+    built: list[str] = []
+
+    class CancellingProvider(BaseProvider):
+        def __init__(self, *args, **kwargs):
+            built.append("constructed")
+
+        def run_streaming(self, request, register_handle):
+            raise AssertionError("must not stream")
+            yield  # pragma: no cover
+
+        @classmethod
+        async def native_title_candidates(cls, workspace_root, session_id):
+            raise asyncio.CancelledError()
+
+    class Descriptor:
+        def factory(self):
+            return CancellingProvider
+
+    monkeypatch.setattr(
+        provider_registry, "get", lambda pid: Descriptor() if pid == "synth" else None
+    )
+    manager = _manager(chats={"chat-1": _chat(provider="synth")})
+    with pytest.raises(asyncio.CancelledError):
+        await manager._native_chat_title(manager._chats["chat-1"])
+    assert built == []
+
+
+@pytest.mark.asyncio
+async def test_rename_during_third_adapter_read_wins(monkeypatch) -> None:
+    """A rename landing while the adapter read is parked must survive the poll."""
+    import asyncio
+
+    from ciao import provider_registry
+
+    reached = asyncio.Event()
+    release = asyncio.Event()
+
+    class PausingProvider(BaseProvider):
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("must not be constructed")
+
+        def run_streaming(self, request, register_handle):
+            raise AssertionError("must not stream")
+            yield  # pragma: no cover
+
+        @classmethod
+        async def native_title_candidates(cls, workspace_root, session_id):
+            reached.set()
+            await release.wait()
+            return ("Clean summary",)
+
+    class Descriptor:
+        def factory(self):
+            return PausingProvider
+
+    monkeypatch.setattr(
+        provider_registry, "get", lambda pid: Descriptor() if pid == "synth" else None
+    )
+    chat = _chat(provider="synth")
+    manager = _manager(chats={"chat-1": chat})
+
+    task = asyncio.ensure_future(manager.auto_title_if_default("chat-1", "hello"))
+    await asyncio.wait_for(reached.wait(), 2)
+    chat.title = "User Picked This"
+    release.set()
+    assert await asyncio.wait_for(task, 2) is None
+    assert manager._chats["chat-1"].title == "User Picked This"
+
+
+@pytest.mark.asyncio
+async def test_removed_chat_during_third_adapter_read_is_not_resurrected(monkeypatch) -> None:
+    """A chat deleted mid-read stays deleted; the native read must not rewrite it."""
+    import asyncio
+
+    from ciao import provider_registry
+
+    reached = asyncio.Event()
+    release = asyncio.Event()
+
+    class PausingProvider(BaseProvider):
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("must not be constructed")
+
+        def run_streaming(self, request, register_handle):
+            raise AssertionError("must not stream")
+            yield  # pragma: no cover
+
+        @classmethod
+        async def native_title_candidates(cls, workspace_root, session_id):
+            reached.set()
+            await release.wait()
+            return ("Clean summary",)
+
+    class Descriptor:
+        def factory(self):
+            return PausingProvider
+
+    monkeypatch.setattr(
+        provider_registry, "get", lambda pid: Descriptor() if pid == "synth" else None
+    )
+    manager = _manager(chats={"chat-1": _chat(provider="synth")})
+
+    task = asyncio.ensure_future(manager.auto_title_if_default("chat-1", "hello"))
+    await asyncio.wait_for(reached.wait(), 2)
+    manager._chats.pop("chat-1")
+    release.set()
+    assert await asyncio.wait_for(task, 2) is None
+    assert "chat-1" not in manager._chats
+
+
 # ── LLM title fallback (tier 2) ──────────────────────────────────────────
 #
 # Claude Code ≥ 2.1.246 skips its own ai-title generation when the first
@@ -568,7 +1058,7 @@ async def test_llm_fallback_titles_chat_when_native_never_lands(monkeypatch) -> 
     def missing_session_info(_sid, directory=None):
         return None
 
-    monkeypatch.setattr(pc, "get_session_info", missing_session_info)
+    monkeypatch.setattr(claude_adapter, "get_session_info", missing_session_info)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
     title = await manager.auto_title_if_default("chat-1", "Check Zendesk ticket 152025")
@@ -598,7 +1088,7 @@ async def test_claude_title_does_not_wait_for_native_poll(monkeypatch) -> None:
     async def fake_oneshot(*_args, **_kwargs):
         return "System One Decision Models"
 
-    monkeypatch.setattr(pc, "get_session_info", missing_session_info)
+    monkeypatch.setattr(claude_adapter, "get_session_info", missing_session_info)
     monkeypatch.setattr(pc.asyncio, "sleep", unexpected_sleep)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
@@ -628,7 +1118,7 @@ async def test_llm_fallback_prompt_carries_assistant_reply(monkeypatch) -> None:
     def missing_session_info(_sid, directory=None):
         return None
 
-    monkeypatch.setattr(pc, "get_session_info", missing_session_info)
+    monkeypatch.setattr(claude_adapter, "get_session_info", missing_session_info)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
     title = await manager.auto_title_if_default(
@@ -652,7 +1142,7 @@ async def test_llm_fallback_failure_still_applies_deterministic_fallback(
     def missing_session_info(_sid, directory=None):
         return None
 
-    monkeypatch.setattr(pc, "get_session_info", missing_session_info)
+    monkeypatch.setattr(claude_adapter, "get_session_info", missing_session_info)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
 
     assert await manager.auto_title_if_default("chat-1", "hello") == "hello"
@@ -676,7 +1166,7 @@ async def test_llm_fallback_rejects_contaminated_title(monkeypatch) -> None:
     def missing_session_info(_sid, directory=None):
         return None
 
-    monkeypatch.setattr(pc, "get_session_info", missing_session_info)
+    monkeypatch.setattr(claude_adapter, "get_session_info", missing_session_info)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", leaking_oneshot)
 
     manager = _manager(chats={"chat-1": _chat(provider="claude")})
@@ -723,7 +1213,7 @@ async def test_llm_fallback_respects_manual_rename_during_call(monkeypatch) -> N
     def missing_session_info(_sid, directory=None):
         return None
 
-    monkeypatch.setattr(pc, "get_session_info", missing_session_info)
+    monkeypatch.setattr(claude_adapter, "get_session_info", missing_session_info)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", slow_oneshot)
 
     assert await manager.auto_title_if_default("chat-1", "hello") is None

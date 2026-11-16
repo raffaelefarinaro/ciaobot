@@ -86,7 +86,20 @@ set and nothing else.
 | `respond_permission` | The approval card; return `QuestionResponseResult` after acknowledgement. | Explicit nonretryable unsupported result. Claude adapts its local `PermissionGate` boolean at this boundary. |
 | `respond_question` | A native question card; return `QuestionResponseResult` after acknowledgement. | Explicit nonretryable unsupported result. |
 | `can_drain` / `drain_events` | Claude and OpenCode, between turns, so a background agent or shell can wake the parent. | OpenCode reports `can_drain` true only while a live server has background shells or subagents outstanding. |
-| `read_thread` / `delete_thread` | OpenCode titles and session reclaim. Claude uses its own JSONL helpers instead. | See the skip list below. |
+| `read_thread` / `delete_thread` | OpenCode transcript history, transcript replay and session reclaim. Claude history uses its own SDK/JSONL helpers instead. Native titles no longer route through this row. | See the skip list below. |
+| `native_title_candidates(workspace_root, session_id)` (classmethod) | `ProjectChatManager._native_chat_title`, tier 1 of the auto-title poll. | On `BaseProvider` the default returns `()` — no native title for that provider. |
+
+`native_title_candidates` is the shared native-title read. It is a
+stateless classmethod on the adapter class — the manager resolves it through
+the provider registry and never constructs a provider — scoped to a
+workspace root (the chat's own agent root) and a persisted session id.
+It returns ordered candidate titles in provider preference order, or an
+empty tuple when the provider has none; there is no new capability flag,
+availability is the empty default. The adapter owns its native storage and
+payload interpretation and must not catch SDK failures (they land on the
+manager's failure log); the host owns filtering, and rejects empty,
+placeholder and context-contaminated candidates through
+`chat_service._real_title` before a candidate can reach the sidebar.
 
 Permission and native-question replies use the shared `BaseProvider` response
 contract, so any adapter can participate without a provider-specific manager
@@ -123,7 +136,7 @@ arm.
 | The subagent watcher falls through to the Claude JSONL reader. | Only if `background_subagents` is true. The watcher then looks for a Claude session file and finds nothing. | `ciao/web/subagent_watchers.py` `watch_inner`. The CLI-task orphan sweep is Claude-only and skips everyone else, which is safe. |
 | `disallowed_tools_for_chat` returns `[]`. | The harness denylist is not applied. Credential denies are also not applied unless the adapter sends them itself. | `ProjectChatManager.disallowed_tools_for_chat`. OpenCode applies the shared patterns from `execution_modes.opencode_credential_deny_rules` inside its own permission rules. |
 | Image preflight runs only for OpenCode. | A model that cannot see images receives them anyway. Claude and current Anthropic/OpenAI models all accept images, which is why the check is OpenCode-only. | `ProjectChatManager._opencode_image_support`. |
-| Native title read returns `None`. | The chat keeps the deterministic title, then the one-shot titler. The poll window is Claude's instant poll only when the id is `claude`; every other id waits out the OpenCode delays first. | `ProjectChatManager._native_chat_title`. |
+| `native_title_candidates` is not overridden. | No native title: the chat keeps the deterministic title, then the one-shot titler. The read seam itself is id-neutral now — the remaining limitation is polling policy: `auto_title_if_default` still gives Claude one immediate native read and all other ids the existing delayed poll window. Polling neutrality is a separate follow-up. | `ProjectChatManager.auto_title_if_default`. |
 | Transcript reload uses the local markdown only. | The chat bubble history still renders from Ciaobot's own transcript. Provider-side history that never landed there does not. | `ciao/web/transcript_service.py`. |
 | Stop escalation disconnects only Claude. | A wedged CLI is not torn down on Stop unless `ActiveHandle.stop` already did it. | `ProjectChatManager` force-stop. |
 | One-shot raises `Unknown one-shot provider`. | Titles, doc folding, and routine-model calls fail. | `ciao/providers/oneshot.py`. This is a separate no-tools call, not `run_streaming`. |

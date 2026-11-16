@@ -5151,6 +5151,16 @@ class OpencodeProvider(BaseSDKProvider):
         return thread
 
     @classmethod
+    async def native_title_candidates(
+        cls, workspace_root: Path, session_id: str
+    ) -> tuple[str, ...]:
+        """The session's own title, the only candidate, exactly as read_thread exposes it."""
+        thread = await cls.read_thread(workspace_root, session_id)
+        info = thread.get("info") if isinstance(thread, dict) else None
+        title = str(info.get("title") or "") if isinstance(info, dict) else ""
+        return (title,)
+
+    @classmethod
     async def read_collab_tree(
         cls, workspace_root: Path, session_id: str
     ) -> list[dict[str, Any]]:

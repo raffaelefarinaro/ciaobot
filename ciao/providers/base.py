@@ -280,6 +280,18 @@ class BaseProvider(ABC):
             False, "Native question responses are not supported by this provider", False
         )
 
+    @classmethod
+    async def native_title_candidates(
+        cls, workspace_root: Path, session_id: str
+    ) -> tuple[str, ...]:
+        """Read candidate titles in provider-preference order; empty means unavailable.
+
+        A stateless read of the provider's persisted session, usable when no
+        live provider instance exists. Adapters only translate their native
+        storage into ordered candidate strings; the host validates them.
+        """
+        return ()
+
     @abstractmethod
     def run_streaming(
         self,

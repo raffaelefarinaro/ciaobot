@@ -586,6 +586,22 @@ class ClaudeProvider(BaseSDKProvider):
         schedule_unattended=True,
     )
 
+    @classmethod
+    async def native_title_candidates(
+        cls, workspace_root: Path, session_id: str
+    ) -> tuple[str, ...]:
+        """Claude Code title candidates: custom title first, then the AI summary.
+
+        SDK reader failures propagate to the caller's failure boundary.
+        """
+        info = get_session_info(session_id, directory=str(workspace_root))
+        if info is None:
+            return ()
+        return (
+            (info.custom_title or "").strip(),
+            (info.summary or "").strip(),
+        )
+
     def __init__(self, workspace_root: Path, *, config: object | None = None) -> None:
         super().__init__(workspace_root, config=config)
         self._client: ClaudeSDKClient | None = None
