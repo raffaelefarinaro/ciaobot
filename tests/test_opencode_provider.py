@@ -104,7 +104,7 @@ async def test_startup_cleanup_error_has_no_exception_chain(monkeypatch, tmp_pat
             return 0
 
     class Tree:
-        def close_checked(self):
+        def close(self):
             raise OSError("cleanup-secret")
 
     server = mod._EphemeralServer(tmp_path)
@@ -145,11 +145,11 @@ async def test_successful_cleanup_sanitizes_startup_exception(
             if cleanup_fails:
                 raise OSError("cleanup-private-sentinel")
 
-        def kill_checked(self):
+        def kill(self):
             if cleanup_fails:
                 raise OSError("cleanup-private-sentinel")
 
-        def close_checked(self):
+        def close(self):
             pass
 
     class Client:
@@ -249,10 +249,10 @@ async def test_ephemeral_none_cleanup_failure_keeps_safe_classification(
         def terminate(self):
             raise OSError("cleanup-private-sentinel")
 
-        def kill_checked(self):
+        def kill(self):
             raise OSError("cleanup-private-sentinel")
 
-        def close_checked(self):
+        def close(self):
             pass
 
     class Client:
@@ -314,10 +314,10 @@ async def test_chat_real_startup_contract_failure_has_safe_actionable_message(
         def terminate(self):
             pass
 
-        def kill_checked(self):
+        def kill(self):
             pass
 
-        def close_checked(self):
+        def close(self):
             pass
 
     class Client:
@@ -382,11 +382,11 @@ async def test_cancellation_during_failed_startup_cleanup_has_no_raw_context(
             if cleanup_fails:
                 raise OSError("cancel-cleanup-sentinel")
 
-        def kill_checked(self):
+        def kill(self):
             if cleanup_fails:
                 raise OSError("cancel-cleanup-sentinel")
 
-        def close_checked(self):
+        def close(self):
             pass
 
     class Client:
@@ -461,10 +461,10 @@ async def test_chat_cancellation_while_waiting_for_exited_server_stderr(monkeypa
             return 1
 
     class Tree:
-        def kill_checked(self):
+        def kill(self):
             pass
 
-        def close_checked(self):
+        def close(self):
             closed.append("tree")
 
     class Client:
@@ -661,10 +661,10 @@ async def test_exited_posix_leader_is_not_signalled(tmp_path):
         def terminate(self):
             pytest.fail("exited leader must not be signalled")
 
-        def kill_checked(self):
+        def kill(self):
             pytest.fail("exited leader must not be signalled")
 
-        def close_checked(self):
+        def close(self):
             pass
 
     assert not await mod._startup_cleanup(tmp_path, Process(), Tree())
@@ -684,7 +684,7 @@ async def test_posix_missing_leader_requires_confirmed_exit(tmp_path):
         def terminate(self):
             raise ProcessLookupError()
 
-        def close_checked(self):
+        def close(self):
             pass
 
     assert not await mod._startup_cleanup(tmp_path, Process(), Tree())
@@ -715,12 +715,12 @@ async def test_posix_kill_and_reap_failure_quarantine(monkeypatch, tmp_path, fai
         def terminate(self):
             calls.append("terminate")
 
-        def kill_checked(self):
+        def kill(self):
             calls.append("kill")
             if failure == "kill":
                 raise OSError("kill-secret")
 
-        def close_checked(self):
+        def close(self):
             calls.append("close")
 
     try:
@@ -730,6 +730,40 @@ async def test_posix_kill_and_reap_failure_quarantine(monkeypatch, tmp_path, fai
     finally:
         with mod._SERVER_START_GUARD:
             mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
+
+
+@pytest.mark.asyncio
+async def test_startup_cleanup_escalates_a_lingering_server_to_kill(monkeypatch, tmp_path):
+    """A server that ignores the stop is killed, reaped and closed in that order."""
+    import ciao.providers.opencode as mod
+    monkeypatch.setattr(mod, "_SHUTDOWN_TIMEOUT", 0.01)
+    calls = []
+
+    class Process:
+        returncode = None
+        waits = 0
+
+        async def wait(self):
+            calls.append("wait")
+            self.waits += 1
+            if self.waits == 1:
+                await asyncio.Event().wait()
+            self.returncode = 0
+            return 0
+
+    class Tree:
+        def terminate(self):
+            calls.append("terminate")
+
+        def kill(self):
+            calls.append("kill")
+
+        def close(self):
+            calls.append("close")
+
+    assert not await mod._startup_cleanup(tmp_path, Process(), Tree())
+    assert calls == ["terminate", "wait", "kill", "wait", "close"]
+    assert str(tmp_path.resolve()) not in mod._SERVER_START_LOCKS
 
 
 @pytest.mark.asyncio
@@ -755,7 +789,7 @@ async def test_startup_cleanup_failure_quarantines_only_uncertain_tree(tmp_path,
             if failure == "terminate":
                 raise OSError("terminate-secret")
 
-        def close_checked(self):
+        def close(self):
             calls.append("close")
 
     class Client:
@@ -788,6 +822,56 @@ async def test_startup_cleanup_failure_quarantines_only_uncertain_tree(tmp_path,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("exited", [False, True])
+async def test_a_close_failure_quarantines_after_client_and_reader_cleanup(tmp_path, exited):
+    """A tree that cannot be closed leaves termination uncertain, and the
+    client (first) and reader (last) cleanups still happen in that order."""
+    import ciao.providers.opencode as mod
+
+    calls = []
+
+    class Process:
+        returncode = 0 if exited else None
+
+        async def wait(self):
+            calls.append("wait")
+            self.returncode = 0
+            return 0
+
+    class Tree:
+        def terminate(self):
+            calls.append("terminate")
+
+        def close(self):
+            calls.append("close")
+            raise OSError("close-secret")
+
+    class Client:
+        async def aclose(self):
+            calls.append("client")
+
+    async def reader_body():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            calls.append("reader")
+
+    reader = asyncio.create_task(reader_body())
+    await asyncio.sleep(0)
+    try:
+        assert await mod._startup_cleanup(tmp_path, Process(), Tree(), Client(), reader)
+        expected = ["client", "wait", "close", "reader"]
+        if not exited:
+            expected.insert(1, "terminate")
+        assert calls == expected
+        state = mod._SERVER_START_LOCKS[str(tmp_path.resolve())]
+        assert state.quarantined
+    finally:
+        with mod._SERVER_START_GUARD:
+            mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["reader", "client"])
 @pytest.mark.parametrize("cleanup_fails", [False, True])
 async def test_chat_immediate_post_spawn_failure_is_cleaned(monkeypatch, tmp_path, failure, cleanup_fails):
@@ -810,12 +894,12 @@ async def test_chat_immediate_post_spawn_failure_is_cleaned(monkeypatch, tmp_pat
             if cleanup_fails:
                 raise OSError("cleanup-sentinel")
 
-        def kill_checked(self):
+        def kill(self):
             calls.append("kill")
             if cleanup_fails:
                 raise OSError("cleanup-sentinel")
 
-        def close_checked(self):
+        def close(self):
             calls.append("close")
 
     class Client:
@@ -1083,7 +1167,7 @@ def test_cross_loop_startup_serializes_chat_and_ephemeral(monkeypatch, tmp_path,
         def terminate(self):
             pass
 
-        def close_checked(self):
+        def close(self):
             pass
 
     async def spawn(*args, **kwargs):
@@ -1200,10 +1284,10 @@ async def test_transient_chat_retry_releases_gate_to_queued_contender(monkeypatc
         def terminate(self):
             pass
 
-        def kill_checked(self):
+        def kill(self):
             pass
 
-        def close_checked(self):
+        def close(self):
             pass
 
     class Client:
@@ -1570,9 +1654,9 @@ async def test_real_enter_cleanup_precedes_waiter_and_quarantines(monkeypatch, t
             if termination_fails:
                 raise OSError("secret injected")
 
-        kill_checked = terminate
+        kill = terminate
 
-        def close_checked(self):
+        def close(self):
             pass
 
     class Client:
@@ -1651,10 +1735,10 @@ async def test_cancelled_spawn_is_owned_until_child_is_reaped(monkeypatch, tmp_p
         def terminate(self):
             calls.append("terminate")
 
-        def kill_checked(self):
+        def kill(self):
             calls.append("kill")
 
-        def close_checked(self):
+        def close(self):
             calls.append("close")
 
     async def spawn(*args, **kwargs):
@@ -1771,10 +1855,10 @@ async def test_unsuccessful_ephemeral_enter_cleans_before_next_start(monkeypatch
         def terminate(self):
             calls.append("terminate")
 
-        def kill_checked(self):
+        def kill(self):
             calls.append("kill")
 
-        def close_checked(self):
+        def close(self):
             calls.append("tree-closed")
 
     class Client:
@@ -1893,9 +1977,9 @@ def test_real_enter_cleanup_blocks_other_loop_and_quarantines(monkeypatch, tmp_p
             if termination_fails:
                 raise OSError("termination-secret")
 
-        kill_checked = terminate
+        kill = terminate
 
-        def close_checked(self):
+        def close(self):
             pass
 
     class Client:
@@ -1984,11 +2068,11 @@ def test_cross_loop_cancelled_owner_drains_cleanup_before_waiter(
             if failure == "stop":
                 raise OSError("stop-secret")
 
-        def kill_checked(self):
+        def kill(self):
             if failure == "stop":
                 raise OSError("stop-secret")
 
-        def close_checked(self):
+        def close(self):
             pass
 
     class Client:
@@ -4925,7 +5009,7 @@ class _NoOpTree:
     """Stands in for ``os_support.processes.ProcessTree`` around a fake process.
 
     The server is spawned and stopped as a process tree; the fakes here have no
-    real pid for a Job Object or a process group to hold.
+    real pid for a process group to hold.
     """
 
     def __init__(self, pid: int, *, dies_with_engine: bool = False) -> None:
@@ -4941,12 +5025,6 @@ class _NoOpTree:
         pass
 
     def close(self) -> None:
-        pass
-
-    def kill_checked(self) -> None:
-        pass
-
-    def close_checked(self) -> None:
         pass
 
 
@@ -4977,7 +5055,7 @@ async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch, p
             terminated.append("terminate")
             FakeProcess.returncode = 0
 
-        def kill_checked(self):
+        def kill(self):
             terminated.append("kill")
             FakeProcess.returncode = 0
 
@@ -6964,8 +7042,8 @@ def test_the_opencode_path_line_is_only_offered_for_the_curl_installer():
 def test_login_status_reports_a_broken_wrapper_as_broken_not_missing(
     tmp_path: Path, monkeypatch
 ):
-    """`resolve_opencode_binary` raises `ToolResolutionError` (an `OSError`) when
-    the wrapper on PATH leads to no single executable.
+    """`resolve_opencode_binary` raises `OSError` when what is on PATH leads to
+    no single executable.
 
     Before the guard this propagated out of `opencode_login_status`, which
     `setup_status` calls, so one interrupted `npm install -g` made the whole
@@ -6973,13 +7051,11 @@ def test_login_status_reports_a_broken_wrapper_as_broken_not_missing(
     install something they already have.
     """
     from ciao.providers import opencode as mod
-    from ciao.os_support.tool_path import ToolResolutionError
 
     def broken(_env=None):
-        raise ToolResolutionError(
-            r"C:\Users\me\AppData\Roaming\npm\opencode.cmd is the wrapper for "
-            r"'opencode' and launches 'C:\...\node_modules\pkg\bin\tool' through "
-            "an interpreter, so there is no single executable to run."
+        raise OSError(
+            "the 'opencode' entry point in node_modules launches an interpreter, "
+            "so there is no single executable to run."
         )
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", broken)
@@ -6995,13 +7071,12 @@ def test_login_status_reports_a_broken_wrapper_as_broken_not_missing(
 async def test_the_ephemeral_server_degrades_when_the_wrapper_is_broken(
     tmp_path: Path, monkeypatch
 ):
-    """The model catalogue asks only "can this start a server"; a wrapper that
+    """The model catalogue asks only "can this start a server"; a resolution that
     leads nowhere answers no, it does not raise into a settings route."""
     from ciao.providers import opencode as mod
-    from ciao.os_support.tool_path import ToolResolutionError
 
     def broken(_env=None):
-        raise ToolResolutionError("no executable behind the wrapper")
+        raise OSError("no executable behind the wrapper")
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", broken)
 

@@ -422,7 +422,7 @@ async def _startup_cleanup(
                     except TimeoutError:
                         if process.returncode is None:
                             try:
-                                tree.kill_checked()
+                                tree.kill()
                             except ProcessLookupError:
                                 missing = True
                             except BaseException:
@@ -442,7 +442,7 @@ async def _startup_cleanup(
                         uncertain = True
             finally:
                 try:
-                    tree.close_checked()
+                    tree.close()
                 except BaseException:
                     uncertain = True
     if reader is not None:
@@ -5505,8 +5505,8 @@ class _EphemeralServer:
         try:
             binary = resolve_opencode_binary()
         except OSError:
-            # A wrapper that leads nowhere is not a missing CLI, but for a caller
-            # asking only "can this start a server" the two answers are the same.
+            # A failed resolution is not a missing CLI, but for a caller asking
+            # only "can this start a server" the two answers are the same.
             logger.warning("opencode: binary resolution failed")
             return None
         if not binary:
@@ -5854,10 +5854,9 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
     try:
         binary = resolve_opencode_binary()
     except OSError as exc:
-        # Found on PATH, but as a wrapper that does not lead to one executable —
-        # a `npm install -g` that was interrupted, or a package whose entry point
-        # is a script. Saying "not installed" would send the operator to install
-        # something they already have.
+        # Present but not resolvable to something runnable — an interrupted
+        # install, or a path that fails to resolve. Saying "not installed" would
+        # send the operator to install something they already have.
         return _provider(
             name="opencode",
             ok=False,

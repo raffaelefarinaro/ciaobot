@@ -29,18 +29,6 @@ import threading
 from pathlib import Path
 
 
-class ToolResolutionError(OSError):
-    """A tool was found on PATH but is not an executable Ciaobot can run.
-
-    An ``OSError`` because that is what it is — a path on disk that cannot be
-    executed. Callers that only want to know whether a tool is usable already
-    treat an ``OSError`` as "not available" (``providers.opencode`` answering a
-    model list, the wizard's PATH and auth hints), so this reports a broken npm
-    install through the same door as a missing binary instead of needing a new
-    one at every call site.
-    """
-
-
 def engine_bin_dir() -> str:
     """The directory holding the ``ciao`` entry point of the running engine.
 

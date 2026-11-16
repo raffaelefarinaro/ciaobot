@@ -196,19 +196,17 @@ def test_main_runs_the_resolved_command_and_returns_its_exit_code(
 
 
 def test_main_reports_an_unusable_install_instead_of_running_it(tmp_path, monkeypatch, capsys) -> None:
-    from ciao.os_support.tool_path import ToolResolutionError
-
     monkeypatch.setattr("ciao.config.CiaoConfig.from_env", classmethod(lambda cls: _config(tmp_path)))
     monkeypatch.setattr(gws_wrapper, "_configured_workspace_root", lambda config: tmp_path)
 
     def broken(name: str) -> list[str]:
-        raise ToolResolutionError("gws.cmd runs run.js with node, but node is not on PATH.")
+        raise OSError("gws is installed but has no executable to run.")
 
     monkeypatch.setattr(gws_wrapper, "resolve_command", broken)
     monkeypatch.setattr(gws_wrapper, "hand_off", lambda *a: pytest.fail("must not run"))
 
     assert gws_wrapper.main(["personal", "drive", "files", "list"]) == 1
-    assert "node is not on PATH" in capsys.readouterr().err
+    assert "no executable to run" in capsys.readouterr().err
 
 
 def test_main_refuses_without_a_linked_profile(tmp_path, monkeypatch, capsys) -> None:

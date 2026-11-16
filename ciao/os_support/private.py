@@ -11,19 +11,19 @@ this module existed: ``0o600`` for a file, ``0o700`` for a directory.
 
 ``is_private_descriptor`` and ``is_private`` answer the legacy question "are the
 bits private?" They do not ask who owns the inode, so a file owned by another
-account with ``0o600`` passes them. The strict verifiers
-``is_private_descriptor_strict`` / ``is_private_strict`` add the ownership and
-platform-ACL questions a caller needs before treating a path as its own private
-state; the legacy functions keep their existing answers for the call sites that
-already depend on them.
+account with ``0o600`` passes them. The strict verifier
+``is_private_descriptor_strict`` adds the ownership and platform-ACL questions a
+caller needs before treating an open file as its own private state; the legacy
+functions keep their existing answers for the call sites that already depend on
+them.
 
-On POSIX the strict verifiers require the inode's owner to be the process's
-effective uid, not just the mode. On macOS they also read the file's extended
+On POSIX the strict verifier requires the inode's owner to be the process's
+effective uid, not just the mode. On macOS it also reads the file's extended
 ACL through ``acl_get_fd_np`` and refuse any allow entry whose principal is not
 the effective user (deny entries are harmless and ignored). This closes the
 case where a mode ``0o600`` file still has ``everyone allow read``. Reading that
 ACL is a native dependency: if the macOS ACL API is unavailable the strict
-verifiers raise ``OSError`` rather than answering "no extended ACL", so their
+verifier raises ``OSError`` rather than answering "no extended ACL", so its
 callers refuse the file instead of treating an unverified ACL as permission.
 Linux POSIX ACLs (``system.posix_acl_access``) are *not* inspected; the strict
 verifier there checks owner and mode only.
@@ -201,10 +201,6 @@ def is_owned_descriptor(fd: int) -> bool:
     """Whether the already-open file is owned by the effective uid."""
     return os.fstat(fd).st_uid == os.geteuid()
 
-def is_owned_path(path: str | os.PathLike[str]) -> bool:
-    """Whether the named file is owned by the effective uid."""
-    return os.lstat(path).st_uid == os.geteuid()
-
 def descriptor_acl_grants_another_account(fd: int) -> bool:
     """Whether the descriptor's platform ACL allows anyone but this user.
 
@@ -230,32 +226,6 @@ def is_private_descriptor_strict(fd: int) -> bool:
     if not is_private_descriptor(fd):
         return False
     return not _acl_grants_another_account(fd)
-
-def is_private_strict(path: str | os.PathLike[str]) -> bool:
-    """Path-bound strict variant of :func:`is_private_descriptor_strict`.
-
-    The final component is opened with ``O_NOFOLLOW`` but a same-UID writer
-    can still replace it after the check; prefer the descriptor form for
-    anything that is then read or written.
-
-    The open is non-blocking where the platform has it. A FIFO whose mode
-    looks private is still not a file the caller can read as state, but
-    opening it read-only without ``O_NONBLOCK`` waits for a writer forever;
-    the mode/owner answer for the inode is unchanged, and a caller that
-    needs a regular file checks that itself.
-    """
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_NONBLOCK", 0)
-    )
-    if stat.S_ISDIR(os.lstat(path).st_mode):
-        flags |= getattr(os, "O_DIRECTORY", 0)
-    descriptor = os.open(path, flags)
-    try:
-        return is_private_descriptor_strict(descriptor)
-    finally:
-        os.close(descriptor)
 
 def make_private(path: str | os.PathLike[str]) -> None:
     """Restrict a file to its owner; see the module docstring."""

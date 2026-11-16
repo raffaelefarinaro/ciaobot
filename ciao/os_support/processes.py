@@ -82,15 +82,6 @@ class ProcessTree:
     def close(self) -> None:
         """Stop tracking the tree; nothing to release on POSIX."""
 
-    def kill_checked(self) -> None:
-        self.kill()
-
-    def close_checked(self) -> None:
-        pass
-
-    def detach_job_handle(self) -> int | None:
-        return None
-
 
 def _reap_process(process: subprocess.Popen[bytes]) -> None:
     try:
