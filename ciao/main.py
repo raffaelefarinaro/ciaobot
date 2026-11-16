@@ -551,13 +551,13 @@ def _restart_watchdog(
 
     A clean-exit request (``restart_code == 0``) just exits. Under ``ciao supervise``
     the supervisor owns the relaunch, so the process exits with the restart code and
-    never execs (an exec would bypass the supervisor's loop and backoff, and on
-    Windows would end the child with no relaunch). A native bootstrap is the
-    same: its parent owns the lifetime and reads the child's exit code, so a
-    relaunch would detach the outcome it is waiting for. Only that flag takes
-    this branch; the legacy installer bootstrap re-execs like any unsupervised
-    run. Otherwise re-exec a fresh interpreter, as before, so launchd keeps
-    tracking the same pid and the relaunch picks up the current environment.
+    never execs (an exec would bypass the supervisor's loop and backoff). A
+    native bootstrap is the same: its parent owns the lifetime and reads the
+    child's exit code, so a relaunch would detach the outcome it is waiting
+    for. Only that flag takes this branch; the legacy installer bootstrap
+    re-execs like any unsupervised run. Otherwise re-exec a fresh interpreter,
+    as before, so launchd keeps tracking the same pid and the relaunch picks
+    up the current environment.
     """
     sleep(RESTART_WATCHDOG_GRACE_S)
     if restart_code == 0:
@@ -951,10 +951,8 @@ async def _run_server_locked(
     # rollback — this process cannot: it is the engine being booted out, and
     # moving the env it is running out of from under itself is how a recovery
     # turns into a second outage. So this never waits on the recovery, only on
-    # the job launch. On Windows the same step starts `\Ciaobot\Updater` in
-    # `run-recover` mode, beside the once-a-minute `\Ciaobot\Recover` task
-    # (#857). A platform with no update host has no swap to recover, so the step
-    # is skipped there.
+    # the job launch. A platform with no update host has no swap to recover, so
+    # the step is skipped there.
     from ciao.update_host import UnsupportedPlatformError, current_update_host
 
     try:

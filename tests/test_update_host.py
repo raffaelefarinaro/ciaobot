@@ -65,15 +65,6 @@ DOMAIN = "gui/501"
 # ── apply_update: the foreground half, on the real macOS path ───────────
 
 
-# MacUpdateHost: launchd's gui/<uid> domain (os.getuid), SIGHUP, and the POSIX
-# shebang entry-point shims a macOS env carries. These tests patch
-# sys.platform to darwin to drive it from any OS; on Windows those calls do not
-# exist. The Windows update host (#857) carries its own tests.
-mac_update_host = pytest.mark.skipif(
-    sys.platform == "win32", reason="drives MacUpdateHost (launchd gui/<uid>, SIGHUP, shebang shims)"
-)
-
-
 def test_macos_apply_update_runs_exactly_these_launchctl_calls(tmp_path: Path) -> None:
     _, state, _, engine = _staged(tmp_path)
 
@@ -351,7 +342,6 @@ def test_macos_recover_apply_writes_the_record_phases_in_order(
 # ── the seam itself: selection, and what `MacUpdateHost` forwards ───────
 
 
-@mac_update_host
 def test_current_update_host_is_macos_on_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "darwin")
 
@@ -360,7 +350,6 @@ def test_current_update_host_is_macos_on_darwin(monkeypatch: pytest.MonkeyPatch)
     assert isinstance(host, MacUpdateHost)
 
 
-@mac_update_host
 def test_current_update_host_reads_platform_on_every_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -378,21 +367,11 @@ def test_current_update_host_reads_platform_on_every_call(
     assert first is not second
 
 
-def test_current_update_host_is_windows_on_win32(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ciao.windows_update import WindowsUpdateHost
-
-    monkeypatch.setattr(sys, "platform", "win32")
-
-    assert isinstance(current_update_host(), WindowsUpdateHost)
-    assert isinstance(update_host.default_update_host(), WindowsUpdateHost)
-
-
-def test_default_update_host_is_the_macos_host_off_windows(
+def test_default_update_host_is_the_macos_host_on_linux(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Linux CI drives the transaction through the macOS host and a fake
-    # launchctl, as it did before Windows had a host: the caller's launchctl and
-    # uid are the host's.
+    # launchctl: the caller's launchctl and uid are the host's.
     calls: list[list[str]] = []
 
     def launchctl(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -408,7 +387,7 @@ def test_default_update_host_is_the_macos_host_off_windows(
     assert calls == [["bootout", "gui/777/com.ciao.server"]]
 
 
-@pytest.mark.parametrize("platform", ["linux", "cygwin", "freebsd14"])
+@pytest.mark.parametrize("platform", ["linux", "win32", "cygwin", "freebsd14"])
 def test_current_update_host_refuses_a_platform_with_no_host(
     platform: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -617,13 +596,11 @@ def test_mac_update_host_stop_engine_runs_the_wait_it_is_given() -> None:
     assert host.stop_engine() is True
 
 
-@mac_update_host
 def test_mac_update_host_interrupt_signals_are_term_and_hup() -> None:
     host = MacUpdateHost(launchctl=lambda args: subprocess.CompletedProcess(args, 0), uid=501)
 
     # The two ways a ten-minute drain really ends besides Ctrl-C: the terminal
-    # closing, and a supervisor stopping the process. `SIGHUP` is an
-    # `AttributeError` on Windows, which is why the set comes from the host.
+    # closing, and a supervisor stopping the process.
     assert host.interrupt_signals() == (signal.SIGTERM, signal.SIGHUP)
 
 
@@ -717,7 +694,6 @@ def _record_label_calls(calls: list[list[str]]) -> Callable[[list[str]], subproc
     return launchctl
 
 
-@mac_update_host
 def test_host_uses_the_receipt_label(monkeypatch: pytest.MonkeyPatch) -> None:
     # An isolated install registers its own LaunchAgent and records its label.
     # Every job the update transaction touches has to be that one: the operator's
@@ -1298,9 +1274,8 @@ def test_fake_host_run_apply_refuses_a_wheel_that_no_longer_matches_its_digest(
 ) -> None:
     op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
     host = FakeHost(engine, program=engine.live_env / "bin" / "python")
-    # The wheel changed on disk after staging verified it. A host that rebuilds
-    # the env installs from this file (Windows, #857), so the check is shared
-    # and runs before the engine is stopped.
+    # The wheel changed on disk after staging verified it; the check runs
+    # before the engine is stopped.
     with Path(op.wheel).open("ab") as handle:
         handle.write(b"tampered")
 

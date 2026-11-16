@@ -215,14 +215,14 @@ class _Harness:
     [
         # Linux has no supervisor the transaction can hand a swap to. This is
         # the case `default_update_host()` would wrongly encourage: it returns
-        # the macOS host off Windows so the transaction's tests can run on CI.
-        ("linux", "installer", _receipt(), "", False, "macOS and Windows"),
-        ("linux", "editable", None, "", False, "macOS and Windows"),
+        # the macOS host everywhere so the transaction's tests can run on CI.
+        ("linux", "installer", _receipt(), "", False, "macOS only"),
+        ("linux", "editable", None, "", False, "macOS only"),
+        ("win32", "installer", _receipt(), "", False, "macOS only"),
         # No receipt, so no proof of the environment and nothing to roll back.
         ("darwin", "installer", None, "", False, "no install receipt"),
         ("darwin", "editable", _receipt(), "", False, "engine installer"),
         ("darwin", "bundled_app", _receipt(backend="none"), "", False, "engine installer"),
-        ("win32", "unknown", None, "", False, "engine installer"),
         # A receipt for a different environment is a stale install, not ours.
         (
             "darwin",
@@ -232,15 +232,12 @@ class _Harness:
             False,
             "different environment",
         ),
-        # The installer registers launchd on macOS and a task on Windows; a
-        # receipt naming another supervisor describes something this engine
-        # cannot stop, swap and start.
+        # The installer registers launchd on macOS; a receipt naming another
+        # supervisor describes something this engine cannot stop, swap and start.
         ("darwin", "installer", _receipt(backend="systemd-user"), "", False, "launchd"),
-        ("darwin", "installer", _receipt(), "windows-task", False, "launchd"),
-        ("win32", "installer", _receipt(backend="launchd"), "", False, "windows-task"),
-        # The two installs the transaction can actually perform unattended.
+        ("darwin", "installer", _receipt(), "systemd-user", False, "launchd"),
+        # The one install the transaction can actually perform unattended.
         ("darwin", "installer", _receipt(), "", True, ""),
-        ("win32", "installer", _receipt(backend="windows-task"), "", True, ""),
     ],
 )
 def test_auto_update_support_classifies_every_install(
@@ -254,7 +251,7 @@ def test_auto_update_support_classifies_every_install(
     result = auto_update_support(platform, mode, receipt, backend)
 
     assert result.supported is supported
-    assert SUPPORTED_PLATFORMS == ("darwin", "win32")
+    assert SUPPORTED_PLATFORMS == ("darwin",)
     if supported:
         assert result.reason == ""
     else:
@@ -893,5 +890,5 @@ def test_wire_auto_update_returns_an_unstarted_coordinator(tmp_path) -> None:
     # classifier, which refuses a Linux engine for its platform.
     status = coordinator.status()
     assert status["supported"] is False
-    assert "macOS and Windows" in status["unsupported_reason"]
+    assert "macOS only" in status["unsupported_reason"]
 

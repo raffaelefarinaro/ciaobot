@@ -17,8 +17,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
-import sys
-
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -82,15 +80,6 @@ RELEASE_BASE = "https://example.test/releases/download"
 TOOL_NAME = "ciaobot"
 TOOL_DIR_NAME = "ciao_bot"
 ENTRY_POINTS = ("ciao", "ciaobot")
-
-
-# MacUpdateHost: launchd's gui/<uid> domain (os.getuid), SIGHUP, and the POSIX
-# shebang entry-point shims a macOS env carries. These tests patch
-# sys.platform to darwin to drive it from any OS; on Windows those calls do not
-# exist. The Windows update host (#857) carries its own tests.
-mac_update_host = pytest.mark.skipif(
-    sys.platform == "win32", reason="drives MacUpdateHost (launchd gui/<uid>, SIGHUP, shebang shims)"
-)
 
 
 def _fake_wheel(path: Path, version: str) -> Path:
@@ -207,7 +196,6 @@ def fake_run() -> tuple[Any, list[list[str]]]:
     return run, calls
 
 
-@mac_update_host
 def test_stage_update_happy_path(tmp_path: Path, release: FakeRelease, fake_run) -> None:
     run, calls = fake_run
     envs: list[dict[str, str] | None] = []
@@ -382,7 +370,6 @@ def test_stage_update_rejects_wheel_digest_mismatch(
     assert op.phase == "failed"
 
 
-@mac_update_host
 def test_stage_update_rejects_version_check_mismatch(
     tmp_path: Path, release: FakeRelease
 ) -> None:
@@ -421,7 +408,6 @@ def test_stage_update_already_current_writes_no_record(
     assert not (tmp_path / "state" / "1.2.3").exists()
 
 
-@mac_update_host
 def test_stage_update_lock_blocks_concurrent_run(
     tmp_path: Path, release: FakeRelease, fake_run
 ) -> None:
@@ -458,7 +444,6 @@ def test_stage_update_lock_blocks_concurrent_run(
     )
 
 
-@mac_update_host
 def test_stage_update_copies_previous_receipt(
     tmp_path: Path, release: FakeRelease, fake_run
 ) -> None:
@@ -493,7 +478,6 @@ def test_stage_update_copies_previous_receipt(
     assert Path(op.previous_receipt).read_bytes() == receipt_path.read_bytes()
 
 
-@mac_update_host
 def test_find_uv_prefers_receipt_then_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -523,7 +507,6 @@ def test_find_uv_prefers_receipt_then_path(
         find_uv(str(tmp_path / "absent" / "uv"))
 
 
-@mac_update_host
 def test_find_uv_refuses_a_missing_or_unusable_receipt_uv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -608,7 +591,6 @@ def test_cli_status_without_record(capsys: pytest.CaptureFixture[str]) -> None:
 # not in `str(exc)`, which is only "returned non-zero exit status 1". The record
 # must keep the real explanation, or `ciao update status` and the UI show an
 # operator an unexplained failure. (Round 1 review finding.)
-@mac_update_host
 def test_stage_update_keeps_uv_stderr_in_failed_record(
     tmp_path: Path, release: FakeRelease, fake_run
 ) -> None:
@@ -1682,7 +1664,6 @@ def test_run_apply_offline_apply_succeeds(tmp_path: Path) -> None:
     assert (engine.live_env / "uv-receipt.toml").is_file()
 
 
-@mac_update_host
 def test_run_apply_entry_point_shims_point_at_the_new_env(tmp_path: Path) -> None:
     op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
     bin_dir = tmp_path / "bin"
@@ -1740,7 +1721,6 @@ def test_run_apply_falls_back_to_rollback_when_shims_cannot_be_written(
     assert engine.up is True
 
 
-@mac_update_host
 def test_run_apply_refuses_an_entry_point_the_staged_path_survives_in(
     tmp_path: Path,
 ) -> None:
@@ -2207,7 +2187,6 @@ def test_cli_apply_rejects_an_unusable_drain_timeout(
     assert engine_update._drain_timeout_arg("1") == 1.0
 
 
-@mac_update_host
 def test_cli_apply_reports_an_interrupted_apply(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3200,7 +3179,6 @@ def test_run_apply_still_refuses_an_entry_point_the_receipt_does_not_name(
 # the host serves; the interpreter is what names the engine install the job runs.
 
 
-@mac_update_host
 def test_run_apply_allows_a_hosted_job_serving_the_receipt_env(
     tmp_path: Path,
 ) -> None:
@@ -3225,7 +3203,6 @@ def test_run_apply_allows_a_hosted_job_serving_the_receipt_env(
     assert engine.starts == 1
 
 
-@mac_update_host
 def test_run_apply_refuses_a_hosted_job_serving_a_foreign_env(
     tmp_path: Path,
 ) -> None:
@@ -3256,7 +3233,6 @@ def test_run_apply_refuses_a_hosted_job_serving_a_foreign_env(
     assert engine.run_calls == []
 
 
-@mac_update_host
 def test_a_hosted_command_with_a_non_python_interpreter_refuses(
     tmp_path: Path,
 ) -> None:
@@ -3293,7 +3269,6 @@ def test_a_hosted_command_with_a_non_python_interpreter_refuses(
     assert engine.starts == 0
 
 
-@mac_update_host
 def test_a_loaded_revision_one_host_is_refused_without_touching_anything(
     tmp_path: Path,
 ) -> None:
@@ -3317,7 +3292,6 @@ def test_a_loaded_revision_one_host_is_refused_without_touching_anything(
     assert _env_version(engine.live_env) == FROM_VERSION
 
 
-@mac_update_host
 def test_an_ordinary_engine_update_leaves_the_host_definition_and_bytes_untouched(
     tmp_path: Path,
 ) -> None:
@@ -3346,7 +3320,6 @@ def test_an_ordinary_engine_update_leaves_the_host_definition_and_bytes_untouche
     assert executable.read_bytes() == host_before
 
 
-@mac_update_host
 def test_a_failed_hosted_update_rolls_back_to_the_same_hosted_state(
     tmp_path: Path,
 ) -> None:
@@ -3380,12 +3353,11 @@ def test_a_failed_hosted_update_rolls_back_to_the_same_hosted_state(
 def test_an_ordinary_engine_update_leaves_the_direct_definition_untouched(
     tmp_path: Path,
 ) -> None:
-    # D2 on the shape Windows actually uses: the service definition runs the
-    # engine directly (`<env>/bin/python -m ciao.cli ...`), with no native host
-    # and no launchd. The swap moves the *engine* env and must leave the service
-    # definition bytes exactly as they were — on Windows and everywhere else.
-    # No launchctl is needed: a direct-loaded job is recognised through the same
-    # `server_command` seam, so this runs in the native Windows job.
+    # D2 on the direct shape: the service definition runs the engine directly
+    # (`<env>/bin/python -m ciao.cli ...`), with no native host. The swap moves
+    # the *engine* env and must leave the service definition bytes exactly as
+    # they were. A direct-loaded job is recognised through the `server_command`
+    # seam.
     op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
     definition_plist = _write_server_plist(engine.live_env / "bin" / "python")
     definition_before = definition_plist.read_bytes()
@@ -3603,24 +3575,13 @@ def test_the_receipt_entry_point_is_compared_resolved(tmp_path: Path) -> None:
     assert engine_update._runs_the_receipt_install(other, env, executable) is False
 
 
-@pytest.mark.parametrize(
-    ("platform", "host_platform", "expected"),
-    [
-        ("darwin", "macosx-11.0-arm64", "3.13"),
-        ("linux", "linux-x86_64", "3.13"),
-        ("win32", "win-amd64", "cpython-3.13-windows-x86_64-none"),
-        ("win32", "win-arm64", "cpython-3.13-windows-aarch64-none"),
-    ],
-)
-def test_python_request_keeps_the_running_version_and_windows_architecture(
-    monkeypatch: pytest.MonkeyPatch, platform: str, host_platform: str, expected: str
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_python_request_is_the_running_version(
+    monkeypatch: pytest.MonkeyPatch, platform: str
 ) -> None:
-    # An x64 engine on Windows on Arm must restage as x64: a bare version lets
-    # uv pick an Arm64 interpreter, for which cryptography ships no wheel.
     monkeypatch.setattr(engine_update.sys, "platform", platform)
     monkeypatch.setattr(engine_update.sys, "version_info", SimpleNamespace(major=3, minor=13))
-    monkeypatch.setattr(engine_update.sysconfig, "get_platform", lambda: host_platform)
-    assert engine_update.python_request() == expected
+    assert engine_update.python_request() == "3.13"
 
 
 def test_pick_wheel_ignores_installer_artifacts(tmp_path: Path) -> None:
