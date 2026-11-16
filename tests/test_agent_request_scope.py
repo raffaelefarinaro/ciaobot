@@ -71,12 +71,8 @@ def test_build_agent_request_machine_scope_has_no_roots(tmp_path: Path) -> None:
     assert request.agent_roots == ()
 
 
-@pytest.mark.parametrize(("platform", "expected"), [("darwin", "workspace"), ("win32", "machine")])
-def test_build_agent_request_unset_scope_uses_platform_default(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str, expected: str
-) -> None:
+def test_build_agent_request_unset_scope_uses_the_default(tmp_path: Path) -> None:
     """A workspace that never chose a File access scope runs under the platform default."""
-    monkeypatch.setattr(sys, "platform", platform)
     manager = _make_manager(tmp_path)
     config = manager._config
     workspace = config.workspace("personal")
@@ -87,7 +83,7 @@ def test_build_agent_request_unset_scope_uses_platform_default(
 
     request = manager.build_agent_request(chat, prompt="hi")
 
-    assert request.agent_fs_scope == expected
+    assert request.agent_fs_scope == "workspace"
 
 
 def _workspace_scoped_chat(
@@ -522,8 +518,6 @@ def test_workspace_scope_skips_missing_gws_credentials_dir(
 def test_workspace_scope_refuses_symlinked_gws_credentials_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    if sys.platform == "win32":
-        return  # Creating a symlink needs a privilege Windows does not grant by default.
     from ciao.gws_auth import profile_config_dir
 
     manager, chat = _credentials_request(tmp_path, monkeypatch)
@@ -547,8 +541,6 @@ def test_workspace_scope_refuses_symlinked_gws_credentials_dir(
 def test_workspace_scope_refuses_symlinked_secrets_folder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    if sys.platform == "win32":
-        return  # Creating a symlink needs a privilege Windows does not grant by default.
     manager, chat = _credentials_request(tmp_path, monkeypatch)
     target = tmp_path / "elsewhere" / "secrets"
     (target / "gws-personal").mkdir(parents=True)
@@ -777,9 +769,6 @@ def archive_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         reset_reroot_cache()
 
 
-_NEEDS_SYMLINK = pytest.mark.skipif(sys.platform == "win32", reason="needs a symlink privilege")
-
-
 def _write_archive(config, chat_id: str = "src-1") -> Path:
     archive = config.logs_root / "Chats" / chat_id / "claude" / "2026-11-01T10-00-00-s.md"
     archive.parent.mkdir(parents=True, exist_ok=True)
@@ -863,9 +852,9 @@ def test_a_memory_pass_in_machine_scope_gets_no_archive_grant(archive_install) -
     [
         "outside_logs",
         "another_chat",
-        pytest.param("symlink", marks=_NEEDS_SYMLINK),
-        pytest.param("middle_symlink", marks=_NEEDS_SYMLINK),
-        pytest.param("symlinked_source_folder", marks=_NEEDS_SYMLINK),
+        "symlink",
+        "middle_symlink",
+        "symlinked_source_folder",
         "hardlink",
         "traversal",
         "missing",
@@ -1008,7 +997,7 @@ def test_darwin_seatbelt_keeps_a_workspace_logs_folder_read_only():
     # Same real-home base as the memory-pass seatbelt test: conftest points
     # Path.home() at an isolated folder, and the profile's system subpaths read
     # /private, so only the real home gives a probe the grant actually decides.
-    import pwd  # POSIX only; a module-level import breaks collection on Windows
+    import pwd
     import shutil  # noqa: PLC0415
     import subprocess  # noqa: PLC0415
     import tempfile  # noqa: PLC0415

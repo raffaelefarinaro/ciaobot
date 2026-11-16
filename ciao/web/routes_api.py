@@ -1341,8 +1341,7 @@ def _gws_package_binary_missing(command: list[str]) -> bool:
     launcher = Path(os.path.realpath(command[-1]))
     if launcher.name != "run.js" or launcher.parent.name == "bin":
         return False
-    binary = "gws.exe" if sys.platform == "win32" else "gws"
-    return not (launcher.parent / "bin" / binary).is_file()
+    return not (launcher.parent / "bin" / "gws").is_file()
 
 
 GWS_BINARY_MISSING_MESSAGE = (
@@ -4139,9 +4138,8 @@ def _mention_candidates(roots: tuple[Path, ...], target: str) -> set[Path]:
         # `~otheruser`, UNC, device and network-share forms are never looked up.
         return set()
     if re.match(r"[A-Za-z]:([\\/]|$)", target):
-        # A drive path is native only on Windows; elsewhere it is foreign.
-        path = Path(target)
-        return _absolute_mention_candidate(roots, path) if os.name == "nt" and path.is_absolute() else set()
+        # A drive path names no file on this machine.
+        return set()
     path = Path(target)
     if path.is_absolute():
         return _absolute_mention_candidate(roots, path)
@@ -5904,9 +5902,6 @@ def _open_path_with_default_app(path: Path) -> None:
     """Open *path* with the OS default application on the machine running Ciao."""
     if sys.platform == "darwin":
         subprocess.run(["open", str(path)], check=True, timeout=30)
-        return
-    if sys.platform == "win32":
-        os.startfile(str(path))  # type: ignore[attr-defined]
         return
     opener = shutil.which("xdg-open")
     if not opener:

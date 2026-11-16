@@ -29,7 +29,6 @@ from ciao.web.mcp_inventory import (
 SERVER_NAME_MAX = 128
 CLAUDE_LOCK_WAIT_S = 5.0
 CLAUDE_LOCK_POLL_S = 0.05
-REPLACE_RETRY_S = 1.0  # Windows refuses to replace a file another process holds open, so the replace is retried briefly
 BACKUP_SUFFIX = ".ciao-bak"
 UNREADABLE_MESSAGE = "The command line tool's settings file could not be read or changed, so nothing was changed."
 BUSY_MESSAGE = "Claude Code is saving its settings. Try again in a moment."
@@ -75,7 +74,6 @@ def _validate_server(server: object) -> None:
 def _claude_config_lock(config_path: Path) -> Iterator[None]:
     lock = config_path.with_name(config_path.name + ".lock")
     deadline = time.monotonic() + CLAUDE_LOCK_WAIT_S
-    permission_deadline = time.monotonic() + REPLACE_RETRY_S
     while True:
         try:
             os.mkdir(lock)
@@ -83,12 +81,6 @@ def _claude_config_lock(config_path: Path) -> Iterator[None]:
         except FileExistsError:
             if time.monotonic() >= deadline:
                 raise McpToggleError("config_busy", BUSY_MESSAGE, 409) from None
-            time.sleep(CLAUDE_LOCK_POLL_S)
-        except PermissionError:
-            # Windows answers PermissionError while the previous holder's directory
-            # is pending delete; a lasting one is a real permission problem.
-            if time.monotonic() >= permission_deadline:
-                raise _unreadable() from None
             time.sleep(CLAUDE_LOCK_POLL_S)
         except OSError:
             raise _unreadable() from None
@@ -143,15 +135,7 @@ def _write_text_atomic(path: Path, text: str) -> None:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(text)
         os.chmod(tmp, mode)
-        deadline = time.monotonic() + REPLACE_RETRY_S
-        while True:
-            try:
-                os.replace(tmp, target)
-                break
-            except PermissionError:
-                if time.monotonic() >= deadline:
-                    raise
-                time.sleep(CLAUDE_LOCK_POLL_S)
+        os.replace(tmp, target)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)

@@ -193,7 +193,6 @@ def update_command(provider: str, tested: str, binary: str) -> str:
     ``tested`` is validated before it is interpolated and the binary is quoted,
     because the host terminal runs this string as shell text.
     """
-    from ciao import host_terminal
     from ciao.tool_path import resolve_on_terminal_path
 
     if provider not in PROVIDERS:
@@ -212,8 +211,6 @@ def update_command(provider: str, tested: str, binary: str) -> str:
         same = False
     if same:
         name = provider
-    elif host_terminal.host_platform() == host_terminal.PLATFORM_WINDOWS:
-        name = "& " + host_terminal._ps_quote(binary)
     else:
         name = shlex.quote(binary)
     return f"{name} upgrade {tested}" if provider == "opencode" else f"{name} update"

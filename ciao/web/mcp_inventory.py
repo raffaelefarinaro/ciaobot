@@ -117,7 +117,7 @@ def _candidate_paths(agent_root: Path, provider: str) -> list[tuple[Path, str, s
         )
         managed = (
             Path("/Library/Application Support/ClaudeCode/managed-settings.json")
-            if os.name == "posix" and __import__("sys").platform == "darwin"
+            if __import__("sys").platform == "darwin"
             else Path("/etc/claude-code/managed-settings.json")
         )
         candidates.append((managed, "managed", "managed", False))
@@ -341,18 +341,8 @@ def _provider_inventory(
     }
 
 
-def _double_ps_quotes(text: str) -> str:
-    """PowerShell treats U+2018-U+201B like an apostrophe inside single quotes."""
-    return "".join(ch * 2 if ch in "'\u2018\u2019\u201a\u201b" else ch for ch in text)
-
-
 def _shell_prefix(agent_root: Path) -> dict[str, str]:
     root = str(agent_root)
-    if os.name == "nt":
-        return {
-            "kind": "powershell",
-            "cd_prefix": f"Set-Location -LiteralPath '{_double_ps_quotes(root)}'; ",
-        }
     return {"kind": "posix", "cd_prefix": f"cd -- {shlex.quote(root)} && "}
 
 

@@ -7,7 +7,6 @@ import json
 import os
 import re
 import secrets
-import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -360,13 +359,8 @@ def coerce_workspace_color(raw: object) -> str:
 
 
 def default_agent_fs_scope() -> str:
-    """Filesystem scope for a workspace with none stored.
-
-    Windows has no sandbox, so workspace scope would refuse every chat there;
-    it defaults to whole machine. Elsewhere the sandbox exists and the default
-    is workspace. A stored value is never overridden by this.
-    """
-    return "machine" if sys.platform == "win32" else "workspace"
+    """Filesystem scope for a workspace with none stored. A stored value is never overridden by this."""
+    return "workspace"
 
 
 def coerce_agent_fs_scope(raw: object) -> str | None:
@@ -1843,8 +1837,7 @@ class CiaoConfig:
                 cwd = None
             if cwd is not None and is_set_up_workspace(cwd):
                 # Started inside a set-up workspace (`ciao run` from the
-                # workspace folder, or the Windows logon task, whose working
-                # directory is the workspace). Setup used to write
+                # workspace folder). Setup used to write
                 # CIAO_WORKSPACE=. into `.env` for this; the registry is the
                 # marker now. Checked before discovery, so a run inside a
                 # scratch workspace never attaches to the installed one.

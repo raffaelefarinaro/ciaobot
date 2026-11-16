@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -35,7 +34,7 @@ def test_the_transcript_lookup_uses_that_slug(monkeypatch: pytest.MonkeyPatch, t
 
 
 def _norm(p: Path) -> str:
-    return str(p).replace("\\", "/") if os.name == "nt" else str(p)
+    return str(p)
 
 
 def _assume_no_git_above(tmp_path: Path) -> None:

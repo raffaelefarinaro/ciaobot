@@ -79,8 +79,7 @@ def test_claude_turn_off_appends_and_keeps_other_keys(tmp_path: Path) -> None:
     assert data["numStartups"] == 3
     backup = home / ".claude.json.ciao-bak"
     assert backup.read_text(encoding="utf-8") == original
-    if os.name != "nt":
-        assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
     assert not (home / ".claude.json.lock").exists()
 
     again = set_mcp_server_enabled(provider="claude", server="notion", agent_root=root, enabled=False)
@@ -234,67 +233,6 @@ def test_write_failure_is_unreadable_and_leaves_no_temp(
     assert config.read_bytes() == original
     assert not list(home.glob(".claude.json.*.tmp"))
     assert not (home / ".claude.json.lock").exists()
-
-
-def test_replace_retries_a_windows_sharing_violation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    home, root = _paths(tmp_path)
-    config = _write_claude(home, {"projects": {}})
-    real_replace = os.replace
-    calls: list[str] = []
-
-    def flaky(src: str, dst: str) -> None:
-        calls.append(dst)
-        if len(calls) == 1:
-            raise PermissionError(13, "being used by another process")
-        real_replace(src, dst)
-
-    monkeypatch.setattr(os, "replace", flaky)
-
-    result = set_mcp_server_enabled(provider="claude", server="x", agent_root=root, enabled=False)
-
-    assert result.changed is True
-    assert len(calls) == 2
-    assert _claude_list(config, root) == ["x"]
-
-
-def test_replace_gives_up_after_the_retry_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    home, root = _paths(tmp_path)
-    config = _write_claude(home, {"projects": {}})
-    original = config.read_bytes()
-    monkeypatch.setattr("ciao.web.mcp_toggle.REPLACE_RETRY_S", 0.05)
-
-    def refuse(_src: object, _dst: object) -> None:
-        raise PermissionError(13, "being used by another process")
-
-    monkeypatch.setattr(os, "replace", refuse)
-
-    with pytest.raises(McpToggleError) as caught:
-        set_mcp_server_enabled(provider="claude", server="x", agent_root=root, enabled=False)
-
-    assert caught.value.reason == "unreadable_config"
-    assert config.read_bytes() == original
-
-
-def test_lock_retries_a_pending_delete_permission_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    home, root = _paths(tmp_path)
-    config = _write_claude(home, {"projects": {}})
-    real_mkdir = os.mkdir
-    lock_attempts: list[str] = []
-
-    def pending_delete(path: Path | str) -> None:
-        if str(path).endswith(".lock"):
-            lock_attempts.append(str(path))
-            if len(lock_attempts) == 1:
-                raise PermissionError(13, "pending delete")
-        real_mkdir(path)
-
-    monkeypatch.setattr(os, "mkdir", pending_delete)
-
-    result = set_mcp_server_enabled(provider="claude", server="x", agent_root=root, enabled=False)
-
-    assert result.changed is True
-    assert len(lock_attempts) == 2
-    assert _claude_list(config, root) == ["x"]
 
 
 def test_claude_top_level_list_warns(tmp_path: Path) -> None:
@@ -478,7 +416,6 @@ def _turn_off_into(name: str, root: Path, errors: list[BaseException]) -> None:
         errors.append(exc)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs a privilege on Windows")
 def test_symlinked_settings_file_uses_the_real_files_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home, root = _paths(tmp_path)
     store = tmp_path / "store"
@@ -507,7 +444,6 @@ def test_symlinked_settings_file_uses_the_real_files_lock(tmp_path: Path, monkey
     assert stat.S_IMODE(real.stat().st_mode) == 0o640
 
 
-@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs a privilege on Windows")
 def test_backup_never_follows_a_dangling_link(tmp_path: Path) -> None:
     home, root = _paths(tmp_path)
     config = _write_claude(home, {"projects": {}})
