@@ -5669,8 +5669,7 @@ def test_bounded_auth_probe_no_post_reap_group_signal(monkeypatch):
 
     monkeypatch.setattr(proc.subprocess, "Popen", lambda *a, **k: Child())
     monkeypatch.setattr(proc, "ProcessTree", Tree)
-    if proc.sys.platform != "win32":
-        monkeypatch.setattr(proc.os, "killpg", lambda *args: signals.append("killpg"))
+    monkeypatch.setattr(proc.os, "killpg", lambda *args: signals.append("killpg"))
     assert proc.bounded_output(["synthetic"], timeout=1, max_stdout=10) == (0, b"")
     assert signals == []
 
