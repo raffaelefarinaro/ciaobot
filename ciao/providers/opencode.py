@@ -63,6 +63,7 @@ import httpx
 if TYPE_CHECKING:
     import subprocess
 
+from ciao.tool_summary import opencode_file_touches, summarize_opencode_tool_input
 from ciao.background_notice import format_finished_runs
 from ciao.core_prompt import system_prompt_payload
 from ciao.models import (
@@ -899,40 +900,6 @@ def error_text(error: Mapping[str, Any] | None) -> str:
     return _sanitize_error(error.get("message")) or str(
         error.get("type") or "OpenCode error"
     )
-
-
-def _summarize_tool_input(tool: str, raw: object) -> str:
-    """Short, non-secret one-liner describing a tool call for the UI."""
-    if not isinstance(raw, Mapping):
-        return ""
-    for key in ("filePath", "path", "file", "pattern", "query", "command", "description"):
-        value = raw.get(key)
-        if isinstance(value, str) and value.strip():
-            # The trace draws one row per line, and V2's `shell` carries no
-            # description, so a heredoc command became a column of fake rows.
-            lines = [line.strip() for line in value.splitlines() if line.strip()]
-            more = f" (+{len(lines) - 1} lines)" if len(lines) > 1 else ""
-            return lines[0][:400] + more
-    # An empty map has no summary; returning its json printed a literal "{}"
-    # next to the tool name in the activity row.
-    return json.dumps(raw, ensure_ascii=False)[:200] if raw else ""
-
-
-def _file_touches(tool: str, raw: object) -> list[dict[str, str]] | None:
-    """Paths a tool call writes, for the PWA's file-change cards."""
-    if not isinstance(raw, Mapping):
-        return None
-    if tool.lower() in {"shell", "bash"}:
-        from ciao.web.chat_broker import extract_file_touches
-
-        return extract_file_touches("bash", raw) or None
-    action = {"write": "write", "edit": "edit", "patch": "edit"}.get(tool.lower())
-    if action is None:
-        return None
-    path = raw.get("filePath") or raw.get("path")
-    if not isinstance(path, str) or not path.strip():
-        return None
-    return [{"file_path": path.strip(), "action": action}]
 
 
 def _token_count(raw: object) -> int:
@@ -4285,9 +4252,9 @@ class OpencodeProvider(BaseSDKProvider):
             return [ToolUseEvent(
                 type="tool_use",
                 tool_name=tool,
-                tool_input=_summarize_tool_input(tool, raw_input),
+                tool_input=summarize_opencode_tool_input(tool, raw_input),
                 tool_use_id=call_id or None,
-                file_touches=_file_touches(tool, raw_input),
+                file_touches=opencode_file_touches(tool, raw_input),
                 work_dirs=tool_work_dirs(tool, raw_input) or None,
                 input_chars=input_chars,
                 control_surface=surface,
@@ -4444,9 +4411,9 @@ class OpencodeProvider(BaseSDKProvider):
             return [ToolUseEvent(
                 type="tool_use",
                 tool_name=tool,
-                tool_input=_summarize_tool_input(tool, raw_input),
+                tool_input=summarize_opencode_tool_input(tool, raw_input),
                 tool_use_id=call_id or None,
-                file_touches=_file_touches(tool, raw_input),
+                file_touches=opencode_file_touches(tool, raw_input),
                 work_dirs=tool_work_dirs(tool, raw_input) or None,
                 input_chars=input_chars,
                 control_surface=surface,
@@ -4464,9 +4431,9 @@ class OpencodeProvider(BaseSDKProvider):
                 events.append(ToolUseEvent(
                     type="tool_use",
                     tool_name=tool,
-                    tool_input=_summarize_tool_input(tool, raw_input),
+                    tool_input=summarize_opencode_tool_input(tool, raw_input),
                     tool_use_id=call_id or None,
-                    file_touches=_file_touches(tool, raw_input),
+                    file_touches=opencode_file_touches(tool, raw_input),
                     work_dirs=tool_work_dirs(tool, raw_input) or None,
                     input_chars=input_chars,
                     control_surface=surface,

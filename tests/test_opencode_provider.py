@@ -6725,18 +6725,18 @@ def test_a_tool_with_genuinely_empty_input_is_still_announced(tmp_path):
 
 def test_an_empty_argument_map_summarizes_to_nothing():
     """It used to print a literal "{}" next to the tool name."""
-    from ciao.providers.opencode import _summarize_tool_input
+    from ciao.tool_summary import summarize_opencode_tool_input
 
-    assert _summarize_tool_input("bash", {}) == ""
-    assert _summarize_tool_input("bash", {"command": "ls"}) == "ls"
+    assert summarize_opencode_tool_input("bash", {}) == ""
+    assert summarize_opencode_tool_input("bash", {"command": "ls"}) == "ls"
 
 
 def test_a_multiline_command_summarizes_to_its_first_line():
     """The trace draws a row per line; a heredoc became a column of fake rows."""
-    from ciao.providers.opencode import _summarize_tool_input
+    from ciao.tool_summary import summarize_opencode_tool_input
 
     command = "python3 - <<'PY'\nfrom pathlib import Path\n\nprint(Path.home())\nPY\n"
-    assert _summarize_tool_input("shell", {"command": command}) == "python3 - <<'PY' (+3 lines)"
+    assert summarize_opencode_tool_input("shell", {"command": command}) == "python3 - <<'PY' (+3 lines)"
 
 
 def test_permission_events_match_the_house_convention(tmp_path):
