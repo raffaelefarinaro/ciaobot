@@ -983,8 +983,7 @@ def test_cli_package_mismatch_names_both_packages(monkeypatch: pytest.MonkeyPatc
     message = te.cli_package_mismatch()
 
     assert message is not None
-    # The message names the resolved package directory, which is drive-qualified
-    # with backslashes on Windows; compare the platform's own spelling.
+    # The message names the resolved package directory.
     assert str(Path("/Users/someone/repos/ciaobot/ciao/__init__.py").resolve().parent) in message
     assert str(Path(te.__file__).resolve().parent) in message
     assert "uv venv .venv-eval" in message
@@ -1239,8 +1238,6 @@ def test_resolve_in_root_refuses_symlink_escape(tmp_path: Path) -> None:
 
 
 def test_close_kills_the_whole_engine_process_group(tmp_path: Path) -> None:
-    if sys.platform == "win32":
-        pytest.skip("process groups are POSIX-only")
     pid_file = tmp_path / "child.pid"
     script = (
         "import subprocess, sys, time, pathlib\n"
@@ -1324,8 +1321,6 @@ def test_close_kills_a_sigterm_ignoring_straggler_without_waitid(
 ) -> None:
     # os.waitid exists on macOS only from CPython 3.13; the floor is 3.12 (#2435).
     # The grandchild ignores SIGTERM, so only the group SIGKILL after the reap clears it.
-    if sys.platform == "win32":
-        pytest.skip("process groups are POSIX-only")
     monkeypatch.delattr(os, "waitid", raising=False)
     pid_file = tmp_path / "child.pid"
     child_code = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(600)"

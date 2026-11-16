@@ -1155,7 +1155,7 @@ def prepare_workspace(
 
 
 def _stop_process_group(proc: subprocess.Popen[bytes]) -> None:
-    """Stop an engine and whatever it spawned (provider CLIs), on POSIX via its process group.
+    """Stop an engine and whatever it spawned (provider CLIs), via its process group.
 
     SIGTERM goes to the whole group while the engine is still alive, so its
     process-group id is reserved and the signal cannot reach an unrelated group.
@@ -1165,14 +1165,6 @@ def _stop_process_group(proc: subprocess.Popen[bytes]) -> None:
     engine some other path already reaped is not signalled at all.
     """
     if proc.returncode is not None:
-        return
-    if sys.platform == "win32":
-        proc.terminate()
-        try:
-            proc.wait(timeout=ENGINE_STOP_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=ENGINE_STOP_TIMEOUT_S)
         return
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(proc.pid, signal.SIGTERM)
@@ -1298,7 +1290,6 @@ class IsolatedEngine(EngineSession):
         self._log = self._log_path.open("wb")
         script = Path(sys.executable).with_name("ciao")
         command = [str(script), "run"] if script.exists() else [sys.executable, "-m", "ciao", "run"]
-        group: dict[str, Any] = {"start_new_session": True} if sys.platform != "win32" else {}
         # engine_env drops every CIAO_* variable first; the fake's variables go in after it.
         env = engine_env(_BASE_ENV, self.workdir, self.ws)
         if task.gws_fake is not None:
@@ -1311,7 +1302,7 @@ class IsolatedEngine(EngineSession):
             env=env,
             stdout=self._log,
             stderr=subprocess.STDOUT,
-            **group,
+            start_new_session=True,
         )
         self._wait_ready()
         self.api("POST", "/api/auth", {"token": self.token})
@@ -1526,8 +1517,8 @@ class IsolatedEngine(EngineSession):
 
 
 def available_capabilities() -> frozenset[str]:
-    """Capabilities this platform's harness can provide. The fake is a POSIX shell launcher."""
-    return frozenset({GWS_FAKE_CAPABILITY}) if sys.platform != "win32" else frozenset()
+    """Capabilities the harness can provide."""
+    return frozenset({GWS_FAKE_CAPABILITY})
 
 
 def gws_fake_bin_dir(ws: Path, profile: str) -> Path:

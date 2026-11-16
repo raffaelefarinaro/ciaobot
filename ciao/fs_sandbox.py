@@ -559,7 +559,7 @@ def _resolved_tool_path(value: str, *, cwd: Path) -> Path | None:
 
 def _case_key(path: Path) -> tuple[str, ...]:
     """The path's components, case-folded where the filesystem ignores case."""
-    if sys.platform in ("darwin", "win32"):
+    if sys.platform == "darwin":
         return tuple(part.casefold() for part in path.parts)
     return path.parts
 
@@ -578,7 +578,7 @@ def _is_read_only_target(target: Path, entries: Sequence[Path]) -> bool:
     An existing target is compared by identity, with each of its ancestors, so a
     case variant of a pinned file or folder, or a hardlink to one, still matches.
     A target that does not exist has no identity yet, so it is compared by its
-    components, case-folded on macOS and Windows.
+    components, case-folded on macOS.
     """
     if target.exists():
         chain = [target, *target.parents]

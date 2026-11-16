@@ -11,7 +11,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,8 +23,6 @@ from ciao import gws_auth
 from ciao import gws_wrapper
 from ciao import task_eval as te
 from ciao.tool_path import common_tool_dirs
-
-posix_only = pytest.mark.skipif(sys.platform == "win32", reason="the fake gws is a POSIX shell launcher")
 
 M4_ID = "M4-email-draft"
 THREAD = "19a0f3c2b1d40001"
@@ -228,7 +225,6 @@ def test_catalog_rejects_bad_gws_calls_regex(tmp_path: Path) -> None:
 # --- install: files, registry, health cache, PATH --------------------------------
 
 
-@posix_only
 def test_install_gws_fake_links_profile_on_disk(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -252,7 +248,6 @@ def test_install_gws_fake_links_profile_on_disk(tmp_path: Path) -> None:
 # --- the fake gws: launcher and operations ---------------------------------------
 
 
-@posix_only
 def test_fake_gws_triage_read_and_reply_draft(tmp_path: Path) -> None:
     inst = _install(tmp_path)
 
@@ -279,7 +274,6 @@ def test_fake_gws_triage_read_and_reply_draft(tmp_path: Path) -> None:
         assert re.search(pattern, last, re.IGNORECASE) is None
 
 
-@posix_only
 def test_fake_gws_raw_drafts_create_resolves_thread_from_in_reply_to(tmp_path: Path) -> None:
     inst = _install(tmp_path)
     raw = _raw("tomas.berg@example.com", "Thursday works", in_reply_to="<offsite-2@mail.example.com>")
@@ -298,7 +292,6 @@ def test_fake_gws_raw_drafts_create_resolves_thread_from_in_reply_to(tmp_path: P
     assert f"effect=draft_created thread={THREAD}" in row["summary"]
 
 
-@posix_only
 def test_fake_gws_send_is_logged_as_sent(tmp_path: Path) -> None:
     inst = _install(tmp_path)
 
@@ -322,7 +315,6 @@ def test_fake_gws_send_is_logged_as_sent(tmp_path: Path) -> None:
     assert _rows(inst.log)[-1]["effect"] == "dry_run"
 
 
-@posix_only
 def test_fake_gws_unknown_command_logged_and_fails(tmp_path: Path) -> None:
     inst = _install(tmp_path)
 
@@ -333,7 +325,6 @@ def test_fake_gws_unknown_command_logged_and_fails(tmp_path: Path) -> None:
     assert _rows(inst.log)[-1]["effect"] == "unknown"
 
 
-@posix_only
 def test_fake_gws_auth_status_and_version(tmp_path: Path) -> None:
     inst = _install(tmp_path)
 
@@ -476,12 +467,8 @@ def test_run_task_passes_gws_log_to_grader(tmp_path: Path, monkeypatch: pytest.M
 # --- capabilities and the CLI wiring ----------------------------------------------
 
 
-def test_available_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "platform", "linux")
+def test_available_capabilities() -> None:
     assert te.available_capabilities() == {"gws_fake"}
-
-    monkeypatch.setattr(sys, "platform", "win32")
-    assert te.available_capabilities() == frozenset()
 
 
 def test_cli_eval_tasks_run_passes_capabilities(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

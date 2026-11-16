@@ -124,7 +124,7 @@ def test_opencode_prefix_is_bwrap_on_linux(tmp_path, monkeypatch):
 
 
 def test_missing_tool_raises(tmp_path, monkeypatch):
-    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "platform", "freebsd14")
     with pytest.raises(FsSandboxUnavailable, match="whole machine"):
         opencode_sandbox_prefix(roots=[tmp_path])
 
@@ -138,7 +138,7 @@ def test_missing_tool_raises(tmp_path, monkeypatch):
 
 def test_darwin_sandbox_exec_refuses_a_file_outside_the_root(tmp_path):
     if sys.platform != "darwin" or not Path(SANDBOX_EXEC_PATH).is_file():
-        # Platform branch, not a skip marker: on Linux and Windows this probe
+        # Platform branch, not a skip marker: on Linux this probe
         # cannot run, and the prefix behavior is covered by the tests above.
         try:
             prefix = opencode_sandbox_prefix(roots=[tmp_path])
@@ -186,8 +186,6 @@ def test_seatbelt_backslash_root_is_escaped():
     with pytest.raises(ValueError):
         _quote_seatbelt_subpath("ro)ot")
 
-    # Keep the crafted POSIX name literal on Windows without creating a file:
-    # Windows treats a backslash as a path separator, not a filename character.
     tricky = PurePosixPath("/root\\nbar")
     profile = _seatbelt_profile([tricky])
     # The grant names the literal-backslash root (doubled backslash) and
@@ -199,7 +197,7 @@ def test_seatbelt_backslash_root_is_escaped():
 def test_darwin_seatbelt_backslash_root_stays_confined(tmp_path):
     if sys.platform != "darwin" or not Path(SANDBOX_EXEC_PATH).is_file():
         # Same platform branch as the live probe above: escaping is covered
-        # by the unit test on Linux/Windows, where sandbox-exec is absent.
+        # by the unit test on Linux, where sandbox-exec is absent.
         assert _quote_seatbelt_subpath("a\\b") == "a\\\\b"
         return
 
@@ -302,11 +300,8 @@ def test_tool_paths_outside_the_roots_are_detected(tmp_path):
     assert out("../outside/secret.txt")
     assert out("/**")
     assert out("~/anything")
-    if sys.platform != "win32":
-        # Windows needs a privilege to create symlinks; the guard only runs on
-        # POSIX, where Claude workspace scope is available.
-        (root / "escape").symlink_to(outside)
-        assert out("escape/secret.txt")
+    (root / "escape").symlink_to(outside)
+    assert out("escape/secret.txt")
 
 
 def _guard_decision(guard, tool_name: str, tool_input: dict, session_id: str | None = None) -> str:
@@ -373,13 +368,11 @@ def _read_task(guard, path, session_id=_TASK_SESSION) -> str:
     return _guard_decision(guard, "Read", {"file_path": str(path)}, session_id)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
 def test_claude_task_output_path_allowed_own_session(tmp_path):
     _, _, tasks, guard = _task_guard_setup(tmp_path)
     assert _read_task(guard, tasks / "abc.output") == "allow"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
 def test_claude_task_output_denied_other_session_or_workspace(tmp_path):
     _, tmp_base, tasks, guard = _task_guard_setup(tmp_path)
     other = tmp_base / f"claude-{os.getuid()}" / "-munged-cwd" / "ffffffff-0000-1111" / "tasks"
@@ -395,7 +388,6 @@ def test_claude_task_output_denied_other_session_or_workspace(tmp_path):
     assert _read_task(guard, other_uid / "x.output") == "deny"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
 def test_claude_task_output_denied_for_non_read_tools(tmp_path):
     _, _, tasks, guard = _task_guard_setup(tmp_path)
     path = str(tasks / "abc.output")
@@ -408,7 +400,6 @@ def test_claude_task_output_denied_for_non_read_tools(tmp_path):
         assert _guard_decision(guard, tool, tool_input, _TASK_SESSION) == "deny", tool
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
 def test_claude_task_output_denied_without_session_id(tmp_path):
     _, _, tasks, guard = _task_guard_setup(tmp_path)
     path = tasks / "abc.output"
@@ -418,7 +409,6 @@ def test_claude_task_output_denied_without_session_id(tmp_path):
     assert _read_task(guard, path, "bad/../id/12345678") == "deny"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
 def test_claude_task_output_denied_for_symlink_escape(tmp_path):
     _, tmp_base, tasks, guard = _task_guard_setup(tmp_path)
     secret = tmp_path / "secret.output"
@@ -434,7 +424,6 @@ def test_claude_task_output_denied_for_symlink_escape(tmp_path):
     assert _read_task(guard, session_dir / "tasks" / "x.output", "0a1b2c3d-9999-9999") == "deny"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
 def test_claude_task_output_denied_for_wrong_shape(tmp_path):
     _, _, tasks, guard = _task_guard_setup(tmp_path)
     (tasks / "abc.txt").write_text("x", encoding="utf-8")
@@ -452,7 +441,6 @@ def test_claude_task_output_denied_for_wrong_shape(tmp_path):
     assert _read_task(guard, f"{tasks}/{{abc}}.output") == "deny"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
 def test_claude_task_output_respects_cli_tmp_base(tmp_path):
     root, tmp_base, tasks, _ = _task_guard_setup(tmp_path)
     elsewhere = (tmp_path / "elsewhere").resolve()
@@ -463,7 +451,6 @@ def test_claude_task_output_respects_cli_tmp_base(tmp_path):
     assert _read_task(no_base, tasks / "abc.output") == "deny"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
 def test_claude_task_output_denied_for_untrimmed_paths(tmp_path):
     _, _, tasks, guard = _task_guard_setup(tmp_path)
     path = str(tasks / "abc.output")
@@ -471,7 +458,6 @@ def test_claude_task_output_denied_for_untrimmed_paths(tmp_path):
         assert _read_task(guard, value) == "deny", repr(value)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
 def test_claude_task_output_denied_for_links_inside_the_tasks_dir(tmp_path):
     _, tmp_base, tasks, guard = _task_guard_setup(tmp_path)
     other = tmp_base / f"claude-{os.getuid()}" / "-munged-cwd" / "ffffffff-0000-1111" / "tasks"
@@ -485,7 +471,6 @@ def test_claude_task_output_denied_for_links_inside_the_tasks_dir(tmp_path):
     assert _read_task(guard, tasks / "hard.output") == "deny"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
 def test_claude_task_output_session_id_boundaries(tmp_path):
     root, tmp_base, _, guard = _task_guard_setup(tmp_path)
 
@@ -503,7 +488,6 @@ def test_claude_task_output_session_id_boundaries(tmp_path):
     assert read_as("abcd efgh") == "deny"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
 def test_claude_task_output_symlinked_tmp_base_and_case_variants(tmp_path):
     root, _, _, _ = _task_guard_setup(tmp_path)
     real = (tmp_path / "real").resolve()
@@ -593,10 +577,6 @@ def test_bwrap_usable_reads_the_probe_exit_code(monkeypatch):
 
 
 def test_engine_read_roots_cover_the_venv_and_every_interpreter_link(tmp_path, monkeypatch):
-    if sys.platform == "win32":
-        # Platform branch, not a skip marker: Windows has no sandbox, so these
-        # grants are never used there, and its symlinks resolve differently.
-        return
     from ciao import fs_sandbox
 
     real = tmp_path / "python" / "cpython-3.13.13"
@@ -720,10 +700,6 @@ def _bwrap_triples(argv: list[str]) -> list[list[str]]:
 
 
 def test_bwrap_recreates_an_alias_outside_the_bound_folders(tmp_path, monkeypatch):
-    if sys.platform == "win32":
-        # Platform branch, not a skip marker: creating a symlink needs a privilege
-        # Windows does not grant by default, and bwrap does not run there.
-        return
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
     monkeypatch.setattr("ciao.fs_sandbox._bwrap_usable", lambda bwrap: True)
@@ -750,9 +726,6 @@ def test_bwrap_recreates_an_alias_outside_the_bound_folders(tmp_path, monkeypatc
 
 
 def test_claude_allow_read_has_symlink_hops_only_on_darwin(tmp_path, monkeypatch):
-    if sys.platform == "win32":
-        # Platform branch, not a skip marker: symlinks need a privilege on Windows.
-        return
     real = tmp_path / "python" / "cpython"
     real.mkdir(parents=True)
     alias = tmp_path / "python" / "alias"
@@ -771,9 +744,6 @@ def test_claude_allow_read_has_symlink_hops_only_on_darwin(tmp_path, monkeypatch
 
 
 def test_symlink_hops_normalize_relative_chains_with_dotdot(tmp_path):
-    if sys.platform == "win32":
-        # Platform branch, not a skip marker: symlinks need a privilege on Windows.
-        return
     from ciao.fs_sandbox import _symlink_hops
 
     (tmp_path / "c").mkdir()
@@ -926,8 +896,6 @@ def test_engine_inside_a_writable_root_is_read_only_after_the_bind_on_bwrap(tmp_
 
 
 def test_node_tool_roots_keep_npm_code_read_only_and_exclude_home_cache(tmp_path, monkeypatch):
-    if sys.platform == "win32":
-        return  # Windows does not use these sandbox grants or POSIX npm symlinks.
     install = tmp_path / "node-install"
     binary = install / "bin"
     binary.mkdir(parents=True)
@@ -951,8 +919,6 @@ def test_node_tool_roots_keep_npm_code_read_only_and_exclude_home_cache(tmp_path
 
 
 def test_gws_tool_roots_grant_npm_package_and_node_not_home(tmp_path, monkeypatch):
-    if sys.platform == "win32":
-        return  # Windows does not use these sandbox grants or POSIX symlinks.
     home = tmp_path / "home"
     package = home / ".local" / "lib" / "node_modules" / "@googleworkspace" / "cli"
     (package / "bin").mkdir(parents=True)
@@ -988,8 +954,6 @@ def test_gws_tool_roots_empty_when_not_installed(monkeypatch):
 
 
 def test_gws_tool_roots_plain_binary_skips_node(tmp_path, monkeypatch):
-    if sys.platform == "win32":
-        return
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     gws = bin_dir / "gws"
@@ -1007,8 +971,6 @@ def test_gws_tool_roots_plain_binary_skips_node(tmp_path, monkeypatch):
 
 
 def test_gws_tool_roots_skip_package_json_outside_node_modules(tmp_path, monkeypatch):
-    if sys.platform == "win32":
-        return  # Windows does not use these sandbox grants or POSIX symlinks.
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     gws = bin_dir / "gws"
@@ -1176,8 +1138,6 @@ def test_claude_settings_grant_read_only_files_without_write(tmp_path, monkeypat
 
 
 def test_claude_settings_drop_read_only_symlinks_on_linux(tmp_path, monkeypatch):
-    if sys.platform == "win32":
-        return  # Creating a symlink needs a privilege Windows does not grant by default.
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
     target = tmp_path / "target"
@@ -1196,8 +1156,6 @@ def test_claude_settings_drop_read_only_symlinks_on_linux(tmp_path, monkeypatch)
 
 
 def test_bwrap_grants_gws_link_package_and_node(tmp_path, monkeypatch):
-    if sys.platform == "win32":
-        return  # bwrap does not run on Windows and symlinks need a privilege there.
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
     monkeypatch.setattr("ciao.fs_sandbox._bwrap_usable", lambda bwrap: True)
@@ -1328,8 +1286,6 @@ def test_seatbelt_denies_write_on_read_only_inside_root(tmp_path, monkeypatch):
 
 
 def test_bwrap_ro_binds_read_only_inside_root_after_root_bind(tmp_path, monkeypatch):
-    if sys.platform == "win32":
-        return  # bwrap does not run on Windows.
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
     monkeypatch.setattr("ciao.fs_sandbox._bwrap_usable", lambda bwrap: True)
@@ -1435,8 +1391,6 @@ def _fake_linux(monkeypatch):
 
 
 def test_bwrap_masks_secrets_between_root_bind_and_linked_bind(tmp_path, monkeypatch):
-    if sys.platform == "win32":
-        return  # bwrap does not run on Windows.
     _fake_linux(monkeypatch)
     root, secrets, linked, other, pins = _secrets_tree(tmp_path)
 
@@ -1455,8 +1409,6 @@ def test_bwrap_masks_secrets_between_root_bind_and_linked_bind(tmp_path, monkeyp
 
 
 def test_bwrap_skips_secrets_mask_when_missing_or_symlink_or_outside_roots(tmp_path, monkeypatch):
-    if sys.platform == "win32":
-        return  # bwrap does not run on Windows.
     _fake_linux(monkeypatch)
     root = tmp_path / "root"
     root.mkdir()
@@ -1575,21 +1527,8 @@ def test_darwin_seatbelt_blocks_moving_secrets_ancestors_and_the_account_dir(tmp
 @pytest.mark.parametrize(
     "name",
     [
-        # `*` and `?` are not legal Windows filename characters, so the folder
-        # the refusal is about cannot exist there; `[`/`]` do exist and still
-        # exercise the glob guard.
-        pytest.param(
-            "se*crets",
-            marks=pytest.mark.skipif(
-                sys.platform == "win32", reason="* is not a legal Windows filename character"
-            ),
-        ),
-        pytest.param(
-            "se?crets",
-            marks=pytest.mark.skipif(
-                sys.platform == "win32", reason="? is not a legal Windows filename character"
-            ),
-        ),
+        "se*crets",
+        "se?crets",
         "se[crets",
         "se]crets",
     ],
@@ -1707,7 +1646,6 @@ def test_claude_file_tool_guard_pins_a_read_only_file_inside_a_root(tmp_path):
     assert _guard_decision(guard, "Write", {"file_path": str(creds)}) == "deny"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="creating a symlink needs a privilege Windows lacks")
 def test_a_link_in_the_archive_folder_to_elsewhere_is_not_readable(tmp_path):
     root, chats, archive = _archive_tree(tmp_path)
     secret = tmp_path.resolve() / "secret.txt"
@@ -1747,7 +1685,7 @@ def test_darwin_seatbelt_reads_a_memory_pass_archive_only():
     # /private, so a probe under pytest's tmp dir passes with or without the
     # grant (#2459). conftest points Path.home() at an isolated folder, so the
     # real one comes from the passwd entry.
-    import pwd  # POSIX only; a module-level import breaks collection on Windows
+    import pwd
 
     real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
     if not os.access(real_home, os.W_OK):
@@ -1799,8 +1737,6 @@ def test_darwin_seatbelt_reads_a_memory_pass_archive_only():
 
 
 def test_bwrap_ro_binds_a_memory_pass_archive_outside_the_roots(tmp_path, monkeypatch):
-    if sys.platform == "win32":
-        return  # bwrap does not run on Windows.
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
     monkeypatch.setattr("ciao.fs_sandbox._bwrap_usable", lambda bwrap: True)
@@ -1814,7 +1750,6 @@ def test_bwrap_ro_binds_a_memory_pass_archive_outside_the_roots(tmp_path, monkey
     assert not any(str(archive) in triple and triple[0] == "--bind" for triple in triples)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
 def test_a_case_variant_of_a_pinned_file_is_not_writable(tmp_path):
     root = (tmp_path / "root").resolve()
     creds = root / "creds"
@@ -1831,7 +1766,6 @@ def test_a_case_variant_of_a_pinned_file_is_not_writable(tmp_path):
     assert _guard_decision(guard, "Read", {"file_path": str(pinned)}) == "allow"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
 def test_a_hardlink_to_a_pinned_file_inside_a_root_is_not_writable(tmp_path):
     root = (tmp_path / "root").resolve()
     creds = root / "creds"
@@ -1847,7 +1781,6 @@ def test_a_hardlink_to_a_pinned_file_inside_a_root_is_not_writable(tmp_path):
     assert _guard_decision(guard, "Read", {"file_path": str(alias)}) == "allow"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
 def test_a_hardlink_to_another_file_is_not_the_granted_file(tmp_path):
     # Read matches by identity, so a link to the granted file reads the same bytes
     # and nothing else: a hardlink to some other file is still refused.

@@ -182,7 +182,6 @@ _MAC_CLOUD_STORAGE_PREFIXES = (
     ("iCloudDrive", "iCloud Drive"),
     ("Box", "Box"),
 )
-_WINDOWS_ONEDRIVE_ENV = ("OneDrive", "OneDriveConsumer", "OneDriveCommercial")
 
 
 def _parts_under(path: Path, base: Path) -> tuple[str, ...] | None:
@@ -226,20 +225,13 @@ def cloud_synced_location(
     *,
     platform: str | None = None,
     home: Path | None = None,
-    env: Mapping[str, str] | None = None,
     finder_prefs: Mapping[str, Any] | None = None,
 ) -> str | None:
     """The sync service whose folder holds ``path`` ("iCloud Drive",
     "Dropbox", ...), or None when the path is not in a known synced folder."""
     platform = platform or sys.platform
     home = home if home is not None else Path.home()
-    source = env if env is not None else os.environ
     target = Path(path).expanduser()
-    if platform == "win32":
-        for name in _WINDOWS_ONEDRIVE_ENV:
-            root = str(source.get(name, "") or "").strip()
-            if root and _parts_under(target, Path(root)) is not None:
-                return "OneDrive"
     parts = _parts_under(target, home)
     if not parts:
         return None
@@ -264,8 +256,6 @@ def cloud_synced_location(
         return "Google Drive"
     if first.startswith("onedrive"):
         return "OneDrive"
-    if platform == "win32" and first == "iclouddrive":
-        return "iCloud Drive"
     return None
 
 
@@ -807,9 +797,7 @@ CLAUDE_INSTALL_DOCS_URL = (
 
 
 def claude_install_command() -> str:
-    """The documented one-line installer for this platform."""
-    if sys.platform == "win32":
-        return "irm https://claude.ai/install.ps1 | iex"
+    """The documented one-line installer."""
     return "curl -fsSL https://claude.ai/install.sh | bash"
 
 
@@ -901,13 +889,6 @@ def claude_app_path() -> str:
             Path("/Applications/Claude Code.app"),
             home / "Applications" / "Claude Code.app",
         ]
-    elif sys.platform == "win32":
-        local = os.environ.get("LOCALAPPDATA", "")
-        if local:
-            candidates = [
-                Path(local) / "AnthropicClaude",
-                Path(local) / "Programs" / "Claude",
-            ]
     else:
         candidates = [Path("/opt/Claude"), Path("/usr/share/claude")]
     for candidate in candidates:

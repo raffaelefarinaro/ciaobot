@@ -439,12 +439,7 @@ def test_setup_status_reports_a_missing_claude_cli_as_an_install_step(
     assert "not installed" in claude["detail"]
     # The installer drops `claude` into ~/.local/bin, which a default macOS
     # PATH omits, so the wizard offers the PATH line as a second step.
-    if sys.platform == "win32":
-        # A persistent user-PATH update through the registry (C10).
-        assert claude["path_command"].startswith("$k = [Microsoft.Win32.Registry]::CurrentUser")
-        assert ".local" in claude["path_command"]
-    else:
-        assert "$HOME/.local/bin" in claude["path_command"]
+    assert "$HOME/.local/bin" in claude["path_command"]
 
 
 def test_setup_status_names_the_desktop_app_when_only_the_cli_is_missing(
@@ -514,12 +509,7 @@ def test_setup_status_offers_the_path_line_for_a_cli_the_terminal_cannot_find(
 
     claude = setup_status(config, env={})["providers"]["claude"]
 
-    if sys.platform == "win32":
-        # A persistent user-PATH update through the registry (C10).
-        assert claude["path_command"].startswith("$k = [Microsoft.Win32.Registry]::CurrentUser")
-        assert ".local" in claude["path_command"]
-    else:
-        assert claude["path_command"].startswith("echo 'export PATH=\"$HOME/.local/bin")
+    assert claude["path_command"].startswith("echo 'export PATH=\"$HOME/.local/bin")
 
 
 def test_setup_status_offers_no_path_line_for_the_bundled_cli(tmp_path, monkeypatch) -> None:
@@ -549,7 +539,6 @@ def test_setup_status_offers_no_path_line_when_the_terminal_finds_claude(
     assert "path_command" not in claude
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shells and their rc files; Windows is the test below")
 def test_claude_path_command_names_the_file_a_login_shell_reads(monkeypatch) -> None:
     """macOS terminals start login shells: bash reads ~/.bash_profile, and
     ~/.bashrc would fix only the shell the user is sitting in."""
@@ -561,23 +550,6 @@ def test_claude_path_command_names_the_file_a_login_shell_reads(monkeypatch) -> 
     assert claude_path_command() == "fish_add_path $HOME/.local/bin"
     monkeypatch.delenv("SHELL")
     assert "~/.zshrc" in claude_path_command()
-
-
-def test_claude_path_command_on_windows_is_a_powershell_line(monkeypatch) -> None:
-    """The wizard used to hand Windows nothing at all, which left the user
-    one command short with nothing to copy."""
-    from ciao.setup_status import claude_path_command
-
-    monkeypatch.setattr("ciao.os_support.shell_hints.sys.platform", "win32")
-
-    line = claude_path_command(r"C:\Users\me\.local\bin")
-
-    assert line.startswith(
-        "$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true);"
-        r" $v = $k.GetValue('Path', '', 'DoNotExpandEnvironmentNames'); "
-        r"$k.SetValue('Path', 'C:\Users\me\.local\bin'"
-    )
-    assert "export" not in line
 
 
 def test_claude_path_command_delegates_to_the_helper(monkeypatch) -> None:
@@ -1650,9 +1622,7 @@ async def test_provider_logout_action_runs_auth_logout(monkeypatch, tmp_path) ->
 
     monkeypatch.setattr(routes_api.subprocess, "run", fake_run)
     monkeypatch.setattr(routes_api.asyncio, "to_thread", fake_to_thread)
-    # The derivation is under test, not where this machine keeps `claude`: the
-    # SDK wheel bundles the CLI on macOS and Linux but not on Windows, so a
-    # runner without it on PATH answered "Claude CLI not found" instead.
+    # The derivation is under test, not where this machine keeps `claude`.
     from ciao.providers import claude as claude_provider
 
     monkeypatch.setattr(claude_provider, "get_bundled_claude_path", lambda: str(tmp_path / "claude"))
@@ -2471,20 +2441,11 @@ def test_cloud_synced_location_recognises_sync_folders(tmp_path) -> None:
         ("darwin", home / "Library/Application Support/x", None),
         ("linux", home / "Dropbox/ws", "Dropbox"),
         ("linux", home / "Library/Mobile Documents/x", None),
-        ("win32", home / "iCloudDrive/ws", "iCloud Drive"),
     ]
     for platform, path, expected in cases:
-        assert cloud_synced_location(path, platform=platform, home=home, env={}) == expected, path
-
-    corp = tmp_path / "corp"
-    assert (
-        cloud_synced_location(corp / "ws", platform="win32", home=home, env={"OneDrive": str(corp)})
-        == "OneDrive"
-    )
-    assert cloud_synced_location(corp / "ws", platform="win32", home=home, env={}) is None
+        assert cloud_synced_location(path, platform=platform, home=home) == expected, path
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
 def test_cloud_synced_location_follows_symlinks(tmp_path) -> None:
     from ciao.setup_status import cloud_synced_location
 
