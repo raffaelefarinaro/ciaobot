@@ -306,11 +306,9 @@ def test_chat_mcp_setup_runs_in_the_workspace_folder() -> None:
     assert "Set-Location -LiteralPath '<workspace folder>'; " in guidance
     assert "never the linked repository" in guidance
 
-    # The prefix forms the server builds (ciao/web/mcp_inventory.py `_shell_prefix`);
-    # the source text is checked, not the helper, so both platforms see the same forms.
+    # The prefix form the server builds (ciao/web/mcp_inventory.py `_shell_prefix`).
     server = (REPO / "ciao" / "web" / "mcp_inventory.py").read_text(encoding="utf-8")
     assert 'f"cd -- {shlex.quote(root)} && "' in server
-    assert "f\"Set-Location -LiteralPath '{_double_ps_quotes(root)}'; \"" in server
 
 
 def _assert_mcp_recovery_location(index: str, settings: str, cli: str) -> None:

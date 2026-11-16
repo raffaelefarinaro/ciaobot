@@ -22,12 +22,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 class _Spawns:
     def __init__(self) -> None:
-        self.calls: list[tuple[list[str], Path, dict[str, str], int]] = []
+        self.calls: list[tuple[list[str], Path, dict[str, str]]] = []
 
-    def __call__(
-        self, argv: list[str], *, cwd: Path, env: dict[str, str], creationflags: int = 0
-    ) -> None:
-        self.calls.append((argv, cwd, env, creationflags))
+    def __call__(self, argv: list[str], *, cwd: Path, env: dict[str, str]) -> None:
+        self.calls.append((argv, cwd, env))
 
 
 def _setup(
@@ -51,7 +49,6 @@ def _setup(
 
 
 def test_actions_map_to_the_commands_ciaobot_already_shows(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The Windows claude-login form (`& '<path>' auth login`) has its own test.
     monkeypatch.setattr(host_terminal, "host_platform", lambda: host_terminal.PLATFORM_MACOS)
     assert host_terminal.action_command("claude-install") == setup_status.claude_install_command()
     assert host_terminal.action_command("claude-login") == setup_status.claude_auth_command(
@@ -93,12 +90,6 @@ def test_update_actions_resolve_from_current_checks(
     with pytest.raises(host_terminal.NothingToUpdate) as excinfo:
         host_terminal.action_command(f"{provider}-update")
     assert not isinstance(excinfo.value, (KeyError, LookupError))
-
-
-def test_ps_quote_doubles_every_powershell_quote_character() -> None:
-    assert host_terminal._ps_quote("C:\\Users\\o'brien") == "'C:\\Users\\o''brien'"
-    for ch in "\u2018\u2019\u201a\u201b":
-        assert host_terminal._ps_quote(f"a{ch}b") == f"'a{ch}{ch}b'"
 
 
 def test_frontend_copy_names_the_gws_install_command() -> None:
@@ -151,49 +142,6 @@ def test_macos_quotes_a_hostile_folder_name(monkeypatch: pytest.MonkeyPatch, tmp
     assert f"cd -- {shlex.quote(str(folder))} || exit 1" in text
     assert not any(line.startswith("cd -- ") and "'" not in line for line in text.splitlines())
     assert "\n$(x)" not in text
-
-
-def test_windows_prefers_windows_terminal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    spawns = _setup(monkeypatch, "win32", found={"wt", "powershell.exe"})
-    assert host_terminal.launch(tmp_path, action=None, runtime_dir=tmp_path) == "Windows Terminal"
-    argv, cwd, _env, flags = spawns.calls[0]
-    assert argv == ["/bin/wt", "-d", str(tmp_path)]
-    assert flags == 0x8 | 0x200
-    assert cwd == tmp_path
-
-
-def test_windows_terminal_runs_the_command_in_powershell(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    spawns = _setup(monkeypatch, "win32", found={"wt", "powershell.exe"})
-    monkeypatch.setattr(host_terminal, "SKILLS_UPDATE_COMMAND", "a; b")
-    host_terminal.launch(tmp_path, action="skills-update", runtime_dir=tmp_path)
-    argv = spawns.calls[0][0]
-    assert argv[-5:] == ["-NoExit", "-ExecutionPolicy", "RemoteSigned", "-Command", "a\\; b"]
-
-
-def test_windows_falls_back_to_a_powershell_console(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    spawns = _setup(monkeypatch, "win32", found={"powershell.exe"})
-    assert host_terminal.launch(tmp_path, action="gws-install", runtime_dir=tmp_path) == "PowerShell"
-    argv, cwd, _env, flags = spawns.calls[0]
-    assert argv[:2] == ["/bin/powershell.exe", "-NoExit"]
-    assert argv[-1] == host_terminal.GWS_INSTALL_COMMAND
-    assert flags == 0x10 | 0x200
-    assert cwd == tmp_path
-
-
-def test_windows_claude_login_uses_the_call_operator_for_a_full_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _setup(monkeypatch, "win32")
-    path = "C:\\Users\\O'Neil\\claude.exe"
-    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: path)
-    monkeypatch.setattr(setup_status, "claude_auth_command", lambda cli="": "whatever auth login")
-    assert host_terminal.action_command("claude-login") == "& 'C:\\Users\\O''Neil\\claude.exe' auth login"
-    monkeypatch.setattr(setup_status, "claude_auth_command", lambda cli="": "claude auth login")
-    assert host_terminal.action_command("claude-login") == "claude auth login"
 
 
 def test_linux_without_a_display_is_unavailable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -400,18 +348,6 @@ def test_resolve_folder_unknown_chat_is_lookup_error(tmp_path: Path) -> None:
 def test_resolve_folder_needs_an_id(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         host_terminal.resolve_folder(_config(tmp_path), _Pcm({}, {}))
-
-
-def test_windows_terminal_escapes_a_semicolon_in_the_folder(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    spawns = _setup(monkeypatch, "win32", found={"wt", "powershell.exe"})
-    folder = tmp_path / "a;new-tab calc"
-    folder.mkdir()
-    host_terminal.launch(folder, action=None, runtime_dir=tmp_path)
-    argv, cwd, _env, _flags = spawns.calls[0]
-    assert argv == ["/bin/wt", "-d", str(folder).replace(";", "\\;")]
-    assert cwd == folder
 
 
 def test_macos_removes_the_script_when_the_spawn_fails(

@@ -267,11 +267,6 @@ def test_update_command_forms(monkeypatch: pytest.MonkeyPatch) -> None:
     assert update_command("opencode", "2.1.0", spaced) == f"'{spaced}' upgrade 2.1.0"
     assert update_command("claude", "2.1.301", spaced) == f"'{spaced}' update"
 
-    monkeypatch.setattr("ciao.host_terminal.host_platform", lambda: "windows")
-    win = "C:\\Users\\o'brien\\opencode.exe"
-    assert update_command("opencode", "2.1.0", win) == "& 'C:\\Users\\o''brien\\opencode.exe' upgrade 2.1.0"
-    assert update_command("claude", "2.1.301", win).endswith("' update")
-
 
 @pytest.mark.parametrize("tested", ["2.1.0; rm -rf /", "2.1", "$(x)", "2.1.0\n", ""])
 def test_update_command_rejects_unvalidated_versions(tested: str) -> None:

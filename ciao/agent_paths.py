@@ -67,14 +67,13 @@ def claude_config_project_key(cwd: str | os.PathLike[str]) -> str:
     """The ``projects`` key of Claude Code's global config for a CLI started in ``cwd``.
 
     Claude Code keys the per-project entry (``disabledMcpServers``, trust, local MCP servers) by
-    the git root of its cwd (a ``.git`` directory or file), else the resolved cwd, with ``/``
-    separators on Windows. Observed 2026-11-09: an entry under ``repo`` applied to a CLI started
-    in ``repo/ws``; the ``repo/ws`` entry was ignored.
+    the git root of its cwd (a ``.git`` directory or file), else the resolved cwd. Observed
+    2026-11-09: an entry under ``repo`` applied to a CLI started in ``repo/ws``; the ``repo/ws``
+    entry was ignored.
     """
     resolved = Path(cwd).resolve()
     root = next((c for c in (resolved, *resolved.parents) if (c / ".git").exists()), resolved)
-    key = str(root)
-    return key.replace("\\", "/") if os.name == "nt" else key
+    return str(root)
 
 
 def claude_global_config_path(env: Mapping[str, str] | None = None) -> Path:
