@@ -80,17 +80,27 @@ set and nothing else.
 | `ActiveHandle.stop()` | The Stop button. | Registered from `run_streaming`. |
 | `steer_turn(request)` | A user steer during a live turn: returns a delivery id and emits `SteerDeliveredEvent` once the model consumed it. | Falls back to the next-turn queue. On `BaseProvider` the default returns `None`. |
 | `move_to_background()` | The PWA's *Move to background* action (OpenCode's Ctrl+B). | On `BaseProvider` the default returns `"unsupported"` and the route answers 409. A provider that implements it sets `ToolUseEvent.backgroundable` on the calls it can move; the PWA shows the action only for those. |
-| `current_session_id` | Permission and question replies. | The reply cannot find the live session. |
-| `send_permission_response` / `permission_gate` | The approval card. | The card cannot be answered. Claude uses `PermissionGate`; OpenCode posts to the session. |
-| `send_question_response` | A native question card. | Same, for questions. |
+| `response_session_id` | Unheld permission and question replies, to reject replies for an old session. | Defaults to `""` when the provider has no session-scoped response fence. |
+| `has_permission_request`, `permission_request_session`, `tool_use_id_for_request` | Permission ownership, child-session selection, and capturing the tool card id before acknowledgement. | Defaults to false/empty values. |
+| `has_question_request`, `question_request_session` | Native-form ownership and child-session selection. | Defaults to false/empty values. |
+| `respond_permission` | The approval card; return `QuestionResponseResult` after acknowledgement. | Explicit nonretryable unsupported result. Claude adapts its local `PermissionGate` boolean at this boundary. |
+| `respond_question` | A native question card; return `QuestionResponseResult` after acknowledgement. | Explicit nonretryable unsupported result. |
 | `can_drain` / `drain_events` | Claude and OpenCode, between turns, so a background agent or shell can wake the parent. | OpenCode reports `can_drain` true only while a live server has background shells or subagents outstanding. |
 | `read_thread` / `delete_thread` | OpenCode titles and session reclaim. Claude uses its own JSONL helpers instead. | See the skip list below. |
 
-The existing native reply path shares `ciao.providers.base.QuestionResponseResult`
-as its acknowledgement value. It requires `ok`; `error` defaults to `""`,
-`retryable` to `True`, and `delivered_as_message`, `expired`, and
-`already_resolved` to `False`. Claude's local boolean permission gate and
-provider-specific manager dispatch remain unchanged.
+Permission and native-question replies use the shared `BaseProvider` response
+contract, so any adapter can participate without a provider-specific manager
+branch. The shared `ciao.providers.base.QuestionResponseResult` requires `ok`;
+`error` defaults to `""`, `retryable` to `True`, and `delivered_as_message`,
+`expired`, and `already_resolved` to `False`. Claude normalizes its local gate's
+boolean result in its adapter; the gate itself retains its boolean API.
+
+`structured_questions` covers intercepted `AskUserQuestion` events; it does
+not promise native-form response support. Native forms are a separate optional
+operation, and unsupported providers return the explicit default failure.
+Existing capability flags remain unchanged. This typed manager seam does not
+make unrelated session/history, drain/models, background, MCP/version or final
+audit paths provider-neutral; those are separate changes.
 
 Declare `capabilities = ProviderCapabilities(...)` honestly.
 `capabilities_for` serves it on `/api/models`. The PWA type says the UI

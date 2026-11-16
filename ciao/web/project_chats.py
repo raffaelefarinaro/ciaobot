@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import inspect
 import json
 import logging
 import os
@@ -190,7 +189,7 @@ from ciao.models import (
 from ciao.os_support.files import open_fd
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
-from ciao.providers.base import MoveToBackgroundOutcome, QuestionResponseResult
+from ciao.providers.base import BaseProvider, MoveToBackgroundOutcome, QuestionResponseResult
 from ciao.providers.claude import get_session_info
 from ciao.providers.opencode import OpencodeProvider
 from ciao.rate_limits import RateLimitStore, default_store_path
@@ -10318,15 +10317,10 @@ class ProjectChatManager:
 
     @staticmethod
     def _provider_holds_permission(
-        provider: object, request_id: str, session_id: str
+        provider: BaseProvider | None, request_id: str, session_id: str
     ) -> bool:
         """Whether the live provider is still waiting on this permission request."""
-        if isinstance(provider, OpencodeProvider):
-            return provider.has_permission_request(request_id, session_id)
-        gate = getattr(provider, "permission_gate", None)
-        has_pending = getattr(gate, "has_pending", None)
-        # The Claude gate's has_pending takes no session: its ids are global.
-        return bool(callable(has_pending) and has_pending(request_id))
+        return provider.has_permission_request(request_id, session_id) if provider else False
 
     async def respond_permission(
         self,
@@ -10339,9 +10333,8 @@ class ProjectChatManager:
     ) -> QuestionResponseResult:
         """Deliver an allow/deny answer and wait for provider acknowledgement.
 
-        Native V2 permission replies are transactional: the PWA keeps the card
-        retryable until OpenCode acknowledges the session-scoped request. The
-        legacy Claude gate remains supported as a local boolean seam.
+        Provider replies are transactional: the PWA keeps the card retryable
+        until the adapter acknowledges the request.
         """
         chat = self._chats.get(chat_id)
         if chat is None:
@@ -10372,8 +10365,7 @@ class ProjectChatManager:
                 return QuestionResponseResult(True)
         held_session = (
             provider.permission_request_session(request_id)
-            if provider_holds and isinstance(provider, OpencodeProvider)
-            else ""
+            if provider_holds and provider is not None else ""
         )
         expected_session = session_id or held_session or (
             stored_session if stored_request == request_id else ""
@@ -10396,72 +10388,31 @@ class ProjectChatManager:
             return QuestionResponseResult(
                 False, "Permission provider is unavailable; retry when it reconnects", True
             )
-        provider_session = str(getattr(provider, "current_session_id", "") or "")
+        provider_session = provider.response_session_id
         if (
             not provider_holds
             and expected_session
             and provider_session
-            and isinstance(provider, OpencodeProvider)
             and provider_session != expected_session
         ):
             self._clear_permission_state(chat_id, request_id, expected_session)
             return QuestionResponseResult(True)
 
-        # V2 removes the pending permission from its in-memory map as soon as
-        # the reply is acknowledged. Capture the source tool-call id before
-        # awaiting the provider so a denial can still retract its file card.
-        tool_use_id = ""
-        resolver = getattr(provider, "tool_use_id_for_request", None)
-        if callable(resolver):
-            tool_use_id = (
-                resolver(request_id, expected_session)
-                if isinstance(provider, OpencodeProvider)
-                else resolver(request_id)
-            )
-
-        responder = getattr(provider, "send_permission_response", None)
-        if callable(responder):
-            if isinstance(provider, OpencodeProvider):
-                result = responder(
-                    request_id, approved, reason, session_id=expected_session
-                )
-            else:
-                result = responder(request_id, approved, reason)
-            if inspect.isawaitable(result):
-                result = await result
-        else:
-            # Claude's SDK exposes a local PermissionGate rather than the V2
-            # session-scoped HTTP response endpoint.
-            gate = getattr(provider, "permission_gate")
-            result = gate.answer(request_id, approved=approved, reason=reason)
-
-        native_result = isinstance(result, QuestionResponseResult)
-        if isinstance(provider, OpencodeProvider) and not native_result:
+        # Capture the source tool id before awaiting: the adapter consumes its
+        # pending entry when V2 acknowledges the response.
+        tool_use_id = provider.tool_use_id_for_request(request_id, expected_session)
+        if not provider.capabilities.permissions:
             return QuestionResponseResult(
-                False,
-                "OpenCode returned an invalid permission acknowledgement",
-                True,
+                False, "Permission responses are not supported by this provider", False
             )
-        response = (
-            result
-            if native_result
-            else QuestionResponseResult(
-                bool(result),
-                "" if result else "Permission request was not acknowledged",
-                False,
-            )
+        response = await provider.respond_permission(
+            request_id, approved, reason, session_id=expected_session
         )
-        # Only a native OpenCode response can prove that a request is stale.
-        # A false result from Claude's local gate means that no matching future
-        # was found, but the persisted card must remain retryable.
-        native_stale = (
-            native_result
-            and not response.ok
+        stale = (
+            not response.ok
             and not response.retryable
             and response.error == "Permission request is no longer active"
         )
-        legacy_stale = not native_result and not response.ok
-        stale = native_stale or legacy_stale
         # A reply that lost the race (another tab answered, V2 409, Claude gate
         # already resolved) changed nothing: never retract the winning call's card.
         already_resolved = stale or response.already_resolved
@@ -10516,16 +10467,10 @@ class ProjectChatManager:
 
     @staticmethod
     def _provider_holds_question(
-        provider: object, request_id: str, session_id: str
+        provider: BaseProvider | None, request_id: str, session_id: str
     ) -> bool:
-        """Whether the live provider is still waiting on this form.
-
-        Only OpenCode holds native forms: Claude's AskUserQuestion carries no
-        request id and is answered as a new message.
-        """
-        return isinstance(provider, OpencodeProvider) and provider.has_question_request(
-            request_id, session_id
-        )
+        """Whether the live provider is still waiting on this form."""
+        return provider.has_question_request(request_id, session_id) if provider else False
 
     async def respond_question(
         self,
@@ -10566,8 +10511,7 @@ class ProjectChatManager:
                 return QuestionResponseResult(True)
         held_session = (
             provider.question_request_session(request_id)
-            if provider_holds and isinstance(provider, OpencodeProvider)
-            else ""
+            if provider_holds and provider is not None else ""
         )
         expected_session = session_id or held_session or (
             stored_session if stored_request == request_id else ""
@@ -10597,38 +10541,26 @@ class ProjectChatManager:
                 "OpenCode form provider is unavailable; retry when it reconnects",
                 True,
             )
-        provider_session = str(getattr(provider, "current_session_id", "") or "")
+        provider_session = provider.response_session_id
         if (
             not provider_holds
             and expected_session
             and provider_session
-            and isinstance(provider, OpencodeProvider)
             and provider_session != expected_session
         ):
             self._clear_question_state(chat_id, request_id, expected_session)
             return QuestionResponseResult(True)
 
-        responder = getattr(provider, "send_question_response", None)
-        if not callable(responder):
+        if not provider.capabilities.structured_questions:
             return QuestionResponseResult(
-                False,
-                "OpenCode form responder is unavailable; retry when it reconnects",
-                True,
+                False, "Native question responses are not supported by this provider", False
             )
-        result = responder(
+        result = await provider.respond_question(
             request_id,
             answers,
             cancel=action == "cancel",
             session_id=expected_session,
         )
-        if inspect.isawaitable(result):
-            result = await result
-        if not isinstance(result, QuestionResponseResult):
-            return QuestionResponseResult(
-                False,
-                "OpenCode returned an invalid form acknowledgement",
-                True,
-            )
         # A reply that lost the race (another tab answered or cancelled, V2
         # 409/404) changed nothing; clearing the matching form is idempotent.
         stale = (

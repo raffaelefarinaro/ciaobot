@@ -9,7 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 from ciao.models import ResultEvent
-from ciao.providers.base import QuestionResponseResult
+from ciao.providers.base import (
+    BaseProvider, ProviderCapabilities, QuestionResponseResult,
+)
 from ciao.web.chat_streaming import ChatStream
 from ciao.web.project_chats import ProjectChatManager
 from tests.test_project_chat_persistence import _make_manager
@@ -131,15 +133,29 @@ async def test_live_provider_reply_is_still_forwarded(tmp_path: Path) -> None:
     manager, chat = _chat_with_form(tmp_path)
     calls: list[tuple] = []
 
-    async def send_question_response(request_id, answers, *, cancel, session_id):
+    async def respond_question(request_id, answers, *, cancel, session_id):
         calls.append((request_id, answers, cancel, session_id))
         return QuestionResponseResult(True)
 
-    manager._providers[chat.chat_id] = SimpleNamespace(  # type: ignore[assignment]
-        provider=SimpleNamespace(
-            current_session_id="ses_1", send_question_response=send_question_response
-        )
-    )
+    class _Provider(BaseProvider):
+        capabilities = ProviderCapabilities(structured_questions=True)
+
+        @property
+        def response_session_id(self) -> str:
+            return "ses_1"
+
+        async def run_streaming(self, request, register_handle):
+            if False:
+                yield None
+
+        async def respond_question(self, request_id, answers, *, cancel=False, session_id=""):
+            return await respond_question(
+                request_id, answers, cancel=cancel, session_id=session_id
+            )
+
+    manager._providers[chat.chat_id] = SimpleNamespace(
+        provider=_Provider(tmp_path)
+    )  # type: ignore[assignment]
     result = await manager.respond_question(
         chat.chat_id, request_id="form-1", answers={"q1": ["ship"]}
     )
@@ -240,16 +256,31 @@ async def test_live_provider_permission_reply_is_still_forwarded(
     manager, chat = _chat_with_permission(tmp_path)
     calls: list[tuple] = []
 
-    async def send_permission_response(*args, **kwargs):
+    async def respond_permission(*args, **kwargs):
         calls.append((args, kwargs))
         return QuestionResponseResult(True)
 
-    manager._providers[chat.chat_id] = SimpleNamespace(  # type: ignore[assignment]
-        provider=SimpleNamespace(
-            current_session_id="ses_1",
-            send_permission_response=send_permission_response,
-        )
-    )
+    class _Provider(BaseProvider):
+        capabilities = ProviderCapabilities(permissions=True)
+
+        @property
+        def response_session_id(self) -> str:
+            return "ses_1"
+
+        async def run_streaming(self, request, register_handle):
+            if False:
+                yield None
+
+        async def respond_permission(
+            self, request_id, approved, reason="", *, session_id=""
+        ):
+            return await respond_permission(
+                request_id, approved, reason, session_id=session_id
+            )
+
+    manager._providers[chat.chat_id] = SimpleNamespace(
+        provider=_Provider(tmp_path)
+    )  # type: ignore[assignment]
     result = await manager.respond_permission(
         chat.chat_id, request_id="perm-1", approved=True
     )

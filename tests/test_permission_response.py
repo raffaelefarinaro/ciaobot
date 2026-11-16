@@ -1,11 +1,11 @@
 """PWA permission-response round-trip.
 
-Validates the full chain from the client-facing route down to the provider's
-PermissionGate:
+Validates the full chain from the client-facing route through the provider
+response contract:
 
     ws client  →  respond_permission(chat_id, request_id, approved, reason, session_id)
                →  ProjectChatManager.respond_permission
-               →  ProviderService.provider.permission_gate.answer
+                →  ProviderService.provider.respond_permission
 """
 
 from __future__ import annotations
@@ -23,9 +23,672 @@ from ciao.config import CiaoConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.providers.opencode import OpencodeProvider
-from ciao.providers.base import QuestionResponseResult
+from ciao.providers.base import (
+    BaseProvider, ProviderCapabilities, QuestionResponseResult,
+)
 from ciao.web.chat_streaming import ChatStream
 from ciao.web.project_chats import ProjectChatManager
+
+
+class _MinimalProvider(BaseProvider):
+    async def run_streaming(self, request, register_handle):
+        if False:
+            yield None
+
+
+class _ThirdPartyProvider(_MinimalProvider):
+    def __init__(
+        self, root: Path, *, capabilities: ProviderCapabilities,
+        response_session_id: str = "",
+    ) -> None:
+        super().__init__(root)
+        self.capabilities = capabilities
+        self._response_session_id = response_session_id
+        self.permissions: dict[str, tuple[str, str]] = {}
+        self.questions: dict[str, str] = {}
+        self.permission_calls: list[tuple[str, bool, str, str]] = []
+        self.question_calls: list[tuple[str, dict, bool, str]] = []
+        self.permission_result = QuestionResponseResult(True)
+        self.question_result = QuestionResponseResult(True)
+        self.permission_wait: tuple[asyncio.Event, asyncio.Event] | None = None
+        self.question_wait: tuple[asyncio.Event, asyncio.Event] | None = None
+        self.raise_on_response = False
+
+    @property
+    def response_session_id(self) -> str:
+        return self._response_session_id
+
+    def has_permission_request(self, request_id: str, session_id: str = "") -> bool:
+        request = self.permissions.get(request_id)
+        return bool(request and (not session_id or request[0] == session_id))
+
+    def permission_request_session(self, request_id: str) -> str:
+        return self.permissions.get(request_id, ("", ""))[0]
+
+    def tool_use_id_for_request(self, request_id: str, session_id: str = "") -> str:
+        request = self.permissions.get(request_id)
+        return request[1] if request and (not session_id or request[0] == session_id) else ""
+
+    def has_question_request(self, request_id: str, session_id: str = "") -> bool:
+        session = self.questions.get(request_id)
+        return bool(session and (not session_id or session == session_id))
+
+    def question_request_session(self, request_id: str) -> str:
+        return self.questions.get(request_id, "")
+
+    async def respond_permission(
+        self, request_id: str, approved: bool, reason: str = "", *,
+        session_id: str = "",
+    ) -> QuestionResponseResult:
+        if self.raise_on_response:
+            raise AssertionError("unsupported permission response was dispatched")
+        self.permission_calls.append((request_id, approved, reason, session_id))
+        self.permissions.pop(request_id, None)
+        if self.permission_wait:
+            entered, release = self.permission_wait
+            entered.set()
+            await release.wait()
+        return self.permission_result
+
+    async def respond_question(
+        self, request_id, answers, *, cancel=False, session_id=""
+    ) -> QuestionResponseResult:
+        if self.raise_on_response:
+            raise AssertionError("unsupported question response was dispatched")
+        self.question_calls.append((request_id, answers, cancel, session_id))
+        self.questions.pop(request_id, None)
+        if self.question_wait:
+            entered, release = self.question_wait
+            entered.set()
+            await release.wait()
+        return self.question_result
+
+
+def _third_party_chat(tmp_path: Path, provider: BaseProvider):
+    from ciao.web.chat_broker import ChatStream as BrokerChatStream
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="third provider")
+    chat.session_id = "ses_1"
+    pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)
+    stream = BrokerChatStream("turn")
+    pcm._broker.register(chat.chat_id, stream)
+    return pcm, chat, stream
+
+
+@pytest.mark.asyncio
+async def test_base_provider_response_defaults_are_explicitly_unsupported(
+    tmp_path: Path,
+) -> None:
+    provider = _MinimalProvider(tmp_path)
+    assert provider.response_session_id == ""
+    assert not provider.has_permission_request("request")
+    assert provider.permission_request_session("request") == ""
+    assert provider.tool_use_id_for_request("request") == ""
+    assert not provider.has_question_request("request")
+    assert provider.question_request_session("request") == ""
+    permission = await provider.respond_permission("request", True)
+    question = await provider.respond_question("request", {})
+    assert permission == QuestionResponseResult(
+        False, "Permission responses are not supported by this provider", False
+    )
+    assert question == QuestionResponseResult(
+        False, "Native question responses are not supported by this provider", False
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approved", [True, False])
+@pytest.mark.parametrize("session_id", ["", "foreign-session"])
+async def test_claude_response_contract_preserves_gate_match_semantics(
+    tmp_path: Path, approved: bool, session_id: str
+) -> None:
+    from claude_agent_sdk.types import (
+        PermissionResultAllow, PermissionResultDeny, ToolPermissionContext,
+    )
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="t")
+    provider = pcm._get_provider(chat.chat_id).provider
+    provider._session_id = "ses_claude"
+    gate = provider.permission_gate
+    context = ToolPermissionContext(
+        signal=None, suggestions=[], tool_use_id="tool-1", agent_id=None
+    )
+    emitted = asyncio.Event()
+    gate.set_emit(lambda _event: emitted.set())
+    pending = asyncio.create_task(gate.handle("Bash", {"command": "ls"}, context))
+    await emitted.wait()
+
+    result = await provider.respond_permission(
+        "tool-1", approved, "because", session_id=session_id
+    )
+    assert result == QuestionResponseResult(True)
+    sdk_result = await pending
+    if approved:
+        assert isinstance(sdk_result, PermissionResultAllow)
+    else:
+        assert isinstance(sdk_result, PermissionResultDeny)
+        assert sdk_result.message == "because"
+        assert sdk_result.interrupt is False
+    assert provider.response_session_id == ""
+
+
+@pytest.mark.asyncio
+async def test_claude_response_contract_no_match_is_already_resolved(
+    tmp_path: Path,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="t")
+    provider = pcm._get_provider(chat.chat_id).provider
+
+    missing = await provider.respond_permission("never-held", True)
+    assert missing == QuestionResponseResult(True, already_resolved=True)
+    assert provider.permission_gate.answer("never-held", approved=True) is False
+
+    from claude_agent_sdk.types import ToolPermissionContext
+
+    context = ToolPermissionContext(
+        signal=None, suggestions=[], tool_use_id="duplicate", agent_id=None
+    )
+    emitted = asyncio.Event()
+    provider.permission_gate.set_emit(lambda _event: emitted.set())
+    pending = asyncio.create_task(
+        provider.permission_gate.handle("Bash", {"command": "ls"}, context)
+    )
+    await emitted.wait()
+    first = await provider.respond_permission("duplicate", True)
+    second = await provider.respond_permission("duplicate", False)
+    assert first == QuestionResponseResult(True)
+    assert second == QuestionResponseResult(True, already_resolved=True)
+    await pending
+
+
+@pytest.mark.asyncio
+async def test_claude_response_after_gate_teardown_is_already_resolved(
+    tmp_path: Path,
+) -> None:
+    from claude_agent_sdk.types import PermissionResultDeny, ToolPermissionContext
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="t")
+    provider = pcm._get_provider(chat.chat_id).provider
+    emitted = asyncio.Event()
+    provider.permission_gate.set_emit(lambda _event: emitted.set())
+    context = ToolPermissionContext(
+        signal=None, suggestions=[], tool_use_id="torn-down", agent_id=None
+    )
+    pending = asyncio.create_task(
+        provider.permission_gate.handle("Bash", {"command": "ls"}, context)
+    )
+    await emitted.wait()
+
+    provider.permission_gate.cancel_all()
+    assert isinstance(await pending, PermissionResultDeny)
+    assert await provider.respond_permission("torn-down", True) == QuestionResponseResult(
+        True, already_resolved=True
+    )
+    assert provider.permission_gate.pending_count == 0
+
+
+@pytest.mark.asyncio
+async def test_unknown_provider_captures_tool_id_before_acknowledgement(
+    tmp_path: Path,
+) -> None:
+    from ciao.web.chat_broker import ChatStream
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="t")
+    chat.session_id = "ses_1"
+    chat.pending_permission = json.dumps({"request_id": "request_newer", "session_id": "ses_1"})
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    captured: list[tuple[str, str]] = []
+
+    class ThirdPartyProvider(_MinimalProvider):
+        capabilities = ProviderCapabilities(permissions=True)
+
+        def has_permission_request(self, request_id: str, session_id: str = "") -> bool:
+            return request_id == "request_child" and session_id in {"", "ses_child"}
+
+        def permission_request_session(self, request_id: str) -> str:
+            return "ses_child"
+
+        def tool_use_id_for_request(self, request_id: str, session_id: str = "") -> str:
+            captured.append((request_id, session_id))
+            return "call_child"
+
+        async def respond_permission(
+            self, request_id: str, approved: bool, reason: str = "", *,
+            session_id: str = "",
+        ) -> QuestionResponseResult:
+            assert (request_id, approved, session_id) == (
+                "request_child", False, "ses_child"
+            )
+            entered.set()
+            await release.wait()
+            return QuestionResponseResult(True)
+
+    provider = ThirdPartyProvider(tmp_path)
+    pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)
+    stream = ChatStream("turn")
+    pcm._broker.register(chat.chat_id, stream)
+    stream.publish({
+        "type": "tool_use", "tool_name": "write", "tool_use_id": "call_child",
+        "file_touch": {"file_path": "child.txt", "action": "created"},
+    })
+
+    reply = asyncio.create_task(pcm.respond_permission(
+        chat.chat_id, request_id="request_child", approved=False
+    ))
+    await entered.wait()
+    assert captured == [("request_child", "ses_child")]
+    assert not any(
+        event.get("type") == "tool_denied" for event in stream.buffered_events()
+    )
+    release.set()
+    result = await reply
+
+    assert result.ok
+    assert json.loads(chat.pending_permission)["request_id"] == "request_newer"
+    assert any(
+        event.get("type") == "tool_denied" and event.get("tool_use_id") == "call_child"
+        for event in stream.buffered_events()
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "approved", "action"),
+    [
+        ("permission", True, "reply"),
+        ("permission", False, "deny"),
+        ("question", True, "reply"),
+        ("question", True, "cancel"),
+    ],
+)
+async def test_unknown_provider_held_child_responses_use_the_contract(
+    tmp_path: Path, operation: str, approved: bool, action: str
+) -> None:
+    from ciao.web.chat_broker import ChatStream as BrokerChatStream
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="third provider")
+    chat.session_id = "ses_1"
+    chat.pending_permission = json.dumps({
+        "request_id": "request_newer", "session_id": "ses_1"
+    })
+    chat.pending_question = json.dumps({
+        "request_id": "question_newer", "session_id": "ses_1",
+        "questions": [{"id": "q", "question": "Newest?"}],
+    })
+    entered, release = asyncio.Event(), asyncio.Event()
+    requests = {"request_child": ("ses_child", "call_child")}
+    forms = {"question_child": "ses_child"}
+    calls: list[tuple] = []
+
+    class ThirdPartyProvider(_MinimalProvider):
+        capabilities = ProviderCapabilities(
+            permissions=True, structured_questions=True
+        )
+
+        @property
+        def response_session_id(self) -> str:
+            return "ses_1"
+
+        def has_permission_request(self, request_id: str, session_id: str = "") -> bool:
+            return request_id in requests and (
+                not session_id or requests[request_id][0] == session_id
+            )
+
+        def permission_request_session(self, request_id: str) -> str:
+            return requests.get(request_id, ("", ""))[0]
+
+        def tool_use_id_for_request(self, request_id: str, session_id: str = "") -> str:
+            source = requests.get(request_id)
+            return source[1] if source and (not session_id or source[0] == session_id) else ""
+
+        def has_question_request(self, request_id: str, session_id: str = "") -> bool:
+            return request_id in forms and (
+                not session_id or forms[request_id] == session_id
+            )
+
+        def question_request_session(self, request_id: str) -> str:
+            return forms.get(request_id, "")
+
+        async def respond_permission(
+            self, request_id: str, approved: bool, reason: str = "", *,
+            session_id: str = "",
+        ) -> QuestionResponseResult:
+            calls.append(("permission", request_id, approved, reason, session_id))
+            requests.pop(request_id)
+            entered.set()
+            await release.wait()
+            return QuestionResponseResult(True)
+
+        async def respond_question(
+            self, request_id, answers, *, cancel=False, session_id=""
+        ) -> QuestionResponseResult:
+            calls.append(("question", request_id, answers, cancel, session_id))
+            forms.pop(request_id)
+            entered.set()
+            await release.wait()
+            return QuestionResponseResult(True)
+
+    provider = ThirdPartyProvider(tmp_path)
+    pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)
+    stream = BrokerChatStream("turn")
+    pcm._broker.register(chat.chat_id, stream)
+    other_tab: asyncio.Queue[dict] = asyncio.Queue()
+    stream._subs.add(other_tab)
+    stream.publish({
+        "type": "tool_use", "tool_name": "write", "tool_use_id": "call_child",
+        "file_touch": {"file_path": "child.txt", "action": "created"},
+    })
+    if operation == "permission" and not approved:
+        stream.publish({
+            "type": "tool_use", "tool_name": "write", "tool_use_id": "call_unrelated",
+            "file_touch": {"file_path": "unrelated.txt", "action": "created"},
+        })
+
+    reason = "child permission reason"
+    if operation == "permission":
+        reply = asyncio.create_task(pcm.respond_permission(
+            chat.chat_id, request_id="request_child", approved=approved, reason=reason
+        ))
+    else:
+        reply = asyncio.create_task(pcm.respond_question(
+            chat.chat_id, request_id="question_child", answers={"q": ["answer"]},
+            action=action,
+        ))
+    await entered.wait()
+    assert (
+        not requests if operation == "permission" else not forms
+    ), "adapter must consume ownership mapping before acknowledgement resumes"
+    if operation == "permission":
+        assert calls == [(
+            "permission", "request_child", approved, reason, "ses_child",
+        )]
+    else:
+        assert calls == [(
+            "question", "question_child", {"q": ["answer"]},
+            action == "cancel", "ses_child",
+        )]
+    if operation == "permission" and not approved:
+        before_ack = stream.buffered_events()
+        assert [event for event in before_ack if event.get("type") == "tool_denied"] == []
+        assert {
+            event.get("tool_use_id") for event in before_ack
+            if event.get("type") == "tool_use" and event.get("file_touch")
+        } == {"call_child", "call_unrelated"}
+    release.set()
+    result = await reply
+
+    assert result.ok
+    assert json.loads(chat.pending_permission)["request_id"] == "request_newer"
+    assert json.loads(chat.pending_question)["request_id"] == "question_newer"
+    frames = [other_tab.get_nowait() for _ in range(other_tab.qsize())]
+    resolved_type = "permission_resolved" if operation == "permission" else "question_resolved"
+    assert {
+        "type": resolved_type,
+        "request_id": "request_child" if operation == "permission" else "question_child",
+        "session_id": "ses_child",
+    } in frames
+    if operation == "permission" and not approved:
+        events = stream.buffered_events()
+        assert [
+            event for event in events if event.get("type") == "tool_denied"
+        ] == [{"type": "tool_denied", "tool_use_id": "call_child"}]
+        touches = {
+            event.get("tool_use_id"): bool(event.get("file_touch"))
+            for event in events if event.get("type") == "tool_use"
+        }
+        assert touches == {"call_child": False, "call_unrelated": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["permission", "question"])
+async def test_unknown_provider_unheld_session_mismatch_does_not_dispatch(
+    tmp_path: Path, operation: str,
+) -> None:
+    provider = _ThirdPartyProvider(
+        tmp_path,
+        capabilities=ProviderCapabilities(permissions=True, structured_questions=True),
+        response_session_id="ses_new",
+    )
+    pcm, chat, stream = _third_party_chat(tmp_path, provider)
+    other_tab: asyncio.Queue[dict] = asyncio.Queue()
+    stream._subs.add(other_tab)
+    if operation == "permission":
+        chat.pending_permission = json.dumps({
+            "request_id": "same-id", "session_id": "ses_old"
+        })
+        call = pcm.respond_permission(
+            chat.chat_id, request_id="same-id", approved=True
+        )
+    else:
+        chat.pending_question = json.dumps({
+            "request_id": "same-id", "session_id": "ses_old",
+            "questions": [{"id": "q", "question": "Old?"}],
+        })
+        call = pcm.respond_question(
+            chat.chat_id, request_id="same-id", answers={"q": ["x"]}
+        )
+    result = await call
+
+    assert result.ok
+    assert provider.permission_calls == []
+    assert provider.question_calls == []
+    assert (
+        chat.pending_permission if operation == "permission" else chat.pending_question
+    ) == ""
+    stale_type = "permission_resolved" if operation == "permission" else "question_resolved"
+    stale_frames = [other_tab.get_nowait() for _ in range(other_tab.qsize())]
+    assert any(
+        event.get("type") == stale_type and event.get("request_id") == "same-id"
+        for event in stale_frames
+    )
+
+    # An explicit old-session submit for the same id must not clear the newer
+    # persisted slot that now owns that id.
+    if operation == "permission":
+        chat.pending_permission = json.dumps({
+            "request_id": "same-id", "session_id": "ses_new"
+        })
+        result = await pcm.respond_permission(
+            chat.chat_id, request_id="same-id", approved=True,
+            session_id="ses_old",
+        )
+        assert json.loads(chat.pending_permission)["session_id"] == "ses_new"
+    else:
+        chat.pending_question = json.dumps({
+            "request_id": "same-id", "session_id": "ses_new",
+            "questions": [{"id": "q", "question": "New?"}],
+        })
+        result = await pcm.respond_question(
+            chat.chat_id, request_id="same-id", answers={"q": ["x"]},
+            session_id="ses_old",
+        )
+        assert json.loads(chat.pending_question)["session_id"] == "ses_new"
+    assert result.ok
+    assert provider.permission_calls == provider.question_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["permission", "question"])
+async def test_response_feature_flags_prevent_dispatch(
+    tmp_path: Path, operation: str,
+) -> None:
+    provider = _ThirdPartyProvider(tmp_path, capabilities=ProviderCapabilities())
+    provider.raise_on_response = True
+    pcm, chat, stream = _third_party_chat(tmp_path, provider)
+    if operation == "permission":
+        chat.pending_permission = json.dumps({
+            "request_id": "live-card", "session_id": "ses_1"
+        })
+        stream.publish({
+            "type": "tool_use", "tool_name": "write", "tool_use_id": "call-1",
+            "file_touch": {"file_path": "notes.md", "action": "created"},
+        })
+        result = await pcm.respond_permission(
+            chat.chat_id, request_id="live-card", approved=False
+        )
+        assert result == QuestionResponseResult(
+            False, "Permission responses are not supported by this provider", False
+        )
+        assert chat.pending_permission
+    else:
+        chat.pending_question = json.dumps({
+            "request_id": "live-card", "session_id": "ses_1",
+            "questions": [{"id": "q", "question": "Continue?"}],
+        })
+        result = await pcm.respond_question(
+            chat.chat_id, request_id="live-card", answers={"q": ["yes"]}
+        )
+        assert result == QuestionResponseResult(
+            False, "Native question responses are not supported by this provider", False
+        )
+        assert chat.pending_question
+    assert provider.permission_calls == provider.question_calls == []
+    assert not any(
+        event.get("type") in {"tool_denied", "permission_resolved", "question_resolved"}
+        for event in stream.buffered_events()
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["permission", "question"])
+async def test_unknown_provider_failed_ack_preserves_pending_state(
+    tmp_path: Path, operation: str,
+) -> None:
+    provider = _ThirdPartyProvider(
+        tmp_path, capabilities=ProviderCapabilities(permissions=True, structured_questions=True)
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+    provider.permission_wait = provider.question_wait = (entered, release)
+    provider.permission_result = provider.question_result = QuestionResponseResult(
+        False, "temporary", True
+    )
+    pcm, chat, stream = _third_party_chat(tmp_path, provider)
+    if operation == "permission":
+        provider.permissions["old"] = ("ses_old", "call_old")
+        chat.pending_permission = json.dumps({"request_id": "old", "session_id": "ses_old"})
+        stream.publish({"type": "permission_request", "request_id": "old", "session_id": "ses_old"})
+        reply = asyncio.create_task(pcm.respond_permission(
+            chat.chat_id, request_id="old", approved=False
+        ))
+    else:
+        provider.questions["old"] = "ses_old"
+        chat.pending_question = json.dumps({
+            "request_id": "old", "session_id": "ses_old",
+            "questions": [{"id": "q", "question": "Old?"}],
+        })
+        stream.publish({
+            "type": "tool_use", "tool_name": "AskUserQuestion",
+            "request_id": "old", "session_id": "ses_old",
+        })
+        reply = asyncio.create_task(pcm.respond_question(
+            chat.chat_id, request_id="old", answers={"q": ["x"]}
+        ))
+    await entered.wait()
+    if operation == "permission":
+        provider.permissions["new"] = ("ses_new", "call_new")
+        chat.pending_permission = json.dumps({"request_id": "new", "session_id": "ses_new"})
+        stream.publish({"type": "permission_request", "request_id": "new", "session_id": "ses_new"})
+    else:
+        provider.questions["new"] = "ses_new"
+        chat.pending_question = json.dumps({
+            "request_id": "new", "session_id": "ses_new",
+            "questions": [{"id": "q", "question": "New?"}],
+        })
+        stream.publish({
+            "type": "tool_use", "tool_name": "AskUserQuestion",
+            "request_id": "new", "session_id": "ses_new",
+        })
+    release.set()
+    result = await reply
+
+    assert result == QuestionResponseResult(False, "temporary", True)
+    state = chat.pending_permission if operation == "permission" else chat.pending_question
+    assert json.loads(state)["request_id"] == "new"
+    events = stream.buffered_events()
+    assert any(event.get("request_id") == "old" for event in events)
+    assert any(event.get("request_id") == "new" for event in events)
+    assert not any(event.get("type") == "tool_denied" for event in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["permission", "question"])
+async def test_successful_ack_does_not_clear_a_replacement_slot(
+    tmp_path: Path, operation: str,
+) -> None:
+    provider = _ThirdPartyProvider(
+        tmp_path, capabilities=ProviderCapabilities(permissions=True, structured_questions=True)
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+    provider.permission_wait = provider.question_wait = (entered, release)
+    pcm, chat, stream = _third_party_chat(tmp_path, provider)
+    other_tab: asyncio.Queue[dict] = asyncio.Queue()
+    stream._subs.add(other_tab)
+    if operation == "permission":
+        provider.permissions["old"] = ("ses_old", "call_old")
+        chat.pending_permission = json.dumps({"request_id": "old", "session_id": "ses_old"})
+        stream.publish({"type": "permission_request", "request_id": "old", "session_id": "ses_old"})
+        reply = asyncio.create_task(pcm.respond_permission(
+            chat.chat_id, request_id="old", approved=True
+        ))
+    else:
+        provider.questions["old"] = "ses_old"
+        chat.pending_question = json.dumps({
+            "request_id": "old", "session_id": "ses_old",
+            "questions": [{"id": "q", "question": "Old?"}],
+        })
+        stream.publish({
+            "type": "tool_use", "tool_name": "AskUserQuestion",
+            "request_id": "old", "session_id": "ses_old",
+        })
+        reply = asyncio.create_task(pcm.respond_question(
+            chat.chat_id, request_id="old", answers={"q": ["x"]}
+        ))
+    await entered.wait()
+    if operation == "permission":
+        provider.permissions["new"] = ("ses_new", "call_new")
+        chat.pending_permission = json.dumps({"request_id": "new", "session_id": "ses_new"})
+        stream.publish({"type": "permission_request", "request_id": "new", "session_id": "ses_new"})
+    else:
+        provider.questions["new"] = "ses_new"
+        chat.pending_question = json.dumps({
+            "request_id": "new", "session_id": "ses_new",
+            "questions": [{"id": "q", "question": "New?"}],
+        })
+        stream.publish({
+            "type": "tool_use", "tool_name": "AskUserQuestion",
+            "request_id": "new", "session_id": "ses_new",
+        })
+    release.set()
+    assert (await reply).ok
+
+    state = chat.pending_permission if operation == "permission" else chat.pending_question
+    assert json.loads(state)["request_id"] == "new"
+    events = stream.buffered_events()
+    assert not any(event.get("request_id") == "old" for event in events)
+    assert any(event.get("request_id") == "new" for event in events)
+    frames = [other_tab.get_nowait() for _ in range(other_tab.qsize())]
+    assert {
+        "type": "permission_resolved" if operation == "permission" else "question_resolved",
+        "request_id": "old", "session_id": "ses_old",
+    } in frames
+    assert not any(
+        event.get("request_id") == "new"
+        and event.get("type") in {"permission_resolved", "question_resolved"}
+        for event in frames
+    )
 
 
 def test_question_response_result_preserves_dataclass_contract() -> None:
@@ -255,7 +918,7 @@ async def test_opencode_disconnect_is_not_authoritative_question_stale(
     ):
         return QuestionResponseResult(False, "OpenCode is not connected", False)
 
-    provider.send_question_response = disconnected  # type: ignore[method-assign]
+    provider.respond_question = disconnected  # type: ignore[method-assign]
     pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)
 
     result = await pcm.respond_question(
@@ -434,17 +1097,20 @@ async def test_denial_retracts_the_tool_card_before_v2_consumes_the_request(
     project = pcm.create_project("General", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="t")
 
-    class _Provider:
-        def tool_use_id_for_request(self, _request_id: str) -> str:
+    class _Provider(_MinimalProvider):
+        capabilities = ProviderCapabilities(permissions=True)
+
+        def tool_use_id_for_request(self, _request_id: str, session_id: str = "") -> str:
             return "call-1"
 
-        async def send_permission_response(
-            self, _request_id: str, _approved: bool, _reason: str = ""
-        ) -> bool:
+        async def respond_permission(
+            self, _request_id: str, _approved: bool, _reason: str = "", *,
+            session_id: str = "",
+        ) -> QuestionResponseResult:
             # The real adapter removes its pending map before returning.
-            return True
+            return QuestionResponseResult(True)
 
-    pcm._providers[chat.chat_id] = SimpleNamespace(provider=_Provider())
+    pcm._providers[chat.chat_id] = SimpleNamespace(provider=_Provider(tmp_path))
     stream = ChatStream("hi")
     pcm._broker.register(chat.chat_id, stream)
     stream.publish({

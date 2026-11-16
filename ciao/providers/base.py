@@ -6,7 +6,7 @@ import base64
 import math
 import os
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator, AsyncIterable, Callable
+from collections.abc import AsyncGenerator, AsyncIterable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -243,6 +243,42 @@ class BaseProvider(ABC):
     def __init__(self, workspace_root: Path, *, config: object | None = None) -> None:
         self.workspace_root = workspace_root
         self.config = config
+
+    @property
+    def response_session_id(self) -> str:
+        """Session used to fence replies when requests are not held locally."""
+        return ""
+
+    def has_permission_request(self, request_id: str, session_id: str = "") -> bool:
+        return False
+
+    def permission_request_session(self, request_id: str) -> str:
+        return ""
+
+    def tool_use_id_for_request(self, request_id: str, session_id: str = "") -> str:
+        return ""
+
+    def has_question_request(self, request_id: str, session_id: str = "") -> bool:
+        return False
+
+    def question_request_session(self, request_id: str) -> str:
+        return ""
+
+    async def respond_permission(
+        self, request_id: str, approved: bool, reason: str = "", *,
+        session_id: str = "",
+    ) -> QuestionResponseResult:
+        return QuestionResponseResult(
+            False, "Permission responses are not supported by this provider", False
+        )
+
+    async def respond_question(
+        self, request_id: str, answers: Mapping[str, Sequence[str]], *,
+        cancel: bool = False, session_id: str = "",
+    ) -> QuestionResponseResult:
+        return QuestionResponseResult(
+            False, "Native question responses are not supported by this provider", False
+        )
 
     @abstractmethod
     def run_streaming(
