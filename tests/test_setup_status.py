@@ -640,19 +640,8 @@ def test_setup_status_route_reports_native_bootstrap_context(tmp_path) -> None:
 
 
 def _fake_engine_python(tmp_path: Path) -> str:
-    """The interpreter setup points the service at.
-
-    POSIX setup only writes it into the plist, so a made-up path will do. The
-    Windows task renderer accepts only python.exe/pythonw.exe and checks that
-    pythonw.exe exists (the task runs hidden), so there it is two empty files.
-    """
-    if sys.platform != "win32":
-        return "/opt/ciao/bin/python"
-    bin_dir = tmp_path / "fake-python"
-    bin_dir.mkdir(exist_ok=True)
-    for name in ("python.exe", "pythonw.exe"):
-        (bin_dir / name).write_bytes(b"")
-    return str(bin_dir / "python.exe")
+    """The interpreter setup points the service at; setup only writes it into the plist, so a made-up path will do."""
+    return "/opt/ciao/bin/python"
 
 def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monkeypatch) -> None:
     # Guard the env handoff assertions below: monkeypatch restores these
@@ -710,14 +699,7 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     assert f"CIAO_VAULT_ROOT={notes}" in env_text
     assert (notes / "MEMORY.md").is_file()
     assert not (workspace / "memory-vault" / "MEMORY.md").exists()
-    # The platform's service definition: the plist, or the Task Scheduler XML
-    # on Windows.
-    if sys.platform == "win32":
-        from ciao import windows_service
-
-        assert (launch_agents / windows_service.TASK_FILE_NAME).is_file()
-    else:
-        assert (launch_agents / "com.ciao.server.plist").is_file()
+    assert (launch_agents / "com.ciao.server.plist").is_file()
     # The wizard no longer writes the retired rumps launcher bundle or its
     # LaunchAgent; Ciaobot.app is the menu bar.
     assert not (apps / "Ciaobot Server.app").exists()

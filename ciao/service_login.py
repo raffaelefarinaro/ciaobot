@@ -14,21 +14,20 @@ Three rules hold on every platform:
   ``CIAO_WORKSPACE`` from the environment, and trusting that fallback would let
   a malformed plist be claimed as this engine's own.
 * **Unknown is an answer.** A query that fails, a plist that does not parse, a
-  ``print-disabled`` listing that cannot be read, a Task Scheduler identity
-  mangled by a lossy code page: each of these reports ``installed=None`` or
+  ``print-disabled`` listing that cannot be read: each of these reports
+  ``installed=None`` or
   ``enabled=None`` with the reason, rather than the default that would be a
   guess. The UI can show "unknown" and the reason; it cannot show a toggle
   whose position nobody proved.
 * **A change is the enabled bit, and nothing else.** macOS asks launchd to
-  enable or disable the job it already has; Windows asks ``schtasks /Change`` to
-  flip the registered task's enabled bit. Nothing here starts, stops, restarts,
-  bootstraps, registers, writes a plist, writes task XML, or edits the stored
+  enable or disable the job it already has. Nothing here starts, stops,
+  restarts, bootstraps, registers, writes a plist, or edits the stored
   definition. The write is followed by a re-read, and a change only counts as
   successful when the re-read says what was asked for.
 
 Every OS call is a fixed argv, captured, without a shell, and bounded by a
 timeout. Tests inject runners; there is no code path that reaches a live
-``launchctl`` or ``schtasks.exe`` from a request.
+``launchctl`` from a request.
 """
 
 from __future__ import annotations
@@ -41,13 +40,11 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Sequence
-from xml.etree import ElementTree
 from xml.parsers.expat import ExpatError
 
-from ciao import macos_service, windows_service
+from ciao import macos_service
 
 PLATFORM_MACOS = "macos"
-PLATFORM_WINDOWS = "windows"
 PLATFORM_LINUX = "linux"
 PLATFORM_OTHER = "other"
 
@@ -55,13 +52,6 @@ PLATFORM_OTHER = "other"
 # wedged launchd surfaces as an error instead of holding a request thread.
 _LAUNCHCTL_TIMEOUT_S = 10.0
 
-# The task schema's namespace: every element in the document is qualified, so a
-# search has to qualify it the same way or it finds nothing.
-_TASK_NS = windows_service.TASK_NS
-
-# schtasks prints the registered task's XML in the console's OEM code page, not
-# the UTF-16 its own declaration claims (see `windows_service.task_command`).
-_XML_DECLARATION = re.compile(r"^\s*<\?xml[^>]*\?>")
 # One `"label" => <word>` line of `launchctl print-disabled`.
 _DISABLED_ENTRY = re.compile(r'"(?P<label>[^"]*)"\s*=>\s*(?P<value>[A-Za-z]+)')
 # The header of the one section of that output we read. Real `launchctl
@@ -79,12 +69,6 @@ _DISABLED_WORDS = {
     "true": True,
     "false": False,
 }
-
-# Fixed, and only ever shown to a human: the argv that inspects the registered
-# task. Nothing in this module runs it, and nothing accepts a command from a
-# caller.
-_WINDOWS_INSPECT_COMMAND = f'schtasks.exe /Query /TN "{windows_service.TASK_NAME}" /XML'
-_WINDOWS_REGISTER_HINT = "`ciao setup --workspace <path> --load-launchd --yes` registers it"
 
 _LINUX_REASON = (
     "Ciaobot does not read or change an engine's start-at-sign-in state on Linux: "
@@ -140,9 +124,9 @@ class LoginUnavailable(LoginError):
 
 
 # --------------------------------------------------------------------------- #
-# The OS seams. Every launchctl/schtasks call this module makes goes through
-# one of these four names, so a test can answer for the machine and nothing
-# else in the file reaches an OS command.
+# The OS seams. Every launchctl call this module makes goes through one of
+# these two names, so a test can answer for the machine and nothing else in
+# the file reaches an OS command.
 # --------------------------------------------------------------------------- #
 
 
@@ -150,7 +134,7 @@ def _uid() -> int:
     """This user's uid, the ``<uid>`` in launchd's ``gui/<uid>`` domain.
 
     Routed through ``macos_service`` because that is where the platform
-    difference already lives: ``os.getuid`` does not exist on Windows.
+    difference already lives.
     """
     return macos_service._getuid()
 
@@ -160,9 +144,8 @@ def _launchctl_run(
 ) -> subprocess.CompletedProcess[str]:
     """Run one bounded ``launchctl`` call: fixed argv, captured, no shell.
 
-    A timeout is reported the way ``windows_service._schtasks`` reports one: as
-    the failed-to-run the caller already handles, not as a
-    ``subprocess.TimeoutExpired`` raised out of a request thread. That matters on
+    A timeout is reported as the failed-to-run the caller already handles, not
+    as a ``subprocess.TimeoutExpired`` raised out of a request thread. That matters on
     the write path too — ``macos_service.set_login_enabled`` catches ``OSError``
     and nothing else, so a launchctl that never answered would be a 500 there
     rather than the 503 this module reports for a change it cannot confirm.
@@ -183,16 +166,6 @@ def _launchctl_run(
         ) from exc
 
 
-def _query_task_xml() -> subprocess.CompletedProcess[str]:
-    """Ask Task Scheduler for the *registered* engine task's definition."""
-    return windows_service.query_task_xml()
-
-
-def _set_task_enabled(enabled: bool) -> None:
-    """Flip the registered task's enabled bit; start nothing."""
-    windows_service.set_task_enabled(enabled)
-
-
 # --------------------------------------------------------------------------- #
 # Shared helpers
 # --------------------------------------------------------------------------- #
@@ -202,8 +175,6 @@ def _platform() -> str:
     """Which service backend this platform has. Read fresh on every call."""
     if sys.platform == "darwin":
         return PLATFORM_MACOS
-    if sys.platform == "win32":
-        return PLATFORM_WINDOWS
     if sys.platform.startswith("linux"):
         return PLATFORM_LINUX
     return PLATFORM_OTHER
@@ -669,160 +640,6 @@ def _set_macos(workspace: Path, enabled: bool) -> LoginStatus:
 
 
 # --------------------------------------------------------------------------- #
-# Windows: the registered Task Scheduler task
-# --------------------------------------------------------------------------- #
-
-
-def _windows_unreadable(reason: str) -> LoginStatus:
-    """Nothing usable came back from ``/Query /XML``.
-
-    ``installed`` stays None on purpose: a failed query, a localized "no such
-    task" and a permission error all look the same on the wire, and answering
-    "not installed" from one of them would be a guess the user would act on.
-    """
-    return LoginStatus(
-        platform=PLATFORM_WINDOWS,
-        supported=True,
-        installed=None,
-        enabled=None,
-        can_change=False,
-        reason=reason,
-        setup_command=_WINDOWS_INSPECT_COMMAND,
-    )
-
-
-def _windows_installed(reason: str) -> LoginStatus:
-    """A task is registered, but the sign-in state could not be proven."""
-    return LoginStatus(
-        platform=PLATFORM_WINDOWS,
-        supported=True,
-        installed=True,
-        enabled=None,
-        can_change=False,
-        reason=reason,
-        setup_command=None,
-    )
-
-
-def _has_enabled_logon_trigger(root: ElementTree.Element) -> bool:
-    """Whether the definition fires at logon with its trigger enabled."""
-    triggers = root.find(f"{_TASK_NS}Triggers")
-    if triggers is None:
-        return False
-    for trigger in triggers.findall(f"{_TASK_NS}LogonTrigger"):
-        node = trigger.find(f"{_TASK_NS}Enabled")
-        if node is not None and (node.text or "").strip().lower() == "true":
-            return True
-    return False
-
-
-def _windows_status(workspace: Path) -> LoginStatus:
-    """Windows: what the registered engine task's own definition says."""
-    requested = _resolved_root(workspace)
-    try:
-        completed = _query_task_xml()
-    except windows_service.WindowsServiceError as exc:
-        return _windows_unreadable(
-            f"The engine task's definition could not be read from Task Scheduler: {exc}"
-        )
-    if completed.returncode != 0:
-        detail = (
-            (completed.stderr or completed.stdout or "").strip()
-            or f"exit {completed.returncode}"
-        )
-        return _windows_unreadable(
-            f"Task Scheduler did not return the engine task's definition: {detail}. "
-            f"{_WINDOWS_REGISTER_HINT}."
-        )
-    # The declaration names an encoding the text no longer has.
-    body = _XML_DECLARATION.sub("", completed.stdout or "")
-    try:
-        root = ElementTree.fromstring(body)
-    except ElementTree.ParseError as exc:
-        return _windows_unreadable(
-            f"The engine task's definition is not XML this can read: {exc}"
-        )
-    if root.tag != f"{_TASK_NS}Task":
-        return _windows_unreadable(
-            "What Task Scheduler returned for the engine task is not a Task "
-            "Scheduler task document."
-        )
-    actions = root.find(f"{_TASK_NS}Actions")
-    execs = actions.findall(f"{_TASK_NS}Exec") if actions is not None else []
-    if len(execs) != 1:
-        return _windows_installed(
-            f"The engine task has {len(execs)} Exec actions instead of one, so "
-            "there is no single workspace to read it from."
-        )
-    node = execs[0].find(f"{_TASK_NS}WorkingDirectory")
-    workdir = (node.text or "").strip() if node is not None else ""
-    if not workdir:
-        return _windows_installed(
-            "The engine task's action names no working directory, so it cannot "
-            "be shown to serve this workspace."
-        )
-    # A `?` or a non-ASCII character means the OEM code page lost or
-    # best-fit-mapped the real path. Trusting it would compare a path the
-    # machine never stored.
-    if "?" in workdir or not workdir.isascii():
-        return _windows_installed(
-            "The engine task's working directory came back through a lossy code "
-            "page, so it cannot be compared with this workspace."
-        )
-    served = _resolved_root(Path(workdir))
-    if served != requested:
-        return _windows_installed(
-            f"The engine task serves {served}, not {requested}. This control "
-            "only changes the task for this workspace; it never repoints another "
-            "workspace's engine."
-        )
-    settings = root.find(f"{_TASK_NS}Settings")
-    enabled_node = settings.find(f"{_TASK_NS}Enabled") if settings is not None else None
-    declared = (enabled_node.text or "").strip().lower() if enabled_node is not None else ""
-    if declared not in {"true", "false"}:
-        return _windows_installed(
-            "The engine task's Settings/Enabled is not an explicit true or "
-            "false, so its sign-in state is unknown."
-        )
-    if not _has_enabled_logon_trigger(root):
-        return _windows_installed(
-            "The engine task has no enabled logon trigger, so enabling the task "
-            f"would not start the engine at the next sign-in. {_WINDOWS_REGISTER_HINT}."
-        )
-    enabled = declared == "true"
-    return LoginStatus(
-        platform=PLATFORM_WINDOWS,
-        supported=True,
-        installed=True,
-        enabled=enabled,
-        can_change=True,
-        reason=_state_reason(enabled),
-        setup_command=None,
-    )
-
-
-def _set_windows(workspace: Path, enabled: bool) -> LoginStatus:
-    """Windows: re-check, flip the registered enabled bit, then re-read it."""
-    before = _windows_status(workspace)
-    _require_changeable(before)
-    try:
-        _set_task_enabled(enabled)
-    except windows_service.WindowsServiceError as exc:
-        raise LoginUnavailable(
-            f"Task Scheduler did not change the engine task's sign-in state: {exc}",
-            _windows_status(workspace),
-        ) from exc
-    after = _windows_status(workspace)
-    if after.enabled != enabled:
-        raise LoginUnavailable(
-            "Task Scheduler reported the change, but the re-read sign-in state is "
-            f"{'unknown' if after.enabled is None else after.enabled}.",
-            after,
-        )
-    return after
-
-
-# --------------------------------------------------------------------------- #
 # The public entry points
 # --------------------------------------------------------------------------- #
 
@@ -831,14 +648,12 @@ def login_status(workspace: Path) -> LoginStatus:
     """Whether the engine service for *workspace* starts at the next sign-in.
 
     Read-only: it never starts, stops, restarts, bootstraps or registers
-    anything, and it never writes a plist or task XML. The only OS calls it
+    anything, and it never writes a plist. The only OS calls it
     makes are a plist read and (on macOS) ``launchctl print-disabled``.
     """
     platform = _platform()
     if platform == PLATFORM_MACOS:
         return _macos_status(Path(workspace))
-    if platform == PLATFORM_WINDOWS:
-        return _windows_status(Path(workspace))
     return _unsupported_status()
 
 
@@ -853,6 +668,4 @@ def set_login_enabled(workspace: Path, enabled: bool) -> LoginStatus:
     platform = _platform()
     if platform == PLATFORM_MACOS:
         return _set_macos(Path(workspace), enabled)
-    if platform == PLATFORM_WINDOWS:
-        return _set_windows(Path(workspace), enabled)
     raise LoginRefused(_unsupported_status().reason, login_status(workspace))

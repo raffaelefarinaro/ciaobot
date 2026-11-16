@@ -76,7 +76,6 @@ def test_plan_refuses_a_protected_destination_or_source_without_a_host(
     assert not any("background job" in r for r in _plan(plain, home / "new", host=None).refusals)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the run-move argv is a POSIX launchd command")
 def test_plan_warns_and_allows_a_protected_folder_through_the_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -181,6 +180,7 @@ def test_plan_accepts_a_new_folder_and_an_empty_one(tmp_path: Path) -> None:
         ("new", {"registered": Path("/elsewhere")}, "runs the workspace at"),
         ("new", {"platform": "linux", "admin": False}, "the administrator moves"),
         ("new", {"platform": "freebsd14"}, "not supported"),
+        ("new", {"platform": "win32"}, "not supported"),
         ("new", {"update_in_flight": True}, "engine update"),
         ("new", {"engine_running": False}, "not running"),
         ("missing/new", {}, "does not exist"),
@@ -356,7 +356,7 @@ def test_links_are_repointed_after_the_folder_moves(tmp_path: Path) -> None:
     old, new = tmp_path / "old", tmp_path / "new"
     (old / "skills" / "remember").mkdir(parents=True)
     (old / ".claude" / "skills").mkdir(parents=True)
-    # Absolute, as sync-skills writes command mirrors (a junction on Windows).
+    # Absolute, as sync-skills writes command mirrors.
     links.link_dir(old / "skills" / "remember", old / ".claude" / "skills" / "remember")
     os.rename(old, new)
 
@@ -635,8 +635,7 @@ def test_stale_denial_does_not_fail_a_new_successful_move(
     denial = tmp_path / "denied.txt"
     monkeypatch.setattr(workspace_access, "denial_path", lambda: denial)
     workspace_access.record_denial("previous attempt", denial)
-    # The forward wait reads launchd's last exit code, and that read has no
-    # uid to build the domain from on Windows. The stale denial is the subject.
+    # The forward wait reads launchd's last exit code; the stale denial is the subject.
     monkeypatch.setattr(macos_service, "server_last_exit_code", lambda: 0)
 
     result, _service, _posts = _run(tmp_path, _Host(), platform="darwin")
@@ -825,11 +824,11 @@ def test_run_move_restarts_the_engine_when_it_will_not_stop(tmp_path: Path) -> N
 
 
 class _HalfRepointService(_Service):
-    """Rewrites the definition, then fails to register it (the Windows shape)."""
+    """Rewrites the definition, then fails to load it."""
 
     def repoint(self, old: Path, new: Path) -> None:
         super().repoint(old, new)
-        raise RuntimeError("schtasks /Create failed")
+        raise RuntimeError("launchctl bootstrap failed")
 
 
 def test_run_move_restores_a_definition_the_repoint_half_wrote(tmp_path: Path) -> None:
@@ -857,7 +856,6 @@ def test_run_move_does_not_move_back_under_an_engine_that_will_not_stop(tmp_path
     assert (tmp_path / "new" / ".env").is_file()
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="flock semantics")
 def test_run_move_waits_for_the_engine_to_release_its_lock(tmp_path: Path) -> None:
     from ciao.os_support.locks import lock_exclusive
 
@@ -909,7 +907,6 @@ def test_routes_are_for_this_computer_only(tmp_path: Path, monkeypatch: pytest.M
     assert listing.json()["path"] == str(tmp_path.resolve())
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the plan's service read is the macOS one here")
 def test_plan_route_returns_the_dry_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(workspace_move, "registered_workspace", lambda: tmp_path)
     monkeypatch.setattr(workspace_move, "update_in_flight", lambda: False)
@@ -949,7 +946,6 @@ def _calls() -> tuple[list[tuple[str, ...]], Any]:
     return calls, systemctl
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="systemd units hold POSIX paths")
 def test_linux_unit_reads_and_repoints_the_workspace(tmp_path: Path) -> None:
     unit = tmp_path / "ciaobot.service"
     unit.write_text(_UNIT, encoding="utf-8")
@@ -974,7 +970,6 @@ def test_linux_unit_reads_and_repoints_the_workspace(tmp_path: Path) -> None:
     assert calls == [("daemon-reload",), ("daemon-reload",)]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="systemd units hold POSIX paths")
 def test_linux_unit_refuses_a_repoint_that_changes_nothing(tmp_path: Path) -> None:
     unit = tmp_path / "ciaobot.service"
     unit.write_text(_UNIT, encoding="utf-8")
@@ -996,7 +991,6 @@ def test_linux_host_drives_systemctl_and_reads_the_port(tmp_path: Path) -> None:
     assert calls == [("start", "ciaobot.service"), ("stop", "ciaobot.service")]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="systemd units hold POSIX paths")
 def test_linux_unit_repoints_once_when_the_new_path_ends_with_the_old(tmp_path: Path) -> None:
     from ciao.linux_service import render_service
 
@@ -1019,7 +1013,6 @@ def test_linux_unit_repoints_once_when_the_new_path_ends_with_the_old(tmp_path: 
     assert definition.workspace() == Path("/home/srv/ciaobot")
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX accounts")
 def test_linux_unit_home_falls_back_to_the_service_account(tmp_path: Path) -> None:
     import getpass
     import pwd
@@ -1043,7 +1036,6 @@ def test_start_route_refuses_on_linux(tmp_path: Path, monkeypatch: pytest.Monkey
     assert "administrator" in response.json()["error"]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="systemd units hold POSIX paths")
 def test_linux_unit_finds_drop_ins_that_name_the_workspace(tmp_path: Path) -> None:
     unit = tmp_path / "ciaobot.service"
     unit.write_text(_UNIT, encoding="utf-8")
@@ -1060,7 +1052,7 @@ def test_linux_unit_finds_drop_ins_that_name_the_workspace(tmp_path: Path) -> No
 
 class _RefusingService(_Service):
     def preflight(self) -> None:
-        raise workspace_move.MoveError("Windows refused to update the Ciaobot logon task")
+        raise workspace_move.MoveError("refused to update the service definition")
 
 
 def test_run_move_stops_before_moving_when_the_definition_cannot_change(tmp_path: Path) -> None:
@@ -1092,8 +1084,7 @@ def test_rollback_keeps_going_when_a_step_fails(tmp_path: Path) -> None:
 
 
 def test_rollback_moves_the_folder_back_before_rewriting_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Windows links (hard links, junctions) need their target to exist, so the
-    # paths under the old root must be real again before they are rewritten.
+    # The paths under the old root must be real again before they are rewritten.
     seen: list[tuple[str, bool]] = []
     real = workspace_move.rewrite_workspace_state
 
@@ -1112,7 +1103,7 @@ class _RefusingHost(_Host):
 
     def start_engine(self) -> Any:
         self.calls.append("start")
-        return SimpleNamespace(ok=False, message="schtasks /Run failed")
+        return SimpleNamespace(ok=False, message="launchctl kickstart failed")
 
 
 def test_a_refusal_says_when_the_engine_did_not_start_again(tmp_path: Path) -> None:
@@ -1120,7 +1111,7 @@ def test_a_refusal_says_when_the_engine_did_not_start_again(tmp_path: Path) -> N
     result, _service, _posts = _run(tmp_path, host, service_type=_RefusingService)
     assert result.phase == "failed"
     assert "refused to update" in result.error
-    assert "did not start again: schtasks /Run failed" in result.error
+    assert "did not start again: launchctl kickstart failed" in result.error
 
 
 class _RollbackStopRaisesHost(_Host):
@@ -1157,22 +1148,8 @@ def test_rollback_does_not_start_the_engine_at_a_missing_folder(
     assert host.calls == ["stop", "start", "stop"]
 
 
-def test_windows_preflight_explains_a_refused_registration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from ciao import windows_service
-
-    def refuse(_definition: Path, name: str = "") -> None:
-        raise windows_service.WindowsServiceError("schtasks /Create failed: Access is denied.")
-
-    monkeypatch.setattr(windows_service, "register_task", refuse)
-    definition = workspace_move.WindowsServiceDefinition(tmp_path / "task.xml")
-    with pytest.raises(workspace_move.MoveError, match="elevated shell"):
-        definition.preflight()
-
-
 @pytest.mark.skipif(
-    sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    hasattr(os, "geteuid") and os.geteuid() == 0,
     reason="POSIX permission bits, not root",
 )
 @pytest.mark.parametrize("kind", ["mac", "linux"])
@@ -1219,8 +1196,7 @@ def test_the_mac_move_job_shares_the_engine_bundle_ids(tmp_path: Path, monkeypat
 # ── the move runs through the verified host ──────────────────────────
 
 
-#: The host the move runs under. The bundle path is a POSIX path, because the
-#: host's own argv rules are POSIX paths and a Windows ``tmp_path`` is not one.
+#: The host the move runs under, as a POSIX path (the host's own argv rules).
 _HOST_BUNDLE = "/Users/me/Applications/Ciaobot Server.app"
 #: The interpreter the host would run. It has to be a real, executable python:
 #: the host's own parser checks that, so a path that does not exist would be
@@ -1268,7 +1244,6 @@ def _spawn_mac_job_plist(
     return job
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the run-move argv is a POSIX launchd command")
 def test_the_mac_move_job_runs_through_the_verified_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
