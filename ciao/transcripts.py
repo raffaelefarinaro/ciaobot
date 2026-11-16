@@ -16,7 +16,6 @@ from typing import Any, cast
 
 from claude_agent_sdk import (
     SessionMessage,
-    delete_session,
     get_session_messages,
     get_session_messages as _sdk_get_session_messages,
 )
@@ -728,26 +727,6 @@ class TranscriptStore:
                     row["effective_model"] = effective
                 rows.append(row)
         return rows
-
-    @staticmethod
-    def delete_sdk_session_blob(workspace_root: Path, session_id: str) -> bool:
-        """Delete the Claude Code SDK session JSONL blob for a session_id.
-
-        Thin wrapper over :func:`claude_agent_sdk.delete_session` kept for
-        call-site stability. Returns True if a session was deleted, False
-        when the id is empty, the session was not found, or the SDK
-        rejected the id (e.g., non-UUID).
-        """
-        if not session_id:
-            return False
-        try:
-            delete_session(session_id, directory=str(workspace_root))
-            return True
-        except (FileNotFoundError, ValueError):
-            return False
-        except Exception:  # noqa: BLE001 — SDK may raise I/O errors
-            logger.exception("delete_session failed for %s", session_id)
-            return False
 
     # ── Global reads (for curation / weekly review) ───────────────────────
 

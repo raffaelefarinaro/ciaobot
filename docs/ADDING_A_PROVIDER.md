@@ -86,8 +86,9 @@ set and nothing else.
 | `respond_permission` | The approval card; return `QuestionResponseResult` after acknowledgement. | Explicit nonretryable unsupported result. Claude adapts its local `PermissionGate` boolean at this boundary. |
 | `respond_question` | A native question card; return `QuestionResponseResult` after acknowledgement. | Explicit nonretryable unsupported result. |
 | `can_drain` / `drain_events` | Claude and OpenCode, between turns, so a background agent or shell can wake the parent. | OpenCode reports `can_drain` true only while a live server has background shells or subagents outstanding. |
-| `read_thread` / `delete_thread` | OpenCode transcript history, transcript replay and session reclaim. Claude history uses its own SDK/JSONL helpers instead. Native titles no longer route through this row. | See the skip list below. |
+| `read_thread` | OpenCode transcript history and transcript replay. Claude history uses its own SDK/JSONL helpers instead. Session reclaim no longer routes through this row. | See the skip list below. |
 | `native_title_candidates(workspace_root, session_id)` (classmethod) | `ProjectChatManager._native_chat_title`, tier 1 of the auto-title poll. | On `BaseProvider` the default returns `()` — no native title for that provider. |
+| `delete_session(workspace_root, session_id)` (classmethod) | `ProjectChatManager._reclaim_provider_sessions_async`, the delete/archive/reset cleanup. | On `BaseProvider` the default returns `None` — an adapter inheriting it intentionally does no reclaim, and the host stays quiet. |
 
 `native_title_candidates` is the shared native-title read. It is a
 stateless classmethod on the adapter class — the manager resolves it through
@@ -100,6 +101,16 @@ payload interpretation and must not catch SDK failures (they land on the
 manager's failure log); the host owns filtering, and rejects empty,
 placeholder and context-contaminated candidates through
 `chat_service._real_title` before a candidate can reach the sidebar.
+
+`delete_session` is the shared session-reclaim seam, used by the same
+stateless registry lookup. It returns `True` for affirmative confirmation, a
+literal `False` to request the host's cleanup-warning log, or `None` for no
+confirmation signal — an unsupported adapter inheriting the default
+intentionally does no reclaim, and a best-effort cleanup may report nothing
+without implying anything was deleted. The host never infers UI or retry
+policy from these values: it warns only on `False` and otherwise continues,
+and the manager swallows adapter failures with its fail-open per-session
+boundary.
 
 Permission and native-question replies use the shared `BaseProvider` response
 contract, so any adapter can participate without a provider-specific manager
@@ -130,7 +141,6 @@ arm.
 
 | If you do nothing | What the user sees | Where |
 |---|---|---|
-| Session delete has no reclaim arm. | The native session file or server-side thread is left behind when the chat is deleted. | `ProjectChatManager` session cleanup: Claude deletes the SDK JSONL blob, OpenCode calls `OpencodeProvider.delete_thread`. |
 | Subagent routes return `[]`. | No child transcripts, and the sidebar shows no running agents. | `ciao/web/routes_api.py` chat subagents and `_running_subagent_rows`. |
 | The schedule archive wait returns "settled" immediately. | A schedule can archive while its background agents are still running. | `ciao/web/schedule_dispatch.py` `_await_schedule_subagents`. |
 | The subagent watcher falls through to the Claude JSONL reader. | Only if `background_subagents` is true. The watcher then looks for a Claude session file and finds nothing. | `ciao/web/subagent_watchers.py` `watch_inner`. The CLI-task orphan sweep is Claude-only and skips everyone else, which is safe. |

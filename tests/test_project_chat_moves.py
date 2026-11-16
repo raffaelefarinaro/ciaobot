@@ -7,15 +7,18 @@ import asyncio
 import concurrent.futures
 import contextlib
 import json
+import logging
 import sqlite3
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from starlette.requests import Request
 
 from ciao.config import CiaoConfig
+from ciao.models import AgentRequest, ChatContext
 from ciao.schedules import ScheduleStore
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
@@ -775,33 +778,171 @@ async def test_archive_route_returns_the_postprocess_lifecycle(
 async def test_delete_and_archive_reclaim_opencode_sessions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Delete and archive reclaim the OpenCode session for each lifecycle path.
+
+    The chat's live provider is disconnected before its session delete, on
+    both paths; the delete path schedules that behind the lifecycle write and
+    the archive path awaits it inline.
+    """
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("provider-reclaim", workspace="work")
-    deleted: list[tuple[str, str]] = []
+    lifecycle: list[str] = []
+    reclaim_seen = asyncio.Event()
 
     async def _fake_opencode_delete(_workspace, session_id: str) -> bool:
-        deleted.append(("opencode", session_id))
+        lifecycle.append(f"delete:{session_id}")
+        reclaim_seen.set()
         return True
 
+    class _RecordingService:
+        async def disconnect(self) -> None:
+            lifecycle.append("disconnect-done")
+
     monkeypatch.setattr(
-        "ciao.web.project_chats.OpencodeProvider.delete_thread",
+        "ciao.providers.opencode.OpencodeProvider.delete_session",
         _fake_opencode_delete,
     )
     opencode = pcm.create_chat(project.project_id, title="opencode-to-delete")
     opencode.provider = "opencode"
     opencode.session_id = "opencode-session"
     opencode.user_turn_count = 1
+    pcm._providers[opencode.chat_id] = _RecordingService()
     assert pcm.delete_chat(opencode.chat_id) is True
-    await asyncio.sleep(0)
-    assert deleted[-1] == ("opencode", "opencode-session")
+    # Deterministic completion: the scheduled cleanup ends at the delete.
+    await asyncio.wait_for(reclaim_seen.wait(), 5)
+    assert lifecycle == ["disconnect-done", "delete:opencode-session"]
+    assert pcm.get_chat(opencode.chat_id) is None
 
     opencode_archived = pcm.create_chat(
         project.project_id, title="opencode-to-archive"
     )
     opencode_archived.provider = "opencode"
     opencode_archived.session_id = "opencode-archive-session"
+    # A seeded turn so the archive actually writes the durable markdown file.
+    pcm._transcripts.record_turn(
+        AgentRequest(
+            prompt="hello", model="sonnet", mode="auto", provider="opencode"
+        ),
+        ctx=ChatContext.for_web(opencode_archived.chat_id),
+        response_text="archived body",
+        effective_model="sonnet",
+        session_id="opencode-archive-session",
+        usage={},
+        quota={},
+        input_kind="text",
+        provider="opencode",
+    )
+    pcm._providers[opencode_archived.chat_id] = _RecordingService()
     await pcm.archive_chat(opencode_archived.chat_id)
-    assert deleted[-1] == ("opencode", "opencode-archive-session")
+    assert lifecycle == [
+        "disconnect-done",
+        "delete:opencode-session",
+        "disconnect-done",
+        "delete:opencode-archive-session",
+    ]
+    assert opencode_archived.archived is True
+
+
+@pytest.mark.parametrize("failure_mode", ["false", "raise"])
+async def test_reclaim_failure_leaves_deletes_and_archives_durable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure_mode: str,
+) -> None:
+    """A refusing cleanup cannot resurrect a deleted chat or undo an archive.
+
+    The lifecycle write wins, the archived transcript stays durable, and the
+    only trace of the failure is the established log record.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("reclaim-fail", workspace="work")
+    reclaim_seen = asyncio.Event()
+    archive_capture: dict[str, Any] = {}
+    real_archive_session = pcm._transcripts.archive_session
+
+    def capturing_archive_session(*args: Any, **kwargs: Any):
+        result = real_archive_session(*args, **kwargs)
+        if result is not None:
+            archive_capture["path"] = result
+            # Capture at archive completion: `_archive_chat_unlocked` awaits
+            # the reclaim only after this writer returns.
+            archive_capture["bytes"] = result.read_bytes()
+        return result
+
+    monkeypatch.setattr(
+        pcm._transcripts, "archive_session", capturing_archive_session
+    )
+
+    async def _failing_delete(_workspace, session_id: str) -> bool | None:
+        reclaim_seen.set()
+        if failure_mode == "false":
+            return False
+        raise RuntimeError("cleanup refused")
+
+    monkeypatch.setattr(
+        "ciao.providers.opencode.OpencodeProvider.delete_session",
+        _failing_delete,
+    )
+    with caplog.at_level(logging.INFO, logger="ciao.web.project_chats"):
+        failed_delete = pcm.create_chat(project.project_id, title="opencode-fail-delete")
+        failed_delete.provider = "opencode"
+        failed_delete.session_id = "fail-delete-session"
+        assert pcm.delete_chat(failed_delete.chat_id) is True
+        # Deterministic completion of the fire-and-forget cleanup.
+        await asyncio.wait_for(reclaim_seen.wait(), 5)
+        assert pcm.get_chat(failed_delete.chat_id) is None
+        caplog.clear()
+
+        archived = pcm.create_chat(project.project_id, title="opencode-fail-archive")
+        archived.provider = "opencode"
+        archived.session_id = "fail-archive-session"
+        archived.user_turn_count = 1
+        pcm._transcripts.record_turn(
+            AgentRequest(
+                prompt="hello", model="sonnet", mode="auto", provider="opencode"
+            ),
+            ctx=ChatContext.for_web(archived.chat_id),
+            response_text="archived body",
+            effective_model="sonnet",
+            session_id="fail-archive-session",
+            usage={},
+            quota={},
+            input_kind="text",
+            provider="opencode",
+        )
+        outcome = await pcm.archive_chat(archived.chat_id)
+        assert outcome is not None
+        assert archived.archived is True
+        archive_file = archive_capture["path"]
+        assert archive_file == tmp_path / archived.archive_path
+        durable_bytes = archive_capture["bytes"]
+        assert "archived body" in durable_bytes.decode("utf-8")
+        # Cleanup happens inside archive_chat; completion is deterministic.
+        if failure_mode == "false":
+            assert [
+                record.getMessage()
+                for record in caplog.records
+                if record.levelno == logging.WARNING
+            ] == [
+                "Provider returned no cleanup confirmation for opencode session "
+                f"fail-archive-session (chat {archived.chat_id})"
+            ]
+        else:
+            failures = [
+                record
+                for record in caplog.records
+                if record.getMessage()
+                == f"Failed to reclaim opencode session fail-archive-session "
+                f"for chat {archived.chat_id}"
+            ]
+            assert len(failures) == 1
+            assert failures[0].exc_info is not None
+        # Nothing rolled back: the chat is still archived and its markdown
+        # transcript on disk is byte-identical to the bytes captured at archive
+        # completion, i.e. before the awaited reclaim ran and failed.
+        assert pcm.get_chat(archived.chat_id).archived is True
+        assert archive_file.read_bytes() == durable_bytes
 
 
 @pytest.mark.asyncio

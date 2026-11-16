@@ -4994,12 +4994,13 @@ class ProjectChatManager:
         *,
         agent_root: Path | None = None,
     ) -> None:
-        """Drop provider-side session blobs/threads for abandoned chats.
+        """Drop provider-side persisted sessions for abandoned chats.
 
-        Claude deletes the SDK JSONL blob. OpenCode deletes its persisted
-        session through ``DELETE /api/session/{id}``.
-        Provider cleanup is fail-open: the Ciaobot archive remains durable even
-        when an external provider is unavailable.
+        Each session is reclaimed through the chat's own adapter class via the
+        shared ``BaseProvider.delete_session`` operation, resolved through the
+        provider registry so cleanup works after the live provider and the
+        chat row are gone. Provider cleanup is fail-open: the Ciaobot archive
+        remains durable even when an external provider is unavailable.
 
         Both providers store a session under the agent root the chat ran in —
         the Claude SDK by hashing that path into its projects directory, and
@@ -5031,12 +5032,10 @@ class ProjectChatManager:
                 continue
             seen.add(sid)
             try:
-                if chat.provider == "claude":
-                    deleted = self._transcripts.delete_sdk_session_blob(root, sid)
-                elif chat.provider == "opencode":
-                    deleted = await OpencodeProvider.delete_thread(root, sid)
-                else:
+                descriptor = provider_registry.get(chat.provider)
+                if descriptor is None:
                     continue
+                deleted = await descriptor.factory().delete_session(root, sid)
             except Exception:  # noqa: BLE001 — provider cleanup is fail-open
                 logger.exception(
                     "Failed to reclaim %s session %s for chat %s",
@@ -5045,7 +5044,7 @@ class ProjectChatManager:
                     chat.chat_id,
                 )
                 continue
-            if chat.provider == "opencode" and not deleted:
+            if deleted is False:
                 logger.warning(
                     "Provider returned no cleanup confirmation for %s session %s "
                     "(chat %s)",
