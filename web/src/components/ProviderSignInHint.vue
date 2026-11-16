@@ -74,7 +74,7 @@ async function copy() {
       <p v-else-if="loadError" class="signin-hint-status" role="alert">{{ loadError }} Settings → Providers has the provider's sign-in button.</p>
       <ol v-else-if="connection" class="signin-hint-steps">
         <li v-if="chatId">Open a terminal on the computer running Ciaobot. From any device, Run in this chat's terminal does this for you: the chat's terminal runs on that computer.</li>
-        <li v-else>On the computer running Ciaobot, open a terminal (Terminal on a Mac, PowerShell on Windows), or use Run in Terminal below when you are on that computer.</li>
+        <li v-else>On the computer running Ciaobot, open a terminal (Terminal on a Mac), or use Run in Terminal below when you are on that computer.</li>
         <li>
           Paste this command, press Enter and finish signing in{{ connection.label ? ` to ${connection.label}` : '' }} in the browser window it opens:
           <div class="signin-hint-cmd">

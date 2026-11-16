@@ -132,7 +132,8 @@ describe('HomeWelcomeCard', () => {
   it('folder label follows the platform', async () => {
     answer(pending({ platform: 'win32' }))
     let view = await mountCard()
-    expect(hasButton(view, 'Show in File Explorer')).toBe(true)
+    expect(hasButton(view, 'Open folder')).toBe(true)
+    expect(hasButton(view, 'Show in File Explorer')).toBe(false)
     view.unmount()
     wrapper = null
     resetWelcomeForTests()

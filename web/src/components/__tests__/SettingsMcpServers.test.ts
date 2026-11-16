@@ -172,6 +172,12 @@ describe('Settings MCP native inventory', () => {
     expect(wrapper.text()).toContain('OpenCode has no remove command')
     wrapper.unmount()
   })
+  it('hides commands when the engine still reports powershell', () => {
+    const { wrapper } = panel(status => { status.shell = { kind: 'powershell', cd_prefix: 'x' } as never })
+    expect(wrapper.findAll('.mcp-commands button').every(b => b.attributes('disabled') !== undefined)).toBe(true)
+    expect(wrapper.get('.mcp-commands').text()).not.toContain('claude mcp')
+    wrapper.unmount()
+  })
   it('Run in terminal types the command', async () => {
     runMock.mockReset().mockResolvedValue('typed')
     const { wrapper } = panel()
@@ -423,14 +429,6 @@ describe('Settings MCP native inventory', () => {
     expect(wrapper.get('.mcp-list-notes').text()).toContain('claude.ai, Settings, Connectors')
     expect(server.findAll('.mcp-signin')).toHaveLength(0)
     expect(server.find('[aria-label="More actions for claude.ai Slack"]').exists()).toBe(false)
-    wrapper.unmount()
-  })
-  it('explains a url the Windows terminal cannot pass safely', async () => {
-    const { wrapper } = panel(status => { status.shell = { kind: 'powershell', cd_prefix: "Set-Location -LiteralPath 'C:\\w'; " } })
-    await wrapper.get('#mcp-server-name').setValue('notion')
-    await wrapper.get('#mcp-server-url').setValue('https://example.com/a&b')
-    expect(wrapper.get('[role="alert"]').text()).toContain("This URL has characters the Windows terminal can't pass safely. Type the add command yourself in a terminal.")
-    expect(row(wrapper, 'add').findAll('button').every(b => b.attributes('disabled') !== undefined)).toBe(true)
     wrapper.unmount()
   })
   it('closes the menu when focus moves outside it', async () => {

@@ -3709,7 +3709,7 @@ describe('ChatLayout chat route without a catalog entry', () => {
       })
       await flushPromises()
       try {
-        // The terminal pane is a lazy chunk; a cold Windows runner can take
+        // The terminal pane is a lazy chunk; a cold CI runner can take
         // over vitest's 1 s default to load it.
         await vi.waitFor(() => {
           expect(wrapper.find('.terminal-pane').exists()).toBe(true)

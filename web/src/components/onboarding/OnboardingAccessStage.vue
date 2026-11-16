@@ -38,9 +38,6 @@ const error = ref('')
 // The scope before the last change, so a risky choice can be undone.
 const previousScope = ref('')
 const canContinue = computed(() => !!scope.value && !pending.value && !error.value)
-// Exact match: "darwin" contains "win", which would show the Windows warning
-// to every macOS user and lock them out of workspace scope.
-const windows = computed(() => platform.value === 'windows' || platform.value === 'win32')
 
 function report(): void {
   emit('state', { dirty: false, pending: pending.value, canContinue: canContinue.value, error: error.value || null })
@@ -66,7 +63,7 @@ onMounted(async () => {
     platform.value = String(host.platform || '').toLowerCase()
     // The host route reports "other" for an unsupported system; that is not a
     // platform whose sandbox behaviour we can describe.
-    platformKnown.value = ['macos', 'darwin', 'windows', 'win32', 'linux'].includes(platform.value)
+    platformKnown.value = ['macos', 'darwin', 'linux'].includes(platform.value)
   } catch (e) {
     error.value = `Could not load access settings: ${apiErrorMessage(e, 'The request failed.')}`
   }
@@ -120,7 +117,7 @@ function undoScope(): void { chooseScope(previousScope.value) }
     <h2 id="access-title">Choose what the agent can access</h2>
 
     <OnboardingChoiceGroup label="Filesystem scope" name="scope" layout="cards" :model-value="scope" @update:model-value="chooseScope">
-      <OnboardingChoice value="workspace" :disabled="windows">
+      <OnboardingChoice value="workspace">
         Workspace only
         <template #description>Access stays inside this workspace.</template>
       </OnboardingChoice>
@@ -131,10 +128,9 @@ function undoScope(): void { chooseScope(previousScope.value) }
       <template #after>
         <p v-if="scope === 'machine'" class="consequence" role="status">
           The agent and its shell can read any file this user can read, outside this workspace too.
-          <OnboardingButton v-if="previousScope === 'workspace' && !windows" variant="link" class="undo" :disabled="pending" @click="undoScope">Undo</OnboardingButton>
+          <OnboardingButton v-if="previousScope === 'workspace'" variant="link" class="undo" :disabled="pending" @click="undoScope">Undo</OnboardingButton>
         </p>
-        <p v-if="windows" class="hint">Windows has no filesystem sandbox; workspace-only scope is unavailable.</p>
-        <p v-else-if="platformKnown" class="hint">Scope limits file access; it is not a safety guarantee.</p>
+        <p v-if="platformKnown" class="hint">Scope limits file access; it is not a safety guarantee.</p>
         <p v-else class="hint">This host's platform was not reported, so no scope can be recommended. Choose one explicitly.</p>
       </template>
     </OnboardingChoiceGroup>

@@ -38,12 +38,6 @@ describe('folder browser driver', () => {
     expect(fromVfPath('nope://x', roots)).toBe('')
   })
 
-  it('toVfPath and fromVfPath handle a Windows-shaped root', () => {
-    const win: WorkspaceDirRoot[] = [{ name: 'workspace', path: 'C:/ws' }]
-    expect(toVfPath('C:/ws/a', win)).toBe('workspace://a')
-    expect(fromVfPath('workspace://a', win)).toBe('C:/ws/a')
-  })
-
   it('toFsData maps a listing onto VueFinder entries', () => {
     const listing = listingAt('/ws/a', roots, [
       { name: 'b.md', path: '/ws/a/b.md', type: 'file', size: 12, mtime: 1700000000, ext: 'md' },

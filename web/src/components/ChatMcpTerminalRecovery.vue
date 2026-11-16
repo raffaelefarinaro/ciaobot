@@ -11,7 +11,7 @@ let generation = 0
 const context = computed(() => JSON.stringify([props.chatId, props.provider, props.server?.name, props.server?.scope, props.server?.enabled, props.server?.allowed, props.server?.kind, props.status?.workspace, props.status?.agent_root, props.status?.shell?.kind, props.status?.shell?.cd_prefix]))
 const rows = computed(() => {
   const { server, status, provider } = props
-  if (!server || !status?.shell || !['posix', 'powershell'].includes(status.shell.kind) || typeof status.shell.cd_prefix !== 'string' || server.enabled === false || server.allowed === false || server.scope === 'claudeai' || !validServerName(server.name)) return []
+  if (!server || !status?.shell || status.shell.kind !== 'posix' || typeof status.shell.cd_prefix !== 'string' || server.enabled === false || server.allowed === false || server.scope === 'claudeai' || !validServerName(server.name)) return []
   const actions = ['list', ...(['http', 'sse', 'remote'].includes(server.kind ?? '') ? ['login'] : [])] as ('list' | 'login')[]
   return actions.flatMap(action => {
     const command = mcpCommand({ provider, action, name: server.name, shell: status.shell.kind, cdPrefix: status.shell.cd_prefix })
