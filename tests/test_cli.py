@@ -19,28 +19,8 @@ from ciao import cli
 
 
 def _fake_python(tmp_path: Path) -> str:
-    """The interpreter setup points its service at.
-
-    POSIX setup only writes the path into the plist, so a made-up one will do.
-    Windows' Task Scheduler renderer accepts only python.exe/pythonw.exe and
-    checks pythonw.exe is really there (the task runs hidden), so on Windows it
-    is a pair of empty files under ``tmp_path``.
-    """
-    if sys.platform != "win32":
-        return "/opt/ciao/bin/python"
-    bin_dir = tmp_path / "fake-python"
-    bin_dir.mkdir(exist_ok=True)
-    for name in ("python.exe", "pythonw.exe"):
-        (bin_dir / name).write_bytes(b"")
-    return str(bin_dir / "python.exe")
-
-# setup's launchd backend: the plist and the ~/Applications bundle clean-up run
-# only there. On Windows setup writes a Task Scheduler definition instead, which
-# tests/test_windows_service.py covers.
-launchd_setup_only = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="the launchd plist and ~/Applications clean-up are setup's macOS backend",
-)
+    """The interpreter setup points its service at; setup only writes the path into the plist, so a made-up one will do."""
+    return "/opt/ciao/bin/python"
 
 
 def test_cli_run_dispatches_server(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -570,20 +550,18 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     )
     assert registry[0]["name"] == "research"
     assert registry[0]["vault_root"] == "research/memory-vault"
-    # The platform's own service definition: the plist here, the Task Scheduler
-    # XML on Windows, whose fields tests/test_windows_service.py pins.
+    # The service definition: the plist.
     service = cli._service_definition(launch_agents)
     assert service is not None and service.is_file()
-    if sys.platform != "win32":
-        plist_text = service.read_text(encoding="utf-8")
-        assert "<string>/opt/ciao/bin/python</string>" in plist_text
-        assert "<string>run</string>" in plist_text
-        assert f"<string>{workspace.resolve()}</string>" in plist_text
-        assert "<string>9443</string>" in plist_text
-        assert f"<string>{workspace.resolve()}/.runtime/ciao.stdout.log</string>" in plist_text
-        # Login Items still groups the server agent under the desktop app.
-        assert "<key>AssociatedBundleIdentifiers</key>" in plist_text
-        assert "<string>local.ciaobot.app</string>" in plist_text
+    plist_text = service.read_text(encoding="utf-8")
+    assert "<string>/opt/ciao/bin/python</string>" in plist_text
+    assert "<string>run</string>" in plist_text
+    assert f"<string>{workspace.resolve()}</string>" in plist_text
+    assert "<string>9443</string>" in plist_text
+    assert f"<string>{workspace.resolve()}/.runtime/ciao.stdout.log</string>" in plist_text
+    # Login Items still groups the server agent under the desktop app.
+    assert "<key>AssociatedBundleIdentifiers</key>" in plist_text
+    assert "<string>local.ciaobot.app</string>" in plist_text
     # No menu-bar agent and no launcher bundle: Ciaobot.app is the menu bar
     # now, and nothing writes the retired rumps helper.
     assert not (launch_agents / "com.ciao.menubar.plist").exists()
@@ -646,7 +624,6 @@ def test_setup_exits_zero_without_warning_on_the_normal_path(
     assert "memory regions not set up" not in capsys.readouterr().err
 
 
-@launchd_setup_only
 def test_setup_uses_bundled_launcher_when_python_is_not_explicit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -667,7 +644,6 @@ def test_setup_uses_bundled_launcher_when_python_is_not_explicit(
     assert "CIAO_NATIVE_SIDECAR" not in plist["EnvironmentVariables"]
 
 
-@launchd_setup_only
 def test_setup_uses_python_module_invocation_for_python_path(tmp_path: Path) -> None:
     launch_agents = tmp_path / "LaunchAgents"
 
@@ -741,12 +717,6 @@ def test_setup_refuses_source_checkout(tmp_path: Path, capsys) -> None:
 def test_setup_refuses_to_repoint_existing_workspace(
     tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    if sys.platform == "win32":
-        # The Windows guard asks Task Scheduler whether the task exists before
-        # trusting the XML (a stale file is not a task); stand in for it here.
-        from ciao import windows_service
-
-        monkeypatch.setattr(windows_service, "task_exists", lambda: True)
     launch_agents = tmp_path / "LaunchAgents"
     apps = tmp_path / "Applications"
     first = tmp_path / "ws-one"
@@ -1089,6 +1059,20 @@ class _PlatformShim:
         return getattr(self._real, name)
 
 
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_setup_load_launchd_is_refused_off_macos(
+    platform: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    monkeypatch.setattr(cli, "sys", _PlatformShim(sys, platform))
+
+    assert cli.main(["setup", "--workspace", str(tmp_path / "ws"), "--load-launchd"]) == 2
+    assert "requires macOS. On Linux" in capsys.readouterr().err
+    assert not (tmp_path / "ws").exists(), "the refusal must come before any setup work"
+
+
 def _plist_with_workspace(workspace: Path) -> str:
     return (
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
@@ -1152,9 +1136,7 @@ def test_setup_workspace_does_not_ask_for_a_backend_on_linux(
 def test_setup_workspace_asks_the_backend_where_a_service_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """macOS and Windows both have a background service, so setup writes its
-    definition by default (#845) and the definition dir comes from the backend.
-    """
+    """macOS has a background service, so setup writes its definition by default (#845) and the definition dir comes from the backend."""
     monkeypatch.setattr(cli.sys, "platform", "darwin")
     monkeypatch.delenv("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", raising=False)
     agents = tmp_path / "LaunchAgents"
@@ -1181,7 +1163,6 @@ def test_setup_workspace_asks_the_backend_where_a_service_exists(
     assert plist.is_file()
 
 
-@launchd_setup_only
 def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:
     apps = tmp_path / "Applications"
     ours = apps / "Ciao.app" / "Contents"
@@ -1208,7 +1189,6 @@ def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:
     assert not foreign.exists()  # untouched (never created); guard for typos
 
 
-@launchd_setup_only
 def test_setup_migrates_native_ciaobot_app_without_removing_pwa(tmp_path: Path) -> None:
     apps = tmp_path / "Applications"
     legacy = apps / "Ciaobot.app" / "Contents"
@@ -1263,7 +1243,6 @@ def test_setup_keeps_browser_pwa_named_ciaobot_app(tmp_path: Path) -> None:
     assert not (apps / "Ciaobot Server.app").exists()
 
 
-@launchd_setup_only
 def test_setup_skips_legacy_companion_when_the_app_is_installed(
     tmp_path: Path,
 ) -> None:
@@ -1292,7 +1271,6 @@ def test_default_app_dir_matches_the_release_installer() -> None:
     assert cli._default_app_dir() == Path.home() / "Applications"
 
 
-@launchd_setup_only
 def test_setup_cleans_our_bundles_from_home_applications(tmp_path: Path, monkeypatch) -> None:
     home_apps = tmp_path / "home" / "Applications"
     for name, bundle_id in (("Ciao.app", "local.ciao.app"), ("Ciaobot.app", "local.ciaobot.app")):
@@ -1416,14 +1394,7 @@ def test_path_export_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     bin_dir = Path(cli.sys.executable).parent
     monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
     hint = cli._path_export_hint()
-    if sys.platform == "win32":
-        # A persistent user-PATH update through the registry, not `export`
-        # (the full line is pinned in tests/test_os_support_shell_hints.py).
-        assert hint is not None
-        assert hint.startswith("$k = [Microsoft.Win32.Registry]::CurrentUser")
-        assert f"'{bin_dir}'" in hint
-    else:
-        assert hint == f'export PATH="{bin_dir}:$PATH"'
+    assert hint == f'export PATH="{bin_dir}:$PATH"'
     monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", str(bin_dir)]))
     assert cli._path_export_hint() is None
 
@@ -1457,25 +1428,7 @@ def test_path_export_hint_uses_the_helper(monkeypatch: pytest.MonkeyPatch) -> No
     assert cli._path_export_hint() == "HINT"
 
 
-def test_setup_summary_prints_the_windows_note(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-) -> None:
-    workspace = tmp_path / "workspace"
-    token_path = workspace / ".runtime" / "setup-token"
-    token_path.parent.mkdir(parents=True)
-    token_path.write_text("tok\n", encoding="utf-8")
-    monkeypatch.setattr(cli, "_path_export_hint", lambda: "LINE")
-    monkeypatch.setattr(cli, "path_hint_note", lambda: "NOTE")
-
-    cli._print_setup_summary(workspace, 9443)
-
-    out = capsys.readouterr().out
-    # Windows writes the user PATH, which the terminal that ran it cannot see,
-    # so the note has to sit directly under the line it is about.
-    assert "  LINE\n  NOTE" in out
-
-
-def test_setup_summary_prints_no_note_without_a_hint(
+def test_setup_summary_prints_no_path_line_without_a_hint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -1483,15 +1436,11 @@ def test_setup_summary_prints_no_note_without_a_hint(
     token_path.parent.mkdir(parents=True)
     token_path.write_text("tok\n", encoding="utf-8")
     monkeypatch.setattr(cli, "_path_export_hint", lambda: None)
-    monkeypatch.setattr(cli, "path_hint_note", lambda: "NOTE")
 
     cli._print_setup_summary(workspace, 9443)
 
     out = capsys.readouterr().out
-    # Nothing was added to PATH, so there is no change to wait for: the note
-    # must not hang on its own.
     assert "PATH" not in out
-    assert "NOTE" not in out
 
 
 def test_setup_url_rotates_token_by_default(tmp_path: Path, capsys) -> None:
@@ -4904,7 +4853,6 @@ def test_a_run_with_no_registered_name_plans_no_entries_and_says_so(
     assert entry.verified == date(2024, 1, 5)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
 def test_rotate_setup_token_writes_an_owner_only_file(tmp_path):
     from ciao.os_support.private import is_private
 
@@ -4934,7 +4882,6 @@ def test_setup_url_reports_a_token_create_race_without_a_traceback(
     assert "setup token" in err
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
 def test_ensure_setup_token_tightens_an_older_world_readable_file(tmp_path: Path) -> None:
     from ciao.os_support.private import is_private
 
@@ -4947,7 +4894,6 @@ def test_ensure_setup_token_tightens_an_older_world_readable_file(tmp_path: Path
     assert is_private(token_path)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="renders a macOS hosted plist")
 def test_setup_command_prints_the_macos_access_note(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

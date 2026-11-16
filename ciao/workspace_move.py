@@ -3,7 +3,7 @@
 The install workspace (``CIAO_WORKSPACE``: ``.env``, ``.runtime/``, the vault,
 skills, the agent roots) cannot be moved by editing ``.env``: the engine finds
 ``.env`` *inside* the workspace, and the service definition (the LaunchAgent on
-macOS, the logon task on Windows) is what names the folder. A move therefore
+macOS, the systemd unit on Linux) is what names the folder. A move therefore
 has to stop the engine, rename the folder, repair what recorded the old
 absolute path, repoint the service definition and start the engine again —
 and the engine cannot do that to itself while it runs.
@@ -13,8 +13,8 @@ So the work is split the way an engine update is:
 * :func:`plan` is read-only. It answers whether a move to ``target`` is safe
   and what the operator should know first. The CLI prints it; the PWA shows it.
 * :func:`start` records an operation outside the workspace and hands it to a
-  one-shot job that is a *sibling* of the engine's own service (a launchd job,
-  a Task Scheduler task), so stopping the engine cannot take the move with it.
+  one-shot job that is a *sibling* of the engine's own service (a launchd job),
+  so stopping the engine cannot take the move with it.
   The CLI's ``--apply`` and the Settings button both call it.
 * :func:`run_move` is that job: drain, stop, rename, rewrite, repoint, start,
   verify — and on any failure after the rename, put everything back and start
@@ -61,8 +61,6 @@ OPERATION_NAME = "operation.json"
 LOCK_NAME = "move.lock"
 JOB_LABEL = "com.ciao.workspace-move"
 JOB_PLIST_NAME = f"{JOB_LABEL}.plist"
-JOB_TASK_NAME = r"\Ciaobot\WorkspaceMove"
-JOB_TASK_FILE = "Ciaobot-WorkspaceMove.xml"
 JOB_LOG_NAME = "workspace-move.log"
 DEFINITION_BACKUP_PREFIX = "service-definition"
 LINUX_UNIT = "ciaobot.service"
@@ -266,7 +264,7 @@ def _age_seconds(stamp: str) -> float:
 def abandoned(op: MoveOperation | None, state_dir: Path | None = None) -> bool:
     """An in-flight record no job is working on: the job crashed, or the machine
     rebooted under it. A queued record gets a grace period, because the job takes
-    the lock only once launchd or Task Scheduler has started it."""
+    the lock only once launchd has started it."""
     if not in_flight(op):
         return False
     assert op is not None
@@ -287,7 +285,7 @@ def _keep_owner(path: Path, like: Path, *, follow: bool = True) -> None:
     the service account; a file root rewrote would otherwise become one the
     engine can no longer write.
     """
-    if sys.platform == "win32" or not _running_as_root():
+    if not _running_as_root():
         return
     try:
         st = like.stat()
@@ -300,7 +298,7 @@ def _keep_owner(path: Path, like: Path, *, follow: bool = True) -> None:
 
 
 def _keep_owner_tree(root: Path, like: Path) -> None:
-    if sys.platform == "win32" or not _running_as_root():
+    if not _running_as_root():
         return
     try:
         st = like.stat()
@@ -393,7 +391,7 @@ def plan(
     source = source.expanduser().resolve()
     raw = target_raw.strip()
     result = MovePlan(source=str(source), target=raw)
-    if platform not in ("darwin", "win32") and not platform.startswith("linux"):
+    if platform != "darwin" and not platform.startswith("linux"):
         result.refusals.append(f"Moving the workspace is not supported on {platform}.")
         return result
     if platform.startswith("linux") and not (_running_as_root() if admin is None else admin):
@@ -537,8 +535,6 @@ def plan(
         schedules: Any = json.loads((source / ".runtime" / "schedules.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         schedules = None
-    # Searched in the parsed values, not the raw text: JSON escapes the
-    # backslashes of a Windows path.
     if _mentions(schedules, str(source)):
         result.warnings.append(
             "Some automation prompts mention the old folder by path. Edit them after the move."
@@ -678,7 +674,7 @@ def rekey_vault_receipts(migration_dir: Path) -> list[str]:
 
 
 def relink_symlinks(root: Path, old: str, new: str) -> int:
-    """Repoint links under ``root`` (symlinks; junctions on Windows) that name ``old``."""
+    """Repoint symlinks under ``root`` that name ``old``."""
     from ciao.os_support import links
 
     count = 0
@@ -828,71 +824,6 @@ class MacServiceDefinition:
             raise MoveError(f"cannot rewrite {self.path}")
 
 
-class WindowsServiceDefinition:
-    """The engine logon task's XML, re-registered after every change."""
-
-    def __init__(self, path: Path | None = None) -> None:
-        from ciao import windows_service
-
-        self.path = path or windows_service.live_task_dir() / windows_service.TASK_FILE_NAME
-
-    def workspace(self) -> Path | None:
-        from ciao import windows_service
-
-        try:
-            if not windows_service.task_exists():
-                return None
-        except windows_service.WindowsServiceError:
-            return None
-        return windows_service.task_workspace(self.path)
-
-    def backup(self, dest: Path) -> None:
-        shutil.copy2(self.path, dest)
-
-    def repoint(self, old: Path, new: Path) -> None:
-        from xml.sax.saxutils import escape
-
-        from ciao import windows_service
-
-        xml = self.path.read_bytes().decode("utf-16")
-        current = windows_service.task_workspace(self.path)
-        if current is None:
-            raise MoveError(f"{self.path} names no working directory")
-        updated = rewrite_prefix(str(current), str(old), str(new))
-        rewritten = xml.replace(
-            f"<WorkingDirectory>{escape(str(current))}</WorkingDirectory>",
-            f"<WorkingDirectory>{escape(updated)}</WorkingDirectory>",
-        )
-        if updated == str(current) or rewritten == xml:
-            raise MoveError(f"could not repoint the working directory in {self.path}")
-        self.path.write_bytes(rewritten.encode("utf-16"))
-        windows_service.register_task(self.path)
-
-    def restore(self, backup: Path) -> None:
-        from ciao import windows_service
-
-        shutil.copy2(backup, self.path)
-        windows_service.register_task(self.path)
-
-    def preflight(self) -> None:
-        """Re-register the unchanged task: the one way to learn it may be changed.
-
-        A task registered from an elevated shell can only be changed by an
-        elevated process, and the move job runs at the user's normal integrity
-        level; `schtasks /Create /F` then answers "Access is denied".
-        """
-        from ciao import windows_service
-
-        try:
-            windows_service.register_task(self.path)
-        except windows_service.WindowsServiceError as exc:
-            raise MoveError(
-                f"Windows refused to update the Ciaobot logon task ({exc}). It was probably "
-                "registered from an elevated shell; re-run setup from a normal PowerShell, "
-                "then move again."
-            ) from exc
-
-
 class LinuxServiceDefinition:
     """The root-installed systemd unit (docs/LINUX.md), reloaded after every change."""
 
@@ -948,8 +879,6 @@ class LinuxServiceDefinition:
         value = self._environment("HOME")
         if value:
             return Path(value)
-        if sys.platform == "win32":
-            return None
         import pwd
 
         user = self.user()
@@ -1048,8 +977,6 @@ class LinuxEngineHost:
 
 
 def current_service_definition() -> ServiceDefinition:
-    if sys.platform == "win32":
-        return WindowsServiceDefinition()
     if sys.platform.startswith("linux"):
         return LinuxServiceDefinition()
     return MacServiceDefinition()
@@ -1195,9 +1122,7 @@ def spawn_job(op: MoveOperation, state_dir: Path) -> None:
     otherwise kill it past every rollback, leaving the engine drained or
     stopped and the folder half-moved.
     """
-    if sys.platform == "win32":
-        _spawn_windows_job(op, state_dir)
-    elif sys.platform.startswith("linux"):
+    if sys.platform.startswith("linux"):
         import signal
 
         previous = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGINT, signal.SIGHUP)}
@@ -1254,29 +1179,6 @@ def _spawn_mac_job(op: MoveOperation, state_dir: Path) -> None:
     if bootstrap.returncode != 0:
         detail = (bootstrap.stderr or bootstrap.stdout or "").strip()
         raise MoveError(detail or "launchctl bootstrap failed")
-
-
-def _spawn_windows_job(op: MoveOperation, state_dir: Path) -> None:
-    from ciao import windows_service
-
-    argv = _job_argv(op, state_dir)
-    xml = windows_service._update_job_xml(
-        task_name=JOB_TASK_NAME,
-        description="Moves the Ciaobot workspace folder, then exits.",
-        triggers="",
-        python=windows_service.windowless_python(argv[0]),
-        arguments=argv[1:],
-        # Never the workspace: Windows refuses to rename a folder that is
-        # some process's working directory.
-        workdir=str(state_dir),
-        user=windows_service.current_user(),
-    )
-    definition = state_dir / JOB_TASK_FILE
-    definition.write_bytes(xml.encode("utf-16"))
-    windows_service.register_task(definition, JOB_TASK_NAME)
-    completed = windows_service._schtasks("/Run", "/TN", JOB_TASK_NAME)
-    if completed.returncode != 0:
-        raise MoveError((completed.stderr or completed.stdout or "").strip() or "schtasks /Run failed")
 
 
 # ── the detached job ─────────────────────────────────────────────────
@@ -1600,9 +1502,7 @@ def run_move(
         rekey_claude_json(str(source), str(target), home=claude_home)
         advance("repointing")
         service.backup(backup)
-        # Restored on any failure from here on: a repoint can fail after it has
-        # already rewritten the definition (Windows writes the XML, then
-        # registers it).
+        # Restored on any failure from here on: a repoint can fail after it has already rewritten the definition.
         backed_up = True
         service.repoint(source, target)
         advance("starting")
@@ -1649,8 +1549,6 @@ def run_move(
                 errors.append(f"restoring the service definition: {rollback_exc}")
         if moved:
             try:
-                # Rename first: on Windows a file link is a hard link and a
-                # directory link a junction, and both need their target to exist.
                 os.rename(target, source)
             except Exception as rollback_exc:  # noqa: BLE001
                 errors.append(f"moving the folder back: {rollback_exc}")
