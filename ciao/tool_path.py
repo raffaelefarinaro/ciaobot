@@ -10,17 +10,7 @@ the server process, so features like the Google Workspace ``gws`` CLI report as
 
 This module recovers the PATH the user's own terminal would use, merges it with
 the process PATH and a curated directory list, and resolves tools against the
-result. What "the user's terminal" means is an operating-system difference, so
-the probing and the tool resolution live in :mod:`ciao.os_support.tool_path`:
-POSIX spawns an interactive login shell, Windows reads the PATH a new logon
-gets out of the registry. Nothing here branches on the platform.
-
-On Windows the resolved path is always a real executable: a ``.cmd``/``.ps1``
-wrapper found on PATH is read for the program it launches, because Windows runs
-one through ``cmd.exe`` and Ciaobot would then stop the wrapper instead of the
-tool. That raises :class:`~ciao.os_support.tool_path.ToolResolutionError` (an
-``OSError``) when the wrapper leads nowhere usable, so a caller that only wants
-to know whether a tool is usable already handles it.
+result. The login-shell probe and the tool lookup live in :mod:`ciao.os_support.tool_path`.
 """
 
 from __future__ import annotations
@@ -63,10 +53,9 @@ def login_shell_path() -> str:
     """PATH as seen by the user's interactive login shell.
 
     Returns the current process PATH augmented with the terminal's PATH and a
-    set of well-known tool directories. Deduplicated, order-preserving, and
-    deduplicated the way the OS compares two directories, so on Windows one
-    spelling of a PATH entry is one entry. Cached for the process lifetime — PATH
-    directories are stable even after a tool is installed into one of them.
+    set of well-known tool directories. Deduplicated and order-preserving.
+    Cached for the process lifetime — PATH directories are stable even after a
+    tool is installed into one of them.
     """
     current = os.environ.get("PATH", "")
     shell_path = terminal_path()
@@ -78,12 +67,7 @@ def resolve_tool(cmd: str) -> str | None:
     """Absolute path to ``cmd`` on the terminal PATH, or None if not found.
 
     Drop-in replacement for ``shutil.which(cmd)`` that also searches the dirs a
-    GUI/launchd-launched server would otherwise miss, and on Windows resolves
-    the npm shim a global install leaves behind to the executable behind it.
-
-    Raises :class:`~ciao.os_support.tool_path.ToolResolutionError` (an
-    ``OSError``) when the match is an npm shim whose executable is missing, so
-    a broken install is not reported as a tool that is not installed.
+    GUI/launchd-launched server would otherwise miss.
     """
     return _resolve_executable(cmd, path=login_shell_path())
 
@@ -91,12 +75,7 @@ def resolve_tool(cmd: str) -> str | None:
 def resolve_command(cmd: str) -> list[str]:
     """The argv prefix that spawns ``cmd`` on the terminal PATH, or ``[]``.
 
-    For callers that spawn an npm-installed tool: ``[exe]`` for an executable,
-    ``[node, script]`` for a Windows npm wrapper that hands a script to node
-    (see :mod:`ciao.os_support.tool_path`). Pass the tool's arguments after it
+    For callers that spawn a tool: ``[exe]``. Pass the tool's arguments after it
     in the same list, so they never go through a shell.
-
-    Raises :class:`~ciao.os_support.tool_path.ToolResolutionError` (an
-    ``OSError``) when the tool is on PATH but cannot be run.
     """
     return _resolve_command(cmd, path=login_shell_path())

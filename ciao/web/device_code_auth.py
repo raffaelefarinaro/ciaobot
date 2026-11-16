@@ -15,7 +15,6 @@ import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from types import MappingProxyType
 
 from ciao.chat_actions import ActionState, ChatAction
@@ -120,15 +119,6 @@ class DeviceCodeFlow(ActionHandler):
             return
         if not prefix:
             self._set(ctx, action, "failed", error=NOT_INSTALLED.format(tool=spec.binary))
-            return
-        # A bare executable must be the tool itself. A Windows wrapper that unwraps to
-        # an unrelated interpreter (az.cmd -> python.exe) would run the wrong program.
-        # The [node, script] form from an npm shim is accepted as resolved.
-        if len(prefix) == 1 and Path(prefix[0]).stem.lower() != spec.binary:
-            self._set(ctx, action, "failed", error=CANNOT_RUN.format(tool=spec.binary))
-            return
-        if len(prefix) not in (1, 2):
-            self._set(ctx, action, "failed", error=CANNOT_RUN.format(tool=spec.binary))
             return
         folder = ctx.agent_root
         if folder is None or ctx.terminals is None:
