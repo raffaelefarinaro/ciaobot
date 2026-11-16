@@ -303,7 +303,6 @@ def test_chat_mcp_setup_runs_in_the_workspace_folder() -> None:
     """
     guidance = _reference("install-and-settings.md")
     assert "cd -- '<workspace folder>' && " in guidance
-    assert "Set-Location -LiteralPath '<workspace folder>'; " in guidance
     assert "never the linked repository" in guidance
 
     # The prefix form the server builds (ciao/web/mcp_inventory.py `_shell_prefix`).

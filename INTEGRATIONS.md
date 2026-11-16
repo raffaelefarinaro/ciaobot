@@ -8,14 +8,6 @@ SDK-level wiring notes (fallback_model, hooks, setting_sources) live in the modu
 
 ## Install
 
-### Windows 11 (x64 or ARM64)
-
-```powershell
-irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex
-```
-
-The installer is per user and needs no administrator rights. It installs the engine into a `uv tool` environment, puts `ciao.exe` on your user `PATH`, creates the workspace (`%USERPROFILE%\Ciaobot`, or `-Workspace DIR`), registers the per-user logon task `\Ciaobot\Engine` and starts it. Options are `-Workspace`, `-NoStart` and `-Uninstall`; because `iex` cannot take arguments, pass them through a script block. The full guide, including logs and troubleshooting, is [docs/WINDOWS.md](docs/WINDOWS.md). For engine updates and rollback, see [the Windows update guide](docs/WINDOWS.md#update-and-rollback).
-
 ### Upgrading from the macOS app
 
 v1.0.0 retires the macOS `Ciaobot.app`; the PWA is now served by the engine.
@@ -56,19 +48,9 @@ the installer says which one applies:
   - bash (login shells read `~/.bash_profile`, not `~/.bashrc`):
     `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bash_profile && source ~/.bash_profile`
   - fish: `fish_add_path $HOME/.local/bin`.
-  - Windows (PowerShell): the wizard substitutes your real directory for the
-    `C:\Users\you` below —
-    `$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true); $v = $k.GetValue('Path', '', 'DoNotExpandEnvironmentNames'); $k.SetValue('Path', 'C:\Users\you\.local\bin' + $(if ($v) { ';' + $v }), [Microsoft.Win32.RegistryValueKind]::ExpandString)`
-    — then open a new terminal so the change takes effect. It reads the old
-    value unexpanded and writes it back as `REG_EXPAND_SZ`, so a PATH that
-    holds `%USERPROFILE%`-style entries keeps both those entries and its
-    registry type; `[Environment]::SetEnvironmentVariable` would freeze them
-    to today's expanded paths and change the type to `REG_SZ`.
 - Another `ciao` already exists (the name collides with Ciao Prolog, among
   others): the installer never overwrites it, so call Ciaobot's engine by its
   full path instead.
-
-On Windows the installer does not write a shim: `ciao.exe` lives in the `uv tool` bin directory (`uv tool dir --bin`), which the installer adds to the user `PATH`.
 
 Provider logins do not depend on the shim: the setup wizard hands out each
 provider's own login command (`claude auth login`, `opencode auth login`).
@@ -81,7 +63,7 @@ or unidentifiable installs with an explicit upgrade message, and chat startup
 fails closed rather than probing retired V1 routes.
 
 ```bash
-npm install -g @opencode/cli        # works on Windows too
+npm install -g @opencode/cli
 # or: brew install anomalyco/tap/opencode-v2
 # or: curl -fsSL https://opencode.ai/v2/install | bash
 ciao auth opencode                  # opens `opencode auth login`
@@ -474,7 +456,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
   authentication; an invalid path is reported as unavailable.
 - `CIAO_GWS_BIN` (test isolation only): absolute path to an executable that `ciao gws` and the Google token health check run instead of `gws`. Set by `ciao eval tasks` for tasks requiring `gws_fake`, so evals never reach Google. When set it is used as-is, with no lookup and no fallback. It is read from the process environment only, unlike `CIAO_OPENCODE_BIN`, which is read from the workspace configuration. A value that is not an absolute path is an error: `ciao gws` exits 2 with `CIAO_GWS_BIN must be an absolute path`, and the token health check reports the token as invalid with that message. Whitespace-only counts as unset. POSIX only.
 - `CIAO_ENGINE_PATH` (internal): legacy override for the engine executable the
-  CLI runs. It is still read by `ciao/cli.py`, and on Windows `ciao service start` uses it as the interpreter (`python.exe` or `pythonw.exe`) when it has to register the logon task, but nothing sets it any more
+  CLI runs. It is still read by `ciao/cli.py`, but nothing sets it any more
   (the bundled launcher that used to is gone), so an operator never needs to.
 - Session cookies are HttpOnly. Production/domain-scoped cookies are also Secure, and state-changing browser requests must come from the same origin (host, scheme and effective port) via `Origin` or `Referer`, or from a host a proxy declared in `X-Forwarded-Host`.
 - Ciaobot sends baseline security headers from the Starlette app, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.

@@ -1424,25 +1424,23 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/servi
 
 `installed` and `enabled` are tri-state, and `null` means *the machine did not
 say*. A definition that does not parse, a `launchctl print-disabled` listing
-that cannot be read, a Task Scheduler identity mangled by a lossy code page, a
-definition that names no workspace, a definition that serves a different
-workspace, a hand-written LaunchAgent with neither `RunAtLoad` nor `KeepAlive`,
-a task with no enabled logon trigger: each reports `null` with the reason in
+that cannot be read, a definition that names no workspace, a definition that
+serves a different workspace, a hand-written LaunchAgent with neither
+`RunAtLoad` nor `KeepAlive`: each reports `null` with the reason in
 `reason` and `can_change: false`. Do not render a switch position out of a
 `null`; render the reason. `can_change` is the only field that licenses a
 write, and it is true only where the enabled bit is proven to be what decides.
 
-`platform` is `macos`, `windows`, `linux`, or `other`. On Linux, and on a
+`platform` is `macos`, `linux`, or `other`. On Linux, and on a
 platform with no service backend, `supported` is false and `reason` points at
 `docs/LINUX.md` (a systemd unit an administrator enables by hand).
 
 The engine identity is fixed and never taken from a request: the
 `com.ciao.server` LaunchAgent in the real per-user LaunchAgents directory on
-macOS, the registered `\Ciaobot\Engine` Task Scheduler task on Windows.
-`installed: false` (macOS, no plist) carries a `setup_command` to run instead;
+macOS. `installed: false` (macOS, no plist) carries a `setup_command` to run instead;
 `setup_command` is always a fixed, non-executing hint. **These routes never
 create, register, start, stop, restart, bootstrap, or repoint a service, and
-never write a plist or task XML.** A service belonging to another workspace is
+never write a plist.** A service belonging to another workspace is
 reported and left alone.
 
 Status codes on PATCH: 200 with the re-read status; 409 with `error` plus the
@@ -1548,7 +1546,7 @@ the bullets it could not write.
 acting_available, agreement}` and is read-only. `handover` is the workspace's
 Memory handover setting. `acting_available` is whether the unattended run can act
 on it on this install: the handover gate trusts only the installed service
-definition (LaunchAgent, Windows task or the root-owned systemd unit), so it is
+definition (LaunchAgent or the root-owned systemd unit), so it is
 false only when no trusted service definition registers the workspace. `agreement` measures how often the verdicts the nightly run recorded
 for `[memory]`/`[profile]` rows matched what the operator then decided, over the
 newest 50 operator (`via: "pwa"`) decisions that carry a prediction; agent,

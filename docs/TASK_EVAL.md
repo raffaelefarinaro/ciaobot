@@ -312,7 +312,7 @@ Each task is `ciao/stock/evals/tasks/<task_id>/task.json`:
   `{"kind": "project", "name", "context"?}`.
 - `requires` lists capability names. `gws_fake` is the only one (see
   [Capabilities](#capabilities)). A task that names a capability the platform
-  lacks is recorded as skipped: `gws_fake` is skipped on Windows.
+  lacks is recorded as skipped.
 - An optional `overlay/` directory sits beside `task.json`. Its files are
   copied over `ws/personal/` before the engine starts, for example
   `overlay/memory-vault/People/x.md`.
@@ -439,8 +439,7 @@ When a run boots, the harness does the following:
   call returns, so the agent sees a connected account.
 
 The fake answers the Gmail calls the M4 task and its neighbours use, from the
-mailbox, and never contacts Google. The launcher is a POSIX shell script, so the
-capability is POSIX only. Windows skips tasks that require it.
+mailbox, and never contacts Google. The launcher is a POSIX shell script.
 
 The fake and its call log live in a folder the agent can write, so the eval is
 not tamper-proof: a deliberately adversarial agent could edit the log or the
@@ -514,7 +513,6 @@ match the fixture exactly. H4 overlays its own `guests.csv` with a filled dietar
 
 ## Known limits
 
-- The `gws_fake` capability is POSIX only; `run` skips M4 on Windows.
 - `--jobs` above 1 has a small port race: each engine's port is probed free when its harness object is created and bound only when the engine starts, so two concurrent boots can collide. Use `--jobs 1` for a run whose numbers you will compare.
 - Settling is inferred from the restart-blocker list, not from the transcript.
   A chat that stops producing turns without a blocker is treated as settled.
