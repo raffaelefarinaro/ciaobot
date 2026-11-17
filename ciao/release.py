@@ -989,7 +989,7 @@ def _probe_bundled_claude(root: Path) -> ProviderProbe:
 
 def _opencode_untested_reason(probe: ProviderProbe) -> tuple[str, str] | None:
     """``(reason, why)`` when OpenCode cannot be recorded as tested."""
-    from ciao.providers.opencode import _server_version_error
+    from ciao.providers.opencode import server_version_error
 
     version = probe.installed
     if version is None:
@@ -998,7 +998,7 @@ def _opencode_untested_reason(probe: ProviderProbe) -> tuple[str, str] | None:
         return "not_installed", "is not installed"
     if "-" in version or not STABLE_VERSION_RE.fullmatch(version):
         return "unpublished", f"{version} is not a stable version"
-    if _server_version_error({"version": version}) is not None:
+    if server_version_error({"version": version}) is not None:
         return "unreadable", f"{version} is outside the supported 2.0.16+ / 2.x contract"
     if probe.published is False:
         return "unpublished", f"{version} is not published on npm"

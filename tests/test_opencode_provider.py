@@ -42,7 +42,8 @@ from ciao.providers.opencode import (
     native_wake_run,
     _log_catalog_change,
     _read_v2_messages,
-    _server_version_error,
+    server_version_error,
+    version_number,
     catalog_providers,
     compose_system,
     config_placeholder_problems,
@@ -2296,13 +2297,166 @@ def test_missing_required_paths_accepts_the_v2_document():
 
 
 def test_v1_and_unknown_server_versions_fail_with_the_upgrade_message():
-    assert _server_version_error({"version": "1.18.18"}) == (
+    assert server_version_error({"version": "1.18.18"}) == (
         f"{OPENCODE_V2_REQUIRED} Installed server version: 1.18.18."
     )
-    assert _server_version_error({"version": "2.0.0"}) is not None
-    assert _server_version_error({"version": "3.0.0"}) is not None
-    assert _server_version_error({"version": "unknown"}) is not None
-    assert _server_version_error({"version": "2.0.16"}) is None
+    assert server_version_error({"version": "2.0.0"}) is not None
+    assert server_version_error({"version": "3.0.0"}) is not None
+    assert server_version_error({"version": "unknown"}) is not None
+    assert server_version_error({"version": "2.0.16"}) is None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        # No digits, no version.
+        (None, None),
+        ("", None),
+        ("unknown", None),
+        # The two documented CLI forms.
+        ("2.0.16", (2, 0, 16)),
+        ("opencode v2.0.16", (2, 0, 16)),
+        # A build suffix is not part of the number.
+        ("2.0.16-beta.3", (2, 0, 16)),
+        # Two parts, and more than three.
+        ("2.0", (2, 0)),
+        ("2.0.16.1", (2, 0, 16, 1)),
+    ],
+)
+def test_version_number_parses_a_dotted_integer_prefix(
+    value: object, expected: tuple[int, ...] | None
+) -> None:
+    """Same permissive dotted-integer prefix parse the parser has always had."""
+    assert version_number(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        # Not a Mapping: nothing version-shaped is read from any other shape.
+        ("2.0.16", OPENCODE_V2_REQUIRED),
+        (["version", "2.0.16"], OPENCODE_V2_REQUIRED),
+        # Missing or blank: refused, with no installed-version detail.
+        ({}, OPENCODE_V2_REQUIRED),
+        ({"version": "   "}, OPENCODE_V2_REQUIRED),
+        # Readable but unsupported: the exact message plus exact detail.
+        ({"version": "unknown"}, f"{OPENCODE_V2_REQUIRED} Installed server version: unknown."),
+        ({"version": "1.18.18"}, f"{OPENCODE_V2_REQUIRED} Installed server version: 1.18.18."),
+        ({"version": "2.0.15"}, f"{OPENCODE_V2_REQUIRED} Installed server version: 2.0.15."),
+        ({"version": "2.0"}, f"{OPENCODE_V2_REQUIRED} Installed server version: 2.0."),
+        ({"version": "3.0.0"}, f"{OPENCODE_V2_REQUIRED} Installed server version: 3.0.0."),
+    ],
+)
+def test_server_version_error_refuses_beyond_the_v2_floor(
+    payload: object, expected: str
+) -> None:
+    """Every refusal carries the same character-identical message as before."""
+    assert server_version_error(payload) == expected
+
+
+@pytest.mark.parametrize(
+    "reported",
+    ["2.0.16", "opencode v2.0.16", "2.3.0", "2.0.16-beta.3"],
+)
+def test_server_version_error_accepts_supported_v2(reported: str) -> None:
+    """``None`` still means version-supported, not healthy or authenticated."""
+    assert server_version_error({"version": reported}) is None
+
+
+def test_server_version_error_accepts_mapping_subclasses_and_strips() -> None:
+    """Mapping acceptance is structural, and a padded version is stripped first."""
+    from collections import UserDict
+
+    assert server_version_error(UserDict(version="2.0.16")) is None
+    assert server_version_error({"version": "  2.0.16  "}) is None
+
+
+def test_public_version_helpers_are_defined_exactly_once_and_not_aliased() -> None:
+    """The public names are the publication, not an alias over the old ones.
+
+    One definition per public helper, and neither old private name survives in
+    the adapter as a definition, import alias, assignment or runtime attribute.
+    """
+    import ciao.providers.opencode as mod
+
+    source = Path(mod.__file__).read_text(encoding="utf-8")
+    for public in ("version_number", "server_version_error"):
+        assert source.count(f"def {public}(") == 1
+    for private in ("_version_number", "_server_version_error"):
+        assert private not in source
+        assert not hasattr(mod, private)
+
+
+def test_public_version_helpers_touch_no_provider_resources(monkeypatch) -> None:
+    """Both published helpers stay pure: no binary, process or HTTP seam fires."""
+    import subprocess
+
+    import ciao.providers.opencode as mod
+
+    calls: dict[str, int] = {
+        "binary": 0,
+        "bounded_output": 0,
+        "popen": 0,
+        "run": 0,
+        "async_exec": 0,
+        "async_body": 0,
+        "http_async": 0,
+        "http_sync": 0,
+    }
+
+    def counting(seam: str):
+        def stub(*args: object, **kwargs: object) -> None:
+            calls[seam] += 1
+
+        return stub
+
+    def counting_async_exec(*args: object, **kwargs: object):
+        # The counter moves at the invocation — the call boundary itself —
+        # not in the async body, so even a spawn that is never awaited is
+        # observed; the stub's body keeps that distinction separately visible.
+        calls["async_exec"] += 1
+
+        async def ready() -> None:
+            calls["async_body"] += 1
+
+        return ready()
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", counting("binary"))
+    monkeypatch.setattr(mod, "bounded_output", counting("bounded_output"))
+    monkeypatch.setattr(subprocess, "Popen", counting("popen"))
+    monkeypatch.setattr(subprocess, "run", counting("run"))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", counting_async_exec)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", counting("http_async"))
+    monkeypatch.setattr(mod.httpx, "Client", counting("http_sync"))
+
+    # Instrumentation liveness: each stub must record when its seam fires...
+    mod.resolve_opencode_binary()
+    mod.bounded_output()
+    subprocess.Popen()
+    subprocess.run()
+    mod.httpx.AsyncClient()
+    mod.httpx.Client()
+    # ...and the async stub records at the call boundary: the invoke counter
+    # moves before its awaitable body ever runs, and only awaiting that same
+    # awaitable moves the body counter.
+    pending = asyncio.create_subprocess_exec()
+    assert calls["async_exec"] == 1
+    assert calls["async_body"] == 0
+    asyncio.run(pending)
+    assert calls["async_body"] == 1
+    assert set(calls.values()) == {1}
+    for seam in calls:
+        calls[seam] = 0
+
+    # ...so a zero count over the helper calls means none of them fired.
+    assert mod.version_number("2.0.16") == (2, 0, 16)
+    assert mod.version_number(None) is None
+    assert mod.server_version_error({"version": "2.0.16"}) is None
+    assert mod.server_version_error({"version": "1.18.18"}) == (
+        f"{OPENCODE_V2_REQUIRED} Installed server version: 1.18.18."
+    )
+    assert mod.server_version_error("not a mapping") == OPENCODE_V2_REQUIRED
+    assert not any(calls.values())
 
 
 # ── model ids ───────────────────────────────────────────────────────────

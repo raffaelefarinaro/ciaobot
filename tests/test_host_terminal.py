@@ -397,7 +397,7 @@ def test_every_emitted_terminal_action_is_allowlisted(
     monkeypatch.setattr(opencode, "resolve_opencode_binary", lambda: "/bin/opencode")
     monkeypatch.setattr(opencode, "_credential_count", lambda *a, **k: 1)
     for error in ("too old", None):
-        monkeypatch.setattr(opencode, "_server_version_error", lambda _v, e=error: e)
+        monkeypatch.setattr(opencode, "server_version_error", lambda _v, e=error: e)
         rows.append(opencode.opencode_login_status(inventory=False))
     actions = [row.get("terminal_action") for row in rows]
     assert all(action in host_terminal.ACTION_IDS for action in actions)
