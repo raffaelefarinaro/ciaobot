@@ -110,6 +110,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let systemSettings: SystemSettingsOpening?
     private var menuBar: MenuBarControlling?
     private var windowCloseObserver: NSObjectProtocol?
+    #if DEBUG
+    private var testWindowReporter: TestWindowReporter?
+    #endif
     /// Installed during `applicationWillFinishLaunching` so a notification
     /// click that launched the app can still reach the delegate. It never
     /// prompts; permission is requested only from the menu action.
@@ -202,6 +205,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // feed.
         updater?.start()
 
+        #if DEBUG
+        // A test launch with a loopback origin and a report secret reports the
+        // main window's state to its fixture; see `TestWindowReporter`.
+        // Ordinary launches start nothing.
+        if let origin = TestLaunch.origin(), let secret = TestLaunch.reportSecret() {
+            let reporter = TestWindowReporter(origin: origin, secret: secret)
+            reporter.start()
+            testWindowReporter = reporter
+        }
+        #endif
+
         // A saved "Hide Dock Icon" choice applies after the initial SwiftUI
         // window has had a chance to appear. It hides the Dock only while the
         // main window is closed; it never turns the login item on and never
@@ -288,6 +302,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         installer.cancel()
+        #if DEBUG
+        testWindowReporter?.stop()
+        testWindowReporter = nil
+        #endif
         if let windowCloseObserver {
             NotificationCenter.default.removeObserver(windowCloseObserver)
             self.windowCloseObserver = nil

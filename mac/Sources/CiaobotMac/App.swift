@@ -57,6 +57,302 @@ enum TestLaunch {
         return defaultAddress
     }
 }
+
+/// What AppKit knows about the main window, as the GUI launch test needs it.
+/// WindowServer's on-screen list only holds windows on the active Space, so a
+/// window ordered in while another app's full-screen Space is active is
+/// absent from it. AppKit's `isOnActiveSpace` is the public way to tell that
+/// case apart from a window that never appeared; the test still checks the
+/// window's owner, layer, alpha and size in WindowServer itself.
+struct TestWindowState: Equatable {
+    let number: Int
+    let visible: Bool
+    let onActiveSpace: Bool
+    let width: Int
+    let height: Int
+
+    @MainActor
+    init(window: NSWindow) {
+        self.init(
+            number: window.windowNumber,
+            visible: window.isVisible,
+            onActiveSpace: window.isOnActiveSpace,
+            width: Int(window.frame.width.rounded()),
+            height: Int(window.frame.height.rounded())
+        )
+    }
+
+    init(number: Int, visible: Bool, onActiveSpace: Bool, width: Int, height: Int) {
+        self.number = number
+        self.visible = visible
+        self.onActiveSpace = onActiveSpace
+        self.width = width
+        self.height = height
+    }
+
+    static let path = "/test/window-state"
+    /// The header that carries the per-launch report secret. The secret is
+    /// never put in the URL, so it cannot reach a request log or a report.
+    static let secretHeader = "X-Ciaobot-Test-Report-Secret"
+    /// The header in which the fixture hands out its current freshness
+    /// challenge. The next report echoes it, which proves that report's state
+    /// was read after the fixture issued the challenge.
+    static let challengeHeader = "X-Ciaobot-Test-Report-Challenge"
+
+    /// A challenge is a 16–64 character hex value; anything else is ignored,
+    /// so a fixture answer can never inject other text into a report URL.
+    static func validChallenge(_ value: String?) -> String? {
+        guard let value, (16...64).contains(value.count),
+              value.allSatisfy({ $0.isHexDigit && $0.isASCII }) else { return nil }
+        return value
+    }
+
+    /// The report request for the loopback test origin: these five values, the
+    /// report's sequence number, the last challenge received and the window's
+    /// visibility-transition count in the query, the launch secret in a header,
+    /// no cookies and no cache.
+    func reportRequest(origin: Origin, sequence: Int, transitions: Int, challenge: String?,
+                       secret: String) -> URLRequest? {
+        guard var components = URLComponents(url: origin.url, resolvingAgainstBaseURL: false) else { return nil }
+        components.path = Self.path
+        components.queryItems = [
+            URLQueryItem(name: "seq", value: String(sequence)),
+            URLQueryItem(name: "challenge", value: challenge ?? ""),
+            URLQueryItem(name: "transitions", value: String(transitions)),
+            URLQueryItem(name: "number", value: String(number)),
+            URLQueryItem(name: "visible", value: visible ? "1" : "0"),
+            URLQueryItem(name: "activeSpace", value: onActiveSpace ? "1" : "0"),
+            URLQueryItem(name: "width", value: String(width)),
+            URLQueryItem(name: "height", value: String(height)),
+        ]
+        guard let url = components.url else { return nil }
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.httpShouldHandleCookies = false
+        request.setValue(secret, forHTTPHeaderField: Self.secretHeader)
+        return request
+    }
+}
+
+extension TestLaunch {
+    /// The per-launch secret the GUI test generates so its fixture can reject
+    /// window reports that did not come from the app it launched. Only a
+    /// 32–128 character hex value is accepted; anything else disables the
+    /// reporter.
+    static func reportSecret(environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
+        guard let secret = environment["CIAOBOT_MAC_TEST_REPORT_SECRET"],
+              (32...128).contains(secret.count),
+              secret.allSatisfy({ $0.isHexDigit && $0.isASCII }) else { return nil }
+        return secret
+    }
+}
+
+enum TestWindowReportOutcome: Equatable, Sendable {
+    case accepted(challenge: String?)
+    case failed
+}
+
+/// Sends one window report. Redirects are refused, so a report never leaves
+/// the validated loopback origin, and only server-trust challenges get
+/// default handling. A report counts as accepted only on a 2xx answer, which
+/// may carry the fixture's next freshness challenge.
+final class TestWindowReportTransport: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    static let shared = TestWindowReportTransport()
+
+    private var session: URLSession!
+
+    init(configuration: URLSessionConfiguration = .ephemeral) {
+        super.init()
+        let configuration = configuration.copy() as! URLSessionConfiguration
+        configuration.timeoutIntervalForRequest = 2
+        configuration.httpCookieAcceptPolicy = .never
+        configuration.httpShouldSetCookies = false
+        configuration.urlCache = nil
+        session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+    }
+
+    func send(_ request: URLRequest, completion: @escaping @Sendable (TestWindowReportOutcome) -> Void) {
+        session.dataTask(with: request) { _, response, error in
+            let http = response as? HTTPURLResponse
+            guard error == nil, let http, (200...299).contains(http.statusCode) else {
+                completion(.failed)
+                return
+            }
+            completion(.accepted(challenge: TestWindowState.validChallenge(
+                http.value(forHTTPHeaderField: TestWindowState.challengeHeader))))
+        }.resume()
+    }
+
+    /// Ends the session; the shared transport lives for the app's lifetime.
+    func invalidate() {
+        session.invalidateAndCancel()
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
+            completionHandler(.performDefaultHandling, nil)
+        } else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+        }
+    }
+}
+
+/// Counts every event that can change whether the main window is ordered in,
+/// as AppKit delivers it, rather than inferring changes from samples. Two
+/// readings with the same count prove the window was not ordered out, closed,
+/// miniaturized or hidden with the app, nor replaced, at any moment between
+/// them, even if it was visible at both.
+///
+/// AppKit posts key-value observation for `isVisible` synchronously on every
+/// order-in and order-out, including `orderOut`, `close` and
+/// `makeKeyAndOrderFront`; the window and app notifications cover
+/// miniaturizing and hiding the app. Every change counts, in either direction.
+@MainActor
+final class TestWindowTransitionCounter {
+    private(set) var count = 0
+    private var window: NSWindow?
+    private var visibility: NSKeyValueObservation?
+    private var tokens: [NSObjectProtocol] = []
+
+    /// Starts observing `window`. A different window than the one observed so
+    /// far counts as a transition, since the earlier window's history no
+    /// longer applies.
+    func track(_ window: NSWindow) {
+        guard window !== self.window else { return }
+        if self.window != nil { count += 1 }
+        stop()
+        self.window = window
+        visibility = window.observe(\.isVisible, options: [.old, .new]) { [weak self] _, change in
+            guard change.oldValue != change.newValue else { return }
+            Self.onMain { self?.count += 1 }
+        }
+        let center = NotificationCenter.default
+        let windowEvents: [Notification.Name] = [
+            NSWindow.willCloseNotification, NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
+        ]
+        let appEvents: [Notification.Name] = [NSApplication.didHideNotification, NSApplication.didUnhideNotification]
+        for name in windowEvents {
+            tokens.append(center.addObserver(forName: name, object: window, queue: nil) { [weak self] _ in
+                Self.onMain { self?.count += 1 }
+            })
+        }
+        for name in appEvents {
+            tokens.append(center.addObserver(forName: name, object: nil, queue: nil) { [weak self] _ in
+                Self.onMain { self?.count += 1 }
+            })
+        }
+    }
+
+    func stop() {
+        visibility?.invalidate()
+        visibility = nil
+        tokens.forEach(NotificationCenter.default.removeObserver)
+        tokens = []
+    }
+
+    /// AppKit delivers these on the main thread; anything else is counted
+    /// there too, after the fact, which only makes a check stricter.
+    private nonisolated static func onMain(_ body: @escaping @MainActor @Sendable () -> Void) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { body() }
+        } else {
+            DispatchQueue.main.async { body() }
+        }
+    }
+}
+
+/// Reports the main window's current state to the loopback test origin on
+/// every tick. It runs only in a DEBUG test launch with a loopback origin and
+/// a report secret, sends nothing until the main window exists, and stops
+/// after a bounded number of reports.
+///
+/// Nothing is suppressed as "already delivered": a lost response cannot tell
+/// the reporter what the fixture recorded, so every tick reports the state as
+/// it is now. One report is in flight at a time and each carries a higher
+/// sequence number, so the fixture can keep the newest state even if requests
+/// arrive out of order. Each report echoes the last challenge the fixture
+/// handed out; the GUI test accepts only a report that answers a challenge it
+/// issued during the current check, so a stale report never counts. Each
+/// report also carries the window's transition count, read in the same main
+/// actor turn as its state.
+@MainActor
+final class TestWindowReporter {
+    typealias Send = @MainActor (URLRequest, @escaping @MainActor @Sendable (TestWindowReportOutcome) -> Void) -> Void
+
+    /// About two minutes of 0.1 s ticks, longer than the GUI test runs.
+    static let maximumReports = 1200
+
+    private let origin: Origin
+    private let secret: String
+    private let mainWindow: () -> NSWindow?
+    private let send: Send
+    private var challenge: String?
+    private var inFlight = false
+    private var sequence = 0
+    private var timer: Timer?
+    private let transitions = TestWindowTransitionCounter()
+
+    init(
+        origin: Origin,
+        secret: String,
+        mainWindow: @escaping @MainActor () -> NSWindow? = { MainWindowPresenter.mainWindow(in: NSApp.windows) },
+        send: @escaping Send = TestWindowReporter.sendOverSharedTransport
+    ) {
+        self.origin = origin
+        self.secret = secret
+        self.mainWindow = mainWindow
+        self.send = send
+    }
+
+    func start() {
+        guard timer == nil else { return }
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.poll() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+        transitions.stop()
+    }
+
+    /// Sends the state read now, unless a report is still in flight.
+    func poll() {
+        guard !inFlight else { return }
+        guard sequence < Self.maximumReports else {
+            stop()
+            return
+        }
+        guard let window = mainWindow() else { return }
+        transitions.track(window)
+        let state = TestWindowState(window: window)
+        sequence += 1
+        guard let request = state.reportRequest(origin: origin, sequence: sequence, transitions: transitions.count,
+                                                challenge: challenge, secret: secret) else { return }
+        inFlight = true
+        send(request) { [weak self] outcome in
+            guard let self else { return }
+            self.inFlight = false
+            if case .accepted(let next?) = outcome { self.challenge = next }
+        }
+    }
+
+    static func sendOverSharedTransport(_ request: URLRequest,
+                                        completion: @escaping @MainActor @Sendable (TestWindowReportOutcome) -> Void) {
+        TestWindowReportTransport.shared.send(request) { outcome in
+            Task { @MainActor in completion(outcome) }
+        }
+    }
+}
 #endif
 
 @MainActor
