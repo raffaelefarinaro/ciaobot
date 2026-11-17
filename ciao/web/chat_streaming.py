@@ -2416,7 +2416,14 @@ class ChatStreaming:
             # asyncgen hook closes it on a later tick. Close it here so its
             # reader is gone before this task ends and a foreground turn or
             # the next drain starts reading.
-            await events.aclose()
+            try:
+                await events.aclose()
+            except Exception:
+                logger.warning(
+                    "Closing the between-turns reader failed for chat %s",
+                    chat_id,
+                    exc_info=True,
+                )
             if not cancelled and not superseded:
                 self._host._flush_result_announce(chat_id)
 

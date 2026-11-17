@@ -22,6 +22,7 @@ from ciao.models import (
     ThinkingEvent,
     ToolUseEvent,
 )
+from ciao.provider_service import ProviderService
 from ciao.web.chat_broker import ChatStream, ChatStreamBroker
 from ciao.web.chat_streaming import ChatStreaming, ChatStreamingHost, StreamOutcome
 from ciao.web.project_chats import ChatInfo, ProjectChatManager
@@ -2196,3 +2197,134 @@ async def test_stop_without_a_cached_provider_still_withdraws_the_waiting_prompt
         probe.release.set()
         await _join(stop_bg, hold.task)
         await _join_drives(manager)
+
+
+# ── the drain reader is closed deterministically (#3172 review) ──────────
+
+
+class _RecordingProvider:
+    """A provider whose drain generator records when it is finalised."""
+
+    can_drain = True
+    background_work_outstanding = False
+
+    def __init__(self, chat) -> None:
+        self.chat = chat
+        self.release = asyncio.Event()
+        self.closed = False
+
+    async def drain_events(self):
+        try:
+            await self.release.wait()
+            yield _late_result(self.chat)
+            await asyncio.Event().wait()
+        finally:
+            self.closed = True
+
+
+def _through_provider_service(manager, chat, monkeypatch):
+    provider = _RecordingProvider(chat)
+    service = ProviderService(manager._config)
+    service._provider = provider  # type: ignore[assignment]
+    manager._providers[chat.chat_id] = service
+    monkeypatch.setattr(manager, "_start_subagent_watcher", lambda *a, **k: None)
+    return provider
+
+
+async def test_a_superseded_drain_closes_the_provider_reader_before_it_ends(
+    admission_case, monkeypatch
+):
+    manager, chat, _ = admission_case
+    provider = _through_provider_service(manager, chat, monkeypatch)
+    manager._streaming.start_between_turns_drain(chat.chat_id, chat.project_id)
+    drain_task = manager._between_turn_drains[chat.chat_id]
+    await _ticks()
+    # A foreground owner supersedes the drain: its loop breaks on the next event.
+    manager._broker.register(chat.chat_id, ChatStream())
+    provider.release.set()
+    await _join(drain_task)
+    assert drain_task.done()
+    assert provider.closed is True
+
+
+async def test_a_cancelled_drain_closes_the_provider_reader_before_it_ends(
+    admission_case, monkeypatch
+):
+    manager, chat, _ = admission_case
+    provider = _through_provider_service(manager, chat, monkeypatch)
+    manager._streaming.start_between_turns_drain(chat.chat_id, chat.project_id)
+    drain_task = manager._between_turn_drains[chat.chat_id]
+    await _ticks()
+    drain_task.cancel()
+    await _join(drain_task)
+    assert drain_task.done()
+    assert provider.closed is True
+
+
+class _FailingCloseEvents:
+    """An event iterator whose ``aclose`` raises."""
+
+    def __init__(self, events, *, hold: bool) -> None:
+        self._events = list(events)
+        self._hold = hold
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._events:
+            return self._events.pop(0)
+        if self._hold:
+            await asyncio.Event().wait()
+        raise StopAsyncIteration
+
+    async def aclose(self) -> None:
+        raise RuntimeError("close failed")
+
+
+async def _idle(release):
+    return
+    yield  # pragma: no cover
+
+
+async def test_a_failing_reader_close_still_flushes_the_result_announce(
+    admission_case, monkeypatch
+):
+    manager, chat, _ = admission_case
+    service, _release, _seen = _drain_case(manager, chat, monkeypatch, _idle)
+    service.drain_events = lambda: _FailingCloseEvents(  # type: ignore[method-assign]
+        [_late_result(chat)], hold=False
+    )
+    flushed: list[str] = []
+    monkeypatch.setattr(manager, "_flush_result_announce", flushed.append)
+    manager._streaming.start_between_turns_drain(chat.chat_id, chat.project_id)
+    drain_task = manager._between_turn_drains[chat.chat_id]
+    await _join(drain_task)
+    assert drain_task.done() and drain_task.exception() is None
+    assert chat.chat_id in flushed
+
+
+async def test_a_failing_reader_close_does_not_replace_a_cancellation(
+    admission_case, monkeypatch
+):
+    manager, chat, _ = admission_case
+    service, _release, _seen = _drain_case(manager, chat, monkeypatch, _idle)
+    service.drain_events = lambda: _FailingCloseEvents([], hold=True)  # type: ignore[method-assign]
+    manager._streaming.start_between_turns_drain(chat.chat_id, chat.project_id)
+    drain_task = manager._between_turn_drains[chat.chat_id]
+    await _ticks()
+    drain_task.cancel()
+    await _join(drain_task)
+    assert drain_task.cancelled()
+
+
+async def test_a_drive_with_no_predecessor_does_not_suspend_before_the_turn(
+    admission_case,
+):
+    manager, chat, _ = admission_case
+    stream = ChatStream()
+    manager._broker.register(chat.chat_id, stream)
+    coro = manager._streaming._await_predecessor(chat.chat_id, stream)
+    with pytest.raises(StopIteration) as done:
+        coro.send(None)  # a suspension would yield a future instead
+    assert done.value.value is False

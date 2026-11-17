@@ -687,12 +687,10 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
                 status_code=409,
             )
 
-        refuse_teardown = getattr(pcm, "refuse_workspace_teardown", None)
-        if callable(refuse_teardown):
-            try:
-                refuse_teardown(name)
-            except RecoveryLifecycleConflict as exc:
-                return JSONResponse({"error": str(exc)}, status_code=409)
+        try:
+            request.app.state.project_chat_manager.refuse_workspace_teardown(name)
+        except RecoveryLifecycleConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
 
         scope = getattr(pcm, "workspace_scope", None)
         project_ids, chat_ids = scope(name) if callable(scope) else (set(), set())
