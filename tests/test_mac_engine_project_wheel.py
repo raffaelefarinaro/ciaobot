@@ -4,6 +4,8 @@ import importlib.util
 import io
 import json
 import os
+import calendar
+import stat
 import subprocess
 import sys
 import tarfile
@@ -76,6 +78,8 @@ __PRELUDE__
     meta = f"Metadata-Version: 2.4\\nName: ciaobot\\nVersion: {o.get('meta_version', ver)}\\n"
     meta += "".join(f"Requires-Dist: {d}\\n" for d in deps)
     meta += 'Requires-Dist: pytest==9; extra == "test"\\n'
+    if o.get("marker_dep"):
+        meta += 'Requires-Dist: gamma==3; python_version < "3.9"\\n'
     tag = o.get("tag", "py3-none-any")
     files[f"{di}/METADATA"] = meta.encode()
     files[f"{di}/WHEEL"] = f"Wheel-Version: 1.0\\nGenerator: stub\\nRoot-Is-Purelib: true\\nTag: {tag}\\n".encode()
@@ -85,6 +89,8 @@ __PRELUDE__
     if o.get("bad_record"):
         rows[0][1] = "sha256=" + _b64(b"other")
     rows.append([f"{di}/RECORD", "", ""])
+    if o.get("unrecorded"):
+        files["ciao/unrecorded.py"] = b"x"  # a member the RECORD rows do not list
     files[f"{di}/RECORD"] = "".join(",".join(r) + "\\n" for r in rows).encode()
 
     def emit(filename):
@@ -102,6 +108,8 @@ __PRELUDE__
     emit(o.get("filename", f"ciaobot-{ver}-py3-none-any.whl"))
     if o.get("two"):
         emit(f"ciaobot-{ver}-py2-none-any.whl")
+    if o.get("two_sorted"):
+        emit(f"ciaobot-{ver}-py3-none-any.whl.orig")  # sorts after the right name, so [0] alone looks fine
     return "x"
 '''
 
@@ -145,8 +153,8 @@ GIT_ENV = {
 }
 
 
-def git(repo: Path, *args: str) -> str:
-    done = subprocess.run(["/usr/bin/git", *args], cwd=repo, env=GIT_ENV, check=True,
+def git(repo: Path, *args: str, env: dict[str, str] | None = None) -> str:
+    done = subprocess.run(["/usr/bin/git", *args], cwd=repo, env={**GIT_ENV, **(env or {})}, check=True,
                           capture_output=True, text=True)
     return done.stdout.strip()
 
@@ -274,6 +282,29 @@ def test_export_records_the_exact_commit_and_runs_npm_at_the_seam(repo, parent, 
         assert env["LC_ALL"] == "C" and env["TZ"] == "UTC"
         assert not Path(env["HOME"]).is_relative_to(ci_cwd.parent) and not Path(env["TMPDIR"]).is_relative_to(ci_cwd.parent)
     assert not Path(ci_env["HOME"]).exists()  # scratch is gone with the staging directory
+
+
+def test_npm_env_keeps_home_and_tmpdir_inside_the_scratch_directory(tmp_path) -> None:
+    scratch = private(tmp_path / "scratch")
+    env = mod._npm_env(tmp_path / "nodebin", scratch)
+    assert env["HOME"] != env["TMPDIR"]
+    for key in ("HOME", "TMPDIR"):
+        path = Path(env[key])
+        assert path.parent == scratch and path.is_dir()
+        assert stat.S_IMODE(path.stat().st_mode) == 0o700
+
+
+def test_export_epoch_comes_from_the_commit_date(repo, parent, tmp_path, monkeypatch) -> None:
+    Npm(monkeypatch, tmp_path)
+    expected = calendar.timegm((2021, 3, 4, 5, 6, 7))
+    assert expected != EPOCH
+    repo.write("ciao/extra.py", "x = 1\n")
+    git(repo.path, "add", "-A", "-f")
+    # The author date stays COMMIT_DATE: only the committer date (%ct) is the epoch.
+    git(repo.path, "commit", "-q", "-m", "later", env={"GIT_COMMITTER_DATE": "2021-03-04T05:06:07Z"})
+    receipt = export(repo, parent, commit=git(repo.path, "rev-parse", "HEAD"))
+    assert receipt["source_date_epoch"] == expected
+    assert int((parent / "out/source/README.md").stat().st_mtime) == expected
 
 
 def test_export_is_repeatable_across_parents(repo, tmp_path, monkeypatch) -> None:
@@ -594,6 +625,9 @@ def test_build_guard_blocks_subprocess_and_network(tmp_path, monkeypatch, prelud
     {"filename": f"ciaobot-{VERSION}-py3-none-macosx_11_0_arm64.whl"},
     {"tag": "cp312-cp312-macosx_11_0_arm64"},
     {"two": True},
+    {"two_sorted": True},
+    {"marker_dep": True},
+    {"unrecorded": True},
     {"ts_off": True},
     {"bad_record": True},
     {"symlink": True},
@@ -602,6 +636,17 @@ def test_build_guard_blocks_subprocess_and_network(tmp_path, monkeypatch, prelud
 ], ids=lambda o: next(iter(o)))
 def test_build_refuses_a_wheel_that_breaks_an_invariant(tmp_path, monkeypatch, opts) -> None:
     make(tmp_path, monkeypatch, **opts).refused()
+
+
+@pytest.mark.parametrize("dependency", ['alpha==1.0; python_version < "3.9"', "alpha==1.0;"])
+def test_read_project_refuses_an_environment_marker_in_dependencies(tmp_path, dependency) -> None:
+    project = private(tmp_path / "project")
+    tool = COMMITTED["build_tools"][0]
+    (project / "pyproject.toml").write_text(PYPROJECT)
+    assert mod._read_project(project, tool) == (VERSION, DEPENDENCIES)
+    (project / "pyproject.toml").write_text(PYPROJECT.replace('"alpha==1.0"', json.dumps(dependency)))
+    with pytest.raises(mod.ProjectWheelError):
+        mod._read_project(project, tool)
 
 
 def test_build_requires_dist_must_equal_pyproject_in_both_directions(tmp_path, monkeypatch) -> None:
