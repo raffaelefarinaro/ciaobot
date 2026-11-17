@@ -64,7 +64,11 @@ if TYPE_CHECKING:
     import subprocess
 
 from ciao.tool_summary import opencode_file_touches, summarize_opencode_tool_input
-from ciao.background_notice import format_finished_runs
+from ciao.background_notice import (
+    NATIVE_WAKE_TAIL_LINES,
+    format_finished_runs,
+    native_wake_run,
+)
 from ciao.core_prompt import system_prompt_payload
 from ciao.models import (
     AgentRequest,
@@ -1173,103 +1177,6 @@ def _data(payload: object) -> object:
         return payload["data"]
     return payload
 
-
-_SHELL_COMMAND_RE = re.compile(r'<shell\b[^>]*?\bcommand="([^"]*)"')
-_SHELL_EXIT_LINE_RE = re.compile(r"Exited with code -?\d+\s*$")
-_SHELL_CANCELLED_RE = re.compile(r"kill|cancel|abort|interrupt", re.IGNORECASE)
-_SHELL_TAIL_LINES = 50
-
-
-def native_shell_run(
-    text: str, description: str | None, metadata: Mapping[str, Any] | None
-) -> dict[str, Any] | None:
-    """A ``format_finished_runs`` entry for one finished OpenCode shell.
-
-    OpenCode wakes the session with a ``synthetic`` item whose metadata names
-    the shell (``source == "shell"``) and whose text wraps the output in a
-    ``<shell ...>`` element. ``state`` stays ``completed`` for a non-zero
-    exit, so the verdict comes from ``exit``. Returns None for any other item.
-    """
-    if not isinstance(metadata, Mapping) or metadata.get("source") != "shell":
-        return None
-    raw = str(text or "")
-    opened = raw.find("<shell ")
-    start = raw.find(">\n", opened) + 2 if opened >= 0 and raw.find(">\n", opened) >= 0 else 0
-    end = raw.rfind("</shell>")
-    body = raw[start:end] if end >= start else raw[start:]
-    body = _SHELL_EXIT_LINE_RE.sub("", body.rstrip())
-    tail = body.rstrip().splitlines()[-_SHELL_TAIL_LINES:]
-    label = str(description or "").strip()
-    if not label:
-        match = _SHELL_COMMAND_RE.search(raw)
-        label = match.group(1) if match else ""
-    label = " ".join(label.split())[:120]
-    exit_code = metadata.get("exit")
-    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
-        exit_code = None
-    if exit_code == 0:
-        status = "ok"
-    elif _SHELL_CANCELLED_RE.search(str(metadata.get("state") or "")):
-        status = "cancelled"
-    else:
-        status = "failed"
-    return {
-        "label": label,
-        "run_id": str(metadata.get("shellID") or ""),
-        "exit_code": exit_code,
-        "status": status,
-        "error": "",
-        "log_path": None,
-        "last_lines": tail,
-    }
-
-
-
-_SUBAGENT_BODY_RE = re.compile(r"<subagent\b[^>]*>\n?(.*?)\n?</subagent>\s*$", re.DOTALL)
-
-
-def native_subagent_run(
-    text: str, description: str | None, metadata: Mapping[str, Any] | None
-) -> dict[str, Any] | None:
-    """A ``format_finished_runs`` entry for one finished background subagent.
-
-    OpenCode wakes the session with a ``synthetic`` item whose metadata names
-    the child session (``source == "subagent"``) and whose text wraps the
-    child's report in a ``<subagent ...>`` element. Without a notice row the
-    wake's reply joins the turn before it and that turn's answer is drawn as
-    a trace step. Returns None for any other item.
-    """
-    if not isinstance(metadata, Mapping) or metadata.get("source") != "subagent":
-        return None
-    raw = str(text or "")
-    match = _SUBAGENT_BODY_RE.search(raw)
-    body = match.group(1) if match else raw
-    state = str(metadata.get("state") or "")
-    if state == "completed":
-        status = "ok"
-    elif _SHELL_CANCELLED_RE.search(state):
-        status = "cancelled"
-    else:
-        status = "failed"
-    label = " ".join(str(description or metadata.get("agent") or "").split())[:120]
-    return {
-        "label": label,
-        "run_id": str(metadata.get("childID") or ""),
-        "exit_code": None,
-        "status": status,
-        "error": "",
-        "log_path": None,
-        "last_lines": body.rstrip().splitlines()[-_SHELL_TAIL_LINES:],
-    }
-
-
-def native_wake_run(
-    text: str, description: str | None, metadata: Mapping[str, Any] | None
-) -> dict[str, Any] | None:
-    """The finished-run entry for a shell or subagent wake item, else None."""
-    return native_shell_run(text, description, metadata) or native_subagent_run(
-        text, description, metadata
-    )
 
 def _projected_message(message: Mapping[str, Any]) -> dict[str, Any] | None:
     """Project one flat V2 message into the provider's internal part shape.
@@ -2587,7 +2494,7 @@ class OpencodeProvider(BaseSDKProvider):
         """Terminal event of one follow-up execution."""
         notice = ""
         if self._wake_runs:
-            notice = format_finished_runs(self._wake_runs, tail_lines=_SHELL_TAIL_LINES)[0]
+            notice = format_finished_runs(self._wake_runs, tail_lines=NATIVE_WAKE_TAIL_LINES)[0]
             self._wake_runs = []
         return ResultEvent(
             type="result",

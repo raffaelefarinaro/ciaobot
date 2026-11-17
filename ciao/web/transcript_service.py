@@ -46,12 +46,13 @@ from ciao.tool_summary import (
     summarize_claude_tool_input,
     summarize_opencode_tool_input,
 )
-from ciao.background_notice import format_finished_runs
-from ciao.models import ChatContext
-from ciao.providers.opencode import (
-    OpencodeProvider,
+from ciao.background_notice import (
+    NATIVE_WAKE_TAIL_LINES,
+    format_finished_runs,
     native_wake_run,
 )
+from ciao.models import ChatContext
+from ciao.providers.opencode import OpencodeProvider
 from ciao.rate_limits import is_rate_limit_telemetry
 from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
 
@@ -797,7 +798,7 @@ def _render_opencode_thread(
         if pending_runs:
             result.append({
                 "role": "system",
-                "content": format_finished_runs(pending_runs, tail_lines=50)[0],
+                "content": format_finished_runs(pending_runs, tail_lines=NATIVE_WAKE_TAIL_LINES)[0],
                 "origin": "background_run",
             })
             pending_runs.clear()
