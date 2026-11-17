@@ -4985,3 +4985,48 @@ def test_curation_plan_text_prints_the_handover_line(
 
     assert rc == 0
     assert "Handover: all" in capsys.readouterr().out
+
+
+def test_cli_root_version_prints_version_without_side_effects(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import ciao
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    assert cli.main(["--version"]) == 0
+    assert capsys.readouterr().out == f"ciao {ciao.__version__}\n"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cli_root_version_module_entry(tmp_path: Path) -> None:
+    import os
+    import subprocess
+    import sys
+
+    import ciao
+
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-m", "ciao", "--version"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONPATH": str(root), "HOME": str(tmp_path), "USERPROFILE": str(tmp_path)},
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"ciao {ciao.__version__}\n"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cli_version_flag_after_subcommand_keeps_routing(monkeypatch: pytest.MonkeyPatch) -> None:
+    gws: list[list[str]] = []
+    rel: list[list[str]] = []
+    monkeypatch.setattr(cli.gws_wrapper, "main", lambda argv: gws.append(argv) or 0)
+    monkeypatch.setattr(cli.release, "main", lambda argv: rel.append(argv) or 0)
+
+    assert cli.main(["gws", "--version"]) == 0
+    assert cli.main(["prepare-release", "--version", "1.2.3"]) == 0
+    assert gws == [["--version"]]
+    assert rel == [["--version", "1.2.3"]]
