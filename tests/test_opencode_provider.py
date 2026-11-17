@@ -27,6 +27,7 @@ from ciao.models import (
     ToolUseEvent,
 )
 from ciao.execution_modes import opencode_credential_deny_rules
+from ciao.background_notice import native_shell_run, native_subagent_run, native_wake_run
 from ciao.providers.opencode import (
     OPENCODE_V2_REQUIRED,
     OpencodeProvider,
@@ -37,9 +38,6 @@ from ciao.providers.opencode import (
     _form_field_active,
     _validate_form_field,
     _projected_message,
-    native_shell_run,
-    native_subagent_run,
-    native_wake_run,
     _log_catalog_change,
     _read_v2_messages,
     server_version_error,
