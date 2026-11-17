@@ -309,6 +309,13 @@ class BaseProvider(ABC):
         """
         return None
 
+    @classmethod
+    async def model_catalog(
+        cls, workspace_root: Path, *, force: bool = False
+    ) -> list[dict[str, Any]]:
+        """Optional dynamic model catalog; empty when none is exposed."""
+        return []
+
     @abstractmethod
     def run_streaming(
         self,
