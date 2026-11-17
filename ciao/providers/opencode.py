@@ -64,7 +64,11 @@ if TYPE_CHECKING:
     import subprocess
 
 from ciao.tool_summary import opencode_file_touches, summarize_opencode_tool_input
-from ciao.background_notice import format_finished_runs
+from ciao.background_notice import (
+    NATIVE_WAKE_TAIL_LINES,
+    format_finished_runs,
+    native_wake_run,
+)
 from ciao.core_prompt import system_prompt_payload
 from ciao.models import (
     AgentRequest,
@@ -745,20 +749,40 @@ def invalidate_opencode_model_cache() -> None:
         _MODEL_CACHE.clear()
 
 
-def _version_number(value: object) -> tuple[int, ...] | None:
-    """Parse ``2.0.16`` or CLI output ``opencode v2.0.16``."""
+def version_number(value: object) -> tuple[int, ...] | None:
+    """Parse the dotted version number out of CLI output such as ``opencode v2.0.16``.
+
+    The published parser behind Ciaobot's OpenCode version policy. It reads
+    the permissive dotted-integer prefix it has always read — an optional
+    ``v``, digits joined by dots, prose around them, and any suffix
+    (``2.0.16-beta.3``) after the numbers ignored — and returns that prefix
+    as a tuple: ``"2.0.16"`` → ``(2, 0, 16)``, ``"2.0"`` → ``(2, 0)``,
+    ``"2.0.16.1"`` → ``(2, 0, 16, 1)``. ``None``, ``""`` and ``"unknown"``
+    parse to ``None``. This is not a validated SemVer, and Python's ordinary
+    string conversion of non-string input is relied on as it always was.
+    """
     match = re.search(r"(?<!\d)v?(\d+(?:\.\d+)+)", str(value or ""))
     if not match:
         return None
     return tuple(int(part) for part in match.group(1).split("."))
 
 
-def _server_version_error(payload: object) -> str | None:
-    """Return the user-facing error when ``/api/info`` is too old or not V2."""
+def server_version_error(payload: object) -> str | None:
+    """Return the user-facing error when ``/api/info`` is too old or not V2.
+
+    Version-only judgment: a Mapping payload whose ``version`` strings to the
+    installed release is supported when its parsed version is in ``2.x`` at
+    or above ``(2, 0, 16)`` — anything unparseable, below the floor, outside
+    major 2, blank, or a payload that is not a Mapping at all is refused with
+    ``OPENCODE_V2_REQUIRED``, plus ``Installed server version: <version>.``
+    when a non-blank version was readable. ``None`` means the version is in
+    the supported range and nothing more: it does not promise server health,
+    authentication, or OpenAPI compatibility.
+    """
     if not isinstance(payload, Mapping):
         return OPENCODE_V2_REQUIRED
     version = str(payload.get("version") or "").strip()
-    parsed = _version_number(version)
+    parsed = version_number(version)
     if parsed is None or parsed < (2, 0, 16) or parsed[0] != 2:
         detail = f" Installed server version: {version}." if version else ""
         return f"{OPENCODE_V2_REQUIRED}{detail}"
@@ -1153,103 +1177,6 @@ def _data(payload: object) -> object:
         return payload["data"]
     return payload
 
-
-_SHELL_COMMAND_RE = re.compile(r'<shell\b[^>]*?\bcommand="([^"]*)"')
-_SHELL_EXIT_LINE_RE = re.compile(r"Exited with code -?\d+\s*$")
-_SHELL_CANCELLED_RE = re.compile(r"kill|cancel|abort|interrupt", re.IGNORECASE)
-_SHELL_TAIL_LINES = 50
-
-
-def native_shell_run(
-    text: str, description: str | None, metadata: Mapping[str, Any] | None
-) -> dict[str, Any] | None:
-    """A ``format_finished_runs`` entry for one finished OpenCode shell.
-
-    OpenCode wakes the session with a ``synthetic`` item whose metadata names
-    the shell (``source == "shell"``) and whose text wraps the output in a
-    ``<shell ...>`` element. ``state`` stays ``completed`` for a non-zero
-    exit, so the verdict comes from ``exit``. Returns None for any other item.
-    """
-    if not isinstance(metadata, Mapping) or metadata.get("source") != "shell":
-        return None
-    raw = str(text or "")
-    opened = raw.find("<shell ")
-    start = raw.find(">\n", opened) + 2 if opened >= 0 and raw.find(">\n", opened) >= 0 else 0
-    end = raw.rfind("</shell>")
-    body = raw[start:end] if end >= start else raw[start:]
-    body = _SHELL_EXIT_LINE_RE.sub("", body.rstrip())
-    tail = body.rstrip().splitlines()[-_SHELL_TAIL_LINES:]
-    label = str(description or "").strip()
-    if not label:
-        match = _SHELL_COMMAND_RE.search(raw)
-        label = match.group(1) if match else ""
-    label = " ".join(label.split())[:120]
-    exit_code = metadata.get("exit")
-    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
-        exit_code = None
-    if exit_code == 0:
-        status = "ok"
-    elif _SHELL_CANCELLED_RE.search(str(metadata.get("state") or "")):
-        status = "cancelled"
-    else:
-        status = "failed"
-    return {
-        "label": label,
-        "run_id": str(metadata.get("shellID") or ""),
-        "exit_code": exit_code,
-        "status": status,
-        "error": "",
-        "log_path": None,
-        "last_lines": tail,
-    }
-
-
-
-_SUBAGENT_BODY_RE = re.compile(r"<subagent\b[^>]*>\n?(.*?)\n?</subagent>\s*$", re.DOTALL)
-
-
-def native_subagent_run(
-    text: str, description: str | None, metadata: Mapping[str, Any] | None
-) -> dict[str, Any] | None:
-    """A ``format_finished_runs`` entry for one finished background subagent.
-
-    OpenCode wakes the session with a ``synthetic`` item whose metadata names
-    the child session (``source == "subagent"``) and whose text wraps the
-    child's report in a ``<subagent ...>`` element. Without a notice row the
-    wake's reply joins the turn before it and that turn's answer is drawn as
-    a trace step. Returns None for any other item.
-    """
-    if not isinstance(metadata, Mapping) or metadata.get("source") != "subagent":
-        return None
-    raw = str(text or "")
-    match = _SUBAGENT_BODY_RE.search(raw)
-    body = match.group(1) if match else raw
-    state = str(metadata.get("state") or "")
-    if state == "completed":
-        status = "ok"
-    elif _SHELL_CANCELLED_RE.search(state):
-        status = "cancelled"
-    else:
-        status = "failed"
-    label = " ".join(str(description or metadata.get("agent") or "").split())[:120]
-    return {
-        "label": label,
-        "run_id": str(metadata.get("childID") or ""),
-        "exit_code": None,
-        "status": status,
-        "error": "",
-        "log_path": None,
-        "last_lines": body.rstrip().splitlines()[-_SHELL_TAIL_LINES:],
-    }
-
-
-def native_wake_run(
-    text: str, description: str | None, metadata: Mapping[str, Any] | None
-) -> dict[str, Any] | None:
-    """The finished-run entry for a shell or subagent wake item, else None."""
-    return native_shell_run(text, description, metadata) or native_subagent_run(
-        text, description, metadata
-    )
 
 def _projected_message(message: Mapping[str, Any]) -> dict[str, Any] | None:
     """Project one flat V2 message into the provider's internal part shape.
@@ -2567,7 +2494,7 @@ class OpencodeProvider(BaseSDKProvider):
         """Terminal event of one follow-up execution."""
         notice = ""
         if self._wake_runs:
-            notice = format_finished_runs(self._wake_runs, tail_lines=_SHELL_TAIL_LINES)[0]
+            notice = format_finished_runs(self._wake_runs, tail_lines=NATIVE_WAKE_TAIL_LINES)[0]
             self._wake_runs = []
         return ResultEvent(
             type="result",
@@ -3059,7 +2986,7 @@ class OpencodeProvider(BaseSDKProvider):
                         payload = response.json()
                     except ValueError:
                         raise _StartupContractError("incompatible_version") from None
-                    version_error = _server_version_error(payload)
+                    version_error = server_version_error(payload)
                     if version_error:
                         raise _StartupContractError("incompatible_version")
                     return
@@ -5510,7 +5437,7 @@ class _EphemeralServer:
                     except ValueError:
                         self._startup_classification = "invalid_response"
                         return None
-                    if _server_version_error(payload) is not None:
+                    if server_version_error(payload) is not None:
                         self._startup_classification = "incompatible_version"
                         return None
                     return self._client
@@ -5860,7 +5787,7 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
         version = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
     except (OSError, subprocess.SubprocessError):
         version = ""
-    if _server_version_error({"version": version}) is not None:
+    if server_version_error({"version": version}) is not None:
         return _provider(
             name="opencode",
             ok=False,
