@@ -2163,6 +2163,19 @@ class OpencodeProvider(BaseSDKProvider):
         )
 
     @property
+    def is_connected(self) -> bool:
+        return self.has_live_server
+
+    def interrupted_background_work(self) -> dict[str, Any] | None:
+        return {
+            "children": self.background_child_ids(),
+            "shells": [
+                {"id": row["id"], "command": row["command"]}
+                for row in self.background_shell_rows()
+            ],
+        }
+
+    @property
     def background_work_outstanding(self) -> bool:
         """True while this chat's session has background shells or subagents running."""
         return bool(self._background_shells or self._background_children)
