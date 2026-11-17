@@ -14,6 +14,15 @@ failure propagation (a getter-raised ``AttributeError`` included, which the
 former ``getattr(..., None)`` probe masked) and the inherited read-only
 descriptor's assignment break.
 
+The model-catalog contract (#3178) is class-level dispatch only: the concrete
+optional ``model_catalog`` classmethod on ``BaseProvider`` and its fresh,
+no-work inherited default (empty for either force value), typed dispatch
+through ``type[BaseProvider]`` to a third-adapter override, unwrapped failure
+and cancellation, and built-in characterization — Claude inherits the empty
+default while OpenCode's real override keeps its cache/force behavior with
+only its fetch seam faked. This is not a service or host migration: no
+service, route or manager consumer is migrated, and no assertion claims it.
+
 Counters observe the actual boundaries, independently: the service's
 ``_ensure_provider``, ``execute_streaming`` and ``disconnect``; registry
 lookups (``provider_registry.require``); factory resolution
@@ -1269,3 +1278,422 @@ async def test_service_without_instance_reports_no_session(
     assert handle.stops == 0
     assert service.active_handle() is handle  # a seeded handle is unchanged
     assert service.provider is None
+
+
+# ── model catalog contract ───────────────────────────────────────────────
+
+
+async def test_minimal_adapter_model_catalog_default_is_fresh(
+    tmp_path: Path,
+) -> None:
+    """The inherited catalog default returns a fresh empty list per call.
+
+    Calls go through the base-typed class without constructing the adapter:
+    an empty result means no dynamic catalog supplied by this operation, not
+    that the provider has no models. Two distinct roots and both force values
+    share the same behavior; mutating one result never leaks into the others.
+    """
+    adapter_class: type[BaseProvider] = _MinimalProvider
+    root_one = tmp_path / "catalog-one"
+    root_two = tmp_path / "catalog-two"
+    root_one.mkdir()
+    root_two.mkdir()
+
+    first: list[dict[str, Any]] = await adapter_class.model_catalog(root_one)
+    second: list[dict[str, Any]] = await adapter_class.model_catalog(
+        root_two, force=False
+    )
+    third: list[dict[str, Any]] = await adapter_class.model_catalog(
+        root_one, force=True
+    )
+
+    assert first == []
+    assert second == []
+    assert third == []
+    assert first is not second
+    assert first is not third
+    assert second is not third
+
+    # A caller mutating its result does not corrupt any other call's result,
+    # and the unchanged class defaults are still in place.
+    first.append({"model": "sentinel"})
+    assert second == []
+    assert third == []
+    assert adapter_class.capabilities == ProviderCapabilities()
+
+
+async def test_default_model_catalog_does_no_provider_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The inherited catalog operation is a no-start class operation.
+
+    Both force values answer [] with no adapter construction, no service
+    streaming/disconnect/registration, no registry or factory resolution, no
+    SDK client, server connection or subprocess, and no handle stop. This
+    pins the inherited operation only, not any overriding adapter.
+    """
+    service = ProviderService(_config(tmp_path))
+    counts = _count_provider_seams(monkeypatch, service)
+    _patch_constructor(monkeypatch, _MinimalProvider, counts)
+    handle = _CountingHandle()
+    service._active_handle = handle
+    adapter_class: type[BaseProvider] = _MinimalProvider
+    root_one = tmp_path / "catalog-quiet-one"
+    root_two = tmp_path / "catalog-quiet-two"
+    root_one.mkdir()
+    root_two.mkdir()
+
+    assert await adapter_class.model_catalog(root_one, force=False) == []
+    assert await adapter_class.model_catalog(root_two, force=True) == []
+
+    # Every real seam counted independently and observed at zero.
+    assert counts.ensure == []
+    assert counts.streams == []
+    assert counts.disconnects == []
+    assert counts.registrations == []
+    assert counts.registry_lookups == []
+    assert counts.factory_resolutions == []
+    assert counts.constructions == []
+    assert counts.sdk_constructions == []
+    assert counts.server_invocations == []
+    assert counts.subprocess_invocations == []
+    assert handle.stops == 0
+    assert service.active_handle() is handle  # the seeded handle, untouched
+    assert service.provider is None  # no instance was ever attached
+
+
+_CATALOG_ROWS: list[dict[str, Any]] = [
+    {"model": "prov/text", "label": "Text", "variants": ["fast"], "images": False},
+    {"model": "prov/vision", "label": "Vision", "variants": [], "images": True},
+    # All three image answers are pinned: explicit False (text-only), explicit
+    # True, and absent (unknown). The extension field is preserved unchanged
+    # through the shared dispatch.
+    {"model": "prov/unknown", "label": "Unknown", "variants": [], "extra": "preserved"},
+]
+
+
+class _CatalogProvider(_MinimalProvider):
+    """A third real adapter whose class-level catalog override is pinned."""
+
+    catalog_calls: list[tuple[type[BaseProvider], Path, bool]] = []
+
+    @classmethod
+    async def model_catalog(
+        cls, workspace_root: Path, *, force: bool = False
+    ) -> list[dict[str, Any]]:
+        """Exact shared signature; records the dispatch and returns fixed rows."""
+        _CatalogProvider.catalog_calls.append((cls, workspace_root, force))
+        return _CATALOG_ROWS
+
+
+async def test_third_adapter_model_catalog_dispatches_through_base_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Typed class dispatch reaches an arbitrary adapter override exactly.
+
+    The call site holds ``type[BaseProvider]`` — no fake service or production
+    wrapper bypasses it. The override receives the exact subclass, root object
+    and force value exactly once per call, and the returned rows pass through
+    with identity and content unchanged. This proves the shared dispatch
+    contract only, not a registry-backed production consumer migration.
+    """
+    service = ProviderService(_config(tmp_path))
+    counts = _count_provider_seams(monkeypatch, service)
+    _patch_constructor(monkeypatch, _CatalogProvider, counts)
+    _CatalogProvider.catalog_calls.clear()
+    root_one = tmp_path / "catalog-override-one"
+    root_two = tmp_path / "catalog-override-two"
+    root_one.mkdir()
+    root_two.mkdir()
+    adapter_class: type[BaseProvider] = _CatalogProvider
+
+    first: list[dict[str, Any]] = await adapter_class.model_catalog(root_one)
+    forced: list[dict[str, Any]] = await adapter_class.model_catalog(
+        root_two, force=True
+    )
+
+    assert first is _CATALOG_ROWS
+    assert forced is _CATALOG_ROWS
+    # Content is pinned against independently constructed literals, not only
+    # the constant's identity, so a corrupted or redefined shared constant
+    # cannot hide behind a passing identity check.
+    expected_rows: list[dict[str, Any]] = [
+        {"model": "prov/text", "label": "Text", "variants": ["fast"], "images": False},
+        {"model": "prov/vision", "label": "Vision", "variants": [], "images": True},
+        {"model": "prov/unknown", "label": "Unknown", "variants": [], "extra": "preserved"},
+    ]
+    assert first == expected_rows
+    assert forced == expected_rows
+    assert _CatalogProvider.catalog_calls == [
+        (_CatalogProvider, root_one, False),
+        (_CatalogProvider, root_two, True),
+    ]
+    # Every seam observed independently and at zero: no construction, stream,
+    # service access, registry, factory, SDK, HTTP or subprocess work happens
+    # behind the shared dispatch.
+    assert counts.ensure == []
+    assert counts.streams == []
+    assert counts.disconnects == []
+    assert counts.registrations == []
+    assert counts.registry_lookups == []
+    assert counts.factory_resolutions == []
+    assert counts.constructions == []
+    assert counts.sdk_constructions == []
+    assert counts.server_invocations == []
+    assert counts.subprocess_invocations == []
+
+
+class _FailingCatalogProvider(_MinimalProvider):
+    """A real subclass whose catalog override raises test-controlled errors."""
+
+    pending_failures: list[BaseException] = []
+    raised: list[BaseException] = []
+
+    @classmethod
+    async def model_catalog(
+        cls, workspace_root: Path, *, force: bool = False
+    ) -> list[dict[str, Any]]:
+        del workspace_root, force
+        failure = cls.pending_failures.pop(0)
+        cls.raised.append(failure)
+        raise failure
+
+
+async def test_model_catalog_override_failures_are_not_wrapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An override's ordinary exception and cancellation propagate exactly.
+
+    Raised once each, through the base-typed class: no retries, no fallback
+    list, no construction or process work. The base adds no fail-open
+    translation; host retry policy is separate and untested here.
+    """
+    service = ProviderService(_config(tmp_path))
+    counts = _count_provider_seams(monkeypatch, service)
+    _patch_constructor(monkeypatch, _FailingCatalogProvider, counts)
+    sentinel = RuntimeError("catalog failed")
+    cancellation = asyncio.CancelledError("catalog cancelled")
+    _FailingCatalogProvider.pending_failures[:] = [sentinel, cancellation]
+    _FailingCatalogProvider.raised.clear()
+    adapter_class: type[BaseProvider] = _FailingCatalogProvider
+    root = tmp_path / "catalog-failure-root"
+    root.mkdir()
+
+    with pytest.raises(RuntimeError) as failure_info:
+        await adapter_class.model_catalog(root)
+    assert failure_info.value is sentinel
+
+    with pytest.raises(asyncio.CancelledError) as cancellation_info:
+        await adapter_class.model_catalog(root)
+    assert cancellation_info.value is cancellation
+
+    # Exactly one raise per call, in order, and no fallback results.
+    assert _FailingCatalogProvider.raised == [sentinel, cancellation]
+    assert counts.ensure == []
+    assert counts.streams == []
+    assert counts.disconnects == []
+    assert counts.registrations == []
+    assert counts.registry_lookups == []
+    assert counts.factory_resolutions == []
+    assert counts.constructions == []
+    assert counts.sdk_constructions == []
+    assert counts.server_invocations == []
+    assert counts.subprocess_invocations == []
+
+
+async def test_claude_inherits_empty_model_catalog_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude answers the catalog contract through the inherited no-work default.
+
+    Both force values return fresh empty lists at temporary roots. Empty is
+    not evidence that Claude has no models. The operation is inherited, not a
+    Claude override; Claude's declared capabilities are unchanged.
+    """
+    service = ProviderService(_config(tmp_path))
+    counts = _count_provider_seams(monkeypatch, service)
+    root_one = tmp_path / "catalog-claude-one"
+    root_two = tmp_path / "catalog-claude-two"
+    root_one.mkdir()
+    root_two.mkdir()
+    adapter_class: type[BaseProvider] = ClaudeProvider
+
+    first: list[dict[str, Any]] = await adapter_class.model_catalog(root_one)
+    forced: list[dict[str, Any]] = await adapter_class.model_catalog(
+        root_two, force=True
+    )
+
+    assert first == []
+    assert forced == []
+    assert first is not forced  # fresh lists, not a shared or cached result
+    first.append({"model": "sentinel"})
+    assert forced == []
+
+    # Capabilities are unchanged by the shared contract addition.
+    assert ClaudeProvider.capabilities == ProviderCapabilities(
+        resume=True,
+        fork=True,
+        images=True,
+        stop=True,
+        permissions=True,
+        structured_questions=True,
+        thinking_levels=True,
+        usage=True,
+        quota=True,
+        subagents=True,
+        background_subagents=True,
+        subagent_messages=True,
+        session_history=True,
+        schedule_unattended=True,
+    )
+    # The default is inherited, not a Claude override: the descriptor found on
+    # the class through the MRO is BaseProvider's own.
+    base_descriptor: Any = inspect.getattr_static(BaseProvider, "model_catalog")
+    assert inspect.getattr_static(ClaudeProvider, "model_catalog") is base_descriptor
+
+    # No constructor, SDK, HTTP or subprocess work on the inherited path.
+    assert counts.ensure == []
+    assert counts.streams == []
+    assert counts.disconnects == []
+    assert counts.registrations == []
+    assert counts.registry_lookups == []
+    assert counts.factory_resolutions == []
+    assert counts.constructions == []
+    assert counts.sdk_constructions == []
+    assert counts.server_invocations == []
+    assert counts.subprocess_invocations == []
+
+
+async def test_opencode_catalog_override_satisfies_shared_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OpenCode's existing override satisfies the shared typed contract.
+
+    The real classmethod runs end to end with only ``_fetch_model_catalog``
+    faked, so descriptor dispatch, per-root caching and keyword-only force
+    invalidation all stay real. Precedence:
+    ``tests/test_opencode_provider.py::test_model_catalog_is_cached_between_calls``.
+    No assertion claims that real OpenCode discovery is side-effect free.
+    """
+    import ciao.providers.opencode as mod
+
+    service = ProviderService(_config(tmp_path))
+    counts = _count_provider_seams(monkeypatch, service)
+    root = tmp_path / "catalog-opencode-unique"
+    root.mkdir()
+    catalog_class: type[BaseProvider] = OpencodeProvider
+    fetch_calls: list[tuple[str, Path]] = []
+    fetch_payloads: list[list[dict[str, Any]]] = []
+
+    async def counting_fetch(
+        cls: type[OpencodeProvider], workspace_root: Path
+    ) -> list[dict[str, Any]]:
+        fetch_calls.append((cls.__name__, workspace_root))
+        generation = len(fetch_payloads) + 1
+        rows: list[dict[str, Any]] = [
+            {
+                "model": f"acme/gen-{generation}",
+                "label": f"Gen {generation}",
+                "variants": ["fast"],
+            },
+            {
+                "model": f"acme/gen-{generation}-vision",
+                "label": f"Vision {generation}",
+                "variants": [],
+                "images": True,
+                "extension": "kept",
+            },
+        ]
+        fetch_payloads.append(rows)
+        return rows
+
+    monkeypatch.setattr(
+        OpencodeProvider, "_fetch_model_catalog", classmethod(counting_fetch)
+    )
+    # The override is the adapter's own, and it answers through a base-typed
+    # call site below.
+    assert "model_catalog" in vars(OpencodeProvider)
+
+    try:
+        first: list[dict[str, Any]] = await catalog_class.model_catalog(root)
+        second: list[dict[str, Any]] = await catalog_class.model_catalog(root)
+        forced: list[dict[str, Any]] = await catalog_class.model_catalog(
+            root, force=True
+        )
+
+        assert fetch_calls == [
+            ("OpencodeProvider", root),
+            ("OpencodeProvider", root),
+        ]
+        assert len(fetch_payloads) == 2  # the cache served the second call
+
+        # Every result is compared against expected generation-labelled values
+        # written out as literals here — independent of the fake's own
+        # construction, so the two sides cannot share an object or drift
+        # together and mask a caching bug.
+        expected_first: list[dict[str, Any]] = [
+            {
+                "model": "acme/gen-1",
+                "label": "Gen 1",
+                "variants": ["fast"],
+            },
+            {
+                "model": "acme/gen-1-vision",
+                "label": "Vision 1",
+                "variants": [],
+                "images": True,
+                "extension": "kept",
+            },
+        ]
+        expected_forced: list[dict[str, Any]] = [
+            {
+                "model": "acme/gen-2",
+                "label": "Gen 2",
+                "variants": ["fast"],
+            },
+            {
+                "model": "acme/gen-2-vision",
+                "label": "Vision 2",
+                "variants": [],
+                "images": True,
+                "extension": "kept",
+            },
+        ]
+
+        # First call: exact generation-1 rows with the extension field intact.
+        assert first == expected_first
+        assert first is not fetch_payloads[0]
+        assert first[0] is not fetch_payloads[0][0]
+        assert first[1] is not fetch_payloads[0][1]
+        assert first[1]["images"] is True
+        assert first[1]["extension"] == "kept"
+
+        # The uncached second call is served from cache: generation-1 values
+        # again, a fresh object against the prior result and the payload —
+        # top level and every row — with no second fetch.
+        assert second == expected_first
+        assert second is not first
+        assert second is not fetch_payloads[0]
+        assert second[0] is not first[0]
+        assert second[1] is not first[1]
+        assert second[0] is not fetch_payloads[0][0]
+        assert second[1] is not fetch_payloads[0][1]
+
+        # The forced call refetches generation 2, not the cached generation 1.
+        assert forced == expected_forced
+        assert forced != expected_first
+        assert forced is not fetch_payloads[1]
+        assert forced[0] is not fetch_payloads[1][0]
+        assert forced[1] is not fetch_payloads[1][1]
+
+        # The fetch seam is faked, so no real construction, streaming, HTTP
+        # connection or subprocess happened behind the catalog read.
+        assert counts.constructions == []
+        assert counts.streams == []
+        assert counts.server_invocations == []
+        assert counts.subprocess_invocations == []
+    finally:
+        # Only this unique root's cache entry is removed; other roots and the
+        # production cache code are untouched.
+        with mod._MODEL_CACHE_GUARD:
+            mod._MODEL_CACHE.pop(str(root), None)
