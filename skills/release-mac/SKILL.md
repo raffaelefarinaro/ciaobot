@@ -104,7 +104,9 @@ must not be published.
 **One artifact ships: the DMG.** It is both the human download and Sparkle's
 update enclosure. Its volume holds `Ciaobot.app` next to an `Applications`
 symlink, so installing means dragging the app into Applications instead of
-running it from the download folder. A copy run from Downloads is translocated
+running it from the download folder. The volume opens as the styled install
+window (fixed size, brand background with an arrow, large icons, no toolbar or
+sidebar) laid out by `mac/scripts/dmg_layout.py`. A copy run from Downloads is translocated
 by macOS, and Sparkle then refuses to update it. `scripts/make-dmg.sh` refuses
 an unstapled app, an app another team signed, a bundle identifier other than
 `local.ciaobot.mac`, an app inside an Applications folder, and an existing
@@ -130,6 +132,10 @@ spctl --assess --type open --context context:primary-signature --verbose=4 Ciaob
 mnt=$(mktemp -d "${TMPDIR:-/tmp}/ciaobot-dmg.XXXXXX")
 hdiutil attach -readonly -nobrowse -mountpoint "$mnt" Ciaobot-<version>.dmg
 ls -l "$mnt/Applications" "$mnt/Ciaobot.app"    # Applications -> /Applications
+layout=$(mktemp "${TMPDIR:-/tmp}/ciaobot-layout.XXXXXX")
+python3 -I scripts/dmg_layout.py dsstore --volume-name Ciaobot --app-name Ciaobot.app > "$layout"
+cmp "$mnt/.DS_Store" "$layout" && echo layout-ok
+rm -f "$layout"
 codesign --verify --deep --strict --verbose=2 "$mnt/Ciaobot.app"
 xcrun stapler validate "$mnt/Ciaobot.app"
 plutil -p "$mnt/Ciaobot.app/Contents/Info.plist" | grep -E 'SU(FeedURL|PublicEDKey|AutomaticallyUpdate)|CFBundle(Short)?Version'
@@ -141,7 +147,10 @@ The plist must carry the feed URL and public key from
 `release/update-config.env`, and Gatekeeper must report `accepted` with
 `source=Notarized Developer ID`. If a check fails, still run the `hdiutil
 detach` line: never leave a volume mounted, and never publish an image whose
-volume lacks the app or the `Applications` symlink. The image is not a `.pkg`:
+volume lacks the app or the `Applications` symlink. `layout-ok` proves the
+`.DS_Store` survived signing, notarization and stapling unchanged; then open the
+stapled DMG in Finder, check the window (fixed size, background art and arrow,
+the two icons readable in Light and Dark mode), and eject it. The image is not a `.pkg`:
 it installs nothing by itself, it only makes the drag to Applications the
 obvious action.
 

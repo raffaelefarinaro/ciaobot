@@ -6,7 +6,10 @@
 # The image is the human download: its volume holds Ciaobot.app next to an
 # `Applications` symlink, so the expected action is to drag the app into
 # Applications before launching it. A copy launched from the download folder is
-# translocated by macOS, and Sparkle then refuses to update it.
+# translocated by macOS, and Sparkle then refuses to update it. The volume also
+# carries a Finder layout (a fixed window, large icons at set positions and a
+# hidden background picture with an arrow) written by scripts/dmg_layout.py from
+# release/dmg/background*.png; it is checked again on the read-only mount.
 #
 # The app must already be notarized and stapled (submitted by
 # scripts/package-notarized.sh) and signed by this project's Developer ID team;
@@ -36,9 +39,11 @@ usage: scripts/make-dmg.sh --app PATH --output PATH --identity IDENTITY
 The app must be a real directory (not a symlink), carry CFBundleIdentifier
 local.ciaobot.mac, pass `xcrun stapler validate`, and be signed by the team in
 release/update-config.env. The image is staged from a copy of the app plus an
-`Applications -> /Applications` symlink, created with hdiutil, signed with the
-identity, verified, mounted read-only and inspected, then detached and moved to
---output. Nothing is written to an Applications folder and an existing output is
+`Applications -> /Applications` symlink and the Finder layout that
+scripts/dmg_layout.py writes from release/dmg/background*.png, created with
+hdiutil, signed with the identity, verified, mounted read-only and inspected
+(the layout must match scripts/dmg_layout.py byte for byte), then detached and
+moved to --output. Nothing is written to an Applications folder and an existing output is
 never replaced.
 
 Notarize, staple and checksum the image afterwards; scripts/package-notarized.sh
@@ -162,6 +167,17 @@ esac
 [ "$signed_team" = "$UPDATE_TEAM_ID" ] \
     || die "app was signed by team $signed_team, not $UPDATE_TEAM_ID; refusing another developer's build"
 
+# The Finder layout is written into the staging folder before the image exists,
+# from committed art and the system python3 and tiffutil; nothing is mounted or
+# driven through Finder.
+dmg_assets=release/dmg
+for art in background.png background@2x.png; do
+    [ -f "$dmg_assets/$art" ] && [ ! -L "$dmg_assets/$art" ] \
+        || die "missing DMG background art in release/dmg: $art"
+done
+command -v python3 >/dev/null 2>&1 || die "python3 is required to write the disk image's Finder layout"
+command -v tiffutil >/dev/null 2>&1 || die "tiffutil is required to build the disk image's background picture"
+
 # --- The output -----------------------------------------------------------
 
 case $output in
@@ -199,6 +215,9 @@ trap cleanup EXIT INT TERM
 mkdir "$stage"
 ditto "$app" "$stage/$app_name"
 ln -s /Applications "$stage/Applications"
+python3 -I scripts/dmg_layout.py stage --volume-name Ciaobot --app-name "$app_name" \
+    --background "$dmg_assets/background.png" --background-2x "$dmg_assets/background@2x.png" "$stage" \
+    || die "could not write the disk image's Finder layout"
 
 hdiutil create -volname Ciaobot -srcfolder "$stage" -fs HFS+ -format UDZO "$pending"
 codesign --force --timestamp --sign "$identity" "$pending"
@@ -232,6 +251,15 @@ mounted_identifier=$(plutil -extract CFBundleIdentifier raw -o - "$mounted_app/C
 link_target=$(readlink "$mount_point/Applications")
 [ "$link_target" = "/Applications" ] \
     || die "the image's Applications link points at '$link_target' instead of /Applications"
+[ -f "$mount_point/.DS_Store" ] && [ ! -L "$mount_point/.DS_Store" ] \
+    || die "the image has no Finder layout (.DS_Store)"
+expected_layout=$work_root/expected.DS_Store
+python3 -I scripts/dmg_layout.py dsstore --volume-name Ciaobot --app-name "$app_name" > "$expected_layout" \
+    || die "could not regenerate the Finder layout to compare against"
+cmp -s "$expected_layout" "$mount_point/.DS_Store" \
+    || die "the image's Finder layout differs from scripts/dmg_layout.py"
+[ -f "$mount_point/.background.tiff" ] && [ ! -L "$mount_point/.background.tiff" ] \
+    || die "the image has no background picture"
 codesign --verify --deep --strict --verbose=2 "$mounted_app"
 hdiutil detach "$mount_point" >/dev/null
 mount_point=

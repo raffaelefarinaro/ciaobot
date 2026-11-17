@@ -82,7 +82,38 @@ signed, that is not `local.ciaobot.mac`, that lives inside an Applications
 folder, and any existing output; it stages a copy in a private directory beside
 the image, signs the image with the same Developer ID, verifies it, mounts it
 read-only to prove the app and the `Applications` symlink are there, and always
-detaches it again, including on failure.
+detaches it again, including on failure. The volume opens as the familiar
+install window: a fixed 640×400 window without toolbar, sidebar, path bar or
+status bar, 128 pt icons with `Ciaobot.app` on the left and `Applications` on
+the right, and a hidden `.background.tiff` (brand art with an arrow between the
+two icons) built from `release/dmg/background.png` and `background@2x.png`. The
+layout is written into the staging folder before the image is created, and the
+read-only mount is checked: its `.DS_Store` must equal, byte for byte, what
+`scripts/dmg_layout.py` generates, and the background picture must be present.
+
+### Disk image layout and background art
+
+`scripts/dmg_layout.py` is the single source of the layout. It uses only the
+system `python3` and `tiffutil`: it writes the volume's `.DS_Store` (window
+bounds, view options, the two icon positions, an alias naming the background by
+volume name and path) and the multi-resolution `.background.tiff` into the
+staging folder, so a release needs no mounted read-write image, no Finder and no
+AppleScript, and the `.DS_Store` is identical on every run. Its `geometry`
+subcommand prints the coordinates as JSON; the art generator reads them from
+there. The committed art in `release/dmg/` (kept out of `Sources/`, so it never
+enters the app bundle) comes from `swift scripts/make-dmg-background.swift`,
+which nobody runs at build time: regenerate it only when the art changes and
+update the pinned SHA-256 values in `DmgScriptTests`. Finder paints the picture
+unchanged in Light and Dark mode but draws icon names in black or white, so each
+name sits on a `#6d739c` plate that holds 4.5:1 against both. The window frame
+counts Finder's 28 pt title bar, so the window bounds are 640×428.
+
+To preview the layout by hand, build `.build/Ciaobot.app` with
+`scripts/build-app.sh`, `ditto` it into a scratch folder next to an
+`Applications -> /Applications` symlink, run `python3 -I scripts/dmg_layout.py
+stage` on that folder, create an image with `hdiutil create -srcfolder`, mount it
+read-only, look at it in both appearances, and detach and delete everything. Never
+sign, notarize or install anything for a preview.
 
 Sparkle is pinned to exactly 2.10.1 in `Package.swift`; `Package.resolved`
 records the resolved revision (`sparkle` 2.10.1, revision `ab7d712`).
@@ -147,7 +178,8 @@ What this build is not:
 
 Download the `.dmg`, open it, drag **Ciaobot** into **Applications**, and launch
 it from there. The volume holds the app next to an `Applications` symlink, so
-that drag is the whole installation. The image is signed with the same
+that drag is the whole installation: the window shows the app, an arrow and
+the Applications folder. The image is signed with the same
 Developer ID as the app inside it, notarized and stapled. Check a hand-downloaded
 image against the digest printed by `scripts/package-notarized.sh` or the digest
 GitHub shows on the release asset; there is no `.sha256` download.
@@ -469,7 +501,7 @@ When macOS actually denies notifications, the blocked row inside **Settings** sh
 - **Change Connected Host…** reuses the existing connection-screen flow and returns **Keep me signed in** to its default instead of carrying the previous choice to the new host. Its unit test proves that the local request is posted only after presentation succeeds, and that a failed presentation reports a visible error instead of dropping the change. A full host switch against a live installation remains manual.
 - When the main SwiftUI window cannot be found, the presenter restores the saved Dock policy, activates the app, and shows an explicit alert rather than creating an `NSWindow` outside SwiftUI's ownership or silently doing nothing. The real alert and the macOS reopen/Dock-reopen path remain manual GUI checks.
 - Automatic updates exist only in a release build that embeds the public feed and EdDSA key. The updater is unit-tested with a Sparkle double, so no test starts an updater or contacts the feed; a real check, download, install and relaunch on this Mac remains a manual check with a notarized release build. Feed signing (`SURequireSignedFeed`) is off for this first release, so a compromised feed could withhold or delay updates (it cannot install an archive that fails the EdDSA signature and notarization checks); turning feed signing on is the recorded follow-up, together with key rotation and delta updates. Installing the first updater-enabled build over 0.1.1 is manual because that build has no updater.
-- The disk image is produced only by a release run on a signing Mac. Its tests drive the real `scripts/make-dmg.sh` with recording `hdiutil`, `codesign` and `xcrun` doubles plus one real `hdiutil` create/mount/detach of a throwaway image, so no test notarizes, staples or Gatekeeper-assesses an image, and none performs a real drag-to-Applications install. Those remain manual release checks.
+- The disk image is produced only by a release run on a signing Mac. Its tests drive the real `scripts/make-dmg.sh` with recording `hdiutil`, `codesign` and `xcrun` doubles plus one real `hdiutil` create/mount/detach of a throwaway image, so no test notarizes, staples or Gatekeeper-assesses an image, and none performs a real drag-to-Applications install. The tests read the staged and mounted `.DS_Store` and background picture; how Finder draws the window in Light and Dark mode remains a manual release check, as do the notarization and install steps.
 - The fixed Settings URLs are unit-tested as exact app-owned strings, but whether System Settings highlights the intended pane on every supported macOS release is a manual check. The app never uses a page-provided URL for this action.
 - The native install is tested with fake installer scripts through the real spawn, pipe and signal path, never against the real release. A full install, setup and connect on a fresh Mac is a manual check before each release that changes the pin.
 - Native repair is tested with fake installer scripts through the real spawn, pipe and signal path, never against a real release. A real repair of a broken installation with engine v1.9.0 is a manual check.
