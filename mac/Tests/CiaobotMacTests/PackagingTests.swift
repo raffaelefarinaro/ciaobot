@@ -101,6 +101,8 @@ final class PackagingTests: XCTestCase {
         XCTAssertTrue(probe.contains("create-stage-app=yes"), probe)
         XCTAssertTrue(probe.contains("create-stage-link=/Applications"),
                       "the volume must offer the Applications symlink: \(probe)")
+        XCTAssertTrue(probe.contains("create-stage-dsstore=yes"),
+                      "the volume must carry its Finder layout: \(probe)")
 
         XCTAssertTrue(artifacts.contains("Ciaobot.app"))
         XCTAssertFalse(artifacts.contains { $0.hasPrefix(".ciaobot-dmg.") },
@@ -518,9 +520,17 @@ final class PackagingTests: XCTestCase {
             try fileManager.copyItem(at: scriptsDirectory.appendingPathComponent(name), to: destination)
             try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destination.path)
         }
+        try fileManager.copyItem(
+            at: scriptsDirectory.appendingPathComponent("dmg_layout.py"),
+            to: scripts.appendingPathComponent("dmg_layout.py")
+        )
         try writeExecutable(Self.stubBundleBuilder, at: scripts.appendingPathComponent("build-app.sh"))
         let release = repo.appendingPathComponent("release", isDirectory: true)
         try fileManager.createDirectory(at: release, withIntermediateDirectories: true)
+        try fileManager.copyItem(
+            at: packageRoot.appendingPathComponent("release/dmg"),
+            to: release.appendingPathComponent("dmg", isDirectory: true)
+        )
         try fileManager.copyItem(
             at: packageRoot.appendingPathComponent("release/update-config.env"),
             to: release.appendingPathComponent("update-config.env")
