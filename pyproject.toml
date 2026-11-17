@@ -54,6 +54,7 @@ dependencies = [
 test = [
   "build==1.6.1",
   "wheel>=0.48.0",
+  "packaging==26.2",
   "pytest==9.2.0",
   "pytest-asyncio==1.4.1.post1",
   "pytest-cov>=5.0.0",

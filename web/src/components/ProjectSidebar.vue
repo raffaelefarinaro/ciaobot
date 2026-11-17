@@ -1975,7 +1975,11 @@ async function confirmDeleteChat(chatId: string) {
     confirmLabel: 'Delete chat',
     destructive: true,
   })) return
-  await store.deleteChat(chatId)
+  try {
+    await store.deleteChat(chatId)
+  } catch (e) {
+    store.pushErrorToast('Could not delete chat', errorMessage(e))
+  }
 }
 </script>
 

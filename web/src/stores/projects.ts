@@ -3316,13 +3316,15 @@ export const useProjectStore = defineStore('projects', () => {
     chatId: string,
     options?: { selectNext?: boolean; onlyIfEmpty?: boolean },
   ): Promise<boolean> {
-    disconnectWs(chatId)
-    dropBesideChat(chatId)
     // `only_if_empty` makes the server apply its own `_is_empty_chat` rule and
     // decline otherwise, so closing a draft can never delete a real chat.
     const query = options?.onlyIfEmpty ? '?only_if_empty=1' : ''
     const result = await api.del<{ deleted?: boolean }>(`/api/chats/${chatId}${query}`)
     if (options?.onlyIfEmpty && result?.deleted === false) return false
+    // Only after the server agreed: a refusal (409 while the chat is still
+    // stopping) leaves the socket and the beside pane as they were.
+    disconnectWs(chatId)
+    dropBesideChat(chatId)
     // The chat is gone for good, and so are its needs-you actions.
     setChatActions(chatId, [])
     // Deliberate delete: the chat is really gone, so any draft riding along

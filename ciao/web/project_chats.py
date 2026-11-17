@@ -15,7 +15,7 @@ import dataclasses
 import time
 import unicodedata
 import uuid
-from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator, Sequence
+from collections.abc import AsyncGenerator, Callable, Coroutine, Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -346,6 +346,13 @@ def _network_retry_interval(attempts: int) -> int:
 
 class RecoveryLifecycleConflict(ValueError):
     """A recovery or lifecycle operation is already in flight."""
+
+
+class ChatTeardownConflict(RecoveryLifecycleConflict):
+    """The chat is still stopping, so a teardown would race its unsettled work."""
+
+
+_TEARDOWN_CONFLICT = "This chat is still stopping. Try again when stopping finishes."
 
 
 class RecoveryRequestConflict(ValueError):
@@ -1761,9 +1768,21 @@ class ProjectChatManager:
             raise ValueError(f"Chat registry {self._path} is not a JSON object")
         return payload
 
+    def _refuse_unsettled_teardown(self, chat_ids: Iterable[str]) -> None:
+        """Refuse a teardown while a Stop handoff or a waiting drive is outstanding."""
+        for chat_id in chat_ids:
+            if self._streaming.teardown_unsettled(chat_id):
+                raise ChatTeardownConflict(_TEARDOWN_CONFLICT)
+
+    def _project_chat_ids(self, project_id: str) -> list[str]:
+        return [
+            cid for cid, chat in self._chats.items() if chat.project_id == project_id
+        ]
+
     @contextmanager
     def _chat_lifecycle_guard(self, chat_id: str) -> Iterator[None]:
         """Reserve lifecycle work against recovery claims without holding a lock across I/O."""
+        self._refuse_unsettled_teardown([chat_id])
         if not self._path:
             yield
             return
@@ -3633,6 +3652,7 @@ class ProjectChatManager:
         project = self._projects.get(project_id)
         if project is None:
             raise ValueError("Project not found.")
+        self._refuse_unsettled_teardown(self._project_chat_ids(project_id))
 
         vault_moved = False
         vault_folder = project.vault_folder or None
@@ -3984,6 +4004,7 @@ class ProjectChatManager:
             raise ValueError(
                 f"The {project.name} project is auto-managed and cannot be deleted."
             )
+        self._refuse_unsettled_teardown(self._project_chat_ids(project_id))
         report: dict[str, Any] = {
             "vault_entry_removed": False,
             "removed_notes": 0,
@@ -5339,7 +5360,6 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None:
             return None
-        self._revoke_mcp_chat(chat_id)
         ctx = ChatContext.for_web(chat_id)
         # Reading a large session JSONL and rendering the markdown transcript
         # is the expensive part. On the loop that froze every other request and
@@ -5355,6 +5375,11 @@ class ProjectChatManager:
         # it) would resurrect a deleted chat in the PWA sidebar.
         if self._chats.get(chat_id) is not chat:
             return None
+        # The entry guard already ran, but a Stop or send can land across the
+        # await above. Refuse before the first mutation so a refusal never
+        # leaves the MCP token revoked on a chat that stays alive.
+        self._refuse_unsettled_teardown([chat_id])
+        self._revoke_mcp_chat(chat_id)
         if chat.retry_status:
             self._clear_chat_retry(chat)
         self._cancel_pending_push(chat_id)
@@ -5608,6 +5633,8 @@ class ProjectChatManager:
             return True
         if chat_id in self._subagents.watching_chat_ids():
             return True
+        if self._streaming.teardown_unsettled(chat_id):
+            return True
         if self._provider_background_busy(chat_id, self._providers.get(chat_id)):
             return True
         chat = self._chats.get(chat_id)
@@ -5703,6 +5730,8 @@ class ProjectChatManager:
         provider without necessarily opening a broker stream.
         """
         if chat_id in active:
+            return True
+        if self._streaming.teardown_unsettled(chat_id):
             return True
         # A Claude drain lives as long as its CLI (#1402), so an idle drain is
         # not work. Claude's background agents are counted by active_chat_ids,
@@ -6696,6 +6725,11 @@ class ProjectChatManager:
         busy = set(self.active_chat_ids())
         return sorted(cid for cid in busy if cid in chat_ids)
 
+    def refuse_workspace_teardown(self, workspace: str) -> None:
+        """Raise ``ChatTeardownConflict`` while a chat of *workspace* is still stopping."""
+        _project_ids, chat_ids = self.workspace_scope(workspace)
+        self._refuse_unsettled_teardown(sorted(chat_ids))
+
     def workspace_counts(self, workspace: str) -> dict[str, int]:
         """How many projects and open chats archiving *workspace* would close."""
         project_ids, chat_ids = self.workspace_scope(workspace)
@@ -6719,7 +6753,8 @@ class ProjectChatManager:
         the removal needs still finds its own agent root.
         """
         counts = self.workspace_counts(workspace)
-        project_ids, _chat_ids = self.workspace_scope(workspace)
+        project_ids, chat_ids = self.workspace_scope(workspace)
+        self._refuse_unsettled_teardown(sorted(chat_ids))
         for project_id in sorted(project_ids):
             self._remove_project(project_id)
         return counts
@@ -10701,6 +10736,30 @@ class ProjectChatManager:
             stream.moved_to_background = False
         return outcome
 
+    async def _finish_background_stop(self, chat_id: str) -> None:
+        """Abort OpenCode's follow-up execution and release the parked announce."""
+        # OpenCode's follow-up execution runs in the server, not in the
+        # drain: ending the drain alone would leave it running (#1391).
+        service = self._providers.get(chat_id)
+        live = service.provider if service is not None else None
+        if isinstance(live, OpencodeProvider) and live.current_session_id:
+            try:
+                await asyncio.wait_for(
+                    live.abort_session(live.current_session_id),
+                    timeout=self._STOP_GRACE_S,
+                )
+            except asyncio.TimeoutError:
+                pass
+        # The drain's cancelled path leaves the park to the next
+        # turn, but Stop starts none, so nobody is left to release it. Flush here or the chat keeps
+        # its interim message with no unread badge, no push and no
+        # archive proposal (issue #437).
+        #
+        # A no-op if a user turn started while we were awaiting the
+        # drain above: `_flush_result_announce` refuses during a live turn,
+        # which discards the park and announces for itself when it ends.
+        self._flush_result_announce(chat_id)
+
     async def stop_chat(self, chat_id: str) -> bool:
         """Stop the chat's in-flight turn.
 
@@ -10735,32 +10794,22 @@ class ProjectChatManager:
             stream.user_stopped = True
             if stream.background:
                 # No active handle exists between turns; stopping means
-                # ending the drain (its cleanup finishes the stream).
-                await self._await_between_turns_drain(chat_id)
-                # OpenCode's follow-up execution runs in the server, not in the
-                # drain: ending the drain alone would leave it running (#1391).
-                service = self._providers.get(chat_id)
-                live = service.provider if service is not None else None
-                if isinstance(live, OpencodeProvider) and live.current_session_id:
-                    try:
-                        await asyncio.wait_for(
-                            live.abort_session(live.current_session_id),
-                            timeout=self._STOP_GRACE_S,
-                        )
-                    except asyncio.TimeoutError:
-                        pass
-                # The drain's cancelled path leaves the park to the next
-                # turn, but Stop starts none, so nobody is left to release it. Flush here or the chat keeps
-                # its interim message with no unread badge, no push and no
-                # archive proposal (issue #437).
-                #
-                # A no-op if a user turn started while we were awaiting the
-                # drain above — Stop followed straight by a send is an ordinary
-                # sequence, and the send cancels the drain and registers its own
-                # stream at that await point. `_flush_result_announce` refuses
-                # during a live turn, which discards the park and announces for
-                # itself when it ends.
-                self._flush_result_announce(chat_id)
+                # ending the drain (its cleanup finishes the stream). The drain
+                # unwind and the provider abort run as one shared handoff that a
+                # following foreground send waits for.
+                self._streaming.begin_background_stop(
+                    chat_id, lambda: self._finish_background_stop(chat_id)
+                )
+                await self._streaming.join_stop_handoff(chat_id)
+                return True
+            # A drive still waiting on its predecessor withdraws; an entered
+            # turn has no pre-entry slot, so this is a no-op for it.
+            self._streaming.request_pre_entry_stop(chat_id, stream)
+        else:
+            # No owner: a background Stop's teardown may still be running, and
+            # a second Stop joins it instead of probing the provider.
+            if self._streaming.pending_stop_handoff(chat_id) is not None:
+                await self._streaming.join_stop_handoff(chat_id)
                 return True
         provider = self._providers.get(chat_id)
         if provider is None:

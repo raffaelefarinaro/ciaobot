@@ -8434,6 +8434,34 @@ describe('workspace and chat transitions', () => {
     expect(apiPost).toHaveBeenCalledWith('/api/chats/c2/read', {})
   })
 
+  test('deleteChat keeps socket and beside pane when the server refuses', async () => {
+    // The server answers 409 while the chat is still stopping: nothing about
+    // the chat is gone, so its socket and beside pane must stay as they were.
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj 1', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c1', project_id: 'p1', title: 'Chat 1', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      { chat_id: 'c2', project_id: 'p1', title: 'Chat 2', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeWorkspace = 'personal'
+    store.activeChatId = 'c2'
+    apiGet.mockResolvedValue([])
+    store.connectWs('c1')
+    store.besideChatId = 'c1'
+    const socketsBefore = fakeSockets.length
+    apiDel.mockRejectedValue(new Error('This chat is still stopping. Try again when stopping finishes.'))
+
+    await expect(store.deleteChat('c1')).rejects.toThrow('still stopping')
+
+    expect(store.chats.find(c => c.chat_id === 'c1')).toBeDefined()
+    expect(store.besideChatId).toBe('c1')
+    expect(fakeSockets.length).toBe(socketsBefore)
+    expect(fakeSockets[0].readyState).toBe(FakeWebSocket.OPEN)
+    expect(store.activeChatId).toBe('c2')
+  })
+
   test('deleteChat clears any lingering draft for the deleted chat', async () => {
     // A deliberate delete is never a sweep casualty: clear its draft key
     // immediately so a later reconciliation pass never mistakes it for one (#277).

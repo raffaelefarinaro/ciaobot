@@ -68,18 +68,19 @@ async def test_own_chat_with_a_foreground_stream_arms_the_reload(tmp_path: Path)
     pcm, plane, project = _setup(tmp_path)
     chat = pcm.create_chat(project.project_id, title="own")
     gate = asyncio.Event()
+    entered = asyncio.Event()
 
     async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        entered.set()
         await gate.wait()
         return
         yield
 
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
     stream = pcm.start_stream(chat.chat_id, "initial")
-    for _ in range(100):
-        if pcm.get_active_stream(chat.chat_id) is not None:
-            break
-        await asyncio.sleep(0.01)
+    # A reload asked by the live turn itself arrives after the turn has
+    # entered the provider, so the drive's pre-entry slot is already released.
+    await asyncio.wait_for(entered.wait(), timeout=5)
 
     result = plane.chat_reload(_principal(chat.chat_id, project.project_id), "")
 
