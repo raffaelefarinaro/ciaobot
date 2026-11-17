@@ -38,12 +38,14 @@ MAX_TAG_COMPONENTS = 64
 MAX_TAGS_PER_WHEEL = 4096
 MAX_TOTAL_TAGS = 1_000_000
 MAX_TARGET_TAGS = 10_000
+MAX_CHAIN_DEPTH = 256
+MAX_REPORT_BYTES = 4 * 1024 * 1024
 LOCK_VERSION = 1
 LOCK_REVISION = 5
 REGISTRY = "https://pypi.org/simple"
 ARTIFACT_HOST = "files.pythonhosted.org"
 _HEX = re.compile(r"[0-9a-f]{64}")
-_UNSUPPORTED_MARKER = re.compile(r"platform_release|platform_version")
+_URL_FORBIDDEN = re.compile(r"[\x00-\x20\x7f\\\s]")
 _EXTRA_MARKER = re.compile(r"\bextra\b")
 _VERSION = re.compile(r"[0-9]+(?:\.[0-9]+)*")
 _CHAIN_SEPARATOR = " → "
@@ -208,15 +210,31 @@ def _evaluate(marker: Any, target: Target, extra: str = "") -> bool:
     if marker is None:
         return True
     _require(type(marker) is str)
-    _require(_UNSUPPORTED_MARKER.search(marker) is None)
     pk = _packaging()
+    env = target.environment()
+    env["extra"] = extra
     try:
         parsed = pk.markers.Marker(marker)
-        env = target.environment()
-        env["extra"] = extra
+        # The parser maps legacy aliases (platform.version, python_implementation, ...)
+        # onto canonical variables, so check the parsed variables, not the text.
+        _require(_marker_variables(parsed._markers, pk.markers.Variable) <= set(env))
         return bool(parsed.evaluate(env))
+    except AuditError:
+        raise
     except Exception as exc:
         raise AuditError("invalid-input") from exc
+
+
+def _marker_variables(node: Any, variable: type) -> set[str]:
+    """Every variable name in a parsed marker tree (tuples, lists, 'and'/'or')."""
+    if isinstance(node, variable):
+        return {str(node.value)}
+    if isinstance(node, (tuple, list)):
+        found: set[str] = set()
+        for item in node:
+            found |= _marker_variables(item, variable)
+        return found
+    return set()
 
 
 # ------------------------------------------------------------ lock model
@@ -243,7 +261,8 @@ def _edge_list(value: Any) -> list[dict[str, Any]]:
 class _Lock:
     def __init__(self, data: dict[str, Any], target: Target) -> None:
         pk = _packaging()
-        _require(data.get("version") == LOCK_VERSION and data.get("revision") == LOCK_REVISION)
+        for key, expected in (("version", LOCK_VERSION), ("revision", LOCK_REVISION)):
+            _require(type(data.get(key)) is int and data[key] == expected)
         requires_python = data.get("requires-python")
         _require(type(requires_python) is str)
         try:
@@ -440,6 +459,7 @@ def _chain(lock: _Lock, state: State, parent: dict[State, State | None], root_na
     labels: list[str] = []
     current: State | None = state
     while current is not None:
+        _require(len(labels) < MAX_CHAIN_DEPTH, "resource-limit")
         labels.append(_label(lock, current, root_name))
         current = parent[current]
     return _CHAIN_SEPARATOR.join(reversed(labels))
@@ -488,10 +508,14 @@ def _locked_candidate(
     url, digest, size = record["url"], record["hash"], record["size"]
     _require(type(url) is str and type(digest) is str and digest.startswith("sha256:"))
     _require(_is_hex(digest[len("sha256:"):]) and _is_pos_int(size))
-    parsed = urllib.parse.urlsplit(url)
-    _require(parsed.scheme == "https" and parsed.hostname == ARTIFACT_HOST)
-    _require(not (parsed.username or parsed.password or parsed.query or parsed.fragment))
-    _require(parsed.port is None and parsed.path.startswith("/packages/"))
+    _require(_URL_FORBIDDEN.search(url) is None)
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError as exc:
+        raise AuditError("invalid-input") from exc
+    # The URL is emitted verbatim, so it must equal its parsed form and name the host as written.
+    _require(parsed.geturl() == url and parsed.scheme == "https" and parsed.netloc == ARTIFACT_HOST)
+    _require(not (parsed.query or parsed.fragment) and parsed.path.startswith("/packages/"))
     filename = urllib.parse.unquote(parsed.path.rsplit("/", 1)[-1])
     match = _wheel_matches(name, version, filename, priority, budget_total)
     if match is None:
@@ -511,7 +535,12 @@ def _select_locked(
     best: tuple[Any, dict[str, Any]] | None = None
     wheels = package.get("wheels", [])
     _require(type(wheels) is list)
+    seen: dict[str, tuple[Any, Any]] = {}
     for record in wheels:
+        if type(record) is dict and type(record.get("url")) is str:
+            filename = urllib.parse.unquote(record["url"].rsplit("/", 1)[-1])
+            _require(seen.setdefault(filename, (record.get("hash"), record.get("size")))
+                     == (record.get("hash"), record.get("size")))
         found = _locked_candidate(name, package["version"], record, priority, budget_total)
         if found is not None and (best is None or found[0] < best[0]):
             best = found
@@ -562,8 +591,10 @@ def audit(project: Path, lock: Path) -> dict[str, Any]:
     """Return the audit report; raise AuditError for exit-2 conditions."""
     _packaging()
     try:
-        pin = engine_runtime.load_runtime_pin()
         pin_bytes = _read_bounded(Path(engine_runtime.MANIFEST), MAX_PIN_BYTES)
+        pin = engine_runtime._validate(json.loads(
+            pin_bytes.decode("utf-8"), object_pairs_hook=engine_runtime._object,
+            parse_constant=engine_runtime._reject_constant))
         build_inputs = engine_derived_wheel.load_build_inputs()
     except AuditError:
         raise
@@ -599,12 +630,10 @@ def audit(project: Path, lock: Path) -> dict[str, Any]:
         elif name in derived:
             selected_rows.append({"name": name, "version": version, "origin": "derived", **derived[name]})
         else:
-            blockers.append({
-                "code": "missing-compatible-wheel",
-                "chain": _chain(model, first[name], parent, root_name),
-            })
+            chain = _chain(model, first[name], parent, root_name)
+            blockers.append({"code": "missing-compatible-wheel", "chain": chain})
     blockers.sort(key=lambda b: (b["code"], b["chain"]))
-    return {
+    report = {
         "schema": 1,
         "kind": "lock-wheel-audit",
         "installable": False,
@@ -618,6 +647,8 @@ def audit(project: Path, lock: Path) -> dict[str, Any]:
         "selected": selected_rows,
         "blockers": blockers,
     }
+    _require(len(json.dumps(report, sort_keys=True, indent=2)) <= MAX_REPORT_BYTES, "resource-limit")
+    return report
 
 
 # -------------------------------------------------------------------- CLI

@@ -615,3 +615,171 @@ def test_cli_exit_one_prints_the_report(tmp_path, monkeypatch, capsys) -> None:
     assert ed.main(["--project", str(project), "--lock", str(lock)]) == 1
     report = json.loads(capsys.readouterr().out)
     assert report["installable"] is False and report["blockers"][0]["chain"] == "ciaobot \u2192 a==1.0"
+
+
+# ------------------------------------------------- review hardening
+
+
+def _target():
+    return ed.Target(ed.engine_runtime.load_runtime_pin())
+
+
+@pytest.mark.parametrize("marker", [
+    "platform_release >= '1'", "platform.release >= '1'", "platform_version >= '1'",
+    "platform.version == 'x'", "'x' == platform.version", "os_name == 'posix' and platform.version == 'x'",
+    "(sys_platform == 'darwin' or (platform_version != 'x'))", "unknown_variable == 'x'",
+])
+def test_markers_outside_the_fixed_environment_are_refused_for_every_alias(monkeypatch, marker) -> None:
+    host = dict(packaging.markers.default_environment(), platform_release="6.1", platform_version="#1")
+    monkeypatch.setattr(packaging.markers, "default_environment", lambda: host)
+    assert code_of(ed._evaluate, marker, _target()) == "invalid-input"
+
+
+@pytest.mark.parametrize("marker,expected", [
+    ("python_implementation == 'CPython' and sys.platform == 'darwin'", True),
+    ("platform.machine == 'arm64' and os.name == 'posix'", True),
+    ("sys_platform == 'linux'", False),
+    ("platform_python_implementation == 'PyPy'", False),
+])
+def test_marker_aliases_inside_the_fixed_environment_use_it_not_the_host(monkeypatch, marker, expected) -> None:
+    linux = dict(packaging.markers.default_environment(), sys_platform="linux", platform_system="Linux",
+                 platform_machine="x86_64", platform_python_implementation="PyPy", os_name="nt")
+    monkeypatch.setattr(packaging.markers, "default_environment", lambda: linux)
+    assert ed._evaluate(marker, _target()) is expected
+
+
+def test_platform_release_marker_in_a_lock_edge_is_refused(tmp_path, monkeypatch) -> None:
+    packages = [pkg("a", deps=[{"name": "b", "marker": "platform_release >= '1'"}]), pkg("b")]
+    assert _audit(tmp_path, monkeypatch, *render(packages, [req("a")])) == "invalid-input"
+    packages = [pkg("a", deps=[{"name": "b", "marker": "platform.version == 'x'"}]), pkg("b")]
+    assert _audit(tmp_path, monkeypatch, *render(packages, [req("a")])) == "invalid-input"
+
+
+def _chain_packages(count, last_wheels):
+    return [pkg(f"p{i}", deps=[{"name": f"p{i + 1}"}] if i + 1 < count else [],
+                wheels=last_wheels if i + 1 == count else ["py3-none-any"]) for i in range(count)]
+
+
+def test_deep_blocker_chain_is_a_resource_limit(tmp_path, monkeypatch) -> None:
+    no_derived(monkeypatch)
+    deep = write(tmp_path, *render(_chain_packages(ed.MAX_CHAIN_DEPTH + 40, []), [req("p0")]))
+    assert code_of(ed.audit, *deep) == "resource-limit"
+    shallow = run_fixture(tmp_path, monkeypatch, _chain_packages(ed.MAX_CHAIN_DEPTH - 5, []), [req("p0")])
+    assert len(shallow["blockers"]) == 1
+
+
+def test_report_size_is_capped(tmp_path, monkeypatch) -> None:
+    packages = [pkg("a", deps=[{"name": f"b{i}"} for i in range(20)])] + [pkg(f"b{i}", wheels=[]) for i in range(20)]
+    inputs = write(tmp_path, *render(packages, [req("a")]))
+    no_derived(monkeypatch)
+    assert len(ed.audit(*inputs)["blockers"]) == 20
+    monkeypatch.setattr(ed, "MAX_REPORT_BYTES", 200)
+    assert code_of(ed.audit, *inputs) == "resource-limit"
+    monkeypatch.setattr(ed, "MAX_REPORT_BYTES", 1)
+    assert code_of(ed.audit, *write(tmp_path, *render([pkg("a")], [req("a")]))) == "resource-limit"
+
+
+def _url_lock(url):
+    project, lock = render([pkg("a")], [req("a")])
+    old = _wheel_url("a-1.0-py3-none-any.whl")
+    assert old in lock
+    return project, lock.replace(old, url)
+
+
+@pytest.mark.parametrize("url", [
+    "https://files.pythonhosted.org/packages/aa/a-1.0-py3-none-any.wh\tl",
+    "https://files.pythonhosted.org/packages/aa/a-1.0-py3-none-any.wh\nl",
+    "https://files.pythonhosted.org/packages/aa/a-1.0-py3-none-any.wh\rl",
+    "https://files.pythonhosted.org/packages/aa/a-1.0-py3-none-any.whl\\x",
+    "https://files.pythonhosted.org/packages/aa/a-1.0-py3-none-any.whl ",
+    "https://files.pythonhosted.org/packages/a\\b/a-1.0-py3-none-any.whl",
+    "https://files.pythonhosted.org/packages/a b/a-1.0-py3-none-any.whl",
+    "https://files.pythonhosted.org/packages/a\x01b/a-1.0-py3-none-any.whl",
+    "https://files.pythonhosted.org/packages/aa/a-1.0-py3-none-any.whl\u00a0",
+    "https://Files.PythonHosted.org/packages/aa/a-1.0-py3-none-any.whl",
+    "https://files.pythonhosted.org:443/packages/aa/a-1.0-py3-none-any.whl",
+    "https://files.pythonhosted.org:99999/packages/aa/a-1.0-py3-none-any.whl",
+    "https://files.pythonhosted.org./packages/aa/a-1.0-py3-none-any.whl",
+    "https://files.pythonhosted.org/packages/aa/a-1.0-py3-none-any.whl?",
+    "https://files.pythonhosted.org/packages/aa/a-1.0-py3-none-any.whl#",
+    "https://[::1/packages/aa/a-1.0-py3-none-any.whl",
+    "https://files.pythonhosted.org/other/a-1.0-py3-none-any.whl",
+    "https://files.pythonhosted.org/a-1.0-py3-none-any.whl",
+])
+def test_wheel_urls_must_be_emitted_exactly_as_validated(tmp_path, monkeypatch, url) -> None:
+    assert _audit(tmp_path, monkeypatch, *_url_lock(url)) == "invalid-input"
+
+
+def test_url_path_prefix_check_is_load_bearing(tmp_path, monkeypatch) -> None:
+    report = run_fixture(tmp_path, monkeypatch, [pkg("a")], [req("a")])
+    assert report["selected"][0]["url"].startswith("https://files.pythonhosted.org/packages/")
+    assert _audit(tmp_path, monkeypatch, *_url_lock(
+        "https://files.pythonhosted.org/simple/a-1.0-py3-none-any.whl")) == "invalid-input"
+
+
+def test_runtime_pin_is_read_once(tmp_path, monkeypatch) -> None:
+    no_derived(monkeypatch)
+    pin_copy = tmp_path / "engine-runtime.json"
+    good = (REPO / "mac/engine-runtime.json").read_bytes()
+    pin_copy.write_bytes(good)
+    monkeypatch.setattr(ed.engine_runtime, "MANIFEST", pin_copy)
+    inputs = write(tmp_path, *render([pkg("a")], [req("a")]))
+    reads = []
+    real = ed._read_bounded
+
+    def spy(path, limit):
+        data = real(path, limit)
+        if Path(path) == pin_copy:
+            reads.append(data)
+            pin_copy.write_bytes(b"{")  # a second read would now see different bytes
+        return data
+
+    monkeypatch.setattr(ed, "_read_bounded", spy)
+    report = ed.audit(*inputs)
+    assert len(reads) == 1
+    assert report["inputs"]["runtime_pin_sha256"] == hashlib.sha256(good).hexdigest()
+
+
+@pytest.mark.parametrize("edit", [
+    lambda lock: lock.replace("version = 1\n", "version = true\n", 1),
+    lambda lock: lock.replace("revision = 5", "revision = true"),
+    lambda lock: lock.replace("revision = 5", "revision = 5.0"),
+    lambda lock: lock.replace("version = 1\n", "version = 1.0\n", 1),
+])
+def test_lock_version_and_revision_must_be_exact_integers(tmp_path, monkeypatch, edit) -> None:
+    project, lock = render([pkg("a")], [req("a")])
+    assert edit(lock) != lock
+    assert _audit(tmp_path, monkeypatch, project, edit(lock)) == "invalid-input"
+
+
+def test_duplicate_wheel_filename_with_different_hash_is_refused(tmp_path, monkeypatch) -> None:
+    project, lock = render([pkg("a")], [req("a")])
+    record = '    { url = "%s", hash = "sha256:%s", size = 200 },' % (_wheel_url("a-1.0-py3-none-any.whl"), WHEEL_SHA)
+    assert record in lock
+    other = record.replace(WHEEL_SHA, "e" * 64)
+    assert _audit(tmp_path, monkeypatch, project, lock.replace(record, record + "\n" + other)) == "invalid-input"
+    no_derived(monkeypatch)
+    same = ed.audit(*write(tmp_path, project, lock.replace(record, record + "\n" + record)))
+    assert same["selected"][0]["sha256"] == WHEEL_SHA
+
+
+def test_multi_tag_wheel_ranks_by_its_best_tag(tmp_path, monkeypatch) -> None:
+    multi = "cp312.py3-cp312.none-macosx_13_0_arm64.any"
+    report = run_fixture(tmp_path, monkeypatch, [pkg(
+        "a", wheels=["cp311-abi3-macosx_11_0_arm64", multi])], [req("a")])
+    assert report["selected"][0]["filename"].endswith(multi + ".whl")
+    assert "cp312-cp312-macosx_13_0_arm64" in report["selected"][0]["tags"]
+    assert "py3-none-any" in report["selected"][0]["tags"]
+
+
+def test_root_self_edge_is_refused(tmp_path, monkeypatch) -> None:
+    packages = [pkg("a", deps=[{"name": "ciaobot"}])]
+    assert _audit(tmp_path, monkeypatch, *render(packages, [req("a")])) == "invalid-input"
+
+
+@pytest.mark.parametrize("edge", ['{ name = "b" }', '{ name = "a", extra = ["x"] }'])
+def test_isolated_root_edge_must_match_the_requires_dist(tmp_path, monkeypatch, edge) -> None:
+    project, lock = render([pkg("a", optional={"x": []}), pkg("b")], [req("a")])
+    root_edge = '    { name = "a" },\n]'
+    assert root_edge in lock
+    assert _audit(tmp_path, monkeypatch, project, lock.replace(root_edge, f"    {edge},\n]", 1)) == "invalid-input"
