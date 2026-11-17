@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "build_tools": [
+    {
+      "name": "setuptools",
+      "version": "84.2.1",
+      "filename": "setuptools-84.2.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/ef/55/6dc6d6bb953bdfc52519a0059592c52b6e3b8ad51cf8256dffceb55b0610/setuptools-84.2.1-py3-none-any.whl",
+      "size": 876263,
+      "sha256": "ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2"
+    }
+  ],
+  "derived_wheels": [
+    {
+      "name": "http-ece",
+      "version": "1.2.1",
+      "reason": "no wheel published for any http-ece release; required by pywebpush (Web Push)",
+      "sdist": {
+        "filename": "http_ece-1.2.1.tar.gz",
+        "url": "https://files.pythonhosted.org/packages/7c/af/249d1576653b69c20b9ac30e284b63bd94af6a175d72d87813235caf2482/http_ece-1.2.1.tar.gz",
+        "size": 8830,
+        "sha256": "8c6ab23116bbf6affda894acfd5f2ca0fb8facbcbb72121c11c75c33e7ce8cff"
+      },
+      "license": {
+        "spdx": "MIT",
+        "declared_in": {
+          "sdist_member": "http_ece-1.2.1/PKG-INFO",
+          "sha256": "005011863b66a1f73e228f95ac3ba2d58959b2d293f134c264947974bf3862de"
+        },
+        "text_file": {
+          "path": "mac/licenses/http-ece-LICENSE",
+          "size": 1081,
+          "sha256": "7d71f48c474da1de82fbdaac7fea5a1eaa41e4ac998dd44fd2897812812138d9"
+        },
+        "source_url": "https://raw.githubusercontent.com/martinthomson/encrypted-content-encoding/master/python/LICENSE",
+        "note": "The pinned sdist ships no licence file; it declares MIT in PKG-INFO (License and classifier) and setup.py. The text is the upstream repository's MIT LICENSE (Copyright (c) 2015 Martin Thomson), committed here and added to the wheel as dist-info/licenses/LICENSE. Maintainer approved 2026-11-17."
+      },
+      "build": {
+        "tool": "setuptools",
+        "backend": "setuptools.build_meta:__legacy__",
+        "source_date_epoch": 1723075847,
+        "umask": "022"
+      },
+      "wheel": {
+        "filename": "http_ece-1.2.1-py2.py3-none-any.whl",
+        "size": 5717,
+        "sha256": "696199016b82de2b91f936d01ddf636769174fcc2766f9b1a741c12676beea80",
+        "requires_dist": [
+          "cryptography>=2.5"
+        ],
+        "members": [
+          {
+            "path": "http_ece-1.2.1.dist-info/METADATA",
+            "size": 1136,
+            "sha256": "66a0ad64af9c95f34fa525de5debd85570a76686b1576d78406a0446fcbf04e4"
+          },
+          {
+            "path": "http_ece-1.2.1.dist-info/RECORD",
+            "size": 478,
+            "sha256": "a48e4d0541a46780fbcc309c9610ef73741801fdd5c4873af8e69fe21dc599a4"
+          },
+          {
+            "path": "http_ece-1.2.1.dist-info/WHEEL",
+            "size": 109,
+            "sha256": "52f960d9a36510a76296cc85489b75417e667b47846c28d0cd1de765e164bf2e"
+          },
+          {
+            "path": "http_ece-1.2.1.dist-info/licenses/LICENSE",
+            "size": 1081,
+            "sha256": "7d71f48c474da1de82fbdaac7fea5a1eaa41e4ac998dd44fd2897812812138d9"
+          },
+          {
+            "path": "http_ece-1.2.1.dist-info/top_level.txt",
+            "size": 9,
+            "sha256": "fbbe03a364f0c71fa6a5da8082763a4a301f86771d8f92ce2bd2269976c3b63e"
+          },
+          {
+            "path": "http_ece/__init__.py",
+            "size": 13073,
+            "sha256": "2ddd0f18e1b0c287fe6bea53be7fbab1d950fe15b7184bb80ffabd98c40433f9"
+          }
+        ]
+      }
+    }
+  ]
+}
