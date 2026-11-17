@@ -38,6 +38,9 @@ class _PCM:
     def workspace_busy_chat_ids(self, workspace: str) -> list[str]:
         return []
 
+    def refuse_workspace_teardown(self, workspace: str) -> None:
+        return None
+
 
 def _world(tmp_path: Path, monkeypatch) -> tuple[TestClient, dict[str, str], CiaoConfig]:
     """A session-guarded app over a real config with `personal` and `work`."""
