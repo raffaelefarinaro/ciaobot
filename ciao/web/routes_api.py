@@ -1866,6 +1866,8 @@ async def project_detail(request: Request) -> JSONResponse:
         delete_vault = raw_delete_vault.strip().lower() in {"1", "true"}
         try:
             result = pcm.delete_project(project_id, delete_vault=delete_vault)
+        except RecoveryLifecycleConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         return JSONResponse({
@@ -1911,6 +1913,8 @@ async def project_complete(request: Request) -> JSONResponse:
         return JSONResponse({"error": "outcome and note must be strings"}, status_code=400)
     try:
         result = pcm.complete_project(project_id, outcome=outcome, note=note)
+    except RecoveryLifecycleConflict as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     return JSONResponse(result)

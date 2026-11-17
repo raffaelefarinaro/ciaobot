@@ -18,7 +18,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -366,6 +366,12 @@ class ChatStreaming:
         self._between_turn_drains: dict[str, asyncio.Task[None]] = {}
         self._last_drain_result: dict[str, tuple[str, bool]] = {}
         self._drive_tasks: dict[str, tuple[ChatStream, asyncio.Task[None]]] = {}
+        # A background Stop's shared teardown: the drain unwind plus the
+        # provider abort. A foreground drive joins it before it enters.
+        self._stop_handoffs: dict[str, asyncio.Task[None]] = {}
+        # A foreground drive that has not entered the provider yet. The event
+        # is its withdrawal signal: Stop sets it to wake the wait.
+        self._pre_entry: dict[str, tuple[ChatStream, asyncio.Event]] = {}
 
     @property
     def turn_perf_started(self) -> dict[tuple[str, int], float]:
@@ -385,6 +391,83 @@ class ChatStreaming:
 
     def discard_drain_result(self, chat_id: str) -> None:
         self._last_drain_result.pop(chat_id, None)
+
+    def teardown_unsettled(self, chat_id: str) -> bool:
+        """True while a Stop handoff or a not-yet-entered drive is outstanding.
+
+        An idle or cancelling drain never counts: every Claude chat has one
+        between turns, and a stuck one must not make the chat undeletable.
+        """
+        return chat_id in self._stop_handoffs or chat_id in self._pre_entry
+
+    def pending_stop_handoff(self, chat_id: str) -> asyncio.Task[None] | None:
+        task = self._stop_handoffs.get(chat_id)
+        if task is None or task.done():
+            return None
+        return task
+
+    async def join_stop_handoff(self, chat_id: str) -> None:
+        task = self.pending_stop_handoff(chat_id)
+        if task is not None:
+            await self._join_task(task)
+
+    def begin_background_stop(
+        self, chat_id: str, finish: Callable[[], Awaitable[None]]
+    ) -> asyncio.Task[None]:
+        """Start (or share) the teardown that follows a background Stop."""
+        pending = self.pending_stop_handoff(chat_id)
+        if pending is not None:
+            return pending
+
+        async def _handoff() -> None:
+            await self._host._await_between_turns_drain(chat_id)
+            try:
+                await finish()
+            except Exception:
+                logger.exception("Background stop teardown failed for chat %s", chat_id)
+
+        task = asyncio.create_task(_handoff())
+        self._stop_handoffs[chat_id] = task
+
+        def _settled(finished: asyncio.Task[None]) -> None:
+            if self._stop_handoffs.get(chat_id) is finished:
+                self._stop_handoffs.pop(chat_id, None)
+
+        task.add_done_callback(_settled)
+        return task
+
+    def request_pre_entry_stop(self, chat_id: str, stream: ChatStream) -> bool:
+        """Wake a drive still waiting on its predecessor so it withdraws."""
+        slot = self._pre_entry.get(chat_id)
+        if slot is None or slot[0] is not stream:
+            return False
+        slot[1].set()
+        return True
+
+    async def _join_predecessors(self, chat_id: str) -> None:
+        await self._host._await_between_turns_drain(chat_id)
+        await self.join_stop_handoff(chat_id)
+
+    async def _await_predecessor(self, chat_id: str, stream: ChatStream) -> bool:
+        """Wait for the previous drain and stop handoff; True if Stop withdrew us."""
+        slot = self._pre_entry.get(chat_id)
+        event = slot[1] if slot is not None and slot[0] is stream else asyncio.Event()
+        join = asyncio.create_task(self._join_predecessors(chat_id))
+        stopper = asyncio.create_task(event.wait())
+        try:
+            await asyncio.wait({join, stopper}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            stream.finish()
+            self._host._broker.clear(chat_id, stream)
+            raise
+        finally:
+            join.cancel()
+            stopper.cancel()
+            await asyncio.gather(join, stopper, return_exceptions=True)
+            current = self._pre_entry.get(chat_id)
+            if current is not None and current[0] is stream:
+                self._pre_entry.pop(chat_id, None)
+        return stream.user_stopped
 
     def drive_task(
         self, chat_id: str, stream: ChatStream | None = None
@@ -433,6 +516,7 @@ class ChatStreaming:
         unattended: bool,
         compact: bool = False,
     ) -> None:
+        self._pre_entry[chat_id] = (stream, asyncio.Event())
         task = asyncio.create_task(
             self.drive(
                 chat_id=chat_id,
@@ -453,6 +537,12 @@ class ChatStreaming:
             current = self._drive_tasks.get(chat_id)
             if current is not None and current[1] is finished:
                 self._drive_tasks.pop(chat_id, None)
+            # A drive cancelled before its first step never reaches
+            # ``_await_predecessor``'s cleanup; the slot is identity-checked on
+            # the stream so a newer admission's slot stays.
+            slot = self._pre_entry.get(chat_id)
+            if slot is not None and slot[0] is stream:
+                self._pre_entry.pop(chat_id, None)
 
         task.add_done_callback(_clear)
         if not unattended:
@@ -516,7 +606,10 @@ class ChatStreaming:
         vault_root: Path | None = None
         agent_root: Path | None = None
         vault_root_resolved = False
-        await self._host._await_between_turns_drain(chat_id)
+        withdrawn = await self._await_predecessor(chat_id, stream)
+        # A compaction is a command, never a chip; only the first pass can be
+        # withdrawn, so the flag is consumed there.
+        withdraw_pending = withdrawn and not compact
 
         hidden_turn = False
         retry_armed = False
@@ -885,13 +978,32 @@ class ChatStreaming:
                     # re-announcing the previous turn's answer.
                     last_assistant_text = ""
                     last_answer_text = ""
-                    stream.publish(
-                        self._host._stop_result_payload(
+                    if withdraw_pending:
+                        # Stop landed while the drive waited on its
+                        # predecessor: the prompt never reached the provider,
+                        # so it returns to the waiting queue as a chip.
+                        withdraw_pending = False
+                        self._host.on_prompt_cancelled(
                             chat_id,
-                            turn_index=current_turn_index,
-                            text=turn_steps.text,
+                            stream,
+                            current_prompt,
+                            current_images,
+                            current_turn_index,
                         )
-                    )
+                        current_turn_index = None
+                        stream.publish(
+                            self._host._stop_result_payload(
+                                chat_id, turn_index=None, text=""
+                            )
+                        )
+                    else:
+                        stream.publish(
+                            self._host._stop_result_payload(
+                                chat_id,
+                                turn_index=current_turn_index,
+                                text=turn_steps.text,
+                            )
+                        )
                 else:
                     turn_task = asyncio.create_task(
                         _run_turn(), name=f"chat-turn-{chat_id}"
@@ -1954,33 +2066,89 @@ class ChatStreaming:
             self._host._state.set_quota(quota)
         self._host._state.update_session(chat.session_id or None, ctx)
 
+    @staticmethod
+    def _request_drain_cancel(task: asyncio.Task[None]) -> None:
+        """Ask a drain to cancel once: a second request would hit its cleanup."""
+        if not task.done() and task.cancelling() == 0:
+            task.cancel()
+
+    @staticmethod
+    async def _join_task(task: asyncio.Task[None]) -> None:
+        """Wait for ``task`` without owning it.
+
+        The task's own cancellation or failure is swallowed; the waiter's own
+        cancellation still propagates, and never cancels the joined task.
+        """
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling() > 0:
+                raise
+        except Exception:  # noqa: BLE001
+            return
+
     def cancel_between_turns_drain(self, chat_id: str) -> None:
         """Fire-and-forget cancel; pair with await_between_turns_drain."""
         task = self._between_turn_drains.get(chat_id)
-        if task is not None and not task.done():
-            task.cancel()
+        if task is not None:
+            self._request_drain_cancel(task)
 
     async def await_between_turns_drain(self, chat_id: str) -> None:
-        """Wait until this chat's drain has fully unwound."""
-        task = self._between_turn_drains.pop(chat_id, None)
+        """Wait until this chat's drain has fully unwound.
+
+        The task stays registered while it unwinds, so every waiter joins the
+        same cleanup instead of the second one returning early.
+        """
+        task = self._between_turn_drains.get(chat_id)
         if task is None:
             return
         if not task.done():
-            task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            return
-        except Exception:  # noqa: BLE001
-            return
+            self._request_drain_cancel(task)
+            await self._join_task(task)
+        if self._between_turn_drains.get(chat_id) is task:
+            self._between_turn_drains.pop(chat_id, None)
 
     def start_between_turns_drain(self, chat_id: str, project_id: str) -> None:
         provider_service = self._host._providers.get(chat_id)
         if provider_service is None or not provider_service.can_drain:
             return
-        self._host._cancel_between_turns_drain(chat_id)
-        task = asyncio.create_task(self._host._drain_between_turns(chat_id, project_id))
+        owner = self._host._broker.get(chat_id)
+        if owner is not None and not owner.background:
+            return
+        old = self._between_turn_drains.get(chat_id)
+        if old is not None and not old.done() and old.cancelling() == 0:
+            # A live, uncancelled drain is already the reader.
+            return
+        if old is not None and not old.done():
+            # A withdrawn Stop cancelled this drain while a foreground turn
+            # waited. Chain a replacement behind its unwind so a background wake
+            # is not lost and two readers never overlap.
+            coro = self._replacement_drain(old, chat_id, project_id)
+        else:
+            coro = self._host._drain_between_turns(chat_id, project_id)
+        task = asyncio.create_task(coro)
         self._between_turn_drains[chat_id] = task
+
+        def _settled(finished: asyncio.Task[None]) -> None:
+            if self._between_turn_drains.get(chat_id) is finished:
+                self._between_turn_drains.pop(chat_id, None)
+            if not finished.cancelled():
+                finished.exception()
+
+        task.add_done_callback(_settled)
+
+    async def _replacement_drain(
+        self, old: asyncio.Task[None], chat_id: str, project_id: str
+    ) -> None:
+        await self._join_task(old)
+        provider_service = self._host._providers.get(chat_id)
+        if provider_service is None or not provider_service.can_drain:
+            return
+        owner = self._host._broker.get(chat_id)
+        if owner is not None and not owner.background:
+            return
+        await self._host._drain_between_turns(chat_id, project_id)
 
     def _record_opencode_wake_turn(self, chat_id: str, event: ResultEvent) -> None:
         """File the execution OpenCode ran after background work finished.
@@ -2034,22 +2202,28 @@ class ChatStreaming:
             return
         stream: ChatStream | None = None
         cancelled = False
+        superseded = False
 
         def close_stream(had_error: bool, last_error: str = "") -> None:
             nonlocal stream
             if stream is None:
                 return
+            # ``get`` hides a finished stream, so read ownership first. A
+            # drain a foreground admission replaced closes its own subscribers
+            # but must not publish a global done over the live turn.
+            owned = self._host._broker.get(chat_id) is stream
             stream.finish()
             self._host._broker.clear(chat_id, stream)
-            self._host._events.publish(
-                {
-                    "type": "chat_streaming_done",
-                    "chat_id": chat_id,
-                    "project_id": project_id,
-                    "is_error": had_error,
-                    "last_error": last_error,
-                }
-            )
+            if owned:
+                self._host._events.publish(
+                    {
+                        "type": "chat_streaming_done",
+                        "chat_id": chat_id,
+                        "project_id": project_id,
+                        "is_error": had_error,
+                        "last_error": last_error,
+                    }
+                )
             stream = None
 
         try:
@@ -2057,6 +2231,16 @@ class ChatStreaming:
             # Reset per terminal result: each wake is its own turn (#2139).
             drain_segment = FinalAnswerTracker()
             async for event in provider_service.drain_events():
+                # No await sits in this body, so one check covers every side
+                # effect of the iteration: a cancelled drain or one a
+                # foreground admission replaced must not touch chat state.
+                current_task = asyncio.current_task()
+                owner = self._host._broker.get(chat_id)
+                if (
+                    current_task is not None and current_task.cancelling() > 0
+                ) or (owner is not None and not owner.background):
+                    superseded = True
+                    break
                 drain_segment.feed(event)
                 if (
                     isinstance(event, ResultEvent)
@@ -2191,7 +2375,7 @@ class ChatStreaming:
             logger.exception("Between-turns drain failed for chat %s", chat_id)
         finally:
             close_stream(False)
-            if not cancelled:
+            if not cancelled and not superseded:
                 self._host._flush_result_announce(chat_id)
 
     async def wait_for_drain_result(

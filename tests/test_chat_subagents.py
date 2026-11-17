@@ -2335,8 +2335,10 @@ async def test_stopping_the_drain_releases_the_park(tmp_path: Path) -> None:
 
     stream = ChatStream(background=True)
     pcm._broker.register("chat-1", stream)
-    drain = asyncio.get_running_loop().create_future()
-    pcm._between_turn_drains["chat-1"] = drain  # type: ignore[assignment]
+    # A real task: the registry holds tasks, and the drain wait reads
+    # ``cancelling()``, which a bare future does not have.
+    drain = asyncio.create_task(asyncio.Event().wait())
+    pcm._between_turn_drains["chat-1"] = drain
     pcm._park_result_announce("chat-1", "proj-1", "Title", "interim")
 
     assert await pcm.stop_chat("chat-1") is True
