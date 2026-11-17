@@ -63,6 +63,7 @@ from claude_agent_sdk import (
 from claude_agent_sdk.types import TERMINAL_TASK_STATUSES, HookContext, HookInput, HookJSONOutput, PermissionMode, SandboxSettings, SystemPromptPreset
 
 from ciao.tool_summary import summarize_claude_tool_input
+from ciao.mcp_names import is_claudeai_connector
 from ciao.fs_sandbox import (
     CLAUDE_FILE_TOOL_PATH_KEYS,
     claude_file_tool_guard,
@@ -146,7 +147,6 @@ MCP_RECONNECT_TIMEOUT_S = 20.0
 _CLAUDEAI_CATALOG_DEADLINE_S = 30.0
 _CLAUDEAI_CATALOG_POLL_S = 2.0
 _CLAUDEAI_CATALOG_MAX_RETRIES = 2
-_CLAUDEAI_PREFIX = "claude.ai "
 _CLAUDEAI_SEEN_MARKER = "claudeai_connectors_seen"
 CLAUDEAI_CATALOG_RETRY_NOTICE = (
     "claude.ai connectors didn't load: Claude Code's connector list request "
@@ -193,11 +193,6 @@ _BASH_MAX_TIMEOUT_ENV = "BASH_MAX_TIMEOUT_MS"
 # Every control-request failure is a bare ``Exception``, so the message is the
 # only thing that identifies an initialize handshake that missed its deadline.
 _INITIALIZE_TIMEOUT_MESSAGE = "Control request timeout: initialize"
-
-
-def is_claudeai_connector(name: str) -> bool:
-    """A claude.ai connector: listed by the claude.ai account, connected on claude.ai, never by ``claude mcp login``."""
-    return name.startswith(_CLAUDEAI_PREFIX)
 
 
 class ClaudeInitializeTimeout(RuntimeError):

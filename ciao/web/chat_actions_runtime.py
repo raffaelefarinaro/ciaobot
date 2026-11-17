@@ -24,9 +24,10 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from ciao.chat_actions import ChatAction, ChatActionError, action_key, action_payload
+from ciao.mcp_names import is_claudeai_connector
 from ciao.oauth_callback import CallbackTarget, validate_pasted_callback
 from ciao.provider_service import ProviderImpl
-from ciao.providers.claude import ClaudeProvider, is_claudeai_connector
+from ciao.providers.claude import ClaudeProvider
 from ciao.providers.opencode import McpOAuthUnavailable, OpencodeProvider
 from ciao.web.chat_actions_base import ActionContext, ActionHandler
 from ciao.web.device_code_auth import DeviceCodeFlow

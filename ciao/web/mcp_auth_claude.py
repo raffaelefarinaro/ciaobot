@@ -18,7 +18,8 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from ciao.chat_actions import ActionState, ChatAction
-from ciao.providers.claude import ClaudeProvider, get_bundled_claude_path, is_claudeai_connector
+from ciao.mcp_names import is_claudeai_connector
+from ciao.providers.claude import ClaudeProvider, get_bundled_claude_path
 from ciao.terminal_scrape import first_https_url, last_error_line, strip_terminal_controls
 from ciao.terminal_sessions import TerminalSessionError
 from ciao.tool_path import resolve_tool
