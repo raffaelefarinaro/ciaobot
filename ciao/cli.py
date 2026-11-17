@@ -10247,6 +10247,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _dispatch(argv_list: list[str]) -> int:
+    if argv_list == ["--version"]:
+        from ciao import __version__  # noqa: PLC0415
+
+        print(f"ciao {__version__}")
+        return 0
     # The agent surface (`ciao memory …`, `ciao vault search …`): dispatch
     # before building the operator parser so a call from a chat costs
     # interpreter start-up, not this module's import graph. ``ciao.agent_cli``

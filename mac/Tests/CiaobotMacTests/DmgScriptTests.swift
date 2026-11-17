@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 
 /// Exercises `scripts/make-dmg.sh` against throwaway staged apps with recording
@@ -231,6 +232,15 @@ final class DmgScriptTests: XCTestCase {
         XCTAssertTrue(probe.contains("create-stage-app=yes"), "the staged volume must contain Ciaobot.app: \(probe)")
         XCTAssertTrue(probe.contains("create-stage-link=/Applications"),
                       "the staged volume must contain Applications -> /Applications: \(probe)")
+        XCTAssertTrue(probe.contains("create-stage-dsstore=yes"),
+                      "the staged volume must carry the Finder layout: \(probe)")
+        XCTAssertTrue(probe.contains("create-stage-background=yes"),
+                      "the staged volume must carry the hidden background picture: \(probe)")
+        XCTAssertEqual(
+            try Data(contentsOf: hdiutilState.appendingPathComponent("stage.DS_Store")),
+            try layoutBytes(),
+            "the staged .DS_Store must be exactly what scripts/dmg_layout.py generates"
+        )
         XCTAssertTrue(probe.contains("detach-published=no"),
                       "nothing may be published before the image is inspected and detached: \(probe)")
         XCTAssertFalse(probe.contains(stage), "the probe must not leak the staging path")
@@ -284,6 +294,80 @@ final class DmgScriptTests: XCTestCase {
         XCTAssertTrue(probe.contains("attach-mountpoint="), "the image must have been mounted for inspection: \(probe)")
     }
 
+    /// A volume that lost its Finder layout is refused, and still detached.
+    func testRefusesAVolumeWithoutItsFinderLayout() throws {
+        let app = try makeApp()
+        let output = try outputPath()
+
+        let result = try runScript(
+            ["--app", app.path, "--output", output, "--identity", identity],
+            environment: ["FAKE_HDIUTIL_SKIP_LAYOUT": "1"]
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("Finder layout"), result.output)
+        XCTAssertFalse(fileManager.fileExists(atPath: output), "a failed inspection must publish nothing")
+
+        let calls = try hdiutilCalls()
+        XCTAssertEqual(calls.filter { $0.first == "attach" }.count, 1)
+        XCTAssertEqual(calls.filter { $0.first == "detach" }.count, 1,
+                       "the failure path must still detach: \(calls)")
+        XCTAssertEqual(calls.last?.first, "detach", "detach must be the last image operation: \(calls)")
+    }
+
+    /// Each mounted layout file is compared or checked on its own; every case
+    /// fails with its own message, publishes nothing and still detaches.
+    private func assertMountedLayoutRefused(
+        _ knob: String, message: String, file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        let app = try makeApp()
+        let output = try outputPath()
+
+        let result = try runScript(
+            ["--app", app.path, "--output", output, "--identity", identity],
+            environment: [knob: "1"]
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.output, file: file, line: line)
+        XCTAssertTrue(result.output.contains(message), result.output, file: file, line: line)
+        XCTAssertFalse(fileManager.fileExists(atPath: output), "a failed inspection must publish nothing",
+                       file: file, line: line)
+        let calls = try hdiutilCalls()
+        XCTAssertEqual(calls.filter { $0.first == "detach" }.count, 1,
+                       "the failure path must still detach: \(calls)", file: file, line: line)
+        XCTAssertEqual(calls.last?.first, "detach", file: file, line: line)
+    }
+
+    func testRefusesACorruptedMountedDSStore() throws {
+        try assertMountedLayoutRefused(
+            "FAKE_HDIUTIL_CORRUPT_DSSTORE", message: "differs from scripts/dmg_layout.py")
+    }
+
+    func testRefusesAMissingBackgroundPictureWithAValidDSStore() throws {
+        try assertMountedLayoutRefused("FAKE_HDIUTIL_SKIP_BACKGROUND", message: "no background picture")
+    }
+
+    func testRefusesACorruptedMountedBackgroundPicture() throws {
+        try assertMountedLayoutRefused(
+            "FAKE_HDIUTIL_CORRUPT_BACKGROUND", message: "background picture differs")
+    }
+
+    /// When the layout cannot be written, no image is created at all.
+    func testALayoutFailureCreatesNoImage() throws {
+        try makeTool("tiffutil", body: "#!/bin/sh\nexit 1\n")
+        let app = try makeApp()
+        let output = try outputPath()
+
+        let result = try runScript(["--app", app.path, "--output", output, "--identity", identity])
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("Finder layout"), result.output)
+        XCTAssertFalse(fileManager.fileExists(atPath: output))
+        XCTAssertNil(try hdiutilLogIfAny(), "no hdiutil call may follow a failed layout step")
+        let leftovers = try fileManager.contentsOfDirectory(atPath: outputDirectory.path)
+        XCTAssertEqual(leftovers, [String](), "the run must leave no staging directory behind: \(leftovers)")
+    }
+
     func testDetachesTheVolumeWhenAHdiutilVerificationFails() throws {
         let app = try makeApp()
         let output = try outputPath()
@@ -334,6 +418,68 @@ final class DmgScriptTests: XCTestCase {
         XCTAssertEqual(attached.status, 0, attached.output)
         XCTAssertFalse(attached.output.contains(scratch.path),
                        "the run left a volume mounted: \(attached.output)")
+
+        // The published image carries the layout the way Finder will read it.
+        let inspect = scratch.appendingPathComponent("inspect", isDirectory: true)
+        try fileManager.createDirectory(at: inspect, withIntermediateDirectories: true)
+        let attach = try run(hdiutil, ["attach", "-readonly", "-nobrowse", "-mountpoint", inspect.path, output])
+        XCTAssertEqual(attach.status, 0, attach.output)
+        defer { _ = try? run(hdiutil, ["detach", inspect.path]) }
+        XCTAssertEqual(try Data(contentsOf: inspect.appendingPathComponent(".DS_Store")), try layoutBytes(),
+                       "the mounted .DS_Store must match scripts/dmg_layout.py")
+        let background = inspect.appendingPathComponent(".background.tiff")
+        let representations = try XCTUnwrap(NSBitmapImageRep.imageReps(withContentsOf: background))
+            .compactMap { $0 as? NSBitmapImageRep }
+        XCTAssertEqual(
+            representations.map { [$0.pixelsWide, $0.pixelsHigh] }.sorted { $0[0] < $1[0] },
+            [[640, 400], [1280, 800]],
+            "the hidden background must hold the 1x and 2x pictures"
+        )
+        var isDirectory: ObjCBool = false
+        XCTAssertTrue(fileManager.fileExists(atPath: inspect.appendingPathComponent("Ciaobot.app").path,
+                                             isDirectory: &isDirectory) && isDirectory.boolValue)
+        XCTAssertEqual(try fileManager.destinationOfSymbolicLink(
+            atPath: inspect.appendingPathComponent("Applications").path), "/Applications")
+        XCTAssertEqual(try run(hdiutil, ["detach", inspect.path]).status, 0)
+        let after = try run(hdiutil, ["info"])
+        XCTAssertFalse(after.output.contains(scratch.path), "a scratch volume is still mounted: \(after.output)")
+    }
+
+    // MARK: - Background art
+
+    private let pinnedArt: [(name: String, sha256: String, pixels: Int)] = [
+        ("background.png", "bd8af3f9bdbdcc7e83a91652733d00c49acdb75f779978e000b80fa07cab278a", 1),
+        ("background@2x.png", "8f5cbd2748dbde7ea7291c0c9935c607b6ca3bb142b7bd2d0e80ff9245fc8333", 2),
+    ]
+
+    /// The committed art is the output of `scripts/make-dmg-background.swift`;
+    /// regenerate it only when the art changes and update these hashes.
+    func testBackgroundArtIsThePinnedPickedOption() throws {
+        let geometry = try layoutGeometry()
+        let plates = try XCTUnwrap(geometry["plates"] as? [String: [String: Int]])
+        for art in pinnedArt {
+            let url = packageRoot.appendingPathComponent("release/dmg/\(art.name)")
+            let data = try Data(contentsOf: url)
+            XCTAssertEqual(SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(), art.sha256,
+                           "\(art.name) changed; regenerate with make-dmg-background.swift and update the pin")
+            let rep = try XCTUnwrap(NSBitmapImageRep(data: data))
+            XCTAssertEqual(rep.pixelsWide, 640 * art.pixels, art.name)
+            XCTAssertEqual(rep.pixelsHigh, 400 * art.pixels, art.name)
+            XCTAssertFalse(rep.hasAlpha, "\(art.name) must be opaque")
+            // Finder draws every icon label in black or white; the plate behind
+            // it keeps 4.5:1 against both.
+            for key in ["app", "applications"] {
+                let plate = try XCTUnwrap(plates[key])
+                let x = (plate["x"]! + plate["width"]! / 2) * art.pixels
+                let y = (plate["y"]! + plate["height"]! / 2) * art.pixels
+                // Raw samples: the PNG is sRGB, and the plate colour is an sRGB value.
+                var samples = [Int](repeating: 0, count: 5)
+                rep.getPixel(&samples, atX: x, y: y)
+                for (actual, want) in zip(samples.prefix(3), [0x6d, 0x73, 0x9c]) {
+                    XCTAssertEqual(actual, want, accuracy: 2, "\(art.name) plate \(key)")
+                }
+            }
+        }
     }
 
     // MARK: - Helpers
@@ -446,6 +592,30 @@ final class DmgScriptTests: XCTestCase {
             [scriptsDirectory.appendingPathComponent("make-dmg.sh").path] + arguments,
             environment: childEnvironment
         )
+    }
+
+    /// The `.DS_Store` bytes the generator writes for the shipped volume.
+    private func layoutBytes() throws -> Data {
+        try runLayout(["dsstore", "--volume-name", "Ciaobot", "--app-name", "Ciaobot.app"])
+    }
+
+    private func layoutGeometry() throws -> [String: Any] {
+        let data = try runLayout(["geometry", "--app-name", "Ciaobot.app"])
+        return try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    private func runLayout(_ arguments: [String]) throws -> Data {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-I", "scripts/dmg_layout.py"] + arguments
+        process.currentDirectoryURL = packageRoot
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0, "dmg_layout.py \(arguments) failed")
+        return data
     }
 
     private func hdiutilCalls() throws -> [[String]] {
