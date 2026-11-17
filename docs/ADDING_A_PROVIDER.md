@@ -87,6 +87,7 @@ set and nothing else.
 | `steer_turn(request)` | A user steer during a live turn: returns a delivery id and emits `SteerDeliveredEvent` once the model consumed it. | Falls back to the next-turn queue. On `BaseProvider` the default returns `None`. |
 | `move_to_background()` | The PWA's *Move to background* action (OpenCode's Ctrl+B). | On `BaseProvider` the default returns `"unsupported"` and the route answers 409. A provider that implements it sets `ToolUseEvent.backgroundable` on the calls it can move; the PWA shows the action only for those. |
 | `response_session_id` | Unheld permission and question replies, to reject replies for an old session. | Defaults to `""` when the provider has no session-scoped response fence. |
+| `current_session_id` | Turn delivery session rotation in `_drive_stream` and the host's live session probes; the service getter forwards it. | Defaults to `None`: the adapter tracks no session. A service with no provider instance reports `None` without constructing one. |
 | `has_permission_request`, `permission_request_session`, `tool_use_id_for_request` | Permission ownership, child-session selection, and capturing the tool card id before acknowledgement. | Defaults to false/empty values. |
 | `has_question_request`, `question_request_session` | Native-form ownership and child-session selection. | Defaults to false/empty values. |
 | `respond_permission` | The approval card; return `QuestionResponseResult` after acknowledgement. | Explicit nonretryable unsupported result. Claude adapts its local `PermissionGate` boolean at this boundary. |
@@ -119,6 +120,28 @@ without implying anything was deleted. The host never infers UI or retry
 policy from these values: it warns only on `False` and otherwise continues,
 and the manager swallows adapter failures with its fail-open per-session
 boundary.
+
+`current_session_id` is a synchronized, read-only observation of the
+session id the live adapter instance currently knows. It may be learned
+during turn setup or mid-stream, so reads are dynamic and immediate —
+`None → id → None` follows the adapter's answer with nothing cached — and
+an adapter returning `""` keeps that exact value at the service boundary;
+callers apply their own truthiness policy. A service without a provider
+instance returns `None` without constructing one. The observation is
+distinct from the stateless `native_title_candidates` and `delete_session`
+classmethods, which read persisted sessions without an instance, and from
+the permission-fence `response_session_id`. Because the base defines it as
+a read-only property, an adapter owning mutable session state overrides it
+with a getter over its own backing field, as both built-ins do. Two
+deliberate compatibility edges are pinned in `tests/test_provider_service.py`:
+a subclass that assigns `self.current_session_id = ...` without overriding
+the inherited property now raises `AttributeError` (including during
+construction), and a getter that raises `AttributeError` propagates to the
+caller instead of being masked by the former duck-typed service probe.
+These preservation claims cover the inspected built-ins only. The
+remaining history, MCP, models, background and Stop paths and the other
+session probes stay provider-specific; this seam does not make the
+session lifecycle provider-neutral.
 
 Permission and native-question replies use the shared `BaseProvider` response
 contract, so any adapter can participate without a provider-specific manager
