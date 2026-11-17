@@ -190,6 +190,39 @@ async def test_an_idle_or_cancelling_drain_never_blocks_delete(tmp_path: Path) -
                 await asyncio.wait_for(task, 5)
 
 
+async def test_a_hung_drain_cannot_hold_the_stop_handoff_forever(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr("ciao.web.chat_streaming._STOP_HANDOFF_DRAIN_TIMEOUT_S", 0.05)
+    pcm = _make_manager(tmp_path)
+    _project, chat = _chat(pcm)
+    gate = asyncio.Event()
+    drain = await _idle_drain(gate)
+    pcm._streaming.between_turn_drains[chat.chat_id] = drain
+    finished: list[str] = []
+
+    async def finish() -> None:
+        finished.append(chat.chat_id)
+
+    task = pcm._streaming.begin_background_stop(chat.chat_id, finish)
+    try:
+        assert pcm._streaming.teardown_unsettled(chat.chat_id) is True
+        with pytest.raises(ChatTeardownConflict):
+            pcm.delete_chat(chat.chat_id)
+        await asyncio.wait_for(task, 5)
+        # The drain still ignores its cancel, yet the handoff has let go.
+        assert not drain.done()
+        assert finished == [chat.chat_id]
+        assert pcm._streaming.teardown_unsettled(chat.chat_id) is False
+        assert pcm.delete_chat(chat.chat_id) is True
+        assert pcm.get_chat(chat.chat_id) is None
+    finally:
+        gate.set()
+        drain.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await asyncio.wait_for(drain, 5)
+
+
 async def test_archive_refusal_after_the_transcript_await_mutates_nothing(
     tmp_path: Path, monkeypatch
 ) -> None:

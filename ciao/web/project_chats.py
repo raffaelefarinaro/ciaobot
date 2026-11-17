@@ -6725,6 +6725,11 @@ class ProjectChatManager:
         busy = set(self.active_chat_ids())
         return sorted(cid for cid in busy if cid in chat_ids)
 
+    def refuse_workspace_teardown(self, workspace: str) -> None:
+        """Raise ``ChatTeardownConflict`` while a chat of *workspace* is still stopping."""
+        _project_ids, chat_ids = self.workspace_scope(workspace)
+        self._refuse_unsettled_teardown(sorted(chat_ids))
+
     def workspace_counts(self, workspace: str) -> dict[str, int]:
         """How many projects and open chats archiving *workspace* would close."""
         project_ids, chat_ids = self.workspace_scope(workspace)

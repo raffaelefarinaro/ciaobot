@@ -357,6 +357,11 @@ class StreamOutcome:
     tool_events: list[dict[str, Any]] = field(default_factory=list)
 
 
+# How long a background Stop waits for the idle drain to unwind before its
+# handoff gives up on it and releases the teardown registration.
+_STOP_HANDOFF_DRAIN_TIMEOUT_S = 10.0
+
+
 class ChatStreaming:
     """Own chat drive-loop, provider-stream, and drain lifecycles."""
 
@@ -385,9 +390,12 @@ class ChatStreaming:
     def last_drain_results(self) -> dict[str, tuple[str, bool]]:
         return self._last_drain_result
 
-    def has_live_drain(self, chat_id: str) -> bool:
+    def _drain_pending(self, chat_id: str) -> asyncio.Task[None] | None:
         task = self._between_turn_drains.get(chat_id)
-        return task is not None and not task.done()
+        return task if task is not None and not task.done() else None
+
+    def has_live_drain(self, chat_id: str) -> bool:
+        return self._drain_pending(chat_id) is not None
 
     def discard_drain_result(self, chat_id: str) -> None:
         self._last_drain_result.pop(chat_id, None)
@@ -420,7 +428,20 @@ class ChatStreaming:
             return pending
 
         async def _handoff() -> None:
-            await self._host._await_between_turns_drain(chat_id)
+            try:
+                await asyncio.wait_for(
+                    self._host._await_between_turns_drain(chat_id),
+                    _STOP_HANDOFF_DRAIN_TIMEOUT_S,
+                )
+            except TimeoutError:
+                # A drain that ignores cancellation must not hold the
+                # registration forever: it would keep the chat undeletable.
+                logger.warning(
+                    "Drain for chat %s did not unwind within %.0fs of Stop; "
+                    "continuing the handoff",
+                    chat_id,
+                    _STOP_HANDOFF_DRAIN_TIMEOUT_S,
+                )
             try:
                 await finish()
             except Exception:
@@ -451,6 +472,13 @@ class ChatStreaming:
     async def _await_predecessor(self, chat_id: str, stream: ChatStream) -> bool:
         """Wait for the previous drain and stop handoff; True if Stop withdrew us."""
         slot = self._pre_entry.get(chat_id)
+        if self._drain_pending(chat_id) is None and self.pending_stop_handoff(chat_id) is None:
+            # Nothing to wait for: stay synchronous, as a drive with no
+            # predecessor always was, so a cancel lands in the turn itself.
+            await self._host._await_between_turns_drain(chat_id)
+            if slot is not None and slot[0] is stream:
+                self._pre_entry.pop(chat_id, None)
+            return stream.user_stopped
         event = slot[1] if slot is not None and slot[0] is stream else asyncio.Event()
         join = asyncio.create_task(self._join_predecessors(chat_id))
         stopper = asyncio.create_task(event.wait())
@@ -2141,7 +2169,15 @@ class ChatStreaming:
     async def _replacement_drain(
         self, old: asyncio.Task[None], chat_id: str, project_id: str
     ) -> None:
-        await self._join_task(old)
+        try:
+            await self._join_task(old)
+        except asyncio.CancelledError:
+            # A waiter cancelled this replacement while the old drain still
+            # unwinds. The replacement is the only registered handle on that
+            # cleanup, so it must outlive the old drain before it ends, or the
+            # next waiter would return while the old drain is untracked.
+            await asyncio.wait({old})
+            raise
         provider_service = self._host._providers.get(chat_id)
         if provider_service is None or not provider_service.can_drain:
             return
@@ -2203,6 +2239,7 @@ class ChatStreaming:
         stream: ChatStream | None = None
         cancelled = False
         superseded = False
+        events = provider_service.drain_events()
 
         def close_stream(had_error: bool, last_error: str = "") -> None:
             nonlocal stream
@@ -2230,7 +2267,7 @@ class ChatStreaming:
             # The final text block of the follow-up execution now streaming.
             # Reset per terminal result: each wake is its own turn (#2139).
             drain_segment = FinalAnswerTracker()
-            async for event in provider_service.drain_events():
+            async for event in events:
                 # No await sits in this body, so one check covers every side
                 # effect of the iteration: a cancelled drain or one a
                 # foreground admission replaced must not touch chat state.
@@ -2375,6 +2412,11 @@ class ChatStreaming:
             logger.exception("Between-turns drain failed for chat %s", chat_id)
         finally:
             close_stream(False)
+            # A ``break`` leaves the generator suspended until the loop's
+            # asyncgen hook closes it on a later tick. Close it here so its
+            # reader is gone before this task ends and a foreground turn or
+            # the next drain starts reading.
+            await events.aclose()
             if not cancelled and not superseded:
                 self._host._flush_result_announce(chat_id)
 

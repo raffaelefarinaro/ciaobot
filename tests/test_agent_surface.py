@@ -1687,6 +1687,39 @@ def test_chat_archive_archives_the_chat_a_title_resolved_to(tmp_path: Path) -> N
     assert archived == ["chat-1"]
 
 
+def test_chat_delete_archive_and_handover_turn_a_teardown_refusal_into_a_tool_error(
+    tmp_path: Path,
+) -> None:
+    from ciao.control_plane import ControlPlaneError, McpPrincipal
+    from ciao.web.project_chats import _TEARDOWN_CONFLICT, ChatTeardownConflict
+
+    _service_, plane, pcm = _names_service(tmp_path)
+
+    def _refuse(*_args, **_kwargs):
+        raise ChatTeardownConflict(_TEARDOWN_CONFLICT)
+
+    async def _refuse_async(*_args, **_kwargs):
+        raise ChatTeardownConflict(_TEARDOWN_CONFLICT)
+
+    pcm.delete_chat = _refuse
+    pcm.handover_chat = _refuse
+    pcm.archive_chat = _refuse_async
+    principal = McpPrincipal(
+        token_id="t", chat_id="chat-2", project_id="project-2", workspace="personal", provider="claude"
+    )
+    calls = [
+        lambda: plane.chat_delete(principal, "chat-1"),
+        lambda: plane.chat_handover(principal, "chat-1", provider="claude", model="sonnet"),
+        lambda: asyncio.run(plane.chat_archive(principal, "chat-1")),
+    ]
+    for call in calls:
+        with pytest.raises(ControlPlaneError) as refused:
+            call()
+        assert refused.value.code == "chat_busy"
+        assert refused.value.retryable is True
+        assert str(refused.value) == _TEARDOWN_CONFLICT
+
+
 # ── Approval policy: no argv auto-approval ────────────────────────────────
 # Since S6 every Ciaobot operation runs as `ciao <noun> <verb>` and no `ciao …`
 # prefix is pre-approved (an allow prefix is a shell-suffix bypass risk). Auto

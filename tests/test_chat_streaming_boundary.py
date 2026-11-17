@@ -1857,6 +1857,72 @@ async def test_superseded_drain_with_a_background_stream_closes_it_silently(
         await _join_drives(manager)
 
 
+def _assert_drain_left_no_trace(manager, chat, seen) -> None:
+    assert seen.registered == []
+    assert seen.published == []
+    assert chat.last_response == "before"
+    assert chat.last_response_status == "success"
+    assert chat.chat_id not in manager._streaming.last_drain_results
+
+
+async def test_a_cancelled_drain_with_no_foreground_owner_has_no_side_effects(
+    admission_case, monkeypatch
+):
+    manager, chat, _ = admission_case
+    chat.last_response = "before"
+    chat.last_response_status = "success"
+
+    async def script(release):
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            pass
+        yield _late_result(chat)
+
+    _service, _release, seen = _drain_case(manager, chat, monkeypatch, script)
+    manager._streaming.start_between_turns_drain(chat.chat_id, chat.project_id)
+    drain_task = manager._between_turn_drains[chat.chat_id]
+    await _ticks()
+    assert manager._broker.get(chat.chat_id) is None
+    drain_task.cancel()
+    await _join(drain_task)
+    assert drain_task.done()
+    _assert_drain_left_no_trace(manager, chat, seen)
+    await _ticks()
+    assert seen.memory == []
+
+
+async def test_a_drain_under_a_foreground_owner_has_no_side_effects_unless_cancelled(
+    admission_case, monkeypatch
+):
+    manager, chat, _ = admission_case
+    chat.last_response = "before"
+    chat.last_response_status = "success"
+
+    async def script(release):
+        await release.wait()
+        yield _late_result(chat)
+
+    _service, release, seen = _drain_case(manager, chat, monkeypatch, script)
+    manager._streaming.start_between_turns_drain(chat.chat_id, chat.project_id)
+    drain_task = manager._between_turn_drains[chat.chat_id]
+    await _ticks()
+    foreground = ChatStream(prompt_text="live")
+    manager._broker.register(chat.chat_id, foreground)
+    seen.registered.clear()
+    try:
+        assert drain_task.cancelling() == 0
+        release.set()
+        await asyncio.wait_for(drain_task, 5)
+        _assert_drain_left_no_trace(manager, chat, seen)
+        assert manager._broker.get(chat.chat_id) is foreground
+        await _ticks()
+        assert seen.memory == []
+    finally:
+        manager._broker.clear(chat.chat_id, foreground)
+        await _join(drain_task)
+
+
 async def test_owned_background_drain_close_publishes_exactly_one_done(
     admission_case, monkeypatch
 ):
@@ -1957,6 +2023,44 @@ async def test_withdrawn_stop_leaves_a_replacement_drain_for_background_wakes(
         await _join_drives(manager)
 
 
+async def test_send_after_a_withdrawn_stop_still_waits_for_the_old_drain(
+    admission_case, driver_probe, monkeypatch
+):
+    manager, chat, _ = admission_case
+    probe = driver_probe(manager, chat)
+    chat.session_id = "sess-drain"
+    service = _StubProviderService(can_drain=True)
+    manager._providers[chat.chat_id] = service
+    monkeypatch.setattr(manager, "_start_subagent_watcher", lambda *a, **k: None)
+    hold = _hold_background_drain(manager, chat)
+    await _ticks(2)
+    try:
+        first = manager.start_stream(chat.chat_id, "send behind the drain")
+        await asyncio.wait_for(hold.entered.wait(), 5)
+        await _ticks()
+        assert await asyncio.wait_for(manager.stop_chat(chat.chat_id), 5) is True
+        await consume(first)
+        replacement = manager._between_turn_drains[chat.chat_id]
+        assert replacement is not hold.task
+        # The old drain's cleanup is still held: send again.
+        second = manager.start_stream(chat.chat_id, "send again")
+        await _ticks()
+        assert not probe.calls
+        assert not hold.task.done()
+        assert not replacement.done()
+        assert manager._between_turn_drains[chat.chat_id] is replacement
+        hold.gate.set()
+        probe.release.set()
+        await consume(second)
+        assert len(probe.calls) == 1
+        assert hold.task.done()
+    finally:
+        hold.gate.set()
+        probe.release.set()
+        await _join(hold.task)
+        await _join_drives(manager)
+
+
 async def test_replacement_drain_exits_without_draining_after_teardown(
     admission_case, driver_probe, monkeypatch
 ):
@@ -2020,6 +2124,9 @@ async def test_pre_entry_slot_is_released_when_the_drive_is_cancelled_before_its
 ):
     manager, chat, _ = admission_case
     probe = driver_probe(manager, chat)
+    # A held predecessor keeps both drives parked, so the slots stay observable.
+    hold = _hold_background_drain(manager, chat)
+    await _ticks(2)
     streaming = manager._streaming
     first_stream = ChatStream(prompt_text="first")
     second_stream = ChatStream(prompt_text="second")
@@ -2062,6 +2169,9 @@ async def test_pre_entry_slot_is_released_when_the_drive_is_cancelled_before_its
     with pytest.raises(asyncio.CancelledError):
         await second_task
     assert chat.chat_id not in streaming._pre_entry
+    hold.gate.set()
+    probe.release.set()
+    await _join(hold.task)
     await _join_drives(manager)
 
 
