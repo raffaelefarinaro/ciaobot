@@ -371,6 +371,9 @@ class _PCM:
     def workspace_busy_chat_ids(self, workspace: str) -> list[str]:
         return []
 
+    def refuse_workspace_teardown(self, workspace: str) -> None:
+        return None
+
     def archive_workspace_projects(self, workspace: str) -> dict[str, int]:
         self.archived.append(workspace)
         return {"projects": 2, "chats": 1}

@@ -26,7 +26,7 @@ from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
 from ciao.schedules import ScheduleManager, ScheduleStore
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
-from ciao.web.project_chats import ProjectChatManager
+from ciao.web.project_chats import _TEARDOWN_CONFLICT, ProjectChatManager
 from ciao.web.routes_api import (
     archive_workspace_setting,
     list_archived_workspaces,
@@ -279,6 +279,26 @@ def test_archive_refuses_while_a_chat_in_the_workspace_is_running(tmp_path, monk
     assert config.workspace("work") is not None
     assert (tmp_path / "work").is_dir()
     assert pcm.get_chat(chat.chat_id) is not None
+
+
+def test_archive_refuses_with_409_while_a_chat_is_still_stopping(tmp_path, monkeypatch):
+    client, config, pcm, store = _app(tmp_path, rerooted=True)
+    general = next(p for p in pcm.list_projects("work") if p.is_auto)
+    chat = pcm.create_chat(general.project_id, title="stopping")
+    monkeypatch.setattr(
+        pcm._streaming, "teardown_unsettled", lambda chat_id: chat_id == chat.chat_id
+    )
+    before = _tree(tmp_path / "work")
+
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 409
+    assert response.json() == {"error": _TEARDOWN_CONFLICT}
+    # Refused before the folder moved: nothing was changed or rolled back.
+    assert config.workspace("work") is not None
+    assert _tree(tmp_path / "work") == before
+    assert pcm.get_chat(chat.chat_id) is not None
+    assert not (tmp_path / ARCHIVE_DIR_NAME).exists()
 
 
 def test_archive_takes_the_workspace_schedules_and_stops_its_routines(tmp_path):

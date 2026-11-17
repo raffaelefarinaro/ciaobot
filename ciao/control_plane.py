@@ -23,7 +23,7 @@ import time
 import uuid
 import weakref
 from collections import deque
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Iterator, Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -243,6 +243,17 @@ class ControlPlaneError(ValueError):
         if suggestions:
             payload["suggestions"] = suggestions
         return payload
+
+
+@contextlib.contextmanager
+def _lifecycle_conflicts() -> Iterator[None]:
+    """Turn a refused chat or project teardown into a stable, retryable tool error."""
+    from ciao.web.project_chats import RecoveryLifecycleConflict  # noqa: PLC0415
+
+    try:
+        yield
+    except RecoveryLifecycleConflict as exc:
+        raise ControlPlaneError("chat_busy", str(exc), retryable=True) from exc
 
 
 MANAGED_RECALL_CHECK_ENABLED = True
@@ -3134,7 +3145,8 @@ class CiaoControlPlane:
                 "project_complete",
                 lambda: self.pcm.complete_project(pid),
             )
-        return _ok(self.pcm.complete_project(pid))
+        with _lifecycle_conflicts():
+            return _ok(self.pcm.complete_project(pid))
 
     def project_restore(self, principal: AgentPrincipal, stem: str) -> dict[str, Any]:
         workspace = self._workspace(principal)
@@ -3156,10 +3168,11 @@ class CiaoControlPlane:
                     "project_id": pid,
                 },
             )
-        return _ok({
-            "deleted": self.pcm.delete_project(pid)["deleted"],
-            "project_id": pid,
-        })
+        with _lifecycle_conflicts():
+            return _ok({
+                "deleted": self.pcm.delete_project(pid)["deleted"],
+                "project_id": pid,
+            })
 
     def chats_list(
         self,
@@ -3566,12 +3579,13 @@ class CiaoControlPlane:
                     messages=[row for row in (messages or []) if isinstance(row, dict)],
                 ),
             )
-        chat = self.pcm.handover_chat(
-            chat_id,
-            provider=provider.strip(),
-            model=model.strip(),
-            messages=[row for row in (messages or []) if isinstance(row, dict)],
-        )
+        with _lifecycle_conflicts():
+            chat = self.pcm.handover_chat(
+                chat_id,
+                provider=provider.strip(),
+                model=model.strip(),
+                messages=[row for row in (messages or []) if isinstance(row, dict)],
+            )
         if chat is None:
             raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
         return _ok(chat.to_dict(local=self.pcm.is_session_local(chat)))
@@ -3587,7 +3601,8 @@ class CiaoControlPlane:
         project = self._project(principal, chat.project_id)
 
         async def _archive() -> dict[str, Any]:
-            outcome = await self.pcm.archive_chat(target_id)
+            with _lifecycle_conflicts():
+                outcome = await self.pcm.archive_chat(target_id)
             if outcome is not None:
                 self.pcm.run_archive_postprocess(target_id, outcome, chat, project)
             return {
@@ -3603,13 +3618,14 @@ class CiaoControlPlane:
 
     def chat_delete(self, principal: AgentPrincipal, chat_id: str) -> dict[str, Any]:
         chat_id = self._chat_id(principal, chat_id)
+
+        def _delete() -> dict[str, Any]:
+            with _lifecycle_conflicts():
+                return {"chat_id": chat_id, "deleted": self.pcm.delete_chat(chat_id)}
+
         if chat_id == principal.chat_id:
-            return self._defer_until_chat_idle(
-                principal,
-                "chat_delete",
-                lambda: {"chat_id": chat_id, "deleted": self.pcm.delete_chat(chat_id)},
-            )
-        return _ok({"chat_id": chat_id, "deleted": self.pcm.delete_chat(chat_id)})
+            return self._defer_until_chat_idle(principal, "chat_delete", _delete)
+        return _ok(_delete())
 
     async def chat_stop(self, principal: AgentPrincipal, chat_id: str) -> dict[str, Any]:
         chat_id = self._chat_id(principal, chat_id)

@@ -1439,6 +1439,10 @@ async def test_stop_before_turn_task_prevents_turn(tmp_path: Path) -> None:
     assert len(results) == 1
     assert results[0].get("stopped") is True
     assert results[0].get("is_error") is False
+    # The prompt never reached the provider: it is a waiting chip, not a turn.
+    assert [e["text"] for e in pcm.get_chat(chat.chat_id).pending_queue] == ["initial"]
+    assert pcm.get_chat(chat.chat_id).user_turn_count == 0
+    assert len([e for e in captured if e.get("type") == "prompt_cancelled"]) == 1
 
     consumer.cancel()
 
@@ -1559,8 +1563,10 @@ async def test_a_board_stop_in_the_pre_task_window_parks_the_queue(
     results = [e for e in captured if e.get("type") == "result"]
     assert len(results) == 1
     assert results[0].get("stopped") is True
+    # The withdrawn prompt is the chip; the parked follow-up comes after it.
     assert [e["text"] for e in pcm.get_chat(chat.chat_id).pending_queue] == [
-        "follow-up"
+        "initial",
+        "follow-up",
     ]
 
     consumer.cancel()

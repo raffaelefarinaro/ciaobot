@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from contextlib import aclosing
 import logging
 import math
 from pathlib import Path
@@ -211,8 +212,12 @@ class ProviderService:
         """
         if self._provider is None:
             return
-        async for event in self._provider.drain_events():
-            yield event
+        # Close the provider's generator here, not at GC: a caller that
+        # closes this one (break, cancellation) must release the reader
+        # (Claude consume task, OpenCode SSE stream) before it returns.
+        async with aclosing(self._provider.drain_events()) as inner:
+            async for event in inner:
+                yield event
 
     @property
     def provider(self) -> ProviderImpl | None:

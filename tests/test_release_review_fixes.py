@@ -105,9 +105,11 @@ class _FakeManager:
 
     archive_chat = ProjectChatManager.archive_chat
     _chat_lifecycle_guard = ProjectChatManager._chat_lifecycle_guard
+    _refuse_unsettled_teardown = ProjectChatManager._refuse_unsettled_teardown
 
     def __init__(self, running: list[int], peak: list[int]) -> None:
         self._path = None
+        self._streaming = type("S", (), {"teardown_unsettled": lambda self, chat_id: False})()
         self._archive_locks: dict[str, asyncio.Lock] = {}
         self._archive_lock_users: dict[str, int] = {}
         self._chats = {"c1": type("C", (), {"archived": False})()}
