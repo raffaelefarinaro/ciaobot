@@ -94,7 +94,8 @@ _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.task_decisions import clean_reason
 from ciao.core_prompt import system_prompt_payload
 from ciao.tool_path import resolve_command
-from ciao.providers.claude import ClaudeProvider, is_process_task
+from ciao.providers.claude import ClaudeProvider
+from ciao.native_task_types import is_process_task
 from ciao.providers.opencode import (
     OpencodeProvider,
     opencode_child_status,

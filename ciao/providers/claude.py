@@ -36,7 +36,6 @@ from dataclasses import dataclass, field, replace
 import logging
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
-from collections.abc import Mapping
 from typing import Any, cast
 
 from claude_agent_sdk import (
@@ -104,6 +103,7 @@ from ciao.providers.base import (
 )
 from ciao.rate_limits import RateLimitStore, default_store_path, is_rate_limit_telemetry
 from ciao.setup_status import record_claude_bundled_skills
+from ciao.native_task_types import is_process_task
 
 logger = logging.getLogger(__name__)
 
@@ -555,11 +555,6 @@ async def _receive_round(
                 await aclose()
             except Exception:  # noqa: BLE001 - best-effort close of a cancelled read
                 pass
-
-
-def is_process_task(info: Mapping[str, Any]) -> bool:
-    """True for a shell or Monitor task; background agents have their own rows."""
-    return "agent" not in str(info.get("task_type") or "")
 
 
 class ClaudeProvider(BaseSDKProvider):
