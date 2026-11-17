@@ -368,3 +368,79 @@ async def test_preflight_unattended_never_blocks(tmp_path: Path, monkeypatch) ->
 
 
 # ── Slow-path probes ────────────────────────────────────────────────────
+
+
+# ── Dispatch through the shared model_catalog classmethod ──────────────
+
+
+async def test_claude_chat_preflight_does_no_catalog_work(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A Claude image turn asks Claude's catalog (empty) and is never questioned."""
+    from ciao.providers.claude import ClaudeProvider
+    from ciao.providers.opencode import OpencodeProvider
+
+    claude_calls: list[Path] = []
+    opencode_calls: list[Path] = []
+
+    async def claude_catalog(cls, workspace_root, *, force=False):
+        claude_calls.append(workspace_root)
+        return []
+
+    async def opencode_catalog(cls, workspace_root, *, force=False):
+        opencode_calls.append(workspace_root)
+        return [dict(row) for row in _CATALOG]
+
+    monkeypatch.setattr(ClaudeProvider, "model_catalog", classmethod(claude_catalog))
+    monkeypatch.setattr(
+        OpencodeProvider, "model_catalog", classmethod(opencode_catalog)
+    )
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("cap", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="cap-test")
+    chat.provider = "claude"
+    chat.model = _TEXT_ONLY
+    pcm._save()
+
+    assert await pcm._model_capable(_TEXT_ONLY, chat) is True
+    assert await pcm._capability_candidates(chat, _TEXT_ONLY) == [
+        {"id": _TEXT_ONLY, "label": _TEXT_ONLY, "disabled": True}
+    ]
+    assert len(claude_calls) == 2
+    assert opencode_calls == []
+
+    seen: list[str] = []
+
+    async def fake_drive(*, chat_id, request, outcome):
+        seen.append(request.model)
+        outcome.response_text = "ok"
+        outcome.had_error = False
+        outcome.effective_model = request.model
+        evt = _ok_result(request.model)
+        outcome.events.append(evt)
+        yield evt
+
+    pcm._drive_stream = fake_drive  # type: ignore[assignment]
+    stream = pcm.start_stream(chat.chat_id, "look", images=[_img(tmp_path)])
+    events = await asyncio.wait_for(_consume(stream), timeout=_TURN_TIMEOUT_S)
+
+    assert seen == [_TEXT_ONLY]
+    assert not any(e.get("type") == "model_capability_question" for e in events)
+    assert opencode_calls == []
+
+
+async def test_unknown_provider_preflight_is_capable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A provider id the registry does not know is treated as capable."""
+    _stub_catalog(monkeypatch)
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("cap", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="cap-test")
+    chat.provider = "no-such-provider"
+
+    assert await pcm._catalog_image_support("no-such-provider", _TEXT_ONLY) is None
+    assert await pcm._model_capable(_TEXT_ONLY, chat) is True
+    assert await pcm._capability_candidates(chat, _TEXT_ONLY) == [
+        {"id": _TEXT_ONLY, "label": _TEXT_ONLY, "disabled": True}
+    ]
