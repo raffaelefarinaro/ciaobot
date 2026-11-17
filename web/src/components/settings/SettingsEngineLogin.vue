@@ -16,7 +16,7 @@
         </template>
         <template v-else>
           Ciaobot for Mac&rsquo;s own <strong>Start at Login</strong>, in the menu bar under
-          Settings, is separate: it opens this window when you sign in.
+          Settings, is separate: it starts Ciaobot for Mac when you sign in.
         </template>
       </p>
     </div>
