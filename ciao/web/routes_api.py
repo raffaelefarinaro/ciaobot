@@ -6699,7 +6699,7 @@ async def list_models(request: Request) -> JSONResponse:
     refresh = str(request.query_params.get("refresh", "")).strip().lower() in {
         "1", "true", "yes", "on",
     }
-    opencode_catalog = await OpencodeProvider.model_catalog(
+    opencode_catalog = await provider_registry.require("opencode").factory().model_catalog(
         workspace_root, force=refresh
     )
     if refresh:

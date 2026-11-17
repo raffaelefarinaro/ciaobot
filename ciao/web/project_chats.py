@@ -7202,20 +7202,24 @@ class ProjectChatManager:
 
     # ── Image-capability pre-flight ──────────────────────────────────────
 
-    async def _opencode_image_support(self, model: str) -> bool | None:
-        """Whether an opencode model accepts images, per opencode's own catalog.
+    async def _catalog_image_support(self, provider: str, model: str) -> bool | None:
+        """Whether ``model`` accepts images, per the provider's own catalog.
 
-        ``None`` means opencode did not say -- the model is absent from the
-        catalog, or its build reports no capability block. Unknown is not a
-        refusal; the caller treats it as capable.
+        ``None`` means the provider did not say -- it is unknown, the model is
+        absent from its catalog, or its build reports no capability block.
+        Unknown is not a refusal; the caller treats it as capable.
         """
-        from ciao.providers.opencode import OpencodeProvider
-
+        descriptor = provider_registry.get(provider)
+        if descriptor is None:
+            return None
         try:
-            catalog = await OpencodeProvider.model_catalog(self._config.workspace_root)
+            catalog = await descriptor.factory().model_catalog(
+                self._config.workspace_root
+            )
         except Exception:  # noqa: BLE001 — a probe must never block a turn
             logger.info(
-                "opencode catalog unavailable for %s; assuming capable",
+                "%s catalog unavailable for %s; assuming capable",
+                provider,
                 model,
                 exc_info=True,
             )
@@ -7229,19 +7233,19 @@ class ProjectChatManager:
     async def _model_capable(self, model: str, chat: ChatInfo) -> bool:
         """Whether ``model`` can accept image input.
 
-        Only opencode can run a model that cannot: Anthropic's and OpenAI's
-        current models all accept images, while opencode is
-        bring-your-own-provider and its catalog spans text-only models. So
-        opencode's own catalog is the single source of truth here, and every
-        other provider answers yes without a lookup.
+        The provider's own ``model_catalog`` is the single source of truth.
+        Only opencode reports one (it is bring-your-own-provider and its
+        catalog spans text-only models); Anthropic's and OpenAI's current
+        models all accept images, and the base default is an empty catalog,
+        so every other provider answers yes without any work.
 
         Unknown answers resolve to capable, so a cold catalog or an older
         opencode build never blocks an image turn -- the upstream rejects the
         attachment itself if it really cannot take one.
         """
-        if not model or chat.provider != "opencode":
+        if not model:
             return True
-        supports = await self._opencode_image_support(model)
+        supports = await self._catalog_image_support(chat.provider, model)
         return True if supports is None else supports
 
     async def _capability_candidates(
@@ -7254,18 +7258,21 @@ class ProjectChatManager:
         the chat's provider states accept images, drawn from the same catalog
         that ruled the current one out, so a suggestion cannot be a guess.
         For opencode, every entry with ``images is True`` in its catalog is
-        offered (no 3-item cap); other providers have no non-vision models
-        today, so only the current entry is returned there.
+        offered (no 3-item cap); other providers report an empty catalog, so
+        only the current entry is returned there.
         """
         entries: list[dict] = [{"id": model, "label": model, "disabled": True}]
-        if chat.provider != "opencode":
+        descriptor = provider_registry.get(chat.provider)
+        if descriptor is None:
             return entries
-        from ciao.providers.opencode import OpencodeProvider
-
         try:
-            catalog = await OpencodeProvider.model_catalog(self._config.workspace_root)
+            catalog = await descriptor.factory().model_catalog(
+                self._config.workspace_root
+            )
         except Exception:  # noqa: BLE001 — the question is still useful empty
-            logger.info("opencode catalog unavailable for candidates", exc_info=True)
+            logger.info(
+                "%s catalog unavailable for candidates", chat.provider, exc_info=True
+            )
             return entries
         for row in catalog:
             candidate = str(row.get("model") or "")
