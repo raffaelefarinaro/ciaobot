@@ -7,6 +7,13 @@ order, laziness, exceptions, cancellation), built-in inheritance and
 disconnect behavior. Characterization: all of that behavior is preserved
 unchanged; only the service's duck-typed probes are removed.
 
+Also covers the ``current_session_id`` observation (#3175): the concrete
+read-only default and the service getter's direct typed forward — no-instance
+guard, adapter-verbatim dynamic values, built-in characterization, getter
+failure propagation (a getter-raised ``AttributeError`` included, which the
+former ``getattr(..., None)`` probe masked) and the inherited read-only
+descriptor's assignment break.
+
 Counters observe the actual boundaries, independently: the service's
 ``_ensure_provider``, ``execute_streaming`` and ``disconnect``; registry
 lookups (``provider_registry.require``); factory resolution
@@ -289,6 +296,98 @@ async def test_minimal_adapter_defaults_do_no_extra_work(
     assert service.provider is adapter  # unchanged final state, not the inference
 
 
+async def test_minimal_adapter_session_observation_defaults_to_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The inherited session observation is None, side-effect-free, direct and
+    through a real service; the sibling defaults and capabilities are unchanged."""
+    service = ProviderService(_config(tmp_path))
+    counts = _count_provider_seams(monkeypatch, service)
+    adapter = _MinimalProvider(tmp_path)
+
+    assert adapter.current_session_id is None  # direct observation
+    assert adapter.response_session_id == ""  # unchanged sibling default
+    assert adapter.capabilities == ProviderCapabilities()
+
+    service._provider = adapter
+    assert service.current_session_id is None  # real-service observation
+    assert service.capabilities == ProviderCapabilities()
+
+    assert service.provider is adapter  # unchanged final state
+    # No provider was looked up, resolved, built, started or torn down.
+    assert counts.ensure == []
+    assert counts.streams == []
+    assert counts.disconnects == []
+    assert counts.registrations == []
+    assert counts.registry_lookups == []
+    assert counts.factory_resolutions == []
+    assert counts.constructions == []
+    assert counts.sdk_constructions == []
+    assert counts.server_invocations == []
+    assert counts.subprocess_invocations == []
+
+
+class _AssigningProvider(BaseProvider):
+    """A real adapter whose constructor assigns ``current_session_id``.
+
+    That assignment succeeded before the base defined the member; with the
+    inherited read-only property it is the deliberate compatibility-boundary
+    break pinned by ``test_assigning_the_inherited_session_property_raises``.
+    """
+
+    assignment_reached: list[bool] = []
+
+    def __init__(self, workspace_root: Path) -> None:
+        super().__init__(workspace_root)
+        self.assignment_reached.append(True)
+        # The failure under test is the runtime descriptor error; setattr keeps
+        # mypy out of an assignment statement the contract now rejects anyway.
+        setattr(self, "current_session_id", "")
+
+    def run_streaming(
+        self,
+        request: AgentRequest,
+        register_handle: Callable[[ActiveHandle | None], None],
+    ) -> AsyncGenerator[StreamEvent, None]:
+        del request, register_handle
+        return self._turn()
+
+    async def _turn(self) -> AsyncGenerator[StreamEvent, None]:
+        yield ResultEvent(type="result", result="ok", session_id="s")
+
+
+def test_assigning_the_inherited_session_property_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Subclass assignment of the inherited read-only session property fails.
+
+    Before the base property existed this instance assignment stored an
+    attribute and construction succeeded, so this is a compatibility-boundary
+    regression, not preservation evidence. The counter proves the failure is
+    the assignment itself, not earlier adapter work.
+    """
+    service = ProviderService(_config(tmp_path))
+    counts = _count_provider_seams(monkeypatch, service)
+    _AssigningProvider.assignment_reached.clear()
+
+    with pytest.raises(AttributeError):
+        _AssigningProvider(tmp_path)
+
+    assert _AssigningProvider.assignment_reached == [True]  # the assignment ran
+    assert service.provider is None  # construction never returned
+    # No stream, SDK, server or subprocess work: every real boundary stayed at zero.
+    assert counts.ensure == []
+    assert counts.streams == []
+    assert counts.disconnects == []
+    assert counts.registrations == []
+    assert counts.registry_lookups == []
+    assert counts.factory_resolutions == []
+    assert counts.constructions == []
+    assert counts.sdk_constructions == []
+    assert counts.server_invocations == []
+    assert counts.subprocess_invocations == []
+
+
 async def test_minimal_adapter_disconnect_counter_counts_when_called(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -417,7 +516,11 @@ async def test_sdk_server_subprocess_counters_fire_on_real_seams(
 
 
 class _ToggleProvider(BaseProvider):
-    """Overridden flags with read counters, for dispatch observation."""
+    """Overridden flags with read counters, for dispatch observation.
+
+    The counting ``current_session_id`` getter reads its own backing field —
+    the supported read-only override shape both built-ins use.
+    """
 
     def __init__(self, workspace_root: Path) -> None:
         super().__init__(workspace_root)
@@ -425,6 +528,8 @@ class _ToggleProvider(BaseProvider):
         self.cli_connected_value = True
         self.can_drain_reads = 0
         self.cli_connected_reads = 0
+        self.current_session_reads = 0
+        self._session_id: str | None = None
         self.drain_calls = 0  # method boundary
         self.drain_bodies = 0  # async generator body start
         self.stream_calls = 0  # run_streaming invocation, at the method boundary
@@ -440,6 +545,11 @@ class _ToggleProvider(BaseProvider):
     def cli_connected(self) -> bool:
         self.cli_connected_reads += 1
         return self.cli_connected_value
+
+    @property
+    def current_session_id(self) -> str | None:
+        self.current_session_reads += 1
+        return self._session_id
 
     def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
         self.drain_calls += 1
@@ -523,6 +633,111 @@ async def test_service_mixes_inherited_defaults_with_one_override(
     assert service.can_drain is True  # overridden by the adapter
     assert service.cli_connected is True  # inherited owner-health default
     assert [event async for event in service.drain_events()] == []  # inherited empty drain
+
+
+async def test_service_forwards_the_adapters_session_values_dynamically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each read observes the adapter exactly once, returning precisely its value.
+
+    None, two ids and a bare "" are forwarded without caching or truthiness
+    conversion; no provider work runs after setup.
+    """
+    service = ProviderService(_config(tmp_path))
+    counts = _count_provider_seams(monkeypatch, service)
+    adapter = _ToggleProvider(tmp_path)
+    service._provider = adapter
+    handle = _CountingHandle()
+    service._active_handle = handle
+
+    for value in (None, "sid-A", "sid-B", "", None):
+        reads = adapter.current_session_reads
+        adapter._session_id = value
+        observed = service.current_session_id
+        if value is None:
+            assert observed is None
+        else:
+            assert observed == value and type(observed) is str  # "" stays a string
+        assert adapter.current_session_reads == reads + 1  # exactly one getter call
+
+    assert adapter.current_session_reads == 5  # positive getter counts, no caching
+    assert adapter.stream_calls == 0  # no start/disconnect/handle mutation
+    assert adapter.disconnected == 0
+    assert counts.ensure == []
+    assert counts.streams == []
+    assert counts.disconnects == []
+    assert counts.registrations == []
+    assert counts.registry_lookups == []
+    assert counts.factory_resolutions == []
+    assert counts.constructions == []
+    assert counts.sdk_constructions == []
+    assert counts.server_invocations == []
+    assert counts.subprocess_invocations == []
+    assert service.provider is adapter  # unchanged instance and handle
+    assert service.active_handle() is handle
+    assert handle.stops == 0
+
+
+class _SessionPairProvider(BaseProvider):
+    """Distinct current and response session values, set independently."""
+
+    def __init__(self, workspace_root: Path) -> None:
+        super().__init__(workspace_root)
+        self.current_value: str | None = None
+        self.response_value = ""
+
+    @property
+    def current_session_id(self) -> str | None:
+        return self.current_value
+
+    @property
+    def response_session_id(self) -> str:
+        return self.response_value
+
+    def run_streaming(
+        self,
+        request: AgentRequest,
+        register_handle: Callable[[ActiveHandle | None], None],
+    ) -> AsyncGenerator[StreamEvent, None]:
+        del request, register_handle
+        return self._turn()
+
+    async def _turn(self) -> AsyncGenerator[StreamEvent, None]:
+        yield ResultEvent(type="result", result="ok", session_id="s")
+
+
+async def test_current_session_id_is_independent_of_the_response_fence(
+    tmp_path: Path,
+) -> None:
+    """Changing either session concept leaves the other's return unchanged."""
+    service = ProviderService(_config(tmp_path))
+    adapter = _SessionPairProvider(tmp_path)
+    service._provider = adapter
+
+    adapter.current_value = "cur-A"
+    adapter.response_value = "resp-A"
+    assert service.current_session_id == "cur-A"
+    assert adapter.response_session_id == "resp-A"
+
+    adapter.current_value = "cur-B"
+    assert service.current_session_id == "cur-B"
+    assert adapter.response_session_id == "resp-A"  # response unchanged
+
+    adapter.current_value = None
+    assert service.current_session_id is None
+    assert adapter.response_session_id == "resp-A"  # response unchanged
+
+    adapter.response_value = "resp-B"
+    assert service.current_session_id is None  # current unchanged
+    assert adapter.response_session_id == "resp-B"
+
+    # An adapter without a response override keeps its inherited "" fence
+    # while its current session id is nonempty: no policy derives one.
+    inheriting = _ToggleProvider(tmp_path)
+    inheriting._session_id = "sid-A"
+    service._provider = inheriting
+    assert service.current_session_id == "sid-A"
+    assert inheriting.response_session_id == ""
 
 
 # ── forwarding ───────────────────────────────────────────────────────────
@@ -662,6 +877,91 @@ async def test_service_propagates_a_drain_exception_exactly(tmp_path: Path) -> N
     assert adapter.drain_bodies == 1
     assert adapter.stream_calls == 0
     assert adapter.disconnected == 0
+
+
+_SESSION_FAILURE = RuntimeError("sentinel session read failure")
+_SESSION_ATTR_FAILURE = AttributeError("sentinel session attribute failure")
+
+
+class _FailingSessionProvider(_ToggleProvider):
+    @property
+    def current_session_id(self) -> str | None:
+        self.current_session_reads += 1
+        raise _SESSION_FAILURE
+
+
+async def test_service_propagates_a_session_getter_failure_exactly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A getter failure propagates the exact object once, with no fallback or startup."""
+    service = ProviderService(_config(tmp_path))
+    counts = _count_provider_seams(monkeypatch, service)
+    adapter = _FailingSessionProvider(tmp_path)
+    service._provider = adapter
+    handle = _CountingHandle()
+    service._active_handle = handle
+
+    with pytest.raises(RuntimeError) as excinfo:
+        service.current_session_id
+
+    assert excinfo.value is _SESSION_FAILURE  # exact object, no coercion
+    assert adapter.current_session_reads == 1  # exactly one getter call
+    assert counts.ensure == []  # no fallback read, lookup or construction
+    assert counts.streams == []
+    assert counts.disconnects == []
+    assert counts.registrations == []
+    assert counts.registry_lookups == []
+    assert counts.factory_resolutions == []
+    assert counts.constructions == []
+    assert counts.sdk_constructions == []
+    assert counts.server_invocations == []
+    assert counts.subprocess_invocations == []
+    assert service.provider is adapter  # unchanged final state
+    assert service.active_handle() is handle
+    assert handle.stops == 0
+
+
+class _BrokenSessionGetterProvider(_ToggleProvider):
+    @property
+    def current_session_id(self) -> str | None:
+        self.current_session_reads += 1
+        raise _SESSION_ATTR_FAILURE
+
+
+async def test_service_propagates_an_attribute_error_from_a_session_getter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A getter-raised AttributeError is an invalid contract, not an absent member.
+
+    The former duck-typed service read (``getattr(..., None)``) returned its
+    default here, masking broken getters; direct typed access deliberately
+    propagates the error. Valid unknown state is None, not an exception.
+    """
+    service = ProviderService(_config(tmp_path))
+    counts = _count_provider_seams(monkeypatch, service)
+    adapter = _BrokenSessionGetterProvider(tmp_path)
+    service._provider = adapter
+    handle = _CountingHandle()
+    service._active_handle = handle
+
+    with pytest.raises(AttributeError) as excinfo:
+        service.current_session_id
+
+    assert excinfo.value is _SESSION_ATTR_FAILURE  # exact object, no masking
+    assert adapter.current_session_reads == 1  # exactly one getter call
+    assert counts.ensure == []
+    assert counts.streams == []
+    assert counts.disconnects == []
+    assert counts.registrations == []
+    assert counts.registry_lookups == []
+    assert counts.factory_resolutions == []
+    assert counts.constructions == []
+    assert counts.sdk_constructions == []
+    assert counts.server_invocations == []
+    assert counts.subprocess_invocations == []
+    assert service.provider is adapter  # unchanged final state
+    assert service.active_handle() is handle
+    assert handle.stops == 0
 
 
 class _BlockingProvider(BaseProvider):
@@ -820,19 +1120,76 @@ async def test_opencode_inherits_owner_health_and_uses_dynamic_eligibility(
     assert service.cli_connected is True
 
 
+async def test_builtin_session_ids_are_observed_exactly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude forwards its stored id verbatim; OpenCode maps its "" to None.
+
+    Both are attached to a real service without any connection. The counters
+    are installed after construction, so setup is never mistaken for
+    forbidden accessor work; the getters and their unknown representations
+    are used exactly as the built-ins define them.
+    """
+    provider = ClaudeProvider(tmp_path)
+    opencode = OpencodeProvider(tmp_path)
+    service = ProviderService(_config(tmp_path))
+    counts = _count_provider_seams(monkeypatch, service)
+    handle = _CountingHandle()
+    service._active_handle = handle
+
+    service._provider = provider
+    assert service.current_session_id is None  # Claude's initial unknown
+    provider._session_id = "sid-1"
+    assert service.current_session_id == "sid-1"
+    provider._session_id = "sid-2"
+    assert service.current_session_id == "sid-2"
+    provider._session_id = None  # Claude's existing unknown representation
+    assert service.current_session_id is None
+
+    service._provider = opencode
+    assert service.current_session_id is None  # "" internally: OpenCode's unknown
+    opencode._session_id = "sid-1"
+    assert service.current_session_id == "sid-1"
+    opencode._session_id = "sid-2"
+    assert service.current_session_id == "sid-2"
+    opencode._session_id = ""  # OpenCode's existing unknown representation
+    assert service.current_session_id is None
+
+    # Exact zero read work: no lookup, resolution, construction or teardown.
+    assert counts.ensure == []
+    assert counts.streams == []
+    assert counts.disconnects == []
+    assert counts.registrations == []
+    assert counts.registry_lookups == []
+    assert counts.factory_resolutions == []
+    assert counts.constructions == []
+    assert counts.sdk_constructions == []
+    assert counts.server_invocations == []
+    assert counts.subprocess_invocations == []
+    assert handle.stops == 0
+    assert service.provider is opencode
+
+
 # ── service disconnect ───────────────────────────────────────────────────
 
 
 async def test_service_disconnect_clears_only_the_instance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """disconnect() clears the provider instance; handle clearing stays with stops."""
+    """disconnect() clears the provider instance; handle clearing stays with stops.
+
+    A seeded session id is observed before disconnect and reads None after,
+    with no retained last-known value and no provider reconstruction.
+    """
     service = ProviderService(_config(tmp_path))
     counts = _count_provider_seams(monkeypatch, service)
     adapter = _ToggleProvider(tmp_path)
+    adapter._session_id = "sid-live"
     service._provider = adapter
     handle = _CountingHandle()
     service._active_handle = handle
+
+    assert service.current_session_id == "sid-live"  # observed before disconnect
 
     await service.disconnect()
 
@@ -841,6 +1198,7 @@ async def test_service_disconnect_clears_only_the_instance(
     assert service.provider is None
     assert service.can_drain is False  # false/false/empty afterwards
     assert service.cli_connected is False
+    assert service.current_session_id is None  # no retained last-known id
     assert [event async for event in service.drain_events()] == []
     # No reconstruction at any seam, counted independently after the iteration.
     assert counts.ensure == []
@@ -879,6 +1237,35 @@ async def test_service_without_instance_keeps_no_instance_guards(
     assert counts.registry_lookups == []
     assert counts.factory_resolutions == []
     assert counts.constructions == []
+    assert handle.stops == 0
+    assert service.active_handle() is handle  # a seeded handle is unchanged
+    assert service.provider is None
+
+
+async def test_service_without_instance_reports_no_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No provider instance: the session observation is None on repeated reads,
+    the service stays unattached and every seam stays demonstrably at zero."""
+    service = ProviderService(_config(tmp_path))
+    counts = _count_provider_seams(monkeypatch, service)
+    handle = _CountingHandle()
+    service._active_handle = handle
+
+    assert service.current_session_id is None
+    assert service.current_session_id is None  # repeated read: still None
+
+    # Every seam counted at its own boundary, not inferred from the value.
+    assert counts.ensure == []
+    assert counts.streams == []
+    assert counts.disconnects == []
+    assert counts.registrations == []
+    assert counts.registry_lookups == []
+    assert counts.factory_resolutions == []
+    assert counts.constructions == []
+    assert counts.sdk_constructions == []
+    assert counts.server_invocations == []
+    assert counts.subprocess_invocations == []
     assert handle.stops == 0
     assert service.active_handle() is handle  # a seeded handle is unchanged
     assert service.provider is None

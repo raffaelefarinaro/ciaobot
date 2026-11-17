@@ -229,7 +229,7 @@ class ProviderService:
         """Session id as currently known to the underlying provider."""
         if self._provider is None:
             return None
-        return getattr(self._provider, "current_session_id", None)
+        return self._provider.current_session_id
 
     async def disconnect(self) -> None:
         """Disconnect the provider (e.g. SDK client)."""

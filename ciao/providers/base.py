@@ -249,6 +249,11 @@ class BaseProvider(ABC):
         """Session used to fence replies when requests are not held locally."""
         return ""
 
+    @property
+    def current_session_id(self) -> str | None:
+        """Session id currently known to this adapter; None when unknown."""
+        return None
+
     def has_permission_request(self, request_id: str, session_id: str = "") -> bool:
         return False
 
