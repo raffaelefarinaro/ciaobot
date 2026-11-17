@@ -56,8 +56,9 @@ _BLOCKED_EVENTS = frozenset({
     "socket.connect", "socket.getaddrinfo", "socket.bind", "socket.gethostbyname",
     "socket.gethostbyaddr", "socket.getnameinfo", "urllib.Request", "subprocess.Popen",
     "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork", "os.forkpty",
-    "ctypes.dlopen",
+    "socket.sendto", "socket.sendmsg",
 })
+_BLOCKED_PREFIXES = ("ctypes.",)
 _GUARD = {"on": False, "violation": False, "installed": False}
 
 
@@ -466,7 +467,10 @@ def _detect_backend(sdist_root: Path, tool: dict[str, Any]) -> str:
 
 
 def _audit(event: str, _args: tuple) -> None:
-    if _GUARD["on"] and event in _BLOCKED_EVENTS:
+    # A tripwire, not a sandbox: it catches a build that strays, it does not contain a
+    # hostile one. Containment rests on the hash-pinned inputs, on verify_derived_wheel
+    # against the pinned wheel, and on sandbox-exec (network and write deny) in the real build.
+    if _GUARD["on"] and (event in _BLOCKED_EVENTS or event.startswith(_BLOCKED_PREFIXES)):
         _GUARD["violation"] = True
         raise RuntimeError("blocked")
 
@@ -491,21 +495,33 @@ def _is_purged(module: str) -> bool:
     return any(module == p or module.startswith(p + ".") for p in _PURGED_PREFIXES)
 
 
+def _private_dirs(scratch: Path) -> dict[str, str]:
+    """Private HOME, TMPDIR and XDG dirs, so no per-user config (~/.pydistutils.cfg) is read."""
+    dirs = {"HOME": "home", "TMPDIR": "tmp", "XDG_CONFIG_HOME": "xdg-config",
+            "XDG_CACHE_HOME": "xdg-cache", "XDG_DATA_HOME": "xdg-data"}
+    for leaf in dirs.values():
+        (scratch / leaf).mkdir(mode=0o700)
+    return {key: str(scratch / leaf) for key, leaf in dirs.items()}
+
+
 def _run_backend(
-    backend: str, backend_dir: Path, sdist_root: Path, out_dir: Path, epoch: int, tool: dict[str, Any]
+    backend: str, backend_dir: Path, sdist_root: Path, out_dir: Path, epoch: int, tool: dict[str, Any],
+    scratch: Path,
 ) -> None:
+    private = _private_dirs(scratch)
     stdlib = _stdlib_roots()
     roots = [str(backend_dir), str(sdist_root), *stdlib, str(Path(__file__).resolve().parent)]
     saved_path, saved_cwd = list(sys.path), os.getcwd()
     saved_env, saved_umask = dict(os.environ), os.umask(0o022)
-    saved_bytecode = sys.dont_write_bytecode
+    saved_bytecode, saved_tempdir = sys.dont_write_bytecode, tempfile.tempdir
     saved_modules = {m: sys.modules.pop(m) for m in [m for m in sys.modules if _is_purged(m)]}
     before = set(sys.modules)
     _install_guard()
     _GUARD["violation"] = False
     try:
         os.environ.clear()
-        os.environ.update({"SOURCE_DATE_EPOCH": str(epoch), "LC_ALL": "C", "TZ": "UTC"})
+        os.environ.update({"SOURCE_DATE_EPOCH": str(epoch), "LC_ALL": "C", "TZ": "UTC", **private})
+        tempfile.tempdir = private["TMPDIR"]
         time.tzset()
         sys.dont_write_bytecode = True
         sys.path[:] = [str(backend_dir), str(sdist_root), *stdlib]
@@ -534,6 +550,7 @@ def _run_backend(
         sys.modules.update(saved_modules)
         sys.path[:] = saved_path
         sys.dont_write_bytecode = saved_bytecode
+        tempfile.tempdir = saved_tempdir
         os.chdir(saved_cwd)
         os.umask(saved_umask)
         os.environ.clear()
@@ -587,12 +604,17 @@ def build_derived_wheel(name: str, sdist: Path, backend_wheel: Path, destination
         _require(_detect_backend(sdist_root, tool) == entry["build"]["backend"])
         out_dir = work / "out"
         out_dir.mkdir(mode=0o700)
-        _run_backend(entry["build"]["backend"], work / "backend", sdist_root, out_dir, epoch, tool)
+        scratch = work / "scratch"
+        scratch.mkdir(mode=0o700)
+        _run_backend(entry["build"]["backend"], work / "backend", sdist_root, out_dir, epoch, tool, scratch)
         produced = sorted(out_dir.iterdir())
         _require(len(produced) == 1 and produced[0].name in _wheel_filenames(entry["name"], entry["version"]))
         data = _read_regular(produced[0], MAX_WHEEL_BYTES)
         members = _check_wheel(data, entry, files, produced[0].name)
         os.chmod(produced[0], 0o644)
+        # Defence in depth: the bytes validated above are the bytes that get published.
+        _require(hashlib.sha256(_read_regular(produced[0], MAX_WHEEL_BYTES)).digest()
+                 == hashlib.sha256(data).digest())
         os.rename(out_dir, target)
         receipt = {
             "name": entry["name"],

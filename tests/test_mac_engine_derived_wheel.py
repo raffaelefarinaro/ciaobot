@@ -61,9 +61,9 @@ __PRELUDE__
     di = f"{name}-{ver}.dist-info"
     body = open("http_ece/__init__.py", "rb").read() + (b"#" if o.get("mutate") else b"")
     requires = o.get("requires_dist", ["cryptography>=2.5"])
-    meta = f"Metadata-Version: 2.1\\nName: {o.get('meta_name', 'http-ece')}\\nVersion: {ver}\\n"
+    meta = f"Metadata-Version: 2.1\\nName: {o.get('meta_name', 'http-ece')}\\nVersion: {o.get('meta_version', ver)}\\n"
     meta += "".join(f"Requires-Dist: {r}\\n" for r in requires)
-    tags = "".join(f"Tag: {p}-none-any\\n" for p in tag.split("."))
+    tags = "".join(f"Tag: {p}-none-any\\n" for p in o.get("wheel_tag", tag).split("."))
     wheel = f"Wheel-Version: 1.0\\nGenerator: stub\\nRoot-Is-Purelib: true\\n{tags}"
     files = {
         "http_ece/__init__.py": body,
@@ -240,9 +240,21 @@ class Spies:
 # ------------------------------------------------------------------ pins
 
 
+REVIEWED_MEMBERS = [
+    ("http_ece-1.2.1.dist-info/METADATA", 1136),
+    ("http_ece-1.2.1.dist-info/RECORD", 478),
+    ("http_ece-1.2.1.dist-info/WHEEL", 109),
+    ("http_ece-1.2.1.dist-info/licenses/LICENSE", 1081),
+    ("http_ece-1.2.1.dist-info/top_level.txt", 9),
+    ("http_ece/__init__.py", 13073),
+]
+
+
 def test_committed_inputs_match_reviewed_values() -> None:
+    raw = (REPO / "mac/engine-build-inputs.json").read_bytes()
+    data = json.loads(raw)
     inputs = mod.load_build_inputs()
-    data = inputs.data
+    assert inputs.data == data and inputs.sha256 == hashlib.sha256(raw).hexdigest()
     assert data["schema_version"] == 1
     assert data["build_tools"] == [{
         "name": "setuptools",
@@ -260,12 +272,30 @@ def test_committed_inputs_match_reviewed_values() -> None:
         "size": 8830,
         "sha256": "8c6ab23116bbf6affda894acfd5f2ca0fb8facbcbb72121c11c75c33e7ce8cff",
     }
-    assert entry["build"]["tool"] == "setuptools"
-    assert entry["build"]["source_date_epoch"] == EPOCH == 1723075847
-    assert entry["build"]["umask"] == "022"
-    assert entry["wheel"]["requires_dist"] == ["cryptography>=2.5"]
+    assert entry["build"] == {
+        "tool": "setuptools",
+        "backend": "setuptools.build_meta:__legacy__",
+        "source_date_epoch": 1723075847,
+        "umask": "022",
+    }
+    assert entry["build"]["source_date_epoch"] == EPOCH
+    wheel = entry["wheel"]
+    assert wheel["filename"] == "http_ece-1.2.1-py2.py3-none-any.whl"
+    assert wheel["size"] == 5717
+    assert wheel["sha256"] == "696199016b82de2b91f936d01ddf636769174fcc2766f9b1a741c12676beea80"
+    assert wheel["requires_dist"] == ["cryptography>=2.5"]
+    assert [(m["path"], m["size"]) for m in wheel["members"]] == REVIEWED_MEMBERS
+    assert [m["sha256"] for m in wheel["members"]] == [
+        "66a0ad64af9c95f34fa525de5debd85570a76686b1576d78406a0446fcbf04e4",
+        "a48e4d0541a46780fbcc309c9610ef73741801fdd5c4873af8e69fe21dc599a4",
+        "52f960d9a36510a76296cc85489b75417e667b47846c28d0cd1de765e164bf2e",
+        "7d71f48c474da1de82fbdaac7fea5a1eaa41e4ac998dd44fd2897812812138d9",
+        "fbbe03a364f0c71fa6a5da8082763a4a301f86771d8f92ce2bd2269976c3b63e",
+        "2ddd0f18e1b0c287fe6bea53be7fbab1d950fe15b7184bb80ffabd98c40433f9",
+    ]
     committed_text = (REPO / "mac/licenses/http-ece-LICENSE").read_bytes()
-    assert entry["license"] == {
+    licence = entry["license"]
+    assert {k: v for k, v in licence.items() if k != "note"} == {
         "spdx": "MIT",
         "declared_in": {
             "sdist_member": "http_ece-1.2.1/PKG-INFO",
@@ -277,12 +307,31 @@ def test_committed_inputs_match_reviewed_values() -> None:
             "sha256": "7d71f48c474da1de82fbdaac7fea5a1eaa41e4ac998dd44fd2897812812138d9",
         },
         "source_url": "https://raw.githubusercontent.com/martinthomson/encrypted-content-encoding/master/python/LICENSE",
-        "note": entry["license"]["note"],
     }
-    assert "no licence file" in entry["license"]["note"]
+    assert "no licence file" in licence["note"]
+    assert "provenance only, not machine-checked" in licence["note"]
     assert len(committed_text) == 1081 and b"Copyright (c) 2015 Martin Thomson" in committed_text
-    assert hashlib.sha256(committed_text).hexdigest() == entry["license"]["text_file"]["sha256"]
-    assert inputs.sha256 == hashlib.sha256((REPO / "mac/engine-build-inputs.json").read_bytes()).hexdigest()
+    assert hashlib.sha256(committed_text).hexdigest() == licence["text_file"]["sha256"]
+
+
+def test_committed_wheel_pin_is_self_consistent_and_verifiable_in_shape() -> None:
+    """The real wheel is not in the repo (no network here), so check the pin's shape.
+
+    The pin must be accepted by the loader, name a wheel `verify_derived_wheel` would look up,
+    carry the licence text it hashes, and list members `_check_wheel` could produce.
+    """
+    entry = mod.load_build_inputs().data["derived_wheels"][0]
+    wheel = entry["wheel"]
+    assert wheel["filename"] in mod._wheel_filenames(entry["name"], entry["version"])
+    paths = [m["path"] for m in wheel["members"]]
+    assert paths == sorted(paths) and len(set(paths)) == len(paths)
+    by_path = {m["path"]: m for m in wheel["members"]}
+    assert by_path["http_ece-1.2.1.dist-info/licenses/LICENSE"]["sha256"] == entry["license"]["text_file"]["sha256"]
+    assert by_path["http_ece-1.2.1.dist-info/licenses/LICENSE"]["size"] == entry["license"]["text_file"]["size"]
+    assert sum(m["size"] for m in wheel["members"]) <= mod.MAX_WHEEL_BYTES
+    # Every non-module member is one _check_wheel's fixed set allows.
+    fixed = {f"http_ece-1.2.1.dist-info/{n}" for n in ("METADATA", "WHEEL", "RECORD", "top_level.txt", "licenses/LICENSE")}
+    assert set(paths) - fixed == {"http_ece/__init__.py"}
 
 
 def test_pin_sdist_matches_uv_lock() -> None:
@@ -434,29 +483,62 @@ def _tar_member(name, kind=tarfile.REGTYPE, linkname="", data=b"x"):
     return info, data
 
 
+def _valid_members():
+    """A complete, valid sdist: PKG-INFO declaring the pinned licence, so the build would succeed."""
+    return [
+        _tar_member(ROOT, tarfile.DIRTYPE),
+        _tar_member(f"{ROOT}/PKG-INFO", data=PKG_INFO),
+        _tar_member(f"{ROOT}/setup.py", data=b"# stub\n"),
+        _tar_member(f"{ROOT}/http_ece/__init__.py", data=MODULE_BYTES),
+    ]
+
+
 def _hostile_sdists():
-    dir_root = _tar_member(ROOT, tarfile.DIRTYPE)
-    ok = _tar_member(f"{ROOT}/setup.py")
+    # Each case is the valid sdist plus hostile members at the end, so valid files are
+    # extracted before the hostile one is reached unless its own guard refuses the archive.
     cases = {
-        "absolute": [dir_root, _tar_member("/etc/passwd")],
-        "dotdot": [dir_root, _tar_member(f"{ROOT}/../evil")],
-        "outside-root": [dir_root, _tar_member("other-1.0/x")],
-        "symlink": [dir_root, _tar_member(f"{ROOT}/l", tarfile.SYMTYPE, "/etc/passwd")],
-        "hardlink": [dir_root, ok, _tar_member(f"{ROOT}/h", tarfile.LNKTYPE, f"{ROOT}/setup.py")],
-        "fifo": [dir_root, _tar_member(f"{ROOT}/f", tarfile.FIFOTYPE)],
-        "device": [dir_root, _tar_member(f"{ROOT}/d", tarfile.CHRTYPE)],
-        "casefold": [dir_root, _tar_member(f"{ROOT}/README"), _tar_member(f"{ROOT}/readme")],
-        "too-many": [dir_root] + [_tar_member(f"{ROOT}/f{i}") for i in range(501)],
-        "too-big": [dir_root, _tar_member(f"{ROOT}/big", data=b"\0" * (4 * 1024 * 1024 + 1))],
+        "absolute": [_tar_member("/etc/passwd")],
+        "dotdot": [_tar_member(f"{ROOT}/../evil")],
+        "dot-component": [_tar_member(f"{ROOT}/./evil")],
+        "empty-component": [_tar_member(f"{ROOT}//evil")],
+        "outside-root": [_tar_member("other-1.0/x")],
+        "outside-root-sliceable": [_tar_member("http_ece-1.2.2/payload.py")],
+        "symlink": [_tar_member(f"{ROOT}/l", tarfile.SYMTYPE, "/etc/passwd")],
+        "hardlink": [_tar_member(f"{ROOT}/h", tarfile.LNKTYPE, f"{ROOT}/setup.py")],
+        "fifo": [_tar_member(f"{ROOT}/f", tarfile.FIFOTYPE)],
+        "device": [_tar_member(f"{ROOT}/d", tarfile.CHRTYPE)],
+        # Distinct on every filesystem; equal only under str.casefold (not str.lower).
+        "casefold": [_tar_member(f"{ROOT}/stra\u00dfe"), _tar_member(f"{ROOT}/STRASSE")],
+        "too-many": [_tar_member(f"{ROOT}/f{i}") for i in range(501)],
+        "too-big": [_tar_member(f"{ROOT}/big", data=b"\0" * (4 * 1024 * 1024 + 1))],
     }
-    return list(cases.items())
+    return [(label, _valid_members() + extra) for label, extra in cases.items()]
+
+
+def test_valid_sdist_fixture_base_builds(tmp_path, monkeypatch) -> None:
+    env = stub_env(tmp_path, monkeypatch, sdist=sdist_bytes(members=_valid_members()))
+    assert env.build()["wheel"]["filename"] == "http_ece-1.2.1-py3-none-any.whl"
 
 
 @pytest.mark.parametrize("label,members", _hostile_sdists(), ids=[c[0] for c in _hostile_sdists()])
 def test_hostile_sdist_refused_before_backend_import(tmp_path, monkeypatch, label, members) -> None:
     env = stub_env(tmp_path, monkeypatch, sdist=sdist_bytes(members=members))
     spies = Spies(monkeypatch)
+    writes, extractions = [], []
+    real_write, real_extract = mod._write_file, mod._extract_sdist
+    monkeypatch.setattr(mod, "_write_file", lambda *a, **k: writes.append(a[0]) or real_write(*a, **k))
+
+    def extract(archive, root_name, epoch, target):
+        try:
+            return real_extract(archive, root_name, epoch, target)
+        except mod.DerivedWheelError:
+            extractions.append(os.path.lexists(target))
+            raise
+
+    monkeypatch.setattr(mod, "_extract_sdist", extract)
     assert_refused(env)
+    assert extractions == [False], "the sdist guard must refuse before anything is extracted"
+    assert writes == [], "nothing may be written by the extraction seam"
     assert spies.calls["import"] == 0
 
 
@@ -562,6 +644,9 @@ GUARD_PRELUDES = {
     "resolve": "import socket\nsocket.getaddrinfo('example.org', 80)",
     "subprocess": "import subprocess\nsubprocess.run(['/usr/bin/true'])",
     "os-system": "import os\nos.system('true')",
+    "sendto": "import socket\nsocket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'x', ('127.0.0.1', 9))",
+    "sendmsg": "import socket\nsocket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendmsg([b'x'], [], 0, ('127.0.0.1', 9))",
+    "ctypes": "import ctypes\nctypes.create_string_buffer(4)",
     "foreign-import": "PLANT",
 }
 
@@ -584,8 +669,100 @@ def test_guard_blocks_network_subprocess_and_foreign_imports(tmp_path, label) ->
     assert list(parent.iterdir()) == []
 
 
+@pytest.mark.parametrize("event", [
+    "socket.connect", "socket.getaddrinfo", "socket.bind", "socket.gethostbyname", "socket.gethostbyaddr",
+    "socket.getnameinfo", "socket.sendto", "socket.sendmsg", "urllib.Request", "subprocess.Popen",
+    "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork", "os.forkpty",
+    "ctypes.dlopen", "ctypes.dlsym", "ctypes.dlsym/handle", "ctypes.cdata",
+    "ctypes.call_function", "ctypes.create_string_buffer", "ctypes.string_at", "ctypes.PyObj_FromPtr",
+])
+def test_audit_hook_blocks_event_only_while_armed(event) -> None:
+    # Disarm in a finally, not a fixture: the armed hook would block pytest's own putenv.
+    saved = dict(mod._GUARD)
+    try:
+        mod._GUARD.update(on=False, violation=False)
+        mod._audit(event, ())
+        assert mod._GUARD["violation"] is False
+        mod._GUARD["on"] = True
+        with pytest.raises(RuntimeError):
+            mod._audit(event, ())
+        assert mod._GUARD["violation"] is True
+        mod._GUARD["violation"] = False
+        mod._audit("open", ())
+        mod._audit("socket.__new__", ())
+        assert mod._GUARD["violation"] is False
+    finally:
+        mod._GUARD.update(saved)
+
+
+def test_build_ignores_real_users_pydistutils_cfg(tmp_path, monkeypatch) -> None:
+    fake_home = private(tmp_path / "real-home")
+    (fake_home / ".pydistutils.cfg").write_text("[build]\nexecutable = /bin/evil\n")
+    import pwd
+    real = pwd.getpwuid(os.getuid())
+    fake = pwd.struct_passwd((real.pw_name, real.pw_passwd, real.pw_uid, real.pw_gid, real.pw_gecos,
+                             str(fake_home), real.pw_shell))
+    monkeypatch.setattr(pwd, "getpwuid", lambda _uid: fake)
+    # Control: with HOME absent (what the scrubbed environment used to leave) the passwd entry
+    # wins, so a probe in the backend would find the planted file.
+    monkeypatch.delenv("HOME", raising=False)
+    assert os.path.exists(os.path.join(os.path.expanduser("~"), ".pydistutils.cfg"))
+    probe = (
+        "import os\n"
+        "if os.path.exists(os.path.join(os.path.expanduser('~'), '.pydistutils.cfg')):\n"
+        "    open('LICENSE', 'wb').write(b'tainted by the real home')\n"
+    )
+    env = stub_env(tmp_path, monkeypatch, prelude=probe)
+    assert env.build()["wheel"]["filename"] == "http_ece-1.2.1-py3-none-any.whl"
+    assert env.destination.is_dir()
+
+
+def test_backend_sees_private_home_tmp_and_xdg(tmp_path, monkeypatch) -> None:
+    probe = (
+        "import os, tempfile\n"
+        "work = os.path.realpath(os.path.join(os.getcwd(), os.pardir))\n"
+        "names = ('HOME', 'TMPDIR', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME')\n"
+        "dirs = [os.environ.get(n, '') for n in names] + [tempfile.gettempdir(), os.path.expanduser('~')]\n"
+        "inside = all(d and os.path.realpath(d).startswith(work + os.sep) and os.path.isdir(d) for d in dirs)\n"
+        "if not inside or set(os.environ) != {'SOURCE_DATE_EPOCH', 'LC_ALL', 'TZ', *names}:\n"
+        "    open('LICENSE', 'wb').write(b'tainted')\n"
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    saved_tempdir = mod.tempfile.tempdir
+    env = stub_env(tmp_path, monkeypatch, prelude=probe)
+    assert env.build()["wheel"]["filename"] == "http_ece-1.2.1-py3-none-any.whl"
+    assert os.environ["HOME"] == str(tmp_path) and mod.tempfile.tempdir == saved_tempdir
+
+
+def test_wheel_tampered_before_publish_is_refused(tmp_path, monkeypatch) -> None:
+    env = stub_env(tmp_path, monkeypatch)
+    real_chmod, real_rename, renames = os.chmod, os.rename, []
+    tampered = []
+
+    def chmod(path, mode, *a, **k):
+        if str(path).endswith(".whl") and f"{os.sep}out{os.sep}" in str(path) and mode == 0o644:
+            with open(path, "ab") as handle:
+                handle.write(b"x")
+            tampered.append(path)
+        return real_chmod(path, mode, *a, **k)
+
+    monkeypatch.setattr(os, "chmod", chmod)
+    monkeypatch.setattr(os, "rename", lambda *a, **k: renames.append(a) or real_rename(*a, **k))
+    assert_refused(env)
+    assert len(tampered) == 1 and renames == []
+
+
 def test_caller_environment_cannot_change_output(tmp_path, monkeypatch) -> None:
-    outputs = []
+    outputs, premodes = [], []
+    real_chmod = os.chmod
+
+    def chmod(path, mode, *a, **k):
+        if str(path).endswith(".whl") and f"{os.sep}out{os.sep}" in str(path):
+            premodes.append(stat.S_IMODE(os.stat(path).st_mode))
+        return real_chmod(path, mode, *a, **k)
+
+    monkeypatch.setattr(os, "chmod", chmod)
     for index, (epoch, tz, mask) in enumerate([("0", "Asia/Tokyo", 0o077), ("99", "America/Chicago", 0o002)]):
         base = private(tmp_path / f"case{index}")
         env = stub_env(base, monkeypatch)
@@ -600,6 +777,8 @@ def test_caller_environment_cannot_change_output(tmp_path, monkeypatch) -> None:
         assert os.environ["SOURCE_DATE_EPOCH"] == epoch and os.environ["TZ"] == tz
         outputs.append((parent / "out" / "http_ece-1.2.1-py3-none-any.whl").read_bytes())
     assert outputs[0] == outputs[1]
+    # The backend wrote its wheel under umask 022 whatever the caller's umask was (077, 002).
+    assert premodes == [0o644, 0o644]
     with zipfile.ZipFile(io.BytesIO(outputs[0])) as zf:
         assert {i.date_time for i in zf.infolist()} == {mod._zip_time(EPOCH)}
 
@@ -614,9 +793,12 @@ OUTPUT_FAULTS = {
     "data-dir": {"extra": [["http_ece-1.2.1.data/scripts/x", "x"]]},
     "extra-py-not-in-sdist": {"extra": [["http_ece/other.py", "x = 1\n"]]},
     "symlink": {"symlink": True},
-    "wrong-tag": {"tag": "cp312"},
-    "wrong-name": {"name": "other_pkg"},
-    "wrong-version": {"version": "9.9.9"},
+    "wrong-filename-tag": {"tag": "cp312"},
+    "wrong-filename-name": {"name": "other_pkg"},
+    "wrong-filename-version": {"version": "9.9.9"},
+    "wrong-wheel-file-tag": {"wheel_tag": "cp312"},
+    "extra-wheel-file-tag": {"tag": "py2.py3", "wheel_tag": "py3"},
+    "wrong-metadata-version": {"meta_version": "9.9.9"},
     "wrong-metadata-name": {"meta_name": "evil"},
     "extra-requires": {"requires_dist": ["cryptography>=2.5", "requests"]},
     "bad-record": {"bad_record": True},
@@ -629,7 +811,30 @@ OUTPUT_FAULTS = {
 @pytest.mark.parametrize("label", list(OUTPUT_FAULTS))
 def test_output_validation_matrix(tmp_path, monkeypatch, label) -> None:
     env = stub_env(tmp_path, monkeypatch, **OUTPUT_FAULTS[label])
+    checked = []
+    real_check = mod._check_wheel
+    monkeypatch.setattr(mod, "_check_wheel", lambda *a, **k: checked.append(1) or real_check(*a, **k))
     assert_refused(env)
+    # The filename faults are refused before the wheel is opened; every other fault must get
+    # as far as the wheel content check, so it is refused by its own guard.
+    assert checked == ([] if label.startswith("wrong-filename-") or label == "two-wheels" else [1])
+
+
+def test_two_wheels_reach_the_single_wheel_guard(tmp_path, monkeypatch) -> None:
+    env = stub_env(tmp_path, monkeypatch, two=True)
+    produced = []
+    real_run = mod._run_backend
+
+    def run(backend, backend_dir, sdist_root, out_dir, *a, **k):
+        real_run(backend, backend_dir, sdist_root, out_dir, *a, **k)
+        produced.append(sorted(p.name for p in out_dir.iterdir()))
+
+    monkeypatch.setattr(mod, "_run_backend", run)
+    assert_refused(env)
+    assert produced == [["http_ece-1.2.1-py2-none-any.whl", "http_ece-1.2.1-py3-none-any.whl"]]
+    # With one wheel (control) the same inputs build.
+    one = stub_env(private(tmp_path / "one"), monkeypatch)
+    assert one.build()["wheel"]["filename"] == "http_ece-1.2.1-py3-none-any.whl"
 
 
 @pytest.mark.parametrize("tag", ["py3", "py2.py3"])
@@ -799,10 +1004,24 @@ def test_cli_failure_is_sanitized(tmp_path) -> None:
     assert verify.returncode == 1 and verify.stderr == "derived wheel failed\n"
 
 
-def test_cli_refuses_dot_components(tmp_path) -> None:
-    result = _run_cli("build", "--name", "http-ece", "--sdist", "a", "--backend-wheel", "b",
-                      "--destination", f"{tmp_path}/./out", cwd=tmp_path)
-    assert result.returncode == 1
+@pytest.mark.parametrize("variant", ["dot", "dotdot", "control"])
+def test_cli_refuses_dot_components(tmp_path, monkeypatch, variant) -> None:
+    # Otherwise valid inputs: only the destination spelling differs, and the control builds.
+    env = stub_env(tmp_path, monkeypatch)
+    destination = {
+        "dot": f"{env.parent}/./out",
+        "dotdot": f"{env.parent}/../parent/out",
+        "control": f"{env.parent}/out",
+    }[variant]
+    built = []
+    real_build = mod.build_derived_wheel
+    monkeypatch.setattr(mod, "build_derived_wheel", lambda *a, **k: built.append(1) or real_build(*a, **k))
+    code = mod.main(["build", "--name", "http-ece", "--sdist", str(env.sdist),
+                     "--backend-wheel", str(env.backend), "--destination", destination])
+    if variant == "control":
+        assert code == 0 and built == [1] and env.destination.is_dir()
+    else:
+        assert code == 1 and built == [] and list(env.parent.iterdir()) == []
 
 
 def test_cli_win32_refusal_precedes_io(tmp_path, monkeypatch, capsys) -> None:

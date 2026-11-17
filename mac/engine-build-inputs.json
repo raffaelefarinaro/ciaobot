@@ -33,7 +33,7 @@
           "sha256": "7d71f48c474da1de82fbdaac7fea5a1eaa41e4ac998dd44fd2897812812138d9"
         },
         "source_url": "https://raw.githubusercontent.com/martinthomson/encrypted-content-encoding/master/python/LICENSE",
-        "note": "The pinned sdist ships no licence file; it declares MIT in PKG-INFO (License and classifier) and setup.py. The text is the upstream repository's MIT LICENSE (Copyright (c) 2015 Martin Thomson), committed here and added to the wheel as dist-info/licenses/LICENSE. Maintainer approved 2026-11-17."
+        "note": "The pinned sdist ships no licence file; it declares MIT in PKG-INFO (License and classifier) and setup.py. The text is the upstream repository's MIT LICENSE (Copyright (c) 2015 Martin Thomson), committed here and added to the wheel as dist-info/licenses/LICENSE. Maintainer approved 2026-11-17. source_url is provenance only, not machine-checked (it tracks a moving branch, not a commit; the committed text is what is hash-pinned)."
       },
       "build": {
         "tool": "setuptools",
