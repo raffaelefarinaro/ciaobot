@@ -104,7 +104,7 @@ set and nothing else.
 | `interrupted_background_work()` | Shutdown record of work a restart loses: `{"children": [...], "shells": [{"id", "command"}]}`. The host checks `background_work_outstanding` first. | Defaults to `None`: nothing to record. |
 | `native_title_candidates(workspace_root, session_id)` (classmethod) | `ProjectChatManager._native_chat_title`, tier 1 of the auto-title poll. | On `BaseProvider` the default returns `()` — no native title for that provider. |
 | `delete_session(workspace_root, session_id)` (classmethod) | `ProjectChatManager._reclaim_provider_sessions_async`, the delete/archive/reset cleanup. | On `BaseProvider` the default returns `None` — an adapter inheriting it intentionally does no reclaim, and the host stays quiet. |
-| `model_catalog(workspace_root, *, force=False)` (classmethod) | **Not yet migrated** — no host caller dispatches it through the shared type; image preflight, `_capability_candidates` and the `/api/models` assembly still call `OpencodeProvider.model_catalog` concretely. | On `BaseProvider` the default returns `[]`: no dynamic catalog supplied by this operation. An overriding adapter may start a short-lived server. |
+| `model_catalog(workspace_root, *, force=False)` (classmethod) | `ProjectChatManager._catalog_image_support` (image preflight, via `_model_capable`), `_capability_candidates`, and the `/api/models` assembly, all through `provider_registry`. | On `BaseProvider` the default returns `[]`: no dynamic catalog supplied by this operation. An overriding adapter may start a short-lived server. |
 
 `native_title_candidates` is the shared native-title read. It is a
 stateless classmethod on the adapter class — the manager resolves it through
@@ -130,9 +130,10 @@ boundary.
 
 `model_catalog(workspace_root, *, force=False)` is the shared optional catalog
 classmethod (#3178): call it on the adapter class, without constructing an
-adapter instance or a `ProviderService`. It sits in the table above as a
-shared seam, but the chat manager does not dispatch it yet — every consumer
-is still concrete. The inherited default returns a fresh `[]` and does no
+adapter instance or a `ProviderService`. The chat manager dispatches it
+through `provider_registry` for image preflight and capability candidates
+(keyed by the chat's provider id), and `/api/models` calls it on the
+`opencode` descriptor. The inherited default returns a fresh `[]` and does no
 work; `[]` means *no dynamic catalog is exposed by this operation*, not that
 the provider cannot run a model and not that discovery completed.
 `workspace_root` scopes adapter-native discovery and keyword-only
@@ -142,15 +143,14 @@ representation passed through unchanged — OpenCode's projection uses `model`
 and `label` strings, `variants` as variant ids, and optional `images`
 (absent means unknown); there is no shared wire schema, no sorting, filtering
 or cross-provider id normalization. Override exceptions and cancellation
-propagate unwrapped to the caller, which keeps its own policy. Only the
+propagate unwrapped to the caller, which keeps its own policy (image
+preflight treats any exception as unknown and therefore capable). Only the
 inherited default is guaranteed no-start: an explicit override can launch a
 short-lived server — OpenCode's catalog call owns an ephemeral
 `opencode serve` process — so status polling, startup, drain eligibility,
-Stop and live-session getters must not call it. The image-preflight
-skip-list row below stays accurate until a separately planned migration
-dispatches `_opencode_image_support`, `_capability_candidates` and the
-`/api/models` assembly through this operation; adding the classmethod does
-not move them, and #3132 stays open.
+Stop and live-session getters must not call it. Because the base default is
+empty, an adapter that does not override it is never questioned about image
+input.
 
 `current_session_id` is a synchronized, read-only observation of the
 session id the live adapter instance currently knows. It may be learned
@@ -207,7 +207,7 @@ arm.
 | The schedule archive wait returns "settled" immediately. | A schedule can archive while its background agents are still running. | `ciao/web/schedule_dispatch.py` `_await_schedule_subagents`. |
 | The subagent watcher falls through to the Claude JSONL reader. | Only if `background_subagents` is true. The watcher then looks for a Claude session file and finds nothing. | `ciao/web/subagent_watchers.py` `watch_inner`. The CLI-task orphan sweep is Claude-only and skips everyone else, which is safe. |
 | `disallowed_tools_for_chat` returns `[]`. | The harness denylist is not applied. Credential denies are also not applied unless the adapter sends them itself. | `ProjectChatManager.disallowed_tools_for_chat`. OpenCode applies the shared patterns from `execution_modes.opencode_credential_deny_rules` inside its own permission rules. |
-| Image preflight runs only for OpenCode. | A model that cannot see images receives them anyway. Claude and current Anthropic/OpenAI models all accept images, which is why the check is OpenCode-only. | `ProjectChatManager._opencode_image_support`. |
+| Image preflight does work only for providers that report a catalog with `images`. | A model that cannot see images receives them anyway. Claude and current Anthropic/OpenAI models all accept images, and the base `model_catalog` default is empty, so only OpenCode ever asks. | `ProjectChatManager._catalog_image_support`. |
 | `native_title_candidates` is not overridden. | No native title: the chat keeps the deterministic title, then the one-shot titler. The read seam itself is id-neutral now — the remaining limitation is polling policy: `auto_title_if_default` still gives Claude one immediate native read and all other ids the existing delayed poll window. Polling neutrality is a separate follow-up. | `ProjectChatManager.auto_title_if_default`. |
 | Transcript reload uses the local markdown only. | The chat bubble history still renders from Ciaobot's own transcript. Provider-side history that never landed there does not. | `ciao/web/transcript_service.py`. |
 | Stop escalation disconnects only Claude. | A wedged CLI is not torn down on Stop unless `ActiveHandle.stop` already did it. | `ProjectChatManager` force-stop. |
@@ -264,8 +264,8 @@ read a path the file tool refuses. See `docs/AGENT_CLI.md`.
   timed `/api/provider` snapshot — and addresses models as
   `providerID/modelID`, with its own cache, keyword-only `force` refresh and a
   short-lived `opencode serve` process while it reads. The `/api/models`
-  response assembly still calls `OpencodeProvider.model_catalog` concretely;
-  dispatching it through the shared type is future work. A fixed catalog can
+  response assembly calls it through `provider_registry.require("opencode")`,
+  and image preflight dispatches it by the chat's provider id. A fixed catalog can
   live on the descriptor's `default_model` instead.
 
 ## Docs, site, and the weekly probe
