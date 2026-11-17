@@ -315,6 +315,43 @@ final class DmgScriptTests: XCTestCase {
         XCTAssertEqual(calls.last?.first, "detach", "detach must be the last image operation: \(calls)")
     }
 
+    /// Each mounted layout file is compared or checked on its own; every case
+    /// fails with its own message, publishes nothing and still detaches.
+    private func assertMountedLayoutRefused(
+        _ knob: String, message: String, file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        let app = try makeApp()
+        let output = try outputPath()
+
+        let result = try runScript(
+            ["--app", app.path, "--output", output, "--identity", identity],
+            environment: [knob: "1"]
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.output, file: file, line: line)
+        XCTAssertTrue(result.output.contains(message), result.output, file: file, line: line)
+        XCTAssertFalse(fileManager.fileExists(atPath: output), "a failed inspection must publish nothing",
+                       file: file, line: line)
+        let calls = try hdiutilCalls()
+        XCTAssertEqual(calls.filter { $0.first == "detach" }.count, 1,
+                       "the failure path must still detach: \(calls)", file: file, line: line)
+        XCTAssertEqual(calls.last?.first, "detach", file: file, line: line)
+    }
+
+    func testRefusesACorruptedMountedDSStore() throws {
+        try assertMountedLayoutRefused(
+            "FAKE_HDIUTIL_CORRUPT_DSSTORE", message: "differs from scripts/dmg_layout.py")
+    }
+
+    func testRefusesAMissingBackgroundPictureWithAValidDSStore() throws {
+        try assertMountedLayoutRefused("FAKE_HDIUTIL_SKIP_BACKGROUND", message: "no background picture")
+    }
+
+    func testRefusesACorruptedMountedBackgroundPicture() throws {
+        try assertMountedLayoutRefused(
+            "FAKE_HDIUTIL_CORRUPT_BACKGROUND", message: "background picture differs")
+    }
+
     /// When the layout cannot be written, no image is created at all.
     func testALayoutFailureCreatesNoImage() throws {
         try makeTool("tiffutil", body: "#!/bin/sh\nexit 1\n")

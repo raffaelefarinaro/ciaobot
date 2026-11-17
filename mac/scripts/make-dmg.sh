@@ -260,6 +260,8 @@ cmp -s "$expected_layout" "$mount_point/.DS_Store" \
     || die "the image's Finder layout differs from scripts/dmg_layout.py"
 [ -f "$mount_point/.background.tiff" ] && [ ! -L "$mount_point/.background.tiff" ] \
     || die "the image has no background picture"
+cmp -s "$stage/.background.tiff" "$mount_point/.background.tiff" \
+    || die "the image's background picture differs from the one staged"
 codesign --verify --deep --strict --verbose=2 "$mounted_app"
 hdiutil detach "$mount_point" >/dev/null
 mount_point=

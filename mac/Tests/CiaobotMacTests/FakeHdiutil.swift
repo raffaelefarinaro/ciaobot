@@ -14,6 +14,9 @@ import Foundation
 /// - `FAKE_HDIUTIL_SKIP_LINK=1` mounts a volume without the Applications link
 /// - `FAKE_HDIUTIL_SKIP_LAYOUT=1` mounts a volume without the `.DS_Store` and
 ///   `.background.tiff` the staging folder carried
+/// - `FAKE_HDIUTIL_CORRUPT_DSSTORE=1` / `FAKE_HDIUTIL_CORRUPT_BACKGROUND=1`
+///   append a byte to that mounted file, so it differs from the staged one
+/// - `FAKE_HDIUTIL_SKIP_BACKGROUND=1` mounts the volume without `.background.tiff`
 /// - `FAKE_HDIUTIL_OUTPUT` a path whose existence is recorded at detach time,
 ///   so a test can prove nothing was published before the image was verified
 enum FakeHdiutil {
@@ -69,6 +72,9 @@ enum FakeHdiutil {
                     [ ! -f "$srcfolder/$layout" ] || cp "$srcfolder/$layout" "$mountpoint/$layout" || exit 1
                 done
             fi
+            [ "${FAKE_HDIUTIL_CORRUPT_DSSTORE:-0}" != 1 ] || printf 'corrupt\\n' >> "$mountpoint/.DS_Store"
+            [ "${FAKE_HDIUTIL_CORRUPT_BACKGROUND:-0}" != 1 ] || printf 'corrupt\\n' >> "$mountpoint/.background.tiff"
+            [ "${FAKE_HDIUTIL_SKIP_BACKGROUND:-0}" != 1 ] || rm -f "$mountpoint/.background.tiff"
             if [ "${FAKE_HDIUTIL_SKIP_LINK:-0}" != 1 ]; then
                 ln -s /Applications "$mountpoint/Applications" || exit 1
             fi

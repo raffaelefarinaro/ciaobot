@@ -50,7 +50,7 @@ PLATE_SIZE = (150, 30)
 PLATE_Y = 282
 PLATE_COLOR = "#6d739c"
 
-_APP_NAME = re.compile(r"^[^/\x00]+\.app$")
+_APP_NAME = re.compile(r"[^/\x00]+\.app")
 
 # Buddy allocator layout (offsets are relative to file offset 4).
 _HEADER_OFFSET, _HEADER_LOG = 0, 5
@@ -62,7 +62,7 @@ _FILE_SIZE = 4 + 8192
 
 
 def _check_app_name(app_name: str) -> None:
-    if not _APP_NAME.match(app_name):
+    if not _APP_NAME.fullmatch(app_name):
         raise ValueError("app name must be a bundle name ending in .app without a slash")
 
 

@@ -89,7 +89,8 @@ the right, and a hidden `.background.tiff` (brand art with an arrow between the
 two icons) built from `release/dmg/background.png` and `background@2x.png`. The
 layout is written into the staging folder before the image is created, and the
 read-only mount is checked: its `.DS_Store` must equal, byte for byte, what
-`scripts/dmg_layout.py` generates, and the background picture must be present.
+`scripts/dmg_layout.py` generates, and the background picture must be present
+and equal, byte for byte, to the staged one.
 
 ### Disk image layout and background art
 

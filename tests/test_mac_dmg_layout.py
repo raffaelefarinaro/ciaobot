@@ -223,7 +223,7 @@ def test_plate_colour_is_legible_in_light_and_dark():
     assert contrast(dmg_layout.PLATE_COLOR, "#ffffff") >= 4.5
 
 
-@pytest.mark.parametrize("app_name", ["Ciaobot", "a/b.app", ""])
+@pytest.mark.parametrize("app_name", ["Ciaobot", "a/b.app", "", "a.app\n"])
 def test_rejects_bad_app_names(app_name):
     with pytest.raises(ValueError):
         dmg_layout.build_dsstore("Ciaobot", app_name)
