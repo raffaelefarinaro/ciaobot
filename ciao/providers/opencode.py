@@ -745,20 +745,40 @@ def invalidate_opencode_model_cache() -> None:
         _MODEL_CACHE.clear()
 
 
-def _version_number(value: object) -> tuple[int, ...] | None:
-    """Parse ``2.0.16`` or CLI output ``opencode v2.0.16``."""
+def version_number(value: object) -> tuple[int, ...] | None:
+    """Parse the dotted version number out of CLI output such as ``opencode v2.0.16``.
+
+    The published parser behind Ciaobot's OpenCode version policy. It reads
+    the permissive dotted-integer prefix it has always read — an optional
+    ``v``, digits joined by dots, prose around them, and any suffix
+    (``2.0.16-beta.3``) after the numbers ignored — and returns that prefix
+    as a tuple: ``"2.0.16"`` → ``(2, 0, 16)``, ``"2.0"`` → ``(2, 0)``,
+    ``"2.0.16.1"`` → ``(2, 0, 16, 1)``. ``None``, ``""`` and ``"unknown"``
+    parse to ``None``. This is not a validated SemVer, and Python's ordinary
+    string conversion of non-string input is relied on as it always was.
+    """
     match = re.search(r"(?<!\d)v?(\d+(?:\.\d+)+)", str(value or ""))
     if not match:
         return None
     return tuple(int(part) for part in match.group(1).split("."))
 
 
-def _server_version_error(payload: object) -> str | None:
-    """Return the user-facing error when ``/api/info`` is too old or not V2."""
+def server_version_error(payload: object) -> str | None:
+    """Return the user-facing error when ``/api/info`` is too old or not V2.
+
+    Version-only judgment: a Mapping payload whose ``version`` strings to the
+    installed release is supported when its parsed version is in ``2.x`` at
+    or above ``(2, 0, 16)`` — anything unparseable, below the floor, outside
+    major 2, blank, or a payload that is not a Mapping at all is refused with
+    ``OPENCODE_V2_REQUIRED``, plus ``Installed server version: <version>.``
+    when a non-blank version was readable. ``None`` means the version is in
+    the supported range and nothing more: it does not promise server health,
+    authentication, or OpenAPI compatibility.
+    """
     if not isinstance(payload, Mapping):
         return OPENCODE_V2_REQUIRED
     version = str(payload.get("version") or "").strip()
-    parsed = _version_number(version)
+    parsed = version_number(version)
     if parsed is None or parsed < (2, 0, 16) or parsed[0] != 2:
         detail = f" Installed server version: {version}." if version else ""
         return f"{OPENCODE_V2_REQUIRED}{detail}"
@@ -3059,7 +3079,7 @@ class OpencodeProvider(BaseSDKProvider):
                         payload = response.json()
                     except ValueError:
                         raise _StartupContractError("incompatible_version") from None
-                    version_error = _server_version_error(payload)
+                    version_error = server_version_error(payload)
                     if version_error:
                         raise _StartupContractError("incompatible_version")
                     return
@@ -5510,7 +5530,7 @@ class _EphemeralServer:
                     except ValueError:
                         self._startup_classification = "invalid_response"
                         return None
-                    if _server_version_error(payload) is not None:
+                    if server_version_error(payload) is not None:
                         self._startup_classification = "incompatible_version"
                         return None
                     return self._client
@@ -5860,7 +5880,7 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
         version = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
     except (OSError, subprocess.SubprocessError):
         version = ""
-    if _server_version_error({"version": version}) is not None:
+    if server_version_error({"version": version}) is not None:
         return _provider(
             name="opencode",
             ok=False,

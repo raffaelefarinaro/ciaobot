@@ -248,14 +248,14 @@ def release_check(
     if tested is None or record.get("ciaobot") != running_version:
         return {"state": "untested"}
     if provider == "opencode":
-        from ciao.providers.opencode import _server_version_error
+        from ciao.providers.opencode import server_version_error
 
-        if _server_version_error({"version": tested}) is not None:
+        if server_version_error({"version": tested}) is not None:
             return {"state": "untested"}
     if bundled:
         return {"state": "bundled", "tested": tested}
     if provider == "opencode":
-        if _server_version_error({"version": installed_text}) is not None:
+        if server_version_error({"version": installed_text}) is not None:
             return {"state": "unsupported", "tested": tested}
     installed = parse_cli_version(installed_text)
     order = compare_versions(installed, tested) if installed else None

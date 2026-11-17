@@ -73,7 +73,7 @@ V2 floor all raise :class:`SourceError` with a stated reason.
 **The floor is single-sourced, not restated.** ``opencode session list`` and
 ``opencode session export`` are read through ``ciao.providers.opencode``'s own
 ``resolve_opencode_binary`` (which honours ``CIAO_OPENCODE_BIN`` and the
-login-shell PATH) and its ``_server_version_error``/``_version_number``, whose
+login-shell PATH) and its ``server_version_error``/``version_number``, whose
 floor is ``(2, 0, 16)``. An older CLI is reported ``Unsupported`` rather than
 parsed on the chance that the schema happens to look familiar; the export schema
 above was read from the tagged source *at that floor* for exactly this reason.
@@ -128,14 +128,12 @@ from ciao.import_sources.contract import (
 )
 
 # The floor, the binary resolution and the V2 version check are the provider's
-# own, imported rather than restated: a second copy of "2.0.16" in an importer is
-# a rule that can drift from the one the engine enforces. They are private to
-# `ciao.providers.opencode` and imported anyway, because that is the price of one
-# supported opencode rather than two.
+# own, imported rather than restated: a second copy of "2.0.16" in an importer
+# is a rule that can drift from the one the engine enforces.
 from ciao.providers.opencode import (
-    _server_version_error,
-    _version_number,
     resolve_opencode_binary,
+    server_version_error,
+    version_number,
 )
 
 logger = logging.getLogger(__name__)
@@ -477,7 +475,7 @@ def _resolve_binary(binary: str | None) -> str:
 def _require_supported_v2(binary: str, *, timeout: float) -> str:
     """The installed version as the CLI reports it, or a refusal.
 
-    The floor is the provider's, not this module's: ``_server_version_error`` is
+    The floor is the provider's, not this module's: ``server_version_error`` is
     the same function ``ciao/providers/opencode.py`` refuses a chat with, so an
     importer and the engine can never disagree about which opencode is supported.
     A version that cannot be parsed at all is refused too — "unknown" is not a
@@ -505,7 +503,7 @@ def _require_supported_v2(binary: str, *, timeout: float) -> str:
         )
     reported = (result.stdout or "").strip().splitlines()
     version = reported[0].strip() if reported else ""
-    unsupported = _server_version_error({"version": version})
+    unsupported = server_version_error({"version": version})
     if unsupported is not None:
         # The parsed tuple is in the message because the string is not: "v2.0.16"
         # and "2.0.16-beta.3" read alike in a log line, and the log is what an
@@ -513,7 +511,7 @@ def _require_supported_v2(binary: str, *, timeout: float) -> str:
         raise SourceError(
             REASON_UNSUPPORTED,
             f"{unsupported} `opencode --version` reported "
-            f"{version or '(nothing)'}, parsed as {_version_number(version) or 'no version'}.",
+            f"{version or '(nothing)'}, parsed as {version_number(version) or 'no version'}.",
         )
     return version
 

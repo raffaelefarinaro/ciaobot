@@ -58,7 +58,7 @@ from ciao.import_sources.opencode import (
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "import"
 
 #: What a supported install answers. Only the parts the adapter parses matter:
-#: `_server_version_error` reads the version out of it.
+#: `server_version_error` reads the version out of it.
 SUPPORTED_VERSION = "opencode v2.0.22"
 
 #: What a V1 install answers — below the enforced `(2, 0, 16)` floor.
