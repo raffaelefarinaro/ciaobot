@@ -33,7 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 LOCK_PATH = REPO_ROOT / "uv.lock"
 PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 MAX_INPUT_BYTES = 16 * 1024 * 1024
-RECEIPT = "fetch-receipt.json"
+RECEIPTS = {"bootstrap": "bootstrap-receipt.json", "closure": "closure-receipt.json"}
 CURL = "/usr/bin/curl"
 ARTIFACT_HOST = "files.pythonhosted.org"
 RUNTIME_PREFIX = "https://github.com/astral-sh/python-build-standalone/releases/download/"
@@ -63,6 +63,9 @@ def _load_sibling(name: str) -> Any:
     return module
 
 
+# Private-helper coupling: this module calls underscore-prefixed names of these
+# siblings (engine_artifact._snapshot/_safe_parent/_platform_check, ...); renaming
+# them breaks the fetch step and the tests here will fail at import or call time.
 engine_artifact = _load_sibling("engine_artifact")
 engine_runtime = _load_sibling("engine_runtime")
 engine_derived_wheel = _load_sibling("engine_derived_wheel")
@@ -114,6 +117,11 @@ def _canonical_pythonhosted(url: Any) -> str:
     return name
 
 
+def _canonical_name(url: str) -> str:
+    """The percent-decoded basename of a URL (the runtime URL encodes `+` as %2B)."""
+    return urllib.parse.unquote(url.rsplit("/", 1)[-1])
+
+
 def _record(filename: Any, url: Any, size: Any, sha256: Any, origin: str, source: str) -> dict[str, Any]:
     _require(type(filename) is str and _is_size(size) and _is_hex(sha256))
     _require(_canonical_pythonhosted(url) == filename)
@@ -151,6 +159,7 @@ class _Inputs:
 
     def lock_wheel(self, name: str, version: Any, filename: Any) -> dict[str, Any]:
         """The one lock wheel record for (name, version, filename), as a fetch record."""
+        _require(type(name) is str and type(version) is str and type(filename) is str)
         package = self.packages.get(name)
         _require(package is not None and package.get("version") == version)
         wheels = package.get("wheels", [])
@@ -181,11 +190,14 @@ def _bootstrap_plan(inputs: _Inputs) -> list[dict[str, Any]]:
     _require(pin["url"].startswith(RUNTIME_PREFIX) and "?" not in pin["url"] and "#" not in pin["url"])
     plan = [{"filename": pin["filename"], "url": pin["url"], "size": pin["size"],
              "sha256": pin["sha256"], "origin": "pin", "source": "runtime-pin"}]
+    # The destination name is the pin's filename; it must be the URL's own basename.
+    _require(_canonical_name(pin["url"]) == pin["filename"])
     data = inputs.build_inputs.data
-    for tool in data["build_tools"]:
-        if tool["name"] == "setuptools":
-            plan.append(_record(tool["filename"], tool["url"], tool["size"], tool["sha256"],
-                                "pin", "build-inputs"))
+    tools = [tool for tool in data["build_tools"] if tool["name"] == "setuptools"]
+    _require(len(tools) == 1)
+    tool = tools[0]
+    plan.append(_record(tool["filename"], tool["url"], tool["size"], tool["sha256"],
+                        "pin", "build-inputs"))
     for derived in data["derived_wheels"]:
         sdist = derived["sdist"]
         plan.append(_record(sdist["filename"], sdist["url"], sdist["size"], sdist["sha256"],
@@ -245,6 +257,8 @@ def _run(argv: list[str], env: dict[str, str], timeout: int) -> int:
     return completed.returncode
 
 
+# --max-filesize only bounds a response that declares a Content-Length; a chunked
+# response is bounded by --max-time until _snapshot rejects the oversize file.
 def _curl_argv(url: str, size: int, output: Path) -> list[str]:
     return [CURL, "-q", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "-fsS",
             "--max-redirs", "5", "--max-filesize", str(size), "--connect-timeout", "30",
@@ -309,7 +323,7 @@ def _publish(wheelhouse: Path, record: dict[str, Any]) -> bool:
     return True
 
 
-def _write_receipt(wheelhouse: Path, plan: list[dict[str, Any]], hashes: dict[str, str]) -> None:
+def _write_receipt(wheelhouse: Path, name: str, plan: list[dict[str, Any]], hashes: dict[str, str]) -> None:
     body = {
         "schema": 1,
         "inputs": {key: hashes[key] for key in sorted(hashes)},
@@ -318,10 +332,10 @@ def _write_receipt(wheelhouse: Path, plan: list[dict[str, Any]], hashes: dict[st
     scratch = Path(tempfile.mkdtemp(prefix=".engine-fetch-", dir=wheelhouse))
     try:
         os.chmod(scratch, 0o700)
-        staged = scratch / RECEIPT
+        staged = scratch / name
         with staged.open("x", encoding="utf-8") as handle:
             handle.write(json.dumps(body, sort_keys=True, indent=2) + "\n")
-        os.replace(staged, wheelhouse / RECEIPT)
+        os.replace(staged, wheelhouse / name)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
@@ -334,21 +348,21 @@ def _wheelhouse(path: Path) -> Path:
         raise FetchError("invalid fetch") from exc
 
 
-def _acquire(wheelhouse: Path, plan: list[dict[str, Any]], inputs: _Inputs) -> None:
+def _acquire(wheelhouse: Path, command: str, plan: list[dict[str, Any]], inputs: _Inputs) -> None:
     house = _wheelhouse(wheelhouse)
     for record in plan:
         _publish(house, record)
-    _write_receipt(house, plan, inputs.hashes)
+    _write_receipt(house, RECEIPTS[command], plan, inputs.hashes)
 
 
 def bootstrap(wheelhouse: Path) -> None:
     inputs = _Inputs()
-    _acquire(wheelhouse, _bootstrap_plan(inputs), inputs)
+    _acquire(wheelhouse, "bootstrap", _bootstrap_plan(inputs), inputs)
 
 
 def closure(wheelhouse: Path, audit_report: Path) -> None:
     inputs = _Inputs()
-    _acquire(wheelhouse, _closure_plan(inputs, Path(audit_report)), inputs)
+    _acquire(wheelhouse, "closure", _closure_plan(inputs, Path(audit_report)), inputs)
 
 
 # ------------------------------------------------------- packaging helper
@@ -368,9 +382,8 @@ def load_verified_packaging(wheelhouse: Path) -> ModuleType:
         _require(_verify_file(wheel, record["size"], record["sha256"]))
         loaded = [n for n in sys.modules if n == "packaging" or n.startswith("packaging.")]
         if loaded:
-            # Already imported: acceptable only if it came from this exact wheel.
+            # Already imported: the checks below accept it only if it came from this exact wheel.
             module = sys.modules.get("packaging")
-            _require(module is not None and _inside(getattr(module, "__file__", None), wheel))
         else:
             sys.path.insert(0, os.fspath(wheel))
             try:

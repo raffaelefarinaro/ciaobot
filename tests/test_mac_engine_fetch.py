@@ -160,8 +160,8 @@ def test_curl_argv_and_env_are_exact(env):
 
 def test_closure_publishes_only_lock_entries_and_receipt(env):
     ef.closure(env.house, env.write_report(env.report))
-    assert _files(env.house) == ["bar-2.0-py3-none-any.whl", "fetch-receipt.json", "foo-1.0-py3-none-any.whl"]
-    receipt = json.loads((env.house / "fetch-receipt.json").read_text())
+    assert _files(env.house) == ["bar-2.0-py3-none-any.whl", "closure-receipt.json", "foo-1.0-py3-none-any.whl"]
+    receipt = json.loads((env.house / "closure-receipt.json").read_text())
     assert [a["filename"] for a in receipt["artifacts"]] == ["bar-2.0-py3-none-any.whl", "foo-1.0-py3-none-any.whl"]
     assert {a["source"] for a in receipt["artifacts"]} == {"lock"}
     assert receipt["inputs"] == env.hashes
@@ -172,10 +172,46 @@ def test_bootstrap_fetches_runtime_build_inputs_and_packaging(env):
     ef.bootstrap(env.house)
     assert _files(env.house) == sorted([
         RUNTIME_NAME, "setuptools-1.0-py3-none-any.whl", "http_ece-1.2.1.tar.gz",
-        "packaging-9.9.9-py3-none-any.whl", "fetch-receipt.json"])
-    receipt = json.loads((env.house / "fetch-receipt.json").read_text())
+        "packaging-9.9.9-py3-none-any.whl", "bootstrap-receipt.json"])
+    receipt = json.loads((env.house / "bootstrap-receipt.json").read_text())
     assert {a["source"] for a in receipt["artifacts"]} == {"runtime-pin", "build-inputs", "lock"}
     assert (env.house / RUNTIME_NAME).read_bytes() == b"runtime-archive"
+
+
+def test_closure_does_not_overwrite_the_bootstrap_receipt(env):
+    ef.bootstrap(env.house)
+    boot = (env.house / "bootstrap-receipt.json").read_bytes()
+    ef.closure(env.house, env.write_report(env.report))
+    assert (env.house / "bootstrap-receipt.json").read_bytes() == boot
+    closure = json.loads((env.house / "closure-receipt.json").read_text())
+    assert {a["source"] for a in closure["artifacts"]} == {"lock"}
+    sources = {a["source"] for a in json.loads(boot)["artifacts"]}
+    assert {"runtime-pin", "build-inputs"} <= sources
+
+
+def test_bootstrap_requires_exactly_one_setuptools_build_tool(env, monkeypatch):
+    inputs = ef.engine_derived_wheel.load_build_inputs()
+    for tools in ([], inputs.data["build_tools"] * 2):
+        data = copy.deepcopy(inputs.data)
+        data["build_tools"] = copy.deepcopy(tools)
+        monkeypatch.setattr(ef.engine_derived_wheel, "load_build_inputs",
+                            lambda data=data: ef.engine_derived_wheel.BuildInputs(data, "b" * 64))
+        with pytest.raises(ef.FetchError):
+            ef.bootstrap(env.house)
+    assert env.calls == []
+
+
+def test_runtime_destination_name_must_match_the_pin_url_basename(env, monkeypatch):
+    # The destination file name comes from the pin; the validator ties it to the URL
+    # (%2B decoded to +), and the plan re-checks it so a drifted pin cannot rename a file.
+    boot = ef._bootstrap_plan(ef._Inputs())
+    assert boot[0]["filename"] == RUNTIME_NAME and "%2B" in boot[0]["url"]
+    pin = {"filename": "other.tar.gz", "url": RUNTIME_URL, "size": 1, "sha256": "a" * 64}
+    monkeypatch.setattr(ef.engine_runtime, "load_runtime_pin", lambda: dict(pin))
+    with pytest.raises(ef.FetchError):
+        ef.bootstrap(env.house)
+    assert env.calls == []
+    assert _files(env.house) == []
 
 
 # ------------------------------------------------- authority (no calls)
@@ -201,6 +237,9 @@ def _mutations():
         "name": field(0, "name", "foo"),
         "version": field(0, "version", "2.1"),
         "filename": field(0, "filename", "other-2.0-py3-none-any.whl"),
+        **{f"{key}_{label}": field(0, key, value)
+           for key in ("name", "version", "filename")
+           for label, value in (("list", ["x"]), ("dict", {"x": 1}), ("int", 1), ("none", None))},
         "url": field(0, "url", f"{HOST}/cc/dd/other-2.0-py3-none-any.whl"),
         "size_plus": lambda r: r["selected"][0].__setitem__("size", r["selected"][0]["size"] + 1),
         "size_bool": field(0, "size", True),
@@ -418,6 +457,25 @@ def test_load_verified_packaging_refuses_preimported_foreign_packaging(env, monk
     foreign.__file__ = "/elsewhere/packaging/__init__.py"
     foreign.__version__ = "9.9.9"
     monkeypatch.setitem(sys.modules, "packaging", foreign)
+    with pytest.raises(ef.FetchError):
+        ef.load_verified_packaging(env.house)
+
+
+def test_load_verified_packaging_accepts_preimported_packaging_from_the_same_wheel(env, clean_packaging):
+    ef.bootstrap(env.house)
+    first = ef.load_verified_packaging(env.house)
+    assert ef.load_verified_packaging(env.house) is first
+    assert env.calls and len([c for c in env.calls if c[0][-1].endswith("packaging-9.9.9-py3-none-any.whl")]) == 1
+
+
+def test_load_verified_packaging_refuses_wheel_whose_own_version_differs_from_the_lock(env, clean_packaging):
+    pk_url = env.pk["url"]
+    bad = _packaging_wheel(env.root / "bad.whl", "9.9.8")
+    env.served[pk_url] = bad
+    text = env.lock.read_text().replace(env.pk["hash"], f"sha256:{_sha(bad)}").replace(
+        f"size = {env.pk['size']}", f"size = {len(bad)}")
+    env.lock.write_text(text)
+    ef.bootstrap(env.house)
     with pytest.raises(ef.FetchError):
         ef.load_verified_packaging(env.house)
 
