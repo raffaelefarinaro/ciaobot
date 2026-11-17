@@ -9,11 +9,10 @@ from each other.
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
-
-import ast
 
 import pytest
 
@@ -22,6 +21,7 @@ from ciao.native_task_types import is_process_task
 
 class _SentinelGetError(Exception):
     """Raised by the get seam so propagation can be pinned by identity."""
+
 
 _TRUE_CASES: list[tuple[str, dict[str, Any]]] = [
     ("no task_type key at all", {}),
@@ -160,7 +160,7 @@ _PREDICATE = "is_process_task"
 def _ciao_source(*parts: str) -> str:
     path = (Path(__file__).resolve().parent.parent / "ciao").joinpath(*parts)
     assert path.exists(), f"{path} does not exist: the neutral owner has not been created"
-    return path.read_text()
+    return path.read_text(encoding="utf-8")
 
 
 def _all_function_names(source: str) -> list[str]:
@@ -202,7 +202,8 @@ def test_adapter_and_host_import_the_predicate_from_the_neutral_module() -> None
     # the background-stop route still read tasks through live_claude. Only the
     # classification moved out of it, so nothing may import the predicate from
     # the adapter any more.
-    assert host_imports["ciao.providers.claude"] == {"ClaudeProvider"}
+    assert _PREDICATE not in host_imports.get("ciao.providers.claude", set())
+    assert _PREDICATE not in adapter_imports.get("ciao.providers.claude", set())
 
 
 def test_native_task_types_imports_only_the_declared_stdlib_typing() -> None:
@@ -211,3 +212,16 @@ def test_native_task_types_imports_only_the_declared_stdlib_typing() -> None:
     # Only the two required type imports: no application, provider, SDK,
     # configuration, filesystem, process or network dependency at all.
     assert imports == {"collections.abc": {"Mapping"}, "typing": {"Any"}}
+
+
+def _called_names(source: str) -> set[str]:
+    return {
+        node.func.id
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+
+
+def test_adapter_and_host_still_call_the_neutral_predicate() -> None:
+    assert _PREDICATE in _called_names(_ciao_source("providers", "claude.py"))
+    assert _PREDICATE in _called_names(_ciao_source("web", "routes_api.py"))
