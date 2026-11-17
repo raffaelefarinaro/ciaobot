@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ciao.agent_paths import claude_config_project_key, claude_global_config_path
-from ciao.providers.claude import is_claudeai_connector
+from ciao.mcp_names import is_claudeai_connector
 
 
 def _jsonc_to_json(text: str) -> str:
