@@ -98,6 +98,7 @@ set and nothing else.
 | `read_thread` | OpenCode transcript history and transcript replay. Claude history uses its own SDK/JSONL helpers instead. Session reclaim no longer routes through this row. | See the skip list below. |
 | `native_title_candidates(workspace_root, session_id)` (classmethod) | `ProjectChatManager._native_chat_title`, tier 1 of the auto-title poll. | On `BaseProvider` the default returns `()` — no native title for that provider. |
 | `delete_session(workspace_root, session_id)` (classmethod) | `ProjectChatManager._reclaim_provider_sessions_async`, the delete/archive/reset cleanup. | On `BaseProvider` the default returns `None` — an adapter inheriting it intentionally does no reclaim, and the host stays quiet. |
+| `model_catalog(workspace_root, *, force=False)` (classmethod) | **Not yet migrated** — no host caller dispatches it through the shared type; image preflight, `_capability_candidates` and the `/api/models` assembly still call `OpencodeProvider.model_catalog` concretely. | On `BaseProvider` the default returns `[]`: no dynamic catalog supplied by this operation. An overriding adapter may start a short-lived server. |
 
 `native_title_candidates` is the shared native-title read. It is a
 stateless classmethod on the adapter class — the manager resolves it through
@@ -120,6 +121,30 @@ without implying anything was deleted. The host never infers UI or retry
 policy from these values: it warns only on `False` and otherwise continues,
 and the manager swallows adapter failures with its fail-open per-session
 boundary.
+
+`model_catalog(workspace_root, *, force=False)` is the shared optional catalog
+classmethod (#3178): call it on the adapter class, without constructing an
+adapter instance or a `ProviderService`. It sits in the table above as a
+shared seam, but the chat manager does not dispatch it yet — every consumer
+is still concrete. The inherited default returns a fresh `[]` and does no
+work; `[]` means *no dynamic catalog is exposed by this operation*, not that
+the provider cannot run a model and not that discovery completed.
+`workspace_root` scopes adapter-native discovery and keyword-only
+`force=True` asks the adapter to bypass its own cache; the base introduces no
+cache and no framework-wide refresh policy. Rows are the adapter's internal
+representation passed through unchanged — OpenCode's projection uses `model`
+and `label` strings, `variants` as variant ids, and optional `images`
+(absent means unknown); there is no shared wire schema, no sorting, filtering
+or cross-provider id normalization. Override exceptions and cancellation
+propagate unwrapped to the caller, which keeps its own policy. Only the
+inherited default is guaranteed no-start: an explicit override can launch a
+short-lived server — OpenCode's catalog call owns an ephemeral
+`opencode serve` process — so status polling, startup, drain eligibility,
+Stop and live-session getters must not call it. The image-preflight
+skip-list row below stays accurate until a separately planned migration
+dispatches `_opencode_image_support`, `_capability_candidates` and the
+`/api/models` assembly through this operation; adding the classmethod does
+not move them, and #3132 stays open.
 
 `current_session_id` is a synchronized, read-only observation of the
 session id the live adapter instance currently knows. It may be learned
@@ -225,9 +250,17 @@ read a path the file tool refuses. See `docs/AGENT_CLI.md`.
   works without it.
 - **Quota.** Claude reports a rate-limit snapshot. OpenCode reports none
   (`quota=False`) because there is no single account to measure.
-- **Dynamic model catalog.** OpenCode joins its `/api/provider` and
-  `/api/model` snapshots and addresses models as `providerID/modelID`.
-  A fixed catalog can live on the descriptor's `default_model` instead.
+- **Dynamic model catalog.** `model_catalog(workspace_root, *, force=False)`
+  (classmethod, optional) is the shared operation for the models a provider
+  can currently reach; the base default answers `[]`. OpenCode overrides it:
+  its `_fetch_model_catalog` reads the V2 `/api/model` snapshot only — already
+  filtered to enabled models, so it deliberately does not join a separately
+  timed `/api/provider` snapshot — and addresses models as
+  `providerID/modelID`, with its own cache, keyword-only `force` refresh and a
+  short-lived `opencode serve` process while it reads. The `/api/models`
+  response assembly still calls `OpencodeProvider.model_catalog` concretely;
+  dispatching it through the shared type is future work. A fixed catalog can
+  live on the descriptor's `default_model` instead.
 
 ## Docs, site, and the weekly probe
 
