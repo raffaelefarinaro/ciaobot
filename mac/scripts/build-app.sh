@@ -2,6 +2,45 @@
 set -eu
 cd -P "$(dirname "$0")/.."
 
+# The bundled engine is built from HEAD by scripts/engine_build.py, so its
+# prerequisites are checked first: a late failure would waste the Swift build.
+# The interpreter is the first of python3.12 and python3.13 on PATH, else
+# python3 when it is 3.12 or 3.13; the driver pins the same allowlist.
+engine_python=
+for candidate in python3.12 python3.13; do
+    if engine_python=$(command -v "$candidate" 2>/dev/null); then
+        break
+    fi
+    engine_python=
+done
+if [ -z "$engine_python" ]; then
+    found=none
+    if command -v python3 >/dev/null 2>&1; then
+        found=$(python3 -I -S -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null) || found=unknown
+        case $found in
+            3.12|3.13) engine_python=$(command -v python3) ;;
+        esac
+    fi
+    [ -n "$engine_python" ] \
+        || { echo "engine build needs Python 3.12 or 3.13 (found $found)" >&2; exit 1; }
+fi
+command -v node >/dev/null && command -v npm >/dev/null \
+    || { echo "the engine build needs node and npm on PATH" >&2; exit 1; }
+# Git runs with its location and configuration variables scrubbed, as the driver does.
+engine_git() {
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
+        -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_SYSTEM -u GIT_CONFIG_NOSYSTEM \
+        /usr/bin/git -c core.fsmonitor=false "$@"
+}
+engine_dirty=$(engine_git status --porcelain --untracked-files=no) \
+    || { echo "could not read the git status of the checkout" >&2; exit 1; }
+[ -z "$engine_dirty" ] \
+    || { echo "engine build failed: commit or stash tracked changes; the engine is built from HEAD" >&2; exit 1; }
+engine_hidden=$(engine_git ls-files -v | awk '/^[a-zS] / { print $2 }') \
+    || { echo "could not list the tracked files of the checkout" >&2; exit 1; }
+[ -z "$engine_hidden" ] \
+    || { echo "engine build failed: tracked files are marked skip-worktree or assume-unchanged; the engine is built from HEAD" >&2; exit 1; }
+
 build_dir="$PWD/.build"
 # Refuse a symlinked .build before SwiftPM or this script writes through it.
 if [ -e "$build_dir" ] || [ -L "$build_dir" ]; then
@@ -178,25 +217,25 @@ test -s "$resources/AppIcon.icns"
 
 # The bundled engine: a relocatable CPython 3.12 prefix with this commit's
 # ciaobot wheel and PWA, built only from the committed pins by
-# scripts/engine_build.py (network on a cold cache). It is built from HEAD, so
-# the tracked tree must be clean. There is no option to skip it.
-command -v python3 >/dev/null \
-    && python3 -I -S -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' \
-    || { echo "the engine build needs python3 3.12 or newer on PATH" >&2; exit 1; }
+# scripts/engine_build.py (network on a cold cache). Its prerequisites were
+# checked at the top of this script. There is no option to skip it.
 engine_cache="$build_dir/engine-cache"
 mkdir -p "$engine_cache"
 [ -d "$engine_cache" ] && [ ! -L "$engine_cache" ] \
     || { echo "refusing a symlinked engine cache: $engine_cache" >&2; exit 1; }
 chmod 700 "$engine_cache"
 engine_build="$staging_root/engine-build"
-python3 -I -S scripts/engine_build.py --cache "$engine_cache" --destination "$engine_build"
+"$engine_python" -I -S scripts/engine_build.py --cache "$engine_cache" --destination "$engine_build"
 mv "$engine_build/engine" "$resources/engine"
-engine_expected=$(python3 -I -S -c 'import json, sys; print("ciao " + json.load(open(sys.argv[1]))["engine"]["version"])' \
-    "$resources/engine/provenance.json")
+# The moved tree must still equal the assembly receipt, and its version must be
+# the committed project version (never the engine's own provenance).
+engine_expected=$("$engine_python" -I -S scripts/engine_build.py --verify "$resources/engine" \
+    "$engine_build/assembly-receipt.json") \
+    || { echo "bundled engine does not match its assembly receipt" >&2; exit 1; }
 engine_actual=$(env -i "$resources/engine/bin/ciao" --version)
 [ "$engine_actual" = "$engine_expected" ] \
     || { echo "bundled engine reports '$engine_actual', expected '$engine_expected'" >&2; exit 1; }
-python3 -I -S -c 'import json, sys; t = json.load(open(sys.argv[1]))["totals"]; print("Engine: %d files (%d Mach-O), %d bytes" % (t["files"], t["macho_files"], t["bytes"]))' \
+"$engine_python" -I -S -c 'import json, sys; t = json.load(open(sys.argv[1]))["totals"]; print("Engine: %d files (%d Mach-O), %d bytes" % (t["files"], t["macho_files"], t["bytes"]))' \
     "$engine_build/assembly-receipt.json"
 
 # Full validation is complete. Publish by renaming the previous entry into a

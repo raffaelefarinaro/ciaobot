@@ -19,10 +19,12 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,8 @@ STEPS = ("fetch-bootstrap", "audit", "fetch-closure", "install", "export", "whee
 DEADLINES = {"fetch": 3600, "install": 1800, "export": 3600, "wheel": 1800, "assemble": 1800, "git": 120}
 _KEY = re.compile(r"[0-9a-f]{64}")
 _HEAD = re.compile(r"[0-9a-f]{40}")
+ALLOWED_PYTHONS = ((3, 12), (3, 13))
+STDERR_TAIL_BYTES = 4096
 DIRTY_MESSAGE = "engine build failed: commit or stash tracked changes; the engine is built from HEAD"
 
 
@@ -45,6 +49,10 @@ class BuildError(Exception):
 
 class DirtyTree(BuildError):
     """The tracked tree differs from HEAD."""
+
+
+class PythonVersion(Exception):
+    """The host interpreter is not an allowed CPython."""
 
 
 def _require(condition: bool) -> None:
@@ -76,12 +84,54 @@ engine_dependencies = engine_install.engine_dependencies
 # ------------------------------------------------------------------- seams
 
 
-def _run(argv: list[str], cwd: Path, timeout: int) -> tuple[int, bytes]:
+def _kill_group(proc: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _run(argv: list[str], cwd: Path, timeout: int, env: dict[str, str] | None = None) -> tuple[int, bytes]:
     """The single process seam; tests patch it. Children inherit the caller's environment
-    so the export step finds node and npm on PATH; every helper runs under -I."""
-    done = subprocess.run(argv, cwd=cwd, env=dict(os.environ), stdin=subprocess.DEVNULL,
-                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout, check=False)
-    return done.returncode, done.stdout
+    so the export step finds node and npm on PATH; every helper runs under -I.
+
+    The child leads its own process group, so the deadline covers a grandchild too. A failing
+    child's last STDERR_TAIL_BYTES of stderr are printed, so a late failure is diagnosable."""
+    with tempfile.TemporaryFile() as errors:
+        proc = subprocess.Popen(argv, cwd=cwd, env=dict(os.environ) if env is None else env,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errors,
+                                start_new_session=True)
+        try:
+            out, _ = proc.communicate(timeout=timeout)
+        except BaseException:
+            _kill_group(proc)
+            proc.communicate()
+            raise
+        if proc.returncode != 0:
+            errors.seek(0, os.SEEK_END)
+            errors.seek(max(0, errors.tell() - STDERR_TAIL_BYTES))
+            tail = errors.read().decode("utf-8", "replace")
+            if tail:
+                print(f"engine build: {Path(argv[0]).name} exited {proc.returncode}; stderr tail:\n{tail}",
+                      file=sys.stderr, flush=True)
+        return proc.returncode, out
+
+
+def _git_env() -> dict[str, str]:
+    """The caller's environment without git's location and configuration overrides."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
+def _git(args: list[str], repo: Path) -> bytes:
+    code, out = _run([GIT, "-c", "core.fsmonitor=false", *args], repo, DEADLINES["git"], _git_env())
+    _require(code == 0)
+    return out
+
+
+def check_python() -> None:
+    found = sys.version_info[:2]
+    if found not in ALLOWED_PYTHONS:
+        raise PythonVersion(f"engine build needs Python 3.12 or 3.13 (found {found[0]}.{found[1]})")
 
 
 def _platform_check() -> None:
@@ -95,20 +145,40 @@ def _platform_check() -> None:
 
 
 def head_commit(repo: Path) -> str:
-    code, out = _run([GIT, "-c", "core.fsmonitor=false", "rev-parse", "--verify", "HEAD"], repo,
-                     DEADLINES["git"])
-    _require(code == 0)
-    commit = out.decode("ascii", "strict").strip()
+    commit = _git(["rev-parse", "--verify", "HEAD"], repo).decode("ascii", "strict").strip()
     _require(_HEAD.fullmatch(commit) is not None)
     return commit
 
 
 def require_clean(repo: Path) -> None:
-    code, out = _run([GIT, "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z",
-                      "--untracked-files=no"], repo, DEADLINES["git"])
-    _require(code == 0)
-    if out != b"":
+    """Refuse a tracked change, and any tracked file git has been told to ignore changes to."""
+    if _git(["status", "--porcelain=v1", "-z", "--untracked-files=no"], repo) != b"":
         raise DirtyTree()
+    for entry in _git(["ls-files", "-v", "-z"], repo).split(b"\0"):
+        # Tags: S skip-worktree; lowercase (h, s, ...) assume-unchanged.
+        if entry[:1] == b"S" or entry[:1].islower():
+            raise DirtyTree()
+
+
+def committed_version(repo: Path) -> str:
+    """The project version in HEAD's pyproject.toml."""
+    data = tomllib.loads(_git(["show", "HEAD:pyproject.toml"], repo).decode("utf-8", "strict"))
+    version = data["project"]["version"]
+    _require(isinstance(version, str) and re.fullmatch(r"[0-9][0-9A-Za-z.+!-]*", version) is not None)
+    return version
+
+
+def verify_engine(engine: Path, receipt: Path) -> str:
+    """Prove a (moved) engine tree equals its assembly receipt; return the expected `--version` line."""
+    try:
+        data = json.loads(Path(receipt).read_bytes())
+        _require(isinstance(data, dict) and data.get("kind") == "engine-assembly")
+        _require(engine_install.inventory(Path(engine)) == data["inventory"])
+        return f"ciao {committed_version(REPO_ROOT)}"
+    except BuildError:
+        raise
+    except Exception as exc:
+        raise BuildError() from exc
 
 
 # ------------------------------------------------------------------- cache
@@ -237,8 +307,12 @@ def build(cache: Path, destination: Path) -> None:
         _step("assemble", **common)
         _require(sorted(os.listdir(work / "c2")) == ["assembly-receipt.json", "engine"])
         os.rename(work / "c2", target)
-        shutil.rmtree(work)
-        work = None
+        leftover, work = work, None
+        # The engine is already published; a cleanup failure must not turn that into a failure.
+        try:
+            shutil.rmtree(leftover)
+        except OSError:
+            print(f"engine build: warning: could not remove the scratch directory {leftover}", file=sys.stderr)
     except BuildError:
         raise
     except Exception as exc:
@@ -259,11 +333,23 @@ class _Parser(argparse.ArgumentParser):
 
 def main(argv: list[str] | None = None) -> int:
     parser = _Parser(allow_abbrev=False, description="Build the bundled engine from HEAD.")
-    parser.add_argument("--cache", required=True)
-    parser.add_argument("--destination", required=True)
+    parser.add_argument("--cache")
+    parser.add_argument("--destination")
+    parser.add_argument("--verify", nargs=2, metavar=("ENGINE", "RECEIPT"))
     args = parser.parse_args(argv)
+    if args.verify is None and (args.cache is None or args.destination is None):
+        parser.error("")
+    if args.verify is not None and (args.cache is not None or args.destination is not None):
+        parser.error("")
     try:
-        build(Path(args.cache), Path(args.destination))
+        check_python()
+        if args.verify is not None:
+            print(verify_engine(Path(args.verify[0]), Path(args.verify[1])))
+        else:
+            build(Path(args.cache), Path(args.destination))
+    except PythonVersion as exc:
+        print(exc, file=sys.stderr)
+        return 1
     except DirtyTree:
         print(DIRTY_MESSAGE, file=sys.stderr)
         return 1

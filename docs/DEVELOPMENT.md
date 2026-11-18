@@ -1039,7 +1039,11 @@ while the server is running, because the live schedule store may be writing it.
   three-dot diff changes `mac/`, `pyproject.toml`, `uv.lock` or
   `web/src/lib/workspaceColors.ts`, the engine colour table it pins (decided by
   the fast `mac-scope` detector), and on every release PR and manual
-  run; other develop PRs run only its scope check, on Linux. The engine's wheelhouse
+  run; other develop PRs run only its scope check, on Linux. Changes under `ciao/` or
+  `web/` alone therefore do not trigger `mac-app` on a develop PR (#3128 M4); the
+  engine build of such changes runs on release PRs and manual dispatch. The engine
+  build needs Python 3.12 or 3.13 (the job installs 3.12; a developer machine whose
+  `python3` is newer needs `python3.12` or `python3.13` on `PATH`) and Node. The engine's wheelhouse
   is cached (`actions/cache`, keyed by the four engine input hashes); the nightly
   dispatch on `develop` seeds a cache every develop PR can read, while release PRs
   into `main` cannot read it and build cold. Web changes in develop PRs get the

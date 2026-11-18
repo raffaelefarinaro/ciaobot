@@ -25,7 +25,9 @@ concurrency:
 # develop PRs only when the diff changes `mac/`, `pyproject.toml`, `uv.lock` or
 # the engine colour table it pins (the `mac-scope` detector), and always on
 # release PRs and manual runs. The app bundle includes the full engine, so
-# `mac-app` builds it whenever it runs on macOS.
+# `mac-app` builds it whenever it runs on macOS. Changes under `ciao/` or
+# `web/` alone do not trigger `mac-app` on a develop PR (#3128 M4); the engine
+# build of such changes runs on release PRs and manual dispatch.
 # `linux-server-latest-python` runs the same backend gates
 # on the newest Python `requires-python` admits (3.14) on release and manual
 # runs; it is a required check on main. `test` is the macOS job —

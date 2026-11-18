@@ -127,6 +127,10 @@ esac
 if in_applications "$app"; then
     die "refusing an app inside an Applications folder: $app"
 fi
+# Distribution signing of the bundled engine is #3128 G. Until it lands an
+# engine-bearing bundle cannot be notarized, so it must not become an image.
+[ ! -e "$app/Contents/Resources/engine" ] && [ ! -L "$app/Contents/Resources/engine" ] \
+    || die "the bundled engine has no distribution signing yet (#3128 G); refusing to build an image of it"
 app_name=$(basename -- "$app")
 
 plist=$app/Contents/Info.plist

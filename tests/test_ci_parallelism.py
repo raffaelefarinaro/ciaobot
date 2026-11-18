@@ -3,6 +3,8 @@
 from pathlib import Path
 import re
 
+import yaml
+
 
 def _jobs() -> dict[str, str]:
     workflow = (Path(__file__).parents[1] / ".github/workflows/ci.yml").read_text()
@@ -59,12 +61,15 @@ def test_mac_app_waits_only_for_fast_mac_scope_detection() -> None:
     assert "working-directory: mac" in app
     assert "always()" not in app
     # Every step but the scope check is gated, so an unrelated PR runs nothing
-    # on macOS and `mac-app` stays green on Linux.
-    gate = "if: needs.mac-scope.outputs.mac_changed == 'true'"
-    app_steps = app.split("\n    - ")[1:]
-    assert app_steps[0].startswith("name: Require successful mac scope detection")
-    assert all(gate in step for step in app_steps[1:])
-    assert app.count(gate) == 11
+    # on macOS and `mac-app` stays green on Linux. Parsed, not substring-matched:
+    # a gate that moved to a comment or another key must fail.
+    gate = "needs.mac-scope.outputs.mac_changed == 'true'"
+    app_steps = yaml.safe_load(
+        (Path(__file__).parents[1] / ".github/workflows/ci.yml").read_text()
+    )["jobs"]["mac-app"]["steps"]
+    assert app_steps[0]["name"] == "Require successful mac scope detection"
+    assert "if" not in app_steps[0]
+    assert [step.get("if") for step in app_steps[1:]] == [gate] * 11
     assert "timeout-minutes: 60" in app
     assert "python-version: '3.12'" in app
     assert "path: mac/.build/engine-cache" in app
