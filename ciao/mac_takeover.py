@@ -37,13 +37,16 @@ plist_removed           apply, rollback             apply: re-prove engine gone 
                                                     write the pointer
 pointer_written         apply, finish, rollback     apply: plist absent and job unloaded -> ok        none to repair
                                                     (else ``old_engine_back``); finish: two stable
-                                                    health reads -> ``healthy``
+                                                    health reads and the old service still gone
+                                                    (else ``old_engine_back``) -> ``healthy``
 healthy                 apply, finish, rollback     apply: ok; finish: lists the Trash candidates    nothing was trashed by us
                                                     (marks ``trash_offered`` first), ``--done`` ->
                                                     ``finished``; rollback: refused once
                                                     ``trash_offered``
-finished/rolled_back    finish (finished only)      terminal; every other command answers             terminal
-                                                    ``already_settled``
+finished/rolled_back    finish, rollback            terminal; finish: finished -> ok, empty           terminal
+                                                    list, rolled_back -> already_settled;
+                                                    rollback: already_settled; apply: plan()
+                                                    skips a settled journal, plans afresh
 ======================  ==========================  ================================================  =================================
 
 ``rollback`` is allowed from every non-terminal state: it refuses while the
@@ -1449,6 +1452,7 @@ def _write_journal(entry: Path, journal: dict[str, Any]) -> None:
         Path(tmp).unlink(missing_ok=True)
         raise
     make_private(entry / JOURNAL_NAME)
+    _fsync_dir(entry)
 
 
 def _advance(entry: Path, expected: str, to: str, **extra: Any) -> None:
@@ -1480,11 +1484,26 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _fsync_dir(directory: Path) -> None:
+    """Make a rename or a new file in ``directory`` durable (a no-op where directories cannot open)."""
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def _fsync_copy(source: Path, target: Path) -> None:
     """Copy ``source`` to ``target`` with copied metadata and durable content."""
     shutil.copy2(source, target)
     with target.open("rb") as handle:
         os.fsync(handle.fileno())
+    _fsync_dir(target.parent)
 
 
 def _atomic_restore(source: Path, target: Path, *, sha256: str) -> None:
@@ -1502,6 +1521,7 @@ def _atomic_restore(source: Path, target: Path, *, sha256: str) -> None:
         if _sha256_file(Path(tmp)) != sha256:
             raise OSError(errno.EIO, f"the restored definition did not verify: {tmp}")
         os.replace(tmp, target)
+        _fsync_dir(target.parent)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
@@ -2128,6 +2148,7 @@ def finish(
     *,
     takeover_id: str,
     done: bool = False,
+    runner: Runner | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     """Prove the bundled engine is healthy and name what the app may trash.
@@ -2136,14 +2157,15 @@ def finish(
     ``trash.json`` itself): the journal ends ``finished``. Any missing proof
     keeps the journal open and refuses ``not_healthy``.
     """
+    chosen = runner if runner is not None else _default_runner()
     try:
-        return _guarded(lambda: _finish_locked(takeover_id, done, sleep), create=False)
+        return _guarded(lambda: _finish_locked(takeover_id, done, chosen, sleep), create=False)
     except _NoState:
         return _refused(REF_NO_JOURNAL, id=takeover_id)
 
 
 def _finish_locked(
-    takeover_id: str, done: bool, sleep: Callable[[float], None]
+    takeover_id: str, done: bool, runner: Runner, sleep: Callable[[float], None]
 ) -> dict[str, Any]:
     journal = _load_journal(takeover_id)
     if journal is None:
@@ -2158,6 +2180,8 @@ def _finish_locked(
     }
     if state == STATE_FINISHED:
         return settled
+    if state == STATE_ROLLED_BACK:
+        return _refused(REF_ALREADY_SETTLED, id=takeover_id, state=state)
     if done:
         if state != STATE_HEALTHY:
             return _refused(REF_NOT_HEALTHY, id=takeover_id, state=state)
@@ -2172,6 +2196,9 @@ def _finish_locked(
     problem = _health_problem(journal, sleep)
     if problem is not None:
         return _refused(REF_NOT_HEALTHY, id=takeover_id, state=state, check=problem)
+    # Trashing the old install is only safe while the old service stays gone.
+    if not _plist_absent_and_job_unloaded(journal, runner):
+        return _old_engine_back(journal)
     trash = _finish_trash(journal)
     if trash:
         # Journalled BEFORE the list leaves this process: once the app may have
@@ -2216,17 +2243,64 @@ def rollback(
         return _refused(REF_NO_JOURNAL, id=takeover_id)
 
 
+#: How far up the parent chain a hosted engine may sit below its launchd job's pid.
+_MAX_JOB_DEPTH = 8
+_PS = "/bin/ps"
+
+
+def _parent_pid(pid: int) -> int | None:
+    """The parent of ``pid`` (``ps -o ppid=``), or ``None`` when it cannot be read."""
+    try:
+        completed = subprocess.run(
+            [_PS, "-o", "ppid=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = (completed.stdout or "").strip()
+    return int(text) if completed.returncode == 0 and text.isdigit() else None
+
+
+def _pid_in_job(pid: Any, job_pid: int, journal: dict[str, Any]) -> bool:
+    """Whether ``pid`` is the loaded job's engine.
+
+    A direct-python install runs the engine as the job's own process, so the pid
+    must equal the job's. A hosted install (``server_host``) has the host as the
+    job's pid and spawns the Python engine as a child, so a descendant of the job
+    (bounded walk up the parent chain, never through pid 1) counts too.
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        return False
+    if pid == job_pid:
+        return True
+    if journal.get("program_kind") != "server_host":
+        return False
+    current = pid
+    for _ in range(_MAX_JOB_DEPTH):
+        parent = _parent_pid(current)
+        if parent is None or parent <= 1:
+            return False
+        if parent == job_pid:
+            return True
+        current = parent
+    return False
+
+
 def _old_engine_proven(journal: dict[str, Any], runner: Runner) -> bool:
-    """The old engine is back: the job loaded with a pid, the same pid on the port and in the lock.
+    """The old engine is back: the job loaded with a pid, that engine on the port and in the lock.
 
     "Something answers the port" is not enough (another engine could); the
-    restored job's own pid must be the listener's and the lock owner's.
+    restored job's own pid (or, for a hosted install, a descendant of it) must be
+    the listener's and the lock owner's.
     """
     loaded, job_pid = _job_state(str(journal["label"]), runner)
     if not loaded or job_pid is None:
         return False
     identity = engine_identity(int(journal["port"]))
-    if identity is None or identity.get("pid") != job_pid:
+    if identity is None or not _pid_in_job(identity.get("pid"), job_pid, journal):
         return False
     runtime = _journal_runtime(journal)
     return _owns_listener(
@@ -2237,18 +2311,29 @@ def _old_engine_proven(journal: dict[str, Any], runner: Runner) -> bool:
 def _lock_is_old_engine(journal: dict[str, Any], runner: Runner) -> bool:
     """Whether the held runtime lock belongs to the OLD engine's loaded job.
 
-    The old engine is the one whose launchd job is loaded and whose pid owns the
-    lock; the bundled one is the pid in ``ready.json``. A lock the job does not
-    explain stays "bundled" (refused): the rollback never guesses.
+    The old engine is the one whose launchd job is loaded and whose pid (or a
+    hosted install's descendant pid) owns the lock; the bundled one is the pid in
+    ``ready.json``. A lock the job does not explain stays "bundled" (refused):
+    the rollback never guesses.
     """
     loaded, job_pid = _job_state(str(journal["label"]), runner)
+    if not loaded or job_pid is None:
+        return False
     owner = read_lock_owner(_journal_runtime(journal))
-    if not loaded or job_pid is None or not isinstance(owner, dict) or owner.get("pid") != job_pid:
+    if not isinstance(owner, dict) or not _pid_in_job(owner.get("pid"), job_pid, journal):
         return False
     ready = app_engine._read_private_json(
         state_dir() / app_engine.READY_RECORD_NAME, label="the app engine ready record"
     )
-    return ready is None or ready.get("pid") != job_pid
+    return ready is None or ready.get("pid") != owner.get("pid")
+
+
+def _pointer_is_ours(pointer_file: Path, workspace: Path) -> bool:
+    """Whether the pointer names ``workspace``, or cannot be read (so cannot be ruled out)."""
+    pointer = app_engine.read_pointer(pointer_file)
+    if pointer is None:
+        return True
+    return _same_dir(pointer.workspace, workspace)
 
 
 def _rollback_locked(
@@ -2324,11 +2409,13 @@ def _rollback_locked(
         # answers; a second rollback repeats from here.
         _note(entry, state, problem=REF_DID_NOT_START)
         return _refused(REF_DID_NOT_START, id=takeover_id, state=state)
-    cleared = app_engine.clear_pointer(expected_workspace=Path(str(journal["workspace"])))
+    workspace = Path(str(journal["workspace"]))
+    cleared = app_engine.clear_pointer(expected_workspace=workspace)
     pointer_file = state_dir() / app_engine.WORKSPACE_POINTER_NAME
-    if not cleared and os.path.lexists(pointer_file):
-        # A pointer that is there but could not be cleared (unreadable, or naming
-        # another workspace) is never silently left behind a "rolled back".
+    if not cleared and os.path.lexists(pointer_file) and _pointer_is_ours(pointer_file, workspace):
+        # A pointer naming this workspace that could not be cleared is never
+        # silently left behind a "rolled back". One naming another workspace
+        # (or no readable workspace at all) is not ours to clear.
         _note(entry, state, problem=REF_NOT_ROLLED_BACK)
         return _refused(
             REF_NOT_ROLLED_BACK,
