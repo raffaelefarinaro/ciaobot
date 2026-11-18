@@ -94,24 +94,6 @@ def test_invalidated_grant_error_names_the_provider_and_remedy() -> None:
     )
 
 
-def test_unsettled_subagents_are_recorded_as_skipped_not_ok() -> None:
-    """A parent turn that finished while its background subagents did not
-    settle is an unfinished run: recording "ok" would clear a previous error
-    stamp and brand the schedule healthy while its synthesis never ran."""
-    from ciao.web.chat_service import _schedule_dispatch_status
-
-    status, error = _schedule_dispatch_status(
-        ScheduleRunOutcome(
-            completed=True,
-            is_error=False,
-            subagents_pending=True,
-        )
-    )
-
-    assert status == "skipped"
-    assert error is None
-
-
 def test_manual_policy_stays_visible_after_clean_success() -> None:
     outcome = ScheduleRunOutcome(completed=True, is_error=False)
     assert _should_auto_archive_schedule_run(_entry(archive="manual"), outcome) is False
@@ -154,32 +136,6 @@ def test_failed_run_is_not_clean_so_error_log_survives() -> None:
     assert _schedule_run_clean(ScheduleRunOutcome(completed=False)) is False
 
 
-def test_pending_background_subagents_keep_run_unclean() -> None:
-    # A parent turn that finished cleanly but left background subagents
-    # running is not "done": it must not count as clean (so it stays visible
-    # and is not auto-archived on a half-complete result).
-    from ciao.web.chat_service import _schedule_run_clean
-
-    assert (
-        _schedule_run_clean(
-            ScheduleRunOutcome(completed=True, is_error=False, subagents_pending=True)
-        )
-        is False
-    )
-
-
-def test_auto_policy_does_not_archive_while_subagents_pending() -> None:
-    outcome = ScheduleRunOutcome(
-        completed=True, is_error=False, subagents_pending=True
-    )
-    # Even if the classifier would say no attention needed, an unsettled run
-    # must stay visible.
-    assert (
-        _should_auto_archive_schedule_run(_entry(), outcome, needs_user=False)
-        is False
-    )
-
-
 # ── Interim subagent text (the 2026-08-30 daily-log failure) ─────────────
 
 
@@ -191,28 +147,6 @@ def test_interim_subagent_text_detected() -> None:
              "and chat-transcript subagents.") is True
     assert f("Nothing to do — all background agents still running.") is False
     assert f("") is False
-
-
-def test_auto_policy_does_not_archive_interim_subagent_text() -> None:
-    """The exact 2026-08-30 shape: clean 1-turn run whose final words were an
-    interim waiting message. The agents' data was never synthesized and the
-    run's follow-up work (writing the log, committing) never happened, so the
-    run must not auto-archive."""
-    outcome = ScheduleRunOutcome(
-        completed=True,
-        is_error=False,
-        final_text="Waiting on the Drive subagent, the last one.",
-        subagents_pending=True,
-    )
-    assert (
-        _should_auto_archive_schedule_run(_entry(), outcome, needs_user=False)
-        is False
-    )
-    # It is reported as skipped-with-reason, not ok: the dispatch row must
-    # tell the story instead of reading "ok".
-    from ciao.web.chat_service import _schedule_run_clean
-
-    assert _schedule_run_clean(outcome) is False
 
 
 def _job_rows(tmp_path: Path) -> list[dict]:
@@ -593,3 +527,63 @@ async def test_attention_classifier_logs_unparseable_reply_as_warning(
     ]
     assert len(warnings) == 1
     assert "no parseable JSON" in warnings[0].getMessage()
+
+
+async def test_clean_run_is_judged_on_its_own_result_without_waiting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clean turn is classified and archived on its own result, even while the
+    provider still reports background work: there is no settle wait to hold it."""
+    import asyncio
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from tests.test_schedule_dead_target import (
+        _dispatch_manager,
+        _stream_stub,
+    )
+
+    pcm, store = _dispatch_manager(tmp_path)
+    project = pcm.create_project("Holder", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="Daily brief", model="opus")
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="brief",
+        model="opus",
+        mode="auto",
+        chat_id=0,
+        frequency="daily",
+        web_chat_id=chat.chat_id,
+        workspace="personal",
+        archive_policy="auto",
+    )
+    pcm._providers[chat.chat_id] = cast(
+        Any, SimpleNamespace(provider=SimpleNamespace(background_work_outstanding=True))
+    )
+    pcm.start_stream = _stream_stub(  # type: ignore[method-assign]
+        [{"type": "result", "text": "Dispatched two agents", "is_error": False}]
+    )
+    judged: list[str] = []
+    archived: list[str] = []
+
+    async def classify(_entry, outcome, *, chat_id: str = "") -> bool:
+        judged.append(outcome.final_text)
+        return False
+
+    async def archive(chat_id: str):
+        archived.append(chat_id)
+        return None
+
+    pcm._schedule_run_needs_user = classify  # type: ignore[method-assign]
+    pcm.archive_chat = archive  # type: ignore[method-assign]
+    monkeypatch.setattr("ciao.web.schedule_dispatch.job_runs.record_run", lambda row: None)
+
+    assert not hasattr(pcm, "_await_schedule_subagents")
+    result = await asyncio.wait_for(
+        pcm.dispatch_schedule(entry, entry.prompt, "opus", "auto", "claude"),
+        timeout=1.0,
+    )
+
+    assert result["status"] == "ok"
+    assert judged == ["Dispatched two agents"]
+    assert archived == [chat.chat_id]

@@ -1,0 +1,17 @@
+{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"mcp","description":"Show MCP servers"}]}
+{"sessionUpdate":"usage_update","size":200000,"used":2,"_meta":{"_claude/model":"claude-sonnet-4-6"}}
+{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Plan the edit."}}
+{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Looking at the file. "}}
+{"sessionUpdate":"tool_call","toolCallId":"toolu_write","kind":"edit","title":"Preparing file","status":"pending","locations":[],"content":[],"_meta":{"claudeCode":{"toolName":"Write"}}}
+{"sessionUpdate":"tool_call_update","toolCallId":"toolu_write","title":"Write old.ts","locations":[{"path":"/work/old.ts"}]}
+{"sessionUpdate":"tool_call_update","toolCallId":"toolu_write","status":"completed"}
+{"sessionUpdate":"tool_call","toolCallId":"toolu_task","kind":"other","title":"Task","status":"pending","rawInput":{"description":"Find the parser"},"_meta":{"claudeCode":{"toolName":"Task"}}}
+{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Sub text."},"_meta":{"claudeCode":{"parentToolUseId":"toolu_task"}}}
+{"sessionUpdate":"tool_call","toolCallId":"toolu_bash","kind":"execute","title":"Terminal","status":"pending","_meta":{"claudeCode":{"toolName":"Bash","parentToolUseId":"toolu_task"}}}
+{"sessionUpdate":"tool_call_update","toolCallId":"toolu_bash","title":"false","rawInput":{"command":"false","description":"Fail"},"_meta":{"claudeCode":{"parentToolUseId":"toolu_task"}}}
+{"sessionUpdate":"tool_call_update","toolCallId":"toolu_bash","status":"failed","_meta":{"claudeCode":{"parentToolUseId":"toolu_task"}}}
+{"sessionUpdate":"tool_call_update","toolCallId":"toolu_task","status":"completed"}
+{"sessionUpdate":"compaction_update","compactionId":"c1","status":"in_progress"}
+{"sessionUpdate":"compaction_summary_chunk","compactionId":"c1","content":{"type":"text","text":"Summary."}}
+{"sessionUpdate":"compaction_update","compactionId":"c1","status":"completed"}
+{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Done."}}

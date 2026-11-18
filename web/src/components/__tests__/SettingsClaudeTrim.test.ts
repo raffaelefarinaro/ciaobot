@@ -70,14 +70,13 @@ const opt = (o: Partial<ClaudeTrimOption> & { key: string }): ClaudeTrimOption =
   reason: `${o.key} reason`,
   group: 'features',
   default_trimmed: false,
-  locked: false,
   ...o,
 })
 
-// The engine's catalog shape: a locked scheduling option, two features, a review
+// The engine's catalog shape: a scheduling option, two features, a review
 // option, four bundled skills (two trimmed by default) and a setting.
 const CATALOG: ClaudeTrimOption[] = [
-  opt({ key: 'tool:CronCreate', label: 'Cron schedules', reason: 'Schedules runs.', group: 'scheduling', default_trimmed: true, locked: true }),
+  opt({ key: 'tool:CronCreate', label: 'Cron schedules', reason: 'Schedules runs.', group: 'scheduling', default_trimmed: true }),
   opt({ key: 'tool:NotebookEdit', label: 'Notebook editing', reason: 'Edits Jupyter notebooks.', default_trimmed: true }),
   opt({ key: 'tool:ReportFindings', label: 'Report findings', reason: 'Reports review findings.', group: 'review' }),
   opt({ key: 'skill:a', label: 'Skill A', group: 'skills', default_trimmed: true }),
@@ -186,15 +185,20 @@ describe('Settings > Workspaces Claude context trimming card', () => {
     }
   })
 
-  it('locked options are disabled and say why', async () => {
+  it('scheduling options are trimmed by default, can be un-trimmed, and the group explains it', async () => {
     state.workspaces = workspaces()
     const wrapper = await mountWorkspacesTab()
     try {
       const toggle = trimSwitch(wrapper, 'Cron schedules')
-      expect(toggle.attributes('disabled')).toBeDefined()
+      expect(toggle.attributes('disabled')).toBeUndefined()
       expect(toggle.attributes('aria-checked')).toBe('false')
-      expect(wrapper.get('.trim-card').text()).toContain('Always hidden — Schedules runs.')
+      expect(wrapper.get('.trim-group-note').text()).toContain("outside Ciaobot's schedules")
+      expect(wrapper.get('.trim-card').text()).not.toContain('Always hidden')
       await toggle.trigger('click')
+      await flushPromises()
+      expect(trimSwitch(wrapper, 'Cron schedules').attributes('aria-checked')).toBe('true')
+      expect(wrapper.find('.workspace-save').exists()).toBe(true)
+      await trimSwitch(wrapper, 'Cron schedules').trigger('click')
       await flushPromises()
       expect(trimSwitch(wrapper, 'Cron schedules').attributes('aria-checked')).toBe('false')
       expect(wrapper.find('.workspace-save').exists()).toBe(false)
