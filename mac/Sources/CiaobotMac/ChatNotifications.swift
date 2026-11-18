@@ -131,6 +131,24 @@ final class UserDefaultsNotificationPreferenceStore: NotificationPreferenceStori
     }
 }
 
+/// What clicking the notification row does for a state. The tray row and the
+/// in-window Settings bridge both read it, so the two surfaces cannot drift.
+enum NotificationSettingAction: String {
+    case toggle
+    case openSystemSettings
+    case none
+}
+
+extension ChatNotificationState {
+    var settingAction: NotificationSettingAction {
+        switch self {
+        case .off, .on: return .toggle
+        case .denied, .deliveryOff: return .openSystemSettings
+        case .unavailable: return .none
+        }
+    }
+}
+
 /// The menu surface for notifications. Kept separate from the controller so
 /// `MenuBarController` does not need to know how the event socket works.
 @MainActor

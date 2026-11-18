@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import WebKit
 import AppKit
 
@@ -618,6 +619,9 @@ struct WebWindow: NSViewRepresentable {
     /// nil for the bundled fallback. The view is passed back so the session can
     /// refuse a callback from a view it already replaced.
     var onWorkspaceColor: ((WorkspaceColorPreset?, WKWebView?) -> Void)? = nil
+    /// The native Settings bridge. Only the connected main window is given one;
+    /// setup and child windows get no `ciaobotAppSettings` handler.
+    var appSettings: AppSettingsBridge? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -629,7 +633,8 @@ struct WebWindow: NSViewRepresentable {
             openExternal: openExternal,
             viewTracker: viewTracker,
             navigationProfile: navigationProfile,
-            onWorkspaceColor: onWorkspaceColor
+            onWorkspaceColor: onWorkspaceColor,
+            appSettings: appSettings
         )
     }
 
@@ -659,9 +664,13 @@ struct WebWindow: NSViewRepresentable {
         nsView.uiDelegate = nil
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, WKScriptMessageHandlerWithReply {
         static let trustedClickMessageName = "ciaobotTrustedClick"
         static let workspaceColorMessageName = "ciaobotWorkspaceColor"
+        static let appSettingsMessageName = "ciaobotAppSettings"
+        /// The one rejection string the page ever sees.
+        static let appSettingsRefusal = "refused"
+        static let appSettingsChangedScript = "window.dispatchEvent(new Event('ciaobot-app-settings-changed'))"
 
         private static let desktopMarkerScript = "window.__CIAOBOT_DESKTOP__ = true;"
 
@@ -894,6 +903,9 @@ struct WebWindow: NSViewRepresentable {
         private(set) var isReleased = false
         /// The app-facing sink for this view's workspace accent.
         var onWorkspaceColor: ((WorkspaceColorPreset?, WKWebView?) -> Void)?
+        /// The Settings bridge, nil for every window but the connected main one.
+        private(set) var appSettings: AppSettingsBridge?
+        private var appSettingsSubscription: AnyCancellable?
         /// Test/observability hook: receives each page payload before any
         /// validation, so a test can prove what the injected observer sent
         /// rather than only what survived the native checks.
@@ -914,7 +926,7 @@ struct WebWindow: NSViewRepresentable {
         var testCrossOriginFrameObserver: ((WKFrameInfo) -> Void)?
         #endif
 
-        init(origin: Origin, onFailure: ((String) -> Void)?, downloadFailure: @escaping DownloadFailureHandler, filePanel: @escaping FilePanelHandler, downloadDestination: @escaping DownloadDestination, openExternal: @escaping ExternalOpener, viewTracker: SessionViewTracker? = nil, navigationProfile: WebWindowNavigationProfile = .main, onWorkspaceColor: ((WorkspaceColorPreset?, WKWebView?) -> Void)? = nil) {
+        init(origin: Origin, onFailure: ((String) -> Void)?, downloadFailure: @escaping DownloadFailureHandler, filePanel: @escaping FilePanelHandler, downloadDestination: @escaping DownloadDestination, openExternal: @escaping ExternalOpener, viewTracker: SessionViewTracker? = nil, navigationProfile: WebWindowNavigationProfile = .main, onWorkspaceColor: ((WorkspaceColorPreset?, WKWebView?) -> Void)? = nil, appSettings: AppSettingsBridge? = nil) {
             self.origin = origin
             self.onFailure = onFailure
             self.downloadFailure = downloadFailure
@@ -924,6 +936,7 @@ struct WebWindow: NSViewRepresentable {
             self.viewTracker = viewTracker
             self.navigationProfile = navigationProfile
             self.onWorkspaceColor = onWorkspaceColor
+            self.appSettings = appSettings
             self.downloads = DownloadCoordinator(origin: origin, destination: downloadDestination, failure: downloadFailure)
         }
 
@@ -971,6 +984,9 @@ struct WebWindow: NSViewRepresentable {
                 forMainFrameOnly: false
             ))
             controller.add(coordinator, name: trustedClickMessageName)
+            if coordinator.appSettings != nil {
+                controller.addScriptMessageHandler(coordinator, contentWorld: .page, name: appSettingsMessageName)
+            }
             #if DEBUG
             controller.add(coordinator, name: "ciaobotCrossOriginProbe")
             #endif
@@ -1009,6 +1025,8 @@ struct WebWindow: NSViewRepresentable {
             clearProvisionalNavigation()
             adoptedDocumentToken = nil
             onWorkspaceColor = nil
+            appSettings = nil
+            appSettingsSubscription = nil
             webView?.configuration.userContentController.removeAllScriptMessageHandlers()
         }
 
@@ -1027,6 +1045,21 @@ struct WebWindow: NSViewRepresentable {
                 adoptedDocumentToken = UUID().uuidString
             }
             self.webView = webView
+            subscribeToAppSettingsChanges()
+        }
+
+        /// Tells the committed main view to re-read the snapshot. The event
+        /// carries no data. `$state` publishes before the value is stored, so
+        /// the hop to the next main-queue turn lets the page's `get` see it.
+        private func subscribeToAppSettingsChanges() {
+            guard let appSettings, !isReleased else { return }
+            appSettingsSubscription = appSettings.changes
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] in
+                    guard let self, !self.isReleased,
+                          self.committedDocumentGeneration == self.documentGeneration else { return }
+                    self.webView?.evaluateJavaScript(Self.appSettingsChangedScript, in: nil, in: .page) { _ in }
+                }
         }
 
         func loadHostChat(_ url: URL) {
@@ -1104,6 +1137,71 @@ struct WebWindow: NSViewRepresentable {
             }
             trustedActivationCount += 1
             gestureGate.record()
+        }
+
+        func userContentController(
+            _ userContentController: WKUserContentController,
+            didReceive message: WKScriptMessage,
+            replyHandler: @escaping (Any?, String?) -> Void
+        ) {
+            guard message.name == Self.appSettingsMessageName else {
+                replyHandler(nil, Self.appSettingsRefusal)
+                return
+            }
+            let frameOrigin = message.frameInfo.securityOrigin
+            let result = MainActor.assumeIsolated {
+                handleAppSettingsMessage(
+                    isMainFrame: message.frameInfo.isMainFrame,
+                    scheme: frameOrigin.protocol,
+                    host: frameOrigin.host,
+                    port: frameOrigin.port,
+                    view: message.webView,
+                    body: message.body
+                )
+            }
+            switch result {
+            case .success(let snapshot): replyHandler(snapshot, nil)
+            case .failure: replyHandler(nil, Self.appSettingsRefusal)
+            }
+        }
+
+        struct RefusedError: Error {}
+
+        /// Validates one `ciaobotAppSettings` request. Every field is untrusted:
+        /// the sending view must be the coordinator's current view, the frame
+        /// the main frame of the exact selected origin, the document the
+        /// committed one, and the body exactly `{op: <string>}`. `get` reads the
+        /// snapshot; `notifications` additionally consumes a trusted click and
+        /// performs exactly the tray row's action. Anything else is refused with
+        /// no side effect.
+        @MainActor
+        func handleAppSettingsMessage(
+            isMainFrame: Bool,
+            scheme: String,
+            host: String,
+            port: Int,
+            view: WKWebView?,
+            body: Any
+        ) -> Result<[String: Any], RefusedError> {
+            guard !isReleased,
+                  let appSettings,
+                  let view,
+                  self.webView === view,
+                  isMainFrame,
+                  committedDocumentGeneration == documentGeneration,
+                  origin.matches(scheme: scheme, host: host, port: port),
+                  let payload = body as? [String: Any],
+                  payload.count == 1,
+                  let op = payload["op"] as? String else { return .failure(RefusedError()) }
+            switch op {
+            case "get":
+                return .success(appSettings.snapshot())
+            case "notifications":
+                guard gestureGate.consume(), appSettings.perform(op) else { return .failure(RefusedError()) }
+                return .success(appSettings.snapshot())
+            default:
+                return .failure(RefusedError())
+            }
         }
 
         /// Validates one workspace-colour message. `WKScriptMessage` cannot be

@@ -1062,17 +1062,17 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
             keyEquivalent: ""
         )
         item.toolTip = Self.notificationToolTip(for: state, streamStatus: streamStatus)
-        switch state {
-        case .off, .on:
+        switch state.settingAction {
+        case .toggle:
             item.action = #selector(toggleNotifications(_:))
             item.target = self
             item.isEnabled = true
             if state == .on { item.state = .on }
-        case .denied, .deliveryOff:
+        case .openSystemSettings:
             item.action = #selector(openNotificationSettings(_:))
             item.target = self
             item.isEnabled = systemSettings != nil
-        case .unavailable:
+        case .none:
             item.isEnabled = false
         }
         return item

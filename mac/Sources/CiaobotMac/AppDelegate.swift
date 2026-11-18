@@ -91,6 +91,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let session: AppSessionStatus
     // Owned here so quitting can cancel a running install.
     let installer = NativeInstaller()
+    /// The in-window Settings bridge. Created here so the connected main window
+    /// can be handed it before the menu-bar controller exists.
+    let appSettings = AppSettingsBridge()
     // One engine updater shared by the connection screen and the menu bar.
     let engineUpdater: EngineUpdater
 
@@ -272,6 +275,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 openChat: { session.openChat(chatID: $0) }
             )
             notifications.start()
+            appSettings.bind(notifications: notifications, systemSettings: systemSettings)
             // One feed pair per saved host. The active host's entry uses the
             // session's own store; every other host uses its snapshot-verified
             // saved sign-in, and a remote host without one is never contacted.
