@@ -12,7 +12,22 @@ struct CiaobotMacApp: App {
     var body: some Scene {
         // A single Window (not a WindowGroup) keeps the client to one native
         // main window and removes File > New Window from the menu.
-        Window("Ciaobot", id: "main") { ConnectionView(session: appDelegate.session, installer: appDelegate.installer, engineUpdater: appDelegate.engineUpdater, appSettings: appDelegate.appSettings) }
+        Window("Ciaobot", id: "main") {
+            ConnectionView(
+                // One launch defaults domain for the stored mode, last server
+                // and saved hosts; a DEBUG test launch keeps all three in its
+                // isolated suite.
+                session: appDelegate.session,
+                lastServer: appDelegate.lastServer,
+                hostStore: appDelegate.hostStore,
+                installer: appDelegate.installer,
+                engineUpdater: appDelegate.engineUpdater,
+                appSettings: appDelegate.appSettings,
+                supervisor: appDelegate.supervisor,
+                engineMode: appDelegate.mode,
+                modeStore: appDelegate.engineMode
+            )
+        }
             .defaultSize(width: 1100, height: 760)
             .commands {
                 CommandGroup(after: .newItem) {
@@ -34,6 +49,13 @@ extension Notification.Name {
 /// fail closed: an origin is honoured only when it is an explicit loopback
 /// origin, and auto-connect never falls back to the proposed live address.
 enum TestLaunch {
+    /// A launch that addresses an isolated fixture — an explicit origin, or a
+    /// request to auto-connect one. The app stays in external engine mode for
+    /// it: a fixture launch must never run the bundled engine.
+    static func addressed(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        origin(environment: environment) != nil || autoConnectRequested(environment: environment)
+    }
+
     static func origin(environment: [String: String] = ProcessInfo.processInfo.environment) -> Origin? {
         guard let raw = environment["CIAOBOT_MAC_TEST_ORIGIN"],
               let origin = Origin(raw), origin.isLoopback else { return nil }
@@ -55,6 +77,42 @@ enum TestLaunch {
         if let origin = origin(environment: environment) { return origin.url.absoluteString }
         if autoConnectRequested(environment: environment) { return "" }
         return defaultAddress
+    }
+
+    /// The home directory of an isolated local-launch checkpoint: every
+    /// app-side engine path (`EngineHome`) and the engine child's `HOME`
+    /// derive from it. Honoured only as an absolute path to an existing
+    /// directory, so a typo cannot point the whole engine at a made-up place.
+    static func engineHome(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL? {
+        absoluteExistingDirectory(environment["CIAOBOT_MAC_TEST_HOME"])
+    }
+
+    /// The resource directory `BundledEngine.locate(resourceDirectory:)`
+    /// reads instead of this bundle's own, so a checkpoint can run against the
+    /// engine inside a locally built app. Absolute and existing, as above.
+    static func engineResources(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL? {
+        absoluteExistingDirectory(environment["CIAOBOT_MAC_TEST_ENGINE_RESOURCES"])
+    }
+
+    /// The `UserDefaults` suite that holds the stored engine mode, last
+    /// server, and saved hosts of a test launch. While it is set the app's
+    /// own defaults domain is never read or written.
+    static func defaultsSuiteName(environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
+        guard let name = environment["CIAOBOT_MAC_TEST_DEFAULTS_SUITE"], !name.isEmpty else { return nil }
+        return name
+    }
+
+    /// The defaults the launch's stores use: the isolated suite when set, else
+    /// the standard domain as before.
+    static func storedDefaults(environment: [String: String] = ProcessInfo.processInfo.environment) -> UserDefaults {
+        defaultsSuiteName(environment: environment).flatMap { UserDefaults(suiteName: $0) } ?? .standard
+    }
+
+    private static func absoluteExistingDirectory(_ raw: String?) -> URL? {
+        guard let raw, raw.hasPrefix("/"), !raw.isEmpty else { return nil }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: raw, isDirectory: &isDirectory), isDirectory.boolValue else { return nil }
+        return URL(fileURLWithPath: raw, isDirectory: true)
     }
 }
 
@@ -374,6 +432,18 @@ struct ConnectionView: View {
     @State private var portText = ""
     @State private var portError: String?
     @State private var pendingPortRestart = false
+    /// The engine mode this connection session runs in. Initialized from the
+    /// launch's resolved mode; **Connect to Another Server…** switches it to
+    /// external mid-session (S6 adds the confirmation).
+    @State private var engineMode: EngineMode
+    /// The local-mode connection decisions (probe, replace, failure, bounded
+    /// retry). A class so the decisions stay testable without a rendered view.
+    @State private var localModel = LocalConnectionModel()
+    /// Mirror of `localModel.phase` that drives the status screen.
+    @State private var localPhase: LocalConnectionModel.Phase = .idle
+    /// The engine itself failed or lost its port while the web view was
+    /// connected; the status screen replaces the dead web view.
+    @State private var engineDown = false
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var discovery: LocalServerDiscovery
     @StateObject private var installer: NativeInstaller
@@ -382,7 +452,15 @@ struct ConnectionView: View {
     private let signIn: SessionSignIn
     private let session: AppSessionStatus?
     private let appSettings: AppSettingsBridge?
-    private let autoConnectTarget: Origin?
+    /// The app-owned bundled engine, non-nil in production. Local mode drives
+    /// the connection from its published running origin; external mode never
+    /// starts or observes it.
+    private let supervisor: EngineSupervisor?
+    /// Writes a mid-session engine-mode switch so the next launch starts in it.
+    private let modeStore: EngineModeStoring?
+    /// Internal so a test can prove local mode has no saved-origin auto
+    /// connect without rendering the view.
+    let autoConnectTarget: Origin?
     private let autoDiscovery: Bool
     private let lastServer: LastServerStoring
     private let hostStore: HostListStoring
@@ -409,9 +487,11 @@ struct ConnectionView: View {
                                     hasInstallation: discovery.installation != nil)
     }
 
-    /// The shipped default only. Exposed so a test can prove the view used by
-    /// the app matches the build policy without rendering it.
-    var automaticallyStartsDiscovery: Bool { autoDiscovery }
+    /// Whether this connection session may start the same-Mac discovery by
+    /// itself. Local mode never probes: the app's own engine is the only
+    /// local server there, and its origin comes from the supervisor.
+    /// `startAutomaticDiscovery` is guarded by this same value.
+    var automaticallyStartsDiscovery: Bool { engineMode == .external && autoDiscovery }
 
     /// The value the address field starts with. Exposed so a test can prove a
     /// saved origin is prefilled without rendering the view.
@@ -427,7 +507,10 @@ struct ConnectionView: View {
         hostStore: HostListStoring = UserDefaultsHostListStore(lastServer: UserDefaultsLastServerStore()),
         installer: NativeInstaller? = nil,
         engineUpdater: EngineUpdater? = nil,
-        appSettings: AppSettingsBridge? = nil
+        appSettings: AppSettingsBridge? = nil,
+        supervisor: EngineSupervisor? = nil,
+        engineMode: EngineMode = .external,
+        modeStore: EngineModeStoring? = nil
     ) {
         self.probe = probe
         self.signIn = signIn ?? .live
@@ -477,15 +560,26 @@ struct ConnectionView: View {
         let testError: String? = nil
         self.isTestLaunch = false
         #endif
-        self.autoConnectTarget = autoConnectTarget
+        self.autoConnectTarget = engineMode == .local ? nil : autoConnectTarget
+        self.supervisor = supervisor
+        self.modeStore = modeStore
         self.launchAddress = initialAddress
+        _engineMode = State(initialValue: engineMode)
         _address = State(initialValue: initialAddress)
         _error = State(initialValue: testError)
     }
 
     var body: some View {
         Group {
-            if let origin {
+            if let local = localEngineScreen {
+                LocalEngineView(
+                    supervisor: local,
+                    connection: localPhase,
+                    canRetry: localModel.canRetry,
+                    onTryAgain: { self.tryAgainLocal() },
+                    onConnectExternal: { self.connectToAnotherServer() }
+                )
+            } else if let origin {
                 // A fallback is reported where the session actually lives: the
                 // connection screen is already gone once the probe succeeds.
                 VStack(spacing: 0) {
@@ -502,6 +596,13 @@ struct ConnectionView: View {
                         storage: storage,
                         websiteDataStore: dataStore,
                         onFailure: { message in
+                            if self.engineMode == .local {
+                                // A failed load is shown on the status screen
+                                // with its own actions; it never reconnects
+                                // by itself.
+                                self.apply(self.localModel.sessionFailed(message))
+                                return
+                            }
                             self.origin = nil
                             self.storage = .ephemeral
                             self.dataStore = nil
@@ -689,18 +790,13 @@ struct ConnectionView: View {
                     .onAppear { startAutomaticDiscovery() }
             }
         }
+        // The running-origin watcher stays mounted for the whole local-mode
+        // session (it observes the engine even while the web view is
+        // connected, when the status screen is not); external mode mounts
+        // nothing.
+        .background(alignment: .center) { engineRunningWatcher }
         .frame(minWidth: 480, minHeight: 320)
-        .onAppear {
-            // A fresh connection screen is disconnected. Do not clear a live
-            // connection when SwiftUI merely re-shows the existing window.
-            if origin == nil { session?.reportDisconnected() }
-            // An install may have finished while the window was closed.
-            if origin == nil, autoConnectTarget == nil { handleInstallState(installer.state) }
-            guard let target = autoConnectTarget, !didAutoConnect else { return }
-            didAutoConnect = true
-            address = target.url.absoluteString
-            connect(to: target)
-        }
+        .onAppear { launchOnAppear() }
         .onReceive(NotificationCenter.default.publisher(for: .ciaobotChangeServer)) { _ in
             guard origin != nil else { return }
             address = origin?.url.absoluteString ?? address
@@ -729,6 +825,23 @@ struct ConnectionView: View {
         .onChange(of: discovery.status) { handleDiscoveryStatus($0) }
     }
 
+    /// What the connection view does when it appears. Internal so a test can
+    /// prove local mode runs none of the external launch machinery.
+    func launchOnAppear(installState: NativeInstallState? = nil) {
+        // A fresh connection screen is disconnected. Do not clear a live
+        // connection when SwiftUI merely re-shows the existing window.
+        if origin == nil { session?.reportDisconnected() }
+        // Local mode connects from the supervisor's running origin, never
+        // from the saved server: the launch machinery below is external-only.
+        guard engineMode == .external else { return }
+        // An install may have finished while the window was closed.
+        if origin == nil, autoConnectTarget == nil { handleInstallState(installState ?? installer.state) }
+        guard let target = autoConnectTarget, !didAutoConnect else { return }
+        didAutoConnect = true
+        address = target.url.absoluteString
+        connect(to: target)
+    }
+
     @ViewBuilder
     private func wizardView(_ wizard: Origin) -> some View {
         VStack(spacing: 0) {
@@ -755,12 +868,38 @@ struct ConnectionView: View {
         }
     }
 
-    /// Automatic same-Mac discovery starts only on the connection screen and
-    /// only in production. Debug builds and test launches leave it to an
-    /// explicit click so the test suite never contacts the real candidate.
-    private func startAutomaticDiscovery() {
-        guard autoDiscovery, origin == nil else { return }
+    /// Automatic same-Mac discovery starts only on the connection screen,
+    /// only in production, and never in local mode (the app's own engine is
+    /// the only local server there, and its origin comes from the supervisor).
+    /// Debug builds and test launches leave it to an explicit click so the
+    /// test suite never contacts the real candidate.
+    func startAutomaticDiscovery() {
+        guard automaticallyStartsDiscovery, origin == nil else { return }
         discovery.refresh()
+    }
+
+    /// The supervisor to show the engine status screen for: local mode with
+    /// the engine not yet connected. Once connected, the web view branch shows
+    /// instead and `EngineRunningWatcher` (always mounted in local mode) keeps
+    /// observing the engine. A failed engine takes the screen back from the
+    /// web view, since the web view would be dead.
+    private var localEngineScreen: EngineSupervisor? {
+        guard engineMode == .local, origin == nil || engineDown, let supervisor else { return nil }
+        return supervisor
+    }
+
+    /// Silently observant in local mode: every running origin the supervisor
+    /// publishes, including one that changes while the web view is connected,
+    /// goes through the same connection path.
+    @ViewBuilder
+    private var engineRunningWatcher: some View {
+        if engineMode == .local, let supervisor {
+            EngineRunningWatcher(
+                supervisor: supervisor,
+                onRunning: connectRunningEngine,
+                onEngineDown: { self.engineDown = $0 }
+            )
+        }
     }
 
     private var addressOrigin: Origin? { Origin(address) }
@@ -910,25 +1049,7 @@ struct ConnectionView: View {
                 if !self.isTestLaunch {
                     self.hostStore.add(candidate)
                 }
-                // The connection screen is about to disappear. A discovery
-                // response that is still in flight must not update the screen
-                // that replaces it.
-                self.discovery.invalidate()
-                // Resolve the store only after the probe succeeds, so a typo
-                // cannot create a persistent mapping or empty store. If the
-                // user opted in but cannot get a persistent store, say so
-                // instead of silently using memory only.
-                self.storage = self.signIn.storage(for: candidate, keepSignedIn: self.keepSignedIn)
-                self.storageNotice = self.signIn.fallback(for: candidate, keepSignedIn: self.keepSignedIn)?.userMessage
-                // Create the one store this connection uses. The web view and
-                // the menu-bar chat feed share it; no second nonpersistent
-                // store and never the default shared store.
-                let store = WebKitSessionStores.make(self.storage)
-                self.dataStore = store
-                self.origin = candidate
-                // The probe verified the protocol shape, not an identity or a
-                // signed-in session. The menu bar says only this much.
-                self.session?.reportConnected(candidate, dataStore: store)
+                self.establishSession(candidate)
             } else {
                 self.error = afterInstall
                     ? (self.installer.mode == .repair
@@ -938,5 +1059,94 @@ struct ConnectionView: View {
                 self.session?.reportDisconnected()
             }
         }
+    }
+
+    /// The probe answered: build the one session for `candidate`.
+    private func establishSession(_ candidate: Origin) {
+        // The connection screen is about to disappear. A discovery
+        // response that is still in flight must not update the screen
+        // that replaces it.
+        discovery.invalidate()
+        // Resolve the store only after the probe succeeds, so a typo
+        // cannot create a persistent mapping or empty store. If the
+        // user opted in but cannot get a persistent store, say so
+        // instead of silently using memory only.
+        storage = signIn.storage(for: candidate, keepSignedIn: keepSignedIn)
+        storageNotice = signIn.fallback(for: candidate, keepSignedIn: keepSignedIn)?.userMessage
+        // Create the one store this connection uses. The web view and
+        // the menu-bar chat feed share it; no second nonpersistent
+        // store and never the default shared store.
+        let store = WebKitSessionStores.make(storage)
+        dataStore = store
+        origin = candidate
+        // The probe verified the protocol shape, not an identity or a
+        // signed-in session. The menu bar says only this much.
+        session?.reportConnected(candidate, dataStore: store)
+    }
+
+    /// Tears down the live session the way Change Server does.
+    private func dropSession() {
+        origin = nil
+        storage = .ephemeral
+        dataStore = nil
+        storageNotice = nil
+        keepSignedInChoice = nil
+        error = nil
+        forgetMessage = nil
+        session?.reportDisconnected()
+    }
+
+    /// The local engine published a running origin: connect to it
+    /// automatically, without the saved-origin prefill or the LastServer
+    /// prompt, and without saving the engine's ephemeral loopback origin as a
+    /// host or the last server. The decisions (connect once per origin,
+    /// replace the session on a changed origin, no retry after a failure) are
+    /// `LocalConnectionModel`'s; this only executes them.
+    func connectRunningEngine(_ candidate: Origin) {
+        apply(localModel.engineRunning(candidate))
+    }
+
+    /// The decision model's current phase. Internal for tests.
+    var localConnectionPhase: LocalConnectionModel.Phase { localModel.phase }
+
+    private func apply(_ effects: [LocalConnectionModel.Effect]) {
+        for effect in effects {
+            switch effect {
+            case .dropSession:
+                dropSession()
+            case .probe(let target):
+                probe.check(target) { ok in
+                    self.apply(self.localModel.probeFinished(target, ok: ok))
+                }
+            case .establish(let target):
+                establishSession(target)
+            }
+        }
+        localPhase = localModel.phase
+    }
+
+    /// Try Again on the local status screen. Internal for tests.
+    func tryAgainLocal() {
+        guard let supervisor else { return }
+        switch LocalEnginePresentation.retry(engine: supervisor.state) {
+        case .restartEngine: supervisor.restartAfterFailure()
+        case .startEngine: supervisor.start()
+        case .reconnect(let origin): apply(localModel.retry(engineOrigin: origin))
+        case .none: break
+        }
+    }
+
+    /// **Connect to Another Server…** from the engine status screen: stop the
+    /// engine, save the external choice, and show the ordinary connection
+    /// screen. S6 adds the confirmation dialog and the menu command. Internal
+    /// for tests.
+    func connectToAnotherServer() {
+        if let supervisor { supervisor.stop {} }
+        modeStore?.mode = .external
+        engineMode = .external
+        localModel.reset()
+        localPhase = .idle
+        engineDown = false
+        dropSession()
     }
 }
