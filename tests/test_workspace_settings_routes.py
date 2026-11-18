@@ -863,13 +863,16 @@ def test_claude_trim_saves_persists_and_validates(tmp_path):
     }
     assert config.workspace("client-a").claude_trim == {"tool:ReportFindings": True}
 
-    # Locked scheduling options cannot be un-trimmed.
-    locked = client.patch(
+    # Scheduling options are trimmed by default, but the user can un-trim them.
+    assert "CronCreate" in config.disallowed_tools_for_workspace("client-a")
+    untrimmed = client.patch(
         "/api/workspaces/client-a",
         json={"claude_trim": {"tool:CronCreate": False}},
     )
-    assert locked.status_code == 400
-    assert config.workspace("client-a").claude_trim == {"tool:ReportFindings": True}
+    assert untrimmed.status_code == 200
+    assert config.workspace("client-a").claude_trim == {"tool:CronCreate": False}
+    assert "CronCreate" not in config.disallowed_tools_for_workspace("client-a")
+    assert "CronDelete" in config.disallowed_tools_for_workspace("client-a")
 
     # An empty object resets to the catalog defaults.
     reset = client.patch("/api/workspaces/client-a", json={"claude_trim": {}})
@@ -889,7 +892,8 @@ def test_workspaces_payload_includes_trim_catalog(tmp_path):
     data = client.get("/api/workspaces").json()
     options = {option["key"]: option for option in data["claude_trim_options"]}
     assert options["tool:NotebookEdit"]["default_trimmed"] is True
-    assert options["tool:NotebookEdit"]["locked"] is False
+    assert options["tool:CronCreate"]["default_trimmed"] is True
+    assert all("locked" not in option for option in options.values())
 
 
 def test_workspace_color_defaults_persists_and_validates(tmp_path):
