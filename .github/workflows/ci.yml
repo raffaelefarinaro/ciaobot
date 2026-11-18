@@ -140,6 +140,7 @@ jobs:
     needs: web-scope
     if: ${{ always() && github.event_name == 'pull_request' && github.base_ref == 'develop' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
     - name: Require successful web scope detection
       env:
@@ -161,6 +162,21 @@ jobs:
       if: needs.web-scope.outputs.web_changed == 'true'
       working-directory: web
       run: npx playwright install --with-deps chromium
+    # The workshop's gates ride the job that already holds node_modules and
+    # Chromium: `build-storybook` also runs the story-index check, and
+    # `test-storybook` executes every story and its play function in the same
+    # browser. They are independent signals, so the runner runs even when the
+    # build failed (`!cancelled()`) and one failure cannot mask the other;
+    # the job still fails. They stay out of linux-web so backend-only PRs
+    # pay none of it.
+    - name: Build Storybook
+      if: needs.web-scope.outputs.web_changed == 'true'
+      working-directory: web
+      run: npm run build-storybook
+    - name: Run Storybook browser runner
+      if: ${{ needs.web-scope.outputs.web_changed == 'true' && !cancelled() }}
+      working-directory: web
+      run: npm run test-storybook
     - name: Run browser suite
       if: needs.web-scope.outputs.web_changed == 'true'
       working-directory: web
