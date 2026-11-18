@@ -6,7 +6,7 @@
 
 This directory is the Mac app inside the Ciaobot repository; the repository's root `AGENTS.md` applies too. Run every command below from `mac/`.
 
-CI is the `mac-app` job in the root `.github/workflows/ci.yml` (macOS 15). It runs on develop PRs whose diff touches `mac/`, and on every release PR and manual run, and blocks on, in order: `swift test`, `swift build`, `scripts/build-app.sh`, `swift test --filter AppAssetsTests`, `plutil -lint .build/Ciaobot.app/Contents/Info.plist`. The app does not bundle or import the engine.
+CI is the `mac-app` job in the root `.github/workflows/ci.yml` (macOS 15). It runs on develop PRs whose diff touches `mac/`, and on every release PR and manual run, and blocks on, in order: `swift test`, `swift build`, `scripts/build-app.sh`, `swift test --filter AppAssetsTests --filter BundledEngineTests`, `plutil -lint .build/Ciaobot.app/Contents/Info.plist`. The app does not bundle or import the engine.
 
 On the maintainer's Mac, `xcode-select` points at the Command Line Tools, which cannot link the package manifest. Prefix every SwiftPM command:
 
