@@ -138,7 +138,10 @@ after building. Every registry-linked ID must exist as a story, not Docs or
 the inventory page; missing/malformed output fails the command. Run the check
 alone with `node --experimental-strip-types web/scripts/check-storybook-index.ts`
 from the repository root (its paths do not depend on the current directory).
-The Node inventory tests separately enforce exact owner/state/ID sets.
+The Node inventory tests derive story coverage from the story files' own CSF
+index rather than a hand-written list: every covered state's story IDs must
+exist there, every story other than the inventory page must be claimed by
+exactly one row state, and each claimed story file must render that owner.
 
 SidebarRow covers default, active, unread, muted, pending and long-content;
 these use its plain-div branch, not links, host controls or keyboard interaction.
