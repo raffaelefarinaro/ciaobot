@@ -81,7 +81,7 @@ def process_table() -> dict[int, tuple[int, str]]:
     try:
         result = subprocess.run(
             ["ps", "-axo", "pid=,ppid=,lstart="],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", timeout=5,
             env={**os.environ, "LC_ALL": "C"},
         )
     except (OSError, subprocess.SubprocessError):
