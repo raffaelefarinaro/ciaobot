@@ -8,9 +8,16 @@
       <p class="hint">
         Whether the Ciaobot engine service on this host is registered to start by itself when you
         sign in to this computer. That is the <em>next</em> sign-in: changing it here never starts or
-        stops the engine you are talking to now. Installing Ciaobot as an app is a separate,
-        optional thing &mdash; a window onto this same address, explained in
-        <strong>Use Ciaobot as an app</strong> below.
+        stops the engine you are talking to now.
+        <template v-if="!desktop">
+          Installing Ciaobot as an app is a separate,
+          optional thing &mdash; a window onto this same address, explained in
+          <strong>Use Ciaobot as an app</strong> below.
+        </template>
+        <template v-else>
+          Ciaobot for Mac&rsquo;s own <strong>Start at Login</strong>, in the menu bar under
+          Settings, is separate: it starts Ciaobot for Mac when you sign in.
+        </template>
       </p>
     </div>
 
@@ -108,9 +115,11 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api } from '../../lib/api'
+import { isDesktopClient } from '../../lib/pwaPlatform'
 import { COPY_FEEDBACK_MS, writeClipboard } from '../../lib/codeCopy'
 import { apiErrorMessage, errorMessage, errorPayload } from '../../lib/errorMessage'
 
+const desktop = isDesktopClient()
 const LOGIN_ROUTE = '/api/service/login'
 
 /** `GET`/`PATCH /api/service/login` (#913), mirrored field for field. */
