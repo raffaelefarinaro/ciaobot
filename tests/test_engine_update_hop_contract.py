@@ -5,11 +5,13 @@ then spawns the *staged* engine's `ciao.engine_update` for the swap (`run-apply`
 `run-recover`), while the 0.5.x Mac app keeps parsing `status --json` and the
 hosted 1.x server keeps its `ciao.cli supervise` entry point. These tests pin
 that receiving half — the hidden verbs, the v1.10.0 `Operation` record shape,
-the JSON keys the old app reads, the supervise command, the wheel-only manifest
-a 1.x install can act on, the startup recovery hook, and the modules the hop
-imports — so the slices that delete the engine's own staging half cannot take
-the receiver with them. The tests change no code; they are the guard P6 has to
-keep green unchanged.
+the JSON keys the old app reads and the sentence it reads when there is no
+record, the argv launchd really runs for the job and the recovery agent, the
+status verb running for real in a fresh `-I` interpreter, the supervise
+command, the wheel-only manifest a 1.x install can act on, the startup
+recovery hook, and the modules the hop imports — so the slices that delete the
+engine's own staging half cannot take the receiver with them. The tests change
+no code; they are the guard P6 has to keep green unchanged.
 """
 
 from __future__ import annotations
@@ -17,11 +19,14 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import subprocess
+import sys
+import venv
 from pathlib import Path
 
 import pytest
 
-from ciao import engine_update, main, release_manifest
+from ciao import engine_update, main, release_manifest, update_host
 
 # The exact fields a v1.10.0 `Operation` record carries (`git show
 # v1.10.0:ciao/engine_update.py`, class `Operation`). This is the durable
@@ -149,6 +154,158 @@ def test_run_recover_verb_runs_named_operation(
     assert len(host.redirected) == 1
 
 
+def test_job_plist_argv_is_the_machine_launch_shape() -> None:
+    """The updater and recovery jobs launch exactly
+    `[<staged python>, -I, -m, ciao.engine_update, run-apply|run-recover,
+    --operation <id>]`.
+
+    A 1.x install caught between wheels owns a plist written by the 1.10.0
+    `update_host`, and the staged engine reading it back must accept the argv
+    that code spelled; symmetrically, the 2.0 writer has to keep spelling it
+    the same way, or the job it installs for the next hop runs something
+    that engine does not parse. `ProgramArguments` is therefore pinned here
+    through the real `_job_plist`, with the same labels, log names and
+    interval the real writers (`_write_updater_plist`, `_write_recover_plist`)
+    pass — the interpreter is whatever python the staged env carries, so its
+    exact path is free but its slot is not.
+    """
+    op = engine_update.Operation(
+        id="20261118T101500Z-op1",
+        phase="staged",
+        from_version="1.10.0",
+        to_version="2.0.0",
+        started_at="2026-11-18T10:15:00+00:00",
+        updated_at="2026-11-18T10:18:00+00:00",
+    )
+    python = "/home/me/.local/state/ciaobot/updates/stage-20261118T101500Z-op1/bin/python"
+    applied = update_host._job_plist(
+        op,
+        python,
+        label=update_host.UPDATER_LABEL,
+        verb="run-apply",
+        log_name="updater.log",
+    )
+    assert applied["ProgramArguments"] == [
+        python,
+        "-I",
+        "-m",
+        "ciao.engine_update",
+        "run-apply",
+        "--operation",
+        "20261118T101500Z-op1",
+    ]
+    recovered = update_host._job_plist(
+        op,
+        python,
+        label=update_host.RECOVER_LABEL,
+        verb="run-recover",
+        log_name="recover.log",
+        start_interval=update_host._RECOVER_INTERVAL,
+    )
+    assert recovered["ProgramArguments"] == [
+        python,
+        "-I",
+        "-m",
+        "ciao.engine_update",
+        "run-recover",
+        "--operation",
+        "20261118T101500Z-op1",
+    ]
+
+
+class _RealDispatchHost:
+    """The platform host `main` hands to a real receiver, as far as these
+    paths reach.
+
+    `main` and the receiver both ask it for the engine port; the exercised
+    paths touch two members more: the detached-stdio redirect every detached
+    job is owed, and the recovery-agent retirement a stand-down performs. If
+    anything on the way reached for the engine service the lookup succeeds but
+    the call raises, so a dispatch that launched launchd jobs in a test would
+    fail loudly rather than quietly pass.
+    """
+
+    def __init__(self) -> None:
+        self.redirected: list[Path] = []
+        self.retired: list[Path] = []
+
+    def redirect_detached_stdio(self, root: Path) -> None:
+        self.redirected.append(root)
+
+    def engine_port(self) -> int:
+        return 1
+
+    def start_engine(self) -> object:
+        raise AssertionError("this dispatch must not start the engine service")
+
+    def retire_recovery_agent(self, root: Path) -> None:
+        self.retired.append(root)
+
+
+def test_run_apply_dispatch_runs_the_real_receiver(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """`main` reaches the real `run_apply`, not just a named stand-in.
+
+    The two verb tests above pin the argv-to-receiver mapping with fakes; this
+    one lets the real `run_apply` run from the dispatched call until it
+    refuses on its own terms: a record in `applying` phase under a redirected
+    state dir, no install receipt for the machine whose home the suite
+    isolates, and an engine port nothing listens on. The pre-flight refusal is
+    the deepest a real dispatch can go inside a test — past it the receiver
+    owns the engine's stop and the env move, machinery for the machine's
+    launchd alone — and reaching it still proves the dispatch, the state-dir
+    lock, the record read, the receipt read and the failed-record write all
+    belong to `run-apply`.
+    """
+    host = _RealDispatchHost()
+    monkeypatch.setattr(engine_update, "current_update_host", lambda: host)
+    monkeypatch.setattr(engine_update, "default_state_dir", lambda: tmp_path)
+    record = dict(_v1_10_record(), phase="applying")
+    engine_update.write_operation(engine_update.Operation(**record), tmp_path)
+
+    assert engine_update.main(["run-apply", "--operation", record["id"]]) == 0
+
+    settled = engine_update.read_operation(tmp_path)
+    assert settled is not None
+    assert settled.phase == "failed"
+    assert "no install receipt" in settled.error
+    assert host.redirected == [tmp_path]
+
+
+def test_run_recover_dispatch_runs_the_real_receiver(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """`main` reaches the real `recover_apply`, which stands down over an
+    already-settled record.
+
+    This is the door the durable `com.ciao.recover` agent actually walks on
+    the tick after a hop succeeded: lock the state dir, read the record, meet
+    a terminal phase, and retire itself without touching anything else. The
+    real receiver runs end to end here on exactly that input — the record must
+    come back byte-identical in meaning (still `applied`, no error), and the
+    stand-down must have reached the host's retirement hook, because that
+    retirement is the only thing that stops launchd from re-running the
+    agent forever over a finished update.
+    """
+    host = _RealDispatchHost()
+    monkeypatch.setattr(engine_update, "current_update_host", lambda: host)
+    monkeypatch.setattr(engine_update, "default_state_dir", lambda: tmp_path)
+    record = dict(_v1_10_record(), phase="applied")
+    engine_update.write_operation(engine_update.Operation(**record), tmp_path)
+
+    assert engine_update.main(["run-recover", "--operation", record["id"]]) == 0
+
+    settled = engine_update.read_operation(tmp_path)
+    assert settled is not None
+    assert settled.phase == "applied"
+    assert settled.error == record["error"]
+    assert host.retired == [tmp_path]
+    assert host.redirected == [tmp_path]
+
+
 def test_v1_10_operation_record_reads(tmp_path: Path) -> None:
     """A staged record written by a v1.10.0 engine reads back intact.
 
@@ -203,14 +360,125 @@ def test_status_json_carries_old_app_keys(
     assert parsed["phase"] in _TERMINAL_PHASES | set(engine_update.PHASES)
 
 
-def test_supervise_command_parses() -> None:
-    """A hosted 1.x install execs `python -I -m ciao.cli supervise`
-    (`native/server-host/ServerHost.swift`) as its engine's program; the 2.0
-    CLI must keep parsing that verb and dispatching it."""
-    from ciao.cli import build_parser
+def test_status_json_without_a_record_prints_the_v1_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`status --json` with no record prints 1.x's plain sentence, not JSON.
 
-    args = build_parser().parse_args(["supervise"])
-    assert getattr(args, "func", None) is not None
+    The 0.5.x app polls `status --json` and hands the stdout to
+    `EngineUpdateRecord.parse`, whose own doc says plain text such as
+    `no update staged` is nil — that sentence is its vocabulary for "nothing
+    in flight", and v1.10.0 printed it for an empty state dir regardless of
+    the flag (`git show v1.10.0:ciao/engine_update.py`, `main`). The receiver
+    must keep exactly that output: the old poller has met nothing else on the
+    hopped engine, so this is pinned word for word.
+    """
+    monkeypatch.setattr(engine_update, "default_state_dir", lambda: tmp_path)
+
+    assert engine_update.main(["status", "--json"]) == 0
+    assert capsys.readouterr().out == "no update staged\n"
+
+
+def _staged_python(tmp_path: Path) -> Path:
+    """A stand-in for the staged environment's interpreter.
+
+    The machine launch's argv carries `-I`, which strips everything a process
+    could borrow from its surroundings: no PYTHONPATH, no script or cwd dir,
+    no user site. That is why the real job works at all — the staged python
+    has this code base installed in its *own* site-packages. The editable
+    install that runs these tests does not survive `-I` that way: with
+    PYTHONPATH cut, `import ciao` falls through to a meta-path finder that
+    resolves outside this checkout, so a child built from the bare
+    `sys.executable` would run other code and no edit here would ever be
+    visible in it. The throwaway venv below plays the staged env's role
+    instead: built from `sys.executable`, carrying this checkout's `ciao`
+    package in its site-packages — the same shape the real staged env has,
+    and the only shape a `-I` import can succeed under.
+    """
+    env_dir = tmp_path / "stage-env"
+    venv.create(env_dir, with_pip=False, symlinks=True)
+    site_dir = (
+        env_dir
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    assert site_dir.is_dir(), f"unexpected venv layout at {site_dir}"
+    site_dir.joinpath("ciao").symlink_to(Path(engine_update.__file__).resolve().parent)
+    python = env_dir / "bin" / "python"
+    assert python.is_file(), f"unexpected venv layout: no python in {env_dir / 'bin'}"
+    return python
+
+
+def test_status_verb_runs_in_a_real_detached_process(tmp_path: Path) -> None:
+    """`[<staged python>, -I, -m, ciao.engine_update, status, --json]` works
+    as a real process — exit code, output and the state dir resolved from
+    `HOME` alone.
+
+    This is the argv the job plist writes (with `status` in the slot the
+    update verbs take), and a stubbed import can prove none of it: under `-I`
+    the child finds the receiver only through its own site-packages, resolves
+    the state dir from `HOME` the way `default_state_dir` does on a machine,
+    and runs `main` for real. The record below is left at the machine-shaped
+    path the module derives from that `HOME`
+    (`~/.local/state/ciaobot/updates` beside
+    `install_receipt.default_receipt_path`'s receipt), so the second run only
+    prints the record if the child's own resolution agrees — move the receiver
+    away from that shape and this fails as "no update staged". (The suite's
+    autouse fixture redirects `default_state_dir` inside the test process, so
+    the path is literally derived here instead of through it.)
+    The `__main__` guard is what turns a module import into that run, so
+    deleting it makes the child exit 0 having printed nothing — an empty
+    stdout fails the assertions below rather than slipping through. Both
+    halves of what the 0.5.x app polls are asserted in the process: the
+    no-record sentence and the record JSON.
+    """
+    # A detached job receives a bare environment from launchd; this is one.
+    env = {"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"}
+    python = _staged_python(tmp_path)
+    argv = [str(python), "-I", "-m", "ciao.engine_update", "status", "--json"]
+
+    first = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=120)
+    assert first.returncode == 0
+    assert first.stdout == "no update staged\n"
+    assert first.stderr == ""
+
+    record = _v1_10_record()
+    state_root = tmp_path / ".local" / "state" / "ciaobot" / "updates"
+    state_root.mkdir(parents=True)
+    engine_update._operation_path(state_root).write_text(
+        json.dumps(record, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    second = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=120)
+    assert second.returncode == 0
+    assert second.stderr == ""
+    parsed = json.loads(second.stdout)
+    assert set(parsed) == set(V1_10_FIELDS)
+    for key in ("id", "phase", "to_version", "error"):
+        assert isinstance(parsed[key], str)
+    assert parsed["id"] == record["id"]
+    assert parsed["phase"] == "staged"
+    assert parsed["to_version"] == record["to_version"]
+
+
+def test_supervise_command_parses() -> None:
+    """A hosted 1.x install execs `<interpreter> -I -m ciao.cli supervise`
+    (`native/server-host/ServerHost.swift`, `SUPERVISOR_ARGUMENTS`), and there
+    is no seam for additional engine arguments: the interpreter and its flags
+    are consumed before the CLI starts, so the argv `build_parser` sees is
+    exactly `["supervise"]` and the `child_args` REMAINDER slot arrives empty.
+    The verb must still dispatch to `_supervise_command` — the member that
+    owns the child and its restart loop, i.e. the engine a hosted install
+    actually runs.
+    """
+    from ciao import cli
+
+    args = cli.build_parser().parse_args(["supervise"])
+    assert args.func is cli._supervise_command
+    assert args.child_args == []
 
 
 def test_wheel_only_manifest_is_installable_by_1x(tmp_path: Path) -> None:
@@ -252,10 +520,12 @@ def test_startup_runs_engine_update_recovery() -> None:
     server — nothing a test can reach without doing everything the function
     must not do here — so this is pinned against its source the way
     tests/test_main_startup_gate.py pins the writer wiring in that very
-    function. `tests/test_engine_update.py` and `tests/test_update_host.py`
-    cover `recover_interrupted_apply`'s behaviour; what is pinned here is that
-    startup itself keeps handing the hop its fast path: the tracker phase, the
-    import, and exactly one call with the resolved host.
+    function. No narrow harness exists either: the call site is inline in
+    that one function, so a behavioural run with a fake tracker would mean
+    booting the server itself; the receiver's behaviour is covered in
+    `tests/test_engine_update.py` and `tests/test_update_host.py` — what is
+    pinned here is the startup wiring: the tracker phase, the import, and
+    exactly one call with the resolved host.
     Pinned against the code only (comments stripped): a call commented out in
     the source must read as gone, or the pin would not guard anything.
     """
