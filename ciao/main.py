@@ -593,6 +593,7 @@ async def _async_main(
     installer_native_fd: int | None = None,
     installer_native_workspace: str | None = None,
     app_engine: bool = False,
+    app_engine_port: int | None = None,
 ) -> int:
     if installer_bootstrap:
         # Before anything is created: refuse to bootstrap over an install, then
@@ -614,6 +615,10 @@ async def _async_main(
         if installer_bootstrap
         else CiaoConfig.from_env()
     )
+    if app_engine_port is not None:
+        # The app's `--port`: this process only, ahead of the instance lock
+        # and the ready record so both carry the port actually served.
+        config.pwa_port = app_engine_port
 
     from ciao.instance_lock import WorkspaceInstanceLock
 
@@ -671,6 +676,14 @@ async def _async_main(
                 installer_native_fd=installer_native_fd,
                 installer_native_workspace=installer_native_workspace,
             )
+        if app_engine:
+            return await _run_server_locked(
+                config,
+                supervised=supervised,
+                startup_id=lock.startup_id,
+                engine_pid=os.getpid(),
+                app_engine=True,
+            )
         return await _run_server_locked(
             config,
             supervised=supervised,
@@ -721,6 +734,18 @@ def _start_workspace_move_verify(
     )
 
 
+def _pin_app_engine_bootstrap_host(config: CiaoConfig, *, app_engine: bool) -> None:
+    """Keep the pre-setup wizard of the app's engine on loopback.
+
+    The installer bootstrap already binds 127.0.0.1; the app engine's
+    bootstrap (no configured workspace yet) must not be a setup wizard
+    reachable on the LAN. Once a workspace is configured the host the
+    settings overlay chose applies as before. This process only, never saved.
+    """
+    if app_engine and config.bootstrap_mode:
+        config.pwa_host = "127.0.0.1"
+
+
 async def _run_server_locked(
     config: CiaoConfig,
     *,
@@ -731,6 +756,7 @@ async def _run_server_locked(
     installer_run_id: str | None = None,
     installer_native_fd: int | None = None,
     installer_native_workspace: str | None = None,
+    app_engine: bool = False,
 ) -> int:
     """Server implementation; caller owns the workspace instance lock."""
 
@@ -769,6 +795,7 @@ async def _run_server_locked(
         config.pwa_port = bootstrap_port
         config.dev_mode = False
         config.app_repo = None
+    _pin_app_engine_bootstrap_host(config, app_engine=app_engine)
 
     setup_error_logging(config.workspace_root)
     # The engine holds a descriptor per accepted connection. A service manager
@@ -1889,6 +1916,7 @@ def main(
     installer_native_fd: int | None = None,
     installer_native_workspace: str | None = None,
     app_engine: bool = False,
+    app_engine_port: int | None = None,
 ) -> None:
     """CLI entrypoint."""
     # INFO until the workspace's own log level (Settings) is known, which
@@ -1898,7 +1926,11 @@ def main(
 
     try:
         if app_engine:
-            code = asyncio.run(_async_main(supervised=supervised, app_engine=True))
+            code = asyncio.run(
+                _async_main(
+                    supervised=supervised, app_engine=True, app_engine_port=app_engine_port
+                )
+            )
         elif installer_native_fd is None:
             code = asyncio.run(_async_main(
                 supervised=supervised,

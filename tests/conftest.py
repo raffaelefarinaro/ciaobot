@@ -392,3 +392,27 @@ def _fail_on_unretrieved_task_exceptions() -> Any:
             + "\n".join(handler.messages),
             pytrace=False,
         )
+
+
+class RealRunnerReached(BaseException):
+    """A takeover test reached the real ``subprocess.run`` launchctl runner.
+
+    A ``BaseException`` on purpose: ``mac_takeover.run_cli`` turns every
+    ``Exception`` into an error document, which would swallow the guard.
+    """
+
+
+@pytest.fixture(autouse=True)
+def never_the_real_launchctl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A takeover test that forgets to inject its runner must fail, not drive launchd.
+
+    Every public entry point and every helper resolves a missing runner through
+    ``mac_takeover._default_runner``, the one place the real ``subprocess.run``
+    is chosen; replacing it covers helper-built runners too.
+    """
+    from ciao import mac_takeover
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise RealRunnerReached(f"a test reached the real subprocess runner: {args}")
+
+    monkeypatch.setattr(mac_takeover, "_default_runner", lambda: refuse)

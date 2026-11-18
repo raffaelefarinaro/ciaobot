@@ -90,15 +90,18 @@ struct BundledEngine: Equatable {
         }
     }
 
+    /// `port` is appended to a `.run` command as `--port N`; the release app
+    /// passes none, so the engine keeps its own default.
     func launch(
         _ command: Command,
+        port: Int? = nil,
         parentEnvironment: [String: String],
         workingDirectory: URL
     ) -> BundledEngineLaunch {
         let arguments: [String]
         switch command {
         case .version: arguments = ["--version"]
-        case .run(let extra): arguments = ["run"] + extra
+        case .run(let extra): arguments = ["run"] + extra + (port.map { ["--port", String($0)] } ?? [])
         }
         return BundledEngineLaunch(
             executable: launcher,

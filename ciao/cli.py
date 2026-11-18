@@ -116,6 +116,9 @@ def _run_command(args: argparse.Namespace) -> int:
     if args.installer_native_workspace is not None and args.installer_native_fd is None:
         print("--installer-native-workspace requires --installer-native-fd", file=sys.stderr)
         return 2
+    if args.port is not None and not args.app_engine:
+        print("--port requires --app-engine", file=sys.stderr)
+        return 2
     if args.app_engine:
         # App-mode: the Mac app owns this engine. The installer handshake has no
         # parent to hand off to here, and the bundle check keeps the flag out of
@@ -127,6 +130,13 @@ def _run_command(args: argparse.Namespace) -> int:
         if not package_version.running_from_app_bundle():
             print("--app-engine runs only from the engine inside Ciaobot.app", file=sys.stderr)
             return 2
+        if args.port is not None:
+            if not 1024 <= args.port <= 65535:
+                print("--port must be between 1024 and 65535", file=sys.stderr)
+                return 2
+            return _run_server(
+                supervised=args.supervised, app_engine=True, app_engine_port=args.port
+            )
         return _run_server(supervised=args.supervised, app_engine=True)
     if not args.installer_bootstrap:
         # Ordinary `ciao run` keeps its exact call shape.
@@ -229,6 +239,7 @@ def _run_server(
     installer_native_fd: int | None = None,
     installer_native_workspace: str | None = None,
     app_engine: bool = False,
+    app_engine_port: int | None = None,
 ) -> int:
     from ciao.config import RESTART_EXIT_CODE
     from ciao.main import main as server_main
@@ -251,6 +262,8 @@ def _run_server(
                 installer_native_fd=installer_native_fd,
                 installer_native_workspace=installer_native_workspace,
             )
+        elif app_engine and app_engine_port is not None:
+            server_main(supervised=supervised, app_engine=True, app_engine_port=app_engine_port)
         elif app_engine:
             # Before any configuration is loaded, no server, threads or locks
             # of its own: the recorded move (this boot is its restart) moves
@@ -8154,6 +8167,9 @@ def build_parser() -> argparse.ArgumentParser:
     # supervises the process itself. Not operator surface: hidden from --help,
     # and refused outside the bundle at dispatch.
     run_parser.add_argument("--app-engine", action="store_true", help=argparse.SUPPRESS)
+    # The app's DEBUG test launch picks the engine's port with this; it
+    # replaces the default for this process and is refused without --app-engine.
+    run_parser.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
     run_parser.set_defaults(func=_run_command)
 
     supervise_parser = subparsers.add_parser(
@@ -8283,7 +8299,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     takeover_parser = subparsers.add_parser(
         "mac-takeover",
-        help="Ciaobot.app only: classify this Mac's 1.x engine for takeover (read-only).",
+        help="Ciaobot.app only: classify this Mac's 1.x engine for takeover "
+        "(plan is read-only; apply/finish/rollback are the journalled transaction).",
     )
     takeover_sub = takeover_parser.add_subparsers(
         dest="mac_takeover_action", required=True
@@ -8297,6 +8314,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     takeover_plan_parser.add_argument("--label", default="com.ciao.server")
     takeover_plan_parser.set_defaults(func=_mac_takeover_command)
+
+    takeover_apply_parser = takeover_sub.add_parser(
+        "apply",
+        help="Ciaobot.app only: back up the old plist, stop the old engine and "
+        "hand the workspace to the bundled engine (journalled).",
+    )
+    takeover_apply_parser.add_argument("--json", action="store_true", dest="as_json")
+    takeover_apply_parser.add_argument(
+        "--expect-sha256",
+        required=True,
+        help="The plist sha256 the plan reported, which must still match.",
+    )
+    takeover_apply_parser.add_argument(
+        "--launch-agents-dir", type=Path, default=None
+    )
+    takeover_apply_parser.add_argument("--label", default="com.ciao.server")
+    takeover_apply_parser.set_defaults(func=_mac_takeover_command)
+
+    takeover_finish_parser = takeover_sub.add_parser(
+        "finish",
+        help="Ciaobot.app only: prove the bundled engine is healthy and list the "
+        "leftovers it may trash; --done closes the takeover after trashing.",
+    )
+    takeover_finish_parser.add_argument("--json", action="store_true", dest="as_json")
+    takeover_finish_parser.add_argument(
+        "--id", required=True, dest="takeover_id", help="The takeover id that apply returned."
+    )
+    takeover_finish_parser.add_argument(
+        "--done",
+        action="store_true",
+        dest="done",
+        help="Close the takeover's journal (call after trashing).",
+    )
+    takeover_finish_parser.set_defaults(func=_mac_takeover_command)
+
+    takeover_rollback_parser = takeover_sub.add_parser(
+        "rollback",
+        help="Ciaobot.app only: restore the 1.x engine after an unfinished takeover.",
+    )
+    takeover_rollback_parser.add_argument("--json", action="store_true", dest="as_json")
+    takeover_rollback_parser.add_argument(
+        "--id", required=True, dest="takeover_id", help="The takeover id that apply returned."
+    )
+    takeover_rollback_parser.set_defaults(func=_mac_takeover_command)
 
     installer_parser = subparsers.add_parser(
         "installer",
