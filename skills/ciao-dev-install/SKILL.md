@@ -53,10 +53,18 @@ build dominates, and its engine part (npm, vite and pip inside
 - Toolchain for the app flow (from `mac/AGENTS.md`): Xcode or Command Line
   Tools via `DEVELOPER_DIR`, Python 3.12 or 3.13 (the first of `python3.12`,
   `python3.13` on `PATH`, else `python3` only when it is 3.12 or 3.13), node
-  and npm on `PATH`, network on a cold engine cache. Toolchain for the service
-  flow: Node 22 (`.nvmrc`), `uv`, Python 3.12+, and a repo `.venv` with
-  `pip install -e '.[test]'` already run. Install anything missing before
-  building.
+  and npm on `PATH`, network on a cold engine cache — **and a bare `python3`
+  of 3.12 or 3.13 on `PATH` for `scripts/package-app.sh` itself**: after the
+  build it signs and checks the bundled engine with plain `python3 -I -S` and
+  dies with `python3 3.12 or newer is required to sign the bundled engine`
+  otherwise. The build's own `python3.12`/`python3.13` pick does not cover
+  that step, and on a Mac the default `python3` (the Command Line Tools one)
+  is usually older. Satisfy it with a PATH shim for the packaging run, e.g.
+  `mkdir -p "$HOME/.local/bin" && ln -s "$(command -v python3.12)"
+  "$HOME/.local/bin/python3"` and prepend `"$HOME/.local/bin"` to `PATH`.
+  Toolchain for the service flow: Node 22 (`.nvmrc`), `uv`, Python 3.12+, and
+  a repo `.venv` with `pip install -e '.[test]'` already run. Install anything
+  missing before building.
 - Never apply a develop-only migration to the live workspace. Neither flow
   runs migrations against the daily-driver workspace; if a branch needs new
   workspace state tested, test it in a throwaway workspace, never the real
@@ -128,8 +136,11 @@ DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer scripts/package-ap
 - Ad-hoc signing is fine for local testing; there is no Developer ID and no
   notarization in this build.
 - Output is a fresh directory holding the sealed, ad-hoc signed `Ciaobot.app`,
-  `Ciaobot-<version>-adhoc.zip`, `MANIFEST.txt` and `SHA256SUMS` (pass
-  `--output DIR` to choose). `MANIFEST.txt` records the `engine_version`.
+  `Ciaobot-<version>-adhoc.zip`, `MANIFEST.txt` and `SHA256SUMS`. Pass
+  `--output DIR` (a new or empty directory) to fix the path — for example
+  `--output "$out"`, so the dev-install step below can name
+  `"$out"/Ciaobot.app` — or read the `app:` line the script prints at the end.
+  `MANIFEST.txt` records the `engine_version`.
 - The DMG is not the dev artifact while the engine has no distribution signing:
   `make-dmg.sh` refuses an engine-bearing app, and every app this flow builds
   carries the engine. Install the app `package-app.sh` produced; the
@@ -152,7 +163,10 @@ does exactly that, small and testable:
 
 `--dry-run` runs the self-check and prints the plan without changing anything.
 It defaults to replacing `$HOME/Applications/Ciaobot.app`; pass
-`--installed /Applications/Ciaobot.app` for an install living there. What it
+`--installed /Applications/Ciaobot.app` for an install living there. Run the
+script from the SAME checkout/worktree that was built — it compares the
+engine version against the `pyproject.toml` two levels above the script — or
+pass `--expect-engine-version` when you must call it from elsewhere. What it
 does (and what you should be able to narrate before confirming):
 
 1. Stages the bundle into `<installed folder>/.Ciaobot.app.staging` — the
@@ -161,10 +175,16 @@ does (and what you should be able to narrate before confirming):
    --strict`, and the bundled engine's `bin/ciao --version` must equal the
    checkout's `pyproject.toml` version (`--expect-engine-version` to pin it).
    This catches a stale or wrong bundle *before* anything is touched.
-3. After your explicit confirmation only — moves the installed app aside to
-   `.Ciaobot.app.prev-<timestamp>` (kept, never deleted — the maintainer
-   removes stale `.prev-*` copies once satisfied) and moves the staged copy
-   into place.
+3. Moves the installed app aside to a free `.Ciaobot.app.prev-<timestamp>`
+   name (kept, never deleted — the maintainer removes stale `.prev-*` copies
+   once satisfied) and moves the staged copy into place; if that second move
+   is blocked, the previous app is restored and the handoff script of A4 is
+   printed.
+
+The script does not enforce any confirmation or the active-chat check: it
+swaps as soon as it runs. The confirmation and the section 1 check are the
+agent's job (A3) and happen before you invoke the real, non-`--dry-run`
+swap — do them, then call it.
 
 Confirm before replacing, then swap:
 
@@ -179,17 +199,25 @@ Confirm before replacing, then swap:
   State plainly what will be cut off and where the previous bundle will be.
 - Never swap while a blocker list is non-empty and unconfirmed, and never
   without an explicit go from the user.
+- The dev-install script does not enforce these gates — it swaps whatever
+  bundle it is pointed at the moment it runs, with no knowledge of chats.
+  They bind the agent's decision to invoke it.
 
 ### A4. If the swap is blocked, hand the maintainer the script
 
 An agent sandbox may deny the rename even though nothing else failed. The
-dev-install script handles it instead of failing: it restores the previous
-state, exits 0, and **prints a ready-to-run swap script on stdout**. Give that
-script to the maintainer — save it (for example as `~/swap-ciaobot.sh`), have
-them read it, and let them run it themselves where the sandbox does not apply.
-It stages, self-checks and swaps exactly what the run planned, so nothing is
-lost by the handoff. Do not retry the swap from the agent context, and do not
-edit the printed script.
+dev-install script handles it instead of failing: it rolls the previous app
+back from the exact backup it recorded, removes the staging copy it created,
+exits 0, and **prints a ready-to-run swap script on stdout**. If even the
+restore is denied, it exits non-zero and names the exact backup path instead
+of printing a script — report where the backup sits and stop. The printed
+script re-stages from the `--staged` bundle, so leave the `package-app.sh`
+output directory where it is; it refuses a staging directory that is already
+in the way, refuses to overwrite any `.prev-*` backup, and rolls the previous
+app back if its own move into place fails. Give the printed script to the
+maintainer — save it (for example as `~/swap-ciaobot.sh`), have them read it,
+and let them run it themselves where the sandbox does not apply. Do not retry
+the swap from the agent context, and do not edit the printed script.
 
 ### A5. What the app flow must never touch
 

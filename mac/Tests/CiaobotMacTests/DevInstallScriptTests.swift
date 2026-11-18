@@ -208,8 +208,9 @@ final class DevInstallScriptTests: XCTestCase {
         XCTAssertEqual(try installedMarker(installed), "installed-old",
                        "the denied swap must leave the previous app in place")
         let staging = installDirectory.appendingPathComponent(".Ciaobot.app.staging", isDirectory: true)
-        XCTAssertTrue(fileManager.fileExists(atPath: staging.path),
-                      "the staging copy stays so the maintainer's script can swap it")
+        XCTAssertFalse(fileManager.fileExists(atPath: staging.path),
+                       "the staging copy this run created must be removed; the handoff script re-stages from --staged")
+        XCTAssertTrue(result.joinedOutput.contains("removed the staging copy this run created"), result.joinedOutput)
 
         // Hand the emitted script to the maintainer: extract it from stdout
         // and run it, and the swap must complete.
@@ -225,6 +226,215 @@ final class DevInstallScriptTests: XCTestCase {
         XCTAssertEqual(try installedMarker(installed), "from-staged")
         XCTAssertFalse(fileManager.fileExists(atPath: staging.path))
         XCTAssertTrue(try backupExists(in: installDirectory))
+    }
+
+    /// A failed swap must restore the previous app from the exact backup path
+    /// recorded this run — never from a `.prev-*` glob, which can pick up an
+    /// older backup from a previous run instead of the bundle just replaced.
+    func testBlockedSwapRestoresTheRecordedBackupNotAnOlderPrevCopy() throws {
+        let staged = try makeStagedApp()
+        let installDirectory = scratch.appendingPathComponent("Install", isDirectory: true)
+        let installed = try makeInstalledApp(in: installDirectory)
+        let stale = installDirectory.appendingPathComponent(".Ciaobot.app.prev-20200101000000", isDirectory: true)
+        try makeMarkerBundle(at: stale, marker: "stale-backup")
+        // Fail every mv whose source is the staging copy: the installed app
+        // moves aside successfully, the staged copy cannot be moved in.
+        // Allowed moves must really move, so the on-disk state matches the
+        // exit status.
+        let stub = try makeStub(
+            "mv",
+            "case $1 in *.Ciaobot.app.staging*) echo 'Operation not permitted' >&2; exit 1 ;; esac\nexec /bin/mv \"$@\""
+        )
+
+        let result = try runDevInstall(
+            ["--staged", staged.path, "--installed", installed.path,
+             "--expect-engine-version", "1.2.3"],
+            stubPath: stub.path
+        )
+
+        XCTAssertEqual(result.status, 0, result.joinedOutput)
+        XCTAssertTrue(result.joinedOutput.contains("SWAP BLOCKED"), result.joinedOutput)
+        XCTAssertTrue(result.joinedOutput.contains("put back in place"), result.joinedOutput)
+        XCTAssertEqual(try installedMarker(installed), "installed-old",
+                       "the recorded backup, not the older .prev-* copy, must be restored")
+        XCTAssertEqual(try installedMarker(stale), "stale-backup",
+                       "the older backup must stay untouched")
+        let backups = try allBackups(in: installDirectory).map(\.lastPathComponent)
+        XCTAssertEqual(backups, [".Ciaobot.app.prev-20200101000000"],
+                       "the fresh backup must have been moved back exactly")
+        XCTAssertFalse(fileManager.fileExists(
+            atPath: installDirectory.appendingPathComponent(".Ciaobot.app.staging").path))
+    }
+
+    /// When the restore itself is denied, the run must fail loudly and name
+    /// the exact backup path, instead of printing a swap script that would
+    /// start from a half-moved state.
+    func testFailingRestoreExitsNonZeroAndPrintsTheExactBackupPath() throws {
+        let staged = try makeStagedApp()
+        let installDirectory = scratch.appendingPathComponent("Install", isDirectory: true)
+        let installed = try makeInstalledApp(in: installDirectory)
+        // Fail every mv whose target is the installed app: the move aside
+        // succeeds, the staged copy cannot be moved in, and neither can the
+        // backup be moved back. Allowed moves must really move.
+        let stub = try makeStub(
+            "mv",
+            "case $2 in */Ciaobot.app) echo 'Operation not permitted' >&2; exit 1 ;; esac\nexec /bin/mv \"$@\""
+        )
+
+        let result = try runDevInstall(
+            ["--staged", staged.path, "--installed", installed.path,
+             "--expect-engine-version", "1.2.3"],
+            stubPath: stub.path
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.joinedOutput)
+        XCTAssertTrue(result.joinedOutput.contains("could NOT be moved back"), result.joinedOutput)
+        XCTAssertTrue(result.joinedOutput.contains(".Ciaobot.app.prev-"), result.joinedOutput)
+        XCTAssertTrue(result.joinedOutput.contains("by hand before swapping again"), result.joinedOutput)
+        XCTAssertFalse(result.joinedOutput.contains("ready-to-run swap script"),
+                       "a failed restore must not hand over a swap script")
+        XCTAssertFalse(fileManager.fileExists(atPath: installed.path),
+                       "the previous app is in the backup, not in place")
+        // The printed backup path must be exact: it exists and holds the
+        // replaced bundle.
+        let printed = try XCTUnwrap(
+            result.joinedOutput
+                .components(separatedBy: "\n")
+                .first { $0.contains("its backup sits exactly at: ") }?
+                .trimmingCharacters(in: .whitespaces)
+                .dropFirst("dev-install: its backup sits exactly at: ".count),
+            result.joinedOutput
+        )
+        let backupURL = URL(fileURLWithPath: String(printed))
+        XCTAssertTrue(fileManager.fileExists(atPath: backupURL.path),
+                      "the printed backup path must exist: \(printed)")
+        XCTAssertEqual(try installedMarker(backupURL), "installed-old")
+        XCTAssertFalse(fileManager.fileExists(
+            atPath: installDirectory.appendingPathComponent(".Ciaobot.app.staging").path),
+                       "the staging copy this run created must be removed")
+        let backups = try allBackups(in: installDirectory)
+        XCTAssertEqual(backups.count, 1, "the previous app sits in exactly one backup")
+        XCTAssertEqual(try installedMarker(try XCTUnwrap(backups.first)), "installed-old")
+    }
+
+    /// Two swaps in the same second must not nest one backup inside another:
+    /// the backup name is collision-corrected with a counter instead of
+    /// overwriting or shadowing an existing `.prev-*` copy.
+    func testSwapPicksACollisionFreeBackupNameWhenTheFirstIsTaken() throws {
+        let staged = try makeStagedApp()
+        let installDirectory = scratch.appendingPathComponent("Install", isDirectory: true)
+        let installed = try makeInstalledApp(in: installDirectory)
+        let taken = installDirectory.appendingPathComponent(".Ciaobot.app.prev-20260101000000", isDirectory: true)
+        try makeMarkerBundle(at: taken, marker: "stale-backup")
+        let stub = try makeStub("date", "printf '%s\\n' '20260101000000'")
+
+        let result = try runDevInstall(
+            ["--staged", staged.path, "--installed", installed.path,
+             "--expect-engine-version", "1.2.3"],
+            stubPath: stub.path
+        )
+
+        XCTAssertEqual(result.status, 0, result.joinedOutput)
+        XCTAssertTrue(result.joinedOutput.contains("swapped into place"), result.joinedOutput)
+        let backups = try allBackups(in: installDirectory).map(\.lastPathComponent)
+        XCTAssertTrue(backups.contains(".Ciaobot.app.prev-20260101000000"),
+                      "the pre-existing backup must keep its name")
+        XCTAssertTrue(backups.contains(".Ciaobot.app.prev-20260101000000-2"),
+                      "the new backup must take a disambiguated name, not overwrite the old one")
+        XCTAssertEqual(backups.count, 2, result.joinedOutput)
+        XCTAssertEqual(try installedMarker(
+            try XCTUnwrap(allBackups(in: installDirectory).first { $0.lastPathComponent == ".Ciaobot.app.prev-20260101000000-2" }
+            )), "installed-old")
+        XCTAssertEqual(try installedMarker(installed), "from-staged")
+    }
+
+    /// The handoff script must refuse a staging directory that is already in
+    /// the way (like the main script), never `rm -rf` it: whatever the
+    /// maintainer keeps at that name survives untouched.
+    func testGeneratedScriptRefusesAStagingDirectoryInProgress() throws {
+        let staged = try makeStagedApp()
+        let installDirectory = scratch.appendingPathComponent("Install", isDirectory: true)
+        let installed = try makeInstalledApp(in: installDirectory)
+        let failingMv = try makeFailingMvStub()
+
+        let result = try runDevInstall(
+            ["--staged", staged.path, "--installed", installed.path,
+             "--expect-engine-version", "1.2.3"],
+            stubPath: failingMv.path
+        )
+        XCTAssertEqual(result.status, 0, result.joinedOutput)
+        let swapScript = try extractedSwapScript(result, as: "swap-refuses-staging.sh")
+
+        let staging = installDirectory.appendingPathComponent(".Ciaobot.app.staging", isDirectory: true)
+        try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
+        try Data("keep this\n".utf8).write(to: staging.appendingPathComponent("sentinel"))
+
+        let handed = try runShell(swapScript)
+        XCTAssertEqual(handed.status, 1, handed.output)
+        XCTAssertTrue(handed.output.contains("staging directory is in the way"), handed.output)
+        XCTAssertEqual(try String(contentsOf: staging.appendingPathComponent("sentinel"), encoding: .utf8),
+                       "keep this\n", "the script must not remove an existing staging directory")
+        XCTAssertEqual(try installedMarker(installed), "installed-old")
+        XCTAssertFalse(try backupExists(in: installDirectory))
+    }
+
+    /// If the handoff script's own move into place fails, it must roll the
+    /// previous app back from the backup it just made and say so.
+    func testGeneratedScriptRollsBackWhenItsSwapMoveFails() throws {
+        let staged = try makeStagedApp()
+        let installDirectory = scratch.appendingPathComponent("Install", isDirectory: true)
+        let installed = try makeInstalledApp(in: installDirectory)
+        let failingMv = try makeFailingMvStub()
+
+        let result = try runDevInstall(
+            ["--staged", staged.path, "--installed", installed.path,
+             "--expect-engine-version", "1.2.3"],
+            stubPath: failingMv.path
+        )
+        XCTAssertEqual(result.status, 0, result.joinedOutput)
+        let swapScript = try extractedSwapScript(result, as: "swap-rollback.sh")
+
+        // Fail only the mv whose source is the staging copy, so the backup
+        // move inside the handoff script succeeds and the swap move fails.
+        // Allowed moves must really move, so the rollback has a backup to
+        // restore.
+        let stub = try makeStub(
+            "mv",
+            "case $1 in *.Ciaobot.app.staging*) echo 'Operation not permitted' >&2; exit 1 ;; esac\nexec /bin/mv \"$@\""
+        )
+        let handed = try runShell(swapScript, stubPath: stub.path)
+        XCTAssertEqual(handed.status, 1, handed.output)
+        XCTAssertTrue(handed.output.contains("the swap failed"), handed.output)
+        XCTAssertTrue(handed.output.contains("put back in place from"), handed.output)
+        XCTAssertEqual(try installedMarker(installed), "installed-old",
+                       "the previous app must be rolled back from the backup")
+        XCTAssertFalse(try backupExists(in: installDirectory),
+                       "the rolled back backup no longer sits in .prev-*")
+        XCTAssertTrue(fileManager.fileExists(
+            atPath: installDirectory.appendingPathComponent(".Ciaobot.app.staging").path),
+                       "the failed move leaves the staged copy for inspection")
+    }
+
+    /// The handoff script must take a collision-safe backup name (date and
+    /// its own pid) and refuse to overwrite an existing backup.
+    func testGeneratedScriptUsesACollisionSafeBackupName() throws {
+        let staged = try makeStagedApp()
+        let installDirectory = scratch.appendingPathComponent("Install", isDirectory: true)
+        let installed = try makeInstalledApp(in: installDirectory)
+        let failingMv = try makeFailingMvStub()
+
+        let result = try runDevInstall(
+            ["--staged", staged.path, "--installed", installed.path,
+             "--expect-engine-version", "1.2.3"],
+            stubPath: failingMv.path
+        )
+        XCTAssertEqual(result.status, 0, result.joinedOutput)
+        let swapScript = try extractedSwapScript(result, as: "swap-collision-name.sh")
+        let text = try String(contentsOf: swapScript, encoding: .utf8)
+        XCTAssertTrue(text.contains(".Ciaobot.app.prev-$(date +%Y%m%d%H%M%S)-$$"),
+                      "the backup name must carry the pid so two runs cannot collide:\n\(text)")
+        XCTAssertTrue(text.contains("a backup already sits at the computed backup name"),
+                      "the script must refuse an existing backup instead of overwriting:\n\(text)")
     }
 
     func testTheScriptKeepsItsExecutableBit() {
@@ -244,6 +454,194 @@ final class DevInstallScriptTests: XCTestCase {
 
         let missing = try runDevInstall(["--dry-run"])
         XCTAssertEqual(missing.status, 2, missing.joinedOutput)
+    }
+
+    /// Paths with quoting, expansion or control characters are refused with
+    /// exit 2 before anything is resolved: they cannot be embedded honestly
+    /// in the generated swap script and they make an mv that swaps a live app
+    /// unreadable.
+    func testRejectsShellUnsafePathsForStagedAndInstalled() throws {
+        let staged = try makeStagedApp()
+        let installDirectory = scratch.appendingPathComponent("Install", isDirectory: true)
+        let installed = try makeInstalledApp(in: installDirectory)
+        let rejected = ["'", "\"", "`", "$", "\\", "\n"]
+
+        for character in rejected {
+            let badStaged = staged.path + "!" + character
+            let stagedRun = try runDevInstall(["--staged", badStaged, "--installed", installed.path])
+            XCTAssertEqual(stagedRun.status, 2, stagedRun.joinedOutput)
+            XCTAssertTrue(stagedRun.joinedOutput.contains("are not supported"), stagedRun.joinedOutput)
+
+            let badInstalled = installed.path + "!" + character
+            let installedRun = try runDevInstall(["--staged", staged.path, "--installed", badInstalled])
+            XCTAssertEqual(installedRun.status, 2, installedRun.joinedOutput)
+            XCTAssertTrue(installedRun.joinedOutput.contains("are not supported"), installedRun.joinedOutput)
+        }
+
+        // Nothing was touched by any of those runs.
+        XCTAssertFalse(fileManager.fileExists(
+            atPath: installDirectory.appendingPathComponent(".Ciaobot.app.staging").path))
+        XCTAssertFalse(try backupExists(in: installDirectory))
+        XCTAssertEqual(try installedMarker(installed), "installed-old")
+    }
+
+    /// The quoting helper must let legal but awkward paths (spaces) through
+    /// the whole flow, including the generated swap script.
+    func testQuotedPathsSurviveTheGeneratedSwapScript() throws {
+        let stagedDir = scratch.appendingPathComponent("My Staged Output", isDirectory: true)
+        let staged = try makeStagedApp(at: stagedDir.appendingPathComponent("Ciaobot.app", isDirectory: true))
+        let installDirectory = scratch.appendingPathComponent("My Installs", isDirectory: true)
+        let installed = try makeInstalledApp(in: installDirectory)
+        let failingMv = try makeFailingMvStub()
+
+        let result = try runDevInstall(
+            ["--staged", staged.path, "--installed", installed.path,
+             "--expect-engine-version", "1.2.3"],
+            stubPath: failingMv.path
+        )
+        XCTAssertEqual(result.status, 0, result.joinedOutput)
+        let swapScript = try extractedSwapScript(result, as: "swap-quoted.sh")
+
+        let handed = try runShell(swapScript)
+        XCTAssertEqual(handed.status, 0, handed.output)
+        XCTAssertTrue(handed.output.contains("swapped into place"), handed.output)
+        XCTAssertEqual(try installedMarker(installed), "from-staged")
+        XCTAssertTrue(try backupExists(in: installDirectory))
+        XCTAssertEqual(try installedMarker(try XCTUnwrap(try backupDirectory(in: installDirectory))),
+                       "installed-old")
+    }
+
+    /// When ditto fails, the staging copy this run created must not stay
+    /// behind blocking the next run.
+    func testFailingDittoLeavesNoStagingCopyBehind() throws {
+        let staged = try makeStagedApp()
+        let installDirectory = scratch.appendingPathComponent("Install", isDirectory: true)
+        let installed = try makeInstalledApp(in: installDirectory)
+        let stub = try makeStub(
+            "ditto",
+            "/usr/bin/ditto \"$@\"\necho 'ditto: broken' >&2\nexit 1"
+        )
+
+        let result = try runDevInstall(
+            ["--staged", staged.path, "--installed", installed.path,
+             "--expect-engine-version", "1.2.3"],
+            stubPath: stub.path
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.joinedOutput)
+        XCTAssertFalse(fileManager.fileExists(
+            atPath: installDirectory.appendingPathComponent(".Ciaobot.app.staging").path),
+                       "the staging copy this run created must be cleaned up when ditto fails")
+        XCTAssertEqual(try installedMarker(installed), "installed-old")
+        XCTAssertFalse(try backupExists(in: installDirectory))
+    }
+
+    /// When the self-check of the staging copy fails, the staging copy must
+    /// not stay behind either.
+    func testFailingSelfCheckLeavesNoStagingCopyBehind() throws {
+        let staged = try makeStagedApp(signed: false)
+        let installDirectory = scratch.appendingPathComponent("Install", isDirectory: true)
+        let installed = try makeInstalledApp(in: installDirectory)
+
+        let result = try runDevInstall(
+            ["--staged", staged.path, "--installed", installed.path,
+             "--expect-engine-version", "1.2.3"]
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.joinedOutput)
+        XCTAssertTrue(result.joinedOutput.contains("could not verify the code signature"), result.joinedOutput)
+        XCTAssertFalse(fileManager.fileExists(
+            atPath: installDirectory.appendingPathComponent(".Ciaobot.app.staging").path),
+                       "the staging copy this run created must be cleaned up when the self-check fails")
+        XCTAssertEqual(try installedMarker(installed), "installed-old")
+        XCTAssertFalse(try backupExists(in: installDirectory))
+    }
+
+    /// The installed app must be a real directory, never a symlink: following
+    /// a link back to the bundle that owns it would corrupt the wrong install.
+    func testRefusesASymlinkedInstalledApp() throws {
+        let staged = try makeStagedApp()
+        let installDirectory = scratch.appendingPathComponent("Install", isDirectory: true)
+        let real = try makeInstalledApp(in: installDirectory.appendingPathComponent("Real", isDirectory: true))
+        let link = installDirectory.appendingPathComponent("Ciaobot.app")
+        try fileManager.createSymbolicLink(at: link, withDestinationURL: real)
+
+        let result = try runDevInstall(
+            ["--staged", staged.path, "--installed", installDirectory.appendingPathComponent("Ciaobot.app").path,
+             "--dry-run", "--expect-engine-version", "1.2.3"]
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.joinedOutput)
+        XCTAssertTrue(result.joinedOutput.contains("installed app is a symlink"), result.joinedOutput)
+        XCTAssertFalse(fileManager.fileExists(
+            atPath: installDirectory.appendingPathComponent(".Ciaobot.app.staging").path))
+    }
+
+    /// A staged bundle nested inside the installed app is refused before
+    /// anything is copied.
+    func testRefusesAStagedBundleInsideTheInstalledApp() throws {
+        let installDirectory = scratch.appendingPathComponent("Install", isDirectory: true)
+        let installed = try makeInstalledApp(in: installDirectory)
+        let nested = installed.appendingPathComponent("Nested/Ciaobot.app", isDirectory: true)
+        try fileManager.createDirectory(at: nested.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+
+        let result = try runDevInstall(
+            ["--staged", nested.path, "--installed", installed.path,
+             "--dry-run", "--expect-engine-version", "1.2.3"]
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.joinedOutput)
+        XCTAssertTrue(result.joinedOutput.contains("inside the installed app"), result.joinedOutput)
+        XCTAssertFalse(fileManager.fileExists(
+            atPath: installDirectory.appendingPathComponent(".Ciaobot.app.staging").path))
+        XCTAssertEqual(try installedMarker(installed), "installed-old")
+    }
+
+    /// And the reverse: an installed app living inside the staged bundle is
+    /// refused too.
+    func testRefusesAnInstalledAppInsideTheStagedBundle() throws {
+        let outer = try makeStagedApp(at: scratch.appendingPathComponent("Outer/Ciaobot.app", isDirectory: true))
+        let inner = try makeInstalledApp(in: outer.appendingPathComponent("Inner", isDirectory: true))
+
+        let result = try runDevInstall(
+            ["--staged", outer.path, "--installed", inner.path,
+             "--dry-run", "--expect-engine-version", "1.2.3"]
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.joinedOutput)
+        XCTAssertTrue(result.joinedOutput.contains("inside the staged bundle"), result.joinedOutput)
+        XCTAssertFalse(fileManager.fileExists(
+            atPath: outer.deletingLastPathComponent().appendingPathComponent(".Ciaobot.app.staging").path))
+        XCTAssertEqual(try installedMarker(inner), "installed-old")
+    }
+
+    /// A staged bundle whose engine is a symlink is refused by the self-check
+    /// before anything changes.
+    func testRefusesAnEngineThatIsASymlink() throws {
+        let staged = try makeStagedApp()
+        let installDirectory = scratch.appendingPathComponent("Install", isDirectory: true)
+        let installed = try makeInstalledApp(in: installDirectory)
+        let engine = staged.appendingPathComponent("Contents/Resources/engine", isDirectory: true)
+        try fileManager.createDirectory(
+            at: scratch.appendingPathComponent("EngineDir/bin", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        try fileManager.removeItem(at: engine)
+        try fileManager.createSymbolicLink(
+            at: engine,
+            withDestinationURL: scratch.appendingPathComponent("EngineDir", isDirectory: true)
+        )
+
+        let result = try runDevInstall(
+            ["--staged", staged.path, "--installed", installed.path,
+             "--dry-run", "--expect-engine-version", "1.2.3"]
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.joinedOutput)
+        XCTAssertTrue(result.joinedOutput.contains("must be a real directory, not a symlink"), result.joinedOutput)
+        XCTAssertFalse(fileManager.fileExists(
+            atPath: installDirectory.appendingPathComponent(".Ciaobot.app.staging").path))
+        XCTAssertEqual(try installedMarker(installed), "installed-old")
     }
 
     // MARK: - Fixtures
@@ -309,6 +707,26 @@ final class DevInstallScriptTests: XCTestCase {
         return app
     }
 
+    /// A minimal bundle that only exists to report a marker through its
+    /// Scratch executable, so backups can be told apart by content.
+    private func makeMarkerBundle(at app: URL, marker: String) throws {
+        let contents = app.appendingPathComponent("Contents", isDirectory: true)
+        try fileManager.createDirectory(at: contents.appendingPathComponent("MacOS"), withIntermediateDirectories: true)
+        let executable = contents.appendingPathComponent("MacOS/Scratch")
+        try Data("#!/bin/sh\necho \(marker)\n".utf8).write(to: executable)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+    }
+
+    /// A single-file tool directory that sits first on PATH for one run.
+    private func makeStub(_ name: String, _ body: String) throws -> URL {
+        let stub = scratch.appendingPathComponent("stub-\(name)-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: stub, withIntermediateDirectories: true)
+        let tool = stub.appendingPathComponent(name)
+        try Data("#!/bin/sh\n\(body)\n".utf8).write(to: tool)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)
+        return stub
+    }
+
     private func signAppBundle(_ app: URL) throws -> URL {
         let result = try run("/usr/bin/codesign", ["--force", "--sign", "-", app.path])
         XCTAssertEqual(result.status, 0, result.output)
@@ -344,6 +762,46 @@ final class DevInstallScriptTests: XCTestCase {
     private func backupDirectory(in directory: URL) throws -> URL? {
         try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
             .first { $0.lastPathComponent.hasPrefix(".Ciaobot.app.prev-") }
+    }
+
+    private func allBackups(in directory: URL) throws -> [URL] {
+        try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix(".Ciaobot.app.prev-") }
+    }
+
+    /// The swap script the blocked run printed on stdout, saved for the
+    /// maintainer to run.
+    private func extractedSwapScript(
+        _ result: (status: Int32, output: String, error: String, joinedOutput: String),
+        as name: String
+    ) throws -> URL {
+        let scriptText = try XCTUnwrap(
+            result.output.range(of: "#!/bin/sh", options: .backwards).map { String(result.output[$0.lowerBound...]) },
+            result.output
+        )
+        let url = scratch.appendingPathComponent(name)
+        try Data(scriptText.utf8).write(to: url)
+        return url
+    }
+
+    @discardableResult
+    private func runShell(_ script: URL, stubPath: String? = nil) throws -> (status: Int32, output: String) {
+        var environment = ProcessInfo.processInfo.environment
+        if let stubPath {
+            environment["PATH"] = "\(stubPath):" + (environment["PATH"] ?? "/usr/bin:/bin")
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [script.path]
+        process.currentDirectoryURL = packageRoot
+        process.environment = environment
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus, String(decoding: data, as: UTF8.self))
     }
 
     /// The expected engine version derives from the checkout's pyproject.toml,
