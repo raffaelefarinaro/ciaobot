@@ -5,6 +5,7 @@
     python3 -I -S scripts/engine_sign.py sign --distribution TEAM IDENTITY ENGINE
     python3 -I -S scripts/engine_sign.py check ENGINE
     python3 -I -S scripts/engine_sign.py check --distribution TEAM ENGINE
+    python3 -I -S scripts/engine_sign.py inventory ENGINE
 
 ENGINE is ``<app>/Contents/Resources/engine``. ``sign`` signs every engine Mach-O (found by magic,
 never by extension) except the SDK's own CLI, deepest path first, one file at a time: never
@@ -16,9 +17,11 @@ app eligible for notarization, an image or an appcast. The SDK CLI keeps Anthrop
 signature, which is verified (pinned to Apple's CA and Anthropic's team with a codesign
 requirement) and never replaced. ``check`` writes nothing. An outer ad-hoc seal
 passes ``codesign --verify --deep --strict`` even over unsigned engine files, so only this check
-proves the engine itself is signed.
+proves the engine itself is signed. ``inventory`` writes nothing and prints the engine's full
+path/size/sha256 inventory as one JSON array on stdout, so a caller can compare two reads.
 
-Stdlib only. Exit 0 silent on success, 1 with ``engine sign failed`` on a refusal, 2 on usage.
+Stdlib only. Exit 0 silent on success (``inventory`` prints the JSON), 1 with ``engine sign failed``
+on a refusal, 2 on usage.
 """
 
 from __future__ import annotations
@@ -258,10 +261,16 @@ def sign_adhoc(engine: Path) -> list[str]:
     return sign_engine(engine)
 
 
+def inventory(engine: Path) -> list[dict[str, Any]]:
+    """The engine's full path/size/sha256 inventory, read-only (symlinks record their target)."""
+    return _inventory(engine)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     distribution: tuple[str, str] | None = None
     check_team: str | None = None
+    inventory_only = False
     if len(args) == 3 and args[0] == "sign" and args[1] == "--adhoc":
         mode, engine_arg = "sign", args[2]
     elif len(args) == 5 and args[0] == "sign" and args[1] == "--distribution":
@@ -272,6 +281,9 @@ def main(argv: list[str] | None = None) -> int:
     elif len(args) == 4 and args[0] == "check" and args[1] == "--distribution":
         mode, engine_arg = "check", args[3]
         check_team = args[2]
+    elif len(args) == 2 and args[0] == "inventory":
+        mode, engine_arg = "inventory", args[1]
+        inventory_only = True
     else:
         print(f"{FAILED}: usage", file=sys.stderr)
         return 2
@@ -282,6 +294,8 @@ def main(argv: list[str] | None = None) -> int:
             _require(re.fullmatch(r"[A-Z0-9]{10}", check_team) is not None)
         if mode == "sign":
             sign_engine(engine, distribution)
+        elif inventory_only:
+            print(json.dumps(inventory(engine)))
         else:
             check(engine, check_team)
     except SignError:

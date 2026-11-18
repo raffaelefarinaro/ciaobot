@@ -533,6 +533,63 @@ final class PackagingTests: XCTestCase {
         }
     }
 
+    /// The engine version probe runs the real launcher; it must change nothing.
+    /// `package-notarized.sh` compares the engine's full inventory (path, size,
+    /// sha256 of every file, via `engine_sign.py inventory`) across the probe,
+    /// so a launcher that writes into the signed bundle it reports on stops the
+    /// run before any notarization.
+    func testNotarizedPackagingRefusesALauncherThatWritesIntoTheBundle() throws {
+        let fixture = try makeFakePackageRepository(sneakyLauncher: true)
+
+        let result = try runPackaging(fixture)
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("changed the bundled engine"), result.output)
+        let log = try? String(contentsOf: fixture.xcrunLog, encoding: .utf8)
+        XCTAssertFalse((log ?? "").contains("notarytool"), log ?? "")
+        // The probe's own empty environment re-asserts the no-bytecode promise
+        // even when the launcher would not.
+        let text = try readScript("package-notarized.sh")
+        XCTAssertTrue(
+            text.contains(#"env -i PYTHONDONTWRITEBYTECODE=1 "$engine/bin/ciao" --version"#),
+            "the version probe must set PYTHONDONTWRITEBYTECODE=1 explicitly in its own environment"
+        )
+    }
+
+    /// The public team config is read by name and never sourced: assignments
+    /// sneaking a `SIGNING_IDENTITY` into it must not redirect signing. This
+    /// run must still (a) succeed and (b) sign everything with the identity the
+    /// caller supplied, never with the one the config injected.
+    func testNotarizedPackagingReadsOnlyTheTeamFromTheUpdateConfig() throws {
+        let fixture = try makeFakePackageRepository(configExtra: [
+            "SIGNING_IDENTITY='Developer ID Application: Someone Else (ZZZZZZZZZZ)'",
+        ])
+
+        let result = try runPackaging(fixture)
+
+        XCTAssertEqual(result.status, 0, result.output)
+        let codesign = try calls(in: fixture.codesignLog)
+        XCTAssertFalse(codesign.contains { $0.contains("ZZZZZZZZZZ") },
+                       "the config's injected identity must never reach codesign: \(codesign)")
+        XCTAssertTrue(codesign.contains { $0.contains(FakePackageRepository.identity) },
+                      "the caller's identity must still sign: \(codesign)")
+    }
+
+    /// The redirect guard is the name-only read: if the config were sourced, a
+    /// `PATH=` (or any other) assignment in it would change this script's
+    /// behaviour, so the script must not contain a source of it at all.
+    func testNotarizedPackagingNeverSourcesTheUpdateConfig() throws {
+        let text = try readScript("package-notarized.sh")
+        XCTAssertFalse(
+            text.contains(". \"$update_config\""),
+            "release/update-config.env must never be sourced: sourcing it would let it override SIGNING_IDENTITY or PATH"
+        )
+        XCTAssertTrue(
+            text.contains("sed -n 's/^UPDATE_TEAM_ID=//p' \"$update_config\""),
+            "the team identifier is read by name from the public config"
+        )
+    }
+
     /// A scratch checkout with the real release scripts, a stand-in bundle
     /// builder and recording doubles for the tools that need an identity, an
     /// Apple credential or a real disk image. The bundle builder is a stub on
@@ -567,7 +624,11 @@ final class PackagingTests: XCTestCase {
 
     private enum FakeEngine { case present, absent, danglingSymlink }
 
-    private func makeFakePackageRepository(engine: FakeEngine = .present) throws -> PackageFixture {
+    private func makeFakePackageRepository(
+        engine: FakeEngine = .present,
+        sneakyLauncher: Bool = false,
+        configExtra: [String] = []
+    ) throws -> PackageFixture {
         let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("ciaobot-release-\(UUID().uuidString)", isDirectory: true)
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
@@ -599,10 +660,12 @@ final class PackagingTests: XCTestCase {
         XCTAssertTrue(source.contains(pinned))
         try source.replacingOccurrences(of: pinned, with: "CODESIGN = \"\(fakeCodesignPath)\"")
             .write(to: signer, atomically: true, encoding: .utf8)
+        let sneakyCiao = #"printf '#!/bin/sh\necho "ciao 1.2.3"\nprintf x > "$(dirname -- "$0")/../pollution.tmp"\n' > "$engine/bin/ciao""#
+        let plainCiao = #"printf '#!/bin/sh\necho "ciao 1.2.3"\n' > "$engine/bin/ciao""#
         let engineLines = """
             engine="$bundle/Contents/Resources/engine"
             mkdir -p "$engine/bin"
-            printf '#!/bin/sh\\necho "ciao 1.2.3"\\n' > "$engine/bin/ciao"
+            \(sneakyLauncher ? sneakyCiao : plainCiao)
             chmod 755 "$engine/bin/ciao"
             printf '{"kind":"ciaobot-engine-provenance","engine":{"version":"1.2.3"}}' > "$engine/provenance.json"
             /usr/bin/lipo /bin/echo -thin arm64e -output "$engine/bin/python3.12"
@@ -626,10 +689,16 @@ final class PackagingTests: XCTestCase {
             at: packageRoot.appendingPathComponent("release/dmg"),
             to: release.appendingPathComponent("dmg", isDirectory: true)
         )
-        try fileManager.copyItem(
-            at: packageRoot.appendingPathComponent("release/update-config.env"),
-            to: release.appendingPathComponent("update-config.env")
-        )
+        let updateConfig = release.appendingPathComponent("update-config.env")
+        if configExtra.isEmpty {
+            try fileManager.copyItem(
+                at: packageRoot.appendingPathComponent("release/update-config.env"), to: updateConfig)
+        } else {
+            var text = try String(
+                contentsOf: packageRoot.appendingPathComponent("release/update-config.env"), encoding: .utf8)
+            text += "\n" + configExtra.joined(separator: "\n") + "\n"
+            try Data(text.utf8).write(to: updateConfig)
+        }
 
         let tools = root.appendingPathComponent("bin", isDirectory: true)
         try fileManager.createDirectory(at: tools, withIntermediateDirectories: true)

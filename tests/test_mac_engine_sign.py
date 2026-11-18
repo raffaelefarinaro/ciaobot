@@ -312,6 +312,51 @@ def test_check_refuses_a_failing_verify_and_writes_nothing(rig):
     assert fake.signs() == []
 
 
+def test_inventory_prints_the_full_inventory(rig, capsys):
+    """`inventory` is the read-only seam `package-notarized.sh` compares across the version probe."""
+    engine, fake = rig
+    assert es.main(["inventory", str(engine)]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    rows = json.loads(captured.out)
+    paths = {row["path"]: row for row in rows}
+    for expected in ["bin/ciao", "bin/python3.12", "bin/python3", "lib/b.dylib", "provenance.json", VENDOR]:
+        assert expected in paths
+    # Every regular file records its size and sha256, whatever its contents.
+    python = paths["bin/python3.12"]
+    assert python["size"] == len(THIN) and len(python["sha256"]) == 64
+    assert paths["bin/ciao"]["size"] == len(b"#!/bin/sh\necho ciao 1.2.3\n")
+    # A symlink records its target instead of a digest.
+    assert paths["bin/python3"] == {"path": "bin/python3", "symlink": "python3.12"}
+    assert "sha256" in paths["bin/ciao"] and paths["bin/ciao"].get("symlink") is None
+    assert fake.calls == []
+
+
+def test_inventory_detects_a_changed_file(rig, capsys):
+    engine, _fake = rig
+    assert es.main(["inventory", str(engine)]) == 0
+    before = json.loads(capsys.readouterr().out)
+    with open(engine / "provenance.json", "ab") as handle:
+        handle.write(b" ")
+    assert es.main(["inventory", str(engine)]) == 0
+    after = json.loads(capsys.readouterr().out)
+    assert before != after
+    before_by_path = {row["path"]: row for row in before}
+    after_by_path = {row["path"]: row for row in after}
+    assert after_by_path["provenance.json"]["size"] == before_by_path["provenance.json"]["size"] + 1
+    assert after_by_path["provenance.json"]["sha256"] != before_by_path["provenance.json"]["sha256"]
+
+
+def test_inventory_refuses_an_engine_shaped_wrong(rig, capsys, tmp_path):
+    engine, _fake = rig
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    assert es.main(["inventory", str(other)]) == 1
+    assert capsys.readouterr() == ("", "engine sign failed\n")
+    assert es.main(["inventory"]) == 2
+    assert "engine sign failed: usage" in capsys.readouterr().err
+
+
 def test_cli(rig, capsys):
     engine, _fake = rig
     assert es.main(["sign", "--distribution", str(engine)]) == 2

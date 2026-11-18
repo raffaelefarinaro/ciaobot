@@ -7,7 +7,9 @@
 # Ciaobot-<version>.dmg that release publishes. A notarized ZIP is still
 # accepted for the older feed. The app inside either archive must be signed by
 # this project's Developer ID team. This script only reads the archive: it
-# mounts a DMG read-only (or unzips a ZIP) into a scratch directory, verifies
+# hashes it (and hashes the staged copy again later, so the enclosure can only
+# cover the bytes the checks verified), mounts a DMG read-only (or unzips a
+# ZIP) into a scratch directory, verifies
 # identity, version, architecture, notarization and signing team, and then runs
 # Sparkle's own generate_appcast on the archive itself so archive signatures are
 # produced by the pinned tool and never hand-written. The private EdDSA key is
@@ -45,7 +47,9 @@ Generate the Sparkle appcast for one packaged Ciaobot archive.
                         is refused
 
 Reads the archive only: it never publishes, installs, launches or contacts the
-update feed. A DMG is mounted read-only for inspection and detached on every
+update feed. The archive is hashed before inspection and the staged copy is
+hashed against that digest, so a changed archive is refused. A DMG is mounted
+read-only for inspection and detached on every
 exit path. An archive another team signed, without a team identifier, or
 without a Developer ID Application authority is refused. The EdDSA private key
 stays in the operator's keychain and is read by Sparkle's own generate_appcast;
@@ -198,6 +202,14 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# The enclosure must be exactly the bytes that were inspected. Hash the archive
+# before it is mounted or extracted; after it is copied into the feed's staging
+# directory the hash is taken again, and a difference refuses the run, so an
+# archive that changed between inspection and staging never reaches
+# generate_appcast's EdDSA signature.
+archive_sha=$(shasum -a 256 "$archive" | awk '{print $1}')
+[ -n "$archive_sha" ] || die "could not hash the archive: $archive"
+
 if [ "$archive_kind" = dmg ]; then
     # Mount inside the scratch directory, read-only and out of Finder, so the
     # published bytes are what gets inspected. The trap detaches it on every
@@ -290,10 +302,15 @@ fi
 
 # generate_appcast reads a directory of archives and writes the appcast beside
 # them, so stage this one archive under its published name. For a DMG that is
-# the image itself: Sparkle signs the bytes that ship, never a repack.
+# the image itself: Sparkle signs the bytes that ship, never a repack. The copy
+# is hashed against the pre-inspection digest above, so the tool can only sign
+# the bytes the checks verified.
 stage=$scratch/feed
 mkdir "$stage"
 cp "$archive" "$stage/$archive_name"
+staged_sha=$(shasum -a 256 "$stage/$archive_name" | awk '{print $1}')
+[ "$staged_sha" = "$archive_sha" ] \
+    || die "the archive changed while it was being inspected; refusing to advertise it: $archive_name"
 appcast_name=appcast.xml
 # generate_appcast resolves a relative -o against the process working
 # directory, not against the archives directory, so pass the absolute path the
