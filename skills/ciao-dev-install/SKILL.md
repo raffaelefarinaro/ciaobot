@@ -51,15 +51,19 @@ build dominates, and its engine part (npm, vite and pip inside
   exactly as it is, uncommitted changes included. A dirty tree is the point
   there, not a warning; just say what state the tree is in.
 - Toolchain for the app flow (from `mac/AGENTS.md`): Xcode or Command Line
-  Tools via `DEVELOPER_DIR`, Python 3.12 or 3.13 (the first of `python3.12`,
-  `python3.13` on `PATH`, else `python3` only when it is 3.12 or 3.13), node
-  and npm on `PATH`, network on a cold engine cache — **and a bare `python3`
-  of 3.12 or 3.13 on `PATH` for `scripts/package-app.sh` itself**: after the
-  build it signs and checks the bundled engine with plain `python3 -I -S` and
-  dies with `python3 3.12 or newer is required to sign the bundled engine`
-  otherwise. The build's own `python3.12`/`python3.13` pick does not cover
-  that step, and on a Mac the default `python3` (the Command Line Tools one)
-  is usually older. Satisfy it with a PATH shim for the packaging run, e.g.
+  Tools via `DEVELOPER_DIR`, node and npm on `PATH`, network on a cold engine
+  cache — **and a bare `python3` of 3.12 or newer on `PATH` for
+  `scripts/package-app.sh` itself** (any version from 3.12 up is fine —
+  3.13, 3.14 and later included): after the build it signs and checks the
+  bundled engine with plain `python3 -I -S` and dies with `python3 3.12 or
+  newer is required to sign the bundled engine` otherwise. The 3.12-or-3.13-only
+  limit belongs to the engine build (`mac/scripts/build-app.sh`: the first of
+  `python3.12`, `python3.13` on `PATH`, else `python3` only when it is 3.12 or
+  3.13; anything newer is refused there) and does not apply to
+  `package-app.sh`. The engine build's own `python3.12`/`python3.13` pick does
+  not cover the packaging step, and on a Mac the default `python3` (the
+  Command Line Tools one) is usually older. Satisfy it with a PATH shim for
+  the packaging run, e.g.
   `mkdir -p "$HOME/.local/bin" && ln -s "$(command -v python3.12)"
   "$HOME/.local/bin/python3"` and prepend `"$HOME/.local/bin"` to `PATH`.
   Toolchain for the service flow: Node 22 (`.nvmrc`), `uv`, Python 3.12+, and
@@ -179,7 +183,8 @@ does (and what you should be able to narrate before confirming):
    name (kept, never deleted — the maintainer removes stale `.prev-*` copies
    once satisfied) and moves the staged copy into place; if that second move
    is blocked, the previous app is restored and the handoff script of A4 is
-   printed.
+   printed. A signal between the two moves puts the previous app back the
+   same way (never nesting the backup) and stops non-zero instead.
 
 The script does not enforce any confirmation or the active-chat check: it
 swaps as soon as it runs. The confirmation and the section 1 check are the

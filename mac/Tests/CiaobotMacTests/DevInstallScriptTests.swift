@@ -317,6 +317,74 @@ final class DevInstallScriptTests: XCTestCase {
         XCTAssertEqual(try installedMarker(try XCTUnwrap(backups.first)), "installed-old")
     }
 
+    /// The restore must never nest the backup: if something (re-)appears at
+    /// the installed path while the previous app sits in the backup, mv would
+    /// file the backup INSIDE that directory instead of replacing it. The
+    /// run must stop non-zero, name the exact backup path, and leave the
+    /// backup exactly where it was recorded.
+    func testRestoreRefusesToNestTheBackupWhenTheInstalledPathReappears() throws {
+        let staged = try makeStagedApp()
+        let installDirectory = scratch.appendingPathComponent("Install", isDirectory: true)
+        let installed = try makeInstalledApp(in: installDirectory)
+        // Deny the move of the staging copy into place — but re-create the
+        // installed path first, the way an environment that refuses the
+        // rename can put something back at the live name. Allowed moves must
+        // really move, so the previous app is in the backup when the restore
+        // would run.
+        let stub = try makeStub(
+            "mv",
+            """
+            case $1 in
+                *.Ciaobot.app.staging)
+                    case $2 in
+                        */Ciaobot.app)
+                            mkdir -p "$2"
+                            : > "$2/recreated-by-environment"
+                            echo 'Operation not permitted' >&2
+                            exit 9
+                            ;;
+                    esac
+                    ;;
+            esac
+            exec /bin/mv "$@"
+            """
+        )
+
+        let result = try runDevInstall(
+            ["--staged", staged.path, "--installed", installed.path,
+             "--expect-engine-version", "1.2.3"],
+            stubPath: stub.path
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.joinedOutput)
+        XCTAssertTrue(result.joinedOutput.contains("could NOT be moved back"), result.joinedOutput)
+        XCTAssertTrue(result.joinedOutput.contains("the backup was NOT moved onto it"), result.joinedOutput)
+        XCTAssertTrue(result.joinedOutput.contains("its backup sits exactly at: "), result.joinedOutput)
+        // Nothing is nested: the re-created path holds only what the
+        // environment put back, no .prev-* copy inside it.
+        let reCreated = try fileManager.contentsOfDirectory(atPath: installed.path)
+        XCTAssertEqual(reCreated, ["recreated-by-environment"], result.joinedOutput)
+        // The printed backup path is exact: it exists and still holds the
+        // replaced bundle, untouched by the refused restore.
+        let printed = try XCTUnwrap(
+            result.joinedOutput
+                .components(separatedBy: "\n")
+                .first { $0.contains("its backup sits exactly at: ") }?
+                .trimmingCharacters(in: .whitespaces)
+                .dropFirst("dev-install: its backup sits exactly at: ".count),
+            result.joinedOutput
+        )
+        let backupURL = URL(fileURLWithPath: String(printed))
+        XCTAssertEqual(try installedMarker(backupURL), "installed-old",
+                       "the backup must still hold the replaced bundle it was recorded from")
+        XCTAssertEqual(try allBackups(in: installDirectory).map(\.lastPathComponent),
+                       [backupURL.lastPathComponent],
+                       "the backup sits exactly where it was recorded and nowhere else")
+        XCTAssertFalse(fileManager.fileExists(
+            atPath: installDirectory.appendingPathComponent(".Ciaobot.app.staging").path),
+                       "the staging copy this run created must be removed")
+    }
+
     /// Two swaps in the same second must not nest one backup inside another:
     /// the backup name is collision-corrected with a counter instead of
     /// overwriting or shadowing an existing `.prev-*` copy.
@@ -415,8 +483,136 @@ final class DevInstallScriptTests: XCTestCase {
                        "the failed move leaves the staged copy for inspection")
     }
 
+    /// A SIGINT while the script holds the previous app in its recorded
+    /// backup and the staging copy is not yet in place (the swap window) must
+    /// put the previous app back exactly as the failure path does and stop
+    /// with the signal's exit status. The stubbed mv holds the move into
+    /// place until the test releases it, so the signal provably lands inside
+    /// the window.
+    func testSignalDuringTheSwapWindowRestoresTheBackup() throws {
+        try assertSignalInSwapWindowRestoresTheBackup(SIGINT, name: "INT", expectedStatus: 130)
+    }
+
+    /// Same as above for SIGTERM; the script traps HUP the same way.
+    func testSignalTermDuringTheSwapWindowRestoresTheBackup() throws {
+        try assertSignalInSwapWindowRestoresTheBackup(SIGTERM, name: "TERM", expectedStatus: 143)
+    }
+
+    private func assertSignalInSwapWindowRestoresTheBackup(
+        _ signal: Int32, name: String, expectedStatus: Int32
+    ) throws {
+        let staged = try makeStagedApp()
+        let installDirectory = scratch.appendingPathComponent("Install", isDirectory: true)
+        let installed = try makeInstalledApp(in: installDirectory)
+        let staging = installDirectory.appendingPathComponent(".Ciaobot.app.staging")
+        let sentinel = scratch.appendingPathComponent("swap-window-\(name)")
+        let release = scratch.appendingPathComponent("release-\(name)")
+        // The stubbed mv holds the move of the staging copy into place until
+        // the test releases it; the real moves must really move, so the
+        // previous app is in the recorded backup when the signal arrives.
+        let stub = try makeStub(
+            "mv",
+            """
+            case $1 in
+                *.Ciaobot.app.staging)
+                    : > "\(sentinel.path)"
+                    n=0
+                    while [ ! -e "\(release.path)" ] && [ "$n" -lt 100 ]; do
+                        n=$((n + 1))
+                        sleep 0.1
+                    done
+                    echo 'Operation not permitted' >&2
+                    exit 9
+                    ;;
+            esac
+            exec /bin/mv "$@"
+            """
+        )
+
+        let result = try runDevInstallSignalled(
+            sentinel: sentinel, release: release,
+            ["--staged", staged.path, "--installed", installed.path,
+             "--expect-engine-version", "1.2.3"],
+            stubPath: stub.path,
+            signal: signal
+        )
+
+        XCTAssertTrue(result.sentinelSeen,
+                      "the signal must land inside the swap window; output so far: \(result.joinedOutput)")
+        XCTAssertEqual(result.status, expectedStatus, result.joinedOutput)
+        XCTAssertTrue(result.joinedOutput.contains("interrupted by \(name)"), result.joinedOutput)
+        XCTAssertTrue(result.joinedOutput.contains("put back in place"), result.joinedOutput)
+        XCTAssertEqual(try installedMarker(installed), "installed-old",
+                       "the previous app must be back in place from the backup")
+        XCTAssertEqual(try allBackups(in: installDirectory), [],
+                       "the backup was moved back, so no .prev-* copy remains")
+        XCTAssertFalse(fileManager.fileExists(atPath: staging.path),
+                       "no staging copy may stay behind after the restore decision")
+        XCTAssertTrue(result.joinedOutput.contains("removed the staging copy this run created"),
+                      result.joinedOutput)
+    }
+
+    /// The handoff script must be as conservative as the main script: when
+    /// its restore would run and the installed path is occupied again, it
+    /// must not move the backup onto it (nesting), and must stop non-zero
+    /// naming where the backup sits.
+    func testGeneratedScriptRefusesToNestTheBackupWhenTheInstalledPathReappears() throws {
+        let staged = try makeStagedApp()
+        let installDirectory = scratch.appendingPathComponent("Install", isDirectory: true)
+        let installed = try makeInstalledApp(in: installDirectory)
+        let failingMv = try makeFailingMvStub()
+
+        let result = try runDevInstall(
+            ["--staged", staged.path, "--installed", installed.path,
+             "--expect-engine-version", "1.2.3"],
+            stubPath: failingMv.path
+        )
+        XCTAssertEqual(result.status, 0, result.joinedOutput)
+        let swapScript = try extractedSwapScript(result, as: "swap-no-nesting.sh")
+
+        // Fail only the mv whose source is the staging copy, and re-create
+        // the installed path first, so the handoff script's restore sees an
+        // occupied installed path. Allowed moves must really move.
+        let stub = try makeStub(
+            "mv",
+            """
+            case $1 in
+                *.Ciaobot.app.staging)
+                    case $2 in
+                        */Ciaobot.app)
+                            mkdir -p "$2"
+                            : > "$2/recreated-by-environment"
+                            echo 'Operation not permitted' >&2
+                            exit 9
+                            ;;
+                    esac
+                    ;;
+            esac
+            exec /bin/mv "$@"
+            """
+        )
+        let handed = try runShell(swapScript, stubPath: stub.path)
+        XCTAssertEqual(handed.status, 1, handed.output)
+        XCTAssertTrue(handed.output.contains("the swap failed"), handed.output)
+        XCTAssertTrue(handed.output.contains("the backup was NOT moved onto it"), handed.output)
+        XCTAssertTrue(handed.output.contains("the previous app sits at: "), handed.output)
+        let reCreated = try fileManager.contentsOfDirectory(atPath: installed.path)
+        XCTAssertEqual(reCreated, ["recreated-by-environment"], handed.output)
+        XCTAssertTrue(try backupExists(in: installDirectory),
+                      "the backup must not have been moved onto the occupied path")
+        XCTAssertEqual(try installedMarker(try XCTUnwrap(try backupDirectory(in: installDirectory))),
+                       "installed-old")
+        XCTAssertTrue(fileManager.fileExists(
+            atPath: installDirectory.appendingPathComponent(".Ciaobot.app.staging").path),
+                       "the failed move leaves the staged copy for inspection")
+    }
+
     /// The handoff script must take a collision-safe backup name (date and
-    /// its own pid) and refuse to overwrite an existing backup.
+    /// its own pid) and refuse an existing backup at that first-choice name
+    /// instead of overwriting it, before anything is moved. The test plants a
+    /// sentinel directory at exactly the name the script computes — the same
+    /// stubbed date stamp and the script's own pid — right before the
+    /// computed line runs, so the refusal is genuinely exercised.
     func testGeneratedScriptUsesACollisionSafeBackupName() throws {
         let staged = try makeStagedApp()
         let installDirectory = scratch.appendingPathComponent("Install", isDirectory: true)
@@ -435,6 +631,38 @@ final class DevInstallScriptTests: XCTestCase {
                       "the backup name must carry the pid so two runs cannot collide:\n\(text)")
         XCTAssertTrue(text.contains("a backup already sits at the computed backup name"),
                       "the script must refuse an existing backup instead of overwriting:\n\(text)")
+
+        // Exercise the refusal: run the script with a pinned date stamp and a
+        // planted backup at exactly the first-choice name it will compute
+        // from that stamp and its own pid.
+        let backupLine = "backup=\"$installed_parent/.Ciaobot.app.prev-$(date +%Y%m%d%H%M%S)-$$\""
+        XCTAssertEqual(text.components(separatedBy: backupLine).count, 2,
+                       "the computed backup line must be unique in the generated script:\n\(text)")
+        let plant = """
+        plant="$installed_parent/.Ciaobot.app.prev-$(date +%Y%m%d%H%M%S)-$$"
+        mkdir -p "$plant/Contents"
+        echo occupied > "$plant/sentinel"
+        """
+        let gated = text.replacingOccurrences(of: backupLine, with: "\(plant)\n\(backupLine)")
+        XCTAssertNotEqual(gated, text, "the plant must have been injected")
+        let gatedScript = scratch.appendingPathComponent("swap-collision-gated.sh")
+        try Data(gated.utf8).write(to: gatedScript)
+        let dateStub = try makeStub("date", "printf '%s\\n' '20260101000000'")
+
+        let handed = try runShell(gatedScript, stubPath: dateStub.path)
+        XCTAssertEqual(handed.status, 1, handed.output)
+        XCTAssertTrue(handed.output.contains("a backup already sits at the computed backup name"), handed.output)
+        XCTAssertTrue(handed.output.contains("inspect or remove it first"), handed.output)
+        XCTAssertFalse(handed.output.contains("swapped into place"), handed.output)
+        XCTAssertEqual(try installedMarker(installed), "installed-old",
+                       "the refusal must fire before anything is moved")
+        let planted = try XCTUnwrap(
+            try allBackups(in: installDirectory).first { $0.lastPathComponent.hasPrefix(".Ciaobot.app.prev-20260101000000-") },
+            handed.output
+        )
+        XCTAssertEqual(try String(contentsOf: planted.appendingPathComponent("sentinel"), encoding: .utf8),
+                       "occupied\n", "the existing backup must be left untouched")
+        XCTAssertEqual(try allBackups(in: installDirectory).count, 1, handed.output)
     }
 
     func testTheScriptKeepsItsExecutableBit() {
@@ -501,6 +729,49 @@ final class DevInstallScriptTests: XCTestCase {
         )
         XCTAssertEqual(result.status, 0, result.joinedOutput)
         let swapScript = try extractedSwapScript(result, as: "swap-quoted.sh")
+
+        let handed = try runShell(swapScript)
+        XCTAssertEqual(handed.status, 0, handed.output)
+        XCTAssertTrue(handed.output.contains("swapped into place"), handed.output)
+        XCTAssertEqual(try installedMarker(installed), "from-staged")
+        XCTAssertTrue(try backupExists(in: installDirectory))
+        XCTAssertEqual(try installedMarker(try XCTUnwrap(try backupDirectory(in: installDirectory))),
+                       "installed-old")
+    }
+
+    /// The quoting helper must escape a single quote as the '\'' idiom when a
+    /// value reaching the printed script carries one. The path arguments are
+    /// refused when they carry a quote, but the physical, symlink-resolved
+    /// location can: the test passes the bundle through a safe-named symlink
+    /// whose target is named with a quote, so the resolved path is quoted
+    /// into the generated swap script, which must round-trip the quote when
+    /// the maintainer runs it.
+    func testGeneratedScriptEscapesASingleQuoteInAResolvedStagedPath() throws {
+        let quotedApp = try makeStagedApp(
+            at: scratch.appendingPathComponent("Quoted/Ciaobot's.app", isDirectory: true)
+        )
+        let link = scratch.appendingPathComponent("Safe-Link/Ciaobot.app", isDirectory: true)
+        try fileManager.createDirectory(
+            at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fileManager.createSymbolicLink(at: link, withDestinationURL: quotedApp)
+        let installDirectory = scratch.appendingPathComponent("Install", isDirectory: true)
+        let installed = try makeInstalledApp(in: installDirectory)
+        let failingMv = try makeFailingMvStub()
+
+        let result = try runDevInstall(
+            ["--staged", link.path, "--installed", installed.path,
+             "--expect-engine-version", "1.2.3"],
+            stubPath: failingMv.path
+        )
+        XCTAssertEqual(result.status, 0, result.joinedOutput)
+        let swapScript = try extractedSwapScript(result, as: "swap-single-quote.sh")
+        let text = try String(contentsOf: swapScript, encoding: .utf8)
+        let resolved = try physicalPath(link.path)
+        XCTAssertTrue(resolved.contains("'"), "fixture must resolve to a path with a quote: \(resolved)")
+        XCTAssertTrue(text.contains("'\\''"),
+                      "the '\'' escape idiom must appear in the generated script:\n\(text)")
+        XCTAssertTrue(text.contains("staged='\(resolved.replacingOccurrences(of: "'", with: "'\\''"))'"),
+                      "the resolved path must be single-quoted with the escape applied:\n\(text)")
 
         let handed = try runShell(swapScript)
         XCTAssertEqual(handed.status, 0, handed.output)
@@ -610,8 +881,11 @@ final class DevInstallScriptTests: XCTestCase {
 
         XCTAssertNotEqual(result.status, 0, result.joinedOutput)
         XCTAssertTrue(result.joinedOutput.contains("inside the staged bundle"), result.joinedOutput)
+        // The script computes the staging path from the installed app's
+        // folder, which here is `inner`'s parent inside the staged bundle —
+        // assert on that real location, not on some other directory.
         XCTAssertFalse(fileManager.fileExists(
-            atPath: outer.deletingLastPathComponent().appendingPathComponent(".Ciaobot.app.staging").path))
+            atPath: inner.deletingLastPathComponent().appendingPathComponent(".Ciaobot.app.staging").path))
         XCTAssertEqual(try installedMarker(inner), "installed-old")
     }
 
@@ -744,6 +1018,23 @@ final class DevInstallScriptTests: XCTestCase {
         return stub
     }
 
+    /// The physical path the script resolves a --staged argument to: the same
+    /// `cd && pwd -P` the script runs (which also prefixes /private to macOS's
+    /// symlinked /var), so quoting expectations match byte for byte.
+    private func physicalPath(_ path: String) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "CDPATH= cd -- \"$1\" && pwd -P", "_", path]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0, String(decoding: data, as: UTF8.self))
+        return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func installedMarker(_ app: URL) throws -> String {
         let text = try String(
             contentsOf: app.appendingPathComponent("Contents/MacOS/Scratch"),
@@ -854,6 +1145,54 @@ final class DevInstallScriptTests: XCTestCase {
         let output = String(decoding: out, as: UTF8.self)
         let error = String(decoding: err, as: UTF8.self)
         return (process.terminationStatus, output, error, output + "\n" + error)
+    }
+
+    /// Runs the script under `stubPath` and, once the stubbed mv proves (via
+    /// the sentinel file) that the script sits between the two moves of the
+    /// swap, sends `sent` to the script process itself — never to the stub —
+    /// then releases the stub and returns the outcome. The shell runs the
+    /// trap only once the interrupted mv completes, so the stub must be
+    /// released promptly after the signal.
+    private func runDevInstallSignalled(
+        sentinel: URL,
+        release: URL,
+        _ arguments: [String],
+        stubPath: String,
+        signal sent: Int32
+    ) throws -> (sentinelSeen: Bool, status: Int32, output: String, error: String, joinedOutput: String) {
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "\(stubPath):" + (environment["PATH"] ?? "/usr/bin:/bin")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [scriptsDirectory.appendingPathComponent("dev-install-app.sh").path] + arguments
+        process.currentDirectoryURL = packageRoot
+        process.environment = environment
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+        try process.run()
+        var sentinelSeen = false
+        for _ in 0..<200 {
+            if fileManager.fileExists(atPath: sentinel.path) {
+                sentinelSeen = true
+                break
+            }
+            if !process.isRunning {
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if sentinelSeen {
+            kill(process.processIdentifier, sent)
+        }
+        try Data("".utf8).write(to: release)
+        let out = outPipe.fileHandleForReading.readDataToEndOfFile()
+        let err = errPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let output = String(decoding: out, as: UTF8.self)
+        let error = String(decoding: err, as: UTF8.self)
+        return (sentinelSeen, process.terminationStatus, output, error, output + "\n" + error)
     }
 
     @discardableResult

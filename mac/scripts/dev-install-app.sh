@@ -16,7 +16,9 @@
 # removes the staging copy it created, prints a ready-to-run swap script for
 # the maintainer, and exits 0: the swap becomes the maintainer's command, not
 # a failure. If even the restore is denied, it exits non-zero and names the
-# exact backup path instead of printing a script. It never builds, signs,
+# exact backup path instead of printing a script. A signal arriving between
+# the two moves puts the previous app back exactly the same way (never
+# nesting the backup) and stops non-zero. It never builds, signs,
 # launches, or uninstalls anything, never deletes an app, and never touches
 # the Ciaobot engine service, its workspace, or its .env.
 set -eu
@@ -45,7 +47,8 @@ name taken in the same second), and moves the staged copy into place. A
 leftover staging directory is refused, never overwritten. Paths containing
 quotes, backticks, dollar signs, backslashes or control characters are
 refused. If the swap cannot be done here, a ready-to-run swap script is
-printed on stdout instead of failing.
+printed on stdout instead of failing. A signal between the two moves puts
+the previous app back and stops non-zero.
 EOF
 }
 
@@ -235,8 +238,11 @@ print_swap_script() {
     printf '%s\n' 'if ! mv "$staging" "$installed"; then'
     printf '%s\n' '    echo "the swap failed" >&2'
     printf '%s\n' '    if [ -e "$backup" ]; then'
-    printf '%s\n' '        if mv "$backup" "$installed"; then'
+    printf '%s\n' '        if [ ! -e "$installed" ] && mv "$backup" "$installed"; then'
     printf '%s\n' '            echo "the previous app was put back in place from $backup" >&2'
+    printf '%s\n' '        elif [ -e "$installed" ]; then'
+    printf '%s\n' '            echo "something now sits at $installed; the backup was NOT moved onto it" >&2'
+    printf '%s\n' '            echo "the previous app sits at: $backup" >&2'
     printf '%s\n' '        else'
     printf '%s\n' '            echo "the previous app could NOT be moved back; it sits at: $backup" >&2'
     printf '%s\n' '        fi'
@@ -266,18 +272,6 @@ fi
 # staging copy is this run's own artifact and the only thing this run ever
 # removes: the EXIT trap deletes it if ditto or the self-check fails, or on
 # the blocked-swap path below. Nothing else is ever removed.
-[ ! -e "$staging" ] \
-    || die "a staging bundle is already in the way: $staging (inspect or remove it first; nothing was changed)"
-
-if [ "$dry" -eq 1 ]; then
-    check_bundle "$staged"
-    printf 'Dry run: nothing was changed.\n'
-    printf 'would stage:  %s -> %s\n' "$staged" "$staging"
-    printf 'would swap:   %s -> %s<timestamp>[-N] (moved aside, not deleted)\n' \
-        "$installed" "$backup_prefix"
-    printf 'then move:    %s -> %s\n' "$staging" "$installed"
-    exit 0
-fi
 
 cleanup_staging() {
     if [ -n "$staging_ours" ] && [ -d "$staging" ]; then
@@ -301,6 +295,60 @@ check_bundle "$staging"
 # copy cannot be moved into place, the previous app is restored from that
 # recorded path — never from a `.prev-*` glob, which could pick up an older
 # backup from a previous run instead of the previous app.
+restore_previous() {
+    # Put the previous app back from the recorded backup. Never nest: if
+    # something (re-)appeared at the installed path, mv would file the
+    # backup INSIDE that directory instead of replacing it. Refuse to move
+    # and leave the backup exactly where it was recorded.
+    if [ -n "$swap_backup" ]; then
+        if [ ! -e "$installed" ] && mv "$swap_backup" "$installed"; then
+            swap_state=restored
+        else
+            swap_state=restore_failed
+        fi
+    else
+        swap_state=stayed
+    fi
+}
+
+# A signal inside the swap window: the previous app already sits in the
+# recorded backup and the staged copy is not yet in place. Undo exactly as
+# the failure path does, then stop with the conventional signal exit status.
+# The EXIT trap removes this run's staging copy only after this restore
+# decision has been made.
+swap_signal() {
+    signal=$1
+    trap - INT TERM HUP
+    restore_previous
+    case $swap_state in
+        restored)
+            printf 'dev-install: interrupted by %s; the previous app was put back in place from %s\n' \
+                "$signal" "$swap_backup" >&2
+            ;;
+        restore_failed)
+            printf 'dev-install: interrupted by %s and the previous app could NOT be moved back.\n' "$signal" >&2
+            printf 'dev-install: its backup sits exactly at: %s\n' "$swap_backup" >&2
+            if [ -e "$installed" ]; then
+                printf 'dev-install: something now sits at %s; the backup was NOT moved onto it.\n' \
+                    "$installed" >&2
+                printf 'dev-install: clear that path, then move the backup back there by hand before swapping again.\n' >&2
+            else
+                printf 'dev-install: %s is missing; move the backup back there by hand before swapping again.\n' \
+                    "$installed" >&2
+            fi
+            ;;
+        *)
+            printf 'dev-install: interrupted by %s; the previous app stayed in place at %s.\n' \
+                "$signal" "$installed" >&2
+            ;;
+    esac
+    case $signal in
+        HUP) exit 129 ;;
+        INT) exit 130 ;;
+        *) exit 143 ;;
+    esac
+}
+
 do_swap() {
     swap_state=failed
     swap_backup=
@@ -320,19 +368,20 @@ do_swap() {
             return 1
         fi
     fi
+    # The swap window: the previous app is in the recorded backup and the
+    # installed name is (momentarily) empty. A signal here puts the previous
+    # app back before anything else happens; outside this window the default
+    # signal action applies and the EXIT trap cleans up as before.
+    trap 'swap_signal HUP' HUP
+    trap 'swap_signal INT' INT
+    trap 'swap_signal TERM' TERM
     if mv "$staging" "$installed"; then
         swap_state=ok
+        trap - INT TERM HUP
         return 0
     fi
-    if [ -n "$swap_backup" ]; then
-        if mv "$swap_backup" "$installed"; then
-            swap_state=restored
-        else
-            swap_state=restore_failed
-        fi
-    else
-        swap_state=stayed
-    fi
+    trap - INT TERM HUP
+    restore_previous
     return 1
 }
 
@@ -353,8 +402,14 @@ case $swap_state in
         # run's staging copy; the backup stays exactly where it was recorded.
         printf 'dev-install: the swap failed and the previous app could NOT be moved back.\n' >&2
         printf 'dev-install: its backup sits exactly at: %s\n' "$swap_backup" >&2
-        printf 'dev-install: %s is missing; move the backup back there by hand before swapping again.\n' \
-            "$installed" >&2
+        if [ -e "$installed" ]; then
+            printf 'dev-install: something now sits at %s; the backup was NOT moved onto it.\n' \
+                "$installed" >&2
+            printf 'dev-install: clear that path, then move the backup back there by hand before swapping again.\n' >&2
+        else
+            printf 'dev-install: %s is missing; move the backup back there by hand before swapping again.\n' \
+                "$installed" >&2
+        fi
         exit 1
         ;;
 esac
