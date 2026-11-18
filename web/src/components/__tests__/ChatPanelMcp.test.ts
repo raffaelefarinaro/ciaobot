@@ -408,7 +408,7 @@ describe('local MCP shortcut', () => {
     store.addPendingFiles('chat-a', [{ ref: 'file-ref', name: 'file.txt' }])
     store.pendingComments = [{ id: 'fc', path: 'file.txt', selection: 'selection', comment: 'note' }]
     store.pendingChatComments = [{ id: 'cc', selection: 'selection', comment: 'note' } as never]
-    store.queuedMessages['chat-a'] = [{ id: 'queued', text: 'queued', delivery: 'queue', steering: false } as never]
+    store.queuedMessages['chat-a'] = [{ id: 'queued', text: 'queued' } as never]
     const buckets = () => [store.pendingImagesFor('chat-a'), store.pendingFilesFor('chat-a'), store.pendingCommentsFor('chat-a'), store.pendingChatCommentsFor('chat-a')]
     const before = buckets()
     const contents = before.map(bucket => JSON.stringify(bucket))
@@ -538,7 +538,7 @@ describe('local MCP shortcut', () => {
     store.addPendingFiles('chat-a', [{ ref: 'file-ref', name: 'file.txt' }])
     store.pendingComments = [{ id: 'file-comment', path: 'file.txt', selection: 'selection', comment: 'note' }]
     store.pendingChatComments = [{ id: 'chat-comment', selection: 'selection', comment: 'note' } as never]
-    store.queuedMessages['chat-a'] = [{ id: 'queued', text: 'queued', delivery: 'queue', steering: false } as never]
+    store.queuedMessages['chat-a'] = [{ id: 'queued', text: 'queued' } as never]
     if (!valid) store.projects = []
     const buckets = [store.pendingImagesFor('chat-a'), store.pendingFilesFor('chat-a'), store.pendingCommentsFor('chat-a'), store.pendingChatCommentsFor('chat-a')]
     const contents = buckets.map(bucket => JSON.stringify(bucket))
@@ -733,7 +733,7 @@ describe('local MCP shortcut', () => {
     store.addPendingFiles('chat-a', [{ ref: 'file-ref', name: 'file.txt' }])
     store.pendingComments = [{ id: 'fc', path: 'file.txt', selection: 'selection', comment: 'note' }]
     store.pendingChatComments = [{ id: 'cc', selection: 'selection', comment: 'note' } as never]
-    store.queuedMessages['chat-a'] = [{ id: 'queued', text: 'queued', delivery: 'queue', steering: false } as never]
+    store.queuedMessages['chat-a'] = [{ id: 'queued', text: 'queued' } as never]
     const buckets = () => [store.pendingImagesFor('chat-a'), store.pendingFilesFor('chat-a'), store.pendingCommentsFor('chat-a'), store.pendingChatCommentsFor('chat-a')]
     const before = buckets()
     const contents = before.map(bucket => JSON.stringify(bucket))

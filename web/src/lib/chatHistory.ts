@@ -157,7 +157,6 @@ export function mergeMessageFields(sMsg: ChatMessage, lMsg: ChatMessage): ChatMe
   // Loop/schedule marker observed live but missing on the server row (older
   // servers, or a row built before the turn was recorded) — keep the ↻.
   if (lMsg.unattended && !sMsg.unattended) merged.unattended = lMsg.unattended
-  if (lMsg.steered && !sMsg.steered) merged.steered = lMsg.steered
   if (lMsg.origin && !sMsg.origin) merged.origin = lMsg.origin
   if (!merged.timestamp && lMsg.timestamp) merged.timestamp = lMsg.timestamp
   return merged
@@ -332,7 +331,7 @@ export function mergeMetadata(server: ChatMessage[], local: ChatMessage[]): Chat
   return mergedMessages
 }
 
-export type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean; steered?: boolean; origin?: TurnOrigin; sent_context?: string; usage?: Record<string, string>; quota?: Record<string, unknown>; effective_model?: string; verification?: TurnVerification }
+export type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean; origin?: TurnOrigin; sent_context?: string; usage?: Record<string, string>; quota?: Record<string, unknown>; effective_model?: string; verification?: TurnVerification }
 
 export const toChatMessage = (m: ServerRow) => ({
   role: m.role as 'user' | 'assistant' | 'system',
@@ -356,8 +355,6 @@ export const toChatMessage = (m: ServerRow) => ({
   // send time; without mapping it here a reload made automated turns
   // read as user-authored.
   unattended: m.unattended || undefined,
-  // A message sent into the running turn (steered), recorded by the host.
-  steered: m.steered || undefined,
   // Who the engine wrote this turn for (wake, automation, webhook, ...).
   origin: m.origin || undefined,
   // The handover pack the engine recorded on a handover marker; the card shows it.

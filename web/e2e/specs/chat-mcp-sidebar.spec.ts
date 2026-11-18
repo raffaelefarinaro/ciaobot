@@ -307,7 +307,7 @@ test('atomic attention cutover keeps MCP recovery in details without chat attent
   expect(await page.evaluate(() => localStorage.getItem('ciao-chat-sent-prompts'))).toBe(history)
   expect((await fixtureWrites(page)).filter(w => /\/queue/.test(w.path)))
     .toEqual(writes.filter(w => /\/queue/.test(w.path)))
-  expect(fixture.frames.filter(frame => ['message', 'queue', 'steer'].includes(JSON.parse(frame).type))).toEqual([])
+  expect(fixture.frames.filter(frame => ['message', 'queue'].includes(JSON.parse(frame).type))).toEqual([])
 })
 
 for (const [name, blocker] of [
@@ -439,14 +439,14 @@ test.describe('local MCP shortcut on a touch device', () => {
     expect(await page.evaluate(() => localStorage.getItem('ciao-chat-sent-prompts'))).toBe(history)
     expect((await fixtureWrites(page)).filter(w => /\/queue/.test(w.path)))
       .toEqual(writes.filter(w => /\/queue/.test(w.path)))
-    expect(fixture.frames.filter(frame => ['message', 'queue', 'steer'].includes(JSON.parse(frame).type))).toEqual([])
+    expect(fixture.frames.filter(frame => ['message', 'queue'].includes(JSON.parse(frame).type))).toEqual([])
   })
 
   test('real bare Enter inserts a newline; Ctrl+Enter opens MCP without a message', async ({ page }) => {
     await isolate(page, 'mcp-shortcut-touch')
     const fixture = await shortcutFixture(page)
     await page.route('**/api/settings/keyboard', route => route.fulfill({ json: {
-      keyboard_shortcuts: {}, keyboard_send_mode: 'enter', mid_turn_delivery: 'queue', revision: 'synthetic',
+      keyboard_shortcuts: {}, keyboard_send_mode: 'enter', revision: 'synthetic',
     } }))
     await boot(page, '/chat/alpha-chat-1')
     expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true)
@@ -460,7 +460,7 @@ test.describe('local MCP shortcut on a touch device', () => {
     await input.press('Control+Enter')
     await expect(page.locator('.chat-mcp-heading')).toBeFocused()
     await expect(input).toHaveValue('')
-    expect(fixture.frames.filter(frame => /"type":"(?:message|steer|queue)"/.test(frame))).toEqual([])
+    expect(fixture.frames.filter(frame => /"type":"(?:message|queue)"/.test(frame))).toEqual([])
     expect((await fixtureWrites(page)).filter(w => /\/actions\/.*(?:start|mcp-auth)/.test(w.path))).toEqual([])
   })
 
@@ -591,7 +591,7 @@ test('streaming keeps Stop and Open MCP independent without creating a turn', as
   await page.getByRole('button', { name: 'Open MCP connections' }).click()
   await expect(page.locator('.chat-mcp-heading')).toBeFocused()
   expect(fixture.frames.filter(frame => JSON.parse(frame).type === 'stop')).toHaveLength(stopCount)
-  expect(fixture.frames.filter(frame => ['message', 'queue', 'steer'].includes(JSON.parse(frame).type))).toEqual([])
+  expect(fixture.frames.filter(frame => ['message', 'queue'].includes(JSON.parse(frame).type))).toEqual([])
   await expect(page.locator('.queued-chip')).toContainText('already queued')
   expect(await page.evaluate(() => localStorage.getItem('ciao-chat-sent-prompts'))).toBe(history)
   await expect(input).toHaveValue('')
@@ -627,7 +627,7 @@ test('local navigation remains available while an image upload is pending', asyn
   await expect(page.locator('.chat-mcp-heading')).toBeFocused()
   await expect(page.locator('.composer-upload')).toBeVisible()
   await expect(page.locator('.image-preview')).toHaveCount(1)
-  expect(fixture.frames.filter(frame => ['message', 'queue', 'steer'].includes(JSON.parse(frame).type))).toEqual([])
+  expect(fixture.frames.filter(frame => ['message', 'queue'].includes(JSON.parse(frame).type))).toEqual([])
   release()
   await expect(page.locator('.image-preview')).toHaveCount(2)
 })
@@ -665,7 +665,7 @@ test('a second pane opens its own provider and workspace through the chord', asy
   await expect(tile.locator('.chat-mcp-provider')).toHaveText('OpenCode')
   await expect(input).toHaveValue('')
   expect(requests.some(url => new URL(url).searchParams.get('workspace') === 'alpha')).toBe(true)
-  expect(fixture.frames.filter(frame => ['message', 'queue', 'steer'].includes(JSON.parse(frame).type))).toEqual([])
+  expect(fixture.frames.filter(frame => ['message', 'queue'].includes(JSON.parse(frame).type))).toEqual([])
   await page.screenshot({ path: `${shortcutScreenshots}/two-panes.png`, animations: 'disabled' })
 })
 
@@ -684,7 +684,7 @@ test('an unsupported actual provider reserves the raw token locally', async ({ p
   await expect(input).toHaveValue(raw)
   await page.reload()
   await expect(page.locator('textarea.chat-input')).toHaveValue(raw)
-  expect(fixture.frames.filter(frame => ['message', 'queue', 'steer'].includes(JSON.parse(frame).type))).toEqual([])
+  expect(fixture.frames.filter(frame => ['message', 'queue'].includes(JSON.parse(frame).type))).toEqual([])
   expect((await fixtureWrites(page)).filter(w => /\/actions\/.*(?:start|mcp-auth)/.test(w.path))).toEqual([])
 })
 
@@ -700,7 +700,7 @@ test('an unresolved owning project is not rescued by the active workspace', asyn
   await expect(page.getByText("This chat's workspace is not available yet. Try again after it loads.")).toBeVisible()
   await input.press('Control+Enter')
   await expect(input).toHaveValue(' \t/McP \n')
-  expect(fixture.frames.filter(frame => ['message', 'queue', 'steer'].includes(JSON.parse(frame).type))).toEqual([])
+  expect(fixture.frames.filter(frame => ['message', 'queue'].includes(JSON.parse(frame).type))).toEqual([])
 })
 
 test('Chat details shows MCP connectivity separately from tool-use history', async ({ page }) => {
