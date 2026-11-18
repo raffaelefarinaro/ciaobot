@@ -1550,6 +1550,7 @@ async def test_claude_workspace_scope_sets_sandbox_and_roots(
     guard = [m for m in matchers if "Read" in (m.matcher or "").split("|")]
     assert len(guard) == 1
     assert set(guard[0].matcher.split("|")) >= {"Read", "Write", "Edit", "Glob", "Grep"}
+    assert all("Bash" not in (m.matcher or "") for m in matchers)
     assert options.settings == json.dumps(claude_settings_layer({}))
 
 

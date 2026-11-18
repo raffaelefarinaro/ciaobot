@@ -67,8 +67,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger(__name__)
 
-# On since the guardrail work (D2a-2) and the PWA work (D2a-3) landed. Every
-# reader must go through this module attribute so the flip is a single edit.
+# Every reader must go through this module attribute so the flip is a single edit.
 MEMORY_PASS_CHATS = True
 _PUMP_RETRY_SECONDS = 30
 
