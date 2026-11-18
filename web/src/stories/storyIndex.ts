@@ -4,6 +4,7 @@
 // lists, and it implements that guard itself as a pure function on a story
 // list and a claim map. Nothing in the app imports this module; only the
 // vitest inventory tests do.
+import { parse as parseSfc } from '@vue/compiler-sfc'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -59,7 +60,9 @@ const toRepoPath = (absolute: string): string => posixPath(relative(repoRoot, ab
 
 /** The `<script>` block contents of a Vue single-file component, concatenated. */
 function scriptContentOfVue(code: string): string {
-  return [...code.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map((match) => match[1]).join('\n')
+  // The real SFC parser, not a tag regexp: it handles any tag casing and attribute shape.
+  const { descriptor } = parseSfc(code)
+  return [descriptor.script?.content, descriptor.scriptSetup?.content].filter(Boolean).join('\n')
 }
 
 /** The import specifiers of a TypeScript source, from the TypeScript compiler
