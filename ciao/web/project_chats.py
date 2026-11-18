@@ -10747,7 +10747,7 @@ class ProjectChatManager:
         # drain: ending the drain alone would leave it running (#1391).
         service = self._providers.get(chat_id)
         live = service.provider if service is not None else None
-        if isinstance(live, OpencodeProvider) and live.current_session_id:
+        if isinstance(live, BaseProvider) and live.current_session_id:
             try:
                 await asyncio.wait_for(
                     live.abort_session(live.current_session_id),

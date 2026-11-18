@@ -14,6 +14,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig
+from ciao.providers.claude import ClaudeProvider
 from ciao.providers.opencode import OpencodeProvider
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
@@ -2519,6 +2520,48 @@ def test_record_interrupted_background_work_skips_idle_and_claude_chats(tmp_path
 
     assert pcm.record_interrupted_background_work() == 0
     assert not (tmp_path / ".runtime" / "interrupted_background_work.json").exists()
+
+
+def test_record_interrupted_background_work_skips_providers_without_restart_record(
+    tmp_path: Path,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("stub-restart", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="stub-restart")
+    chat.session_id = "sess-stub-1"
+    pcm._providers[chat.chat_id] = SimpleNamespace(
+        provider=ClaudeProvider(tmp_path), background_work_outstanding=True
+    )
+
+    assert pcm.record_interrupted_background_work() == 0
+    assert not (tmp_path / ".runtime" / "interrupted_background_work.json").exists()
+
+
+async def test_finish_background_stop_calls_abort_through_contract(tmp_path: Path) -> None:
+    aborted: list[str] = []
+
+    class _Stub(ClaudeProvider):
+        @property
+        def current_session_id(self) -> str | None:
+            return "sess-abort-1"
+
+        async def abort_session(self, session_id: str) -> None:
+            aborted.append(session_id)
+
+    pcm = _make_manager(tmp_path)
+    pcm._providers["chat-stub"] = SimpleNamespace(provider=_Stub(tmp_path))
+    await pcm._finish_background_stop("chat-stub")
+    assert aborted == ["sess-abort-1"]
+
+    # A Claude-like provider keeps the base no-op abort: awaited without error.
+    class _ClaudeLike(ClaudeProvider):
+        @property
+        def current_session_id(self) -> str | None:
+            return "sess-claude-1"
+
+    pcm._providers["chat-claude"] = SimpleNamespace(provider=_ClaudeLike(tmp_path))
+    await pcm._finish_background_stop("chat-claude")
+    assert aborted == ["sess-abort-1"]
 
 
 async def test_interrupted_work_sweep_skips_archived_moved_and_stale_records(

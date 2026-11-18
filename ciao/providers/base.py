@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import math
 import os
@@ -438,6 +439,10 @@ class BaseProvider(ABC):
     async def refresh_background_shells(self) -> int:
         """Reconcile tracked background shells with the provider; return the count."""
         return 0
+
+    async def wait_background_change(self, timeout: float) -> None:
+        """Wait up to ``timeout`` seconds for tracked background work to change."""
+        await asyncio.sleep(timeout)
 
     @property
     def background_count(self) -> int:

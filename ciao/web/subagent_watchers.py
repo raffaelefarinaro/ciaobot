@@ -50,10 +50,7 @@ from ciao import subagent_tracking
 from ciao import provider_registry
 from ciao.providers.base import BACKGROUND_WORK_MAX_S as _BACKGROUND_WORK_MAX_S
 from ciao.providers.base import BaseProvider, live_for_session
-from ciao.providers.opencode import (
-    OpencodeProvider,
-    opencode_collab_tree_counts,
-)
+from ciao.providers.opencode import opencode_collab_tree_counts
 from ciao.subagent_tracking import SubagentInfo
 from ciao.web import chat_service
 
@@ -437,7 +434,7 @@ class SubagentWatchers:
                     # active_chat_ids() counts it and the restart drain has no
                     # timeout. Engine shutdown ends the background work anyway.
                     break
-                if isinstance(live, OpencodeProvider):
+                if live is not None:
                     # Republish as soon as the drain/pump sees a shell exit or
                     # a child end, so the count reaches zero before the
                     # follow-up result arrives.
@@ -639,19 +636,15 @@ class SubagentWatchers:
             chats: dict[str, dict[str, Any]] = {}
             for chat_id, service in list(self._host._providers.items()):
                 live = service.provider
-                if not isinstance(live, OpencodeProvider) or not service.background_work_outstanding:
+                if not isinstance(live, BaseProvider) or not service.background_work_outstanding:
+                    continue
+                work = live.interrupted_background_work()
+                if work is None:
                     continue
                 chat = self._host._chats.get(chat_id)
                 if chat is None or not chat.session_id:
                     continue
-                chats[chat_id] = {
-                    "session_id": chat.session_id,
-                    "children": live.background_child_ids(),
-                    "shells": [
-                        {"id": row["id"], "command": row["command"]}
-                        for row in live.background_shell_rows()
-                    ],
-                }
+                chats[chat_id] = {"session_id": chat.session_id, **work}
             if not chats:
                 return 0
             path = self._interrupted_work_path()
