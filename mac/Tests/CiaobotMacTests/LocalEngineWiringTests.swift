@@ -15,8 +15,12 @@ private final class StubMainWindowPresenter: MainWindowPresenting {
 private final class StubMenuBarController: MenuBarControlling {
     private(set) var startCount = 0
     private(set) var stopCount = 0
+    private(set) var quittingCount = 0
     func start() { startCount += 1 }
     func stop() { stopCount += 1 }
+    func setQuittingTitle() { quittingCount += 1 }
+    private(set) var localModes: [Bool] = []
+    func setLocalEngineMode(_ local: Bool) { localModes.append(local) }
 }
 
 /// Records what the supervisor asked instead of running any process.
@@ -442,6 +446,16 @@ final class LocalEngineWiringTests: XCTestCase {
         XCTAssertEqual(TestLaunch.defaultsSuiteName(environment: ["CIAOBOT_MAC_TEST_DEFAULTS_SUITE": "suite"]), "suite")
         XCTAssertTrue(TestLaunch.addressed(environment: ["CIAOBOT_MAC_TEST_AUTOCONNECT": "1"]))
         XCTAssertFalse(TestLaunch.addressed(environment: [:]))
+    }
+
+    func testEnginePortOverrideIsStrictAndRangeChecked() {
+        XCTAssertNil(TestLaunch.enginePort(environment: [:]))
+        XCTAssertEqual(TestLaunch.enginePort(environment: ["CIAOBOT_MAC_TEST_ENGINE_PORT": "9100"]), 9100)
+        XCTAssertEqual(TestLaunch.enginePort(environment: ["CIAOBOT_MAC_TEST_ENGINE_PORT": "1024"]), 1024)
+        XCTAssertEqual(TestLaunch.enginePort(environment: ["CIAOBOT_MAC_TEST_ENGINE_PORT": "65535"]), 65535)
+        for raw in ["", "1023", "65536", "0", "-9100", "+9100", " 9100", "9100 ", "91.0", "9e3", "abc", "٩١٠٠"] {
+            XCTAssertNil(TestLaunch.enginePort(environment: ["CIAOBOT_MAC_TEST_ENGINE_PORT": raw]), raw)
+        }
     }
 
     func testEngineHomeOverrideRequiresAnExistingAbsoluteDirectory() throws {
