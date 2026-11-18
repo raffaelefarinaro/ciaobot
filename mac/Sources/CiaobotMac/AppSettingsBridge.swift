@@ -48,14 +48,15 @@ final class AppSettingsBridge {
         return ["v": 1, "notifications": notificationsValue]
     }
 
-    /// Runs one gesture-gated op. Returns false (no side effect) for an unknown
-    /// op, an unbound bridge, or a state with no action.
+    /// Runs one gesture-gated op. Returns false for an unknown op, an unbound
+    /// bridge, a state with no action, or a toggle the notification controller
+    /// did not act on (not started, request in flight); none of those has a
+    /// side effect.
     func perform(_ op: String) -> Bool {
         guard op == "notifications", let notifications else { return false }
         switch notifications.state.settingAction {
         case .toggle:
-            notifications.performMenuAction()
-            return true
+            return notifications.performMenuAction()
         case .openSystemSettings:
             guard let systemSettings else { return false }
             systemSettings.openNotificationSettings()

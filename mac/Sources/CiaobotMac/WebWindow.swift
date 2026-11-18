@@ -40,6 +40,33 @@ final class UserGestureGate {
     }
 }
 
+/// A trusted main-frame click, bound to the committed document it happened in.
+/// Unlike `UserGestureGate` it ignores keyboard activation (typing in a page
+/// field is not consent) and is never valid for another document. Checking it
+/// does not spend it: the caller spends it only after the action ran.
+final class DocumentClickGesture {
+    private let validity: TimeInterval
+    private var recorded: (at: Date, generation: Int)?
+
+    init(validity: TimeInterval = 1.0) {
+        self.validity = validity
+    }
+
+    func record(generation: Int, now: Date = Date()) {
+        recorded = (now, generation)
+    }
+
+    func isPending(generation: Int, now: Date = Date()) -> Bool {
+        guard let recorded, recorded.generation == generation,
+              now >= recorded.at, now.timeIntervalSince(recorded.at) <= validity else { return false }
+        return true
+    }
+
+    func clear() {
+        recorded = nil
+    }
+}
+
 struct FilePanelRequest: Equatable {
     let allowsMultipleSelection: Bool
     let allowsDirectories: Bool
@@ -847,11 +874,11 @@ struct WebWindow: NSViewRepresentable {
           window.__CIAOBOT_TRUSTED_CLICK_INSTALLED__ = true;
           const bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.\(trustedClickMessageName);
           if (!bridge) return;
-          const send = () => { try { bridge.postMessage(1); } catch (_) {} };
-          const mark = (event) => { if (event.isTrusted) send(); };
+          const send = (kind) => { try { bridge.postMessage(kind); } catch (_) {} };
+          const mark = (event) => { if (event.isTrusted) send('click'); };
           addEventListener('click', mark, true);
           addEventListener('keydown', (event) => {
-            if (event.isTrusted && (event.key === 'Enter' || event.key === ' ')) send();
+            if (event.isTrusted && (event.key === 'Enter' || event.key === ' ')) send(1);
           }, true);
         })();
         """
@@ -866,6 +893,8 @@ struct WebWindow: NSViewRepresentable {
         let viewTracker: SessionViewTracker?
         let navigationProfile: WebWindowNavigationProfile
         let gestureGate = UserGestureGate()
+        /// Authorizes the Settings bridge's `notifications` op only.
+        let clickGesture = DocumentClickGesture()
 
         private(set) var children: [ChildWindowController] = []
         private(set) var trustedActivationCount = 0
@@ -1022,6 +1051,7 @@ struct WebWindow: NSViewRepresentable {
             children.forEach { $0.close() }
             children.removeAll()
             gestureGate.clear()
+            clickGesture.clear()
             clearProvisionalNavigation()
             adoptedDocumentToken = nil
             onWorkspaceColor = nil
@@ -1057,9 +1087,21 @@ struct WebWindow: NSViewRepresentable {
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] in
                     guard let self, !self.isReleased,
-                          self.committedDocumentGeneration == self.documentGeneration else { return }
+                          self.committedDocumentGeneration == self.documentGeneration,
+                          self.documentIsOnOrigin(self.currentDocumentURL()) else { return }
                     self.webView?.evaluateJavaScript(Self.appSettingsChangedScript, in: nil, in: .page) { _ in }
                 }
+        }
+
+        /// Test seam: the main-frame document URL the change dispatch checks.
+        lazy var currentDocumentURL: () -> URL? = { [weak self] in self?.webView?.url }
+
+        /// Whether the main-frame document's URL is on the selected origin.
+        func documentIsOnOrigin(_ url: URL?) -> Bool {
+            guard let url,
+                  let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                  let scheme = components.scheme, let host = components.host else { return false }
+            return origin.matches(scheme: scheme, host: host, port: components.port ?? 0)
         }
 
         func loadHostChat(_ url: URL) {
@@ -1132,11 +1174,38 @@ struct WebWindow: NSViewRepresentable {
             }
             guard message.name == Self.trustedClickMessageName else { return }
             let frameOrigin = message.frameInfo.securityOrigin
-            guard message.frameInfo.isMainFrame || origin.matches(scheme: frameOrigin.protocol, host: frameOrigin.host, port: frameOrigin.port) else {
-                return
+            MainActor.assumeIsolated {
+                handleTrustedActivationMessage(
+                    isMainFrame: message.frameInfo.isMainFrame,
+                    scheme: frameOrigin.protocol,
+                    host: frameOrigin.host,
+                    port: frameOrigin.port,
+                    body: message.body
+                )
             }
+        }
+
+        /// Records one trusted activation. Every activation feeds the shared
+        /// gate; a click (body `"click"`, not a key press) from the main frame
+        /// of the exact origin, while the committed document is current, also
+        /// feeds the click record the Settings bridge requires.
+        @MainActor
+        func handleTrustedActivationMessage(
+            isMainFrame: Bool,
+            scheme: String,
+            host: String,
+            port: Int,
+            body: Any,
+            now: Date = Date()
+        ) {
+            let matches = origin.matches(scheme: scheme, host: host, port: port)
+            guard isMainFrame || matches else { return }
             trustedActivationCount += 1
-            gestureGate.record()
+            gestureGate.record(now: now)
+            if isMainFrame, matches, (body as? String) == "click",
+               committedDocumentGeneration == documentGeneration {
+                clickGesture.record(generation: committedDocumentGeneration, now: now)
+            }
         }
 
         func userContentController(
@@ -1171,7 +1240,8 @@ struct WebWindow: NSViewRepresentable {
         /// the sending view must be the coordinator's current view, the frame
         /// the main frame of the exact selected origin, the document the
         /// committed one, and the body exactly `{op: <string>}`. `get` reads the
-        /// snapshot; `notifications` additionally consumes a trusted click and
+        /// snapshot; `notifications` additionally spends a trusted click made in
+        /// this committed document and
         /// performs exactly the tray row's action. Anything else is refused with
         /// no side effect.
         @MainActor
@@ -1181,7 +1251,8 @@ struct WebWindow: NSViewRepresentable {
             host: String,
             port: Int,
             view: WKWebView?,
-            body: Any
+            body: Any,
+            now: Date = Date()
         ) -> Result<[String: Any], RefusedError> {
             guard !isReleased,
                   let appSettings,
@@ -1197,7 +1268,11 @@ struct WebWindow: NSViewRepresentable {
             case "get":
                 return .success(appSettings.snapshot())
             case "notifications":
-                guard gestureGate.consume(), appSettings.perform(op) else { return .failure(RefusedError()) }
+                // A refusal leaves the click unspent; it is spent only once the
+                // action actually ran.
+                guard clickGesture.isPending(generation: committedDocumentGeneration, now: now),
+                      appSettings.perform(op) else { return .failure(RefusedError()) }
+                clickGesture.clear()
                 return .success(appSettings.snapshot())
             default:
                 return .failure(RefusedError())

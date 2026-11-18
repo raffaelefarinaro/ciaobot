@@ -38,6 +38,22 @@ final class AppSettingsWebKitTests: XCTestCase {
         return Harness(coordinator: coordinator, webView: webView, fake: fake, settings: settings)
     }
 
+    /// A trusted click from the main frame of the selected origin, delivered
+    /// through the same entry the injected script's message reaches.
+    private func click(_ h: Harness, main: Bool = true, body: Any = "click", at now: Date = Date()) {
+        h.coordinator.handleTrustedActivationMessage(
+            isMainFrame: main, scheme: "https", host: "example.com", port: 443, body: body, now: now
+        )
+    }
+
+    private func notify(_ h: Harness, scheme: String = "https", port: Int = 443, now: Date = Date()) -> Bool {
+        if case .success = h.coordinator.handleAppSettingsMessage(
+            isMainFrame: true, scheme: scheme, host: "example.com", port: port,
+            view: h.webView, body: ["op": "notifications"], now: now
+        ) { return true }
+        return false
+    }
+
     private func load(_ harness: Harness, body: String = "<p>settings</p>") throws {
         harness.webView.loadHTMLString(
             "<!doctype html><html><body>\(body)<script>window.__ready = true;</script></body></html>",
@@ -120,7 +136,7 @@ final class AppSettingsWebKitTests: XCTestCase {
     func testNotificationsWithAGestureActsOnce() throws {
         let h = try makeHarness()
         try load(h)
-        h.coordinator.gestureGate.record()
+        click(h)
         let outcome = try post(h.webView, "{op: 'notifications'}")
         XCTAssertNotNil(outcome["ok"], "\(outcome)")
         XCTAssertEqual(h.fake.actionCount, 1)
@@ -132,7 +148,7 @@ final class AppSettingsWebKitTests: XCTestCase {
     func testDeniedOpensSystemSettingsWithAGesture() throws {
         let h = try makeHarness(state: .denied)
         try load(h)
-        h.coordinator.gestureGate.record()
+        click(h)
         XCTAssertNotNil(try post(h.webView, "{op: 'notifications'}")["ok"])
         XCTAssertEqual(h.settings.notificationSettingsCount, 1)
         XCTAssertEqual(h.fake.actionCount, 0)
@@ -154,7 +170,7 @@ final class AppSettingsWebKitTests: XCTestCase {
             "null",
         ]
         for body in bodies {
-            h.coordinator.gestureGate.record()
+            click(h)
             assertRefused(try post(h.webView, body))
         }
         XCTAssertEqual(h.fake.actionCount, 0)
@@ -163,9 +179,13 @@ final class AppSettingsWebKitTests: XCTestCase {
     func testIframeCallIsRefusedEvenWithAGesture() throws {
         let h = try makeHarness()
         try load(h, body: "<iframe id='f' srcdoc='<p>frame</p>'></iframe>")
-        let frameReady = js(h.webView, "document.getElementById('f').contentDocument.readyState") as? String
-        XCTAssertNotNil(frameReady)
-        h.coordinator.gestureGate.record()
+        // The frame really has the handler, so the refusal below comes from the
+        // main-frame guard and not from a missing handler.
+        XCTAssertEqual(
+            js(h.webView, "typeof document.getElementById('f').contentWindow.webkit.messageHandlers.ciaobotAppSettings") as? String,
+            "object"
+        )
+        click(h)
         let outcome = try post(
             h.webView, "{op: 'notifications'}",
             in: "document.getElementById('f').contentWindow"
@@ -180,7 +200,7 @@ final class AppSettingsWebKitTests: XCTestCase {
         let body: [String: Any] = ["op": "notifications"]
         let view = h.webView
         func call(main: Bool = true, host: String = "example.com", view: WKWebView? = view) -> Bool {
-            h.coordinator.gestureGate.record()
+            click(h)
             if case .success = h.coordinator.handleAppSettingsMessage(
                 isMainFrame: main, scheme: "https", host: host, port: 443, view: view, body: body
             ) { return true }
@@ -193,6 +213,77 @@ final class AppSettingsWebKitTests: XCTestCase {
         XCTAssertEqual(h.fake.actionCount, 0)
         XCTAssertTrue(call(), "The same call from the real frame must succeed, so the refusals above are the guards.")
         XCTAssertEqual(h.fake.actionCount, 1)
+    }
+
+    func testKeyboardActivationAndSubframeClickDoNotAuthorize() throws {
+        let h = try makeHarness()
+        try load(h)
+        click(h, body: 1)
+        XCTAssertFalse(notify(h), "A key press is not a click.")
+        click(h, main: false)
+        XCTAssertFalse(notify(h), "A subframe click is not a main-frame click.")
+        XCTAssertEqual(h.fake.actionCount, 0)
+        click(h)
+        XCTAssertTrue(notify(h))
+        XCTAssertEqual(h.fake.actionCount, 1)
+    }
+
+    func testClickExpiresAfterOneSecond() throws {
+        let h = try makeHarness()
+        try load(h)
+        let t0 = Date()
+        click(h, at: t0)
+        XCTAssertFalse(notify(h, now: t0.addingTimeInterval(1.5)))
+        XCTAssertEqual(h.fake.actionCount, 0)
+        click(h, at: t0)
+        XCTAssertTrue(notify(h, now: t0.addingTimeInterval(0.5)))
+        XCTAssertEqual(h.fake.actionCount, 1)
+    }
+
+    func testSchemeAndPortMismatchAreRefused() throws {
+        let h = try makeHarness()
+        try load(h)
+        click(h)
+        XCTAssertFalse(notify(h, scheme: "http", port: 443))
+        XCTAssertFalse(notify(h, port: 8443))
+        XCTAssertEqual(h.fake.actionCount, 0)
+        XCTAssertTrue(notify(h), "The gesture was untouched by the refusals.")
+    }
+
+    func testClickBeforeANavigationDoesNotAuthorizeTheNextDocument() throws {
+        let h = try makeHarness()
+        try load(h)
+        click(h)
+        let token = NSObject()
+        h.coordinator.handleProvisionalStart(from: h.webView, navigation: token)
+        h.coordinator.handleCommit(from: h.webView, navigation: token)
+        XCTAssertFalse(notify(h), "The click belongs to the previous document.")
+        XCTAssertEqual(h.fake.actionCount, 0)
+        click(h)
+        XCTAssertTrue(notify(h))
+    }
+
+    func testClickWhileUncommittedIsNotRecordedAndNotificationsIsRefused() throws {
+        let h = try makeHarness()
+        try load(h)
+        click(h)
+        h.coordinator.handleProvisionalStart(from: h.webView, navigation: NSObject())
+        XCTAssertFalse(notify(h), "An uncommitted document must not reach native, notifications included.")
+        click(h)
+        XCTAssertFalse(notify(h))
+        XCTAssertEqual(h.fake.actionCount, 0)
+    }
+
+    func testRefusedActionLeavesTheClickUnspent() throws {
+        let h = try makeHarness()
+        try load(h)
+        h.fake.performResult = false
+        click(h)
+        XCTAssertFalse(notify(h), "A toggle that did nothing must not report success.")
+        h.fake.performResult = true
+        XCTAssertTrue(notify(h), "The refusal must not have spent the click.")
+        XCTAssertEqual(h.fake.actionCount, 2)
+        XCTAssertFalse(notify(h), "Success spends it.")
     }
 
     func testUncommittedDocumentIsRefusedUntilCommit() throws {
@@ -233,11 +324,52 @@ final class AppSettingsWebKitTests: XCTestCase {
         XCTAssertEqual(js(h.webView, "window.__changes") as? Int, 0)
     }
 
+    /// WebKit's navigation policy cancels an off-origin load, so the guard is
+    /// exercised on the URL check the dispatch uses.
+    func testChangeSignalOnlyTargetsADocumentOnTheSelectedOrigin() throws {
+        let h = try makeHarness()
+        let c = h.coordinator
+        XCTAssertTrue(c.documentIsOnOrigin(URL(string: "https://example.com/chat")))
+        XCTAssertTrue(c.documentIsOnOrigin(URL(string: "https://example.com:443/")))
+        XCTAssertFalse(c.documentIsOnOrigin(URL(string: "https://other.example/")))
+        XCTAssertFalse(c.documentIsOnOrigin(URL(string: "http://example.com/")))
+        XCTAssertFalse(c.documentIsOnOrigin(URL(string: "https://example.com:8443/")))
+        XCTAssertFalse(c.documentIsOnOrigin(URL(string: "about:blank")))
+        XCTAssertFalse(c.documentIsOnOrigin(nil))
+    }
+
+    func testChangeSignalIsNotDispatchedToAnOffOriginDocument() throws {
+        let h = try makeHarness()
+        try load(h)
+        _ = js(h.webView, "window.__changes = 0; window.addEventListener('ciaobot-app-settings-changed', () => { window.__changes += 1; });")
+        h.coordinator.currentDocumentURL = { URL(string: "https://other.example/") }
+        h.fake.subject.send(.on)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertEqual(js(h.webView, "window.__changes") as? Int, 0)
+        h.coordinator.currentDocumentURL = { URL(string: "https://example.com/") }
+        h.fake.subject.send(.off)
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline, (js(h.webView, "window.__changes") as? Int ?? 0) < 1 {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertEqual(js(h.webView, "window.__changes") as? Int, 1, "The same change on the origin must dispatch.")
+    }
+
+    func testChangeSignalStopsAfterRelease() throws {
+        let h = try makeHarness()
+        try load(h)
+        _ = js(h.webView, "window.__changes = 0; window.addEventListener('ciaobot-app-settings-changed', () => { window.__changes += 1; });")
+        h.coordinator.prepareForRelease()
+        h.fake.subject.send(.on)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertEqual(js(h.webView, "window.__changes") as? Int, 0)
+    }
+
     func testCallAfterReleaseIsRefused() throws {
         let h = try makeHarness()
         try load(h)
         h.coordinator.prepareForRelease()
-        h.coordinator.gestureGate.record()
+        click(h)
         if case .success = h.coordinator.handleAppSettingsMessage(
             isMainFrame: true, scheme: "https", host: "example.com", port: 443, view: h.webView, body: ["op": "get"]
         ) { XCTFail("A released coordinator must refuse") }

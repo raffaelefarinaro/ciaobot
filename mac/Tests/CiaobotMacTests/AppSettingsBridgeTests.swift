@@ -9,6 +9,7 @@ final class AppSettingsFakeNotifications: NotificationMenuProviding {
     let subject: CurrentValueSubject<ChatNotificationState, Never>
     let streamSubject: CurrentValueSubject<ChatNotificationStreamStatus, Never>
     private(set) var actionCount = 0
+    var performResult = true
 
     init(_ state: ChatNotificationState = .off, stream: ChatNotificationStreamStatus = .ready) {
         subject = CurrentValueSubject(state)
@@ -20,7 +21,7 @@ final class AppSettingsFakeNotifications: NotificationMenuProviding {
     var streamStatus: ChatNotificationStreamStatus { streamSubject.value }
     var streamStatusPublisher: AnyPublisher<ChatNotificationStreamStatus, Never> { streamSubject.eraseToAnyPublisher() }
 
-    func performMenuAction() { actionCount += 1 }
+    func performMenuAction() -> Bool { actionCount += 1; return performResult }
     func refreshIfNeeded() {}
     func stop() {}
 }
@@ -72,6 +73,14 @@ final class AppSettingsBridgeTests: XCTestCase {
             XCTAssertEqual(fake.actionCount, 1)
             XCTAssertEqual(settings.notificationSettingsCount, 0)
         }
+    }
+
+    func testToggleThatDidNothingIsNotReportedAsSuccess() {
+        let fake = AppSettingsFakeNotifications(.off)
+        fake.performResult = false
+        let bridge = AppSettingsBridge()
+        bridge.bind(notifications: fake, systemSettings: nil)
+        XCTAssertFalse(bridge.perform("notifications"))
     }
 
     func testDeniedAndDeliveryOffOpenSystemSettingsOnly() {

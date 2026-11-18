@@ -128,7 +128,7 @@ private final class FakeNotificationMenu: NotificationMenuProviding {
         streamSubject.eraseToAnyPublisher()
     }
 
-    func performMenuAction() { actionCount += 1 }
+    @discardableResult func performMenuAction() -> Bool { actionCount += 1; return true }
     func refreshIfNeeded() { refreshCount += 1 }
     func stop() { stopCount += 1 }
     func set(_ state: ChatNotificationState) { subject.send(state) }

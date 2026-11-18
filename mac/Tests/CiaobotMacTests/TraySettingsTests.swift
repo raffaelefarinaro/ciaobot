@@ -151,7 +151,7 @@ private final class FakeSettingsNotifications: NotificationMenuProviding {
         streamSubject.eraseToAnyPublisher()
     }
 
-    func performMenuAction() { actionCount += 1 }
+    @discardableResult func performMenuAction() -> Bool { actionCount += 1; return true }
     func refreshIfNeeded() { refreshCount += 1 }
     func stop() { stopCount += 1 }
 }
