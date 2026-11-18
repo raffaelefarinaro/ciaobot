@@ -7975,7 +7975,7 @@ def _service_command(args: argparse.Namespace) -> int:
         return 0
 
     def run(argv: Sequence[str], stdin: str | None) -> None:
-        subprocess.run(argv, input=stdin, text=True, check=True)
+        subprocess.run(argv, input=stdin, text=True, encoding="utf-8", check=True)
 
     try:
         linux_service.run_plan(plan, run=run)
