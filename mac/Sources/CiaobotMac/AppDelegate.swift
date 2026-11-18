@@ -98,11 +98,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let engineUpdater: EngineUpdater
     /// The stored engine-mode choice (`CiaobotEngineMode`).
     let engineMode: EngineModeStoring
-    /// The engine mode this launch runs in: `local` owns the bundled engine
+    /// The engine mode this app runs in: `local` owns the bundled engine
     /// (started at launch, below), `external` is the unchanged connection
-    /// screen. Resolved once at construction; a mid-session switch is view
-    /// state until the next launch.
-    let mode: EngineMode
+    /// screen. Resolved at construction, then kept current by the connection
+    /// view's in-session switches (`modeDidChange`), so the quit path and the
+    /// tray never act on a stale mode.
+    private(set) var mode: EngineMode
     /// The app-owned engine and everything needed to run it. Never started in
     /// external mode. The test initializer leaves it out unless injected.
     let supervisor: EngineSupervisor?
@@ -111,6 +112,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// all three stored decisions.
     let lastServer: LastServerStoring
     let hostStore: HostListStoring
+
+    /// Reads the launch Apple event (`applicationWillFinishLaunching` reads
+    /// the login launch there, the only moment it is current).
+    private let launchEvent: () -> NSAppleEventDescriptor?
+    /// The main window, for the login-launch close. The production default
+    /// resolves the same identifier the presenter reopens.
+    private let mainWindow: @MainActor () -> NSWindow?
+    /// Presents the quit confirmation. Tests record the call and decide.
+    private let presentQuitDialog: @MainActor (EngineQuitDialog) -> Bool
+    /// The running-chat count for the quit confirmation.
+    private let blockers: RestartBlockersFetching
+    /// Responds to a deferred `applicationShouldTerminate`. Tests record it.
+    private let replyToTerminate: @MainActor (Bool) -> Void
+    /// Raised by Sparkle's immediate install: that terminate is a system quit.
+    private let updateQuit: UpdateQuitIntent
+    /// Schedules the login-launch window close retries. Tests drive it.
+    private let loginCloseSchedule: LoginLaunchWindowCloser.Schedule?
+    private var loginCloser: LoginLaunchWindowCloser?
+    /// True only while `applicationShouldTerminate` is on the stack. AppKit
+    /// ignores a reply sent before that call returns `.terminateLater` and
+    /// then waits forever, so a reply requested in that window is sent from a
+    /// later main-queue turn instead.
+    private var insideShouldTerminate = false
+    /// True when this launch came from the login item: no main window is
+    /// opened, while the engine starts as usual (S6).
+    private var launchedAtLogin = false
+    /// One terminate request at a time: while the quit dialog or the
+    /// stop-and-exit flow is pending, further quit events wait for its reply.
+    private var terminationDeferred = false
 
     typealias MenuBarFactory = @MainActor (AppSessionStatus, ClientUpdateControlling?, EngineUpdateMenuProviding?,
                                            @escaping () -> Void, @escaping () -> Void) -> MenuBarControlling
@@ -146,6 +176,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         let session = AppSessionStatus(workspaceIcon: workspaceIcon)
         let engineUpdater = EngineUpdater()
+        let updateQuit = UpdateQuitIntent()
         // One launch defaults domain for the stored engine mode, last server
         // and saved hosts. A DEBUG test launch with an isolated suite keeps
         // all three away from the app's own defaults; every other launch uses
@@ -170,7 +201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // The updater lives for the app's lifetime. Creating it is inert in
             // a debug build, a test process, or a build without the release
             // updater keys; `start()` decides and records why.
-            updater: ClientUpdater(),
+            updater: ClientUpdater(updateQuit: updateQuit),
             engineUpdater: engineUpdater,
             engineUpdates: EngineUpdateMonitor(status: session, updater: engineUpdater),
             // The signing probe is the real one here. The row explains an
@@ -191,7 +222,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ),
             supervisor: Self.makeSupervisor(),
             lastServer: lastServerStore,
-            hostStore: UserDefaultsHostListStore(defaults: launchDefaults, lastServer: lastServerStore)
+            hostStore: UserDefaultsHostListStore(defaults: launchDefaults, lastServer: lastServerStore),
+            updateQuit: updateQuit
         )
     }
 
@@ -219,7 +251,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mode: EngineMode? = nil,
         supervisor: EngineSupervisor? = nil,
         lastServer: LastServerStoring? = nil,
-        hostStore: HostListStoring? = nil
+        hostStore: HostListStoring? = nil,
+        // The lifecycle surfaces (S6). Defaults are the real behaviour; the
+        // test initializer injects doubles, so no test shows a dialog, reads
+        // the loopback route, closes a real window, or replies to AppKit.
+        // `launchEvent`'s default reads the current Apple event, which is only
+        // non-nil while one is being handled — never in a test process.
+        launchEvent: @escaping () -> NSAppleEventDescriptor? = { NSAppleEventManager.shared().currentAppleEvent },
+        mainWindow: (@MainActor () -> NSWindow?)? = nil,
+        quitDialog: (@MainActor (EngineQuitDialog) -> Bool)? = nil,
+        restartBlockers: RestartBlockersFetching? = nil,
+        replyToTerminate: (@MainActor (Bool) -> Void)? = nil,
+        updateQuit: UpdateQuitIntent? = nil,
+        loginCloseSchedule: LoginLaunchWindowCloser.Schedule? = nil
     ) {
         self.session = session
         self.presenter = presenter
@@ -238,6 +282,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let lastServer = lastServer ?? UserDefaultsLastServerStore()
         self.lastServer = lastServer
         self.hostStore = hostStore ?? UserDefaultsHostListStore(lastServer: lastServer)
+        self.launchEvent = launchEvent
+        // The real window resolution is the presenter's own rule: the scene
+        // keeper with the stable `main` identifier.
+        self.mainWindow = mainWindow ?? { MainWindowPresenter.mainWindow(in: NSApp.windows) }
+        self.presentQuitDialog = quitDialog ?? { dialog in
+            EngineLifecycle.presentConfirmation(
+                title: dialog.title, body: dialog.body,
+                confirm: EngineLifecycle.quitConfirmButton, cancel: EngineLifecycle.quitCancelButton
+            )
+        }
+        self.blockers = restartBlockers ?? RestartBlockersProbe()
+        self.replyToTerminate = replyToTerminate ?? { NSApp.reply(toApplicationShouldTerminate: $0) }
+        self.updateQuit = updateQuit ?? UpdateQuitIntent()
+        self.loginCloseSchedule = loginCloseSchedule
         super.init()
     }
 
@@ -261,10 +319,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static func makeSupervisor() -> EngineSupervisor {
         let resourceDirectory: URL?
         let home: URL
+        let enginePort: Int?
         #if DEBUG
+        enginePort = TestLaunch.enginePort()
         resourceDirectory = TestLaunch.engineResources() ?? Bundle.main.resourceURL
         home = TestLaunch.engineHome() ?? FileManager.default.homeDirectoryForCurrentUser
         #else
+        enginePort = nil
         resourceDirectory = Bundle.main.resourceURL
         home = FileManager.default.homeDirectoryForCurrentUser
         #endif
@@ -273,7 +334,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             engine: engine,
             home: EngineHome(home: home),
             processes: FoundationEngineProcesses(),
-            identity: EngineIdentityProbe()
+            identity: EngineIdentityProbe(),
+            enginePort: enginePort
         )
     }
 
@@ -284,6 +346,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let permission = SystemNotificationPermissionClient()
         permission.prepare()
         notificationPermission = permission
+        // The launch Apple event is the current event only now, so the login
+        // launch fact is read here (S6): a login launch opens no window.
+        launchedAtLogin = EngineLifecycle.isLoginLaunch(launchEvent())
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -316,6 +381,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // quit handling).
         if mode == .local {
             supervisor?.start()
+        }
+
+        // A login launch opens no main window: the engine starts as usual and
+        // the tray is the way back in. SwiftUI creates the scene window during
+        // launch at no fixed moment, so the closer retries until it exists
+        // (bounded) — and the window-close observer below then applies the
+        // saved Dock preference.
+        // The scene keeps its window for the app's lifetime, so the tray
+        // reopens the same one.
+        if launchedAtLogin {
+            let closer = LoginLaunchWindowCloser(window: mainWindow, schedule: loginCloseSchedule)
+            loginCloser = closer
+            closer.start()
         }
 
         // A saved "Hide Dock Icon" choice applies after the initial SwiftUI
@@ -396,7 +474,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 systemSettings: systemSettings,
                 changeHost: ConnectionMenuActions.changeConnectedHost(present: present),
                 updates: updater,
-                engineUpdates: engineUpdates
+                engineUpdates: engineUpdates,
+                engineSupervisor: supervisor,
+                localEngineMode: mode == .local
             )
         }
         controller.start()
@@ -428,5 +508,100 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             presenter.present()
         }
         return true
+    }
+
+    // MARK: Quit (S6)
+
+    /// One quit decision for every terminate request (#3129 S6). The tray and
+    /// Cmd-Q converge here like the plan says, so they get exactly one
+    /// confirmation; a session-ending quit never asks and still stops the
+    /// engine; external mode leaves at once because it stopped nothing.
+    ///
+    /// While a deferred flow is pending (dialog open, or the engine draining),
+    /// further terminate requests return `.terminateLater` and wait for the
+    /// one reply the pending flow makes.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if terminationDeferred { return .terminateLater }
+        // A reply made before this method returns is ignored by AppKit, so
+        // every reply requested while it is on the stack waits one turn.
+        insideShouldTerminate = true
+        defer { insideShouldTerminate = false }
+        // Sparkle's immediate install terminates the app to swap the bundle:
+        // it is a system quit, so no dialog stands in front of it.
+        let reason = EngineLifecycle.quitReason(launchEvent(), updateInstall: updateQuit.installing)
+        switch EngineLifecycle.terminationPlan(mode: mode, engineState: supervisor?.state, quitReason: reason) {
+        case .terminateNow:
+            return .terminateNow
+        case .stopThenTerminate(let grace):
+            guard let supervisor else { return .terminateNow }
+            terminationDeferred = true
+            stopEngineThenTerminate(supervisor, grace: grace)
+            return .terminateLater
+        case .confirm:
+            guard let supervisor else { return .terminateNow }
+            terminationDeferred = true
+            beginConfirmedQuit(supervisor)
+            return .terminateLater
+        }
+    }
+
+    /// Stops the engine and ends the app only after the stop completes, so the
+    /// engine drains before exit. The tray shows the fixed stopping line for
+    /// the whole stop.
+    private func stopEngineThenTerminate(_ supervisor: EngineSupervisor, grace: TimeInterval) {
+        menuBar?.setQuittingTitle()
+        supervisor.stop(grace: grace) { [weak self] in
+            self?.finishDeferredTermination(terminate: true)
+        }
+    }
+
+    /// A user quit of a starting or running local engine: read the blocker
+    /// count from the engine's own loopback route (no session, one second,
+    /// nil on anything else), show the one confirmation, and act on it. Cancel
+    /// replies false, which puts the app back where it was.
+    private func beginConfirmedQuit(_ supervisor: EngineSupervisor) {
+        let decide: (Int?) -> Void = { [weak self] count in
+            // The probe resolves on the main queue, like every connection fetch.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let message = EngineLifecycle.quitMessage(blockers: count)
+                guard self.presentQuitDialog(EngineQuitDialog(title: message.title, body: message.body)) else {
+                    self.finishDeferredTermination(terminate: false)
+                    return
+                }
+                self.stopEngineThenTerminate(supervisor, grace: EngineLifecycle.quitGrace)
+            }
+        }
+        // A starting engine has no origin yet, so it shows the dialog with no
+        // count rather than fetching one.
+        if case .running(let origin, _, _) = supervisor.state {
+            blockers.activeChats(of: origin, completion: decide)
+        } else {
+            decide(nil)
+        }
+    }
+
+    /// `terminationDeferred` stays set until the reply is actually sent, so a
+    /// quit that arrives during the hop still joins this flow.
+    private func finishDeferredTermination(terminate: Bool) {
+        let send: @MainActor () -> Void = { [self] in
+            terminationDeferred = false
+            replyToTerminate(terminate)
+        }
+        if insideShouldTerminate {
+            DispatchQueue.main.async { MainActor.assumeIsolated { send() } }
+        } else {
+            send()
+        }
+    }
+
+    // MARK: Mode switch (S6)
+
+    /// The connection view switched the engine mode in this session (Connect
+    /// to Another Server, Use Ciaobot on This Mac). The quit path and the tray
+    /// read the mode from here, so they follow it immediately.
+    func modeDidChange(_ newMode: EngineMode) {
+        mode = newMode
+        menuBar?.setLocalEngineMode(newMode == .local)
     }
 }
