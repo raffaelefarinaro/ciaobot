@@ -131,6 +131,24 @@ final class UserDefaultsNotificationPreferenceStore: NotificationPreferenceStori
     }
 }
 
+/// What clicking the notification row does for a state. The tray row and the
+/// in-window Settings bridge both read it, so the two surfaces cannot drift.
+enum NotificationSettingAction: String {
+    case toggle
+    case openSystemSettings
+    case none
+}
+
+extension ChatNotificationState {
+    var settingAction: NotificationSettingAction {
+        switch self {
+        case .off, .on: return .toggle
+        case .denied, .deliveryOff: return .openSystemSettings
+        case .unavailable: return .none
+        }
+    }
+}
+
 /// The menu surface for notifications. Kept separate from the controller so
 /// `MenuBarController` does not need to know how the event socket works.
 @MainActor
@@ -139,8 +157,11 @@ protocol NotificationMenuProviding: AnyObject {
     var statePublisher: AnyPublisher<ChatNotificationState, Never> { get }
     var streamStatus: ChatNotificationStreamStatus { get }
     var streamStatusPublisher: AnyPublisher<ChatNotificationStreamStatus, Never> { get }
-    /// The single explicit user action from the menu.
-    func performMenuAction()
+    /// The single explicit user action from the menu. Returns false when the
+    /// call did nothing (not started, or an authorization request is already in
+    /// flight, or the state has no action).
+    @discardableResult
+    func performMenuAction() -> Bool
     /// Called when the menu opens. It only re-reads OS state and retries a
     /// failed/late connection; it never prompts.
     func refreshIfNeeded()
@@ -295,8 +316,9 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
         streamStatus = .notConnected
     }
 
-    func performMenuAction() {
-        guard started, !permissionRequestInFlight else { return }
+    @discardableResult
+    func performMenuAction() -> Bool {
+        guard started, !permissionRequestInFlight else { return false }
 
         switch state {
         case .on:
@@ -309,7 +331,7 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
         case .off:
             guard permission.isAvailable else {
                 state = .unavailable(.unbundled)
-                return
+                return true
             }
             // This is the only path that may show an OS permission prompt.
             permissionRequestInFlight = true
@@ -349,8 +371,9 @@ final class ChatNotificationController: ObservableObject, NotificationMenuProvid
             // second authorization request.
             refreshAuthorizationOnly()
         case .unavailable:
-            break
+            return false
         }
+        return true
     }
 
     func refreshIfNeeded() {
