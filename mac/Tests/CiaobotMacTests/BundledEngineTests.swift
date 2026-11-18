@@ -205,7 +205,9 @@ final class BundledEngineTests: XCTestCase {
         let enumerator = try XCTUnwrap(FileManager.default.enumerator(atPath: Self.sourcesDirectory.path))
         var checked = 0
         while let rel = enumerator.nextObject() as? String {
-            guard rel.hasSuffix(".swift"), URL(fileURLWithPath: rel).lastPathComponent != "BundledEngine.swift" else { continue }
+            // EngineSupervisor (#3129 S5a) is the one sanctioned consumer until S5b wires it into the app.
+            let name = URL(fileURLWithPath: rel).lastPathComponent
+            guard rel.hasSuffix(".swift"), name != "BundledEngine.swift", name != "EngineSupervisor.swift" else { continue }
             checked += 1
             let text = try String(contentsOf: Self.sourcesDirectory.appendingPathComponent(rel))
             let code = text.split(separator: "\n", omittingEmptySubsequences: false)
