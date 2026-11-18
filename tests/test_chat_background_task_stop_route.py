@@ -178,7 +178,7 @@ def test_stop_requires_the_session_cookie(tmp_path: Path) -> None:
     assert sdk.stopped == []
 
 
-def test_opencode_stop_background_shell_deletes_the_shell(tmp_path: Path) -> None:
+def test_opencode_stop_background_task_deletes_the_shell(tmp_path: Path) -> None:
     sdk = _OpencodeClient()
     provider = _opencode_provider(tmp_path, sdk)
 
