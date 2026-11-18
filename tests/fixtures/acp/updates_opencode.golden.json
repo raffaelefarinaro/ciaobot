@@ -1,0 +1,9 @@
+[
+  ["text", null, null],
+  ["tool_use", "tool_a", null],
+  ["tool_result", "tool_a", null],
+  ["tool_use", "ses_child:tool_b", "ses_child"],
+  ["text", null, "ses_child"],
+  ["tool_result", "ses_child:tool_b", "ses_child"],
+  ["text", null, null]
+]

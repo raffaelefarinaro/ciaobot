@@ -4,14 +4,14 @@ import { boot, isolate } from '../support/app'
 // The engine's trim catalog, injected on GET /api/workspaces. The fixture does
 // not carry one, so the card only renders here.
 const CATALOG = [
-  { key: 'tool:CronCreate', kind: 'tool', name: 'CronCreate', label: 'Cron schedules', reason: 'Schedules runs.', group: 'scheduling', default_trimmed: true, locked: true },
-  { key: 'tool:NotebookEdit', kind: 'tool', name: 'NotebookEdit', label: 'Notebook editing', reason: 'Edits Jupyter notebooks.', group: 'features', default_trimmed: true, locked: false },
-  { key: 'tool:ReportFindings', kind: 'tool', name: 'ReportFindings', label: 'Report findings', reason: 'Reports review findings.', group: 'review', default_trimmed: false, locked: false },
-  { key: 'skill:a', kind: 'skill', name: 'a', label: 'Skill A', reason: 'Bundled skill A.', group: 'skills', default_trimmed: true, locked: false },
-  { key: 'skill:b', kind: 'skill', name: 'b', label: 'Skill B', reason: 'Bundled skill B.', group: 'skills', default_trimmed: true, locked: false },
-  { key: 'skill:c', kind: 'skill', name: 'c', label: 'Skill C', reason: 'Bundled skill C.', group: 'skills', default_trimmed: false, locked: false },
-  { key: 'skill:d', kind: 'skill', name: 'd', label: 'Skill D', reason: 'Bundled skill D.', group: 'skills', default_trimmed: false, locked: false },
-  { key: 'setting:disableWorkflows', kind: 'setting', name: 'disableWorkflows', label: 'Workflows', reason: 'Turns off workflows.', group: 'features', default_trimmed: false, locked: false },
+  { key: 'tool:CronCreate', kind: 'tool', name: 'CronCreate', label: 'Cron schedules', reason: 'Schedules runs.', group: 'scheduling', default_trimmed: true },
+  { key: 'tool:NotebookEdit', kind: 'tool', name: 'NotebookEdit', label: 'Notebook editing', reason: 'Edits Jupyter notebooks.', group: 'features', default_trimmed: true },
+  { key: 'tool:ReportFindings', kind: 'tool', name: 'ReportFindings', label: 'Report findings', reason: 'Reports review findings.', group: 'review', default_trimmed: false },
+  { key: 'skill:a', kind: 'skill', name: 'a', label: 'Skill A', reason: 'Bundled skill A.', group: 'skills', default_trimmed: true },
+  { key: 'skill:b', kind: 'skill', name: 'b', label: 'Skill B', reason: 'Bundled skill B.', group: 'skills', default_trimmed: true },
+  { key: 'skill:c', kind: 'skill', name: 'c', label: 'Skill C', reason: 'Bundled skill C.', group: 'skills', default_trimmed: false },
+  { key: 'skill:d', kind: 'skill', name: 'd', label: 'Skill D', reason: 'Bundled skill D.', group: 'skills', default_trimmed: false },
+  { key: 'setting:disableWorkflows', kind: 'setting', name: 'disableWorkflows', label: 'Workflows', reason: 'Turns off workflows.', group: 'features', default_trimmed: false },
 ]
 
 async function openCard(page: Page, id: string, patches: Array<Record<string, unknown>>) {

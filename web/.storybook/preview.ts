@@ -4,6 +4,9 @@ import { computed, onUnmounted, watch } from 'vue'
 import { DEFAULT_WORKSPACE_COLOR, WORKSPACE_COLOR_PRESETS } from '../src/lib/workspaceColors'
 import { applyStoryAppearance } from '../src/stories/appearanceGlobals'
 import '../src/styles/app.css'
+import { assertNoFixtureViolations, fenceStory, type FixtureConfig } from '../src/stories/fixtureBoundary'
+
+const wrapperTemplate = '<div style="padding: var(--space-4); min-width: 0; box-sizing: border-box; background: var(--bg); color: var(--fg)"><story /></div>'
 
 // The production widths the layout is checked at, not stand-ins for them.
 const viewports: ViewportMap = {
@@ -74,6 +77,18 @@ const preview: Preview = {
     },
   },
   decorators: [
+    (_Story, context) => ({
+      // Every story and docs page runs inside the fixture boundary, built from
+      // `parameters.fixture` ({ routes, sockets }; empty when absent). There is
+      // no opt-out flag: a story can only declare what it is allowed to reach.
+      // fetch, XHR, WebSocket, EventSource and beacon attempts outside the
+      // declaration are rejected and recorded as violations.
+      setup() {
+        const boundary = fenceStory(context.parameters.fixture as FixtureConfig | undefined, context.viewMode === 'docs')
+        onUnmounted(() => boundary.dispose())
+      },
+      template: wrapperTemplate,
+    }),
     (story, context) => ({
       components: { story },
       setup() {
@@ -99,5 +114,8 @@ const preview: Preview = {
       template: '<div :data-workspace-color="accent" style="padding: var(--space-4); min-width: 0; box-sizing: border-box; background: var(--bg); color: var(--fg)"><story /></div>',
     }),
   ],
+  // The boundary throws at the call site, but a component may swallow that
+  // (`.catch(() => {})`). The recorded violations still fail the story here.
+  afterEach: () => assertNoFixtureViolations(),
 }
 export default preview
