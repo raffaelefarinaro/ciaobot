@@ -25,7 +25,8 @@ struct CiaobotMacApp: App {
                 appSettings: appDelegate.appSettings,
                 supervisor: appDelegate.supervisor,
                 engineMode: appDelegate.mode,
-                modeStore: appDelegate.engineMode
+                modeStore: appDelegate.engineMode,
+                onModeChange: { appDelegate.modeDidChange($0) }
             )
         }
             .defaultSize(width: 1100, height: 760)
@@ -444,7 +445,7 @@ struct ConnectionView: View {
     @State private var pendingPortRestart = false
     /// The engine mode this connection session runs in. Initialized from the
     /// launch's resolved mode; **Connect to Another Server…** switches it to
-    /// external mid-session (S6 adds the confirmation).
+    /// external mid-session, behind the confirmation (S6).
     @State private var engineMode: EngineMode
     /// The local-mode connection decisions (probe, replace, failure, bounded
     /// retry). A class so the decisions stay testable without a rendered view.
@@ -474,6 +475,13 @@ struct ConnectionView: View {
     private let autoDiscovery: Bool
     private let lastServer: LastServerStoring
     private let hostStore: HostListStoring
+    /// Presents the mode-switch confirmation (S6). The real one is the AppKit
+    /// dialog; tests record the call and decide.
+    private let presentModeSwitchDialog: @MainActor (EngineLifecycle.ModeSwitchDialog) -> Bool
+    /// Tells the app delegate (quit path, tray) about an in-session mode switch.
+    private let onModeChange: (@MainActor (EngineMode) -> Void)?
+    /// Arm64 only: an Intel Mac has no bundled engine to use.
+    private let hostIsArm64: Bool
     /// A test launch never reads or writes the saved host list, exactly as it
     /// never reads the saved origin: the operator's real defaults stay out of
     /// the fixture run.
@@ -520,8 +528,13 @@ struct ConnectionView: View {
         appSettings: AppSettingsBridge? = nil,
         supervisor: EngineSupervisor? = nil,
         engineMode: EngineMode = .external,
-        modeStore: EngineModeStoring? = nil
+        modeStore: EngineModeStoring? = nil,
+        modeSwitchDialog: (@MainActor (EngineLifecycle.ModeSwitchDialog) -> Bool)? = nil,
+        onModeChange: (@MainActor (EngineMode) -> Void)? = nil,
+        hostIsArm64: Bool = EngineSupervisor.hostIsArm64
     ) {
+        self.onModeChange = onModeChange
+        self.hostIsArm64 = hostIsArm64
         self.probe = probe
         self.signIn = signIn ?? .live
         self.autoDiscovery = autoDiscovery
@@ -529,6 +542,11 @@ struct ConnectionView: View {
         self.appSettings = appSettings
         self.lastServer = lastServer
         self.hostStore = hostStore
+        self.presentModeSwitchDialog = modeSwitchDialog ?? { dialog in
+            EngineLifecycle.presentConfirmation(
+                title: dialog.title, body: dialog.body, confirm: dialog.confirm, cancel: dialog.cancel
+            )
+        }
         _discovery = StateObject(wrappedValue: discovery ?? LocalServerDiscovery())
         _installer = StateObject(wrappedValue: installer ?? NativeInstaller())
         _engineUpdater = StateObject(wrappedValue: engineUpdater ?? EngineUpdater())
@@ -587,7 +605,7 @@ struct ConnectionView: View {
                     connection: localPhase,
                     canRetry: localModel.canRetry,
                     onTryAgain: { self.tryAgainLocal() },
-                    onConnectExternal: { self.connectToAnotherServer() }
+                    onConnectExternal: { self.confirmAndConnectToAnotherServer() }
                 )
             } else if let origin {
                 // A fallback is reported where the session actually lives: the
@@ -690,6 +708,11 @@ struct ConnectionView: View {
                             }
                             .disabled(busy)
                             .accessibilityHint("Connects to the Ciaobot found on this Mac.")
+                        }
+                        if offersThisMac {
+                            Button(Self.useThisMacTitle) { useThisMac() }
+                                .disabled(busy)
+                                .accessibilityHint("Runs the Ciaobot engine bundled with this app on this Mac.")
                         }
                         Button(discovery.status == .idle ? "Find Ciaobot on This Mac" : "Check Again") {
                             engineUpdater.reset()
@@ -808,6 +831,13 @@ struct ConnectionView: View {
         .frame(minWidth: 480, minHeight: 320)
         .onAppear { launchOnAppear() }
         .onReceive(NotificationCenter.default.publisher(for: .ciaobotChangeServer)) { _ in
+            if engineMode == .local {
+                // The app-menu command and the tray row land here too. Only
+                // the confirmation stops the engine (S6), and the dialog must
+                // not run inside a view update, so it steps out first.
+                DispatchQueue.main.async { self.confirmAndConnectToAnotherServer() }
+                return
+            }
             guard origin != nil else { return }
             address = origin?.url.absoluteString ?? address
             discovery.invalidate()
@@ -1095,6 +1125,31 @@ struct ConnectionView: View {
     }
 
     /// Tears down the live session the way Change Server does.
+    static let useThisMacTitle = "Use Ciaobot on This Mac"
+
+    /// The connection screen offers the bundled engine only in external mode,
+    /// on an arm64 Mac, when the app actually carries a usable engine.
+    var offersThisMac: Bool {
+        engineMode == .external && hostIsArm64 && supervisor?.hasEngine == true
+    }
+
+    /// **Use Ciaobot on This Mac** (external → local): saves the local choice,
+    /// tells the app delegate, then starts the engine; the running-origin
+    /// watcher connects when it is up. (The 1.x takeover check, S7, runs
+    /// before the start once it exists.) Internal for tests.
+    func useThisMac() {
+        guard offersThisMac, let supervisor else { return }
+        discovery.invalidate()
+        dropSession()
+        modeStore?.mode = .local
+        engineMode = .local
+        localModel.reset()
+        localPhase = .idle
+        engineDown = false
+        onModeChange?(.local)
+        supervisor.start()
+    }
+
     private func dropSession() {
         origin = nil
         storage = .ephemeral
@@ -1146,14 +1201,25 @@ struct ConnectionView: View {
         }
     }
 
-    /// **Connect to Another Server…** from the engine status screen: stop the
-    /// engine, save the external choice, and show the ordinary connection
-    /// screen. S6 adds the confirmation dialog and the menu command. Internal
-    /// for tests.
+    /// Every connect-to-another-server surface in local mode (the status
+    /// screen's button, the app-menu command ⇧⌘L, and the tray row) confirms
+    /// once before the engine stops (S6). Cancel leaves the engine and the
+    /// running session exactly as they were. External mode never shows this
+    /// dialog, so its surfaces keep their shipped behaviour.
+    func confirmAndConnectToAnotherServer() {
+        guard engineMode == .local else { return }
+        guard presentModeSwitchDialog(EngineLifecycle.modeSwitchDialog) else { return }
+        connectToAnotherServer()
+    }
+
+    /// **Connect to Another Server…** from the engine status screen (after
+    /// confirmation): stop the engine, save the external choice, and show the
+    /// ordinary connection screen. Internal for tests.
     func connectToAnotherServer() {
         if let supervisor { supervisor.stop {} }
         modeStore?.mode = .external
         engineMode = .external
+        onModeChange?(.external)
         localModel.reset()
         localPhase = .idle
         engineDown = false

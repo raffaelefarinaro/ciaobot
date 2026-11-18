@@ -193,7 +193,22 @@ final class EngineSupervisor: ObservableObject {
         begin()
     }
 
+    /// True when this app carries a usable bundled engine; the connection
+    /// screen offers **Use Ciaobot on This Mac** only then.
+    var hasEngine: Bool { engine != nil }
+
+    /// Whether this Mac can run the bundled engine at all (arm64 only).
+    nonisolated static var hostIsArm64: Bool { BundledEngine.hostIsArm64 }
+
+    /// A stop while a stop is already draining joins it: it waits for the same
+    /// exit and renews nothing, so a second caller (a quit during a mode
+    /// switch) neither re-sends SIGTERM nor moves the first caller's SIGKILL
+    /// deadline.
     func stop(grace: TimeInterval = 35, completion: @escaping () -> Void) {
+        if state == .stopping {
+            stopCompletions.append(completion)
+            return
+        }
         generation += 1
         startQueued = false
         failedChildExiting = false
