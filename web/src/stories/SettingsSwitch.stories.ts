@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/vue3-vite'
 import { ref } from 'vue'
+import { expect } from 'storybook/test'
 import SettingsSwitch from '../components/settings/SettingsSwitch.vue'
 
 const meta = {
@@ -19,7 +20,17 @@ const meta = {
 export default meta
 type Story = StoryObj<typeof meta>
 
-export const On: Story = {}
+// Clicking toggles aria-checked through the production toggle flow and keeps
+// focus on the switch for keyboard use.
+export const On: Story = {
+  play: async ({ canvas, userEvent }) => {
+    const button = canvas.getByRole('switch')
+    expect(button.getAttribute('aria-checked')).toBe('true')
+    await userEvent.click(button)
+    expect(button.getAttribute('aria-checked')).toBe('false')
+    expect(document.activeElement).toBe(button)
+  },
+}
 export const Off: Story = { args: { checked: false } }
 export const DisabledOn: Story = { args: { disabled: true } }
 export const DisabledOff: Story = { args: { checked: false, disabled: true } }

@@ -16,6 +16,25 @@ const lifecycleEvents = new Set([
   'storybook/instrumenter/sync', 'previewKeydown', 'pong',
 ])
 
+// The vitest browser runner's established control socket (result reporting,
+// console forwarding, user-event commands). Its birpc envelopes are
+// flatted-encoded: a root object whose values index into the array. Only a
+// request (t 'q' with a string method name) or a response (t 's' with a string
+// id) is permitted.
+function isRunnerEnvelope(data: unknown): boolean {
+  if (typeof data !== 'string') return false
+  try {
+    const flat = JSON.parse(data) as unknown
+    if (!Array.isArray(flat) || typeof flat[0] !== 'object' || flat[0] === null) return false
+    const root = flat[0] as Record<string, unknown>
+    if (!Object.keys(root).every(key => ['m', 'a', 't', 'i', 'r', 'e'].includes(key))) return false
+    const field = (key: string) => typeof root[key] === 'string' ? flat[Number(root[key])] : undefined
+    if (typeof field('i') !== 'string') return false
+    if (field('t') === 'q') return typeof field('m') === 'string'
+    return field('t') === 's' && !('m' in root)
+  } catch { return false }
+}
+
 // Only established workshop sockets can reach this seam: constructors below
 // reject all new connections. Never forward custom/invoke/save/editor events.
 function infrastructureMessage(socket: WebSocket, data: unknown): boolean {
@@ -27,6 +46,13 @@ function infrastructureMessage(socket: WebSocket, data: unknown): boolean {
     if (socket.protocol === 'vite-hmr') {
       return url.pathname === '/' && [...url.searchParams.keys()].every(key => key === 'token')
         && data === '{"type":"ping"}'
+    }
+    if (url.pathname === '/__vitest_browser_api__') {
+      // The browser interaction runner's page-load control socket; it does not
+      // exist outside `npm run test-storybook`. The exact query shape is pinned
+      // so a repurposed path fails.
+      return [...url.searchParams.keys()].sort().join(',') === 'method,projectName,rpcId,sessionId,token,type'
+        && isRunnerEnvelope(data)
     }
     const token = (globalThis as typeof globalThis & { CHANNEL_OPTIONS?: { wsToken?: string } }).CHANNEL_OPTIONS?.wsToken
     if (!token || url.pathname !== '/storybook-server-channel'

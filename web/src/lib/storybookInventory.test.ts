@@ -503,6 +503,14 @@ describe('filtering and isolation', () => {
     expect(filterInventory(entries, { ...defaults, query: 'displayname missing' })).toEqual([])
     expect(filterInventory(entries, { ...defaults, query: '   ' })).toEqual(entries)
   })
+  it('keeps story files and workshop config out of the application vitest suite', () => {
+    const config = readFileSync(resolve(root, 'web/vite.config.ts'), 'utf8')
+    const exclude = config.match(/test:\s*\{[\s\S]*?exclude:\s*\[([^\]]*)\]/)
+    expect(exclude, 'application vitest test.exclude list').not.toBeNull()
+    const globs = (exclude![1].match(/'[^']+'/g) ?? []).map((glob) => glob.slice(1, -1))
+    expect(globs).toContain('**/*.stories.*')
+    expect(globs).toContain('.storybook/**')
+  })
   it('keeps the registry pure and production sources independent of the workshop', () => {
     const source = readFileSync(join(src, 'stories/inventory.ts'), 'utf8')
     expect(source).not.toMatch(/^\s*import\b|\bimport\s*\(|\bimport\.meta/m)

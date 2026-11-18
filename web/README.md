@@ -156,7 +156,11 @@ keyboard-focus and reduced-motion states do not gain story coverage.
 The Node tests check data and filters, not Vue interactions or manager links.
 Check filtering, keyboard access, narrow/zoom layouts and story links in both
 the development and built workshop in a browser; record screenshots and network
-evidence with the change. Automated Storybook browser interactions are future work.
+evidence with the change. `npm run test-storybook` runs the browser interaction
+runner (@storybook/addon-vitest, vitest browser mode with the Playwright
+provider): every story has to render in headless Chromium and its `play`
+functions execute there. Chromium must be installed locally
+(`npx playwright install chromium`).
 
 ConfirmDialog has normal, destructive, optional-reason, long-content and narrow
 stories; PromptDialog has empty, whitespace, prefilled, populated, validation-disabled
