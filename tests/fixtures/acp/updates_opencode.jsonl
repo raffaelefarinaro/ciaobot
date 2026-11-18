@@ -1,0 +1,10 @@
+{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Checking."}}
+{"sessionUpdate":"tool_call","toolCallId":"tool_a","kind":"edit","title":"edit","status":"pending","locations":[{"path":"/work/a.py"}],"rawInput":{"filePath":"/work/a.py"}}
+{"sessionUpdate":"tool_call_update","toolCallId":"tool_a","status":"completed"}
+{"sessionUpdate":"tool_call","toolCallId":"ses_child:tool_b","kind":"execute","title":"Research: ls","status":"pending","rawInput":{"command":"ls"},"_meta":{"opencode/child-session":{"id":"ses_child","parentID":"ses_root","depth":1,"title":"Research"}}}
+{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"child says hi"},"_meta":{"opencode/child-session":{"id":"ses_child","parentID":"ses_root","depth":1,"title":"Research"}}}
+{"sessionUpdate":"tool_call_update","toolCallId":"ses_child:tool_b","status":"completed","_meta":{"opencode/child-session":{"id":"ses_child","parentID":"ses_root","depth":1,"title":"Research"}}}
+{"sessionUpdate":"current_mode_update","currentModeId":"plan"}
+{"sessionUpdate":"session_info_update","title":"Fix a"}
+{"sessionUpdate":"some_future_update","x":1}
+{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Finished."}}
