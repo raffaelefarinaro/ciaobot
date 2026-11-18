@@ -795,12 +795,17 @@ def _direct_ciao_imports(path: str) -> set[str]:
 def test_module_keeps_its_direct_import_boundary() -> None:
     # The promise is about THIS file's own imports. macos_service still imports
     # ciao.server_host itself, so the transitive closure is deliberately not
-    # claimed (see the module docstring).
+    # claimed (see the module docstring). S4b adds app_engine (the pointer and
+    # its record writes) and, function-local, os_support.private (the private
+    # journal write) and os_support.locks (the runtime-root lock probe).
     imported = _direct_ciao_imports(mac_takeover.__file__)
     allowed = {
         "ciao",
+        "ciao.app_engine",
         "ciao.macos_service",
         "ciao.os_support.definition",
+        "ciao.os_support.locks",
+        "ciao.os_support.private",
         "ciao.package_version",
     }
     assert imported <= allowed, imported - allowed
