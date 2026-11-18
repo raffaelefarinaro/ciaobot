@@ -37,6 +37,10 @@ const RETIRED: Record<string, string> = {
 const MARKER = '__CIAOBOT_DESKTOP__'
 const MARKER_READER = join(SRC, 'lib', 'pwaPlatform.ts')
 
+/** The Mac app's settings bridge and the one file allowed to name its handler. */
+const BRIDGE = 'ciaobotAppSettings'
+const BRIDGE_READER = join(SRC, 'lib', 'macAppSettings.ts')
+
 /** Every `.ts`/`.vue` under `web/src`, `__tests__` included: a test that uses
  * the retired helper or bridge asserts a branch that can no longer be taken. */
 function sourceFiles(): string[] {
@@ -75,5 +79,12 @@ describe('app-presence abstraction', () => {
       .filter(file => !file.includes('__tests__') && !file.endsWith('.test.ts'))
       .filter(file => readFileSync(file, 'utf8').includes(MARKER))
     expect(readers).toEqual([MARKER_READER])
+  })
+
+  it('reads the Mac app settings handler only in lib/macAppSettings.ts', () => {
+    const readers = sourceFiles()
+      .filter(file => !file.includes('__tests__') && !file.endsWith('.test.ts'))
+      .filter(file => readFileSync(file, 'utf8').includes(BRIDGE))
+    expect(readers).toEqual([BRIDGE_READER])
   })
 })

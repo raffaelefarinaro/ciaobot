@@ -4,7 +4,9 @@
       <p class="section-title">Notifications</p>
       <p class="hint">
         {{ desktop
-          ? 'Ciaobot for Mac shows a macOS notification when a chat replies.'
+          ? (mac !== null
+            ? 'Ciaobot for Mac shows a macOS notification when a chat replies. This is the same switch as the menu bar\'s Settings → Chat Notifications.'
+            : 'Ciaobot for Mac shows a macOS notification when a chat replies.')
           : 'Ciaobot notifies you when a chat replies and the browser tab is in the background.' }}
         <a
           class="settings-help-link"
@@ -24,7 +26,21 @@
             <span class="notif-dot" :class="`notif-dot--${status.tone}`" aria-hidden="true" />
             {{ status.label }}
           </span>
-          <span v-if="status.detail" class="notif-detail" v-html="status.detail" />
+          <span v-if="mac && mac.detail" class="notif-detail">{{ mac.detail }}</span>
+          <span v-else-if="status.detail" class="notif-detail" v-html="status.detail" />
+        </span>
+        <span v-if="mac && mac.action === 'toggle'" class="notif-end">
+          <SettingsSwitch
+            :checked="mac.state === 'on'"
+            :busy="macBusy"
+            aria-label="Chat notifications"
+            @toggle="macAction"
+          />
+        </span>
+        <span v-else-if="mac && mac.action === 'openSystemSettings'" class="notif-end">
+          <button class="btn-secondary btn-small" :disabled="macBusy" @click="macAction">
+            Open System Settings
+          </button>
         </span>
         <span v-if="showToggle" class="notif-end">
           <button
@@ -46,14 +62,23 @@
       then enable it here.
     </p>
     <p v-if="pushError" class="action-result" role="alert">{{ pushError }}</p>
+    <p v-if="macError" class="action-result" role="alert">{{ macError }}</p>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api } from '../../lib/api'
 import { errorMessage } from '../../lib/errorMessage'
 import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported } from '../../lib/push'
+import {
+  MAC_APP_SETTINGS_CHANGED,
+  hasMacAppSettings,
+  readMacAppSettings,
+  requestMacNotificationAction,
+  type MacNotificationSettings,
+} from '../../lib/macAppSettings'
+import SettingsSwitch from './SettingsSwitch.vue'
 import { isDesktopClient, isIos, isMacDesktop, isStandalone } from '../../lib/pwaPlatform'
 
 /** Ciaobot for Mac sends its own native notifications, so no Web Push state
@@ -66,13 +91,56 @@ const pushError = ref('')
 const permissionDenied = ref(false)
 const needsIosInstall = ref(false)
 
+/** The Mac app's own notification state, mirrored from its menu bar Settings
+ *  row. Null when the app has no bridge (an older Mac app): the static text
+ *  below stays. */
+const mac = ref<MacNotificationSettings | null>(null)
+const macBusy = ref(false)
+const macError = ref('')
+const MAC_REFUSED = 'Ciaobot for Mac did not change notifications. Use the menu bar: Ciaobot \u2192 Settings.'
+
+async function refreshMac() {
+  const snapshot = await readMacAppSettings()
+  if (snapshot?.notifications) mac.value = snapshot.notifications
+}
+
+async function macAction() {
+  if (macBusy.value) return
+  macBusy.value = true
+  macError.value = ''
+  try {
+    const snapshot = await requestMacNotificationAction()
+    if (snapshot?.notifications) mac.value = snapshot.notifications
+    else macError.value = MAC_REFUSED
+  } finally {
+    macBusy.value = false
+  }
+}
+
+function onVisible() {
+  if (document.visibilityState === 'visible') void refreshMac()
+}
+onBeforeUnmount(() => {
+  window.removeEventListener(MAC_APP_SETTINGS_CHANGED, refreshMac)
+  document.removeEventListener('visibilitychange', onVisible)
+})
+
 const showToggle = computed(
   () => !desktop && !needsIosInstall.value && !permissionDenied.value && pushSupportedFlag.value,
 )
 
 type Tone = 'ok' | 'warn' | 'off'
+function macTone(m: MacNotificationSettings): Tone {
+  if (m.state === 'on' && m.ready) return 'ok'
+  if (m.state === 'denied' || m.state === 'deliveryOff' || m.state === 'unavailable') return 'warn'
+  return 'off'
+}
 // Static strings only (no user data), so v-html is safe for the arrows/strong.
 const status = computed<{ label: string; tone: Tone; detail: string }>(() => {
+  if (mac.value) {
+    const m = mac.value
+    return { label: m.title, tone: macTone(m), detail: '' }
+  }
   if (desktop) {
     return {
       label: 'Handled by the Mac app',
@@ -106,7 +174,14 @@ const status = computed<{ label: string; tone: Tone; detail: string }>(() => {
 })
 
 onMounted(async () => {
-  if (desktop) return
+  if (desktop) {
+    if (hasMacAppSettings()) {
+      window.addEventListener(MAC_APP_SETTINGS_CHANGED, refreshMac)
+      document.addEventListener('visibilitychange', onVisible)
+      await refreshMac()
+    }
+    return
+  }
   pushSupportedFlag.value = pushSupported()
   if (isIos() && !isStandalone()) {
     needsIosInstall.value = true
