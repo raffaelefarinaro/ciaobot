@@ -13,7 +13,7 @@ import os
 from tests.conftest import INHERITED_ENV_PREFIXES
 
 # Names a Ciaobot chat exports; none is set by a conftest fixture.
-CHAT_EXPORTS = ("CIAO_VAULT_ROOT", "CIAO_AGENT_TOKEN", "CIAO_CHAT_ID", "CIAO_BUNDLED_APP", "PWA_AUTH_TOKEN")
+CHAT_EXPORTS = ("CIAO_VAULT_ROOT", "CIAO_AGENT_TOKEN", "CIAO_CHAT_ID", "PWA_AUTH_TOKEN")
 
 
 def test_inherited_ciao_and_pwa_variables_are_gone() -> None:

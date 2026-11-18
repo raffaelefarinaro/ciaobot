@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 
 # A Ciaobot chat (or the bundled app's launcher) exports its own CIAO_*
-# settings - vault root, workspace, agent token, CIAO_BUNDLED_APP - and
+# settings - vault root, workspace, agent token - and
 # PWA_AUTH_TOKEN to every command it runs, this suite included. Drop them
 # before any `ciao` module is imported, so code reading them at import time
 # sees a clean environment too; pytest-xdist workers inherit the cleaned one.

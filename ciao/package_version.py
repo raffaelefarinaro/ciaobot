@@ -14,7 +14,7 @@ from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    pass
+    from pathlib import Path
 
 from ciao import __version__, install_receipt
 from ciao.os_support.processes import isolated_probe_flags
@@ -254,20 +254,41 @@ def package_changelog(
     }
 
 
-_BUNDLE_RUNTIME_MARKER = "Ciaobot.app/Contents/Resources/ciao-runtime"
+_APP_ENGINE_MARKER = re.compile(r"\.app/Contents/Resources/engine/")
 
 
 def _inside_app_bundle(path: str | os.PathLike[str] | None) -> bool:
-    """Whether ``path`` resolves inside a Ciaobot.app embedded runtime."""
+    """Whether ``path`` resolves inside a Ciaobot.app bundled engine."""
     if not path:
         return False
     from pathlib import Path
 
     try:
-        resolved = str(Path(path).resolve())
+        resolved = Path(path).resolve().as_posix()
     except (OSError, RuntimeError, ValueError):
-        resolved = str(path)
-    return _BUNDLE_RUNTIME_MARKER in resolved or _BUNDLE_RUNTIME_MARKER in str(path)
+        resolved = Path(path).as_posix()
+    return bool(
+        _APP_ENGINE_MARKER.search(resolved)
+        or _APP_ENGINE_MARKER.search(Path(path).as_posix())
+    )
+
+
+def app_engine_root() -> Path | None:
+    """The bundled engine directory (``.../Contents/Resources/engine``), or None.
+
+    Derived from ``sys.executable`` (``<root>/bin/python3.12``); the root must
+    hold ``bin/ciao``.
+    """
+    if not running_from_app_bundle():
+        return None
+    from pathlib import Path
+
+    exe = Path(sys.executable)
+    for candidate in (exe, exe.resolve()):
+        root = candidate.parent.parent
+        if _inside_app_bundle(root / "bin") and (root / "bin" / "ciao").is_file():
+            return root
+    return None
 
 
 def _imported_ciao_file() -> str | None:
@@ -295,15 +316,11 @@ def _in_source_checkout(ciao_file: str | None) -> bool:
 def running_from_app_bundle() -> bool:
     """Whether this process is the engine embedded in Ciaobot.app.
 
-    Decided from where the ``ciao`` package and the interpreter actually live,
-    not from ``CIAO_BUNDLED_APP`` alone: the bundled launcher exports that
-    marker, so every shell a Ciaobot chat opens inherits it, and a source dev
-    server started from such a shell would otherwise call itself bundled and
-    refuse every redeploy.
+    Decided from where the ``ciao`` package and the interpreter actually live.
 
-    The imported package wins over the interpreter. The bundled launcher also
-    prepends the bundle's ``bin`` to ``PATH``, so ``ciao dev`` run from an app
-    shell can reuse the bundled interpreter while importing ``ciao`` from the
+    The imported package wins over the interpreter. The bundled engine's
+    ``bin`` is first on ``PATH`` in every shell a chat opens, so ``ciao dev``
+    run from an app shell can reuse the bundled interpreter while importing ``ciao`` from the
     checkout it was started in; that server is a source checkout.
     """
     ciao_file = _imported_ciao_file()
@@ -319,8 +336,7 @@ def detect_install_mode() -> str:
     # Bundle location is authoritative when the package itself lives inside
     # the app bundle. A package imported from a git checkout is `editable`
     # even on the bundled interpreter (see ``running_from_app_bundle``). An
-    # inherited CIAO_BUNDLED_APP marker without a bundle location does not
-    # count.
+    # bundle location is what counts, no environment marker.
     try:
         if running_from_app_bundle():
             return "bundled_app"

@@ -9,14 +9,17 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from ciao import main, tool_path
 from ciao.config import CiaoConfig
 from ciao.install_receipt import InstallReceipt, write_receipt
-from ciao.package_version import detect_install_mode, update_package
+from ciao.package_version import app_engine_root, detect_install_mode, update_package
 from ciao.web.routes_node import package_update_endpoint
 
 
-_BUNDLE_PYTHON = (
-    "/Applications/Ciaobot.app/Contents/Resources/ciao-runtime/python/arm64/bin/python3.12"
+_BUNDLE_PYTHON = "/Applications/Ciaobot.app/Contents/Resources/engine/bin/python3.12"
+_BUNDLE_CIAO = (
+    "/Applications/Ciaobot.app/Contents/Resources/engine/"
+    "lib/python3.12/site-packages/ciao/__init__.py"
 )
 
 
@@ -41,19 +44,16 @@ def _fake_ciao_module(monkeypatch, path) -> None:
 
 
 def test_detect_install_mode_bundled_app(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
     monkeypatch.setattr(sys, "executable", _BUNDLE_PYTHON)
     _fake_ciao_module(monkeypatch, tmp_path / "site-packages" / "ciao" / "__init__.py")
     assert detect_install_mode() == "bundled_app"
 
 
 def test_detect_install_mode_bundled_app_from_package_location(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
     monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python3"))
     _fake_ciao_module(
         monkeypatch,
-        "/Applications/Ciaobot.app/Contents/Resources/ciao-runtime/"
-        "site-packages/arm64/ciao/__init__.py",
+        _BUNDLE_CIAO,
     )
     assert detect_install_mode() == "bundled_app"
 
@@ -65,7 +65,6 @@ def test_detect_install_mode_ignores_inherited_marker_in_checkout(monkeypatch, t
     (repo / "ciao").mkdir(parents=True)
     (repo / ".git").mkdir()
     (repo / "pyproject.toml").write_text("", encoding="utf-8")
-    monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
     monkeypatch.setattr(sys, "executable", str(repo / ".venv" / "bin" / "python3"))
     _fake_ciao_module(monkeypatch, repo / "ciao" / "__init__.py")
     assert detect_install_mode() == "editable"
@@ -81,7 +80,6 @@ def test_detect_install_mode_prefers_checkout_over_bundled_interpreter(
     (repo / "ciao").mkdir(parents=True)
     (repo / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
     (repo / "pyproject.toml").write_text("", encoding="utf-8")
-    monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
     monkeypatch.setattr(sys, "executable", _BUNDLE_PYTHON)
     _fake_ciao_module(monkeypatch, repo / "ciao" / "__init__.py")
     assert detect_install_mode() == "editable"
@@ -91,31 +89,73 @@ def test_detect_install_mode_bundled_package_on_bundled_interpreter(
     monkeypatch,
 ) -> None:
     # The genuine app: interpreter and package both inside the bundle runtime.
-    monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
     monkeypatch.setattr(sys, "executable", _BUNDLE_PYTHON)
     _fake_ciao_module(
         monkeypatch,
-        "/Applications/Ciaobot.app/Contents/Resources/ciao-runtime/"
-        "site-packages/arm64/ciao/__init__.py",
+        _BUNDLE_CIAO,
     )
     assert detect_install_mode() == "bundled_app"
 
 
-def test_detect_install_mode_ignores_a_non_one_bundled_marker(monkeypatch, tmp_path) -> None:
-    # Matches ciao.main, which only treats CIAO_BUNDLED_APP == "1" as bundled.
-    monkeypatch.setenv("CIAO_BUNDLED_APP", "0")
-    monkeypatch.setitem(
-        sys.modules,
-        "ciao",
-        types.SimpleNamespace(
-            __file__=str(tmp_path / "site-packages" / "ciao" / "__init__.py")
-        ),
-    )
+def test_bundled_marker_env_is_ignored(monkeypatch, tmp_path) -> None:
+    # The old launcher exported CIAO_BUNDLED_APP=1; only the path counts now.
+    monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python3"))
+    _fake_ciao_module(monkeypatch, tmp_path / "site-packages" / "ciao" / "__init__.py")
     assert detect_install_mode() == "unknown"
 
 
+def test_old_tauri_runtime_path_is_not_bundled(monkeypatch) -> None:
+    old = "/Applications/Ciaobot.app/Contents/Resources/ciao-runtime"
+    monkeypatch.setattr(sys, "executable", f"{old}/python/arm64/bin/python3.12")
+    _fake_ciao_module(monkeypatch, f"{old}/site-packages/arm64/ciao/__init__.py")
+    assert detect_install_mode() != "bundled_app"
+
+
+def test_checkout_package_on_bundled_python_is_editable(monkeypatch, tmp_path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "ciao").mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (repo / "pyproject.toml").write_text("", encoding="utf-8")
+    monkeypatch.setattr(sys, "executable", _BUNDLE_PYTHON)
+    _fake_ciao_module(monkeypatch, repo / "ciao" / "__init__.py")
+    assert detect_install_mode() == "editable"
+
+
+def _engine_tree(tmp_path, *, with_ciao: bool = True):
+    root = tmp_path / "Ciaobot.app" / "Contents" / "Resources" / "engine"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / "python3.12").write_text("", encoding="utf-8")
+    if with_ciao:
+        (root / "bin" / "ciao").write_text("", encoding="utf-8")
+    return root
+
+
+def test_app_engine_root_from_interpreter(monkeypatch, tmp_path) -> None:
+    root = _engine_tree(tmp_path)
+    monkeypatch.setattr(sys, "executable", str(root / "bin" / "python3.12"))
+    _fake_ciao_module(
+        monkeypatch, root / "lib" / "python3.12" / "site-packages" / "ciao" / "__init__.py"
+    )
+    assert app_engine_root() == root.resolve()
+
+
+def test_app_engine_root_needs_bin_ciao(monkeypatch, tmp_path) -> None:
+    root = _engine_tree(tmp_path, with_ciao=False)
+    monkeypatch.setattr(sys, "executable", str(root / "bin" / "python3.12"))
+    _fake_ciao_module(
+        monkeypatch, root / "lib" / "python3.12" / "site-packages" / "ciao" / "__init__.py"
+    )
+    assert app_engine_root() is None
+
+
+def test_app_engine_root_none_outside_bundle(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python3"))
+    _fake_ciao_module(monkeypatch, tmp_path / "site-packages" / "ciao" / "__init__.py")
+    assert app_engine_root() is None
+
+
 def test_detect_install_mode_unknown_without_package_manager(monkeypatch, tmp_path) -> None:
-    monkeypatch.delenv("CIAO_BUNDLED_APP", raising=False)
     monkeypatch.setitem(
         sys.modules,
         "ciao",
@@ -128,7 +168,6 @@ def test_detect_install_mode_unknown_without_package_manager(monkeypatch, tmp_pa
 
 def _no_bundle_site_packages(monkeypatch, tmp_path) -> None:
     """Stage a plain site-packages import: neither a bundle nor a checkout."""
-    monkeypatch.delenv("CIAO_BUNDLED_APP", raising=False)
     monkeypatch.setitem(
         sys.modules,
         "ciao",
@@ -296,3 +335,32 @@ def test_package_update_endpoint_installer_is_guidance() -> None:
 
     assert response.status_code == 400
     assert response.json()["mode"] == "installer"
+
+
+def _compose_path(monkeypatch, tmp_path) -> list[str]:
+    import os
+
+    tool = tmp_path / "tools"
+    tool.mkdir()
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setattr(tool_path, "common_tool_dirs", lambda: [str(tool)])
+    main._ensure_tool_dirs_on_path()
+    return os.environ["PATH"].split(os.pathsep)
+
+
+def test_bundled_child_path_puts_engine_bin_first(monkeypatch, tmp_path) -> None:
+    root = _engine_tree(tmp_path)
+    monkeypatch.setattr(sys, "executable", str(root / "bin" / "python3.12"))
+    _fake_ciao_module(
+        monkeypatch, root / "lib" / "python3.12" / "site-packages" / "ciao" / "__init__.py"
+    )
+    parts = _compose_path(monkeypatch, tmp_path)
+    assert parts[0] == str(root.resolve() / "bin")
+    assert parts.index("/usr/bin") < parts.index(str(tmp_path / "tools"))
+
+
+def test_unbundled_child_path_keeps_tool_dirs_first(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python3"))
+    _fake_ciao_module(monkeypatch, tmp_path / "site-packages" / "ciao" / "__init__.py")
+    parts = _compose_path(monkeypatch, tmp_path)
+    assert parts == [str(tmp_path / "tools"), "/usr/bin"]
