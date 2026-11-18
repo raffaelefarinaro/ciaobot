@@ -326,7 +326,13 @@ final class PackagingTests: XCTestCase {
     func testPackagingScriptNeverOverwritesOrLeaksPrivatePaths() throws {
         let text = try readScript("package-app.sh")
         XCTAssertFalse(text.contains("--force       replace"), "there must be no force option")
-        XCTAssertFalse(text.contains("rm -rf \"$bundle\""), "packaging must never delete a bundle")
+        // The cleanup trap removes only the partial bundle and ZIP the run itself created in the
+        // output directory; the source app is never a deletion target.
+        XCTAssertTrue(text.contains("rm -rf \"$bundle\" 2>/dev/null || :"),
+                      "a failed run must remove its partial bundle from the output directory")
+        XCTAssertTrue(text.contains("[ -n \"$partial\" ]"),
+                      "the cleanup must be gated on the run not having finished")
+        XCTAssertFalse(text.contains("rm -rf \"$app\""), "packaging must never delete the source app")
         XCTAssertTrue(
             text.contains("refusing a non-empty --output directory"),
             "a non-empty output directory must be refused, not replaced"

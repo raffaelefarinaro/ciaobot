@@ -512,13 +512,19 @@ def _plausible_cputype(cputype: int) -> bool:
 
 
 def _slice_bounds(handle: Any, size: int) -> tuple[int, int] | None:
-    """(offset, length) of the arm64 slice, or None when the file is not Mach-O at all."""
+    """(offset, length) of the arm64 slice, or None when the file is not Mach-O at all.
+
+    A Mach-O of any other architecture raises AssembleError, including a thin 64-bit file whose
+    cputype is read from the header and compared directly.
+    """
     handle.seek(0)
     magic = handle.read(8)
     if len(magic) < 8:
         return None
     head = magic[:4]
     if head == THIN_MAGIC_64:
+        if struct.unpack("<i", magic[4:8])[0] != CPU_TYPE_ARM64:
+            raise AssembleError()
         return 0, size
     if head in OTHER_MACHO_MAGICS:
         raise AssembleError()

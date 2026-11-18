@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -35,6 +36,11 @@ def latest_release_redirect_url(repo: str | None = None) -> str:
     """
     repo = (repo or DEFAULT_GITHUB_REPO).strip("/")
     return f"https://github.com/{repo}/releases/latest"
+
+
+# The 2.0 Mac app DMG on the newest stable release (#3205). #3131 owns the
+# asset name; change it here only.
+MAC_APP_DOWNLOAD_URL = f"https://github.com/{DEFAULT_GITHUB_REPO}/releases/latest/download/Ciaobot.dmg"
 
 
 def _release_page_request(url: str) -> urllib.request.Request:
@@ -395,6 +401,44 @@ def detect_install_mode() -> str:
         pass
 
     return "unknown"
+
+
+@functools.cache
+def _host_is_apple_silicon() -> bool:
+    """Apple silicon, including a Python running under Rosetta."""
+    import platform as host
+    import subprocess
+
+    if host.machine() == "arm64":
+        return True
+    try:
+        probe = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "hw.optional.arm64"],
+            capture_output=True, text=True, encoding="utf-8", timeout=2, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.stdout.strip() == "1"
+
+
+def needs_mac_app_switch(
+    *,
+    host_platform: str = sys.platform,
+    install_mode: str | None = None,
+    apple_silicon: bool | None = None,
+) -> bool:
+    """Whether this engine is a 1.x-installer Mac install that should move into Ciaobot for Mac.
+
+    Only installer-managed engines on Apple silicon qualify: the bundled engine
+    is the app already, a checkout is a developer's on purpose, and the app
+    runs no local engine on Intel (#3129).
+    """
+    if host_platform != "darwin":
+        return False
+    mode = install_mode if install_mode is not None else detect_install_mode()
+    if mode != "installer":
+        return False
+    return apple_silicon if apple_silicon is not None else _host_is_apple_silicon()
 
 
 _VERSION_OUTPUT_RE = re.compile(r"[0-9][0-9A-Za-z.\-+]*")
