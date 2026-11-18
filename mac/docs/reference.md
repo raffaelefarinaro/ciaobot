@@ -421,6 +421,14 @@ The menu-bar status line is intentionally factual and minimal: **Not connected**
 
 The Dock icon carries the same attention count as the menu-bar mark. Both read the one known-count total across the loaded hosts, so they can never disagree: a positive total is drawn on the Dock tile, and a zero total, no known count, an unavailable chat list, or a disconnect clears the badge instead of leaving a stale number. The Dock badge never fetches, counts, or polls anything by itself.
 
+## Bundled engine
+
+`Sources/CiaobotMac/BundledEngine.swift` describes the engine shipped inside the app at `Contents/Resources/engine` (the layout frozen by `scripts/engine_assemble.py`). Nothing in the app calls it at launch or login yet; #3129 wires it in. `NativeInstaller` and `EngineUpdater` are untouched.
+
+`BundledEngine.locate(resourceDirectory:)` refuses a non-arm64 host first, before any file access, then resolves the resource directory's own symlinks (so an ancestor such as `/var` is accepted and the result is physical) and `lstat`s, in order, `engine` (directory), `engine/bin` (directory), `engine/bin/ciao` (regular, executable), `engine/bin/python3.12` (regular) and `engine/provenance.json` (regular). A missing entry, a symlink at any of them, or a wrong type or mode is a distinct error naming the path relative to the resource directory. Because no component below the resolved directory may be a symlink, nothing can lead out of the bundle.
+
+`launch(_:parentEnvironment:workingDirectory:)` returns a `BundledEngineLaunch` value (absolute launcher path, arguments, environment, working directory) and spawns nothing; the consumer runs it itself. The executable is `engine/bin/ciao` called directly, with no shell, no `PATH` lookup and no `/usr/bin/env`. The arguments are `["--version"]` or `["run"] + extra`. The environment is the parent's minus every `CIAO_*`, `PWA_*`, `PYTHON*` and `DYLD_*` variable and minus `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE`; nothing is added. The working directory is whatever the caller passes (the user's home, never the read-only signed engine root).
+
 ## Installing Ciaobot on this Mac
 
 The connection screen offers **Install Ciaobot on This Mac** only when discovery finds no Ciaobot on this Mac, or after a failed attempt as a retry. When an installation is found, the offer does not appear.

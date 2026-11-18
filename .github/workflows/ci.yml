@@ -269,7 +269,7 @@ jobs:
     - name: Verify packaged assets and icon
       if: needs.mac-scope.outputs.mac_changed == 'true'
       working-directory: mac
-      run: swift test --filter AppAssetsTests
+      run: swift test --filter AppAssetsTests --filter BundledEngineTests
     - name: Validate bundle metadata
       if: needs.mac-scope.outputs.mac_changed == 'true'
       working-directory: mac
