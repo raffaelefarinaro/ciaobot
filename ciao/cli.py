@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, cast
 import urllib.error
 import urllib.request
 
-from ciao import dev, gws_wrapper, package_smoke, proposal_kinds, public_release, release, service_backend
+from ciao import dev, gws_wrapper, package_smoke, package_version, proposal_kinds, public_release, release, service_backend
 from ciao.install_discovery import trusted_registry
 from ciao.server_host import (
     BUNDLE_ID,
@@ -96,6 +96,21 @@ def _run_command(args: argparse.Namespace) -> int:
     if args.installer_native_workspace is not None and args.installer_native_fd is None:
         print("--installer-native-workspace requires --installer-native-fd", file=sys.stderr)
         return 2
+    if args.app_engine:
+        # App-mode: the Mac app owns this engine. The installer handshake has no
+        # parent to hand off to here, and the bundle check keeps the flag out of
+        # reach everywhere else.
+        if any(
+            (args.installer_suggest_workspace, args.installer_run_id,
+             args.installer_bootstrap, args.installer_native_workspace,
+             args.installer_native_fd)
+        ):
+            print("--app-engine cannot be combined with installer options", file=sys.stderr)
+            return 2
+        if not package_version.running_from_app_bundle():
+            print("--app-engine runs only from the engine inside Ciaobot.app", file=sys.stderr)
+            return 2
+        return _run_server(supervised=args.supervised, app_engine=True)
     if not args.installer_bootstrap:
         # Ordinary `ciao run` keeps its exact call shape.
         return _run_server(supervised=args.supervised)
@@ -196,6 +211,7 @@ def _run_server(
     installer_suggest_workspace: str | None = None,
     installer_native_fd: int | None = None,
     installer_native_workspace: str | None = None,
+    app_engine: bool = False,
 ) -> int:
     from ciao.config import RESTART_EXIT_CODE
     from ciao.main import main as server_main
@@ -218,6 +234,8 @@ def _run_server(
                 installer_native_fd=installer_native_fd,
                 installer_native_workspace=installer_native_workspace,
             )
+        elif app_engine:
+            server_main(supervised=supervised, app_engine=True)
         else:
             server_main(supervised=supervised)
     except SystemExit as exc:
@@ -1442,7 +1460,12 @@ def setup_workspace(
     # existing notes folder when the live LaunchAgent would be hijacked.
     # The later `_write_launchd_plist` guard is defense-in-depth; this one
     # makes refusal non-mutating for `setup_workspace` and `/api/setup/finish`.
-    write_launchd = _service_platform() or launch_agents_dir is not None
+    # In app mode the Mac app owns this engine, so it writes the app-owned
+    # workspace pointer below instead of planting a LaunchAgent — launchd
+    # would otherwise start a second engine at the next login.
+    write_launchd = (
+        _service_platform() or launch_agents_dir is not None
+    ) and not package_version.running_from_app_bundle()
     if write_launchd and not confirm_repoint:
         allow_env = os.environ.get("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", "").strip().lower() in (
             "1",
@@ -1600,6 +1623,15 @@ def setup_workspace(
                 encoding="utf-8", newline="",
             )
             written.append(env_path)
+    if package_version.running_from_app_bundle():
+        # The workspace pointer replaces the service definition in app mode:
+        # this bundled engine is restarted by the app, and the next start
+        # resolves CIAO_WORKSPACE/CIAO_RUNTIME_ROOT from this file instead of
+        # a LaunchAgent plist. Written after .env so the engine's next start
+        # reads the finished workspace.
+        from ciao import app_engine
+
+        written.append(app_engine.write_pointer(root, runtime_root))
     if first_setup or fresh_env:
         # First-time setup: stamp when this workspace was provisioned so the
         # post-setup restart can hold system-routine catch-up for a grace
@@ -8010,6 +8042,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=argparse.SUPPRESS,
     )
+    # App-owned engine mode (#3129): the Mac app launches this exact flag and
+    # supervises the process itself. Not operator surface: hidden from --help,
+    # and refused outside the bundle at dispatch.
+    run_parser.add_argument("--app-engine", action="store_true", help=argparse.SUPPRESS)
     run_parser.set_defaults(func=_run_command)
 
     supervise_parser = subparsers.add_parser(

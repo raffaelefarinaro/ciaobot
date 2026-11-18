@@ -112,6 +112,46 @@ def _workspace_env(source: Any) -> str:
     return str(source.get("CIAO_WORKSPACE", "") or "").strip()
 
 
+def _overlay_workspace_env(
+    base: Mapping[str, str],
+    *,
+    workspace: str,
+    runtime_root: str | None = None,
+) -> dict[str, str]:
+    """``base`` with the workspace's ``.env`` overlaid and the workspace pinned.
+
+    The one merge for both workspace sources (the pointer file the app owns and
+    the service definition install discovery reads). The workspace's ``.env`` is
+    what the running server reads; a bare-shell invocation must see the same
+    values. The workspace is pinned absolutely so the file's relative
+    ``CIAO_WORKSPACE=.`` cannot rebase onto the shell cwd — pinned even when
+    that workspace has no ``.env``: a source naming a directory means a server
+    is installed there, and falling through to a freshly manufactured bootstrap
+    root beside it is the failure discovery exists to prevent. Precedence
+    matches ``load_dotenv``: the caller's environment wins over the file.
+
+    The pin is the merge's final word, not the overlay's: this is entered for an
+    *empty* ``CIAO_WORKSPACE`` as well as an unset one (``export
+    CIAO_WORKSPACE=`` in a shell profile), and the caller's environment wins the
+    merge, so an empty string would otherwise beat the pin. The result was the
+    hybrid this pinning exists to prevent — the installed workspace's auth and
+    provider settings applied to a freshly manufactured bootstrap root, because
+    ``bootstrap_mode`` still saw no workspace.
+    """
+    from dotenv import dotenv_values
+
+    try:
+        overlay: dict[str, str] = without_ignored_dotenv_keys(
+            dotenv_values(Path(workspace) / ".env")
+        )
+    except OSError:
+        overlay = {}
+    merged: dict[str, str] = {**overlay, **base, "CIAO_WORKSPACE": workspace}
+    if runtime_root is not None:
+        merged["CIAO_RUNTIME_ROOT"] = runtime_root
+    return merged
+
+
 def installed_workspace_env(base: Mapping[str, str]) -> dict[str, str]:
     """``base`` with the installed server's workspace and its ``.env`` applied.
 
@@ -122,15 +162,37 @@ def installed_workspace_env(base: Mapping[str, str]) -> dict[str, str]:
     manufactured beside it. ``base`` naming a workspace already is that answer,
     and it is returned untouched.
 
+    App mode answers differently: when this engine is the one Ciaobot for Mac
+    spawned, the app-owned workspace pointer is the only source, and the
+    LaunchAgent plist is never read at all. Before a takeover that plist still
+    names the old engine's workspace, and a bundled engine adopting it would
+    collide with the old engine's port and lock; after it, nothing names a
+    workspace, so an absent or unusable pointer is bootstrap and the setup
+    wizard runs.
+
     Read-only, like the ``export=False`` branch of :meth:`CiaoConfig.from_env`:
     the discovered ``.env`` is overlaid into a private mapping rather than loaded
     into ``os.environ``, because ``load_dotenv`` sets keys it has never seen and
     nothing restores them, so a read-only diagnostic would change its caller's
-    environment. No file is created and no secret is minted. Precedence matches
-    ``load_dotenv``: the caller's environment wins over the file.
+    environment. No file is created and no secret is minted.
     """
     if _workspace_env(base):
         return dict(base)
+    from ciao import package_version
+
+    if package_version.running_from_app_bundle():
+        from ciao import app_engine
+
+        pointer = app_engine.read_pointer()
+        if pointer is None:
+            # Nothing names a workspace in app mode: bootstrap, never the
+            # LaunchAgent the takeover is removing (or has removed).
+            return dict(base)
+        return _overlay_workspace_env(
+            base,
+            workspace=str(pointer.workspace),
+            runtime_root=str(pointer.runtime_root),
+        )
     # The platform branch, the definition it reads and the staleness guard all
     # live in `ciao.install_discovery`; imported here so the seam stays the one
     # place that knows the platform and the patch target the existing tests
@@ -140,40 +202,7 @@ def installed_workspace_env(base: Mapping[str, str]) -> dict[str, str]:
     discovered = discover_workspace(base)
     if discovered is None:
         return dict(base)
-    # The discovered workspace's .env is what the running server reads; a
-    # bare-shell invocation must see the same values — auth settings first:
-    # `ciao run` against a stopped install must require the workspace's
-    # password, not fall back to an unauthenticated shell env. The discovered
-    # workspace is pinned absolutely so the file's relative CIAO_WORKSPACE=.
-    # cannot rebase onto the shell cwd. This must run before any field is
-    # parsed from the mapping, or it would see only the bare shell.
-    from dotenv import dotenv_values
-
-    discovered_workspace = str(discovered)
-    dotenv_path = Path(discovered_workspace) / ".env"
-    # Pinned even when that workspace has no `.env`: a service definition pointing
-    # at a directory means a server is installed there, and falling through to a
-    # freshly manufactured bootstrap root beside it is the failure discovery
-    # exists to prevent. (`from_env` used to pin only when the `.env` existed,
-    # while the CLI's own copy always pinned; this is the one rule for both.)
-    # A definition naming a directory that is no longer there is stale, and pinning
-    # it would recreate what the operator deleted (`_read_or_create_secret` mkdirs
-    # the runtime root), so `discover_workspace`'s `is_dir()` guard is part of
-    # this rule.
-    try:
-        overlay: dict[str, str] = without_ignored_dotenv_keys(dotenv_values(dotenv_path))
-    except OSError:
-        overlay = {}
-    # The pin is the merge's final word, not the overlay's: discovery is entered
-    # for an *empty* CIAO_WORKSPACE as well as an unset one
-    # (`export CIAO_WORKSPACE=` in a shell profile), and the caller's
-    # environment wins the merge, so an empty string would otherwise beat the
-    # pin. The result was the hybrid this pinning exists to prevent — the
-    # installed workspace's auth and provider settings applied to a freshly
-    # manufactured bootstrap root, because `bootstrap_mode` still saw no
-    # workspace.
-    merged: dict[str, str] = {**overlay, **base, "CIAO_WORKSPACE": discovered_workspace}
-    return merged
+    return _overlay_workspace_env(base, workspace=str(discovered))
 
 
 def reset_exported_dotenv() -> None:
