@@ -3182,6 +3182,33 @@ def test_catalog_lists_only_active_providers():
     ]
 
 
+def test_catalog_deduplicates_model_ids_keeping_first_unless_more_capable():
+    providers = {"data": [{"id": "openai", "activation": "enabled"}]}
+
+    def m(model_id, variants=(), image=False):
+        return {
+            "providerID": "openai", "modelID": model_id, "name": model_id,
+            "enabled": True, "variants": [{"id": v} for v in variants],
+            "capabilities": {"input": ["text", "image"] if image else ["text"]},
+        }
+
+    models = {"data": [
+        m("a", ["low"]),
+        m("b", ["low"]),
+        {**m("a", ["low"]), "name": "later"},  # equal: first kept
+        m("c", []),
+        m("b", ["low", "high"]),               # more variants: replaces, at b's slot
+        m("c", [], image=True),                # image-capable: replaces
+        m("a", []),                            # less capable: ignored
+    ]}
+    rows = _catalog_from_api(providers, models)
+    assert [r["model"] for r in rows] == ["openai/a", "openai/b", "openai/c"]
+    assert rows[0]["variants"] == ["low"]
+    assert rows[0]["label"] == "a (openai)"
+    assert rows[1]["variants"] == ["high", "low"]
+    assert rows[2]["images"] is True
+
+
 def test_catalog_reports_per_model_reasoning_variants():
     providers = {"data": [{"id": "opencode", "activation": "auto"}]}
     models = {"data": [
