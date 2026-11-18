@@ -36,7 +36,7 @@ export const inventory: InventoryEntry[] = [
     kind: 'component',
     owner: { path: 'web/src/components/settings/SettingsSwitch.vue', anchor: 'class="settings-switch"' },
     sources: [],
-    consumers: ['web/src/components/settings/SettingsRestartResume.vue'],
+    consumers: ['web/src/components/settings/SettingsNotifications.vue', 'web/src/components/settings/SettingsRestartResume.vue'],
     variants: ['checked', 'disabled', 'busy'],
     variantNotes: 'Controlled native switch; checked controls On/Off, disabled blocks activation, busy shows an ellipsis without disabling. Parents own saves.',
     states: [
@@ -190,7 +190,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ChatTurnActivity.vue",
       "web/src/components/InjectedPromptCard.vue",
       "web/src/components/NeedsYouCard.vue",
-      "web/src/components/NeedsYouStack.vue",
       "web/src/components/ProjectView.vue",
       "web/src/components/TaskOriginNote.vue",
       "web/src/components/needs-you/registry.ts"
@@ -2504,6 +2503,7 @@ export const inventory: InventoryEntry[] = [
     },
     "sources": [],
     "consumers": [
+      "web/src/components/ChatMcpConnections.vue",
       "web/src/components/NeedsYouStack.vue"
     ],
     "variants": [],
@@ -3648,7 +3648,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ProposalReviewPanel.vue",
       "web/src/components/SchedulePanel.vue",
       "web/src/components/SettingsView.vue",
-      "web/src/components/TaskWorkspaceSurface.vue",
       "web/src/components/UsageView.vue",
       "web/src/components/VaultReviewPanel.vue",
       "web/src/components/WebhookTriggers.vue",
