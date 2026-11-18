@@ -429,6 +429,19 @@ The Dock icon carries the same attention count as the menu-bar mark. Both read t
 
 `launch(_:parentEnvironment:workingDirectory:)` returns a `BundledEngineLaunch` value (absolute launcher path, arguments, environment, working directory) and spawns nothing; the consumer runs it itself. The executable is `engine/bin/ciao` called directly, with no shell, no `PATH` lookup and no `/usr/bin/env`. The arguments are `["--version"]` or `["run"] + extra`. The environment is the parent's minus every `CIAO_*`, `PWA_*`, `PYTHON*` and `DYLD_*` variable and minus `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE`; nothing is added. The working directory is whatever the caller passes (the user's home, never the read-only signed engine root).
 
+### Engine supervisor (not wired yet)
+
+`Sources/CiaobotMac/EngineSupervisor.swift` is the app-side owner of the bundled engine's lifetime (#3129 S5a). Nothing constructs it yet; S5b wires local mode into the app. It is tested with fakes only (`EngineSupervisorTests`), and no test spawns a real engine.
+
+- **Mode.** `EngineMode.initial(saved:lastOrigin:hostIsArm64:)`: a saved `local` or `external` wins; otherwise a non-arm64 host is `external`, no last connection or a loopback one is `local`, and any other last connection is `external`. `UserDefaultsEngineModeStore` keeps the choice under `CiaobotEngineMode`.
+- **Paths.** `EngineHome` derives every app-side path from one home directory: `~/Library/Application Support/Ciaobot/engine/` (`ready.json`, `workspace.json`, `takeover/`) and the log `~/Library/Logs/Ciaobot/engine.log`.
+- **Spawn.** `engine/bin/ciao run --app-engine`, with the app's environment plus `HOME` set to the injected home (the launcher strips `CIAO_*`, `PWA_*`, `PYTHON*`, `DYLD_*`) and the home as working directory. stdout and stderr are appended to the log, which is rotated to `engine.log.1` at start when over 20 MB. A missing bundled engine (including an Intel host) is `failed` with fixed copy and nothing is spawned.
+- **Readiness.** Every 250 ms for at most 90 s the supervisor reads `ready.json` until its `pid` is the child's, then `GET http://127.0.0.1:<port>/api/startup-status` must return the same `pid` and `startup_id` (an `EngineIdentityChecking`, because `ProbeChecking` answers only yes or no). On timeout the child is terminated and the state is `failed`.
+- **Running.** A 5 s timer re-reads `ready.json`. A new `startup_id` (an `execv` restart in the same pid) is probed again before it is published, and a new port publishes a new origin.
+- **Exit.** Status 69 is `portInUse(port)` with no retry. Any other unexpected exit retries after 2 s, 5 s and 15 s; a fourth exit within five minutes is `failed` with the last non-empty log line (at most 200 characters). `restartAfterFailure()` clears that history.
+- **Orphans.** Before spawning, a live pid named by `ready.json` is terminated (SIGTERM, then SIGKILL after 35 s) only when its parent is pid 1 and its executable path lies under the engine root. Any other live pid holding the record is `failed("Another Ciaobot is already running this workspace.")` and is never signalled.
+- **Stop.** `stop(grace:completion:)` sends SIGTERM and SIGKILL only after the grace (35 s by default); the completion runs when the child has exited. A stop never respawns.
+
 ## Installing Ciaobot on this Mac
 
 The connection screen offers **Install Ciaobot on This Mac** only when discovery finds no Ciaobot on this Mac, or after a failed attempt as a retry. When an installation is found, the offer does not appear.
