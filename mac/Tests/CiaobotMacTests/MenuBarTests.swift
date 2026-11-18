@@ -74,9 +74,11 @@ private final class FakeMainWindowPresenter: MainWindowPresenting {
 private final class FakeMenuBarController: MenuBarControlling {
     private(set) var startCount = 0
     private(set) var stopCount = 0
+    private(set) var quittingCount = 0
 
     func start() { startCount += 1 }
     func stop() { stopCount += 1 }
+    func setQuittingTitle() { quittingCount += 1 }
 }
 
 /// Records what the app asked of the updater. No Sparkle object exists, so no

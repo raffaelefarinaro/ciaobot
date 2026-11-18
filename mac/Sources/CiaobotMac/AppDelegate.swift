@@ -112,6 +112,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let lastServer: LastServerStoring
     let hostStore: HostListStoring
 
+    /// Reads the launch Apple event (`applicationWillFinishLaunching` reads
+    /// the login launch there, the only moment it is current).
+    private let launchEvent: () -> NSAppleEventDescriptor?
+    /// The main window, for the login-launch close. The production default
+    /// resolves the same identifier the presenter reopens.
+    private let mainWindow: @MainActor () -> NSWindow?
+    /// Presents the quit confirmation. Tests record the call and decide.
+    private let presentQuitDialog: @MainActor (EngineQuitDialog) -> Bool
+    /// The running-chat count for the quit confirmation.
+    private let blockers: RestartBlockersFetching
+    /// Responds to a deferred `applicationShouldTerminate`. Tests record it.
+    private let replyToTerminate: @MainActor (Bool) -> Void
+    /// True when this launch came from the login item: no main window is
+    /// opened, while the engine starts as usual (S6).
+    private var launchedAtLogin = false
+    /// One terminate request at a time: while the quit dialog or the
+    /// stop-and-exit flow is pending, further quit events wait for its reply.
+    private var terminationDeferred = false
+
     typealias MenuBarFactory = @MainActor (AppSessionStatus, ClientUpdateControlling?, EngineUpdateMenuProviding?,
                                            @escaping () -> Void, @escaping () -> Void) -> MenuBarControlling
 
@@ -219,7 +238,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mode: EngineMode? = nil,
         supervisor: EngineSupervisor? = nil,
         lastServer: LastServerStoring? = nil,
-        hostStore: HostListStoring? = nil
+        hostStore: HostListStoring? = nil,
+        // The lifecycle surfaces (S6). Defaults are the real behaviour; the
+        // test initializer injects doubles, so no test shows a dialog, reads
+        // the loopback route, closes a real window, or replies to AppKit.
+        // `launchEvent`'s default reads the current Apple event, which is only
+        // non-nil while one is being handled — never in a test process.
+        launchEvent: @escaping () -> NSAppleEventDescriptor? = { NSAppleEventManager.shared().currentAppleEvent },
+        mainWindow: (@MainActor () -> NSWindow?)? = nil,
+        quitDialog: (@MainActor (EngineQuitDialog) -> Bool)? = nil,
+        restartBlockers: RestartBlockersFetching? = nil,
+        replyToTerminate: (@MainActor (Bool) -> Void)? = nil
     ) {
         self.session = session
         self.presenter = presenter
@@ -238,6 +267,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let lastServer = lastServer ?? UserDefaultsLastServerStore()
         self.lastServer = lastServer
         self.hostStore = hostStore ?? UserDefaultsHostListStore(lastServer: lastServer)
+        self.launchEvent = launchEvent
+        // The real window resolution is the presenter's own rule: the scene
+        // keeper with the stable `main` identifier.
+        self.mainWindow = mainWindow ?? { MainWindowPresenter.mainWindow(in: NSApp.windows) }
+        self.presentQuitDialog = quitDialog ?? { dialog in
+            EngineLifecycle.presentConfirmation(
+                title: dialog.title, body: dialog.body,
+                confirm: EngineLifecycle.quitConfirmButton, cancel: EngineLifecycle.quitCancelButton
+            )
+        }
+        self.blockers = restartBlockers ?? RestartBlockersProbe()
+        self.replyToTerminate = replyToTerminate ?? { NSApp.reply(toApplicationShouldTerminate: $0) }
         super.init()
     }
 
@@ -284,6 +325,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let permission = SystemNotificationPermissionClient()
         permission.prepare()
         notificationPermission = permission
+        // The launch Apple event is the current event only now, so the login
+        // launch fact is read here (S6): a login launch opens no window.
+        launchedAtLogin = EngineLifecycle.isLoginLaunch(launchEvent())
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -316,6 +360,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // quit handling).
         if mode == .local {
             supervisor?.start()
+        }
+
+        // A login launch opens no main window: the engine starts as usual and
+        // the tray is the way back in. SwiftUI creates the scene window during
+        // launch, so closing it happens one main-loop turn later — and the
+        // window-close observer below then applies the saved Dock preference.
+        // The scene keeps its window for the app's lifetime, so the tray
+        // reopens the same one.
+        if launchedAtLogin {
+            DispatchQueue.main.async { [mainWindow] in
+                mainWindow()?.close()
+            }
         }
 
         // A saved "Hide Dock Icon" choice applies after the initial SwiftUI
@@ -396,7 +452,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 systemSettings: systemSettings,
                 changeHost: ConnectionMenuActions.changeConnectedHost(present: present),
                 updates: updater,
-                engineUpdates: engineUpdates
+                engineUpdates: engineUpdates,
+                engineSupervisor: supervisor,
+                localEngineMode: mode == .local
             )
         }
         controller.start()
@@ -428,5 +486,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             presenter.present()
         }
         return true
+    }
+
+    // MARK: Quit (S6)
+
+    /// One quit decision for every terminate request (#3129 S6). The tray and
+    /// Cmd-Q converge here like the plan says, so they get exactly one
+    /// confirmation; a session-ending quit never asks and still stops the
+    /// engine; external mode leaves at once because it stopped nothing.
+    ///
+    /// While a deferred flow is pending (dialog open, or the engine draining),
+    /// further terminate requests return `.terminateLater` and wait for the
+    /// one reply the pending flow makes.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if terminationDeferred { return .terminateLater }
+        let reason = EngineLifecycle.quitReason(launchEvent())
+        switch EngineLifecycle.terminationPlan(mode: mode, engineState: supervisor?.state, quitReason: reason) {
+        case .terminateNow:
+            return .terminateNow
+        case .stopThenTerminate(let grace):
+            terminationDeferred = true
+            stopEngineThenTerminate(grace: grace)
+            return .terminateLater
+        case .confirm:
+            terminationDeferred = true
+            beginConfirmedQuit()
+            return .terminateLater
+        }
+    }
+
+    /// Stops the engine and ends the app only after the stop completes, so the
+    /// engine drains before exit. The tray shows the fixed stopping line for
+    /// the whole stop; a missing supervisor (nothing to stop) leaves at once.
+    private func stopEngineThenTerminate(grace: TimeInterval) {
+        menuBar?.setQuittingTitle()
+        guard let supervisor else {
+            finishDeferredTermination(terminate: true)
+            return
+        }
+        supervisor.stop(grace: grace) { [weak self] in
+            self?.finishDeferredTermination(terminate: true)
+        }
+    }
+
+    /// A user quit of a starting or running local engine: read the running-chat
+    /// count from the engine's own loopback route (no session, one second,
+    /// nil on anything else), show the one confirmation, and act on it. Cancel
+    /// replies false, which puts the app back where it was.
+    private func beginConfirmedQuit() {
+        guard let supervisor else {
+            finishDeferredTermination(terminate: true)
+            return
+        }
+        let decide: (Int?) -> Void = { [weak self] count in
+            // The probe resolves on the main queue, like every connection fetch.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let message = EngineLifecycle.quitMessage(activeChats: count)
+                guard self.presentQuitDialog(EngineQuitDialog(title: message.title, body: message.body)) else {
+                    self.finishDeferredTermination(terminate: false)
+                    return
+                }
+                self.stopEngineThenTerminate(grace: EngineLifecycle.quitGrace)
+            }
+        }
+        // A starting engine has no origin yet, so it shows the dialog with no
+        // count rather than fetching one.
+        if case .running(let origin, _, _) = supervisor.state {
+            blockers.activeChats(of: origin, completion: decide)
+        } else {
+            decide(nil)
+        }
+    }
+
+    private func finishDeferredTermination(terminate: Bool) {
+        terminationDeferred = false
+        replyToTerminate(terminate)
     }
 }

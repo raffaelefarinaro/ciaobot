@@ -434,7 +434,7 @@ struct ConnectionView: View {
     @State private var pendingPortRestart = false
     /// The engine mode this connection session runs in. Initialized from the
     /// launch's resolved mode; **Connect to Another Server…** switches it to
-    /// external mid-session (S6 adds the confirmation).
+    /// external mid-session, behind the confirmation (S6).
     @State private var engineMode: EngineMode
     /// The local-mode connection decisions (probe, replace, failure, bounded
     /// retry). A class so the decisions stay testable without a rendered view.
@@ -464,6 +464,9 @@ struct ConnectionView: View {
     private let autoDiscovery: Bool
     private let lastServer: LastServerStoring
     private let hostStore: HostListStoring
+    /// Presents the mode-switch confirmation (S6). The real one is the AppKit
+    /// dialog; tests record the call and decide.
+    private let presentModeSwitchDialog: @MainActor (EngineLifecycle.ModeSwitchDialog) -> Bool
     /// A test launch never reads or writes the saved host list, exactly as it
     /// never reads the saved origin: the operator's real defaults stay out of
     /// the fixture run.
@@ -510,7 +513,8 @@ struct ConnectionView: View {
         appSettings: AppSettingsBridge? = nil,
         supervisor: EngineSupervisor? = nil,
         engineMode: EngineMode = .external,
-        modeStore: EngineModeStoring? = nil
+        modeStore: EngineModeStoring? = nil,
+        modeSwitchDialog: (@MainActor (EngineLifecycle.ModeSwitchDialog) -> Bool)? = nil
     ) {
         self.probe = probe
         self.signIn = signIn ?? .live
@@ -519,6 +523,11 @@ struct ConnectionView: View {
         self.appSettings = appSettings
         self.lastServer = lastServer
         self.hostStore = hostStore
+        self.presentModeSwitchDialog = modeSwitchDialog ?? { dialog in
+            EngineLifecycle.presentConfirmation(
+                title: dialog.title, body: dialog.body, confirm: dialog.confirm, cancel: dialog.cancel
+            )
+        }
         _discovery = StateObject(wrappedValue: discovery ?? LocalServerDiscovery())
         _installer = StateObject(wrappedValue: installer ?? NativeInstaller())
         _engineUpdater = StateObject(wrappedValue: engineUpdater ?? EngineUpdater())
@@ -577,7 +586,7 @@ struct ConnectionView: View {
                     connection: localPhase,
                     canRetry: localModel.canRetry,
                     onTryAgain: { self.tryAgainLocal() },
-                    onConnectExternal: { self.connectToAnotherServer() }
+                    onConnectExternal: { self.confirmAndConnectToAnotherServer() }
                 )
             } else if let origin {
                 // A fallback is reported where the session actually lives: the
@@ -798,6 +807,13 @@ struct ConnectionView: View {
         .frame(minWidth: 480, minHeight: 320)
         .onAppear { launchOnAppear() }
         .onReceive(NotificationCenter.default.publisher(for: .ciaobotChangeServer)) { _ in
+            if engineMode == .local {
+                // The app-menu command and the tray row land here too. Only
+                // the confirmation stops the engine (S6), and the dialog must
+                // not run inside a view update, so it steps out first.
+                DispatchQueue.main.async { self.confirmAndConnectToAnotherServer() }
+                return
+            }
             guard origin != nil else { return }
             address = origin?.url.absoluteString ?? address
             discovery.invalidate()
@@ -1136,10 +1152,20 @@ struct ConnectionView: View {
         }
     }
 
-    /// **Connect to Another Server…** from the engine status screen: stop the
-    /// engine, save the external choice, and show the ordinary connection
-    /// screen. S6 adds the confirmation dialog and the menu command. Internal
-    /// for tests.
+    /// Every connect-to-another-server surface in local mode (the status
+    /// screen's button, the app-menu command ⇧⌘L, and the tray row) confirms
+    /// once before the engine stops (S6). Cancel leaves the engine and the
+    /// running session exactly as they were. External mode never shows this
+    /// dialog, so its surfaces keep their shipped behaviour.
+    func confirmAndConnectToAnotherServer() {
+        guard engineMode == .local else { return }
+        guard presentModeSwitchDialog(EngineLifecycle.modeSwitchDialog) else { return }
+        connectToAnotherServer()
+    }
+
+    /// **Connect to Another Server…** from the engine status screen (after
+    /// confirmation): stop the engine, save the external choice, and show the
+    /// ordinary connection screen. Internal for tests.
     func connectToAnotherServer() {
         if let supervisor { supervisor.stop {} }
         modeStore?.mode = .external

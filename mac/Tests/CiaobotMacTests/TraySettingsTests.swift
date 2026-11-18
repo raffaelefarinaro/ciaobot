@@ -182,9 +182,11 @@ private final class SettingsFakeStatusItemFactory: StatusItemFactory {
 private final class SettingsFakeMenuBar: MenuBarControlling {
     private(set) var startCount = 0
     private(set) var stopCount = 0
+    private(set) var quittingCount = 0
 
     func start() { startCount += 1 }
     func stop() { stopCount += 1 }
+    func setQuittingTitle() { quittingCount += 1 }
 }
 
 @MainActor
