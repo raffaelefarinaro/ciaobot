@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import Network
 
 @testable import CiaobotMac
 
@@ -10,6 +11,7 @@ private final class LifecycleProcesses: EngineProcessRunning {
     var onExit: ((Int32, Int32) -> Void)?
     var spawns: [(launch: BundledEngineLaunch, log: URL)] = []
     var terminated: [Int32] = []
+    var terminateKeepsAlive = false
     var killed: [Int32] = []
     var alive: [Int32: EngineProcessInfo] = [:]
     var nextPID: Int32 = 5000
@@ -19,7 +21,7 @@ private final class LifecycleProcesses: EngineProcessRunning {
         nextPID += 1
         return nextPID
     }
-    func terminate(_ pid: Int32) { terminated.append(pid); alive[pid] = nil }
+    func terminate(_ pid: Int32) { terminated.append(pid); if !terminateKeepsAlive { alive[pid] = nil } }
     func kill(_ pid: Int32) { killed.append(pid); alive[pid] = nil }
     func inspect(_ pid: Int32) -> EngineProcessInfo? { alive[pid] }
 }
@@ -89,6 +91,8 @@ private final class LifecycleMenuBar: MenuBarControlling {
     func start() {}
     func stop() {}
     func setQuittingTitle() { quittingCount += 1 }
+    private(set) var localModes: [Bool] = []
+    func setLocalEngineMode(_ local: Bool) { localModes.append(local) }
 }
 
 /// A window double that records close without performing it: the login-launch
@@ -248,19 +252,23 @@ final class EngineLifecycleTests: XCTestCase {
         XCTAssertFalse(EngineLifecycle.isLoginLaunch(nil))
     }
 
-    func testQuitMessageCopyForNilZeroAndThreeChats() {
+    func testQuitMessageCopyForNilZeroAndThreeBlockers() {
         let base = "This also stops Ciaobot on this Mac: chats, schedules and access from your phone pause until you open Ciaobot again."
-        let none = EngineLifecycle.quitMessage(activeChats: nil)
+        let none = EngineLifecycle.quitMessage(blockers: nil)
         XCTAssertEqual(none.title, "Quit Ciaobot?")
         XCTAssertEqual(none.body, base)
-        XCTAssertEqual(EngineLifecycle.quitMessage(activeChats: 0).body, base,
-                       "zero working chats state no count")
-        let three = EngineLifecycle.quitMessage(activeChats: 3)
-        XCTAssertTrue(three.body.hasSuffix(" 3 chats are still working and will be interrupted."),
-                      "the body names the count, \(three.body)")
-        XCTAssertTrue(
-            EngineLifecycle.quitMessage(activeChats: 1).body.hasSuffix(" 1 chat is still working and will be interrupted.")
-        )
+        XCTAssertEqual(EngineLifecycle.quitMessage(blockers: 0).body, base, "zero blockers add nothing")
+        // restart_blockers also counts open questions, permissions and
+        // background agents, so the copy never claims a chat count.
+        let suffix = " Chats or background work are still running and will be interrupted."
+        XCTAssertEqual(EngineLifecycle.quitMessage(blockers: 3).body, base + suffix)
+        XCTAssertEqual(EngineLifecycle.quitMessage(blockers: 1).body, base + suffix)
+    }
+
+    func testAnUpdateInstallIsASystemQuit() {
+        XCTAssertEqual(EngineLifecycle.quitReason(nil, updateInstall: true), .system)
+        XCTAssertEqual(EngineLifecycle.quitReason(quitEvent(reason: nil), updateInstall: true), .system)
+        XCTAssertEqual(EngineLifecycle.quitReason(nil, updateInstall: false), .user)
     }
 
     func testTerminationPlanTable() {
@@ -344,6 +352,8 @@ final class EngineLifecycleTests: XCTestCase {
         launchEvent: (() -> NSAppleEventDescriptor?)? = nil,
         mainWindow: (@MainActor () -> NSWindow?)? = nil,
         quitDialog: (@MainActor (EngineQuitDialog) -> Bool)? = nil,
+        updateQuit: UpdateQuitIntent? = nil,
+        loginCloseSchedule: LoginLaunchWindowCloser.Schedule? = nil,
         launched: Bool = false
     ) -> AppDelegate {
         let delegate = AppDelegate(
@@ -359,7 +369,9 @@ final class EngineLifecycleTests: XCTestCase {
             mainWindow: mainWindow,
             quitDialog: quitDialog ?? { [dialogs] dialog in dialogs.present(dialog) },
             restartBlockers: blockers,
-            replyToTerminate: { [self] terminate in replies.append(terminate) }
+            replyToTerminate: { [self] terminate in replies.append(terminate) },
+            updateQuit: updateQuit,
+            loginCloseSchedule: loginCloseSchedule
         )
         // The tray surfaces are handed over at launch; a started app runs no
         // second engine (a running or starting supervisor ignores `start()`).
@@ -403,8 +415,8 @@ final class EngineLifecycleTests: XCTestCase {
         XCTAssertEqual(blockers.origins.count, 1, "the fetch starts with the terminate request")
         blockers.answerAll()
         XCTAssertEqual(dialogs.titles, ["Quit Ciaobot?"])
-        XCTAssertTrue(dialogs.bodies.first?.hasSuffix(" 3 chats are still working and will be interrupted.") ?? false,
-                      "the dialog names the engine's working chats")
+        XCTAssertTrue(dialogs.bodies.first?.hasSuffix(" Chats or background work are still running and will be interrupted.") ?? false,
+                      "the dialog says work is still running")
         XCTAssertEqual(blockers.origins.map { $0.canonicalKey }, ["http://127.0.0.1:8777"],
                        "the count comes from the engine's own origin")
         XCTAssertEqual(processes.terminated, [pid], "a confirmed quit SIGTERMs the engine")
@@ -473,7 +485,7 @@ final class EngineLifecycleTests: XCTestCase {
         XCTAssertEqual(shouldTerminate(delegate), .terminateLater)
         XCTAssertEqual(dialogs.titles, [], "there is nothing left to ask about")
         XCTAssertEqual(blockers.origins, [])
-        XCTAssertEqual(processes.terminated, [pid, pid], "the joined stop renews the SIGTERM")
+        XCTAssertEqual(processes.terminated, [pid], "a joined stop sends no second SIGTERM")
         XCTAssertEqual(menuBar.quittingCount, 1)
         processes.onExit?(pid, 0)
         XCTAssertEqual(replies, [true])
@@ -801,6 +813,348 @@ final class EngineLifecycleTests: XCTestCase {
             XCTAssertTrue(row.target === controller)
         }
     }
+
+    // MARK: Reply ordering (AppKit ignores a reply sent before .terminateLater returns)
+
+    /// Spins the main queue so a deferred reply can land.
+    private func settle() {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+    }
+
+    /// A starting engine with **Cancel**: the dialog answers synchronously, so
+    /// the reply must still come after `.terminateLater` was returned, and the
+    /// flow must be reusable afterwards.
+    func testAStartingEngineCancelRepliesOnlyAfterTheReturn() {
+        let supervisor = makeSupervisor()
+        supervisor.start()
+        XCTAssertEqual(supervisor.state, .starting)
+        dialogs.result = false
+        let delegate = makeDelegate(mode: .local, supervisor: supervisor)
+
+        XCTAssertEqual(shouldTerminate(delegate), .terminateLater)
+        XCTAssertEqual(replies, [], "a reply before the return value would be ignored by AppKit")
+        settle()
+        XCTAssertEqual(replies, [false])
+
+        XCTAssertEqual(shouldTerminate(delegate), .terminateLater, "the cancel reset the flow")
+        XCTAssertEqual(dialogs.titles.count, 2)
+        XCTAssertEqual(replies, [false], "the second reply has not been sent yet")
+        settle()
+        XCTAssertEqual(replies, [false, false])
+    }
+
+    /// A stop that completes inline (an orphan that is already gone, so there
+    /// is no child to wait for) must reply only after the return as well.
+    func testAStopThatFinishesInlineRepliesOnlyAfterTheReturn() throws {
+        let orphan: Int32 = 7777
+        try writeReady(pid: orphan)
+        processes.alive[orphan] = EngineProcessInfo(parentPID: 1, path: engineRoot.path + "/bin/python")
+        processes.terminateKeepsAlive = true
+        let supervisor = makeSupervisor()
+        supervisor.start()
+        XCTAssertEqual(supervisor.state, .starting, "reaping the orphan")
+        processes.alive[orphan] = nil   // gone by the time the quit's stop looks
+        let reason = quitEvent(reason: kAELogOut)
+        let delegate = makeDelegate(mode: .local, supervisor: supervisor, launchEvent: { reason })
+
+        XCTAssertEqual(shouldTerminate(delegate), .terminateLater)
+        XCTAssertEqual(replies, [], "the inline completion must not reply before the return")
+        settle()
+        XCTAssertEqual(replies, [true])
+        XCTAssertEqual(dialogs.titles, [])
+    }
+
+    /// With no supervisor there is nothing to stop and nothing to reply to:
+    /// the app returns `.terminateNow` directly.
+    func testLocalModeWithoutASupervisorTerminatesNowWithoutAReply() {
+        let delegate = makeDelegate(mode: .local, supervisor: nil)
+        XCTAssertEqual(shouldTerminate(delegate), .terminateNow)
+        settle()
+        XCTAssertEqual(replies, [])
+        XCTAssertEqual(dialogs.titles, [])
+    }
+
+    /// A deferred reply that comes later (the drain) is sent at once, not hopped.
+    func testAReplyAfterTheDrainIsNotDelayedByAHop() throws {
+        let supervisor = makeSupervisor()
+        let pid = try bringUp(supervisor)
+        let reason = quitEvent(reason: kAELogOut)
+        let delegate = makeDelegate(mode: .local, supervisor: supervisor, launchEvent: { reason })
+        XCTAssertEqual(shouldTerminate(delegate), .terminateLater)
+        processes.onExit?(pid, 0)
+        XCTAssertEqual(replies, [true], "outside the delegate call the reply is immediate")
+    }
+
+    // MARK: Update-driven quit
+
+    /// Sparkle's immediate install terminates the app: no dialog may stand in
+    /// front of it, and the engine still drains before the reply.
+    func testAnUpdateInstallTerminateShowsNoDialogAndDrainsTheEngine() throws {
+        let supervisor = makeSupervisor()
+        let pid = try bringUp(supervisor)
+        dialogs.result = false   // would cancel the quit if it were asked
+        let updateQuit = UpdateQuitIntent()
+        let delegate = makeDelegate(mode: .local, supervisor: supervisor, updateQuit: updateQuit, launched: true)
+
+        updateQuit.beginInstall()
+        XCTAssertEqual(shouldTerminate(delegate), .terminateLater)
+        XCTAssertEqual(dialogs.titles, [], "an update-driven quit never asks")
+        XCTAssertEqual(blockers.origins, [])
+        XCTAssertEqual(processes.terminated, [pid])
+        processes.onExit?(pid, 0)
+        XCTAssertEqual(replies, [true])
+    }
+
+    /// Without the update flag the same running engine asks (control for the test above).
+    func testWithoutTheUpdateFlagTheSameQuitAsks() throws {
+        let supervisor = makeSupervisor()
+        _ = try bringUp(supervisor)
+        dialogs.result = false
+        let delegate = makeDelegate(mode: .local, supervisor: supervisor, updateQuit: UpdateQuitIntent())
+        XCTAssertEqual(shouldTerminate(delegate), .terminateLater)
+        blockers.answerAll()
+        XCTAssertEqual(dialogs.titles.count, 1)
+    }
+
+    /// The install handler raises the flag before it runs Sparkle's handler.
+    func testTheInstallDelegateRaisesTheFlagBeforeSparkleTerminates() {
+        let updateQuit = UpdateQuitIntent()
+        var deferred: (() -> Void)?
+        let delegate = ClientUpdateInstallDelegate(
+            immediateInstall: ImmediateInstallScheduler { handler in deferred = handler },
+            updateQuit: updateQuit
+        )
+        var flagWhenSparkleTerminated: Bool?
+        XCTAssertTrue(delegate.takeControl { flagWhenSparkleTerminated = updateQuit.installing })
+        XCTAssertFalse(updateQuit.installing, "nothing is raised before the deferred turn")
+        deferred?()
+        XCTAssertEqual(flagWhenSparkleTerminated, true)
+    }
+
+    // MARK: Stop joins
+
+    /// A second stop joins the first: no second SIGTERM and the SIGKILL
+    /// deadline of the first stop is not pushed back.
+    func testAJoinedStopKeepsTheFirstStopsKillDeadline() throws {
+        let supervisor = makeSupervisor()
+        let pid = try bringUp(supervisor)
+        var completions = 0
+        supervisor.stop(grace: 35) { completions += 1 }
+        time.advance(30)
+        supervisor.stop(grace: 35) { completions += 1 }
+        XCTAssertEqual(processes.terminated, [pid], "no second SIGTERM on join")
+        time.advance(5)
+        XCTAssertEqual(processes.killed, [pid], "the first deadline still applies")
+        time.advance(5)
+        XCTAssertEqual(completions, 2, "both callers are released")
+    }
+
+    // MARK: Blockers probe state
+
+    func testTwoSuccessiveBlockerFetchesDoNotShareABody() throws {
+        let server = try LoopbackBlockersServer(bodies: [#"{"restart_blockers":[1,2,3]}"#, #"{"restart_blockers":[1]}"#])
+        defer { server.stop() }
+        let origin = try XCTUnwrap(Origin("http://127.0.0.1:\(server.port)"))
+        let probe = RestartBlockersProbe()
+        var counts: [Int?] = []
+        for _ in 0..<2 {
+            let done = expectation(description: "fetch")
+            probe.activeChats(of: origin) { counts.append($0); done.fulfill() }
+            wait(for: [done], timeout: 5)
+        }
+        XCTAssertEqual(counts, [3, 1], "a second quit reads its own answer")
+    }
+
+    // MARK: Login launch window
+
+    private func manualSchedule() -> (LoginLaunchWindowCloser.Schedule, () -> Bool) {
+        final class Box { var work: [@MainActor () -> Void] = [] }
+        let box = Box()
+        let schedule: LoginLaunchWindowCloser.Schedule = { _, work in box.work.append(work) }
+        // Runs one pending retry; false when none is pending.
+        let step: () -> Bool = {
+            guard !box.work.isEmpty else { return false }
+            let next = box.work.removeFirst()
+            MainActor.assumeIsolated { next() }
+            return true
+        }
+        return (schedule, step)
+    }
+
+    /// The scene window appears late: the closer retries until it exists, closes it once and stops.
+    func testTheLoginCloserRetriesUntilALateWindowExists() {
+        let window = makeSpyWindow()
+        var calls = 0
+        let (schedule, step) = manualSchedule()
+        let closer = LoginLaunchWindowCloser(window: { calls += 1; return calls > 3 ? window : nil }, schedule: schedule)
+        closer.start()
+        XCTAssertEqual(window.closeCount, 0)
+        while step() {}
+        XCTAssertEqual(window.closeCount, 1, "closed exactly once")
+        XCTAssertEqual(calls, 4, "no polling after the close")
+        XCTAssertTrue(closer.closed)
+    }
+
+    /// A window that never appears is given up on, bounded.
+    func testTheLoginCloserGivesUpAfterTheBound() {
+        var calls = 0
+        let (schedule, step) = manualSchedule()
+        let closer = LoginLaunchWindowCloser(window: { calls += 1; return nil }, schedule: schedule)
+        closer.start()
+        while step() {}
+        XCTAssertEqual(calls, LoginLaunchWindowCloser.maximumAttempts)
+        XCTAssertFalse(closer.closed)
+    }
+
+    /// Through the delegate: a login launch whose window shows up only after
+    /// several turns still gets closed.
+    func testALoginLaunchClosesAWindowThatAppearsLate() {
+        let window = makeSpyWindow()
+        let login = launchEvent(propDataKeyword: keyAELaunchedAsLogInItem)
+        var calls = 0
+        let (schedule, step) = manualSchedule()
+        let delegate = makeDelegate(mode: .external, launchEvent: { login },
+                                    mainWindow: { calls += 1; return calls > 2 ? window : nil },
+                                    loginCloseSchedule: schedule)
+        delegate.applicationWillFinishLaunching(Notification(name: NSApplication.willFinishLaunchingNotification))
+        delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        while step() {}
+        XCTAssertEqual(window.closeCount, 1)
+    }
+
+    // MARK: Use Ciaobot on This Mac
+
+    private func makeExternalView(
+        supervisor: EngineSupervisor?,
+        modeStore: EngineModeStoring,
+        hostIsArm64: Bool = true,
+        engineMode: EngineMode = .external,
+        onModeChange: @escaping @MainActor (EngineMode) -> Void = { _ in }
+    ) -> ConnectionView {
+        ConnectionView(
+            probe: LifecycleProbe(),
+            signIn: SessionSignIn(
+                registry: SessionStoreRegistry(fileURL: FileManager.default.temporaryDirectory
+                    .appendingPathComponent("EngineLifecycle-Registry-\(UUID().uuidString).json")),
+                eraser: LifecycleEraser(),
+                persistentAvailable: false
+            ),
+            session: AppSessionStatus(),
+            lastServer: lastServer,
+            hostStore: hostStore,
+            supervisor: supervisor,
+            engineMode: engineMode,
+            modeStore: modeStore,
+            onModeChange: onModeChange,
+            hostIsArm64: hostIsArm64
+        )
+    }
+
+    func testUseThisMacSwitchesToLocalAndStartsTheEngine() {
+        let store = TransientEngineModeStore()
+        store.mode = .external
+        var changes: [EngineMode] = []
+        let view = makeExternalView(supervisor: makeSupervisor(), modeStore: store) { changes.append($0) }
+
+        XCTAssertTrue(view.offersThisMac)
+        view.useThisMac()
+        XCTAssertEqual(store.mode, .local)
+        XCTAssertEqual(changes, [.local])
+        XCTAssertEqual(processes.spawns.count, 1, "the supervisor starts after the mode is saved")
+    }
+
+    func testUseThisMacIsHiddenAndInertOnIntelMissingEngineAndLocalMode() {
+        let store = TransientEngineModeStore()
+        store.mode = .external
+        let intel = makeExternalView(supervisor: makeSupervisor(), modeStore: store, hostIsArm64: false)
+        XCTAssertFalse(intel.offersThisMac)
+        intel.useThisMac()
+
+        let noEngine = EngineSupervisor(engine: nil, home: home, processes: processes, identity: identity)
+        let missing = makeExternalView(supervisor: noEngine, modeStore: store)
+        XCTAssertFalse(missing.offersThisMac)
+        missing.useThisMac()
+
+        let local = makeExternalView(supervisor: makeSupervisor(), modeStore: store, engineMode: .local)
+        XCTAssertFalse(local.offersThisMac, "already local")
+
+        let none = makeExternalView(supervisor: nil, modeStore: store)
+        XCTAssertFalse(none.offersThisMac)
+
+        XCTAssertEqual(store.mode, .external)
+        XCTAssertEqual(processes.spawns.count, 0)
+    }
+
+    /// An in-session switch reaches the delegate and the tray: after Connect
+    /// to Another Server the quit is no longer a local-engine quit.
+    func testAnInSessionModeSwitchUpdatesTheDelegateAndTheTray() throws {
+        let supervisor = makeSupervisor()
+        _ = try bringUp(supervisor)
+        let delegate = makeDelegate(mode: .local, supervisor: supervisor, launched: true)
+        let store = TransientEngineModeStore()
+        store.mode = .local
+        let view = makeExternalView(supervisor: supervisor, modeStore: store, engineMode: .local) {
+            delegate.modeDidChange($0)
+        }
+
+        view.connectToAnotherServer()
+        XCTAssertEqual(delegate.mode, .external)
+        XCTAssertEqual(menuBar.localModes, [false])
+        // The stop was a join-free stop of the running engine; quitting now
+        // never asks about an engine the app no longer owns.
+        XCTAssertEqual(shouldTerminate(delegate), .terminateNow, "no stale local mode after the switch")
+        XCTAssertEqual(dialogs.titles, [])
+    }
+
+    func testTheTrayRestartRowFollowsTheLocalMode() {
+        let supervisor = makeSupervisor()
+        _ = collidePort(supervisor)
+        let controller = makeController(status: AppSessionStatus(), supervisor: supervisor, localEngineMode: true)
+        controller.start()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertNotNil(controller.menu?.deepRow(withTitle: MenuBarController.engineStoppedRowTitle))
+        controller.setLocalEngineMode(false)
+        XCTAssertNil(controller.menu?.deepRow(withTitle: MenuBarController.engineStoppedRowTitle),
+                     "an external session has no engine row")
+        controller.setLocalEngineMode(true)
+        XCTAssertNotNil(controller.menu?.deepRow(withTitle: MenuBarController.engineStoppedRowTitle))
+    }
+}
+
+/// A one-shot loopback HTTP server that answers each request with the next body.
+private final class LoopbackBlockersServer {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "LoopbackBlockersServer")
+    private let lock = NSLock()
+    private var bodies: [String]
+    private(set) var port: UInt16 = 0
+
+    init(bodies: [String]) throws {
+        self.bodies = bodies
+        listener = try NWListener(using: .tcp, on: .any)
+        let ready = DispatchSemaphore(value: 0)
+        listener.stateUpdateHandler = { state in
+            if case .ready = state { ready.signal() }
+        }
+        listener.newConnectionHandler = { [weak self] connection in
+            connection.start(queue: self?.queue ?? .global())
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { _, _, _, _ in
+                guard let self else { return connection.cancel() }
+                self.lock.lock()
+                let body = self.bodies.isEmpty ? "{}" : self.bodies.removeFirst()
+                self.lock.unlock()
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n"
+                connection.send(content: Data((head + body).utf8), completion: .contentProcessed { _ in connection.cancel() })
+            }
+        }
+        listener.start(queue: queue)
+        guard ready.wait(timeout: .now() + 5) == .success, let port = listener.port?.rawValue else {
+            throw NSError(domain: "LoopbackBlockersServer", code: 1)
+        }
+        self.port = port
+    }
+
+    func stop() { listener.cancel() }
 }
 
 private extension NSMenu {

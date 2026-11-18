@@ -73,6 +73,9 @@ protocol MenuBarControlling: AnyObject {
     /// Shows the fixed stopping line while the quit path stops the engine;
     /// connection and chat updates keep it until the item is stopped.
     func setQuittingTitle()
+    /// The engine mode changed in this session; the rows that only make sense
+    /// with an app-owned engine follow it.
+    func setLocalEngineMode(_ local: Bool)
 }
 
 /// Bounds and cleans untrusted server text before it reaches AppKit. Chat
@@ -222,7 +225,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     private let engineSupervisor: EngineSupervisor?
     /// True when this app runs the bundled engine: the change-server row
     /// switches the engine mode itself, so it works without a connection.
-    private let localEngineMode: Bool
+    private var localEngineMode: Bool
     private let updates: ClientUpdateControlling?
     private let engineUpdates: EngineUpdateMenuProviding?
     private let now: () -> Date
@@ -461,6 +464,12 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     /// The fixed stopping line, for the whole stop the quit path drives (S6).
     /// Connection and chat updates keep it until the item is stopped, so a
     /// republished connection cannot overwrite it mid-drain.
+    func setLocalEngineMode(_ local: Bool) {
+        guard localEngineMode != local else { return }
+        localEngineMode = local
+        rebuildMenu()
+    }
+
     func setQuittingTitle() {
         quitting = true
         statusEntry?.title = Self.stoppingTitle
@@ -1296,7 +1305,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     /// port-in-use engine is not running, and the tray row restarts it without
     /// opening the window. Any other state adds no row.
     private func engineRestartItem() -> NSMenuItem? {
-        guard let engineSupervisor else { return nil }
+        guard localEngineMode, let engineSupervisor else { return nil }
         switch engineSupervisor.state {
         case .failed, .portInUse:
             break
@@ -1318,7 +1327,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     /// re-checked at the click, so a row rebuilt moments before cannot start
     /// an engine that is already running or starting.
     @objc func restartEngine(_ sender: Any?) {
-        guard let engineSupervisor else { return }
+        guard localEngineMode, let engineSupervisor else { return }
         switch engineSupervisor.state {
         case .failed, .portInUse:
             engineSupervisor.start()

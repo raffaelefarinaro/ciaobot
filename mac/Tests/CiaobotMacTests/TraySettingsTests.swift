@@ -187,6 +187,8 @@ private final class SettingsFakeMenuBar: MenuBarControlling {
     func start() { startCount += 1 }
     func stop() { stopCount += 1 }
     func setQuittingTitle() { quittingCount += 1 }
+    private(set) var localModes: [Bool] = []
+    func setLocalEngineMode(_ local: Bool) { localModes.append(local) }
 }
 
 @MainActor

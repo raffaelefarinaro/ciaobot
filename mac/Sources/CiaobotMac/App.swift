@@ -25,7 +25,8 @@ struct CiaobotMacApp: App {
                 appSettings: appDelegate.appSettings,
                 supervisor: appDelegate.supervisor,
                 engineMode: appDelegate.mode,
-                modeStore: appDelegate.engineMode
+                modeStore: appDelegate.engineMode,
+                onModeChange: { appDelegate.modeDidChange($0) }
             )
         }
             .defaultSize(width: 1100, height: 760)
@@ -467,6 +468,10 @@ struct ConnectionView: View {
     /// Presents the mode-switch confirmation (S6). The real one is the AppKit
     /// dialog; tests record the call and decide.
     private let presentModeSwitchDialog: @MainActor (EngineLifecycle.ModeSwitchDialog) -> Bool
+    /// Tells the app delegate (quit path, tray) about an in-session mode switch.
+    private let onModeChange: (@MainActor (EngineMode) -> Void)?
+    /// Arm64 only: an Intel Mac has no bundled engine to use.
+    private let hostIsArm64: Bool
     /// A test launch never reads or writes the saved host list, exactly as it
     /// never reads the saved origin: the operator's real defaults stay out of
     /// the fixture run.
@@ -514,8 +519,12 @@ struct ConnectionView: View {
         supervisor: EngineSupervisor? = nil,
         engineMode: EngineMode = .external,
         modeStore: EngineModeStoring? = nil,
-        modeSwitchDialog: (@MainActor (EngineLifecycle.ModeSwitchDialog) -> Bool)? = nil
+        modeSwitchDialog: (@MainActor (EngineLifecycle.ModeSwitchDialog) -> Bool)? = nil,
+        onModeChange: (@MainActor (EngineMode) -> Void)? = nil,
+        hostIsArm64: Bool = EngineSupervisor.hostIsArm64
     ) {
+        self.onModeChange = onModeChange
+        self.hostIsArm64 = hostIsArm64
         self.probe = probe
         self.signIn = signIn ?? .live
         self.autoDiscovery = autoDiscovery
@@ -689,6 +698,11 @@ struct ConnectionView: View {
                             }
                             .disabled(busy)
                             .accessibilityHint("Connects to the Ciaobot found on this Mac.")
+                        }
+                        if offersThisMac {
+                            Button(Self.useThisMacTitle) { useThisMac() }
+                                .disabled(busy)
+                                .accessibilityHint("Runs the Ciaobot engine bundled with this app on this Mac.")
                         }
                         Button(discovery.status == .idle ? "Find Ciaobot on This Mac" : "Check Again") {
                             engineUpdater.reset()
@@ -1101,6 +1115,31 @@ struct ConnectionView: View {
     }
 
     /// Tears down the live session the way Change Server does.
+    static let useThisMacTitle = "Use Ciaobot on This Mac"
+
+    /// The connection screen offers the bundled engine only in external mode,
+    /// on an arm64 Mac, when the app actually carries a usable engine.
+    var offersThisMac: Bool {
+        engineMode == .external && hostIsArm64 && supervisor?.hasEngine == true
+    }
+
+    /// **Use Ciaobot on This Mac** (external → local): saves the local choice,
+    /// tells the app delegate, then starts the engine; the running-origin
+    /// watcher connects when it is up. (The 1.x takeover check, S7, runs
+    /// before the start once it exists.) Internal for tests.
+    func useThisMac() {
+        guard offersThisMac, let supervisor else { return }
+        discovery.invalidate()
+        dropSession()
+        modeStore?.mode = .local
+        engineMode = .local
+        localModel.reset()
+        localPhase = .idle
+        engineDown = false
+        onModeChange?(.local)
+        supervisor.start()
+    }
+
     private func dropSession() {
         origin = nil
         storage = .ephemeral
@@ -1170,6 +1209,7 @@ struct ConnectionView: View {
         if let supervisor { supervisor.stop {} }
         modeStore?.mode = .external
         engineMode = .external
+        onModeChange?(.external)
         localModel.reset()
         localPhase = .idle
         engineDown = false

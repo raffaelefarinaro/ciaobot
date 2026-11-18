@@ -29,7 +29,12 @@ enum EngineLifecycle {
     /// Only the session-ending reasons count as `.system`; anything else —
     /// a user quit, a quit event without a reason, or no Apple event at all
     /// (the tray does not send one) — reads as `.user`.
-    static func quitReason(_ event: NSAppleEventDescriptor?) -> QuitReason {
+    ///
+    /// `updateInstall` is true while Sparkle's immediate install is taking the
+    /// app down to replace the bundle: the user already chose to install, so
+    /// that terminate is a system quit too (no dialog, bounded drain).
+    static func quitReason(_ event: NSAppleEventDescriptor?, updateInstall: Bool = false) -> QuitReason {
+        if updateInstall { return .system }
         guard let event, event.eventClass == kCoreEventClass, event.eventID == kAEQuitApplication,
               let reason = event.attributeDescriptor(forKeyword: kAEQuitReason) else { return .user }
         switch reason.enumCodeValue {
@@ -60,14 +65,14 @@ enum EngineLifecycle {
     static let quitCancelButton = "Cancel"
 
     /// The quit confirmation's fixed copy. The body always states what
-    /// stopping the engine means; when the engine reports running chats, the
-    /// body names the count too.
-    static func quitMessage(activeChats: Int?) -> (title: String, body: String) {
+    /// stopping the engine means. `restart_blockers` counts more than chats
+    /// (open questions and permission requests, background agents), so when
+    /// it reports anything the body says "chats or background work", not a
+    /// chat count.
+    static func quitMessage(blockers: Int?) -> (title: String, body: String) {
         var body = "This also stops Ciaobot on this Mac: chats, schedules and access from your phone pause until you open Ciaobot again."
-        if let activeChats, activeChats > 0 {
-            body += activeChats == 1
-                ? " 1 chat is still working and will be interrupted."
-                : " \(activeChats) chats are still working and will be interrupted."
+        if let blockers, blockers > 0 {
+            body += " Chats or background work are still running and will be interrupted."
         }
         return ("Quit Ciaobot?", body)
     }
@@ -183,6 +188,9 @@ final class RestartBlockersProbe: NSObject, URLSessionDataDelegate, RestartBlock
         configuration.timeoutIntervalForRequest = Self.timeout
         configuration.timeoutIntervalForResource = Self.timeout
         let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+        // One probe serves every quit: a previous answer's bytes must never
+        // prefix this one's.
+        self.body = Data()
         self.completion = completion
         var request = URLRequest(url: origin.url.appendingPathComponent("api/admin/restart-blockers"))
         request.httpShouldHandleCookies = false
@@ -212,5 +220,59 @@ final class RestartBlockersProbe: NSObject, URLSessionDataDelegate, RestartBlock
         completion = nil
         session.finishTasksAndInvalidate()
         DispatchQueue.main.async { callback?(found) }
+    }
+}
+
+/// Set while Sparkle's immediate install is terminating the app to replace
+/// the bundle. The install handler raises it just before it runs, so the
+/// terminate that follows reads as a system quit: no dialog stands in front of
+/// an update the user already chose, and the engine still drains with the
+/// system grace. One instance is shared by the updater and the app delegate.
+@MainActor
+final class UpdateQuitIntent {
+    private(set) var installing = false
+
+    func beginInstall() { installing = true }
+}
+
+/// Closes the main window of a login launch once SwiftUI has created it.
+///
+/// The scene window does not exist at a fixed point of launch, so a single
+/// deferred close can run before it does and silently close nothing. This
+/// retries on a short interval until the window exists, closes it once, and
+/// gives up after a bound so a launch that never creates it leaves nothing
+/// polling. The caller's own `willClose` observer applies the Dock preference.
+@MainActor
+final class LoginLaunchWindowCloser {
+    static let interval: TimeInterval = 0.05
+    static let maximumAttempts = 100   // 5 s
+
+    typealias Schedule = (TimeInterval, @escaping @MainActor () -> Void) -> Void
+
+    private let window: @MainActor () -> NSWindow?
+    private let schedule: Schedule
+    private(set) var attempts = 0
+    private(set) var closed = false
+
+    init(window: @escaping @MainActor () -> NSWindow?, schedule: Schedule? = nil) {
+        self.window = window
+        self.schedule = schedule ?? { delay, work in
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                MainActor.assumeIsolated { work() }
+            }
+        }
+    }
+
+    func start() { attempt() }
+
+    private func attempt() {
+        guard !closed, attempts < Self.maximumAttempts else { return }
+        attempts += 1
+        if let window = window() {
+            closed = true
+            window.close()
+            return
+        }
+        schedule(Self.interval) { [self] in attempt() }
     }
 }
