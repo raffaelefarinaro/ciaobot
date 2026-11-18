@@ -5299,6 +5299,7 @@ def _catalog_from_api(
     if not isinstance(models, list):
         return []
     rows: list[dict[str, Any]] = []
+    by_model: dict[str, int] = {}
     for model in models:
         if not isinstance(model, Mapping) or model.get("enabled") is False:
             continue
@@ -5323,8 +5324,19 @@ def _catalog_from_api(
         accepts_images = model_accepts_images(model)
         if accepts_images is not None:
             row["images"] = accepts_images
-        rows.append(row)
+        seen = by_model.get(row["model"])
+        if seen is None:
+            by_model[row["model"]] = len(rows)
+            rows.append(row)
+        elif _catalog_capability(row) > _catalog_capability(rows[seen]):
+            # V2 can list one model id twice; keep one row, at the first
+            # position, preferring a strictly more capable duplicate.
+            rows[seen] = row
     return rows
+
+
+def _catalog_capability(row: Mapping[str, Any]) -> tuple[int, bool]:
+    return len(row["variants"]), row.get("images") is True
 
 
 class _EphemeralServer:
