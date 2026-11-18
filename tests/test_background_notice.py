@@ -607,9 +607,9 @@ def test_adapter_and_renderer_import_the_shared_parser_from_the_neutral_module()
     shared_renderer = renderer_imports["ciao.background_notice"]
     assert "native_wake_run" in shared_renderer
     assert "NATIVE_WAKE_TAIL_LINES" in shared_renderer
-    # The renderer still reads sessions through the concrete adapter; only
-    # the parser moved out of it.
-    assert renderer_imports["ciao.providers.opencode"] == {"OpencodeProvider"}
+    # The renderer reads sessions through the provider registry, not the
+    # concrete adapter.
+    assert "ciao.providers.opencode" not in renderer_imports
 
 
 def test_background_notice_imports_no_provider_sdk_or_web_module() -> None:

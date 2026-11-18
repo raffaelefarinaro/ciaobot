@@ -182,3 +182,89 @@ async def test_watcher_deadline_is_the_background_work_cap(monkeypatch) -> None:
     await host.watchers.watch_inner("chat-1", "proj-1", [])  # type: ignore[attr-defined]
 
     assert len(lookups) == 2
+
+
+def _live_opencode(tmp_path: Path, session_id: str):
+    from ciao.providers.opencode import OpencodeProvider
+
+    provider = OpencodeProvider(tmp_path)
+    provider._client = object()  # type: ignore[assignment]
+    provider._process = SimpleNamespace(returncode=None)
+    provider._session_id = session_id
+    return provider
+
+
+@pytest.mark.parametrize(
+    ("kind", "expect_live"),
+    [("non_provider", False), ("other_session", False), ("same_session", True)],
+)
+@pytest.mark.asyncio
+async def test_watcher_reads_live_or_ephemeral_tree(
+    tmp_path: Path, monkeypatch, kind: str, expect_live: bool
+) -> None:
+    from ciao.providers.opencode import OpencodeProvider
+
+    calls: list[str] = []
+
+    async def ephemeral(_root, _session) -> list[dict]:
+        calls.append("ephemeral")
+        return []
+
+    async def live_tree() -> list[dict]:
+        calls.append("live")
+        return []
+
+    async def shells() -> int:
+        return 0
+
+    monkeypatch.setattr(OpencodeProvider, "read_collab_tree", staticmethod(ephemeral))
+    provider: object
+    if kind == "non_provider":
+        provider = SimpleNamespace(
+            is_connected=True,
+            current_session_id="ses_parent",
+            read_live_collab_tree=live_tree,
+            refresh_background_shells=shells,
+        )
+    else:
+        real = _live_opencode(tmp_path, "ses_parent" if kind == "same_session" else "ses_other")
+        monkeypatch.setattr(real, "read_live_collab_tree", live_tree)
+        monkeypatch.setattr(real, "refresh_background_shells", shells)
+        provider = real
+
+    host = _host()
+    host._chats = {"chat-1": SimpleNamespace(provider="opencode", session_id="ses_parent")}
+    host._providers = {"chat-1": SimpleNamespace(provider=provider)}  # type: ignore[attr-defined]
+
+    await host.watchers.watch_inner("chat-1", "proj-1", [])  # type: ignore[attr-defined]
+
+    assert calls == (["live"] if expect_live else ["ephemeral"])
+
+
+@pytest.mark.parametrize("kind", ["connected", "disconnected", "non_provider", "no_service"])
+def test_current_count_prefers_connected_provider(
+    tmp_path: Path, monkeypatch, kind: str
+) -> None:
+    host = _host()
+    host._chats = {"chat-1": SimpleNamespace(provider="opencode", session_id="ses_1")}
+    host._providers = {}  # type: ignore[attr-defined]
+    watchers = host.watchers  # type: ignore[attr-defined]
+    watchers._background_work_last["chat-1"] = 7
+    provider: object | None
+    if kind == "non_provider":
+        provider = SimpleNamespace(is_connected=True, background_count=99)
+    elif kind == "no_service":
+        provider = None
+    else:
+        real = _live_opencode(tmp_path, "ses_1")
+        if kind == "disconnected":
+            real._client = None
+        monkeypatch.setattr(type(real), "background_count", property(lambda _self: 3))
+        provider = real
+    if provider is not None:
+        host._providers["chat-1"] = SimpleNamespace(provider=provider)  # type: ignore[attr-defined]
+
+    expected = 3 if kind == "connected" else watchers.running_count("chat-1")
+    assert watchers.current_count("chat-1") == expected
+    if kind == "connected":
+        assert expected != watchers.running_count("chat-1")
