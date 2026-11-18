@@ -1779,7 +1779,7 @@ def test_opencode_cli_auto_mode_keeps_shell_ask_for_ciao_commands() -> None:
     _agent, rules = mode_settings("auto")
     shell = [rule for rule in rules if rule["action"] == "shell"]
     assert shell == [{"action": "shell", "resource": "*", "effect": "ask"}]
-    assert rules[-1]["effect"] == "deny"
+    assert rules[-1] == {"action": "shell", "resource": "*", "effect": "ask"}
 
 
 @pytest.mark.parametrize("mode", ["plan", "normal", "bypass"])

@@ -50,3 +50,24 @@ def test_task_body_refuses_a_symlink_into_the_runtime_directory(tmp_path: Path) 
     link.symlink_to(target)
     with pytest.raises(agent_cli.UsageError, match="credential"):
         agent_cli._task_body(f"@{link}")
+
+
+def test_claude_denylist_is_trim_plus_extras_only(tmp_path: Path) -> None:
+    from ciao.claude_trim import trim_tool_denies
+    from ciao.config import CiaoConfig, WorkspaceConfig
+
+    runtime = tmp_path / ".runtime"
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+    )
+    config.workspaces["work"] = WorkspaceConfig(
+        name="work", vault_root="memory-vault/work", disallowed_tools=["Bash"]
+    )
+
+    denies = config.disallowed_tools_for_workspace("work")
+
+    assert denies == [*trim_tool_denies({}), "Bash"]
+    assert not [d for d in denies if any(m in d for m in (".env", ".runtime", "secrets"))]

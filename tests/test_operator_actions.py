@@ -1167,12 +1167,11 @@ def test_env_vars_the_engine_no_longer_reads_are_surfaced(tmp_path: Path) -> Non
     # explainer, not the only way to clear the tile (#1134).
     assert actions[0].run_label
     assert actions[0].chat_prompt
-    assert "sandbox" in actions[0].chat_prompt
-    # The agent cannot read `.env` (credential denylist) and must not print
-    # its values, so the prompt must not ask for them (#1457).
+    # The agent must not print `.env` values, so the prompt must not ask for
+    # them (#1457).
     prompt = actions[0].chat_prompt.lower()
     assert "tell me" not in prompt
-    assert "do not try to read or edit `.env`" in prompt
+    assert "do not edit `.env` yourself" in prompt
     # The fixture sets PWA_AUTH_REQUIRED=false; that value must never appear.
     assert "false" not in prompt
     assert "where its setting lives now" in prompt

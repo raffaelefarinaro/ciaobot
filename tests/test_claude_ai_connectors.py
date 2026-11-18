@@ -3,8 +3,8 @@
 A workspace's ``claude_ai_connectors`` (default on) decides whether its Claude
 chats load the Claude account's claude.ai connectors. Off sets
 ``ENABLE_CLAUDEAI_MCP_SERVERS=false`` on the spawned Claude Code process. A
-memory pass always carries that variable, whatever the setting. Other providers
-never see it.
+memory pass follows the same switch as any other chat. Other providers never
+see it.
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ def _chat(manager: ProjectChatManager, provider: str):
 
 
 def _pass_chat(manager: ProjectChatManager, provider: str):
-    """A memory pass in the workspace's Memory project, built as the guardrail tests build it."""
+    """A memory pass in the workspace's Memory project."""
     project = manager._memory_pass.ensure_project("work")
     return manager.create_chat(
         project.project_id,
@@ -140,10 +140,11 @@ def test_claude_chat_in_a_workspace_without_connectors_sets_false(tmp_path: Path
     assert env[ENV_VAR] == "false"
 
 
-def test_memory_pass_always_sets_false_even_when_connectors_are_allowed(tmp_path: Path) -> None:
-    manager = _manager(tmp_path, connectors=True)
-    env = manager._build_extra_env(_pass_chat(manager, "claude"))
-    assert env[ENV_VAR] == "false"
+def test_memory_pass_follows_the_workspace_switch(tmp_path: Path) -> None:
+    on = _manager(tmp_path / "on", connectors=True)
+    assert ENV_VAR not in on._build_extra_env(_pass_chat(on, "claude"))
+    off = _manager(tmp_path / "off", connectors=False)
+    assert off._build_extra_env(_pass_chat(off, "claude"))[ENV_VAR] == "false"
 
 
 def test_non_claude_chats_never_get_the_variable(tmp_path: Path) -> None:

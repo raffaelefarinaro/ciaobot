@@ -6580,35 +6580,16 @@ class ProjectChatManager:
         workspace's own `disallowed_tools` in `workspaces.json`, or the PWA
         field). Declared MCP servers all load unless that list names them.
 
-        It also always carries the unconditional credential/runtime-state file
-        denies (``ciao.execution_modes.credential_path_deny_rules``), which no
-        workspace override or ``none`` opt-out clears.
-
-        A memory pass carries more than an ordinary chat: on top of the
-        workspace list, it denies every declared MCP server and every shipped
-        ``gws-*`` skill (``CiaoConfig.memory_pass_denied_tools``). A pass reads
-        and edits the vault; it must not reach an external surface.
-
-        Two limits stated plainly. This scopes REACHABILITY, not authority: a
-        shared account behind a reachable server still holds that account's full
-        authority. And this list is only applied when the chat's provider is
-        ``claude`` (see the guard below). opencode is not left unconstrained:
-        it gets the equivalent credential denies as session permission rules
-        from its own provider
-        (``ciao.providers.opencode.mode_settings``, sharing the patterns in
-        ``ciao.execution_modes``). The part that remains Claude-only is the
-        harness denylist and any ``mcp__<server>`` deny; closing that needs a per-provider mechanism and is out of scope.
+        This scopes REACHABILITY, not authority: a shared account behind a
+        reachable server still holds that account's full authority. The list is
+        only applied when the chat's provider is ``claude`` (see the guard
+        below).
         """
         if chat.provider != "claude":
             return []
         project = self._projects.get(chat.project_id)
         workspace = project.workspace if project else None
-        base = self._config.disallowed_tools_for_workspace(workspace)
-        if is_memory_pass_chat(chat, project):
-            base = list(dict.fromkeys(
-                [*base, *self._config.memory_pass_denied_tools(workspace)]
-            ))
-        return base
+        return self._config.disallowed_tools_for_workspace(workspace)
 
     def claude_settings_for_chat(self, chat: ChatInfo) -> dict[str, Any] | None:
         """The Claude CLI settings layer for a chat's spawned CLI; None off the claude provider."""
@@ -6911,12 +6892,8 @@ class ProjectChatManager:
         env["GH_PROMPT_DISABLED"] = "1"
         # The claude.ai connectors (the Claude account's remote MCP servers)
         # load into every Claude chat unless Claude Code is told not to. A
-        # workspace can switch them off; a memory pass always runs without them,
-        # since a pass reads and edits the vault and must not reach an external
-        # surface. Other providers never see this variable.
-        if chat.provider == "claude" and (
-            is_memory_pass_chat(chat, project) or not self._claude_ai_connectors_on(workspace)
-        ):
+        # workspace can switch them off. Other providers never see this variable.
+        if chat.provider == "claude" and not self._claude_ai_connectors_on(workspace):
             env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
         # The macOS keychain is outside a workspace sandbox, so gh cannot read
         # its own login there: the engine passes the token in (#1961). Only the
@@ -7179,10 +7156,6 @@ class ProjectChatManager:
             agent_denied=denied,
             agent_denied_except=denied_except,
             linked_repo=self.linked_repo_for_chat(chat),
-            # The guardrail marker: Claude reads the extra denies off
-            # ``disallowed_tools``, opencode needs a marker to pick its own
-            # stricter ruleset.
-            memory_pass=is_memory_pass_chat(chat, project),
             thinking_level=self._thinking_level_for_chat(chat),
             context_digest=context_digest,
             context_session_id=context_session_id,

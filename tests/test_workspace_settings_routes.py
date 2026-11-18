@@ -12,7 +12,6 @@ from starlette.testclient import TestClient
 
 from ciao.claude_trim import trim_tool_denies
 from ciao.config import CiaoConfig
-from ciao.execution_modes import credential_path_deny_rules
 from ciao.web.routes_api import (
     archive_workspace_setting,
     gws_integration_settings,
@@ -343,20 +342,6 @@ def test_startup_exception_chain_never_leaks_in_response_or_logs(
             mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
 
 
-def _policy_denies(config: CiaoConfig, tools: list[str]) -> list[str]:
-    """The workspace-policy part of a denylist, without the credential denies.
-
-    ``credential_path_deny_rules`` is prepended unconditionally to every
-    workspace (covered by tests/test_credential_denies.py), so these
-    assertions strip it to keep testing what they are about: the harness
-    defaults, the per-workspace extras, and the derived ``mcp__<server>``
-    denies. The config is needed because the rules include patterns derived
-    from its resolved runtime root, not just the static names.
-    """
-    fixed = set(credential_path_deny_rules(config.state_path.parent))
-    return [tool for tool in tools if tool not in fixed]
-
-
 class _PCM:
     def __init__(self) -> None:
         self.refresh_count = 0
@@ -478,7 +463,7 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
     # default (claude_default_model).
     assert config.default_model_for_workspace("client-a") == "opus"
     # extras are added on top of the trim defaults
-    assert _policy_denies(config, config.disallowed_tools_for_workspace("client-a")) == [
+    assert config.disallowed_tools_for_workspace("client-a") == [
         *trim_tool_denies({}),
         "mcp__claude_ai_Slack",
         "Bash",
@@ -515,9 +500,7 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
         json={"disallowed_tools": "mcp__example,Bash"},
     )
     assert patch.status_code == 200
-    assert _policy_denies(
-        config, config.disallowed_tools_for_workspace("client-a")
-    ) == [*trim_tool_denies({}), "mcp__example", "Bash"]
+    assert config.disallowed_tools_for_workspace("client-a") == [*trim_tool_denies({}), "mcp__example", "Bash"]
 
     delete = client.delete("/api/workspaces/client-a")
     assert delete.status_code == 200
@@ -810,7 +793,7 @@ def test_connectors_always_allowed_and_extras_honored(tmp_path):
     )
     assert resp.status_code == 200
     effective = config.disallowed_tools_for_workspace("personal")
-    assert _policy_denies(config, effective) == [*trim_tool_denies({}), "mcp__n8n_mcp"]
+    assert effective == [*trim_tool_denies({}), "mcp__n8n_mcp"]
     assert "mcp__claude_ai_Airtable" not in effective
 
     # Persisted to disk without the (removed) claude_ai_mcps field.

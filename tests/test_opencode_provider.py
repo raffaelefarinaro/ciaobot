@@ -26,13 +26,13 @@ from ciao.models import (
     TokenUsageEvent,
     ToolUseEvent,
 )
-from ciao.execution_modes import opencode_credential_deny_rules
 from ciao.background_notice import native_shell_run, native_subagent_run, native_wake_run
 from ciao.providers.opencode import (
     OPENCODE_V2_REQUIRED,
     OpencodeProvider,
     OpencodeSettings,
     _catalog_from_api,
+    _MODE_PERMISSIONS,
     _context_window_for,
     _form_answer_value,
     _form_field_active,
@@ -46,7 +46,6 @@ from ciao.providers.opencode import (
     compose_system,
     config_placeholder_problems,
     error_text,
-    memory_pass_guardrail_rules,
     model_accepts_images,
     missing_required_paths,
     mode_settings,
@@ -2561,39 +2560,9 @@ def test_auto_allows_everything_but_keeps_shell_gated():
     actions = _actions("auto")
     assert actions["*"] == "allow"
     assert actions["shell"] == "ask"
-    assert actions["glob"] == "ask"
-    assert actions["grep"] == "ask"
     assert "edit" not in actions
     shell = _shell_patterns("auto")
     assert shell["ask"] == {"*"}
-
-
-@pytest.mark.parametrize("mode", ["plan", "normal", "auto"])
-def test_v2_search_actions_require_explicit_approval(mode: BridgeMode):
-    rules = mode_settings(mode)[1]
-    for action in {"glob", "grep"}:
-        matching = [
-            rule for rule in rules
-            if rule["action"] == action and rule["resource"] == "*"
-        ]
-        assert matching[-1]["effect"] == "ask"
-
-
-def test_bypass_lets_search_actions_run_without_a_card():
-    rules = mode_settings("bypass")[1]
-    for action in ("glob", "grep"):
-        matching = [
-            rule for rule in rules
-            if rule["action"] in (action, "*") and rule["resource"] == "*"
-        ]
-        assert matching[-1]["effect"] == "allow"
-
-
-def test_protected_glob_patterns_remain_hard_denied_after_search_approval():
-    rules = mode_settings("bypass")[1]
-    glob_rules = [rule for rule in rules if rule["action"] == "glob"]
-    assert next(rule["effect"] for rule in reversed(glob_rules) if rule["resource"] == ".env") == "deny"
-    assert next(rule["effect"] for rule in reversed(glob_rules) if rule["resource"] == ".runtime/**") == "deny"
 
 
 def test_plan_mode_is_read_only():
@@ -2609,50 +2578,12 @@ def test_tools_can_be_disabled_for_one_shot_sessions():
     assert rules == [{"action": "*", "resource": "*", "effect": "deny"}]
 
 
-# ── memory-pass guardrails ──────────────────────────────────────────────
-# The end-of-conversation memory pass runs as an attended `bypass` chat, but
-# a blanket `allow` is the wrong ruleset for it: the pass edits the vault and
-# needs nothing else. opencode also ignores `disallowed_tools`, so the only
-# place a stricter ruleset can live is the session's own permission set.
-
-
-def test_memory_pass_rule_is_an_allow_list_that_denies_search_and_mcp():
-    rules = memory_pass_guardrail_rules()
-
-    # Deny-all first: opencode resolves last-match-wins, so every carve-out has
-    # to follow the wildcard. That wildcard is also what blocks MCP — its
-    # permission union has no `mcp` action to name.
-    assert rules[0] == {"action": "*", "resource": "*", "effect": "deny"}
-
-    allowed = {rule["action"] for rule in rules if rule["effect"] == "allow"}
-    # What a pass actually needs: read and edit the vault, and shell out to
-    # `ciao vault search` because a search cannot be scoped to the vault.
-    assert {
-        "read",
-        "edit",
-        "write",
-        "shell",
-        "external_directory",
-        "question",
-    } <= allowed
-    # Search is denied outright, not left at the default `ask`: 7 of 12
-    # opencode agent chats in the #594 experiment stopped on that card, and V2
-    # sends the pattern as the resource so it cannot be scoped anyway.
-    assert not allowed & {"glob", "grep"}
-    for action in ("glob", "grep"):
-        assert next(
-            rule["effect"] for rule in reversed(rules) if rule["action"] == action
-        ) == "deny"
-    # gws skills are denied by name even though `skill` is allowed, so the
-    # vault skills around them still run.
-    assert {"action": "skill", "resource": "gws-*", "effect": "deny"} in rules
-    # Every grant is a bare `*` resource, so an action nobody allowed — an
-    # MCP call among them — matches no allow and falls through to the deny.
-    assert {rule["resource"] for rule in rules if rule["effect"] == "allow"} == {"*"}
-    # The credential denies come last so nothing above can outrank them.
-    assert rules[len(rules) - len(opencode_credential_deny_rules()):] == (
-        opencode_credential_deny_rules()
-    )
+@pytest.mark.parametrize("mode", ["plan", "normal", "auto", "bypass"])
+def test_mode_rules_are_the_mode_table_only(mode: BridgeMode):
+    assert mode_settings(mode)[1] == _MODE_PERMISSIONS[mode]
+    assert mode_settings(mode, tools_enabled=False)[1] == [
+        {"action": "*", "resource": "*", "effect": "deny"}
+    ]
 
 
 @pytest.mark.parametrize("mode", ["plan", "bypass"])
@@ -2671,30 +2602,6 @@ def test_session_settings_prefers_custom_rules(tmp_path: Path, mode: BridgeMode)
     assert agent == "build"
     assert rules == custom
     assert rules is not custom
-
-
-def test_session_settings_uses_the_guardrail_for_a_memory_pass(tmp_path: Path):
-    plain = OpencodeProvider(tmp_path)
-    request = AgentRequest(
-        prompt="p", model="m", mode="bypass", provider="opencode", memory_pass=True
-    )
-
-    # A pass takes the allow-list instead of bypass's blanket `allow`, so the
-    # marker — not the mode — is what selects the guardrail.
-    assert plain._session_settings(request) == (
-        "build",
-        memory_pass_guardrail_rules(plain._runtime_root(), plain.workspace_root),
-    )
-
-    # An ordinary chat in the same mode is untouched.
-    ordinary = AgentRequest(prompt="p", model="m", mode="bypass", provider="opencode")
-    assert plain._session_settings(ordinary) == mode_settings("bypass")
-
-    # A caller-supplied ruleset still wins: it is the read-only memory agent,
-    # not a pass, and it is not running a Ciaobot mode at all.
-    custom = [{"action": "*", "resource": "*", "effect": "deny"}]
-    scoped = OpencodeProvider(tmp_path, permission_rules=custom)
-    assert scoped._session_settings(request) == ("build", custom)
 
 
 class _SessionResponse:
