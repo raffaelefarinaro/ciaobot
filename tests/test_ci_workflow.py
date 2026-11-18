@@ -146,8 +146,13 @@ def test_publish_uploads_engine_installer() -> None:
 
 
 def test_retired_app_installer_is_not_in_the_source_tree() -> None:
+    # The macOS app installer is retired. scripts/install.sh may exist only as the
+    # Linux-only headless installer (#3131 L2), which refuses macOS and root.
     root = Path(__file__).parents[1]
-    assert not (root / "scripts" / "install.sh").exists()
+    installer = root / "scripts" / "install.sh"
+    if installer.exists():
+        text = installer.read_text(encoding="utf-8")
+        assert "Linux" in text and "Darwin" in text and "root" in text
 
 
 def test_release_workflows_do_not_publish_removed_install_channels() -> None:

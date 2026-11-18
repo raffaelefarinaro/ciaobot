@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/vue3-vite'
+import { expect } from 'storybook/test'
 import { ref } from 'vue'
 import type { ConcreteComponent } from 'vue'
 import SettingsRadioGroup from '../components/settings/SettingsRadioGroup.vue'
@@ -23,7 +24,7 @@ const fontOptions = [
 
 const meta = {
   id: 'settings-radio-group',
-  title: 'Settings/Settings radio group',
+  title: 'Selection remainder/SettingsRadioGroup',
   component: SettingsRadioGroup as unknown as ConcreteComponent<RadioArgs>,
   args: { label: 'Theme', options: themeOptions, modelValue: 'dark' },
   argTypes: { modelValue: { control: false, description: 'Locally controlled selection; click or use arrow keys, Home and End.' } },
@@ -60,4 +61,18 @@ export const Narrow: Story = {
   args: { label: 'Body font', options: fontOptions, modelValue: 'serif' },
   globals: { font: 'serif' },
   decorators: [() => ({ template: '<div style="max-width: 390px"><story /></div>' })],
+}
+export const KeyboardFocus: Story = {
+  play: async ({ canvas, userEvent }) => {
+    await userEvent.tab()
+    const dark = canvas.getByRole('radio', { name: 'Dark' })
+    expect(document.activeElement).toBe(dark)
+    expect(dark.matches(':focus-visible')).toBe(true)
+    expect(dark.getAttribute('aria-checked')).toBe('true')
+    await userEvent.keyboard('{ArrowRight}')
+    const light = canvas.getByRole('radio', { name: 'Light' })
+    expect(document.activeElement).toBe(light)
+    expect(light.getAttribute('aria-checked')).toBe('true')
+    expect(dark.getAttribute('aria-checked')).toBe('false')
+  },
 }
