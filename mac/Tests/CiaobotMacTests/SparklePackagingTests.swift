@@ -453,6 +453,47 @@ final class SparklePackagingTests: XCTestCase {
         )
     }
 
+    /// The build embeds the engine the driver produced and checks that its
+    /// `--version` matches provenance.json.
+    func testBuildEmbedsTheEngineAndChecksItsVersion() throws {
+        let fixture = try makeFakeBuildRepository(preExistingSymlinkedInfoPlist: false)
+        let log = scratch.appendingPathComponent("engine-\(UUID().uuidString).log")
+
+        let result = try runFakeBuild(fixture, tag: "engine", environment: ["FAKE_ENGINE_LOG": log.path])
+
+        XCTAssertEqual(result.status, 0, result.output)
+        let engine = fixture.repo.appendingPathComponent(".build/Ciaobot.app/Contents/Resources/engine/bin/ciao")
+        XCTAssertTrue(fileManager.isExecutableFile(atPath: engine.path), result.output)
+        XCTAssertTrue(result.output.contains("Engine: 3 files"), result.output)
+        let line = try String(contentsOf: log, encoding: .utf8)
+        let repoPath = fixture.repo.resolvingSymlinksInPath().path
+        XCTAssertTrue(line.contains("\(repoPath)/.build/engine-cache"), line)
+        XCTAssertTrue(line.contains("\(repoPath)/.build/ciaobot-app."), line)
+    }
+
+    /// A failing engine build publishes nothing and leaves the previous bundle alone.
+    func testFailedEngineBuildPublishesNothing() throws {
+        let fixture = try makeFakeBuildRepository(preExistingSymlinkedInfoPlist: false)
+        XCTAssertEqual(try runFakeBuild(fixture, tag: "first").status, 0)
+        let binary = fixture.repo.appendingPathComponent(".build/Ciaobot.app/Contents/MacOS/CiaobotMac")
+
+        let result = try runFakeBuild(fixture, tag: "second", environment: ["FAKE_ENGINE_STATUS": "1"])
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(try String(contentsOf: binary, encoding: .utf8).contains("# first"))
+        XCTAssertEqual(try quarantinedBundles(in: fixture.repo).count, 0)
+    }
+
+    func testEngineVersionMismatchIsRefused() throws {
+        let fixture = try makeFakeBuildRepository(preExistingSymlinkedInfoPlist: false)
+
+        let result = try runFakeBuild(fixture, tag: "mismatch", environment: ["FAKE_ENGINE_VERSION": "0.0.1"])
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("bundled engine reports"), result.output)
+        XCTAssertFalse(fileManager.fileExists(atPath: fixture.repo.appendingPathComponent(".build/Ciaobot.app").path))
+    }
+
     /// The build refuses a symlinked .build before invoking the toolchain or
     /// writing anything through it.
     func testBuildRefusesSymlinkedBuildDirectoryBeforeWriting() throws {
@@ -748,6 +789,7 @@ final class SparklePackagingTests: XCTestCase {
             try fileManager.copyItem(at: scriptsDirectory.appendingPathComponent(name), to: destination)
             try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destination.path)
         }
+        try writeExecutable(fakeEngineDriver, at: scripts.appendingPathComponent("engine_build.py"))
         let resources = repo.appendingPathComponent("Sources/CiaobotMac/Resources", isDirectory: true)
         try fileManager.createDirectory(at: resources, withIntermediateDirectories: true)
         for name in ["app-icon.png", "mark_template.png", "dock-icon-ink.png", "dock-icon-dots.png",
@@ -791,9 +833,36 @@ final class SparklePackagingTests: XCTestCase {
         return FakeBuildFixture(repo: repo, tools: tools, sentinel: sentinel)
     }
 
+    /// Stands in for scripts/engine_build.py (the real chain needs the network
+    /// and a clean committed tree): same CLI, same C2 layout, logs its argv.
+    private var fakeEngineDriver: String {
+        """
+        import json, os, sys
+        argv = sys.argv[1:]
+        args = dict(zip(argv[0::2], argv[1::2]))
+        log = os.environ.get("FAKE_ENGINE_LOG")
+        if log:
+            with open(log, "a") as handle:
+                handle.write(json.dumps(argv) + "\\n")
+        if os.environ.get("FAKE_ENGINE_STATUS", "0") != "0":
+            sys.exit(int(os.environ["FAKE_ENGINE_STATUS"]))
+        dest = args["--destination"]
+        os.makedirs(dest + "/engine/bin")
+        path = dest + "/engine/bin/ciao"
+        with open(path, "w") as handle:
+            handle.write("#!/bin/sh\\necho \\"ciao " + os.environ.get("FAKE_ENGINE_VERSION", "9.9.9") + "\\"\\n")
+        os.chmod(path, 0o755)
+        with open(dest + "/engine/provenance.json", "w") as handle:
+            json.dump({"engine": {"version": "9.9.9"}}, handle)
+        with open(dest + "/assembly-receipt.json", "w") as handle:
+            json.dump({"totals": {"files": 3, "macho_files": 0, "bytes": 10}}, handle)
+        """
+    }
+
     private func runFakeBuild(
         _ fixture: FakeBuildFixture,
-        tag: String
+        tag: String,
+        environment extra: [String: String] = [:]
     ) throws -> (status: Int32, output: String) {
         let bin = fixture.repo.appendingPathComponent(".build/out/Products/Release", isDirectory: true)
         return try run(
@@ -803,7 +872,7 @@ final class SparklePackagingTests: XCTestCase {
                 "PATH": fixture.tools.path + ":" + (ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"),
                 "FAKE_BIN_PATH": bin.path,
                 "FAKE_BUILD_TAG": tag,
-            ],
+            ].merging(extra) { _, new in new },
             directory: fixture.repo
         )
     }

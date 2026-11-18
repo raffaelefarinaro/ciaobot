@@ -176,6 +176,29 @@ PLIST
 plutil -lint "$bundle/Contents/Info.plist"
 test -s "$resources/AppIcon.icns"
 
+# The bundled engine: a relocatable CPython 3.12 prefix with this commit's
+# ciaobot wheel and PWA, built only from the committed pins by
+# scripts/engine_build.py (network on a cold cache). It is built from HEAD, so
+# the tracked tree must be clean. There is no option to skip it.
+command -v python3 >/dev/null \
+    && python3 -I -S -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' \
+    || { echo "the engine build needs python3 3.12 or newer on PATH" >&2; exit 1; }
+engine_cache="$build_dir/engine-cache"
+mkdir -p "$engine_cache"
+[ -d "$engine_cache" ] && [ ! -L "$engine_cache" ] \
+    || { echo "refusing a symlinked engine cache: $engine_cache" >&2; exit 1; }
+chmod 700 "$engine_cache"
+engine_build="$staging_root/engine-build"
+python3 -I -S scripts/engine_build.py --cache "$engine_cache" --destination "$engine_build"
+mv "$engine_build/engine" "$resources/engine"
+engine_expected=$(python3 -I -S -c 'import json, sys; print("ciao " + json.load(open(sys.argv[1]))["engine"]["version"])' \
+    "$resources/engine/provenance.json")
+engine_actual=$(env -i "$resources/engine/bin/ciao" --version)
+[ "$engine_actual" = "$engine_expected" ] \
+    || { echo "bundled engine reports '$engine_actual', expected '$engine_expected'" >&2; exit 1; }
+python3 -I -S -c 'import json, sys; t = json.load(open(sys.argv[1]))["totals"]; print("Engine: %d files (%d Mach-O), %d bytes" % (t["files"], t["macho_files"], t["bytes"]))' \
+    "$engine_build/assembly-receipt.json"
+
 # Full validation is complete. Publish by renaming the previous entry into a
 # fresh quarantine directory (mv never follows it and deletes nothing), then
 # rename this run's validated staging bundle into place.
@@ -183,6 +206,8 @@ test -s "$resources/AppIcon.icns"
     || { echo "staged app is not a real directory: $bundle" >&2; exit 1; }
 [ -f "$bundle/Contents/Info.plist" ] && [ ! -L "$bundle/Contents/Info.plist" ] \
     || { echo "staged Info.plist is not a regular file: $bundle/Contents/Info.plist" >&2; exit 1; }
+[ -x "$bundle/Contents/Resources/engine/bin/ciao" ] && [ ! -L "$bundle/Contents/Resources/engine" ] \
+    || { echo "staged app has no bundled engine" >&2; exit 1; }
 published="$build_dir/Ciaobot.app"
 if [ -e "$published" ] || [ -L "$published" ]; then
     quarantine_root=$(mktemp -d "$build_dir/ciaobot-quarantine.XXXXXX")

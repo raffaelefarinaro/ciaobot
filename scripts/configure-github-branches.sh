@@ -7,7 +7,7 @@ repo="${1:-raffaelefarinaro/ciaobot}"
 
 # develop: the checks a develop PR runs (the macOS `test` job does not run
 # there). `linux-e2e` is skipped for PRs whose diff does not change `web/`.
-# `mac-app` runs only its scope check on PRs whose diff does not change `mac/`.
+# `mac-app` runs only its scope check on PRs whose diff does not change `mac/`, `pyproject.toml` or `uv.lock`.
 # Admins stay exempt so release-on-main.yml can merge its
 # sync-develop PR with `gh pr merge --admin`.
 develop_json() {

@@ -1034,11 +1034,15 @@ while the server is running, because the live schedule store may be writing it.
   launchd, installer, engine-update and migration coverage — about 18 minutes)
   runs on release PRs and manual full runs, not ordinary develop PRs. The Swift
   Mac app in `mac/` is built by its own `mac-app` job (`swift test`,
-  `swift build`, `scripts/build-app.sh`, the asset test and a plist lint on
-  `macos-15`), which runs on develop PRs whose three-dot diff changes `mac/` or
+  `swift build`, `scripts/build-app.sh`, which builds the bundled engine, the
+  asset test and a plist lint on `macos-15`), which runs on develop PRs whose
+  three-dot diff changes `mac/`, `pyproject.toml`, `uv.lock` or
   `web/src/lib/workspaceColors.ts`, the engine colour table it pins (decided by
   the fast `mac-scope` detector), and on every release PR and manual
-  run; other develop PRs run only its scope check, on Linux. Web changes in develop PRs get the
+  run; other develop PRs run only its scope check, on Linux. The engine's wheelhouse
+  is cached (`actions/cache`, keyed by the four engine input hashes); the nightly
+  dispatch on `develop` seeds a cache every develop PR can read, while release PRs
+  into `main` cannot read it and build cold. Web changes in develop PRs get the
   Linux browser check before merge; the macOS browser run is the release PR.
   A full macOS or Python 3.14 failure therefore surfaces on the release PR, and `/ciao-release` merges into
   `main` only when that PR's `linux-server-latest-python`, `test` and `mac-app` checks are green.
