@@ -219,6 +219,25 @@ def read_operation(state_dir: Path | None = None) -> MoveOperation | None:
         parsed: Any = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    return _parse_operation(parsed)
+
+
+def read_operation_strict(state_dir: Path) -> MoveOperation | None:
+    """The record at ``state_dir``, read as strictly as the workspace pointer.
+
+    Used where the record drives a rename (app mode): the file must be this
+    user's own ``0o600`` regular file, not a symlink, and bounded in size —
+    anything else reads as "no record", never as an instruction.
+    """
+    from ciao import app_engine
+
+    parsed = app_engine._read_private_json(
+        state_dir / OPERATION_NAME, label="the workspace move record"
+    )
+    return _parse_operation(parsed)
+
+
+def _parse_operation(parsed: Any) -> MoveOperation | None:
     if not isinstance(parsed, dict) or parsed.get("phase") not in PHASES:
         return None
     try:
@@ -1294,6 +1313,11 @@ def _server_lock_held(workspace: Path) -> bool:
     runtime = Path(runtime_raw).expanduser() if runtime_raw else workspace / ".runtime"
     if not runtime.is_absolute():
         runtime = workspace / runtime
+    return _runtime_lock_held(runtime)
+
+
+def _runtime_lock_held(runtime: Path) -> bool:
+    """Whether a process holds the ``server.lock`` under runtime root ``runtime``."""
     try:
         handle = (runtime / "server.lock").open("rb")
     except OSError:

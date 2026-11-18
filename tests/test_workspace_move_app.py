@@ -19,6 +19,7 @@ import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -58,9 +59,12 @@ def _op(
     app: bool = True,
     runtime_root: str = "",
     error: str = "",
+    updated_ago: float = 0.0,
 ) -> workspace_move.MoveOperation:
     """The operation record the app-mode flow leaves behind for this boot."""
-    stamp = datetime.now(UTC).isoformat(timespec="seconds")
+    stamp = (datetime.now(UTC) - timedelta(seconds=updated_ago)).isoformat(
+        timespec="seconds"
+    )
     return workspace_move.MoveOperation(
         id="op-1",
         phase=phase,
@@ -258,7 +262,13 @@ def _mid_move_setup(
     app_engine.write_pointer(target, target / ".runtime")
     root = _store(
         tmp_path / "state",
-        _op(source, target, phase=phase, runtime_root=str(source / ".runtime")),
+        _op(
+            source,
+            target,
+            phase=phase,
+            runtime_root=str(source / ".runtime"),
+            updated_ago=workspace_move_app.VERIFY_GRACE_S + 60,
+        ),
     )
     return source, target, root
 
@@ -390,11 +400,18 @@ def test_before_boot_never_raises(
         tmp_path / "state2",
         _op(source, target, runtime_root=str(source / ".runtime")),
     )
-    monkeypatch.setattr(
-        workspace_move,
-        "rewrite_prefix",
-        lambda value, old, new: (_ for _ in ()).throw(RuntimeError("prefix blew up")),
-    )
+    real_prefix = workspace_move.rewrite_prefix
+    prefix_calls: list[str] = []
+
+    def prefix(value: str, old: str, new: str) -> str:
+        # The first call is the pre-move liveness probe; the repoint (after
+        # the rename) is the one that blows up.
+        prefix_calls.append(value)
+        if len(prefix_calls) > 1:
+            raise RuntimeError("prefix blew up")
+        return real_prefix(value, old, new)
+
+    monkeypatch.setattr(workspace_move, "rewrite_prefix", prefix)
     result = workspace_move_app.before_boot(state_dir=op_root)
     # It must not raise: the boot reports a rollback result and continues on
     # the folder the pointer names.
@@ -415,7 +432,9 @@ def test_before_boot_never_raises(
         lambda op, state_dir: (_ for _ in ()).throw(OSError("disk full")),
     )
     result = workspace_move_app.before_boot(state_dir=failing_root)
-    assert result == "skipped"
+    # Record writes are best-effort: the refusal is the answer, and the
+    # failed write is one stderr line.
+    assert result == "failed"
     err = capsys.readouterr().err
     assert any(
         line.startswith("workspace move:") for line in err.splitlines()
@@ -466,6 +485,7 @@ def test_stale_stopping_is_failed_without_moving(
 ) -> None:
     _app_mode(monkeypatch)
     source = _workspace(tmp_path / "ws")
+    app_engine.write_pointer(source, source / ".runtime")
     target = tmp_path / "moved"
     old = datetime.now(UTC) - timedelta(seconds=int(workspace_move_app.STALE_STOPPING_S) + 120)
     op = workspace_move.MoveOperation(
@@ -500,6 +520,7 @@ def test_server_lock_held_skips(
 
     _app_mode(monkeypatch)
     source = _workspace(tmp_path / "ws")
+    app_engine.write_pointer(source, source / ".runtime")
     target = tmp_path / "moved"
     root = _store(
         tmp_path / "state",
@@ -547,6 +568,621 @@ def test_signals_ignored_during_forward_and_restored(
     if original_hup is not None:
         assert original_hup_handler is not None
         assert signal.getsignal(original_hup) == original_hup_handler
+
+
+# ── a failed record write never strands the data ────────────────────
+
+
+def _fail_record_writes(
+    monkeypatch: pytest.MonkeyPatch, *, from_call: int, persistent: bool
+) -> Callable[[], None]:
+    """Fail the Nth record write (and every later one when ``persistent``).
+
+    Every other write delegates to the real writer. Returns a function that
+    restores the real writer, for the "following boot" half of a test.
+    """
+    real = workspace_move.write_operation
+    calls = [0]
+
+    def write(op: workspace_move.MoveOperation, state_dir: Path | None = None) -> None:
+        calls[0] += 1
+        if calls[0] == from_call or (persistent and calls[0] > from_call):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        real(op, state_dir)
+
+    monkeypatch.setattr(workspace_move, "write_operation", write)
+    return lambda: monkeypatch.setattr(workspace_move, "write_operation", real)
+
+
+def _assert_data_where_pointer_names(source: Path, target: Path) -> Path:
+    pointer = app_engine.read_pointer()
+    assert pointer is not None
+    assert (pointer.workspace / ".env").is_file(), "the pointer names a folder with the data"
+    assert (pointer.workspace / ".runtime" / "state.json").is_file()
+    assert pointer.workspace in (source.resolve(), target.resolve())
+    return pointer.workspace
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+@pytest.mark.parametrize("from_call", [2, 3, 4])
+def test_forward_record_write_failure_after_rename_keeps_the_data_reachable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    from_call: int,
+    persistent: bool,
+) -> None:
+    source, target, root = _forward_setup(tmp_path, monkeypatch)
+    restore = _fail_record_writes(monkeypatch, from_call=from_call, persistent=persistent)
+
+    result = workspace_move_app.before_boot(state_dir=root)
+
+    # The record is advisory: the folder is back and the pointer names it.
+    assert result == "rolled_back"
+    assert source.is_dir() and not target.exists()
+    assert _assert_data_where_pointer_names(source, target) == source.resolve()
+    state = json.loads((source / ".runtime" / "state.json").read_text())
+    assert state["vault"] == str(source / "vault")
+
+    # A following boot (the record may be stale) must not bury or move it.
+    restore()
+    again = workspace_move_app.before_boot(state_dir=root)
+    assert again in ("none", "rolled_back")
+    assert source.is_dir() and not target.exists()
+    assert _assert_data_where_pointer_names(source, target) == source.resolve()
+
+
+def test_forward_record_write_failure_before_rename_moves_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, target, root = _forward_setup(tmp_path, monkeypatch)
+    _fail_record_writes(monkeypatch, from_call=1, persistent=True)
+
+    assert workspace_move_app.before_boot(state_dir=root) == "failed"
+
+    assert source.is_dir() and not target.exists()
+    assert _assert_data_where_pointer_names(source, target) == source.resolve()
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_rollback_record_write_failure_still_renames_back_and_repoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, persistent: bool
+) -> None:
+    source, target, root = _mid_move_setup(tmp_path, monkeypatch, "verifying")
+    restore = _fail_record_writes(monkeypatch, from_call=1, persistent=persistent)
+
+    result = workspace_move_app.before_boot(state_dir=root)
+
+    assert result == "rolled_back"
+    assert source.is_dir() and not target.exists()
+    assert _assert_data_where_pointer_names(source, target) == source.resolve()
+
+    restore()
+    workspace_move_app.before_boot(state_dir=root)
+    assert source.is_dir() and not target.exists()
+    assert _assert_data_where_pointer_names(source, target) == source.resolve()
+
+
+def test_rollback_record_write_failure_with_rename_back_failure_names_the_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, target, root = _mid_move_setup(tmp_path, monkeypatch, "verifying")
+    _fail_record_writes(monkeypatch, from_call=1, persistent=True)
+    real_rename = os.rename
+
+    def rename(src: Path, dst: Path, **kwargs: object) -> None:
+        if Path(src) == target:
+            raise OSError("rename back failed")
+        return real_rename(src, dst, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "rename", rename)
+
+    assert workspace_move_app.before_boot(state_dir=root) == "rollback_failed"
+
+    assert target.is_dir()
+    assert _assert_data_where_pointer_names(source, target) == target.resolve()
+
+
+# ── the record is validated before anything moves ───────────────────
+
+
+def _refusal_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path, Path]:
+    """A valid forward setup; tests then swap one thing for something invalid."""
+    return _forward_setup(tmp_path, monkeypatch)
+
+
+def _expect_refused(root: Path, *folders: Path, reason: str) -> None:
+    result = workspace_move_app.before_boot(state_dir=root)
+    assert result == "failed"
+    final = _state_dir(root)
+    assert final is not None and final.phase == "failed"
+    assert reason in final.error
+    for folder in folders:
+        assert (folder / ".env").is_file(), f"{folder} must be untouched"
+    pointer = app_engine.read_pointer()
+    assert pointer is not None
+
+
+def test_refuses_a_symlinked_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, _target, _root = _refusal_setup(tmp_path, monkeypatch)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(elsewhere, target_is_directory=True)
+    root = _store(
+        tmp_path / "state",
+        _op(source, link, runtime_root=str(source / ".runtime")),
+    )
+
+    _expect_refused(root, source, reason="symbolic link")
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_refuses_a_symlinked_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    real = _workspace(tmp_path / "real")
+    link = tmp_path / "ws"
+    link.symlink_to(real, target_is_directory=True)
+    app_engine.write_pointer(real, real / ".runtime")
+    root = _store(
+        tmp_path / "state",
+        _op(link, tmp_path / "moved", runtime_root=str(real / ".runtime")),
+    )
+
+    _expect_refused(root, real, reason="symbolic link")
+    assert not (tmp_path / "moved").exists()
+
+
+@pytest.mark.parametrize(
+    ("inside", "reason"),
+    [
+        ("target-in-source", "inside one another"),
+        ("source-in-target", "inside one another"),
+        ("same", "same folder"),
+    ],
+)
+def test_refuses_overlapping_or_equal_folders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inside: str, reason: str
+) -> None:
+    source, _target, _root = _refusal_setup(tmp_path, monkeypatch)
+    target = {
+        "target-in-source": source / "inner",
+        "source-in-target": tmp_path,
+        "same": source,
+    }[inside]
+    root = _store(
+        tmp_path / "state",
+        _op(source, target, runtime_root=str(source / ".runtime")),
+    )
+
+    _expect_refused(root, source, reason=reason)
+    assert not (source / "inner").exists()
+
+
+def test_refuses_a_non_empty_target_and_keeps_its_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, target, root = _refusal_setup(tmp_path, monkeypatch)
+    target.mkdir()
+    (target / "keep.txt").write_text("mine", encoding="utf-8")
+
+    _expect_refused(root, source, reason="not empty")
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "mine"
+
+
+def test_refuses_a_target_that_is_a_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, target, root = _refusal_setup(tmp_path, monkeypatch)
+    target.write_text("a file", encoding="utf-8")
+
+    _expect_refused(root, source, reason="not empty")
+    assert target.read_text(encoding="utf-8") == "a file"
+
+
+def test_an_empty_target_directory_is_replaced_by_the_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, target, root = _refusal_setup(tmp_path, monkeypatch)
+    target.mkdir()
+
+    assert workspace_move_app.before_boot(state_dir=root) == "moved"
+
+    assert not source.exists()
+    assert (target / ".env").is_file()
+
+
+def test_refuses_a_source_the_pointer_does_not_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, target, _root = _refusal_setup(tmp_path, monkeypatch)
+    other = _workspace(tmp_path / "other")
+    app_engine.write_pointer(other, other / ".runtime")
+    root = tmp_path / "state"
+
+    _expect_refused(root, source, other, reason="not the workspace Ciaobot is using")
+    assert not target.exists()
+
+
+def test_refuses_when_no_pointer_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, target, root = _refusal_setup(tmp_path, monkeypatch)
+    (app_engine.state_dir() / app_engine.WORKSPACE_POINTER_NAME).unlink()
+
+    result = workspace_move_app.before_boot(state_dir=root)
+
+    assert result == "failed"
+    assert source.is_dir() and not target.exists()
+
+
+@pytest.mark.parametrize("field", ["source", "target", "runtime_root"])
+@pytest.mark.parametrize("value", ["relative/path", ""])
+def test_refuses_relative_or_empty_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: str
+) -> None:
+    source, target, _root = _refusal_setup(tmp_path, monkeypatch)
+    op = _op(source, target, runtime_root=str(source / ".runtime"))
+    setattr(op, field, value)
+    root = _store(tmp_path / "state", op)
+
+    _expect_refused(root, source, reason="not an absolute path")
+    assert not target.exists()
+
+
+def test_refuses_a_missing_target_parent_without_creating_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, _target, _root = _refusal_setup(tmp_path, monkeypatch)
+    target = tmp_path / "nowhere" / "moved"
+    root = _store(
+        tmp_path / "state",
+        _op(source, target, runtime_root=str(source / ".runtime")),
+    )
+
+    _expect_refused(root, source, reason="does not exist")
+    assert not (tmp_path / "nowhere").exists()
+
+
+def test_refuses_a_source_that_is_not_a_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    source = tmp_path / "ws"
+    source.write_text("not a folder", encoding="utf-8")
+    keep = _workspace(tmp_path / "keep")
+    app_engine.write_pointer(keep, keep / ".runtime")
+    pointer_file = app_engine.state_dir() / app_engine.WORKSPACE_POINTER_NAME
+    payload = json.loads(pointer_file.read_text())
+    payload["workspace"] = str(source)
+    pointer_file.write_text(json.dumps(payload), encoding="utf-8")
+    os.chmod(pointer_file, 0o600)
+    root = _store(
+        tmp_path / "state",
+        _op(source, tmp_path / "moved", runtime_root=str(keep / ".runtime")),
+    )
+
+    assert workspace_move_app.before_boot(state_dir=root) == "failed"
+    assert source.read_text(encoding="utf-8") == "not a folder"
+    assert not (tmp_path / "moved").exists()
+
+
+def test_a_world_readable_record_is_not_acted_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, target, root = _refusal_setup(tmp_path, monkeypatch)
+    os.chmod(root / "operation.json", 0o644)
+
+    assert workspace_move_app.before_boot(state_dir=root) == "none"
+    assert source.is_dir() and not target.exists()
+
+
+def test_a_symlinked_record_is_not_acted_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, target, root = _refusal_setup(tmp_path, monkeypatch)
+    real = root / "real.json"
+    (root / "operation.json").rename(real)
+    (root / "operation.json").symlink_to(real)
+
+    assert workspace_move_app.before_boot(state_dir=root) == "none"
+    assert source.is_dir() and not target.exists()
+
+
+def test_a_future_dated_stopping_record_does_not_bypass_the_age_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, target, _root = _refusal_setup(tmp_path, monkeypatch)
+    op = _op(source, target, runtime_root=str(source / ".runtime"))
+    op.updated_at = (datetime.now(UTC) + timedelta(days=365)).isoformat(timespec="seconds")
+    root = _store(tmp_path / "state", op)
+
+    assert workspace_move_app.before_boot(state_dir=root) == "failed"
+
+    assert source.is_dir() and not target.exists()
+    final = _state_dir(root)
+    assert final is not None
+    assert final.error == workspace_move_app._INTERRUPTED_BEFORE_MOVE
+
+
+def test_recover_refusal_is_rollback_failed_and_touches_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, target, _root = _mid_move_setup(tmp_path, monkeypatch, "verifying")
+    other = _workspace(tmp_path / "other")
+    app_engine.write_pointer(other, other / ".runtime")
+    root = tmp_path / "state"
+
+    assert workspace_move_app.before_boot(state_dir=root) == "rollback_failed"
+
+    assert target.is_dir() and not source.exists()
+    pointer = app_engine.read_pointer()
+    assert pointer is not None and pointer.workspace == other.resolve()
+
+
+# ── spelling: the runtime root follows a differently spelled source ──
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs symlinks")
+def test_runtime_root_is_rewritten_when_the_record_spells_paths_through_an_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    real = tmp_path / "real"
+    real.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+    source = _workspace(real / "ws")
+    app_engine.write_pointer(source, source / ".runtime")
+    root = _store(
+        tmp_path / "state",
+        _op(
+            alias / "ws",
+            alias / "moved",
+            runtime_root=str(alias / "ws" / ".runtime"),
+        ),
+    )
+
+    assert workspace_move_app.before_boot(state_dir=root) == "moved"
+
+    target = real / "moved"
+    pointer = app_engine.read_pointer()
+    assert pointer is not None
+    assert pointer.workspace == target.resolve()
+    assert pointer.runtime_root == (target / ".runtime").resolve()
+    assert (target / ".runtime").is_dir()
+
+
+# ── rollback with both folders present ──────────────────────────────
+
+
+def test_rollback_moves_the_data_over_an_empty_fresh_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, target, root = _mid_move_setup(tmp_path, monkeypatch, "verifying")
+    source.mkdir()  # a fresh, empty folder at the old path
+
+    assert workspace_move_app.before_boot(state_dir=root) == "rolled_back"
+
+    assert not target.exists()
+    assert _assert_data_where_pointer_names(source, target) == source.resolve()
+
+
+def test_rollback_with_a_populated_source_and_empty_target_points_at_the_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, target, root = _mid_move_setup(tmp_path, monkeypatch, "verifying")
+    # Data is at the source; the target is a fresh empty folder. The pointer
+    # names the empty target, which must not win.
+    target.rename(source)
+    target.mkdir()
+
+    assert workspace_move_app.before_boot(state_dir=root) == "rolled_back"
+
+    assert _assert_data_where_pointer_names(source, target) == source.resolve()
+
+
+def test_rollback_with_both_folders_populated_fails_and_moves_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, target, root = _mid_move_setup(tmp_path, monkeypatch, "verifying")
+    _workspace(source)
+    before = app_engine.read_pointer()
+    assert before is not None
+
+    assert workspace_move_app.before_boot(state_dir=root) == "rollback_failed"
+
+    assert (source / ".env").is_file() and (target / ".env").is_file()
+    after = app_engine.read_pointer()
+    assert after == before
+    final = _state_dir(root)
+    assert final is not None and "hold files" in final.error
+
+
+def _case_insensitive(tmp_path: Path) -> bool:
+    probe = tmp_path / "CaseProbe"
+    probe.mkdir()
+    return (tmp_path / "caseprobe").exists()
+
+
+def test_case_only_rename_forward_and_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if not _case_insensitive(tmp_path):
+        pytest.skip("needs a case-insensitive volume")
+    _app_mode(monkeypatch)
+    source = _workspace(tmp_path / "Ws")
+    target = tmp_path / "ws"
+    app_engine.write_pointer(source, source / ".runtime")
+    root = _store(
+        tmp_path / "state",
+        _op(source, target, runtime_root=str(source / ".runtime")),
+    )
+
+    assert workspace_move_app.before_boot(state_dir=root) == "moved"
+    assert "ws" in os.listdir(tmp_path) and "Ws" not in os.listdir(tmp_path)
+
+    # The verify never came: the next boot (after the grace) puts the
+    # spelling back instead of calling the one folder "both present".
+    final = _state_dir(root)
+    assert final is not None
+    final.updated_at = (
+        datetime.now(UTC) - timedelta(seconds=workspace_move_app.VERIFY_GRACE_S + 60)
+    ).isoformat(timespec="seconds")
+    workspace_move.write_operation(final, root)
+
+    assert workspace_move_app.before_boot(state_dir=root) == "rolled_back"
+    assert "Ws" in os.listdir(tmp_path) and "ws" not in os.listdir(tmp_path)
+    assert (tmp_path / "Ws" / ".env").is_file()
+
+
+# ── never rename while an engine may be alive ───────────────────────
+
+
+def test_fresh_verifying_record_is_not_rolled_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second boot (or an ordinary restart) inside the verifying window."""
+    source, target, _root = _mid_move_setup(tmp_path, monkeypatch, "verifying")
+    root = _store(
+        tmp_path / "state",
+        _op(
+            source,
+            target,
+            phase="verifying",
+            runtime_root=str(source / ".runtime"),
+            updated_ago=5,
+        ),
+    )
+
+    assert workspace_move_app.before_boot(state_dir=root) == "skipped"
+
+    assert target.is_dir() and not source.exists()
+    pointer = app_engine.read_pointer()
+    assert pointer is not None and pointer.workspace == target.resolve()
+    final = _state_dir(root)
+    assert final is not None and final.phase == "verifying"
+
+
+def test_aged_verifying_record_with_a_live_engine_is_not_rolled_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.os_support.locks import lock_exclusive
+
+    source, target, root = _mid_move_setup(tmp_path, monkeypatch, "verifying")
+
+    with (target / ".runtime" / "server.lock").open("rb") as held:
+        lock_exclusive(held.fileno(), blocking=False)
+        result = workspace_move_app.before_boot(state_dir=root)
+
+    assert result == "skipped"
+    assert target.is_dir() and not source.exists()
+
+
+def test_live_engine_on_an_external_runtime_root_blocks_the_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.os_support.locks import lock_exclusive
+
+    _app_mode(monkeypatch)
+    source = _workspace(tmp_path / "ws")
+    runtime = tmp_path / "rt"
+    runtime.mkdir()
+    (runtime / "server.lock").touch()
+    # The workspace's .env names no external runtime; only the record does.
+    app_engine.write_pointer(source, runtime)
+    root = _store(
+        tmp_path / "state",
+        _op(source, tmp_path / "moved", runtime_root=str(runtime)),
+    )
+
+    with (runtime / "server.lock").open("rb") as held:
+        lock_exclusive(held.fileno(), blocking=False)
+        result = workspace_move_app.before_boot(state_dir=root)
+
+    assert result == "skipped"
+    assert source.is_dir() and not (tmp_path / "moved").exists()
+
+
+# ── signals, threads and devices ────────────────────────────────────
+
+
+def test_signals_ignored_tolerates_a_missing_previous_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real = signal.getsignal
+    installed: list[tuple[int, object]] = []
+    real_signal = signal.signal
+
+    monkeypatch.setattr(
+        signal, "getsignal", lambda sig: None if sig == signal.SIGTERM else real(sig)
+    )
+
+    def recording(sig: int, handler: object) -> object:
+        installed.append((sig, handler))
+        return real_signal(sig, handler)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(signal, "signal", recording)
+    original = real(signal.SIGTERM)
+    try:
+        with workspace_move_app._signals_ignored():
+            pass
+    finally:
+        real_signal(signal.SIGTERM, original)
+
+    assert (signal.SIGTERM, signal.SIG_DFL) in installed
+
+
+def test_signals_ignored_from_a_worker_thread_does_not_crash() -> None:
+    import threading
+
+    outcome: list[object] = []
+
+    def run() -> None:
+        try:
+            with workspace_move_app._signals_ignored():
+                outcome.append(signal.getsignal(signal.SIGTERM) != signal.SIG_IGN)
+        except BaseException as exc:  # noqa: BLE001
+            outcome.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join()
+
+    assert outcome == [True]
+
+
+def test_cross_device_rename_fails_without_copying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    source, target, root = _forward_setup(tmp_path, monkeypatch)
+    real_rename = os.rename
+
+    def rename(src: Path, dst: Path, **kwargs: object) -> None:
+        if Path(src) == source:
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_rename(src, dst, **kwargs)  # type: ignore[arg-type]
+
+    def no_copy(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a cross-device move must never copy")
+
+    monkeypatch.setattr(os, "rename", rename)
+    monkeypatch.setattr(shutil, "copytree", no_copy)
+    monkeypatch.setattr(shutil, "move", no_copy)
+
+    assert workspace_move_app.before_boot(state_dir=root) == "failed"
+
+    assert source.is_dir() and not target.exists()
+    final = _state_dir(root)
+    assert final is not None
+    assert final.phase == "failed" and "different volume" in final.error
 
 
 # ── the cli wiring: the restart hook and the environment fix ─────────
