@@ -79,7 +79,8 @@ final class EngineSupervisorTests: XCTestCase {
 
     private func makeSupervisor(
         engine: BundledEngine? = nil,
-        environment: [String: String] = ["PATH": "/usr/bin"]
+        environment: [String: String] = ["PATH": "/usr/bin"],
+        enginePort: Int? = nil
     ) -> EngineSupervisor {
         EngineSupervisor(
             engine: engine ?? BundledEngine(root: engineRoot),
@@ -87,6 +88,7 @@ final class EngineSupervisorTests: XCTestCase {
             processes: processes,
             identity: identity,
             environment: environment,
+            enginePort: enginePort,
             clock: { [time] in time.now },
             schedule: { [time] delay, work in time.schedule(delay, work) }
         )
@@ -165,6 +167,17 @@ final class EngineSupervisorTests: XCTestCase {
         XCTAssertEqual(spawn.launch.workingDirectory, home.home)
         XCTAssertEqual(spawn.log, home.logFile)
         XCTAssertEqual(supervisor.state, .starting)
+    }
+
+    func testTheDebugPortIsPassedToTheEngineAndTheOriginFollowsTheReadyRecord() throws {
+        let supervisor = makeSupervisor(enginePort: 9100)
+        _ = try bringUp(supervisor, port: 9100)
+        let spawn = try XCTUnwrap(processes.spawns.first)
+        XCTAssertEqual(spawn.launch.arguments, ["run", "--app-engine", "--port", "9100"])
+        guard case .running(let origin, _, _) = supervisor.state else {
+            return XCTFail("expected running, got \(supervisor.state)")
+        }
+        XCTAssertEqual(origin.url.absoluteString, "http://127.0.0.1:9100")
     }
 
     func testLogOverTwentyMegabytesRotatesBeforeSpawn() throws {

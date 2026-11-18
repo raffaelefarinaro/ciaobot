@@ -444,6 +444,16 @@ final class LocalEngineWiringTests: XCTestCase {
         XCTAssertFalse(TestLaunch.addressed(environment: [:]))
     }
 
+    func testEnginePortOverrideIsStrictAndRangeChecked() {
+        XCTAssertNil(TestLaunch.enginePort(environment: [:]))
+        XCTAssertEqual(TestLaunch.enginePort(environment: ["CIAOBOT_MAC_TEST_ENGINE_PORT": "9100"]), 9100)
+        XCTAssertEqual(TestLaunch.enginePort(environment: ["CIAOBOT_MAC_TEST_ENGINE_PORT": "1024"]), 1024)
+        XCTAssertEqual(TestLaunch.enginePort(environment: ["CIAOBOT_MAC_TEST_ENGINE_PORT": "65535"]), 65535)
+        for raw in ["", "1023", "65536", "0", "-9100", "+9100", " 9100", "9100 ", "91.0", "9e3", "abc", "٩١٠٠"] {
+            XCTAssertNil(TestLaunch.enginePort(environment: ["CIAOBOT_MAC_TEST_ENGINE_PORT": raw]), raw)
+        }
+    }
+
     func testEngineHomeOverrideRequiresAnExistingAbsoluteDirectory() throws {
         let directory = try makeTempDirectory("engine-home")
         let environment = ["CIAOBOT_MAC_TEST_HOME": directory.resolvingSymlinksInPath().path]
