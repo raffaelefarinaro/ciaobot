@@ -22,6 +22,37 @@ def test_browser_waits_only_for_fast_scope_detection() -> None:
     assert 'test "$SCOPE_RESULT" = success' in jobs["linux-e2e"]
 
 
+def test_linux_e2e_storybook_steps_are_gated_and_ordered() -> None:
+    # #3269 added the workshop gates to linux-e2e beside the e2e suite: the
+    # Storybook build (which also runs the story-index check) and the browser
+    # runner. Parsed per step, like mac-app below: a dropped or mis-typed
+    # web_changed guard would make a backend-only develop PR run - and fail -
+    # web commands no backend PR pays for, and only this check sees it.
+    steps = yaml.safe_load(
+        (Path(__file__).parents[1] / ".github/workflows/ci.yml").read_text()
+    )["jobs"]["linux-e2e"]["steps"]
+    gate = "needs.web-scope.outputs.web_changed == 'true'"
+    assert steps[0]["name"] == "Require successful web scope detection"
+    assert "if" not in steps[0]
+    *web_steps, traces = steps[1:]
+    assert [step.get("if") for step in web_steps] == [gate] * len(web_steps)
+    assert traces["if"] == "failure()"
+    assert [step.get("uses") for step in web_steps[:2]] == [
+        "actions/checkout@v7",
+        "actions/setup-node@v7",
+    ]
+    # Build first, then the runner that needs its output, both after the
+    # Chromium install and before the e2e suite.
+    assert [step["run"] for step in web_steps[2:]] == [
+        "npm ci",
+        "npx playwright install --with-deps chromium",
+        "npm run build-storybook",
+        "npm run test-storybook",
+        "npm run test:e2e",
+    ]
+    assert all(step.get("working-directory") == "web" for step in web_steps[2:])
+
+
 def test_only_superseded_pr_runs_are_cancelled() -> None:
     workflow = (Path(__file__).parents[1] / ".github/workflows/ci.yml").read_text()
     assert "concurrency:" in workflow
