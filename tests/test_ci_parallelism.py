@@ -20,6 +20,60 @@ def test_browser_waits_only_for_fast_scope_detection() -> None:
     assert "npm" not in jobs["web-scope"]
     assert "always()" in jobs["linux-e2e"]
     assert 'test "$SCOPE_RESULT" = success' in jobs["linux-e2e"]
+    # Bounded like mac-app below: a hung e2e run must not hold a PR open
+    # indefinitely.
+    assert "\n    timeout-minutes: 30\n" in jobs["linux-e2e"]
+
+
+def test_linux_e2e_storybook_steps_are_gated_and_ordered() -> None:
+    # #3269 added the workshop gates to linux-e2e beside the e2e suite: the
+    # Storybook build (which also runs the story-index check) and the browser
+    # runner. They are independent signals, so the runner still runs after a
+    # failed build (`!cancelled()`) and one failure cannot mask the other;
+    # the job still fails. They also stay out of linux-web, which keeps
+    # backend-only PRs fast. Parsed per step, like mac-app below: a dropped or
+    # mis-typed web_changed guard would make a backend-only develop PR run -
+    # and fail - web commands no backend PR pays for, and only this check
+    # sees it.
+    jobs = yaml.safe_load(
+        (Path(__file__).parents[1] / ".github/workflows/ci.yml").read_text()
+    )["jobs"]
+    steps = jobs["linux-e2e"]["steps"]
+    gate = "needs.web-scope.outputs.web_changed == 'true'"
+    assert steps[0]["name"] == "Require successful web scope detection"
+    assert "if" not in steps[0]
+    *web_steps, traces = steps[1:]
+    assert traces["if"] == "failure()"
+    assert [step.get("uses") for step in web_steps[:2]] == [
+        "actions/checkout@v7",
+        "actions/setup-node@v7",
+    ]
+    # Build first, then the runner, both after the Chromium install and
+    # before the e2e suite.
+    assert [step["run"] for step in web_steps[2:]] == [
+        "npm ci",
+        "npx playwright install --with-deps chromium",
+        "npm run build-storybook",
+        "npm run test-storybook",
+        "npm run test:e2e",
+    ]
+    assert all(step.get("working-directory") == "web" for step in web_steps[2:])
+    # The runner is the one web step allowed to run after a failed sibling:
+    # it keeps the plain web_changed guard but drops the implicit success()
+    # via `!cancelled()`, so a failed build still gives the runner a report.
+    runner = next(
+        step for step in web_steps if step.get("run") == "npm run test-storybook"
+    )
+    assert runner["if"] == "${{ " + gate + " && !cancelled() }}"
+    siblings = [step for step in web_steps if step is not runner]
+    assert [step.get("if") for step in siblings] == [gate] * len(siblings)
+    # The issue keeps the workshop gates out of linux-web entirely: not one
+    # step name or command there may mention Storybook.
+    assert not [
+        step
+        for step in jobs["linux-web"]["steps"]
+        if "storybook" in (step.get("name", "") + step.get("run", "")).lower()
+    ]
 
 
 def test_only_superseded_pr_runs_are_cancelled() -> None:

@@ -2,17 +2,26 @@ import type { Meta, StoryObj } from '@storybook/vue3-vite'
 import { expect, waitFor } from 'storybook/test'
 import { defineComponent, h, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 import HomeTodayStats from '../components/HomeTodayStats.vue'
-import { mountConnectedStats } from './connectedStats'
-import { statsWorkspaces, type StatsState } from './statsBoundary'
+import { useProjectStore } from '../stores/projects'
+import { mountConnected } from './mountConnected'
+import { statsRoutes, statsWorkspaces, type StatsState, usageRoute } from './homeTodayStatsFixture'
+
+function mountStats(host: HTMLElement) {
+  return mountConnected(host, {
+    component: HomeTodayStats,
+    routerRoutes: [usageRoute()],
+    seed: pinia => { useProjectStore(pinia).activeWorkspace = 'storybook-alpha' },
+  })
+}
 
 function renderState(state: StatsState) {
   return defineComponent({
     setup() {
       const host = ref<HTMLElement>()
-      const fixture = shallowRef<ReturnType<typeof mountConnectedStats>>()
+      const fixture = shallowRef<ReturnType<typeof mountStats>>()
       const error = ref('')
       onMounted(() => {
-        try { fixture.value = mountConnectedStats(host.value!, state) }
+        try { fixture.value = mountStats(host.value!) }
         catch (cause) { error.value = String(cause) }
       })
       onBeforeUnmount(() => fixture.value?.dispose())
@@ -23,7 +32,7 @@ function renderState(state: StatsState) {
           h('select', {
             'aria-label': 'Fixture workspace',
             onChange: (event: Event) => {
-              if (fixture.value) fixture.value.projects.activeWorkspace = (event.target as HTMLSelectElement).value
+              if (fixture.value) useProjectStore(fixture.value.pinia).activeWorkspace = (event.target as HTMLSelectElement).value
             },
           }, statsWorkspaces.map(value => h('option', { value }, value))),
         ]),
@@ -60,7 +69,23 @@ const playSettled: Story['play'] = async ({ canvas }) => {
   expect(canvas.queryAllByRole('alert')).toHaveLength(0)
   expect(canvas.queryByText(/Story network violation/)).toBeNull()
 }
-export const Default: Story = { render: () => renderState('default'), play: playSettled }
-export const Loading: Story = { render: () => renderState('loading'), play: playSettled }
-export const Failed: Story = { render: () => renderState('failed'), play: playSettled }
-export const Partial: Story = { render: () => renderState('partial'), play: playSettled }
+export const Default: Story = {
+  parameters: { fixture: { routes: statsRoutes('default') } },
+  render: () => renderState('default'),
+  play: playSettled,
+}
+export const Loading: Story = {
+  parameters: { fixture: { routes: statsRoutes('loading') } },
+  render: () => renderState('loading'),
+  play: playSettled,
+}
+export const Failed: Story = {
+  parameters: { fixture: { routes: statsRoutes('failed') } },
+  render: () => renderState('failed'),
+  play: playSettled,
+}
+export const Partial: Story = {
+  parameters: { fixture: { routes: statsRoutes('partial') } },
+  render: () => renderState('partial'),
+  play: playSettled,
+}
