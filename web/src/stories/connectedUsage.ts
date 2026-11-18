@@ -1,19 +1,19 @@
 import { createApp, defineComponent, h } from 'vue'
 import { createPinia, disposePinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter, RouterView } from 'vue-router'
-import HomeTodayStats from '../components/HomeTodayStats.vue'
+import UsageView from '../components/UsageView.vue'
 import { useProjectStore } from '../stores/projects'
-import { installStatsBoundary, type StatsState } from './statsBoundary'
+import { installUsageBoundary, type UsageFixtureState } from './usageBoundary'
 
-/** A separate Vue app prevents fixture plugins leaking into Storybook's app. */
-export function mountConnectedStats(host: HTMLElement, state: StatsState, workspace = 'storybook-alpha') {
-  const boundary = installStatsBoundary(state)
+/** Separate Vue app so fixture plugins do not leak into Storybook's app. */
+export function mountConnectedUsage(host: HTMLElement, state: UsageFixtureState, workspace = 'storybook-alpha') {
+  const boundary = installUsageBoundary(state)
   const pinia = createPinia()
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
-      { path: '/', component: HomeTodayStats },
-      { path: '/stats', component: defineComponent({ render: () => h('p', 'Inert Usage destination — no Usage page or bootstrap mounted.') }) },
+      { path: '/', component: UsageView },
+      { path: '/stats', component: defineComponent({ render: () => h('p', 'Inert stats destination for workshop routing only.') }) },
     ],
   })
   const app = createApp({ render: () => h(RouterView) })
@@ -35,8 +35,6 @@ export function mountConnectedStats(host: HTMLElement, state: StatsState, worksp
     app.use(pinia)
     app.use(router)
     const projects = useProjectStore(pinia)
-    // Seed state only. fetchAll/switchWorkspace are app orchestration, not this
-    // owner's dependency. Its real watcher and stats client remain untouched.
     projects.activeWorkspace = workspace
     void router.replace('/')
     app.mount(host)

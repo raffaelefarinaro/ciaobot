@@ -481,7 +481,6 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "vault_root": "memory-vault/client-a",
         "default_provider": "claude",
         "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
-        "claude_ai_connectors": True,
         "gws_profile": "work",
         "color": "amber",
         "memory_handover": "all",
@@ -515,7 +514,6 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "vault_root": "memory-vault/personal",
             "default_provider": "claude",
             "disallowed_tools": None,
-            "claude_ai_connectors": True,
             "gws_profile": "personal",
             "color": "amber",
         },
@@ -803,32 +801,22 @@ def test_connectors_always_allowed_and_extras_honored(tmp_path):
     assert personal_stored["disallowed_tools"] == ["mcp__n8n_mcp"]
 
 
-def test_claude_ai_connectors_switch_saves_persists_and_validates(tmp_path):
+def test_retired_connectors_field_is_not_read_on_save(tmp_path):
+    """A PATCH that still sends the old field does not trim connectors or persist it."""
     client, config, _pcm = _client(tmp_path)
     client.post("/api/workspaces", json={"name": "client-a", "vault_root": "client-a"})
-    assert config.workspace("client-a").claude_ai_connectors is True
 
-    off = client.patch("/api/workspaces/client-a", json={"claude_ai_connectors": False})
-    assert off.status_code == 200
-    assert any(
-        w["name"] == "client-a" and w["claude_ai_connectors"] is False
-        for w in off.json()["workspaces"]
+    ignored = client.patch("/api/workspaces/client-a", json={"claude_ai_connectors": False})
+    assert ignored.status_code == 200
+    assert "setting:claude_ai_connectors" not in config.workspace("client-a").claude_trim
+    assert all(
+        "claude_ai_connectors" not in w for w in ignored.json()["workspaces"]
     )
-    assert config.workspace("client-a").claude_ai_connectors is False
-
-    # A save that leaves the switch out keeps it.
-    kept = client.patch("/api/workspaces/client-a", json={"color": "cyan"})
-    assert kept.status_code == 200
-    assert config.workspace("client-a").claude_ai_connectors is False
 
     stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
-    assert next(w for w in stored if w["name"] == "client-a")["claude_ai_connectors"] is False
-
-    # Only a real boolean is accepted; a string would otherwise be read as truthy.
-    bad = client.patch("/api/workspaces/client-a", json={"claude_ai_connectors": "false"})
-    assert bad.status_code == 400
-    assert "claude_ai_connectors" in bad.json()["error"]
-    assert config.workspace("client-a").claude_ai_connectors is False
+    row = next(w for w in stored if w["name"] == "client-a")
+    assert "claude_ai_connectors" not in row
+    assert "setting:claude_ai_connectors" not in row.get("claude_trim", {})
 
 
 def test_claude_trim_saves_persists_and_validates(tmp_path):
@@ -846,13 +834,16 @@ def test_claude_trim_saves_persists_and_validates(tmp_path):
     }
     assert config.workspace("client-a").claude_trim == {"tool:ReportFindings": True}
 
-    # Locked scheduling options cannot be un-trimmed.
-    locked = client.patch(
+    # Scheduling options are trimmed by default, but the user can un-trim them.
+    assert "CronCreate" in config.disallowed_tools_for_workspace("client-a")
+    untrimmed = client.patch(
         "/api/workspaces/client-a",
         json={"claude_trim": {"tool:CronCreate": False}},
     )
-    assert locked.status_code == 400
-    assert config.workspace("client-a").claude_trim == {"tool:ReportFindings": True}
+    assert untrimmed.status_code == 200
+    assert config.workspace("client-a").claude_trim == {"tool:CronCreate": False}
+    assert "CronCreate" not in config.disallowed_tools_for_workspace("client-a")
+    assert "CronDelete" in config.disallowed_tools_for_workspace("client-a")
 
     # An empty object resets to the catalog defaults.
     reset = client.patch("/api/workspaces/client-a", json={"claude_trim": {}})
@@ -872,7 +863,8 @@ def test_workspaces_payload_includes_trim_catalog(tmp_path):
     data = client.get("/api/workspaces").json()
     options = {option["key"]: option for option in data["claude_trim_options"]}
     assert options["tool:NotebookEdit"]["default_trimmed"] is True
-    assert options["tool:NotebookEdit"]["locked"] is False
+    assert options["tool:CronCreate"]["default_trimmed"] is True
+    assert all("locked" not in option for option in options.values())
 
 
 def test_workspace_color_defaults_persists_and_validates(tmp_path):

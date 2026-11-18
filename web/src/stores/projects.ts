@@ -15,7 +15,7 @@ import {
 } from '../lib/serverRestart'
 import { apiErrorMessage, errorMessage, errorPayload } from '../lib/errorMessage'
 import { nextBackgroundableCalls, type BackgroundableCalls } from '../lib/moveToBackground'
-import { applyKeyboardSettings, useKeyboardSettings } from '../composables/useKeyboardSettings'
+import { applyKeyboardSettings } from '../composables/useKeyboardSettings'
 import { applyAppearanceSettings } from '../composables/useAppearanceSettings'
 import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft, type OrphanDraft } from '../lib/chatDrafts'
 import { isMemoryProject, isMemoryPassChat, memoryPassNeedsAttention as memoryPassNeedsAttentionFor } from '../lib/memoryPass'
@@ -36,8 +36,6 @@ import type {
   MoveToBackgroundResponse,
   SubagentTranscript,
   WsEvent,
-  QueueDelivery,
-  SteerFallbackReason,
   EventsWsMessage,
   InAppToast,
   PackageStatus,
@@ -438,16 +436,7 @@ export const useProjectStore = defineStore('projects', () => {
   // signal on the per-chat socket when a send is rejected mid-drain).
   const serverRestarting = ref(false)
   const serverRestartMessage = ref('')
-  // `delivery` is what the message will do; `steering` means it was handed to
-  // the running turn and is locked until the provider confirms delivery.
-  const STEER_FALLBACK_NOTICE: Record<SteerFallbackReason, string> = {
-    finished: 'Steering missed the reply, so it was queued instead.',
-    not_running: 'Nothing was running to steer into, so it was queued instead.',
-    no_turn: 'Nothing was running to steer into, so it was queued instead.',
-    stopped: 'Stopped before it was steered. It stays in the queue.',
-    send_id_limit: 'That steer batch was too large to deduplicate safely; overflow was queued for the next turn.',
-  }
-  type QueuedMessage = { id: string; text: string; images?: string[]; delivery: QueueDelivery; steering?: boolean; waiting?: boolean }
+  type QueuedMessage = { id: string; text: string; images?: string[]; waiting?: boolean }
   function makeQueuedId(): string {
     if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
       return crypto.randomUUID()
@@ -462,46 +451,6 @@ export const useProjectStore = defineStore('projects', () => {
   const queueTakeFailures = ref<Record<string, number>>({})
   const queuedTakeAcks: Record<string, Set<string>> = {}
   const acknowledgedQueueTakes: Record<string, Set<string>> = {}
-  // One-line dock notice per chat after a steer fell back to the queue.
-  const steerNotice = ref<Record<string, string>>({})
-  // The server answers every steer with steered, steer_fallback or a
-  // queue_state; this only guards a lock the server never answers (a race, a
-  // background stream, ids that are gone), so it cannot stick forever.
-  const STEER_LOCK_TIMEOUT_MS = 15000
-  const STEER_NOTICE_MS = 8000
-  const steerLockTimers = new Map<string, ReturnType<typeof setTimeout>>()
-  const steerNoticeTimers = new Map<string, ReturnType<typeof setTimeout>>()
-  function clearSteerLockTimer(chatId: string) {
-    cancelTimer(steerLockTimers.get(chatId))
-    steerLockTimers.delete(chatId)
-  }
-  function setSteerNotice(chatId: string, text: string) {
-    steerNotice.value[chatId] = text
-    cancelTimer(steerNoticeTimers.get(chatId))
-    steerNoticeTimers.set(chatId, scheduleTimer(() => {
-      delete steerNotice.value[chatId]
-      steerNoticeTimers.delete(chatId)
-    }, STEER_NOTICE_MS))
-  }
-  function clearSteerNotice(chatId: string) {
-    cancelTimer(steerNoticeTimers.get(chatId))
-    steerNoticeTimers.delete(chatId)
-    delete steerNotice.value[chatId]
-  }
-  function armSteerLockTimer(chatId: string) {
-    clearSteerLockTimer(chatId)
-    steerLockTimers.set(chatId, scheduleTimer(() => {
-      steerLockTimers.delete(chatId)
-      let reverted = false
-      for (const q of queuedMessages.value[chatId] || []) {
-        if (!q.steering) continue
-        q.delivery = 'queue'
-        q.steering = false
-        reverted = true
-      }
-      if (reverted) setSteerNotice(chatId, 'The steer was not confirmed, so it was queued instead.')
-    }, STEER_LOCK_TIMEOUT_MS))
-  }
   // Pending Auto-mode permission prompts keyed by chat_id. The chat bubble
   // renders Approve/Deny buttons for each entry; clicking sends a
   // `permission_response` on the per-chat WS and waits for the provider ack.
@@ -2345,8 +2294,6 @@ export const useProjectStore = defineStore('projects', () => {
           id: entry.id || makeQueuedId(),
           text: (entry.text || '').trim(),
           images: entry.images?.length ? [...entry.images] : undefined,
-          delivery: 'queue',
-          steering: false,
           waiting: true,
         }))
         if (isChatStreaming(chat.chat_id)) {
@@ -5304,11 +5251,10 @@ export const useProjectStore = defineStore('projects', () => {
   function handleEventsMessage(msg: EventsWsMessage) {
     switch (msg.type) {
       case 'snapshot': {
-        if (msg.keyboard_shortcuts || msg.keyboard_send_mode || msg.mid_turn_delivery) {
+        if (msg.keyboard_shortcuts || msg.keyboard_send_mode) {
           applyKeyboardSettings({
             keyboard_shortcuts: msg.keyboard_shortcuts,
             keyboard_send_mode: msg.keyboard_send_mode,
-            mid_turn_delivery: msg.mid_turn_delivery,
             revision: msg.keyboard_revision,
           })
         }
@@ -5664,8 +5610,6 @@ export const useProjectStore = defineStore('projects', () => {
         if (streaming.value[msg.chat_id]) delete streaming.value[msg.chat_id]
         if (streamingText.value[msg.chat_id]) delete streamingText.value[msg.chat_id]
         delete streamingTextPhase.value[msg.chat_id]
-        clearSteerLockTimer(msg.chat_id)
-        clearSteerNotice(msg.chat_id)
         if (queuedMessages.value[msg.chat_id]) delete queuedMessages.value[msg.chat_id]
         if (unread.value[msg.chat_id]) {
           delete unread.value[msg.chat_id]
@@ -6030,16 +5974,9 @@ export const useProjectStore = defineStore('projects', () => {
       }
       if (!queuedMessages.value[chatId]) queuedMessages.value[chatId] = []
       const queueId = makeQueuedId()
-      // The Settings default decides whether a mid-turn message waits for the
-      // next turn or is steered into the running one. Images steer too.
-      const delivery: QueueDelivery = useKeyboardSettings().settings.value.mid_turn_delivery
-      queuedMessages.value[chatId].push({
-        id: queueId, text: composed, images: imageRefs, delivery, steering: delivery === 'steer',
-      })
-      clearSteerNotice(chatId)
-      if (delivery === 'steer') armSteerLockTimer(chatId)
+      queuedMessages.value[chatId].push({ id: queueId, text: composed, images: imageRefs })
       const payload: Record<string, unknown> = {
-        type: 'message', text: composed, mode: 'queue', delivery, send_id: sendId,
+        type: 'message', text: composed, mode: 'queue', send_id: sendId,
       }
       if (imageRefs) payload.images = imageRefs
       if (origin) payload.origin = origin
@@ -6122,7 +6059,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   function requestQueuedEdit(chatId: string, entryId: string): boolean {
     const ws = sockets.value[chatId]
-    const index = queuedMessages.value[chatId]?.findIndex(q => q.id === entryId && !q.steering) ?? -1
+    const index = queuedMessages.value[chatId]?.findIndex(q => q.id === entryId) ?? -1
     if (index < 0 || ws?.readyState !== WebSocket.OPEN) return false
     ws.send(JSON.stringify({ type: 'queue_take', entry_id: entryId, request_id: makeQueuedId() }))
     return true
@@ -6133,15 +6070,6 @@ export const useProjectStore = defineStore('projects', () => {
     const ws = sockets.value[chatId]
     if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'queue_take_ack', entry_id: entryId }))
     else (queuedTakeAcks[chatId] ||= new Set()).add(entryId)
-  }
-
-  function removeQueuedByIds(chatId: string, entryIds: string[] | undefined) {
-    const list = queuedMessages.value[chatId]
-    if (!list || !entryIds?.length) return
-    const gone = new Set(entryIds)
-    const remaining = list.filter(q => !gone.has(q.id))
-    if (remaining.length) queuedMessages.value[chatId] = remaining
-    else delete queuedMessages.value[chatId]
   }
 
   function removeQueuedById(chatId: string, entryId: string) {
@@ -6183,44 +6111,24 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   /**
-   * Switch queued entries between Queue and Steer with one frame. Steer sends
-   * them now, combined in list order (the order the ids are sent in). With a
-   * turn running the chips lock as "Steering…" until the server confirms (or a
-   * 15 s timer gives up); with nothing running this is "Send now" on waiting
-   * entries, which starts a turn and removes them through `user_echo`, so
-   * nothing is changed or locked optimistically.
+   * "Send now" on waiting entries while nothing runs: starts a turn from them
+   * and removes them through `user_echo`, so nothing is changed optimistically.
+   * With a turn running the chips only queue, so no frame is sent.
    */
-  function setQueuedDelivery(chatId: string, entryIds: string[], delivery: QueueDelivery) {
-    const list = queuedMessages.value[chatId]
+  function sendQueuedNow(chatId: string, entryIds: string[]): void {
     const ws = sockets.value[chatId]
-    if (!list?.length || ws?.readyState !== WebSocket.OPEN) return
+    if (ws?.readyState !== WebSocket.OPEN || isChatStreaming(chatId)) return
     const wanted = new Set(entryIds)
-    const chosen = list.filter(q => wanted.has(q.id) && !q.steering)
+    const chosen = (queuedMessages.value[chatId] || []).filter(q => wanted.has(q.id))
     if (!chosen.length) return
-    // Only while a turn runs is the change optimistic. Idle, "Send now"
-    // starts a turn and the echo removes the entries; a server that does
-    // nothing leaves the chips exactly as they were.
-    if (isChatStreaming(chatId)) {
-      for (const entry of chosen) {
-        entry.delivery = delivery
-        if (delivery === 'steer') {
-          entry.steering = true
-          entry.waiting = false
-        }
-      }
-      if (delivery === 'steer') armSteerLockTimer(chatId)
-    }
-    clearSteerNotice(chatId)
     ws.send(JSON.stringify({
       type: 'queue_set_delivery',
       entry_ids: chosen.map(q => q.id),
-      delivery,
+      delivery: 'steer',
     }))
   }
 
   function clearQueued(chatId: string) {
-    clearSteerLockTimer(chatId)
-    clearSteerNotice(chatId)
     delete queuedMessages.value[chatId]
   }
 
@@ -6900,7 +6808,6 @@ export const useProjectStore = defineStore('projects', () => {
           if (existing) {
             existing.text = trimmed
             existing.images = event.images?.length ? event.images : undefined
-            if (event.delivery) existing.delivery = event.delivery
           }
           break
         }
@@ -6909,8 +6816,6 @@ export const useProjectStore = defineStore('projects', () => {
           id: entryId || makeQueuedId(),
           text: trimmed,
           images: event.images?.length ? event.images : undefined,
-          delivery: event.delivery === 'steer' ? 'steer' : 'queue',
-          steering: false,
           waiting: Boolean(event.waiting),
         })
         queuedMessages.value[chatId] = list
@@ -6934,7 +6839,6 @@ export const useProjectStore = defineStore('projects', () => {
         // Authoritative queue order from the backend (e.g. after a reorder/edit
         // from another client, or on reconnect). Rebuild local chips to match.
         const incoming = event.queue || []
-        clearSteerLockTimer(chatId)
         if (!incoming.length) {
           delete queuedMessages.value[chatId]
           break
@@ -6943,36 +6847,8 @@ export const useProjectStore = defineStore('projects', () => {
           id: q.id || makeQueuedId(),
           text: (q.text || '').trim(),
           images: q.images?.length ? q.images : undefined,
-          delivery: q.delivery === 'steer' ? 'steer' : 'queue',
-          steering: Boolean(q.steering),
-          waiting: Boolean(q.waiting) && !q.steering,
+          waiting: Boolean(q.waiting),
         }))
-        break
-      }
-
-      case 'steered': {
-        // The provider took the steer: the entries leave the queue and the
-        // message is its own user turn. Replays dedup by turn_index.
-        _commitStreamingTextToTimeline(chatId)
-        clearSteerLockTimer(chatId)
-        removeQueuedByIds(chatId, event.entry_ids)
-        const trimmed = (event.text || '').trim()
-        if (!trimmed) break
-        const turnIndex = event.turn_index
-        if (turnIndex != null && msgs.some(m => m.role === 'user' && m.turn_index === turnIndex)) break
-        const last = msgs[msgs.length - 1]
-        if (turnIndex == null && last && last.role === 'user' && last.content === trimmed) break
-        msgs.push({
-          role: 'user',
-          content: trimmed,
-          timestamp: event.sent_at || new Date().toISOString(),
-          images: event.images?.length ? event.images : undefined,
-          turn_index: turnIndex,
-          steered: true,
-          origin: event.origin || undefined,
-        })
-        messages.value[chatId] = normalizeMessages([...msgs])
-        persistMessages()
         break
       }
 
@@ -6988,21 +6864,6 @@ export const useProjectStore = defineStore('projects', () => {
         streamingThinking.value[chatId] = ''
         streamingTimeline.value[chatId] = []
         delete streamingTextPhase.value[chatId]
-        break
-      }
-
-      case 'steer_fallback': {
-        // A steer could not be delivered: the entries are plain queued
-        // messages again. Say so, because nothing else on screen changed.
-        const ids = new Set(event.entry_ids || [])
-        for (const q of queuedMessages.value[chatId] || []) {
-          if (!ids.has(q.id)) continue
-          q.delivery = 'queue'
-          q.steering = false
-          q.waiting = false
-        }
-        clearSteerLockTimer(chatId)
-        setSteerNotice(chatId, STEER_FALLBACK_NOTICE[event.reason] || STEER_FALLBACK_NOTICE.not_running)
         break
       }
 
@@ -7299,7 +7160,6 @@ export const useProjectStore = defineStore('projects', () => {
       case 'result': {
         delete backgroundableCalls.value[chatId]
         settleCompactState(chatId)
-        clearSteerLockTimer(chatId)
         // The broker replays its whole event buffer to every new subscriber,
         // so a reconnect receives the terminal `result` of a turn the history
         // reload already hydrated. Rendering it again appended a second
@@ -7625,7 +7485,7 @@ export const useProjectStore = defineStore('projects', () => {
   return {
     // State
     projects, chats, workspaces, workspaceRegistryStatus, workspaceRegistryError, workspaceProviderOptions, claudeTrimOptions, activeWorkspace, activeChatId, besideChatId, bootstrapped, chatsHealth, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
-    streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, backgroundableCalls, steerNotice,
+    streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, backgroundableCalls,
     projectStreaming, wakeStreaming, isWakeStreaming, backgroundAgents, runningSubagents, stoppingTasks, stopTaskErrors, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     chatActions, pendingChatModeWrites,
     serverRestarting, serverRestartMessage,
@@ -7642,7 +7502,7 @@ export const useProjectStore = defineStore('projects', () => {
     archivingChats, isArchiving,
     canLoadOlderByChat, isLoadingOlderByChat,
     // Actions
-    setQueuedDelivery,
+    sendQueuedNow,
     fetchAll, fetchWorkspaces, createWorkspace, reorderWorkspaces, updateWorkspace,
     archiveWorkspace, fetchArchivedWorkspaces, restoreArchivedWorkspace,
     workspaceRegistryRevision, refreshWorkspaceRegistry,

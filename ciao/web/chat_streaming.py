@@ -369,7 +369,6 @@ class ChatStreaming:
         self._host = host
         self._turn_perf_started: dict[tuple[str, int], float] = {}
         self._between_turn_drains: dict[str, asyncio.Task[None]] = {}
-        self._last_drain_result: dict[str, tuple[str, bool]] = {}
         self._drive_tasks: dict[str, tuple[ChatStream, asyncio.Task[None]]] = {}
         # A background Stop's shared teardown: the drain unwind plus the
         # provider abort. A foreground drive joins it before it enters.
@@ -386,19 +385,12 @@ class ChatStreaming:
     def between_turn_drains(self) -> dict[str, asyncio.Task[None]]:
         return self._between_turn_drains
 
-    @property
-    def last_drain_results(self) -> dict[str, tuple[str, bool]]:
-        return self._last_drain_result
-
     def _drain_pending(self, chat_id: str) -> asyncio.Task[None] | None:
         task = self._between_turn_drains.get(chat_id)
         return task if task is not None and not task.done() else None
 
     def has_live_drain(self, chat_id: str) -> bool:
         return self._drain_pending(chat_id) is not None
-
-    def discard_drain_result(self, chat_id: str) -> None:
-        self._last_drain_result.pop(chat_id, None)
 
     def teardown_unsettled(self, chat_id: str) -> bool:
         """True while a Stop handoff or a not-yet-entered drive is outstanding.
@@ -2325,8 +2317,6 @@ class ChatStreaming:
                     is_error = bool(event.is_error)
                     self._record_opencode_wake_turn(chat_id, event)
                     settled = self._host._background_count_now(chat_id) == 0
-                    if settled:
-                        self._last_drain_result[chat_id] = (text, is_error)
                     chat_now = self._host._chats.get(chat_id)
                     last_error = (
                         annotate_reauth(
@@ -2426,15 +2416,3 @@ class ChatStreaming:
                 )
             if not cancelled and not superseded:
                 self._host._flush_result_announce(chat_id)
-
-    async def wait_for_drain_result(
-        self, chat_id: str, *, timeout_s: float = 180.0
-    ) -> tuple[str, bool] | None:
-        """Wait for the drain's next follow-up result recorded at background count zero."""
-        deadline = time.perf_counter() + timeout_s
-        while time.perf_counter() < deadline:
-            result = self._last_drain_result.get(chat_id)
-            if result is not None:
-                return result
-            await asyncio.sleep(1)
-        return None

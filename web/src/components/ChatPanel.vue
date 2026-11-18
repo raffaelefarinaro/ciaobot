@@ -312,12 +312,6 @@
               <!-- An automation's tick, not something the reader typed.
                    Without this the two are indistinguishable in the
                    transcript. -->
-              <div v-if="item.msg.steered" class="message-meta">
-                <span
-                  class="steered-mark"
-                  title="Sent into the running reply"
-                >steered</span>
-              </div>
               <div v-if="item.msg.unattended && !item.msg.origin" class="message-meta">
                 <span
                   class="unattended-mark"
@@ -907,14 +901,14 @@
 
     <!-- Queued messages (sent while a response was already streaming). -->
     <div v-if="view.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
-      <div v-if="steerAllIds.length >= 2" class="queued-head">
+      <div v-if="!view.isStreaming && waitingIds.length >= 2" class="queued-head">
         <span class="queued-count">{{ view.currentQueued.length }} queued</span>
         <button
           type="button"
-          class="queued-steer-all"
-          :title="view.isStreaming ? 'Send these into the running reply as one message' : 'Send these now as one message'"
-          @click="steerQueued($event, steerAllIds, 'steer')"
-        >{{ view.isStreaming ? 'Steer all' : 'Send all now' }}</button>
+          class="queued-send-all"
+          title="Send these now as one message"
+          @click="sendNow($event, waitingIds)"
+        >Send all now</button>
       </div>
       <div
         v-for="(q, i) in view.currentQueued"
@@ -922,47 +916,24 @@
         class="queued-chip"
         tabindex="-1"
         :data-queue-id="q.id"
-        :class="{ 'is-steering': q.steering }"
         :title="queuedChipTitle(q)"
       >
-        <span class="queued-steering">{{ q.steering ? 'Steering…' : '' }}</span>
         <div class="queued-body">
           <div v-if="q.images?.length" class="queued-images">
             <img v-for="img in q.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="queued-image-thumb" />
           </div>
           <span class="queued-text">{{ queuedDisplayText(q.text) }}</span>
         </div>
-        <div v-if="!q.steering" class="queued-controls">
-          <div
-            v-if="view.isStreaming && !q.waiting"
-            class="queued-mode"
-            role="group"
-            :aria-label="`What “${queuedExcerpt(q.text)}” will do`"
-          >
-            <button
-              type="button"
-              class="queued-mode-option"
-              :aria-pressed="q.delivery === 'queue'"
-              title="Send as the next message when the reply finishes"
-              @click="q.delivery === 'queue' || steerQueued($event, [q.id], 'queue')"
-            >Queue</button>
-            <button
-              type="button"
-              class="queued-mode-option"
-              :aria-pressed="q.delivery === 'steer'"
-              title="Send into the running reply now"
-              @click="q.delivery === 'steer' || steerQueued($event, [q.id], 'steer')"
-            >Steer</button>
-          </div>
-          <span v-else class="queued-label">Waiting</span>
+        <div class="queued-controls">
+          <span v-if="view.isStreaming" class="queued-label">{{ q.waiting ? 'Waiting' : 'Queued' }}</span>
           <div class="queued-actions">
             <button
-              v-if="q.waiting || !view.isStreaming"
+              v-if="!view.isStreaming"
               type="button"
               class="queued-send-now"
-              :title="view.isStreaming ? 'Send this into the running reply now' : 'Start a turn with this message now'"
-              @click="steerQueued($event, [q.id], 'steer')"
-            >{{ view.isStreaming ? 'Steer' : 'Send now' }}</button>
+              title="Start a turn with this message now"
+              @click="sendNow($event, [q.id])"
+            >Send now</button>
             <button
               class="queued-action"
               :disabled="i === 0"
@@ -988,14 +959,7 @@
         </div>
       </div>
     </div>
-    <!-- One live region for the whole queue, always mounted: a chip that
-         appears already in the Steering state is announced by this text
-         changing, not by a new element. -->
-    <span class="queue-live sr-only" aria-live="polite">{{ steeringAnnouncement }}</span>
-    <p v-if="queueEditNotice" class="queue-edit-notice steer-notice" role="status">{{ queueEditNotice }}</p>
-    <!-- Outside the queue block: the fallback reply usually empties it, and a
-         collapsed dock hides it, but the notice must still be read. -->
-    <p v-if="store.steerNotice[chat.chat_id]" class="steer-notice" role="status">{{ store.steerNotice[chat.chat_id] }}</p>
+    <p v-if="queueEditNotice" class="queue-edit-notice queue-notice" role="status">{{ queueEditNotice }}</p>
 
     <!-- Dock strip: one counted line for everything not expanded above, so the
          dock never grows past one card plus this. Rendered whenever there is
@@ -2002,18 +1966,10 @@ watch(() => chat.value.provider, () => {
 
 const queueEditNotice = ref('')
 
-// Entries that "Steer all" combines: queue-mode ones not already handed over,
-// in list order.
-const steerAllIds = computed(() =>
-  view.currentQueued.filter(q => q.delivery === 'queue' && !q.steering).map(q => q.id),
-)
+// Entries that "Send all now" combines, in list order.
+const waitingIds = computed(() => view.currentQueued.map(q => q.id))
 
-const steeringAnnouncement = computed(() => {
-  const n = view.currentQueued.filter(q => q.steering).length
-  return n ? `Steering ${n} ${n === 1 ? 'message' : 'messages'}` : ''
-})
-
-// When the chip that holds focus leaves the queue (it was steered, sent or
+// When the chip that holds focus leaves the queue (it was sent or
 // removed), focus would fall to <body>. Hand it to the composer instead.
 watch(
   () => view.currentQueued.map(q => q.id),
@@ -2044,20 +2000,18 @@ function queuedExcerpt(text: string): string {
 // The clicked button is replaced once the chip changes state, which would drop
 // keyboard focus to the page. Hand it to the chip (or the composer when the
 // chip is gone) so the next Tab starts from a sensible place.
-function steerQueued(event: Event, ids: string[], delivery: 'queue' | 'steer') {
+function sendNow(event: Event, ids: string[]) {
   const chip = (event.currentTarget as HTMLElement | null)?.closest<HTMLElement>('.queued-chip') ?? null
-  store.setQueuedDelivery(chat.value.chat_id, ids, delivery)
+  store.sendQueuedNow(chat.value.chat_id, ids)
   void nextTick(() => {
     if (chip?.isConnected) chip.focus()
     else inputEl.value?.focus()
   })
 }
 
-function queuedChipTitle(q: { delivery: string; steering?: boolean }): string {
-  if (q.steering) return 'Handed to the running reply; waiting for it to take the message'
-  if (!view.isStreaming) return 'Held until you send it, edit it or remove it'
-  return q.delivery === 'steer'
-    ? 'Will be sent into the running reply'
+function queuedChipTitle(q: { waiting?: boolean }): string {
+  return !view.isStreaming || q.waiting
+    ? 'Held until you send it, edit it or remove it'
     : 'Will be sent when current response finishes'
 }
 
@@ -7050,15 +7004,6 @@ details[open] > .activity-summary::before {
   text-align: right;
 }
 
-/* Marks a request sent into the running reply. Same treatment as the
-   automation mark: a property of the message, not part of the timestamp. */
-.steered-mark {
-  color: var(--accent);
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  margin-right: 6px;
-}
-
 /* Marks a turn fired by an automation. Accent-coloured so it reads as a
    property of the message, not as part of the timestamp next to it. */
 .unattended-mark {
@@ -7609,7 +7554,7 @@ details[open] > .activity-summary::before {
 }
 
 /* Queued message chips. Each chip is the message text, then one control row:
-   the delivery toggle on the left, the edit actions on the right. In a wide
+   the status on the left, the edit actions on the right. In a wide
    pane the two share a line; in a narrow one the controls wrap under the text
    instead of the text being squeezed between them. */
 .queued-messages {
@@ -7649,14 +7594,6 @@ details[open] > .activity-summary::before {
   color: var(--fg2);
 }
 .queued-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.queued-chip.is-steering { opacity: 0.85; padding: 8px 12px; }
-.queued-steering {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--accent);
-  flex-shrink: 0;
-}
-.queued-steering:empty { display: none; }
 /* The body's grow factor dwarfs the controls': on a shared line the text takes
    the free space and the controls sit at their own width on the right; once
    wrapped, the controls are alone on their line and stretch to push the
@@ -7702,32 +7639,6 @@ details[open] > .activity-summary::before {
   color: var(--accent);
   flex-shrink: 0;
 }
-.queued-mode {
-  display: inline-flex;
-  flex-shrink: 0;
-  padding: 2px;
-  gap: 2px;
-  background: var(--bg);
-  border-radius: var(--radius-sm);
-}
-.queued-mode-option {
-  background: none;
-  border: none;
-  border-radius: calc(var(--radius-sm) - 2px);
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  font-weight: 600;
-  padding: 3px 10px;
-  cursor: pointer;
-}
-.queued-mode-option[aria-pressed="true"] { background: var(--accent); color: var(--bg); }
-.queued-mode-option:not([aria-pressed="true"]):hover { background: var(--bg2); color: var(--fg); }
-/* Inset and in --fg: the pressed option is filled with --accent, so an accent
-   ring would vanish on it. */
-.queued-mode-option:focus-visible {
-  outline: 2px solid var(--fg);
-  outline-offset: -2px;
-}
 .queued-actions {
   display: flex;
   align-items: center;
@@ -7735,7 +7646,7 @@ details[open] > .activity-summary::before {
   flex-shrink: 0;
   margin-left: auto;
 }
-.queued-steer-all,
+.queued-send-all,
 .queued-send-now {
   background: none;
   color: var(--accent);
@@ -7747,9 +7658,9 @@ details[open] > .activity-summary::before {
   cursor: pointer;
   flex-shrink: 0;
 }
-.queued-steer-all:hover,
+.queued-send-all:hover,
 .queued-send-now:hover { background: var(--bg2); }
-.queued-steer-all:disabled,
+.queued-send-all:disabled,
 .queued-send-now:disabled { opacity: 0.4; cursor: not-allowed; }
 .queued-action,
 .queued-remove {
@@ -7770,7 +7681,7 @@ details[open] > .activity-summary::before {
 .queued-remove:hover { color: var(--fg); background: var(--bg2); }
 .queued-action:disabled,
 .queued-remove:disabled { opacity: 0.3; cursor: not-allowed; }
-.queued-steer-all:focus-visible,
+.queued-send-all:focus-visible,
 .queued-send-now:focus-visible,
 .queued-action:focus-visible,
 .queued-remove:focus-visible {
@@ -7778,9 +7689,8 @@ details[open] > .activity-summary::before {
   outline-offset: -2px;
 }
 @media (pointer: coarse) {
-  .queued-steer-all,
-  .queued-send-now,
-  .queued-mode-option {
+  .queued-send-all,
+  .queued-send-now {
     min-height: 44px;
   }
   .queued-action,
@@ -7788,10 +7698,8 @@ details[open] > .activity-summary::before {
     width: 44px;
     height: 44px;
   }
-  .queued-mode { padding: 0; gap: 0; }
-  .queued-mode-option { min-width: 64px; }
 }
-.steer-notice {
+.queue-notice {
   padding: 0 0 6px;
   margin: 0;
   font-size: 12px;

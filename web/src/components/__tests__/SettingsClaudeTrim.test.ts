@@ -70,14 +70,13 @@ const opt = (o: Partial<ClaudeTrimOption> & { key: string }): ClaudeTrimOption =
   reason: `${o.key} reason`,
   group: 'features',
   default_trimmed: false,
-  locked: false,
   ...o,
 })
 
-// The engine's catalog shape: a locked scheduling option, two features, a review
+// The engine's catalog shape: a scheduling option, two features, a review
 // option, four bundled skills (two trimmed by default) and a setting.
 const CATALOG: ClaudeTrimOption[] = [
-  opt({ key: 'tool:CronCreate', label: 'Cron schedules', reason: 'Schedules runs.', group: 'scheduling', default_trimmed: true, locked: true }),
+  opt({ key: 'tool:CronCreate', label: 'Cron schedules', reason: 'Schedules runs.', group: 'scheduling', default_trimmed: true }),
   opt({ key: 'tool:NotebookEdit', label: 'Notebook editing', reason: 'Edits Jupyter notebooks.', default_trimmed: true }),
   opt({ key: 'tool:ReportFindings', label: 'Report findings', reason: 'Reports review findings.', group: 'review' }),
   opt({ key: 'skill:a', label: 'Skill A', group: 'skills', default_trimmed: true }),
@@ -85,6 +84,14 @@ const CATALOG: ClaudeTrimOption[] = [
   opt({ key: 'skill:c', label: 'Skill C', group: 'skills' }),
   opt({ key: 'skill:d', label: 'Skill D', group: 'skills' }),
   opt({ key: 'setting:disableWorkflows', kind: 'setting', label: 'Workflows', reason: 'Turns off workflows.' }),
+  opt({
+    key: 'setting:claude_ai_connectors',
+    kind: 'setting',
+    label: 'claude.ai connectors',
+    reason: "Your Claude account's connectors (Slack, Jira, …); hide them to keep those remote tools out of this workspace's Claude chats.",
+    group: 'Connectors',
+    default_trimmed: false,
+  }),
 ]
 
 function workspaces(entryExtra: Record<string, unknown> = {}, withCatalog = true): WorkspacesResponse {
@@ -145,9 +152,9 @@ describe('Settings > Workspaces Claude context trimming card', () => {
     try {
       const card = wrapper.get('.trim-card')
       expect(card.get('.section-title').text()).toBe('Claude context trimming')
-      expect(wrapper.findAll('.trim-group')).toHaveLength(4)
+      expect(wrapper.findAll('.trim-group')).toHaveLength(5)
       const titles = wrapper.findAll('.trim-group-title').map(t => t.text())
-      expect(titles).toEqual(expect.arrayContaining(['Scheduling', 'Features', 'Review']))
+      expect(titles).toEqual(expect.arrayContaining(['Scheduling', 'Features', 'Review', 'Connectors']))
       const disclosures = wrapper.findAll('details.trim-disclosure')
       expect(disclosures).toHaveLength(1)
       expect(disclosures[0].get('summary').text()).toBe('Bundled skills · 2 of 4 hidden')
@@ -186,15 +193,20 @@ describe('Settings > Workspaces Claude context trimming card', () => {
     }
   })
 
-  it('locked options are disabled and say why', async () => {
+  it('scheduling options are trimmed by default, can be un-trimmed, and the group explains it', async () => {
     state.workspaces = workspaces()
     const wrapper = await mountWorkspacesTab()
     try {
       const toggle = trimSwitch(wrapper, 'Cron schedules')
-      expect(toggle.attributes('disabled')).toBeDefined()
+      expect(toggle.attributes('disabled')).toBeUndefined()
       expect(toggle.attributes('aria-checked')).toBe('false')
-      expect(wrapper.get('.trim-card').text()).toContain('Always hidden — Schedules runs.')
+      expect(wrapper.get('.trim-group-note').text()).toContain("outside Ciaobot's schedules")
+      expect(wrapper.get('.trim-card').text()).not.toContain('Always hidden')
       await toggle.trigger('click')
+      await flushPromises()
+      expect(trimSwitch(wrapper, 'Cron schedules').attributes('aria-checked')).toBe('true')
+      expect(wrapper.find('.workspace-save').exists()).toBe(true)
+      await trimSwitch(wrapper, 'Cron schedules').trigger('click')
       await flushPromises()
       expect(trimSwitch(wrapper, 'Cron schedules').attributes('aria-checked')).toBe('false')
       expect(wrapper.find('.workspace-save').exists()).toBe(false)
@@ -266,6 +278,29 @@ describe('Settings > Workspaces Claude context trimming card', () => {
     const wrapper = await mountWorkspacesTab()
     try {
       expect(wrapper.get('.trim-reset').attributes('disabled')).toBeDefined()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('shows the claude.ai connectors option and toggles it', async () => {
+    const { api } = await import('../../lib/api')
+    state.workspaces = workspaces()
+    const wrapper = await mountWorkspacesTab()
+    try {
+      const toggle = trimSwitch(wrapper, 'claude.ai connectors')
+      expect(toggle.attributes('aria-checked')).toBe('true')
+      expect(toggle.text()).toBe('On')
+      expect(wrapper.text()).toContain("Your Claude account's connectors (Slack, Jira, …)")
+      await toggle.trigger('click')
+      await flushPromises()
+      expect(trimSwitch(wrapper, 'claude.ai connectors').attributes('aria-checked')).toBe('false')
+      await wrapper.get('.workspace-save').trigger('click')
+      await flushPromises()
+      expect(api.patch).toHaveBeenCalledWith(
+        '/api/workspaces/personal',
+        expect.objectContaining({ claude_trim: { 'setting:claude_ai_connectors': true } }),
+      )
     } finally {
       wrapper.unmount()
     }

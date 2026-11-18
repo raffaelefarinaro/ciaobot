@@ -1,14 +1,13 @@
 import { shallowReactive } from 'vue'
+import { STATS_RANGES } from '../lib/usageStats'
+import type { StatsRange } from '../lib/usageStats'
+import { declaredUsagePath, syntheticUsageRaw, usageWorkspaces } from './usageFixtures'
 
-export type StatsState = 'default' | 'loading' | 'failed' | 'partial'
-export const statsWorkspaces = ['storybook-alpha', 'storybook-beta'] as const
-const paths = statsWorkspaces.map(workspace => `/api/stats?workspace=${workspace}&range=30`)
-const today = {
-  chats_opened: 12, messages_sent: 24, chats_archived: 2, memories_saved: 3,
-  projects_worked_on: 2, tasks_completed: 1,
-  avg_chats_opened_30d: 1.2, avg_messages_sent_30d: 8.4, avg_chats_archived_30d: 0.5,
-  avg_memories_saved_30d: 0.4, avg_projects_worked_on_30d: 1, avg_tasks_completed_30d: 0.2,
-}
+export type UsageFixtureState = 'loaded' | 'initial-loading' | 'failed' | 'refresh-loading'
+export { usageWorkspaces }
+
+const paths = usageWorkspaces.flatMap(workspace => STATS_RANGES.map(range => declaredUsagePath(workspace, range)))
+
 let active = false
 const lifecycleEvents = new Set([
   'storyRenderPhaseChanged', 'storyRendered', 'storyFinished', 'storyUnmounted',
@@ -16,10 +15,6 @@ const lifecycleEvents = new Set([
   'storybook/instrumenter/sync', 'previewKeydown', 'pong',
 ])
 
-// The method names the vitest browser runner's page side calls over its
-// control socket (@vitest/browser client.js, tester and orchestrator bundles,
-// and vitest's runtime rpc: result reporting, console forwarding, module/mock
-// resolution, user-event commands). Anything else is refused.
 const runnerMethods = new Set([
   'onCollected', 'onQueued', 'onTaskUpdate', 'onTaskArtifactRecord', 'onAfterSuiteRun',
   'onUserConsoleLog', 'onUnhandledError', 'onAsyncLeaks', 'onOrchestratorReady', 'onCancel',
@@ -28,11 +23,6 @@ const runnerMethods = new Set([
   'snapshotSaved', 'resolveSnapshotPath', 'triggerCommand',
 ])
 
-// The runner's birpc envelopes are flatted-encoded: a root object whose string
-// values index into the array (booleans stay inline). A request is
-// `{m, a, t:'q'}` with an optional string `i` (absent for events) and an
-// optional `o:true` (optional calls); m must be an allow-listed runner method.
-// A response is `{t:'s', i, r|e}`.
 function isRunnerEnvelope(data: unknown): boolean {
   if (typeof data !== 'string') return false
   try {
@@ -51,8 +41,6 @@ function isRunnerEnvelope(data: unknown): boolean {
   } catch { return false }
 }
 
-// Only established workshop sockets can reach this seam: constructors below
-// reject all new connections. Never forward custom/invoke/save/editor events.
 function infrastructureMessage(socket: WebSocket, data: unknown): boolean {
   if (typeof data !== 'string') return false
   try {
@@ -64,9 +52,6 @@ function infrastructureMessage(socket: WebSocket, data: unknown): boolean {
         && data === '{"type":"ping"}'
     }
     if (url.pathname === '/__vitest_browser_api__') {
-      // The browser interaction runner's page-load control socket; it does not
-      // exist outside `npm run test-storybook`. The exact query shape is pinned
-      // so a repurposed path fails.
       return [...url.searchParams.keys()].sort().join(',') === 'method,projectName,rpcId,sessionId,token,type'
         && isRunnerEnvelope(data)
     }
@@ -80,20 +65,27 @@ function infrastructureMessage(socket: WebSocket, data: unknown): boolean {
   } catch { return false }
 }
 
-/**
- * A trusted-component fixture boundary, not a sandbox for hostile JavaScript.
- * No native fetch fallback, including "same-origin" or broad asset prefixes.
- * Storybook modules/assets and tightly scoped existing workshop socket messages
- * are infrastructure, not API fixtures. No app bootstrap runs here.
- */
-export function installStatsBoundary(state: StatsState) {
-  if (active) throw new Error('Connected story already mounted; inline/concurrent docs are forbidden')
+function parseDeclaredPath(path: string): { workspace: string; range: StatsRange } | null {
+  if (!paths.includes(path)) return null
+  const qs = path.split('?', 2)[1] ?? ''
+  const params = new URLSearchParams(qs)
+  const workspace = params.get('workspace') ?? ''
+  const range = Number(params.get('range'))
+  if (!usageWorkspaces.includes(workspace as (typeof usageWorkspaces)[number])) return null
+  if (!STATS_RANGES.includes(range as StatsRange)) return null
+  return { workspace, range: range as StatsRange }
+}
+
+/** Fail-closed GET fixture for the Usage page's stats client. */
+export function installUsageBoundary(state: UsageFixtureState) {
+  if (active) throw new Error('Connected usage story already mounted; inline/concurrent docs are forbidden')
   active = true
   const violations = shallowReactive<string[]>([])
   const requests = shallowReactive<string[]>([])
   const restore: Array<() => void> = []
   const held = new Set<(reason: Error) => void>()
   let disposed = false
+  let answered = 0
   function reject(transport: string, detail = ''): never {
     const message = `Story network violation: ${transport} ${detail}`.trim()
     violations.push(message)
@@ -110,10 +102,13 @@ export function installStatsBoundary(state: StatsState) {
   function dispose() {
     if (disposed) return
     disposed = true
-    held.forEach(rejectHeld => rejectHeld(new Error('Stats fixture disposed')))
+    held.forEach(rejectHeld => rejectHeld(new Error('Usage fixture disposed')))
     held.clear()
     restore.reverse().forEach(fn => fn())
     active = false
+  }
+  function hold(): Promise<Response> {
+    return new Promise<Response>((_resolve, rejectHeld) => { held.add(rejectHeld) })
   }
   const fixtureFetch: typeof fetch = async (input, init) => {
     if (disposed) return reject('fetch', 'fixture disposed')
@@ -124,22 +119,28 @@ export function installStatsBoundary(state: StatsState) {
     const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
     const body = init?.body ?? (input instanceof Request ? input.body : null)
     const path = `${url.pathname}${url.search}${url.hash}`
-    if (url.origin !== location.origin || url.username || url.password || method !== 'GET' || body != null || !paths.includes(path)) {
+    const declared = parseDeclaredPath(path)
+    if (url.origin !== location.origin || url.username || url.password || method !== 'GET' || body != null || !declared) {
       return reject('fetch', `${method} ${url.href}`)
     }
     requests.push(path)
-    if (state === 'loading') return new Promise<Response>((_resolve, rejectHeld) => { held.add(rejectHeld) })
-    const payload = state === 'failed' ? { error: 'Synthetic stats unavailable' }
-      : state === 'partial' ? { today: { chats_opened: 0, messages_sent: 'invalid', memories_saved: 3, avg_chats_opened_30d: 0.4 } }
-        : { today: { ...today, chats_opened: path === paths[1] ? 4 : 12 } }
+    answered += 1
+    if (state === 'initial-loading') return hold()
+    if (state === 'failed') {
+      return new Response(JSON.stringify({ error: 'Synthetic usage unavailable' }), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (state === 'refresh-loading' && answered > 1) return hold()
+    const payload = syntheticUsageRaw(declared.workspace, declared.range)
     return new Response(JSON.stringify(payload), {
-      status: state === 'failed' ? 503 : 200,
+      status: 200,
       headers: { 'Content-Type': 'application/json' },
     })
   }
   try {
     replace(globalThis, 'fetch', fixtureFetch)
-    // Also fence instances created before installation, not only constructors.
     for (const key of ['open', 'send'] as const) {
       replace(XMLHttpRequest.prototype, key, function () { return reject(`XMLHttpRequest.${key}`) })
     }
@@ -156,8 +157,6 @@ export function installStatsBoundary(state: StatsState) {
       if (original) replace(original.prototype, 'constructor', blocked)
       replace(globalThis, key, blocked)
     }
-    // Beacon is normally inherited; patch that entry too, not just the
-    // navigator instance (Navigator.prototype.sendBeacon.call is also a sink).
     const navigatorPrototype = Object.getPrototypeOf(navigator)
     if (navigatorPrototype && 'sendBeacon' in navigatorPrototype) {
       replace(navigatorPrototype, 'sendBeacon', function () { return reject('sendBeacon') })

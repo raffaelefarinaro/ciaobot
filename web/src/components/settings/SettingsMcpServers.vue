@@ -34,7 +34,7 @@
           <p v-if="anyClaudeAi" class="hint">
             claude.ai connectors are connected, reconnected and disconnected on
             <a href="https://claude.ai/settings/connectors" target="_blank" rel="noopener noreferrer">claude.ai, Settings, Connectors</a>.
-            To hide every claude.ai connector in this workspace, turn off claude.ai connectors in <router-link to="/settings/workspace">Overview</router-link>.
+            To hide every claude.ai connector in this workspace, turn off claude.ai connectors under <router-link to="/settings/workspace">Claude context trimming</router-link>.
           </p>
         </div>
         <ul v-if="current.servers.length" class="mcp-list" role="list">

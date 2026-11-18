@@ -2116,6 +2116,17 @@ def test_a_completed_slot_marker_only_moves_forward():
     assert entry.last_status == "running"
 
 
+def test_a_retired_unfinished_status_no_longer_counts_as_a_served_slot():
+    """"unfinished" is gone with the subagent settle wait. A stored row that
+    still says so is not a completed run, so it must not credit its slot."""
+    from ciao.schedules import COMPLETED_RUN_STATUSES, stamp_run_outcome
+
+    assert COMPLETED_RUN_STATUSES == {"ok", "skipped"}
+    entry = _entry(last_dispatch_id="2026-06-16#b", last_status="running")
+    assert stamp_run_outcome(entry, "2026-06-16#b", "unfinished") is True
+    assert entry.last_completed_on == ""
+
+
 async def test_tick_stamps_first_seen_for_system_routines(tmp_path: Path) -> None:
     store = ScheduleStore(
         tmp_path, include_system=True, workspace_names=lambda: ["personal"]

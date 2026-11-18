@@ -5150,7 +5150,6 @@ class ProjectChatManager:
         ctx = ChatContext.for_web(chat_id)
         self._advance_retry_generation(chat_id)
         self._cancel_between_turns_drain(chat_id)
-        self._streaming.discard_drain_result(chat_id)
         provider = self._pop_provider(chat_id)
         self._schedule_provider_cleanup(chat, provider, agent_root=agent_root)
         # Explicit deletion is a tombstone, not merely a sidebar mutation.
@@ -6891,9 +6890,11 @@ class ProjectChatManager:
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["GH_PROMPT_DISABLED"] = "1"
         # The claude.ai connectors (the Claude account's remote MCP servers)
-        # load into every Claude chat unless Claude Code is told not to. A
-        # workspace can switch them off. Other providers never see this variable.
-        if chat.provider == "claude" and not self._claude_ai_connectors_on(workspace):
+        # load into every Claude chat unless Claude Code is told not to.
+        # Trimming setting:claude_ai_connectors switches them off. A memory
+        # pass follows the same switch as any other chat. Other providers never
+        # see this variable. The default (not trimmed) leaves it unset.
+        if chat.provider == "claude" and self._claude_ai_connectors_trimmed(workspace):
             env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
         # The macOS keychain is outside a workspace sandbox, so gh cannot read
         # its own login there: the engine passes the token in (#1961). Only the
@@ -6940,15 +6941,16 @@ class ProjectChatManager:
 
         await asyncio.to_thread(gh_token_for_sandbox, gh_path, dict(os.environ))
 
-    def _claude_ai_connectors_on(self, workspace: str) -> bool:
-        """Whether a Claude chat in ``workspace`` loads the claude.ai connectors.
+    def _claude_ai_connectors_trimmed(self, workspace: str) -> bool:
+        """Whether a Claude chat in ``workspace`` hides the claude.ai connectors.
 
-        An unregistered or empty workspace name keeps the default (on).
+        An unregistered or empty workspace name keeps the catalog default (on).
         """
+        from ciao.claude_trim import CONNECTORS_TRIM_KEY, effective_trim  # noqa: PLC0415
+
         config_workspace = self._config.workspace(workspace) if workspace else None
-        if config_workspace is None:
-            return True
-        return bool(config_workspace.claude_ai_connectors)
+        overrides = config_workspace.claude_trim if config_workspace is not None else {}
+        return bool(effective_trim(overrides)[CONNECTORS_TRIM_KEY])
 
     def _effective_mode_for_chat(
         self, chat: ChatInfo, *, unattended: bool = False
@@ -10096,16 +10098,6 @@ class ProjectChatManager:
         drains.update(value)
 
     @property
-    def _last_drain_result(self) -> dict[str, tuple[str, bool]]:
-        return self._streaming.last_drain_results
-
-    @_last_drain_result.setter
-    def _last_drain_result(self, value: dict[str, tuple[str, bool]]) -> None:
-        results = self._streaming.last_drain_results
-        results.clear()
-        results.update(value)
-
-    @property
     def _turn_perf_started(self) -> dict[tuple[str, int], float]:
         return self._streaming.turn_perf_started
 
@@ -11062,30 +11054,6 @@ class ProjectChatManager:
             dispatcher = ScheduleDispatcher(self)
             self._schedule_dispatcher = dispatcher
             return dispatcher
-
-    async def _await_schedule_subagents(
-        self, chat_id: str, *, timeout_s: float = 900.0
-    ) -> tuple[bool, bool]:
-        """Delegate the schedule subagent wait to its lifecycle collaborator."""
-        return await self._schedule_dispatcher_for()._await_schedule_subagents(
-            chat_id, timeout_s=timeout_s
-        )
-
-    async def _wait_for_drain_result(
-        self, chat_id: str, *, timeout_s: float = 180.0
-    ) -> tuple[str, bool] | None:
-        return await self._streaming.wait_for_drain_result(
-            chat_id, timeout_s=timeout_s
-        )
-
-    def _discard_schedule_drain_result(self, chat_id: str) -> None:
-        """Drop a stale follow-up result before a scheduled run waits.
-
-        The schedule collaborator calls this manager seam instead of reaching
-        into ``ChatStreaming`` directly, keeping the streaming owner explicit
-        while preserving the existing drain lifecycle patch point.
-        """
-        self._streaming.discard_drain_result(chat_id)
 
     async def _schedule_run_needs_user(
         self, entry: ScheduleEntry, outcome: chat_service.ScheduleRunOutcome,

@@ -4810,8 +4810,8 @@ describe('queued message replay handling', () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
     store.queuedMessages[chatId] = [
-      { id: 'q-1', text: 'msg A', delivery: 'queue' },
-      { id: 'q-2', text: 'msg B', delivery: 'queue' },
+      { id: 'q-1', text: 'msg A' },
+      { id: 'q-2', text: 'msg B' },
     ]
     store.connectWs(chatId)
 
@@ -4825,7 +4825,7 @@ describe('queued message replay handling', () => {
     })
 
     expect(store.queuedMessages[chatId]).toEqual([
-      { id: 'q-2', text: 'msg B', delivery: 'queue' },
+      { id: 'q-2', text: 'msg B' },
     ])
   })
 
@@ -4833,8 +4833,8 @@ describe('queued message replay handling', () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
     store.queuedMessages[chatId] = [
-      { id: 'q-1', text: 'same prompt', delivery: 'queue' },
-      { id: 'q-2', text: 'same prompt', delivery: 'queue' },
+      { id: 'q-1', text: 'same prompt' },
+      { id: 'q-2', text: 'same prompt' },
     ]
     store.connectWs(chatId)
 
@@ -4847,7 +4847,7 @@ describe('queued message replay handling', () => {
     })
 
     expect(store.queuedMessages[chatId]).toEqual([
-      { id: 'q-2', text: 'same prompt', delivery: 'queue' },
+      { id: 'q-2', text: 'same prompt' },
     ])
   })
 
@@ -4855,8 +4855,8 @@ describe('queued message replay handling', () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
     store.queuedMessages[chatId] = [
-      { id: 'q-1', text: 'follow-up A', delivery: 'queue' },
-      { id: 'q-2', text: 'follow-up B', delivery: 'queue' },
+      { id: 'q-1', text: 'follow-up A' },
+      { id: 'q-2', text: 'follow-up B' },
     ]
     store.connectWs(chatId)
 
@@ -4869,15 +4869,15 @@ describe('queued message replay handling', () => {
     })
 
     expect(store.queuedMessages[chatId]).toEqual([
-      { id: 'q-1', text: 'follow-up A', delivery: 'queue' },
-      { id: 'q-2', text: 'follow-up B', delivery: 'queue' },
+      { id: 'q-1', text: 'follow-up A' },
+      { id: 'q-2', text: 'follow-up B' },
     ])
   })
 
   test('clears local queued chips when server history contains the flushed user turn', async () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
-    store.queuedMessages[chatId] = [{ id: 'q-1', text: 'msg A', delivery: 'queue' }]
+    store.queuedMessages[chatId] = [{ id: 'q-1', text: 'msg A' }]
     apiGet.mockResolvedValue([
       { role: 'user', content: 'initial', sent_at: '', turn_index: 0 },
       { role: 'assistant', content: 'reply', sent_at: '' },
@@ -6684,7 +6684,7 @@ describe('parked pending_queue chips', () => {
 
   test('an idle chat payload with pending_queue becomes chips', () => {
     const store = useProjectStore()
-    store.queuedMessages.idle = [{ id: 'old', text: 'stale chip', delivery: 'queue' }]
+    store.queuedMessages.idle = [{ id: 'old', text: 'stale chip' }]
     store.reconcileChatList([
       chat({
         chat_id: 'idle',
@@ -6692,14 +6692,14 @@ describe('parked pending_queue chips', () => {
       }),
     ])
     expect(store.queuedMessages.idle).toEqual([
-      { id: 'q-1', text: 'after the error', images: ['shot.png'], delivery: 'queue', steering: false, waiting: true },
+      { id: 'q-1', text: 'after the error', images: ['shot.png'], waiting: true },
     ])
   })
 
   test('a parked chat payload while streaming adds missing waiting chips ahead of the live ones', () => {
     const store = useProjectStore()
     store.streaming.live = true
-    store.queuedMessages.live = [{ id: 'q-live', text: 'live', delivery: 'queue' }]
+    store.queuedMessages.live = [{ id: 'q-live', text: 'live' }]
     store.reconcileChatList([
       chat({ chat_id: 'live', pending_queue: [{ id: 'q-wait', text: 'held' }, { id: 'q-live', text: 'live' }] }),
     ])
@@ -6709,16 +6709,16 @@ describe('parked pending_queue chips', () => {
   test('an empty pending_queue during streaming does not clear existing chips', () => {
     const store = useProjectStore()
     store.streaming.live = true
-    store.queuedMessages.live = [{ id: 'q-live', text: 'still queued', delivery: 'queue' }]
+    store.queuedMessages.live = [{ id: 'q-live', text: 'still queued' }]
     store.reconcileChatList([
       chat({ chat_id: 'live', pending_queue: [] }),
     ])
-    expect(store.queuedMessages.live).toEqual([{ id: 'q-live', text: 'still queued', delivery: 'queue' }])
+    expect(store.queuedMessages.live).toEqual([{ id: 'q-live', text: 'still queued' }])
   })
 
   test('an empty pending_queue on an idle chat clears parked chips', () => {
     const store = useProjectStore()
-    store.queuedMessages.idle = [{ id: 'q-1', text: 'after the error', delivery: 'queue' }]
+    store.queuedMessages.idle = [{ id: 'q-1', text: 'after the error' }]
     store.reconcileChatList([
       chat({ chat_id: 'idle', pending_queue: [] }),
     ])
@@ -10728,8 +10728,8 @@ describe('failed chats count as needs you', () => {
   })
 })
 
-describe('queue delivery: queue or steer', () => {
-  const chatId = 'chat-steer'
+describe('queue entries and settings events', () => {
+  const chatId = 'chat-queue'
 
   function frames(socket: FakeWebSocket, type: string) {
     return socket.send.mock.calls
@@ -10742,13 +10742,11 @@ describe('queue delivery: queue or steer', () => {
   }
 
   async function setup() {
-    const { applyKeyboardSettings } = await import('../composables/useKeyboardSettings')
-    applyKeyboardSettings({ mid_turn_delivery: 'queue' })
     const store = useProjectStore()
     store.activeChatId = chatId
     store.connectWs(chatId)
     store.streaming[chatId] = true
-    return { store, socket: fakeSockets[fakeSockets.length - 1], applyKeyboardSettings }
+    return { store, socket: fakeSockets[fakeSockets.length - 1] }
   }
 
   it('requests a take without changing the queue and applies only successful results', async () => {
@@ -10767,167 +10765,33 @@ describe('queue delivery: queue or steer', () => {
     expect(frames(socket, 'queue_take_ack')[0]).toEqual({ type: 'queue_take_ack', entry_id: 'a' })
   })
 
-  it('sends delivery steer for a mid-turn message when the preference is steer', async () => {
-    const { store, socket, applyKeyboardSettings } = await setup()
-    applyKeyboardSettings({ mid_turn_delivery: 'steer' })
-    store.sendMessage(chatId, 'change course')
-    const [frame] = frames(socket, 'message')
-    expect(frame).toMatchObject({ text: 'change course', delivery: 'steer' })
-    expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'steer', steering: true })
-    applyKeyboardSettings({ mid_turn_delivery: 'queue' })
-  })
-
-  it('sends delivery queue by default', async () => {
+  it('a mid-turn message is queued with no delivery field', async () => {
     const { store, socket } = await setup()
-    store.sendMessage(chatId, 'later')
-    expect(frames(socket, 'message')[0]).toMatchObject({ delivery: 'queue' })
-    expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
+    expect(store.sendMessage(chatId, 'change course')).toBe(true)
+    const frame = frames(socket, 'message')[0]
+    expect(frame).toMatchObject({ text: 'change course', mode: 'queue' })
+    expect(Object.keys(frame)).not.toContain('delivery')
+    expect(store.queuedMessages[chatId]).toHaveLength(1)
+    expect(Object.keys(store.queuedMessages[chatId][0]).sort()).toEqual(['id', 'images', 'text'])
   })
 
-  it('steers a message with images when the preference is steer', async () => {
-    const { store, socket, applyKeyboardSettings } = await setup()
-    applyKeyboardSettings({ mid_turn_delivery: 'steer' })
-    store.pendingImages = ['shot.png']
-    store.sendMessage(chatId, 'look at this')
-    expect(frames(socket, 'message')[0]).toMatchObject({ delivery: 'steer', images: ['shot.png'] })
-    expect(store.queuedMessages[chatId][0].steering).toBe(true)
-    applyKeyboardSettings({ mid_turn_delivery: 'queue' })
-  })
-
-  it('folds a steered event into the transcript once', async () => {
+  it('sendQueuedNow sends one frame only when idle', async () => {
     const { store, socket } = await setup()
-    store.messages[chatId] = []
     emit(socket, { type: 'queue_state', queue: [
-      { id: 'a', text: 'one', delivery: 'steer', steering: true },
-      { id: 'b', text: 'two', delivery: 'queue', steering: false },
+      { id: 'a', text: 'one', waiting: true },
+      { id: 'b', text: 'two', waiting: true },
+      { id: 'c', text: 'three', waiting: true },
     ] })
-    const steered = { type: 'steered', entry_ids: ['a'], text: 'one', turn_index: 3, sent_at: '2026-10-15T10:00:00Z', delivery_id: 'd1' }
-    emit(socket, steered)
-    emit(socket, steered)
-    const bubbles = (store.messages[chatId] || []).filter(m => m.role === 'user' && m.content === 'one')
-    expect(bubbles).toHaveLength(1)
-    expect(bubbles[0]).toMatchObject({ steered: true, turn_index: 3 })
-    expect(store.queuedMessages[chatId].map(q => q.id)).toEqual(['b'])
-  })
-
-  it('steered event carries origin onto the message', async () => {
-    const { store, socket } = await setup()
-    store.messages[chatId] = []
-    emit(socket, { type: 'steered', entry_ids: ['w'], text: '[Ciaobot] 1 background run finished.', turn_index: 4, sent_at: '2026-10-19T10:00:00Z', delivery_id: 'd1', origin: 'background_run' })
-    emit(socket, { type: 'steered', entry_ids: ['t'], text: 'typed', turn_index: 5, sent_at: '2026-10-19T10:00:01Z', delivery_id: 'd2' })
-    const msgs = store.messages[chatId] || []
-    expect(msgs.find(m => m.role === 'user' && m.turn_index === 4)).toMatchObject({ steered: true, origin: 'background_run' })
-    expect(msgs.find(m => m.role === 'user' && m.turn_index === 5)?.origin).toBeUndefined()
-  })
-
-  it('steer_fallback flips chips to queue and sets a notice', async () => {
-    const { store, socket } = await setup()
-    emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'steer', steering: true }] })
-    emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
-    expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
-    expect(store.steerNotice[chatId]).toContain('Steering missed the reply')
-    emit(socket, { type: 'result', text: 'done' })
-    emit(socket, { type: 'user_echo', text: 'one', turn_index: 5, entry_id: 'a' })
-    // The notice outlives the reply that ended and the turn that flushed it.
-    expect(store.steerNotice[chatId]).toContain('Steering missed the reply')
-  })
-
-  it('the fallback notice clears after 8 seconds and on the next send', async () => {
-    vi.useFakeTimers()
-    try {
-      const { store, socket } = await setup()
-      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
-      vi.advanceTimersByTime(7900)
-      expect(store.steerNotice[chatId]).toBeDefined()
-      vi.advanceTimersByTime(200)
-      expect(store.steerNotice[chatId]).toBeUndefined()
-
-      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
-      store.sendMessage(chatId, 'next')
-      expect(store.steerNotice[chatId]).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('a Steering lock the server never answers reverts to queue after 15 seconds with a notice', async () => {
-    vi.useFakeTimers()
-    try {
-      const { store, socket } = await setup()
-      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
-      store.setQueuedDelivery(chatId, ['a'], 'steer')
-      expect(store.queuedMessages[chatId][0].steering).toBe(true)
-      vi.advanceTimersByTime(14000)
-      expect(store.queuedMessages[chatId][0].steering).toBe(true)
-      vi.advanceTimersByTime(1500)
-      expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
-      expect(store.steerNotice[chatId]).toBeTruthy()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('a disposed store never reverts a pending steer lock or fires the notice timer', async () => {
-    vi.useFakeTimers()
-    try {
-      const { store, socket } = await setup()
-      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
-      store.setQueuedDelivery(chatId, ['a'], 'steer')
-      store.$dispose()
-      vi.advanceTimersByTime(20000)
-      expect(store.queuedMessages[chatId][0].steering).toBe(true)
-      expect(store.steerNotice[chatId]).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('clearQueued cancels the lock and notice timers', async () => {
-    vi.useFakeTimers()
-    try {
-      const { store, socket } = await setup()
-      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
-      store.setQueuedDelivery(chatId, ['a'], 'steer')
-      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
-      store.setQueuedDelivery(chatId, ['a'], 'steer')
-      expect(store.steerNotice[chatId]).toBeUndefined()
-      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
-      expect(store.steerNotice[chatId]).toBeDefined()
-      store.clearQueued(chatId)
-      expect(store.steerNotice[chatId]).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('a steer answered by steer_fallback or queue_state cancels the lock timer', async () => {
-    vi.useFakeTimers()
-    try {
-      const { store, socket } = await setup()
-      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
-      store.setQueuedDelivery(chatId, ['a'], 'steer')
-      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'steer', steering: true }] })
-      vi.advanceTimersByTime(16000)
-      expect(store.queuedMessages[chatId][0].steering).toBe(true)
-      expect(store.steerNotice[chatId]).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('a steer-default send arms the lock timer too', async () => {
-    vi.useFakeTimers()
-    const { applyKeyboardSettings } = await import('../composables/useKeyboardSettings')
-    try {
-      const { store } = await setup()
-      applyKeyboardSettings({ mid_turn_delivery: 'steer' })
-      store.sendMessage(chatId, 'go')
-      vi.advanceTimersByTime(15500)
-      expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
-    } finally {
-      applyKeyboardSettings({ mid_turn_delivery: 'queue' })
-      vi.useRealTimers()
-    }
+    socket.send.mockClear()
+    store.sendQueuedNow(chatId, ['b', 'a'])
+    expect(frames(socket, 'queue_set_delivery')).toHaveLength(0)
+    store.streaming[chatId] = false
+    store.sendQueuedNow(chatId, ['c', 'a'])
+    expect(frames(socket, 'queue_set_delivery')).toEqual([
+      { type: 'queue_set_delivery', entry_ids: ['a', 'c'], delivery: 'steer' },
+    ])
+    // Nothing is changed optimistically: the echo removes the entries.
+    expect(store.queuedMessages[chatId].map(q => q.id)).toEqual(['a', 'b', 'c'])
   })
 
   it('reads the waiting flag from queue_state, and the server flag wins over the chat record', async () => {
@@ -10937,13 +10801,13 @@ describe('queue delivery: queue or steer', () => {
     ])
     expect(store.queuedMessages[chatId][0].waiting).toBe(true)
     emit(socket, { type: 'queue_state', queue: [
-      { id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: true },
-      { id: 'l', text: 'live', delivery: 'queue', steering: false, waiting: false },
+      { id: 'w', text: 'held', waiting: true },
+      { id: 'l', text: 'live', waiting: false },
     ] })
     expect(store.queuedMessages[chatId].map(q => !!q.waiting)).toEqual([true, false])
     // The server says it is live now (adopted into the turn).
     emit(socket, { type: 'queue_state', queue: [
-      { id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: false },
+      { id: 'w', text: 'held', waiting: false },
     ] })
     expect(store.queuedMessages[chatId][0].waiting).toBe(false)
   })
@@ -10951,17 +10815,17 @@ describe('queue delivery: queue or steer', () => {
   it('an entry that arrives only via queue_state after a reload is waiting', async () => {
     const { store, socket } = await setup()
     expect(store.queuedMessages[chatId]).toBeUndefined()
-    emit(socket, { type: 'queue_state', queue: [{ id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: true }] })
+    emit(socket, { type: 'queue_state', queue: [{ id: 'w', text: 'held', waiting: true }] })
     expect(store.queuedMessages[chatId][0]).toMatchObject({ id: 'w', waiting: true })
   })
 
-  it('a queued event is live, and steering an entry clears its waiting mark', async () => {
+  it('a queued event is live, and a queue_state entry can be waiting', async () => {
     const { store, socket } = await setup()
-    emit(socket, { type: 'queued', id: 'n', text: 'new', delivery: 'queue', waiting: false })
-    expect(store.queuedMessages[chatId][0].waiting).toBe(false)
-    emit(socket, { type: 'queue_state', queue: [{ id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: true }] })
-    store.setQueuedDelivery(chatId, ['w'], 'steer')
-    expect(store.queuedMessages[chatId][0].waiting).toBe(false)
+    emit(socket, { type: 'queued', id: 'n', text: 'new', waiting: false })
+    expect(store.queuedMessages[chatId][0]).toMatchObject({ id: 'n', waiting: false })
+    expect(Object.keys(store.queuedMessages[chatId][0])).not.toContain('delivery')
+    emit(socket, { type: 'queue_state', queue: [{ id: 'w', text: 'held', waiting: true }] })
+    expect(store.queuedMessages[chatId][0].waiting).toBe(true)
   })
 
   it('prompt_cancelled removes the bubble and partials for that turn; a resend shows once', async () => {
@@ -10978,16 +10842,17 @@ describe('queue delivery: queue or steer', () => {
     expect(bubbles()).toHaveLength(1)
   })
 
-  it('snapshot and keyboard_settings_changed carry the preference', async () => {
+  it('keyboard_settings_changed applies the send mode', async () => {
     const { useKeyboardSettings } = await import('../composables/useKeyboardSettings')
     const store = useProjectStore()
     apiGet.mockResolvedValue([])
     store.connectEventsWs()
     const sock = fakeSockets[fakeSockets.length - 1]
-    sock.onmessage?.({ data: JSON.stringify({ type: 'keyboard_settings_changed', keyboard_shortcuts: {}, keyboard_send_mode: 'modifier', mid_turn_delivery: 'steer', revision: 'r1' }) })
-    expect(useKeyboardSettings().settings.value.mid_turn_delivery).toBe('steer')
-    sock.onmessage?.({ data: JSON.stringify({ type: 'keyboard_settings_changed', keyboard_shortcuts: {}, keyboard_send_mode: 'modifier', mid_turn_delivery: 'queue', revision: 'r2' }) })
-    expect(useKeyboardSettings().settings.value.mid_turn_delivery).toBe('queue')
+    sock.onmessage?.({ data: JSON.stringify({ type: 'keyboard_settings_changed', keyboard_shortcuts: {}, keyboard_send_mode: 'enter', revision: 'r1' }) })
+    expect(useKeyboardSettings().settings.value.keyboard_send_mode).toBe('enter')
+    expect(Object.keys(useKeyboardSettings().settings.value)).not.toContain('mid_turn_delivery')
+    sock.onmessage?.({ data: JSON.stringify({ type: 'keyboard_settings_changed', keyboard_shortcuts: {}, keyboard_send_mode: 'modifier', revision: 'r2' }) })
+    expect(useKeyboardSettings().settings.value.keyboard_send_mode).toBe('modifier')
   })
 
   it('appearance_settings_changed applies the value', async () => {
