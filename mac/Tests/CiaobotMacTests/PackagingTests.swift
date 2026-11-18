@@ -480,29 +480,114 @@ final class PackagingTests: XCTestCase {
 
     // MARK: - Fake release repository
 
-    /// Until the engine is distribution-signed (#3128 G), notarization would
-    /// reject the bundle; the script refuses before any Apple call.
-    func testNotarizedPackagingRefusesAnEngineBearingBundle() throws {
-        let fixture = try makeFakePackageRepository(withEngine: true)
+    /// The bundled engine (#3128 G) is signed inside-out with the Developer ID identity, hardened runtime and a
+    /// secure timestamp, no entitlements and never `--deep`, before Sparkle and the app, and before any Apple call.
+    func testNotarizedPackagingSignsTheEngineBeforeTheApp() throws {
+        let fixture = try makeFakePackageRepository()
 
         let result = try runPackaging(fixture)
 
+        XCTAssertEqual(result.status, 0, result.output)
+        let codesign = try calls(in: fixture.codesignLog)
+        let engineSigns = codesign.enumerated().filter { _, call in
+            call.contains("--force") && (call.last ?? "").contains("/Contents/Resources/engine/")
+        }
+        XCTAssertEqual(engineSigns.count, 1, "the fixture engine has exactly one Mach-O: \(codesign)")
+        let engineCall = try XCTUnwrap(engineSigns.first)
+        XCTAssertEqual(
+            Array(engineCall.element.dropLast()),
+            ["--force", "--sign", FakePackageRepository.identity, "--options", "runtime", "--timestamp"]
+        )
+        let appSign = try XCTUnwrap(codesign.firstIndex { call in
+            call.contains("--force") && (call.last ?? "").hasSuffix("/Ciaobot.app")
+        })
+        XCTAssertLessThan(engineCall.offset, appSign, "the engine is signed before the app seal")
+        for call in codesign where call.contains("--force") {
+            XCTAssertFalse(call.contains("--deep") || call.contains("--entitlements"), "\(call)")
+        }
+    }
+
+    /// A signature the check refuses (here: no secure timestamp) stops the run before notarization.
+    func testNotarizedPackagingRefusesAnEngineThatIsNotDistributionSigned() throws {
+        let fixture = try makeFakePackageRepository()
+
+        let result = try runPackaging(fixture, environment: ["FAKE_CODESIGN_NO_TIMESTAMP": "1"])
+
         XCTAssertNotEqual(result.status, 0, result.output)
-        XCTAssertTrue(result.output.contains("#3128 G"), result.output)
+        XCTAssertTrue(result.output.contains("could not distribution-sign the bundled engine"), result.output)
         let log = try? String(contentsOf: fixture.xcrunLog, encoding: .utf8)
         XCTAssertFalse((log ?? "").contains("notarytool"), log ?? "")
     }
 
-    /// A dangling engine symlink must be refused too, not mistaken for absent.
-    func testNotarizedPackagingRefusesADanglingEngineSymlink() throws {
-        let fixture = try makeFakePackageRepository(engineDanglingSymlink: true)
+    /// A bundle without a real engine directory, including a dangling symlink standing in for it, is refused.
+    func testNotarizedPackagingRefusesABundleWithoutARealEngine() throws {
+        for engine in [FakeEngine.absent, FakeEngine.danglingSymlink] {
+            let fixture = try makeFakePackageRepository(engine: engine)
+
+            let result = try runPackaging(fixture)
+
+            XCTAssertNotEqual(result.status, 0, "\(engine): \(result.output)")
+            XCTAssertTrue(result.output.contains("no bundled engine"), result.output)
+            let log = try? String(contentsOf: fixture.xcrunLog, encoding: .utf8)
+            XCTAssertFalse((log ?? "").contains("notarytool"), log ?? "")
+        }
+    }
+
+    /// The engine version probe runs the real launcher; it must change nothing.
+    /// `package-notarized.sh` compares the engine's full inventory (path, size,
+    /// sha256 of every file, via `engine_sign.py inventory`) across the probe,
+    /// so a launcher that writes into the signed bundle it reports on stops the
+    /// run before any notarization.
+    func testNotarizedPackagingRefusesALauncherThatWritesIntoTheBundle() throws {
+        let fixture = try makeFakePackageRepository(sneakyLauncher: true)
 
         let result = try runPackaging(fixture)
 
         XCTAssertNotEqual(result.status, 0, result.output)
-        XCTAssertTrue(result.output.contains("#3128 G"), result.output)
+        XCTAssertTrue(result.output.contains("changed the bundled engine"), result.output)
         let log = try? String(contentsOf: fixture.xcrunLog, encoding: .utf8)
         XCTAssertFalse((log ?? "").contains("notarytool"), log ?? "")
+        // The probe's own empty environment re-asserts the no-bytecode promise
+        // even when the launcher would not.
+        let text = try readScript("package-notarized.sh")
+        XCTAssertTrue(
+            text.contains(#"env -i PYTHONDONTWRITEBYTECODE=1 "$engine/bin/ciao" --version"#),
+            "the version probe must set PYTHONDONTWRITEBYTECODE=1 explicitly in its own environment"
+        )
+    }
+
+    /// The public team config is read by name and never sourced: assignments
+    /// sneaking a `SIGNING_IDENTITY` into it must not redirect signing. This
+    /// run must still (a) succeed and (b) sign everything with the identity the
+    /// caller supplied, never with the one the config injected.
+    func testNotarizedPackagingReadsOnlyTheTeamFromTheUpdateConfig() throws {
+        let fixture = try makeFakePackageRepository(configExtra: [
+            "SIGNING_IDENTITY='Developer ID Application: Someone Else (ZZZZZZZZZZ)'",
+        ])
+
+        let result = try runPackaging(fixture)
+
+        XCTAssertEqual(result.status, 0, result.output)
+        let codesign = try calls(in: fixture.codesignLog)
+        XCTAssertFalse(codesign.contains { $0.contains("ZZZZZZZZZZ") },
+                       "the config's injected identity must never reach codesign: \(codesign)")
+        XCTAssertTrue(codesign.contains { $0.contains(FakePackageRepository.identity) },
+                      "the caller's identity must still sign: \(codesign)")
+    }
+
+    /// The redirect guard is the name-only read: if the config were sourced, a
+    /// `PATH=` (or any other) assignment in it would change this script's
+    /// behaviour, so the script must not contain a source of it at all.
+    func testNotarizedPackagingNeverSourcesTheUpdateConfig() throws {
+        let text = try readScript("package-notarized.sh")
+        XCTAssertFalse(
+            text.contains(". \"$update_config\""),
+            "release/update-config.env must never be sourced: sourcing it would let it override SIGNING_IDENTITY or PATH"
+        )
+        XCTAssertTrue(
+            text.contains("sed -n 's/^UPDATE_TEAM_ID=//p' \"$update_config\""),
+            "the team identifier is read by name from the public config"
+        )
     }
 
     /// A scratch checkout with the real release scripts, a stand-in bundle
@@ -537,7 +622,13 @@ final class PackagingTests: XCTestCase {
         temporaryDirectories = []
     }
 
-    private func makeFakePackageRepository(withEngine: Bool = false, engineDanglingSymlink: Bool = false) throws -> PackageFixture {
+    private enum FakeEngine { case present, absent, danglingSymlink }
+
+    private func makeFakePackageRepository(
+        engine: FakeEngine = .present,
+        sneakyLauncher: Bool = false,
+        configExtra: [String] = []
+    ) throws -> PackageFixture {
         let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("ciaobot-release-\(UUID().uuidString)", isDirectory: true)
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
@@ -551,14 +642,34 @@ final class PackagingTests: XCTestCase {
             try fileManager.copyItem(at: scriptsDirectory.appendingPathComponent(name), to: destination)
             try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destination.path)
         }
-        try fileManager.copyItem(
-            at: scriptsDirectory.appendingPathComponent("dmg_layout.py"),
-            to: scripts.appendingPathComponent("dmg_layout.py")
-        )
+        // engine_sign.py loads its sibling helpers by path, transitively.
+        let helpers = try fileManager.contentsOfDirectory(atPath: scriptsDirectory.path)
+            .filter { $0 == "dmg_layout.py" || ($0.hasPrefix("engine_") && $0.hasSuffix(".py")) }
+        for name in helpers {
+            try fileManager.copyItem(
+                at: scriptsDirectory.appendingPathComponent(name),
+                to: scripts.appendingPathComponent(name)
+            )
+        }
+        // engine_sign.py calls /usr/bin/codesign by absolute path on purpose, so the copy in this scratch checkout
+        // is pointed at the recording fake instead (the real signing is covered by EngineSigningTests).
+        let signer = scripts.appendingPathComponent("engine_sign.py")
+        let fakeCodesignPath = root.appendingPathComponent("bin/codesign").path
+        let source = try String(contentsOf: signer, encoding: .utf8)
+        let pinned = #"CODESIGN = "/usr/bin/codesign""#
+        XCTAssertTrue(source.contains(pinned))
+        try source.replacingOccurrences(of: pinned, with: "CODESIGN = \"\(fakeCodesignPath)\"")
+            .write(to: signer, atomically: true, encoding: .utf8)
+        let sneakyCiao = #"printf '#!/bin/sh\necho "ciao 1.2.3"\nprintf x > "$(dirname -- "$0")/../pollution.tmp"\n' > "$engine/bin/ciao""#
+        let plainCiao = #"printf '#!/bin/sh\necho "ciao 1.2.3"\n' > "$engine/bin/ciao""#
         let engineLines = """
-            mkdir -p "$bundle/Contents/Resources/engine/bin"
-            printf '#!/bin/sh\\nexit 0\\n' > "$bundle/Contents/Resources/engine/bin/ciao"
-            chmod 755 "$bundle/Contents/Resources/engine/bin/ciao"
+            engine="$bundle/Contents/Resources/engine"
+            mkdir -p "$engine/bin"
+            \(sneakyLauncher ? sneakyCiao : plainCiao)
+            chmod 755 "$engine/bin/ciao"
+            printf '{"kind":"ciaobot-engine-provenance","engine":{"version":"1.2.3"}}' > "$engine/provenance.json"
+            /usr/bin/lipo /bin/echo -thin arm64e -output "$engine/bin/python3.12"
+            chmod 755 "$engine/bin/python3.12"
 
             """
         let danglingLines = """
@@ -567,8 +678,8 @@ final class PackagingTests: XCTestCase {
 
             """
         try writeExecutable(
-            withEngine ? Self.stubBundleBuilder + "\n" + engineLines
-                : engineDanglingSymlink ? Self.stubBundleBuilder + "\n" + danglingLines
+            engine == .present ? Self.stubBundleBuilder + "\n" + engineLines
+                : engine == .danglingSymlink ? Self.stubBundleBuilder + "\n" + danglingLines
                 : Self.stubBundleBuilder,
             at: scripts.appendingPathComponent("build-app.sh")
         )
@@ -578,10 +689,16 @@ final class PackagingTests: XCTestCase {
             at: packageRoot.appendingPathComponent("release/dmg"),
             to: release.appendingPathComponent("dmg", isDirectory: true)
         )
-        try fileManager.copyItem(
-            at: packageRoot.appendingPathComponent("release/update-config.env"),
-            to: release.appendingPathComponent("update-config.env")
-        )
+        let updateConfig = release.appendingPathComponent("update-config.env")
+        if configExtra.isEmpty {
+            try fileManager.copyItem(
+                at: packageRoot.appendingPathComponent("release/update-config.env"), to: updateConfig)
+        } else {
+            var text = try String(
+                contentsOf: packageRoot.appendingPathComponent("release/update-config.env"), encoding: .utf8)
+            text += "\n" + configExtra.joined(separator: "\n") + "\n"
+            try Data(text.utf8).write(to: updateConfig)
+        }
 
         let tools = root.appendingPathComponent("bin", isDirectory: true)
         try fileManager.createDirectory(at: tools, withIntermediateDirectories: true)
@@ -618,7 +735,10 @@ final class PackagingTests: XCTestCase {
         // Only a test that asks for the opt-in archive may see the flag.
         environment.removeValue(forKey: "CIAOBOT_ALSO_ZIP")
         for (key, value) in overrides { environment[key] = value }
-        environment["PATH"] = fixture.tools.path + ":/usr/bin:/bin:/usr/sbin:/sbin"
+        // The ambient PATH follows the fakes so python3 (3.12 or newer, to sign the engine) resolves as it does for
+        // the operator; the fakes still shadow codesign, xcrun, spctl and hdiutil.
+        environment["PATH"] = fixture.tools.path + ":" + (environment["PATH"] ?? "/usr/bin:/bin")
+            + ":/usr/bin:/bin:/usr/sbin:/sbin"
         // The script writes into a fresh mktemp directory; point it at the
         // scratch tree so the artifacts can be inspected.
         environment["TMPDIR"] = fixture.tmp.path
@@ -703,7 +823,9 @@ final class PackagingTests: XCTestCase {
     done
     [ -n "$describe" ] || exit 0
     printf '%s\\n' 'Identifier=local.ciaobot.mac' >&2
+    printf '%s\\n' 'CodeDirectory v=20500 size=1000 flags=0x10002(runtime) hashes=3+7 location=embedded' >&2
     printf '%s\\n' 'Authority=Developer ID Application: Test Signer (AXBFS96Y9F)' >&2
+    [ -n "${FAKE_CODESIGN_NO_TIMESTAMP:-}" ] || printf '%s\\n' 'Timestamp=Nov 18, 2026 at 10:00:00' >&2
     printf '%s\\n' 'TeamIdentifier=AXBFS96Y9F' >&2
     printf '%s\\n' 'flags=0x10002(runtime)' >&2
     exit 0

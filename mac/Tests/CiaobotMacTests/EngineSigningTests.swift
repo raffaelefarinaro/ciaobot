@@ -45,6 +45,27 @@ final class EngineSigningTests: XCTestCase {
         }
     }
 
+    /// The distribution gate (#3128 G) that `make-dmg.sh` and `make-appcast.sh` rely on: an ad-hoc signed engine
+    /// passes the ad-hoc check but not the distribution check, and the usage forms are exact.
+    func testDistributionCheckRefusesAnAdHocSignedEngine() throws {
+        let app = scratch.appendingPathComponent("Ciaobot.app", isDirectory: true)
+        try makeApp(at: app)
+        let engine = app.appendingPathComponent("Contents/Resources/engine", isDirectory: true)
+        try makeEngine(at: engine, extraMachO: ["lib/a.so"])
+        let signed = try engineSign(["sign", "--adhoc", engine.path])
+        XCTAssertEqual(signed.status, 0, signed.output)
+
+        let adhoc = try engineSign(["check", engine.path])
+        XCTAssertEqual(adhoc.status, 0, adhoc.output)
+        let distribution = try engineSign(["check", "--distribution", "AXBFS96Y9F", engine.path])
+        XCTAssertEqual(distribution.status, 1, distribution.output)
+        XCTAssertTrue(distribution.output.contains("engine sign failed"), distribution.output)
+        let usage = try engineSign(["check", "--distribution", engine.path])
+        XCTAssertEqual(usage.status, 2, usage.output)
+        let badIdentity = try engineSign(["sign", "--distribution", "AXBFS96Y9F", "-", engine.path])
+        XCTAssertEqual(badIdentity.status, 1, badIdentity.output)
+    }
+
     func testSigningRefusesAnEngineOutsideAnAppLayout() throws {
         let engine = scratch.appendingPathComponent("engine", isDirectory: true)
         try makeEngine(at: engine, extraMachO: [])
