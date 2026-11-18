@@ -2,7 +2,8 @@ import Foundation
 import Darwin
 
 /// Whether this app runs the bundled engine itself (`local`) or connects to a
-/// server somebody else runs (`external`). #3129 S5a; nothing wires it yet.
+/// server somebody else runs (`external`). #3129 S5a; the app delegate wires
+/// local mode in (S5b).
 enum EngineMode: String {
     case local, external
 
@@ -19,6 +20,12 @@ enum EngineMode: String {
 
 protocol EngineModeStoring: AnyObject {
     var mode: EngineMode? { get set }
+}
+
+/// A mode store that touches nothing on disk. The AppDelegate test
+/// initializer uses it, so an ordinary test launch reads no defaults.
+final class TransientEngineModeStore: EngineModeStoring {
+    var mode: EngineMode?
 }
 
 final class UserDefaultsEngineModeStore: EngineModeStoring {
@@ -117,7 +124,8 @@ final class EngineSupervisor: ObservableObject {
     @Published private(set) var state: EngineState = .stopped
 
     private let engine: BundledEngine?
-    private let home: EngineHome
+    /// Read by the local engine screen for **Show Log** (`home.logFile`).
+    let home: EngineHome
     private let processes: EngineProcessRunning
     private let identityChecker: EngineIdentityChecking
     private let clock: () -> Date
