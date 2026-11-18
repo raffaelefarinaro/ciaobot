@@ -90,6 +90,8 @@ from ciao.models import (
 from ciao.providers.base import (
     ActiveHandle,
     BaseSDKProvider,
+    McpOAuthAttempt,
+    McpOAuthUnavailable,
     MoveToBackgroundOutcome,
     ProviderCapabilities,
     QuestionResponseResult,
@@ -1808,27 +1810,6 @@ def server_config_content(repo: str, existing: str = "") -> str:
                 "linked repo skills not added"
             )
     return json.dumps(config)
-
-
-@dataclass(frozen=True, slots=True)
-class McpOAuthAttempt:
-    """One OAuth sign-in attempt OpenCode started for an MCP server."""
-
-    integration_id: str
-    attempt_id: str
-    url: str
-    mode: str
-
-
-class McpOAuthUnavailable(Exception):
-    """OpenCode cannot offer an MCP sign-in here. ``reason`` names why.
-
-    ``reason`` is one of ``not_running``, ``no_integration`` or ``no_oauth_method``.
-    """
-
-    def __init__(self, reason: str) -> None:
-        super().__init__(reason)
-        self.reason = reason
 
 
 class OpencodeProvider(BaseSDKProvider):

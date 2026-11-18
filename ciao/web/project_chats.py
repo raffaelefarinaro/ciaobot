@@ -5570,7 +5570,7 @@ class ProjectChatManager:
         self._steer_locks.pop(chat_id, None)
         return self._providers.pop(chat_id, None)
 
-    async def ensure_opencode_server(self, chat_id: str) -> OpencodeProvider:
+    async def ensure_opencode_server(self, chat_id: str) -> BaseProvider:
         """Start an OpenCode chat's server without a turn, or return the live one.
 
         The MCP sign-in card needs the server a turn would start; the idle sweep
@@ -5585,13 +5585,11 @@ class ProjectChatManager:
             raise ValueError(f"chat {chat_id} is not an active OpenCode chat")
         existing = self._providers.get(chat_id)
         live = existing.provider if existing is not None else None
-        if isinstance(live, OpencodeProvider) and live.has_live_server:
+        if isinstance(live, BaseProvider) and live.is_connected:
             self._provider_last_used[chat_id] = time.monotonic()
             return live
         service = self._get_provider(chat_id)
         provider = service.ensure_provider(chat.provider)
-        if not isinstance(provider, OpencodeProvider):
-            raise ValueError(f"chat {chat_id} is not an active OpenCode chat")
         await self.warm_gh_token(chat)
         request = self.build_agent_request(
             chat, prompt="", resume_session=chat.session_id or None, compact=True
