@@ -234,6 +234,38 @@ final class EngineSupervisorTests: XCTestCase {
         processes.onExit?(pid, 1)
         time.advance(60)
         XCTAssertEqual(processes.spawns.count, 1)
+        XCTAssertTrue(processes.killed.isEmpty, "it exited within the grace")
+    }
+
+    func testStuckChildAfterReadinessTimeoutIsKilledAfterTheGraceAndALaterStartSucceeds() throws {
+        processes.diesOnTerminate = false
+        let supervisor = makeSupervisor()
+        supervisor.start()
+        let pid = processes.nextPID
+        time.advance(91)
+        XCTAssertEqual(supervisor.state, .failed(EngineSupervisor.startTimeoutMessage))
+        XCTAssertEqual(processes.terminated, [pid])
+        time.advance(33)
+        XCTAssertTrue(processes.killed.isEmpty, "waits for the grace")
+        time.advance(3)
+        XCTAssertEqual(processes.killed, [pid])
+        // Try Again while the old engine is still dying waits for it, then spawns.
+        supervisor.restartAfterFailure()
+        XCTAssertEqual(processes.spawns.count, 1)
+        XCTAssertEqual(supervisor.state, .starting)
+        processes.onExit?(pid, 137)
+        XCTAssertEqual(processes.spawns.count, 2)
+        XCTAssertEqual(supervisor.state, .starting)
+    }
+
+    func testStuckChildWhoseExitIsNeverReportedIsReleasedAfterTheKillWait() throws {
+        processes.diesOnTerminate = false
+        let supervisor = makeSupervisor()
+        supervisor.start()
+        time.advance(91)
+        supervisor.start()
+        time.advance(35 + EngineSupervisor.killWait + 1)
+        XCTAssertEqual(processes.spawns.count, 2, "the lost exit report must not wedge the supervisor")
     }
 
     // MARK: Exit and retry
@@ -387,6 +419,111 @@ final class EngineSupervisorTests: XCTestCase {
         XCTAssertTrue(processes.terminated.isEmpty)
     }
 
+    func testOrphanReplacedByAnUnrelatedProcessMidWaitIsNeverKilled() throws {
+        for replacement in [
+            EngineProcessInfo(parentPID: 777, path: engineRoot.appendingPathComponent("bin/python3.12").path),
+            EngineProcessInfo(parentPID: 1, path: "/usr/bin/unrelated"),
+        ] {
+            let processes = FakeProcesses()
+            let orphan = try orphanSetup(parent: 1, path: engineRoot.appendingPathComponent("bin/python3.12").path)
+            processes.alive[orphan] = EngineProcessInfo(parentPID: 1, path: engineRoot.appendingPathComponent("bin/python3.12").path)
+            processes.diesOnTerminate = false
+            let supervisor = EngineSupervisor(
+                engine: BundledEngine(root: engineRoot), home: home, processes: processes, identity: identity,
+                environment: ["PATH": "/usr/bin"], clock: { [time] in time.now },
+                schedule: { [time] d, w in time.schedule(d, w) })
+            supervisor.start()
+            XCTAssertEqual(processes.terminated, [orphan])
+            time.advance(2)
+            processes.alive[orphan] = replacement
+            time.advance(40)
+            XCTAssertTrue(processes.killed.isEmpty, "a recycled pid is not ours to kill: \(replacement)")
+            XCTAssertEqual(processes.spawns.count, 1, "the orphan is gone, so the engine starts")
+        }
+    }
+
+    func testPidOneOrBelowInTheRecordIsIgnored() throws {
+        try writeReady(pid: 1)
+        processes.alive[1] = EngineProcessInfo(parentPID: 0, path: engineRoot.appendingPathComponent("bin/x").path)
+        makeSupervisor().start()
+        XCTAssertTrue(processes.terminated.isEmpty)
+        XCTAssertTrue(processes.killed.isEmpty)
+        XCTAssertEqual(processes.spawns.count, 1)
+    }
+
+    func testRootAndProcessPathAreComparedAsRealPaths() throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: engineRoot.appendingPathComponent("bin"), withIntermediateDirectories: true)
+        let physical = EngineSupervisor.canonical(engineRoot.path)
+        let logical = physical.hasPrefix("/private/") ? String(physical.dropFirst("/private".count)) : physical
+        XCTAssertNotEqual(physical, logical, "the temp directory must be under /private for this test to mean anything")
+        for (root, procPath) in [(logical, physical + "/bin/python3.12"), (physical, logical + "/bin/python3.12")] {
+            let processes = FakeProcesses()
+            let orphan: Int32 = 4343
+            try writeReady(pid: orphan)
+            processes.alive[orphan] = EngineProcessInfo(parentPID: 1, path: procPath)
+            let supervisor = EngineSupervisor(
+                engine: BundledEngine(root: URL(fileURLWithPath: root, isDirectory: true)), home: home,
+                processes: processes, identity: identity, environment: ["PATH": "/usr/bin"],
+                clock: { [time] in time.now }, schedule: { [time] d, w in time.schedule(d, w) })
+            supervisor.start()
+            XCTAssertEqual(processes.terminated, [orphan], "root \(root) vs process \(procPath)")
+        }
+    }
+
+    func testAnotherInstanceMessageIsRecoverableAndTryAgainWorksOnceItIsGone() throws {
+        let orphan = try orphanSetup(parent: 777, path: "/Applications/Other.app/x")
+        let supervisor = makeSupervisor()
+        supervisor.start()
+        XCTAssertEqual(supervisor.state, .failed(EngineSupervisor.anotherRunningMessage))
+        XCTAssertTrue(EngineSupervisor.anotherRunningMessage.contains("Try Again"))
+        processes.alive[orphan] = nil
+        supervisor.restartAfterFailure()
+        XCTAssertEqual(processes.spawns.count, 1)
+        XCTAssertEqual(supervisor.state, .starting)
+    }
+
+    func testStartFromFailedClearsTheFailureHistory() throws {
+        let supervisor = makeSupervisor()
+        supervisor.start()
+        for _ in 0..<4 {
+            processes.onExit?(processes.nextPID, 1)
+            time.advance(16)
+        }
+        guard case .failed = supervisor.state else { return XCTFail("\(supervisor.state)") }
+        supervisor.start()
+        XCTAssertEqual(processes.spawns.count, 5)
+        processes.onExit?(processes.nextPID, 1)
+        XCTAssertEqual(supervisor.state, .starting, "history restarted from zero")
+    }
+
+    func testLogDirectoryIsCreatedPrivate() throws {
+        makeSupervisor().start()
+        let attributes = try FileManager.default.attributesOfItem(atPath: home.logFile.deletingLastPathComponent().path)
+        XCTAssertEqual((attributes[.posixPermissions] as? Int).map { $0 & 0o777 }, 0o700)
+    }
+
+    func testJSONIntegerRejectsBooleansFractionsAndStrings() throws {
+        let parsed = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(#"{"t":true,"f":false,"i":8777,"d":1.5,"s":"1","one":1}"#.utf8)) as? [String: Any])
+        XCTAssertNil(jsonInteger(parsed["t"]))
+        XCTAssertNil(jsonInteger(parsed["f"]))
+        XCTAssertNil(jsonInteger(parsed["d"]))
+        XCTAssertNil(jsonInteger(parsed["s"]))
+        XCTAssertNil(jsonInteger(nil))
+        XCTAssertEqual(jsonInteger(parsed["i"]), 8777)
+        XCTAssertEqual(jsonInteger(parsed["one"]), 1)
+    }
+
+    func testReadyRecordWithBooleanPidIsNotTreatedAsPidOne() throws {
+        try #"{"pid":true,"port":8777,"startup_id":"x"}"#.write(to: home.readyRecord, atomically: true, encoding: .utf8)
+        processes.alive[1] = EngineProcessInfo(parentPID: 0, path: "/sbin/launchd")
+        let supervisor = makeSupervisor()
+        supervisor.start()
+        XCTAssertEqual(supervisor.state, .starting, "no 'another instance' from a boolean pid")
+        XCTAssertEqual(processes.spawns.count, 1)
+    }
+
     // MARK: Stop
 
     func testStopSendsSigtermThenSigkillOnlyAfterTheGrace() throws {
@@ -406,6 +543,50 @@ final class EngineSupervisorTests: XCTestCase {
         XCTAssertEqual(completed, 1)
         time.advance(60)
         XCTAssertEqual(processes.spawns.count, 1, "a stop never respawns")
+    }
+
+    func testStopThatNeverGetsAnExitReportCompletesAfterTheKillWait() throws {
+        let supervisor = makeSupervisor()
+        _ = try bringUp(supervisor)
+        var completed = 0
+        supervisor.stop(grace: 35) { completed += 1 }
+        time.advance(35.5)
+        XCTAssertEqual(completed, 0)
+        XCTAssertEqual(supervisor.state, .stopping)
+        time.advance(EngineSupervisor.killWait)
+        XCTAssertEqual(completed, 1, "stopping has a ceiling")
+        XCTAssertEqual(supervisor.state, .stopped)
+    }
+
+    func testStopDuringOrphanReapStillKillsTheOrphanAfterTheGrace() throws {
+        let orphan = try orphanSetup(parent: 1, path: engineRoot.appendingPathComponent("bin/python3.12").path)
+        processes.diesOnTerminate = false
+        let supervisor = makeSupervisor()
+        supervisor.start()
+        XCTAssertEqual(processes.terminated, [orphan])
+        var completed = 0
+        supervisor.stop(grace: 10) { completed += 1 }
+        XCTAssertEqual(supervisor.state, .stopping)
+        time.advance(9)
+        XCTAssertTrue(processes.killed.isEmpty)
+        XCTAssertEqual(completed, 0)
+        time.advance(2)
+        XCTAssertEqual(processes.killed, [orphan])
+        XCTAssertEqual(completed, 1)
+        XCTAssertEqual(supervisor.state, .stopped)
+        XCTAssertTrue(processes.spawns.isEmpty, "a stop never starts the engine")
+    }
+
+    func testStartWhileStoppingIsDropped() throws {
+        let supervisor = makeSupervisor()
+        let pid = try bringUp(supervisor)
+        supervisor.stop(grace: 35) {}
+        supervisor.start()
+        XCTAssertEqual(supervisor.state, .stopping)
+        processes.onExit?(pid, 0)
+        time.advance(60)
+        XCTAssertEqual(processes.spawns.count, 1)
+        XCTAssertEqual(supervisor.state, .stopped)
     }
 
     func testGracefulExitWithinTheGraceSkipsSigkill() throws {

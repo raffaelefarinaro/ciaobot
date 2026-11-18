@@ -88,6 +88,14 @@ protocol EngineIdentityChecking {
     func identity(of origin: Origin, completion: @escaping (EngineIdentity?) -> Void)
 }
 
+/// A JSON integer. Booleans (which bridge to 1 and 0) and fractions are not integers.
+func jsonInteger(_ value: Any?) -> Int? {
+    guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+    let double = number.doubleValue
+    guard double == double.rounded(), abs(double) < 9e15 else { return nil }
+    return number.intValue
+}
+
 @MainActor
 final class EngineSupervisor: ObservableObject {
     static let readyPollInterval: TimeInterval = 0.25
@@ -95,12 +103,15 @@ final class EngineSupervisor: ObservableObject {
     static let runningPollInterval: TimeInterval = 5
     static let retryDelays: [TimeInterval] = [2, 5, 15]
     static let retryWindow: TimeInterval = 300
-    static let orphanGrace: TimeInterval = 35
+    /// SIGTERM to SIGKILL for any engine process we signal (an orphan, or a child that failed to become ready).
+    static let terminationGrace: TimeInterval = 35
+    /// After SIGKILL, how long to wait for the exit report before giving up on it.
+    static let killWait: TimeInterval = 5
     static let orphanPollInterval: TimeInterval = 0.5
     static let maximumLogBytes = 20 * 1024 * 1024
     static let startTimeoutMessage = "The Ciaobot engine did not start. See ~/Library/Logs/Ciaobot/engine.log."
     static let unavailableMessage = "This Mac cannot run the Ciaobot engine bundled with the app."
-    static let anotherRunningMessage = "Another Ciaobot is already running this workspace."
+    static let anotherRunningMessage = "Another Ciaobot is already running this workspace. Quit it, then choose Try Again."
     static let spawnFailureMessage = "The Ciaobot engine could not be started. See ~/Library/Logs/Ciaobot/engine.log."
 
     @Published private(set) var state: EngineState = .stopped
@@ -116,6 +127,13 @@ final class EngineSupervisor: ObservableObject {
     /// Invalidates every timer and probe callback scheduled before a spawn or stop.
     private var generation = 0
     private var child: Int32?
+    /// An orphan from an earlier app run that we have SIGTERMed and are waiting on.
+    private var reaping: Int32?
+    /// The child is being terminated after a readiness timeout: its exit must not retry.
+    private var failedChildExiting = false
+    /// A start requested while the previous child was still dying.
+    private var startQueued = false
+    private var killToken = 0
     private var failures: [Date] = []
     private var lastPort = 0
     private var stopCompletions: [() -> Void] = []
@@ -145,9 +163,13 @@ final class EngineSupervisor: ObservableObject {
 
     // MARK: Public
 
+    /// A no-op while starting, running or stopping: a start requested during
+    /// `.stopping` is dropped, not queued, so a quit in progress cannot be undone.
+    /// From `.failed` it clears the failure history, like `restartAfterFailure()`.
     func start() {
         switch state {
-        case .stopped, .failed, .portInUse: break
+        case .stopped, .portInUse: break
+        case .failed: failures = []
         default: return
         }
         begin()
@@ -161,18 +183,60 @@ final class EngineSupervisor: ObservableObject {
 
     func stop(grace: TimeInterval = 35, completion: @escaping () -> Void) {
         generation += 1
-        guard let pid = child else {
+        startQueued = false
+        failedChildExiting = false
+        if let pid = child {
+            state = .stopping
+            stopCompletions.append(completion)
+            terminateChild(pid, grace: grace)
+        } else if let orphan = reaping {
+            state = .stopping
+            stopCompletions.append(completion)
+            awaitOrphan(orphan, deadline: clock().addingTimeInterval(grace), token: generation) { [weak self] in
+                self?.completeStop()
+            }
+        } else {
             state = .stopped
             completion()
-            return
         }
-        state = .stopping
-        stopCompletions.append(completion)
+    }
+
+    /// SIGTERM now, SIGKILL after `grace`, and if the exit is still not reported
+    /// `killWait` later, stop waiting for it so no state can stay stuck.
+    private func terminateChild(_ pid: Int32, grace: TimeInterval) {
+        guard pid > 1 else { return }
         processes.terminate(pid)
-        let token = generation
+        killToken += 1
+        let token = killToken
         schedule(grace) { [weak self] in
-            guard let self, self.generation == token, self.child == pid else { return }
+            guard let self, self.killToken == token, self.child == pid else { return }
             self.processes.kill(pid)
+            self.schedule(Self.killWait) { [weak self] in
+                guard let self, self.killToken == token, self.child == pid else { return }
+                self.child = nil
+                self.generation += 1
+                self.childReleased()
+            }
+        }
+    }
+
+    private func completeStop() {
+        state = .stopped
+        let done = stopCompletions
+        stopCompletions = []
+        done.forEach { $0() }
+    }
+
+    /// The child we were terminating is gone (exited, or never reported).
+    private func childReleased() {
+        if state == .stopping {
+            completeStop()
+        } else if failedChildExiting {
+            failedChildExiting = false
+            if startQueued {
+                startQueued = false
+                begin()
+            }
         }
     }
 
@@ -183,42 +247,76 @@ final class EngineSupervisor: ObservableObject {
             state = .failed(Self.unavailableMessage)
             return
         }
-        generation += 1
         state = .starting
+        guard child == nil else {
+            // The engine that failed to become ready is still dying and holds the lock.
+            startQueued = true
+            return
+        }
+        generation += 1
         reapOrphanThenSpawn(token: generation)
     }
 
+    /// The live pid in `ready.json` is ours to signal only when its parent is
+    /// launchd and its executable lies under the engine root, both compared as
+    /// real paths (`proc_pidpath` reports `/private/var/...`).
+    private func isOurOrphan(_ pid: Int32, _ info: EngineProcessInfo) -> Bool {
+        guard pid > 1, info.parentPID == 1, let root = engine?.root, let path = info.path else { return false }
+        return Self.canonical(path).hasPrefix(Self.canonical(root.path) + "/")
+    }
+
+    nonisolated static func canonical(_ path: String) -> String {
+        if let resolved = realpath(path, nil) {
+            defer { free(resolved) }
+            return String(cString: resolved)
+        }
+        let url = URL(fileURLWithPath: path)
+        if let resolved = realpath(url.deletingLastPathComponent().path, nil) {
+            defer { free(resolved) }
+            return String(cString: resolved) + "/" + url.lastPathComponent
+        }
+        return path
+    }
+
     private func reapOrphanThenSpawn(token: Int) {
-        guard let root = engine?.root, let record = readRecord(), let pid = record.pid,
-              let info = processes.inspect(pid) else {
+        guard let record = readRecord(), let pid = record.pid, let info = processes.inspect(pid) else {
             spawn(token: token)
             return
         }
-        let underRoot = info.path.map { $0.hasPrefix(root.path + "/") } ?? false
-        guard info.parentPID == 1, underRoot else {
+        guard isOurOrphan(pid, info) else {
             state = .failed(Self.anotherRunningMessage)
             return
         }
+        reaping = pid
         processes.terminate(pid)
-        waitForOrphan(pid, deadline: clock().addingTimeInterval(Self.orphanGrace), token: token)
+        awaitOrphan(pid, deadline: clock().addingTimeInterval(Self.terminationGrace), token: token) { [weak self] in
+            self?.spawn(token: token)
+        }
     }
 
-    private func waitForOrphan(_ pid: Int32, deadline: Date, token: Int) {
+    /// Polls a SIGTERMed orphan. The full identity check runs on every poll and
+    /// again before SIGKILL, so a pid recycled for an unrelated process is never signalled.
+    private func awaitOrphan(_ pid: Int32, deadline: Date, token: Int, then done: @escaping () -> Void) {
         guard generation == token else { return }
-        if processes.inspect(pid) == nil {
-            spawn(token: token)
-        } else if clock() >= deadline {
+        guard let info = processes.inspect(pid), isOurOrphan(pid, info) else {
+            reaping = nil
+            done()
+            return
+        }
+        if clock() >= deadline {
             processes.kill(pid)
-            spawn(token: token)
+            reaping = nil
+            done()
         } else {
             schedule(Self.orphanPollInterval) { [weak self] in
-                self?.waitForOrphan(pid, deadline: deadline, token: token)
+                self?.awaitOrphan(pid, deadline: deadline, token: token, then: done)
             }
         }
     }
 
     private func spawn(token: Int) {
         guard generation == token, let engine else { return }
+        reaping = nil
         var parent = environment
         parent["HOME"] = home.home.path
         let launch = engine.launch(.run(["--app-engine"]), parentEnvironment: parent, workingDirectory: home.home)
@@ -237,7 +335,8 @@ final class EngineSupervisor: ObservableObject {
 
     private func prepareLog() throws {
         let fm = FileManager.default
-        try fm.createDirectory(at: home.logFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fm.createDirectory(at: home.logFile.deletingLastPathComponent(), withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
         let size = (try? fm.attributesOfItem(atPath: home.logFile.path)[.size] as? Int) ?? 0
         if size > Self.maximumLogBytes {
             let rotated = home.logFile.appendingPathExtension("1")
@@ -258,8 +357,8 @@ final class EngineSupervisor: ObservableObject {
         guard let data = try? Data(contentsOf: home.readyRecord),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return ReadyRecord(
-            pid: (object["pid"] as? Int).flatMap { Int32(exactly: $0) },
-            port: (object["port"] as? Int).flatMap { (1...65535).contains($0) ? $0 : nil },
+            pid: jsonInteger(object["pid"]).flatMap { Int32(exactly: $0) }.flatMap { $0 > 1 ? $0 : nil },
+            port: jsonInteger(object["port"]).flatMap { (1...65535).contains($0) ? $0 : nil },
             startupID: (object["startup_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         )
     }
@@ -267,10 +366,12 @@ final class EngineSupervisor: ObservableObject {
     private func pollReady(pid: Int32, deadline: Date, token: Int) {
         guard generation == token, child == pid else { return }
         if clock() >= deadline {
-            child = nil
+            // Keep the child: a stuck engine holds server.lock, so it is terminated
+            // and killed like any other, and a later start waits for it to go.
             generation += 1
-            processes.terminate(pid)
+            failedChildExiting = true
             state = .failed(Self.startTimeoutMessage)
+            terminateChild(pid, grace: Self.terminationGrace)
             return
         }
         if let record = readRecord(), record.pid == pid, let port = record.port, let id = record.startupID {
@@ -331,14 +432,12 @@ final class EngineSupervisor: ObservableObject {
         guard pid == child else { return }
         child = nil
         generation += 1
-        if state == .stopping {
-            state = .stopped
-            let done = stopCompletions
-            stopCompletions = []
-            done.forEach { $0() }
+        if state == .stopping || failedChildExiting {
+            childReleased()
             return
         }
         if status == Self.portInUseStatus {
+            // The record's port, else the last port probed; 0 when neither was ever read.
             state = .portInUse(readRecord()?.port ?? lastPort)
             return
         }
@@ -371,43 +470,72 @@ final class EngineSupervisor: ObservableObject {
     }
 }
 
-// MARK: Real implementations (never used by tests)
+// MARK: Real implementations (never used by tests of the supervisor itself)
 
-/// Runs the engine with Foundation.Process, stdout and stderr appended to the log.
+struct EngineSpawnError: Error, Equatable { let code: Int32 }
+
+/// Runs the engine with `posix_spawn` in its own session (`POSIX_SPAWN_SETSID`),
+/// so the engine is a process-group leader and SIGKILL can reach the whole group
+/// (`killpg`). stdout and stderr are opened `O_APPEND` onto the log by the spawn
+/// itself, so there is no handle to leak when the spawn fails.
+///
+/// Known limit: macOS has no parent-death signal. If the app itself is
+/// SIGKILLed or crashes, the engine keeps running; the next launch finds it
+/// through `ready.json` and reaps it (ppid 1 and a path under the engine root).
+/// Its descendants are reaped only by the group kill of that engine, which the
+/// orphan path does when the pid leads its own group.
 final class FoundationEngineProcesses: EngineProcessRunning {
     var onExit: ((Int32, Int32) -> Void)?
-    private var running: [Int32: Process] = [:]
+    private var sources: [Int32: DispatchSourceProcess] = [:]
 
     func spawn(_ launch: BundledEngineLaunch, log: URL) throws -> Int32 {
-        if !FileManager.default.fileExists(atPath: log.path) {
-            FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        var attributes: posix_spawnattr_t?
+        posix_spawnattr_init(&attributes)
+        defer { posix_spawnattr_destroy(&attributes) }
+
+        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
+        posix_spawn_file_actions_addopen(&actions, 1, log.path, O_WRONLY | O_CREAT | O_APPEND, 0o600)
+        posix_spawn_file_actions_adddup2(&actions, 1, 2)
+        let chdir = posix_spawn_file_actions_addchdir_np(&actions, launch.workingDirectory.path)
+        guard chdir == 0 else { throw EngineSpawnError(code: chdir) }
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSID))
+
+        let argv = ([launch.executable.path] + launch.arguments).map { strdup($0) } + [nil]
+        let envp = launch.environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
+        defer { argv.forEach { free($0) }; envp.forEach { free($0) } }
+
+        var pid: pid_t = 0
+        let status = posix_spawn(&pid, launch.executable.path, &actions, &attributes, argv, envp)
+        guard status == 0 else { throw EngineSpawnError(code: status) }
+
+        let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
+        source.setEventHandler { [weak self] in
+            var raw: Int32 = 0
+            waitpid(pid, &raw, 0)
+            // Exit code, or 128 + signal for a signalled child.
+            let code: Int32 = (raw & 0x7f) == 0 ? (raw >> 8) & 0xff : 128 + (raw & 0x7f)
+            self?.sources[pid]?.cancel()
+            self?.sources[pid] = nil
+            self?.onExit?(pid, code)
         }
-        let handle = try FileHandle(forWritingTo: log)
-        try handle.seekToEnd()
-        let process = Process()
-        process.executableURL = launch.executable
-        process.arguments = launch.arguments
-        process.environment = launch.environment
-        process.currentDirectoryURL = launch.workingDirectory
-        process.standardOutput = handle
-        process.standardError = handle
-        process.standardInput = FileHandle.nullDevice
-        process.terminationHandler = { [weak self] finished in
-            try? handle.close()
-            let pid = finished.processIdentifier
-            let status = finished.terminationStatus
-            DispatchQueue.main.async {
-                self?.running[pid] = nil
-                self?.onExit?(pid, status)
-            }
-        }
-        try process.run()
-        running[process.processIdentifier] = process
-        return process.processIdentifier
+        sources[pid] = source
+        source.resume()
+        return pid
     }
 
-    func terminate(_ pid: Int32) { Darwin.kill(pid, SIGTERM) }
-    func kill(_ pid: Int32) { Darwin.kill(pid, SIGKILL) }
+    func terminate(_ pid: Int32) {
+        guard pid > 1 else { return }
+        Darwin.kill(pid, SIGTERM)
+    }
+
+    /// The whole group when the process leads its own (the engine we spawn does), else the pid.
+    func kill(_ pid: Int32) {
+        guard pid > 1 else { return }
+        if getpgid(pid) == pid { Darwin.killpg(pid, SIGKILL) } else { Darwin.kill(pid, SIGKILL) }
+    }
 
     func inspect(_ pid: Int32) -> EngineProcessInfo? {
         var info = proc_bsdinfo()
@@ -421,27 +549,78 @@ final class FoundationEngineProcesses: EngineProcessRunning {
 }
 
 /// Reads `startup_id` and `pid` from `/api/startup-status` with no credentials.
+/// The body is capped while it streams, redirects are refused, and a wall-clock
+/// timer plus `timeoutIntervalForResource` bound a server that drips bytes.
 final class EngineIdentityProbe: EngineIdentityChecking {
+    static let defaultTimeout: TimeInterval = 5
+
+    private let configuration: URLSessionConfiguration
+    private let timeout: TimeInterval
+
+    init(configuration: URLSessionConfiguration = .ephemeral, timeout: TimeInterval = EngineIdentityProbe.defaultTimeout) {
+        self.configuration = configuration
+        self.timeout = timeout
+    }
+
+    /// The identity in a `/api/startup-status` answer, or nil for any other status or shape.
+    static func parse(status: Int, data: Data) -> EngineIdentity? {
+        guard (200...299).contains(status), data.count <= Probe.maximumResponseBytes,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let id = object["startup_id"] as? String, !id.isEmpty,
+              let raw = jsonInteger(object["pid"]), raw > 1,
+              let pid = Int32(exactly: raw) else { return nil }
+        return EngineIdentity(pid: pid, startupID: id)
+    }
+
     func identity(of origin: Origin, completion: @escaping (EngineIdentity?) -> Void) {
-        let config = URLSessionConfiguration.ephemeral
+        let config = configuration.copy() as! URLSessionConfiguration
         config.httpShouldSetCookies = false
+        config.httpCookieAcceptPolicy = .never
         config.httpCookieStorage = nil
         config.urlCredentialStorage = nil
-        config.timeoutIntervalForRequest = 5
-        let session = URLSession(configuration: config)
-        var request = URLRequest(url: origin.url.appendingPathComponent("api/startup-status"))
-        request.httpShouldHandleCookies = false
-        session.dataTask(with: request) { data, response, error in
-            session.finishTasksAndInvalidate()
-            var found: EngineIdentity?
-            if error == nil, let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
-               let data, data.count <= Probe.maximumResponseBytes,
-               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let id = object["startup_id"] as? String, !id.isEmpty,
-               let pid = (object["pid"] as? Int).flatMap({ Int32(exactly: $0) }) {
-                found = EngineIdentity(pid: pid, startupID: id)
-            }
-            DispatchQueue.main.async { completion(found) }
-        }.resume()
+        config.httpAdditionalHeaders = nil
+        config.timeoutIntervalForRequest = timeout
+        config.timeoutIntervalForResource = timeout
+        let request = IdentityRequest(completion: completion)
+        let session = URLSession(configuration: config, delegate: request, delegateQueue: nil)
+        var urlRequest = URLRequest(url: origin.url.appendingPathComponent("api/startup-status"))
+        urlRequest.httpShouldHandleCookies = false
+        let task = session.dataTask(with: urlRequest)
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { task.cancel() }
+        task.resume()
+    }
+}
+
+private final class IdentityRequest: NSObject, URLSessionDataDelegate {
+    private var body = Data()
+    private var completion: ((EngineIdentity?) -> Void)?
+
+    init(completion: @escaping (EngineIdentity?) -> Void) { self.completion = completion }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        completionHandler(.cancelAuthenticationChallenge, nil)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard data.count <= Probe.maximumResponseBytes - body.count else {
+            dataTask.cancel()
+            return
+        }
+        body.append(data)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        let status = (task.response as? HTTPURLResponse)?.statusCode ?? 0
+        let found = error == nil ? EngineIdentityProbe.parse(status: status, data: body) : nil
+        let callback = completion
+        completion = nil
+        session.finishTasksAndInvalidate()
+        DispatchQueue.main.async { callback?(found) }
     }
 }
