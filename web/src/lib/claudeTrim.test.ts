@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   claudeTrimDomId,
   claudeTrimGroupLabel,
+  claudeTrimGroupNote,
   groupClaudeTrimOptions,
   isTrimmed,
   normalizeClaudeTrim,
@@ -17,11 +18,10 @@ const opt = (o: Partial<ClaudeTrimOption> & { key: string }): ClaudeTrimOption =
   reason: `${o.key} reason`,
   group: 'features',
   default_trimmed: false,
-  locked: false,
   ...o,
 })
 
-const locked = opt({ key: 'tool:CronCreate', group: 'scheduling', default_trimmed: true, locked: true })
+const scheduling = opt({ key: 'tool:CronCreate', group: 'scheduling', default_trimmed: true })
 const notebook = opt({ key: 'tool:NotebookEdit', group: 'features', default_trimmed: true })
 const findings = opt({ key: 'tool:ReportFindings', group: 'review', default_trimmed: false })
 const skills = [
@@ -31,13 +31,14 @@ const skills = [
   opt({ key: 'skill:d', group: 'skills', default_trimmed: false }),
 ]
 const workflows = opt({ key: 'setting:disableWorkflows', kind: 'setting', group: 'features', default_trimmed: false })
-const catalog = [locked, notebook, findings, ...skills, workflows]
+const catalog = [scheduling, notebook, findings, ...skills, workflows]
 
 describe('claude trim helpers', () => {
-  it('isTrimmed reads the override, else the default, and locked is always trimmed', () => {
+  it('isTrimmed reads the override, else the default', () => {
     expect(isTrimmed(notebook, {})).toBe(true)
     expect(isTrimmed(notebook, { 'tool:NotebookEdit': false })).toBe(false)
-    expect(isTrimmed(locked, { 'tool:CronCreate': false })).toBe(true)
+    expect(isTrimmed(scheduling, {})).toBe(true)
+    expect(isTrimmed(scheduling, { 'tool:CronCreate': false })).toBe(false)
   })
 
   it('setTrimmed writes only differences from the default', () => {
@@ -47,9 +48,10 @@ describe('claude trim helpers', () => {
     expect(setTrimmed({}, findings, true)).toEqual({ 'tool:ReportFindings': true })
   })
 
-  it('setTrimmed ignores locked options and never mutates', () => {
+  it('setTrimmed un-trims a scheduling option and never mutates', () => {
     const m = { 'tool:ReportFindings': true }
-    expect(setTrimmed(m, locked, false)).toEqual(m)
+    expect(setTrimmed(m, scheduling, false)).toEqual({ ...m, 'tool:CronCreate': false })
+    expect(setTrimmed({ 'tool:CronCreate': false }, scheduling, true)).toEqual({})
     setTrimmed(m, findings, false)
     expect(m).toEqual({ 'tool:ReportFindings': true })
   })
@@ -68,6 +70,11 @@ describe('claude trim helpers', () => {
     expect(groups[3].collapsible).toBe(true)
     expect(groups[1].collapsible).toBe(false)
     expect(groups[3].label).toBe('Bundled skills')
+  })
+
+  it('claudeTrimGroupNote explains only the scheduling group', () => {
+    expect(claudeTrimGroupNote('scheduling')).toContain("outside Ciaobot's schedules")
+    expect(claudeTrimGroupNote('features')).toBe('')
   })
 
   it('claudeTrimGroupLabel falls back to a capitalised id', () => {

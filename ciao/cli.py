@@ -3999,6 +3999,16 @@ def _workspace_move_command(args: argparse.Namespace) -> int:
     if not args.apply:
         print("Nothing changed. Re-run with --apply to move it.")
         return 0
+    from ciao.package_version import running_from_app_bundle
+
+    if running_from_app_bundle():
+        # `workspace_move.start` would refuse the launchd job anyway; say the
+        # actionable answer instead, before anything is recorded.
+        print(
+            "In Ciaobot for Mac, move the workspace from Settings → Ciaobot folder → Move…",
+            file=sys.stderr,
+        )
+        return 1
     if sys.platform.startswith("linux"):
         print("Moving. Ciaobot stops once running chats finish, and starts again from the new folder.")
     try:

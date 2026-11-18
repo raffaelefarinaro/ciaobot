@@ -185,10 +185,10 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/setup/list-dirs` | List local subdirectories for the setup wizard folder picker (bootstrap mode, localhost only) |
 | GET | `/api/setup/inspect-folder` | Probe a candidate workspace folder for vault mode and any nested workspaces (bootstrap mode, localhost only) |
 | POST | `/api/setup/mkdir` | Create a folder from the setup wizard folder picker (bootstrap mode, localhost only) |
-| GET | `/api/workspace-move` | The install workspace path, whether this browser may move it (`local`), a `cloud_sync_warning` sentence (empty unless the workspace is in a cloud-synced folder), and the last move's record |
+| GET | `/api/workspace-move` | The install workspace path, whether this browser may move it (`local`), whether this engine is the one inside Ciaobot for Mac (`app`), a `cloud_sync_warning` sentence (empty unless the workspace is in a cloud-synced folder), and the last move's record |
 | GET | `/api/workspace-move/dirs` | List local subdirectories for the Move workspace folder picker (host browser only: loopback peer, local `Host`, exact same-origin `Origin`) |
 | POST | `/api/workspace-move/plan` | Dry-run moving the install workspace to `{target}`: `{ok, refusals, warnings}` (host browser only: loopback peer, local `Host`, exact same-origin `Origin`) |
-| POST | `/api/workspace-move` | Start moving the install workspace to `{target}`: detached drain, stop, move, repoint, restart (host browser only: loopback peer, local `Host`, exact same-origin `Origin`; 202) |
+| POST | `/api/workspace-move` | Start moving the install workspace to `{target}`: detached drain, stop, move, repoint, restart (host browser only: loopback peer, local `Host`, exact same-origin `Origin`; 202). In Ciaobot for Mac (`app: true`) the engine drains, restarts itself and moves the folder before it boots again; it repoints the app-owned workspace pointer and starts no launchd job. 409 when another move holds the move lock. There is no cancel while it drains (up to 600 s, with new-chat admission closed), and chats paused on a question form are not counted as active (same as the Settings restart drain) |
 
 | GET | `/api/stats` | Usage statistics for one workspace: `?workspace=<name>` (required, a registered workspace, else 400) and `?range=7\|30\|90\|365` (default 30, anything else 400). Returns `{workspace, range_days, generated_at, today, totals, previous, daily_messages, projects, memory_pipeline, hours, models}` computed from existing stores (`ciao/usage_stats.py`); completed local days are cached in memory, today is live. Same payload as `ciao stats` |
 | GET | `/api/agent/status` | Agent CLI surface status: `{ready, operations, telemetry_path, version}` for the Settings → Agent CLI panel |
@@ -1038,7 +1038,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 # means the engine default. Each workspace also reports claude_trim (sparse
 # map of Claude trim-option key -> true/false, {} = catalog defaults), and the
 # top level carries claude_trim_options: the catalog (key, kind, name, label,
-# reason, group, default_trimmed, locked) the Settings trim card renders.
+# reason, group, default_trimmed) the Settings trim card renders.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 
 # Upsert — body keys: name, default_provider, provider_overrides,
@@ -1047,8 +1047,8 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 # pink — PWA accent only), disallowed_tools (extra tools added to the trim
 # defaults, CSV or list; null/none = no extras), claude_trim (object of trim
 # option key -> true/false; sparse, replaces the stored map, {} resets to
-# defaults; an unknown key, a non-boolean, or un-trimming a locked option is a
-# 400), claude_ai_connectors (boolean, default true). When false,
+# defaults; an unknown key or a non-boolean is a
+# 400; the scheduling options are trimmed by default and can be un-trimmed), claude_ai_connectors (boolean, default true). When false,
 # Claude chats in the workspace start with ENABLE_CLAUDEAI_MCP_SERVERS=false, so
 # the Claude account's claude.ai connectors (Slack, Jira, ...) do not load into
 # them; a non-boolean value is a 400. Memory passes never load them. POST
