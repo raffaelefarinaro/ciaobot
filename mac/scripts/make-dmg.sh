@@ -13,9 +13,11 @@
 #
 # The app must already be notarized and stapled (submitted by
 # scripts/package-notarized.sh) and signed by this project's Developer ID team;
-# the image itself is signed with the same identity. Notarizing and stapling the
-# image changes its bytes, so its checksum is written by the caller after that
-# step, never here.
+# a bundled engine must be distribution-signed by the same team, checked on the
+# source app, on the staged copy right before the image is created, and on the
+# mounted image itself. The image itself is signed with the same identity.
+# Notarizing and stapling the image changes its bytes, so its checksum is
+# written by the caller after that step, never here.
 #
 # The script never installs, launches or contacts anything. It writes only
 # inside the --output directory (a fresh hidden staging directory beside the
@@ -38,7 +40,10 @@ usage: scripts/make-dmg.sh --app PATH --output PATH --identity IDENTITY
 
 The app must be a real directory (not a symlink), carry CFBundleIdentifier
 local.ciaobot.mac, pass `xcrun stapler validate`, and be signed by the team in
-release/update-config.env. The image is staged from a copy of the app plus an
+release/update-config.env. A bundled engine (Contents/Resources/engine) must
+additionally pass `scripts/engine_sign.py check --distribution` for that team
+on the source app, on the staged copy, and on the app inside the mounted image.
+The image is staged from a copy of the app plus an
 `Applications -> /Applications` symlink and the Finder layout that
 scripts/dmg_layout.py writes from release/dmg/background*.png, created with
 hdiutil, signed with the identity, verified, mounted read-only and inspected
@@ -127,10 +132,6 @@ esac
 if in_applications "$app"; then
     die "refusing an app inside an Applications folder: $app"
 fi
-# Distribution signing of the bundled engine is #3128 G. Until it lands an
-# engine-bearing bundle cannot be notarized, so it must not become an image.
-[ ! -e "$app/Contents/Resources/engine" ] && [ ! -L "$app/Contents/Resources/engine" ] \
-    || die "the bundled engine has no distribution signing yet (#3128 G); refusing to build an image of it"
 app_name=$(basename -- "$app")
 
 plist=$app/Contents/Info.plist
@@ -157,6 +158,30 @@ update_config=release/update-config.env
 case $UPDATE_TEAM_ID in
     *[!A-Z0-9]*) die "UPDATE_TEAM_ID must be a plain Apple team identifier: $UPDATE_TEAM_ID" ;;
 esac
+
+# A bundled engine (#3128 G) must be distribution-signed by this team wherever
+# those bytes are read: every non-vendor Mach-O with Developer ID, hardened
+# runtime and a secure timestamp, and the SDK's CLI still verifying as
+# Anthropic's. The property belongs to the exact bytes at the exact location,
+# and the image is built from a later `ditto` copy staged in a scratch tree, so
+# every copy is checked where it is used: the source app before staging, the
+# staged copy right before the image is created, and the app on the mounted
+# image after the build. An earlier pass never vouches for a later copy.
+check_engine() {
+    engine_dir=$1
+    what=$2
+    if [ -e "$engine_dir" ] || [ -L "$engine_dir" ]; then
+        [ -d "$engine_dir" ] && [ ! -L "$engine_dir" ] \
+            || die "$what engine is not a real directory: $engine_dir"
+        command -v python3 >/dev/null \
+            && python3 -I -S -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' \
+            || die "python3 3.12 or newer is required to check the bundled engine"
+        python3 -I -S scripts/engine_sign.py check --distribution "$UPDATE_TEAM_ID" "$engine_dir" \
+            || die "$what engine is not distribution-signed by team $UPDATE_TEAM_ID; refusing to build an image of it"
+    fi
+}
+
+check_engine "$app/Contents/Resources/engine" "the bundled"
 
 signature=$(codesign -d --verbose=4 "$app" 2>&1) \
     || die "could not read the app's code signature: $app"
@@ -219,9 +244,20 @@ trap cleanup EXIT INT TERM
 mkdir "$stage"
 ditto "$app" "$stage/$app_name"
 ln -s /Applications "$stage/Applications"
+
 python3 -I scripts/dmg_layout.py stage --volume-name Ciaobot --app-name "$app_name" \
     --background "$dmg_assets/background.png" --background-2x "$dmg_assets/background@2x.png" "$stage" \
     || die "could not write the disk image's Finder layout"
+
+# The staged copy is what the image is built from, and it is a fresh `ditto`
+# copy made after the source check above: right before the image is created the
+# staging tree is checked again, so a swap between the check and the copy (an
+# engine that lost the staging copy or picked up different bytes) cannot reach
+# the image.
+staged_engine=$stage/$app_name/Contents/Resources/engine
+[ ! -e "$app/Contents/Resources/engine" ] || [ -e "$staged_engine" ] \
+    || die "the image staging tree lost the bundled engine"
+check_engine "$staged_engine" "the staged"
 
 hdiutil create -volname Ciaobot -srcfolder "$stage" -fs HFS+ -format UDZO "$pending"
 codesign --force --timestamp --sign "$identity" "$pending"
@@ -250,6 +286,13 @@ mounted_app=$mount_point/$app_name
 mounted_identifier=$(plutil -extract CFBundleIdentifier raw -o - "$mounted_app/Contents/Info.plist" 2>/dev/null || true)
 [ "$mounted_identifier" = "$identifier" ] \
     || die "the image's app has CFBundleIdentifier '${mounted_identifier:-missing}'"
+# The engine the user will actually mount is the image's own copy: the same
+# distribution rule, checked on what the image carries, so a difference between
+# the staging tree and the image cannot pass unnoticed.
+mounted_engine=$mounted_app/Contents/Resources/engine
+[ ! -e "$staged_engine" ] || [ -e "$mounted_engine" ] \
+    || die "the image lost the bundled engine"
+check_engine "$mounted_engine" "the image's"
 [ -L "$mount_point/Applications" ] \
     || die "the image has no Applications symlink; the app could only be run from the download folder"
 link_target=$(readlink "$mount_point/Applications")

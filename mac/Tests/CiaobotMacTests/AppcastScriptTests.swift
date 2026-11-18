@@ -39,6 +39,31 @@ final class AppcastScriptTests: XCTestCase {
             exit "${CIAOBOT_TEST_CODESIGN_STATUS:-0}"
         fi
         [ -n "$describe" ] || exit 1
+        last=
+        for argument in "$@"; do last=$argument; done
+        case $last in
+            */Contents/Resources/engine/*)
+                # Engine fixtures carry their own verdict: a marker in the file
+                # makes the double report the ad-hoc, team-less signature the
+                # distribution check must refuse; any other engine file reports
+                # a full distribution signature of the team in
+                # release/update-config.env.
+                if /usr/bin/grep -aq 'CIAOBOT-TEST-ADHOC' "$last" 2>/dev/null; then
+                    printf '%s\\n' 'CodeDirectory v=20400 size=999 flags=0x2(adhoc) hashes=3+7 location=embedded' >&2
+                    printf '%s\\n' 'Signature=adhoc' >&2
+                    printf '%s\\n' 'TeamIdentifier=not set' >&2
+                else
+                    printf '%s\\n' 'CodeDirectory v=20500 size=1000 flags=0x10000(runtime) hashes=3+7 location=embedded' >&2
+                    printf '%s\\n' 'Authority=Developer ID Application: Test Signer (AXBFS96Y9F)' >&2
+                    printf '%s\\n' 'Authority=Developer ID Certification Authority' >&2
+                    printf '%s\\n' 'Authority=Apple Root CA' >&2
+                    printf '%s\\n' 'Timestamp=Nov 18, 2026 at 10:00:00' >&2
+                    printf '%s\\n' 'TeamIdentifier=AXBFS96Y9F' >&2
+                fi
+                exit 0
+                ;;
+            *) ;;
+        esac
         # codesign -d writes the signed description to stderr.
         printf '%s\\n' "${CIAOBOT_TEST_CODESIGN_DESCRIPTION:-}" >&2
         exit 0
@@ -61,16 +86,23 @@ final class AppcastScriptTests: XCTestCase {
         case $1 in
             attach)
                 mountpoint=
+                archive=
                 while [ $# -gt 0 ]; do
                     case $1 in
                         -mountpoint) mountpoint=$2; shift 2 ;;
-                        *) shift ;;
+                        -*) shift ;;
+                        *) archive=$1; shift ;;
                     esac
                 done
                 [ -n "$mountpoint" ] || exit 1
                 [ "${CIAOBOT_TEST_HDIUTIL_ATTACH_STATUS:-0}" = 0 ] || exit "${CIAOBOT_TEST_HDIUTIL_ATTACH_STATUS}"
                 mkdir -p "$mountpoint" || exit 1
                 cp -R "$CIAOBOT_TEST_APP" "$mountpoint/Ciaobot.app" || exit 1
+                if [ "${CIAOBOT_TEST_ARCHIVE_APPEND:-0}" = 1 ] && [ -n "$archive" ]; then
+                    # A swap between the inspection and the staging copy: the
+                    # archive's bytes change while its image is mounted.
+                    printf 'swapped\\n' >> "$archive"
+                fi
                 ;;
             detach) ;;
             *) exit 1 ;;
@@ -345,8 +377,8 @@ final class AppcastScriptTests: XCTestCase {
 
     // MARK: - Refusals about the archive's contents
 
-    /// Until the engine is distribution-signed (#3128 G) no update may carry it,
-    /// including through a dangling symlink standing in for it.
+    /// A bundled engine that is not distribution-signed (#3128 G; here an empty directory) or is not a real
+    /// directory (a dangling symlink standing in for it) must not become an update.
     func testRefusesAnArchiveThatBundlesTheEngine() throws {
         for dangling in [false, true] {
             let archive = try makeDmg(version: "0.1.2")
@@ -364,10 +396,109 @@ final class AppcastScriptTests: XCTestCase {
             )
 
             XCTAssertNotEqual(result.status, 0, "dangling=\(dangling): \(result.output)")
-            XCTAssertTrue(result.output.contains("#3128 G"), result.output)
+            XCTAssertTrue(
+                result.output.contains(dangling ? "not a real directory" : "not distribution-signed"), result.output)
             XCTAssertNil(try recordedArgumentsIfAny())
             try fileManager.removeItem(at: engine)
         }
+    }
+
+    // MARK: - The bundled engine
+
+    /// An engine-bearing archive whose engine is only ad-hoc signed must not be
+    /// advertised: the fake codesign reports `Signature=adhoc` and no team for
+    /// the engine files, so `engine_sign.py check --distribution` refuses it
+    /// (#3128 G). Weakening that check to a plain `check` — which accepts
+    /// ad-hoc — or dropping the team argument makes the acceptance test below
+    /// (and the whole gate) fail.
+    func testRefusesAnArchiveWhoseEngineIsOnlyAdHocSigned() throws {
+        let repo = try makeScriptRepo()
+        let archive = try makeDmg(version: "0.1.2", engine: .adHocSigned)
+        let output = try outputPath()
+
+        let result = try runScript(
+            ["--archive", archive.path, "--download-url", downloadPrefix, "--output", output.path],
+            scriptsRoot: repo
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("not distribution-signed"), result.output)
+        XCTAssertTrue(result.output.contains("AXBFS96Y9F"), result.output)
+        XCTAssertNil(try recordedArgumentsIfAny(), "a refused engine must never reach the appcast")
+        let calls = try hdiutilCalls()
+        XCTAssertEqual(calls.filter { $0.first == "detach" }.count, 1,
+                       "the mounted image must be detached on the refusal: \(calls)")
+    }
+
+    /// The positive half of the gate: an archive whose engine files carry a full
+    /// distribution signature (team, hardened runtime, secure timestamp) is
+    /// advertised. This exercises the real `python3 >= 3.12` lookup and the team
+    /// plumbing from `release/update-config.env`, and it fails when
+    /// `check --distribution` is weakened to a plain `check` (which demands an
+    /// ad-hoc signature instead) or the team argument is dropped.
+    func testAcceptsAnArchiveWhoseEngineIsDistributionSigned() throws {
+        let repo = try makeScriptRepo()
+        let archive = try makeDmg(version: "0.1.2", engine: .distributionSigned)
+        let output = try outputPath()
+
+        let result = try runScript(
+            ["--archive", archive.path, "--download-url", downloadPrefix, "--output", output.path],
+            scriptsRoot: repo
+        )
+
+        XCTAssertEqual(result.status, 0, result.output)
+        XCTAssertTrue(fileManager.fileExists(atPath: output.path), result.output)
+        let feed = try String(contentsOf: output, encoding: .utf8)
+        XCTAssertTrue(feed.contains("url=\"\(downloadPrefix)Ciaobot-0.1.2.dmg\""),
+                      "the enclosure stays the published DMG: \(feed)")
+        let calls = try hdiutilCalls()
+        XCTAssertEqual(calls.filter { $0.first == "attach" }.count,
+                       calls.filter { $0.first == "detach" }.count,
+                       "the mounted image must be detached: \(calls)")
+    }
+
+    /// The enclosure must be the bytes the checks verified: the archive is
+    /// hashed before it is mounted, and the staged copy is hashed against that
+    /// digest. When the double swaps bytes into the archive while its image is
+    /// mounted — between inspection and staging — the run refuses and nothing
+    /// reaches `generate_appcast`.
+    func testRefusesAnArchiveThatChangedWhileItWasInspected() throws {
+        let archive = try makeDmg(version: "0.1.2")
+        let output = try outputPath()
+
+        let result = try runScript(
+            ["--archive", archive.path, "--download-url", downloadPrefix, "--output", output.path],
+            environment: ["CIAOBOT_TEST_ARCHIVE_APPEND": "1"]
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(
+            result.output.contains("changed while it was being inspected"), result.output)
+        XCTAssertNotNil(try hdiutilCallsIfAny(), "the changed bytes are caught after the inspection")
+        XCTAssertNil(try recordedArgumentsIfAny(), "a swapped archive must never reach the appcast")
+        XCTAssertFalse(fileManager.fileExists(atPath: output.path))
+        let calls = try hdiutilCalls()
+        XCTAssertEqual(calls.filter { $0.first == "detach" }.count, 1,
+                       "the mounted image must still be detached: \(calls)")
+    }
+
+    /// The engine check is driven by a real `python3` with the same gate the
+    /// operator's runs face: a `python3` that is older than 3.12 on PATH is
+    /// refused before the appcast can be generated.
+    func testRefusesAnEngineCheckWithATooOldPython() throws {
+        try makeTool("python3", body: "#!/bin/sh\nexit 1\n")
+        let repo = try makeScriptRepo()
+        let archive = try makeDmg(version: "0.1.2", engine: .distributionSigned)
+        let output = try outputPath()
+
+        let result = try runScript(
+            ["--archive", archive.path, "--download-url", downloadPrefix, "--output", output.path],
+            scriptsRoot: repo
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("python3 3.12 or newer is required"), result.output)
+        XCTAssertNil(try recordedArgumentsIfAny())
     }
 
     func testRefusesAForeignBundleIdentity() throws {
@@ -545,9 +676,10 @@ final class AppcastScriptTests: XCTestCase {
     private func makeArchive(
         version: String,
         named name: String? = nil,
-        bundleIdentifier: String = "local.ciaobot.mac"
+        bundleIdentifier: String = "local.ciaobot.mac",
+        engine: EngineFixture = .none
     ) throws -> URL {
-        try makeAppFixture(version: version, bundleIdentifier: bundleIdentifier)
+        try makeAppFixture(version: version, bundleIdentifier: bundleIdentifier, engine: engine)
         let archive = scratch.appendingPathComponent(name ?? "Ciaobot-\(version)-notarized.zip")
         try Data("archive placeholder".utf8).write(to: archive)
         return archive
@@ -558,15 +690,20 @@ final class AppcastScriptTests: XCTestCase {
     private func makeDmg(
         version: String,
         named name: String? = nil,
-        bundleIdentifier: String = "local.ciaobot.mac"
+        bundleIdentifier: String = "local.ciaobot.mac",
+        engine: EngineFixture = .none
     ) throws -> URL {
-        try makeAppFixture(version: version, bundleIdentifier: bundleIdentifier)
+        try makeAppFixture(version: version, bundleIdentifier: bundleIdentifier, engine: engine)
         let archive = scratch.appendingPathComponent(name ?? "Ciaobot-\(version).dmg")
         try Data("disk image placeholder".utf8).write(to: archive)
         return archive
     }
 
-    private func makeAppFixture(version: String, bundleIdentifier: String) throws {
+    private func makeAppFixture(
+        version: String,
+        bundleIdentifier: String,
+        engine: EngineFixture = .none
+    ) throws {
         let app = scratch.appendingPathComponent("fixture/Ciaobot.app", isDirectory: true)
         let contents = app.appendingPathComponent("Contents", isDirectory: true)
         let macos = contents.appendingPathComponent("MacOS", isDirectory: true)
@@ -584,6 +721,86 @@ final class AppcastScriptTests: XCTestCase {
         """
         try Data(plist.utf8).write(to: contents.appendingPathComponent("Info.plist"))
         try Data("#!/bin/sh\nexit 0\n".utf8).write(to: macos.appendingPathComponent("CiaobotMac"))
+        if engine != .none {
+            try makeEngine(at: app, adHocSigned: engine == .adHocSigned)
+        }
+    }
+
+    /// A thin 64-bit arm64 Mach-O header: enough for the engine scripts' magic
+    /// test, and bytes no one executes, so no real identity is ever used.
+    private static let machoBytes = Data([
+        0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ])
+    /// Marks an engine fixture file the codesign double must describe as an
+    /// ad-hoc, team-less signature instead of a distribution one.
+    private static let adHocMarker = "CIAOBOT-TEST-ADHOC\n"
+    private static let engineProvenance = #"{"kind":"ciaobot-engine-provenance","engine":{"version":"1.2.3"}}"#
+
+    private enum EngineFixture { case none, adHocSigned, distributionSigned }
+
+    /// A bundled engine whose two Mach-O files carry, per file, either a full
+    /// distribution signature description or, with `adHocSigned` (encoded by
+    /// the marker the fake codesign reads out of the file), the ad-hoc
+    /// signature the distribution gate must refuse.
+    private func makeEngine(at app: URL, adHocSigned: Bool) throws {
+        let engine = app.appendingPathComponent("Contents/Resources/engine", isDirectory: true)
+        try fileManager.createDirectory(
+            at: engine.appendingPathComponent("bin"), withIntermediateDirectories: true)
+        try Data("#!/bin/sh\necho \"ciao 1.2.3\"\n".utf8)
+            .write(to: engine.appendingPathComponent("bin/ciao"))
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: engine.appendingPathComponent("bin/ciao").path)
+        for rel in ["bin/python3.12", "lib/a.so"] {
+            let target = engine.appendingPathComponent(rel)
+            try fileManager.createDirectory(
+                at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            var bytes = Self.machoBytes
+            if adHocSigned { bytes.append(contentsOf: Data(Self.adHocMarker.utf8)) }
+            try bytes.write(to: target)
+            if rel == "bin/python3.12" {
+                try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
+            }
+        }
+        try Data(Self.engineProvenance.utf8).write(to: engine.appendingPathComponent("provenance.json"))
+    }
+
+    /// A scratch checkout of the scripts and the team config the engine tests
+    /// need. `engine_sign.py` pins `/usr/bin/codesign` by path on purpose, so
+    /// the copied module is pointed at this suite's fake instead — the same
+    /// seam the packaging fixture uses. No test touches the real scripts.
+    /// Returns the copied scripts directory, the root `runScript` wants.
+    private func makeScriptRepo() throws -> URL {
+        let repo = scratch.appendingPathComponent("repo", isDirectory: true)
+        let scripts = repo.appendingPathComponent("scripts", isDirectory: true)
+        try fileManager.createDirectory(at: scripts, withIntermediateDirectories: true)
+        try fileManager.copyItem(
+            at: scriptsDirectory.appendingPathComponent("make-appcast.sh"), to: scripts.appendingPathComponent("make-appcast.sh"))
+        // engine_sign.py loads its sibling helpers by path, transitively; copy
+        // every one of them, exactly like the packaging fixture does.
+        let helpers = try fileManager.contentsOfDirectory(atPath: scriptsDirectory.path)
+            .filter { $0.hasPrefix("engine_") && $0.hasSuffix(".py") }
+        for name in helpers {
+            try fileManager.copyItem(
+                at: scriptsDirectory.appendingPathComponent(name), to: scripts.appendingPathComponent(name))
+        }
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: scripts.appendingPathComponent("make-appcast.sh").path)
+        try fileManager.createDirectory(
+            at: repo.appendingPathComponent("release", isDirectory: true), withIntermediateDirectories: true)
+        try fileManager.copyItem(
+            at: packageRoot.appendingPathComponent("release/update-config.env"),
+            to: repo.appendingPathComponent("release/update-config.env"))
+        let signer = scripts.appendingPathComponent("engine_sign.py")
+        let pinned = #"CODESIGN = "/usr/bin/codesign""#
+        let source = try String(contentsOf: signer, encoding: .utf8)
+        XCTAssertTrue(source.contains(pinned), "engine_sign.py's pinned codesign path is the patch seam")
+        try source.replacingOccurrences(
+            of: pinned, with: "CODESIGN = \"\(tools.appendingPathComponent("codesign").path)\"")
+            .write(to: signer, atomically: true, encoding: .utf8)
+        return scripts
     }
 
     private func shasum(_ url: URL) throws -> String {
@@ -642,7 +859,8 @@ final class AppcastScriptTests: XCTestCase {
     @discardableResult
     private func runScript(
         _ arguments: [String],
-        environment: [String: String] = [:]
+        environment: [String: String] = [:],
+        scriptsRoot: URL? = nil
     ) throws -> (status: Int32, output: String) {
         var childEnvironment = ProcessInfo.processInfo.environment
         childEnvironment["PATH"] = tools.path + ":" + (childEnvironment["PATH"] ?? "/usr/bin:/bin")
@@ -656,7 +874,7 @@ final class AppcastScriptTests: XCTestCase {
         for (key, value) in environment { childEnvironment[key] = value }
         return try run(
             "/bin/sh",
-            [scriptsDirectory.appendingPathComponent("make-appcast.sh").path] + arguments,
+            [(scriptsRoot ?? scriptsDirectory).appendingPathComponent("make-appcast.sh").path] + arguments,
             environment: childEnvironment
         )
     }
