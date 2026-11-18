@@ -233,14 +233,20 @@ export const inventory: InventoryEntry[] = [
       "web/src/App.vue"
     ],
     "variants": [],
-    "variantNotes": "Choose/note/awaiting-review/error. Detailed variants are unassessed.",
+    "variantNotes": "Production askArchiveTask requests with one mounted host per canvas; no inline Docs. Further configurable variants are unassessed.",
     "states": [
-      {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ArchiveTaskDialog.vue implements this render; no rendered-state story exists."
-      },
+      { "name": "closed", "coverage": "covered", "storyIds": ["archive-task-dialog--closed"], "note": "No request: the production dialog stays closed." },
+      { "name": "choose", "coverage": "covered", "storyIds": ["archive-task-dialog--choose"], "note": "Open task that is not done: Cancel, Keep task open, and Complete task…." },
+      { "name": "awaiting-review", "coverage": "covered", "storyIds": ["archive-task-dialog--awaiting-review"], "note": "Review-ready task asks to approve and archive, or keep the task open." },
+      { "name": "note", "coverage": "covered", "storyIds": ["archive-task-dialog--note"], "note": "Optional completion note, Back, and Mark done; focus moves to the note field." },
+      { "name": "note-awaiting-review", "coverage": "covered", "storyIds": ["archive-task-dialog--note-awaiting-review"], "note": "Review-ready note step confirms with Approve Done." },
+      { "name": "busy", "coverage": "covered", "storyIds": ["archive-task-dialog--busy"], "note": "Held completion POST shows Saving… and disables Back, the note, and the submit action." },
+      { "name": "submit-error", "coverage": "covered", "storyIds": ["archive-task-dialog--submit-error"], "note": "Refused completion keeps the dialog open, shows the alert, and returns focus to the note." },
+      { "name": "keep-task-open", "coverage": "covered", "storyIds": ["archive-task-dialog--keep-task-open"], "note": "Keep task open resolves keep and closes the dialog." },
+      { "name": "escape-cancels", "coverage": "covered", "storyIds": ["archive-task-dialog--escape-cancels"], "note": "Escape resolves cancel and closes the dialog." },
+      { "name": "back", "coverage": "covered", "storyIds": ["archive-task-dialog--back"], "note": "Back returns from the note step to the choose actions." },
+      { "name": "initial-focus", "coverage": "covered", "storyIds": ["archive-task-dialog--initial-focus"], "note": "Open focus is on Cancel, the safe action." },
+      { "name": "narrow", "coverage": "covered", "storyIds": ["archive-task-dialog--narrow"], "note": "Choose step in a maximum 390px containing block; also check a real narrow viewport." },
       {
         "name": "other states",
         "coverage": "unknown",
