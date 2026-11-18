@@ -9,6 +9,7 @@ its own.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -39,6 +40,7 @@ def _write_pointer_file(body: str, name: str = "workspace.json") -> Path:
     state = app_engine.state_dir()
     state.mkdir(parents=True, exist_ok=True)
     (state / name).write_text(body, encoding="utf-8")
+    os.chmod(state / name, 0o600)
     return state / name
 
 
@@ -209,6 +211,145 @@ def test_clear_pointer_removes_only_matching_workspaces(tmp_path: Path) -> None:
     assert not (app_engine.state_dir() / "workspace.json").exists()
 
 
+def test_clear_pointer_accepts_a_symlinked_workspace_path(tmp_path: Path) -> None:
+    """The pointer stores the resolved directory; the caller may name it
+    through an alias, and an alias of a different directory still refuses."""
+    real = tmp_path / "real-workspace"
+    (real / ".runtime").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    alias = tmp_path / "alias-workspace"
+    alias.symlink_to(real, target_is_directory=True)
+    decoy = tmp_path / "decoy-alias"
+    decoy.symlink_to(elsewhere, target_is_directory=True)
+    app_engine.write_pointer(real, real / ".runtime")
+
+    assert app_engine.clear_pointer(expected_workspace=decoy) is False
+    assert app_engine.clear_pointer(expected_workspace=alias) is True
+    assert not (app_engine.state_dir() / "workspace.json").exists()
+
+
+def test_clear_pointer_accepts_the_var_alias_form(tmp_path: Path) -> None:
+    """On macOS ``/var`` and ``/private/var`` name one directory; a caller
+    clearing with the ``/var`` spelling must reach the record either way."""
+    workspace = tmp_path / "real-workspace"
+    (workspace / ".runtime").mkdir(parents=True)
+    text = str(workspace)
+    if text.startswith("/private/var/"):
+        alias = Path("/var" + text[len("/private/var") :])
+    elif text.startswith("/var/"):
+        alias = Path("/private/var" + text[len("/var") :])
+    else:
+        pytest.skip(f"tmp_path is not under the macOS /var alias: {text}")
+    app_engine.write_pointer(workspace, workspace / ".runtime")
+
+    assert app_engine.clear_pointer(expected_workspace=alias) is True
+    assert not (app_engine.state_dir() / "workspace.json").exists()
+
+
+# --- the records are this engine's private files --------------------------------
+
+
+def test_writes_refuse_a_symlinked_record_directory(tmp_path: Path) -> None:
+    """The record is written where the state dir names it, never through a
+    swapped link — and nothing is left wherever the link pointed."""
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    state = app_engine.state_dir()
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.symlink_to(real, target_is_directory=True)
+    workspace = tmp_path / "workspace"
+    (workspace / ".runtime").mkdir(parents=True)
+
+    with pytest.raises(OSError):
+        app_engine.write_pointer(workspace, workspace / ".runtime")
+
+    assert list(real.iterdir()) == []
+
+
+def test_a_custom_path_refuses_a_symlinked_record_directory(tmp_path: Path) -> None:
+    """A caller-named ``path=`` is checked the same way as the state dir."""
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    decoy = tmp_path / "custom-decoy"
+    decoy.symlink_to(real, target_is_directory=True)
+    workspace = tmp_path / "workspace"
+    (workspace / ".runtime").mkdir(parents=True)
+
+    with pytest.raises(OSError):
+        app_engine.write_pointer(workspace, workspace / ".runtime", path=decoy / "pointer.json")
+
+    assert list(real.iterdir()) == []
+
+
+def test_a_custom_path_keeps_a_pre_existing_record_directory(tmp_path: Path) -> None:
+    """A caller-owned directory keeps its mode: this module created nothing.
+
+    The record itself is still owner-only (0600), checked on its own
+    descriptor, so a permissive directory still yields a private record.
+    """
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    os.chmod(existing, 0o755)
+    workspace = tmp_path / "workspace"
+    (workspace / ".runtime").mkdir(parents=True)
+
+    target = app_engine.write_pointer(
+        workspace, workspace / ".runtime", path=existing / "workspace.json"
+    )
+
+    assert target.exists()
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert existing.stat().st_mode & 0o777 == 0o755
+
+
+def test_a_custom_path_makes_only_its_own_new_directories_private(
+    tmp_path: Path,
+) -> None:
+    """Missing levels are created (0700); an existing level is left alone."""
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    os.chmod(existing, 0o755)
+    workspace = tmp_path / "workspace"
+    (workspace / ".runtime").mkdir(parents=True)
+
+    target = app_engine.write_pointer(
+        workspace,
+        workspace / ".runtime",
+        path=existing / "fresh" / "pointer.json",
+    )
+
+    assert target.exists()
+    assert (existing / "fresh").stat().st_mode & 0o777 == 0o700
+    assert existing.stat().st_mode & 0o777 == 0o755
+
+
+def test_read_pointer_refuses_a_group_or_world_readable_record(
+    tmp_path: Path,
+) -> None:
+    """A record another account could read is not this engine's record."""
+    workspace = tmp_path / "workspace"
+    (workspace / ".runtime").mkdir(parents=True)
+    target = _write_pointer_file(_pointer_body(workspace, workspace / ".runtime"))
+    os.chmod(target, 0o644)
+
+    assert app_engine.read_pointer() is None
+
+
+def test_read_pointer_refuses_a_symlinked_record(tmp_path: Path) -> None:
+    """A symlink standing in for the record is never read through."""
+    workspace = tmp_path / "workspace"
+    (workspace / ".runtime").mkdir(parents=True)
+    real = tmp_path / "real-pointer.json"
+    real.write_text(_pointer_body(workspace, workspace / ".runtime"), encoding="utf-8")
+    os.chmod(real, 0o600)
+    state = app_engine.state_dir()
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "workspace.json").symlink_to(real)
+
+    assert app_engine.read_pointer() is None
+
+
 # --- the ready record ----------------------------------------------------------
 
 
@@ -268,7 +409,10 @@ def test_watch_parent_fires_when_the_watched_parent_dies(tmp_path: Path) -> None
 
     The real shape, small: the grandchild here is the engine running
     ``watch_parent`` against its own parent (default ``os.getppid()``); killing
-    the middle process is killing the app.
+    the middle process is killing the app. The ``registered`` marker proves the
+    kqueue filter is in place *before* the watched pid dies — without it, a
+    kill that lands too early leaves the grandchild to the ``ESRCH`` branch
+    and the blocking ``NOTE_EXIT`` wait would never be exercised.
     """
     repo = str(Path(app_engine.__file__).resolve().parents[1])
     grandchild = tmp_path / "grandchild.py"
@@ -286,7 +430,11 @@ def test_watch_parent_fires_when_the_watched_parent_dies(tmp_path: Path) -> None
                 Path(sys.argv[1]).write_text("fired", encoding="utf-8")
 
 
-            watch_parent(on_parent_exit)
+            def on_registered() -> None:
+                Path(sys.argv[2]).write_text("registered", encoding="utf-8")
+
+
+            watch_parent(on_parent_exit, on_registered=on_registered)
             time.sleep(30)
             """
         ),
@@ -300,22 +448,26 @@ def test_watch_parent_fires_when_the_watched_parent_dies(tmp_path: Path) -> None
             import os
             import subprocess
             import sys
+            import time
 
-            repo, grandchild, marker = sys.argv[1:4]
+            repo, grandchild, registered, marker = sys.argv[1:5]
             env = dict(os.environ)
             env["PYTHONPATH"] = repo + os.pathsep + env.get("PYTHONPATH", "")
-            process = subprocess.Popen([sys.executable, grandchild, marker], env=env)
+            process = subprocess.Popen(
+                [sys.executable, grandchild, marker, registered], env=env
+            )
             print(json.dumps({"grandchild": process.pid}), flush=True)
             time.sleep(30)
             """
         ),
         encoding="utf-8",
     )
-    marker = tmp_path / "marker"
+    registered = tmp_path / "watch-registered"
+    marker = tmp_path / "callback-fired"
     env = dict(os.environ)
     env["PYTHONPATH"] = repo + os.pathsep + env.get("PYTHONPATH", "")
     middle = subprocess.Popen(
-        [sys.executable, str(child), repo, str(grandchild), str(marker)],
+        [sys.executable, str(child), repo, str(grandchild), str(registered), str(marker)],
         stdout=subprocess.PIPE,
         env=env,
     )
@@ -330,9 +482,12 @@ def test_watch_parent_fires_when_the_watched_parent_dies(tmp_path: Path) -> None
         grandchild_pid = int(
             json.loads((middle.stdout or b"").readline().decode())["grandchild"]
         )
-        # A moment for the grandchild to register its kqueue filter; after the
-        # middle process dies only the callback below matters.
-        time.sleep(1.0)
+        # Wait until the grandchild's kqueue filter is actually registered;
+        # killing before that would prove nothing about the blocking wait.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not registered.exists():
+            time.sleep(0.05)
+        assert registered.exists(), "the grandchild never registered its watch"
         _kill(middle.pid)
         middle.wait(timeout=5)
         deadline = time.monotonic() + 5
@@ -379,11 +534,47 @@ def test_app_engine_refused_outside_the_bundle(
     assert "Ciaobot.app" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    "installer_args",
+    [
+        pytest.param(["--installer-bootstrap"], id="bootstrap"),
+        pytest.param(["--installer-run-id", "run-1"], id="run-id"),
+        pytest.param(["--installer-suggest-workspace", "/tmp/elsewhere"], id="suggest-workspace"),
+        pytest.param(["--installer-native-fd", "7"], id="native-fd"),
+        pytest.param(["--installer-native-fd", "0"], id="native-fd-0"),
+        pytest.param(["--installer-native-workspace", "/tmp/elsewhere"], id="native-workspace"),
+    ],
+)
+def test_app_engine_refuses_each_installer_flag(
+    installer_args: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The installer handshake has no parent under the app: any installer flag
+    at all contradicts it.
+
+    The provided-flag check compares the optional values with ``is not None``,
+    not truthiness: ``--installer-native-fd 0`` names a real (stdio)
+    descriptor, and an empty run id is an empty value, not an absent one.
+    """
+    from ciao import cli, package_version
+
+    monkeypatch.setattr(package_version, "running_from_app_bundle", lambda: True)
+    dispatched: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        cli, "_run_server", lambda **kwargs: dispatched.append(kwargs) or 0
+    )
+
+    assert cli.main(["run", "--app-engine", *installer_args]) == 2
+
+    assert dispatched == []
+    assert "installer" in capsys.readouterr().err
+
+
 def test_app_engine_refuses_the_installer_flags(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The installer handshake has no parent under the app: both modes at once
-    is a contradiction."""
+    """Bootstrap-plus-app-engine stays refused; the refusal message names it."""
     from ciao import cli, package_version
 
     monkeypatch.setattr(package_version, "running_from_app_bundle", lambda: True)
@@ -396,6 +587,43 @@ def test_app_engine_refuses_the_installer_flags(
 
     assert dispatched == []
     assert "installer" in capsys.readouterr().err
+
+
+def _installer_args(**overrides: object) -> "argparse.Namespace":
+    values: dict[str, object] = {
+        "installer_bootstrap": False,
+        "installer_suggest_workspace": None,
+        "installer_run_id": None,
+        "installer_native_workspace": None,
+        "installer_native_fd": None,
+    }
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+@pytest.mark.parametrize(
+    "provided",
+    [
+        pytest.param({"installer_bootstrap": True}, id="bootstrap"),
+        pytest.param({"installer_run_id": "run-1"}, id="run-id"),
+        pytest.param({"installer_run_id": ""}, id="empty-run-id"),
+        pytest.param({"installer_suggest_workspace": "/tmp/elsewhere"}, id="suggest-workspace"),
+        pytest.param({"installer_native_fd": 7}, id="native-fd"),
+        pytest.param({"installer_native_fd": 0}, id="native-fd-stdio"),
+        pytest.param({"installer_native_workspace": "/tmp/elsewhere"}, id="native-workspace"),
+    ],
+)
+def test_the_app_engine_refusal_treats_every_provided_installer_value_as_one(
+    provided: dict[str, object],
+) -> None:
+    """The refusal compares the optional installer values with `is not None`,
+    not truthiness: fd 0 and an empty run id are provided flags. Checked on the
+    refusal helper directly, because through the whole CLI most of these
+    combinations are refused anyway by the earlier installer guards."""
+    from ciao import cli
+
+    assert cli._app_engine_refuses_installer_flags(_installer_args(**provided)) is True
+    assert cli._app_engine_refuses_installer_flags(_installer_args()) is False
 
 
 def test_app_engine_dispatch_carries_the_app_engine_kwarg(

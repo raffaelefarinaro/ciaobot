@@ -74,6 +74,24 @@ def _relaunch_argv() -> list[str]:
     return [sys.executable, *python_isolation_flags(), "-m", "ciao.cli", *sys.argv[1:]]
 
 
+def _app_engine_refuses_installer_flags(args: argparse.Namespace) -> bool:
+    """Whether ``--app-engine`` arrives with any installer flag provided.
+
+    The optional installer values are compared with ``is not None``, not
+    truthiness: ``--installer-native-fd 0`` names a real (stdio) descriptor,
+    and an empty run id is a provided value, not an absent one. Its own
+    function so the check is testable without the pre-block guards that
+    normally refuse most of these combinations first.
+    """
+    return bool(
+        args.installer_bootstrap
+        or args.installer_suggest_workspace is not None
+        or args.installer_run_id is not None
+        or args.installer_native_workspace is not None
+        or args.installer_native_fd is not None
+    )
+
+
 def _run_command(args: argparse.Namespace) -> int:
     if args.installer_suggest_workspace is not None and not args.installer_bootstrap:
         print("--installer-suggest-workspace requires --installer-bootstrap", file=sys.stderr)
@@ -99,12 +117,9 @@ def _run_command(args: argparse.Namespace) -> int:
     if args.app_engine:
         # App-mode: the Mac app owns this engine. The installer handshake has no
         # parent to hand off to here, and the bundle check keeps the flag out of
-        # reach everywhere else.
-        if any(
-            (args.installer_suggest_workspace, args.installer_run_id,
-             args.installer_bootstrap, args.installer_native_workspace,
-             args.installer_native_fd)
-        ):
+        # reach everywhere else; the refusal helper treats every provided value
+        # (`--installer-native-fd 0` included) as one.
+        if _app_engine_refuses_installer_flags(args):
             print("--app-engine cannot be combined with installer options", file=sys.stderr)
             return 2
         if not package_version.running_from_app_bundle():

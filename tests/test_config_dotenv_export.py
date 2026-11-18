@@ -366,11 +366,22 @@ def test_app_mode_prefers_the_pointer_over_the_old_plist(
 
     The old plist still names the 1.x workspace until the app stops that
     engine's job, and a bundled engine adopting it would collide with the old
-    engine's port and instance lock. The pointer names what the app now owns,
-    and discovery must not even be asked: reaching it at all is the regression.
+    engine's port and instance lock. Discovery answers with that workspace
+    here — a real, different install — on purpose: an ``AssertionError`` from
+    this seam would be swallowed by ``install_discovery``, so only a fixture
+    whose workspace the assertions can tell apart from the pointer's proves
+    which source the code actually used.
     """
     _app_mode(monkeypatch)
     from ciao import app_engine
+
+    install = _workspace_with_env(tmp_path / "old-install", "PWA_AUTH_TOKEN=old\n")
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(install), runtime_root=str(install / ".runtime")
+        ),
+    )
 
     workspace = _workspace_with_env(tmp_path / "pointer-ws", "PWA_AUTH_TOKEN=pointer\n")
     runtime = tmp_path / "pointer-runtime-named"
@@ -379,9 +390,11 @@ def test_app_mode_prefers_the_pointer_over_the_old_plist(
 
     merged = ciao_config.installed_workspace_env({"FOO": "from-shell"})
 
-    assert merged["CIAO_WORKSPACE"] == str(workspace.resolve())
+    assert merged["CIAO_WORKSPACE"] == str(workspace.resolve()), (
+        "the pointer's workspace wins, not the old plist's"
+    )
     assert merged["CIAO_RUNTIME_ROOT"] == str(runtime.resolve())
-    assert merged["PWA_AUTH_TOKEN"] == "pointer", "the workspace .env still applies"
+    assert merged["PWA_AUTH_TOKEN"] == "pointer", "the pointer's workspace .env applies"
     assert merged["FOO"] == "from-shell"
 
 
