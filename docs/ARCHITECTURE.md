@@ -63,6 +63,8 @@ ciao/                          Python backend (Starlette).
     stdio_rpc.py               Async JSON-lines RPC process transport used by CLI app-server adapters.
     opencode.py                OpenCode 2.0.16+ provider over per-chat `opencode serve` (ephemeral loopback port, scoped MCP token, V2 OpenAPI fail-closed readiness, flat-message normalization, steer delivery for user steers, queue otherwise).
     oneshot.py                 Single-turn provider call (max_turns=1, no tools). Used by routine-model automations.
+    acp/__init__.py            Agent Client Protocol client layer package (#3137).
+    acp/normalize.py           Pure ACP `session/update` -> StreamEvent translation: key canonicalisation, tool-call tracking by id (refresh, result), subagent parent ids (Claude `parentToolUseId`, opencode child-session meta), usage, model/mode config values, compaction flag, per-turn top-level text (`TurnText`) and the stop-reason -> `ResultEvent` mapping. No I/O.
   context/                     Provider-neutral per-turn context capsule (workspace, project, vault hints, and one bounded task-board recipe line — never a board dump; see the capsule section).
   observability/               Hooks: PreToolUse keeps Claude Bash jobs in the active turn. Runtime/entity context is built once in the request capsule; ClaudeProvider delivers that capsule through UserPromptSubmit for native slash invocations.
   schedules.py                 Cron-style schedule dispatch.
