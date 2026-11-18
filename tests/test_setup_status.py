@@ -3033,3 +3033,43 @@ def test_completed_legacy_import_inspection_does_not_list_removed_workspaces(
 
     assert inspect.status_code == 200, inspect.text
     assert "research" not in inspect.json()["existing_workspaces"]
+
+
+def test_claude_mcp_command_uses_bare_name_on_terminal_path(monkeypatch) -> None:
+    from ciao.setup_status import claude_mcp_command
+
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: "/usr/bin/claude")
+
+    assert claude_mcp_command("/x y/claude") == "claude mcp"
+
+
+def test_claude_mcp_command_quotes_the_bundled_binary(monkeypatch) -> None:
+    from ciao.setup_status import claude_mcp_command
+
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "/x y/claude")
+
+    assert claude_mcp_command() == "'/x y/claude' mcp"
+
+
+def test_installed_claude_row_carries_mcp_command(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
+
+    # Signed out (the autouse fixture) and signed in are both installed rows.
+    signed_out = setup_status(_config(tmp_path), env={})["providers"]["claude"]
+    _sign_in_claude(monkeypatch)
+    signed_in = setup_status(_config(tmp_path), env={})["providers"]["claude"]
+
+    assert signed_out["mcp_command"] == "/usr/local/bin/claude mcp"
+    assert signed_in["mcp_command"] == "/usr/local/bin/claude mcp"
+
+
+def test_missing_claude_row_has_no_mcp_command(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "")
+    monkeypatch.setattr("ciao.setup_status.claude_app_path", lambda: "")
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
+
+    claude = setup_status(_config(tmp_path), env={})["providers"]["claude"]
+
+    assert claude["auth"] == "not_installed"
+    assert "mcp_command" not in claude

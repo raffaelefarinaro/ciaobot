@@ -311,6 +311,7 @@ def _provider(
     cli_path: str = "",
     path_command: str = "",
     terminal_action: str = "",
+    mcp_command: str = "",
     release_check: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
@@ -343,6 +344,8 @@ def _provider(
         row["path_command"] = path_command
     if terminal_action:
         row["terminal_action"] = terminal_action
+    if mcp_command:
+        row["mcp_command"] = mcp_command
     if release_check is not None:
         row["release_check"] = release_check
     return row
@@ -874,6 +877,24 @@ def claude_auth_command(cli_path: str = "") -> str:
     return f"{shlex.quote(binary)} auth login" if binary else "claude auth login"
 
 
+def claude_mcp_command(cli_path: str = "") -> str:
+    """Terminal command that opens Claude Code's own MCP management.
+
+    Same PATH rule as ``claude_auth_command``: the bare word only when the
+    user's terminal resolves it, else the binary named by absolute path.
+    """
+    from ciao.tool_path import resolve_on_terminal_path
+
+    try:
+        in_terminal = resolve_on_terminal_path("claude")
+    except Exception:
+        in_terminal = None
+    if in_terminal:
+        return "claude mcp"
+    binary = cli_path or claude_cli_path()
+    return f"{shlex.quote(binary)} mcp" if binary else "claude mcp"
+
+
 def claude_app_path() -> str:
     """Path to an installed Claude desktop app, or "".
 
@@ -991,6 +1012,7 @@ def _claude_status(
             cli_path=binary,
             release_check=check,
             terminal_action="claude-login",
+            mcp_command=claude_mcp_command(binary),
         )
     # No fallback on unparseable probe output: a timeout or process error is
     # not evidence of authentication, and neither is Desktop metadata — an
@@ -1021,6 +1043,7 @@ def _claude_status(
             release_check=check,
             path_command=claude_path_hint(binary),
             terminal_action="claude-install",
+            mcp_command=claude_mcp_command(binary),
         )
     app_path = claude_app_path()
     auth_command = claude_auth_command(binary)
@@ -1045,6 +1068,7 @@ def _claude_status(
         # the user is about to be handed a command to type into that terminal.
         path_command=claude_path_hint(binary),
         terminal_action="claude-login",
+        mcp_command=claude_mcp_command(binary),
     )
 
 

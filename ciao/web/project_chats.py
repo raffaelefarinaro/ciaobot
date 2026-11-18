@@ -5150,7 +5150,6 @@ class ProjectChatManager:
         ctx = ChatContext.for_web(chat_id)
         self._advance_retry_generation(chat_id)
         self._cancel_between_turns_drain(chat_id)
-        self._streaming.discard_drain_result(chat_id)
         provider = self._pop_provider(chat_id)
         self._schedule_provider_cleanup(chat, provider, agent_root=agent_root)
         # Explicit deletion is a tombstone, not merely a sidebar mutation.
@@ -10125,16 +10124,6 @@ class ProjectChatManager:
         drains.update(value)
 
     @property
-    def _last_drain_result(self) -> dict[str, tuple[str, bool]]:
-        return self._streaming.last_drain_results
-
-    @_last_drain_result.setter
-    def _last_drain_result(self, value: dict[str, tuple[str, bool]]) -> None:
-        results = self._streaming.last_drain_results
-        results.clear()
-        results.update(value)
-
-    @property
     def _turn_perf_started(self) -> dict[tuple[str, int], float]:
         return self._streaming.turn_perf_started
 
@@ -11091,30 +11080,6 @@ class ProjectChatManager:
             dispatcher = ScheduleDispatcher(self)
             self._schedule_dispatcher = dispatcher
             return dispatcher
-
-    async def _await_schedule_subagents(
-        self, chat_id: str, *, timeout_s: float = 900.0
-    ) -> tuple[bool, bool]:
-        """Delegate the schedule subagent wait to its lifecycle collaborator."""
-        return await self._schedule_dispatcher_for()._await_schedule_subagents(
-            chat_id, timeout_s=timeout_s
-        )
-
-    async def _wait_for_drain_result(
-        self, chat_id: str, *, timeout_s: float = 180.0
-    ) -> tuple[str, bool] | None:
-        return await self._streaming.wait_for_drain_result(
-            chat_id, timeout_s=timeout_s
-        )
-
-    def _discard_schedule_drain_result(self, chat_id: str) -> None:
-        """Drop a stale follow-up result before a scheduled run waits.
-
-        The schedule collaborator calls this manager seam instead of reaching
-        into ``ChatStreaming`` directly, keeping the streaming owner explicit
-        while preserving the existing drain lifecycle patch point.
-        """
-        self._streaming.discard_drain_result(chat_id)
 
     async def _schedule_run_needs_user(
         self, entry: ScheduleEntry, outcome: chat_service.ScheduleRunOutcome,
