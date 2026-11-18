@@ -59,7 +59,17 @@ def port_in_use_message(port: int, workspace: Path | None = None) -> str:
 
     Names the port, says what holds it, and gives the two ways out: free the
     port, or choose another one through ``PWA_PORT`` in the workspace ``.env``.
+    The engine inside Ciaobot.app reads no ``PWA_PORT`` before setup, so there
+    the only way out is to free the port and let the app try again.
     """
+    from ciao.package_version import running_from_app_bundle
+
+    if running_from_app_bundle():
+        return (
+            f"port {port} is already in use by another program. "
+            f"Quit the other Ciaobot or program using port {port}, "
+            "then choose Try Again in Ciaobot."
+        )
     env = (Path(workspace) / ".env") if workspace is not None else Path(".env")
     return (
         f"port {port} is already in use by another program. "

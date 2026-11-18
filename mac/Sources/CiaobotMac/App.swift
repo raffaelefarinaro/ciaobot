@@ -95,6 +95,16 @@ enum TestLaunch {
         absoluteExistingDirectory(environment["CIAOBOT_MAC_TEST_ENGINE_RESOURCES"])
     }
 
+    /// The port the bundled engine serves on, passed as `--port`. Digits only
+    /// and 1024-65535, as the engine itself requires; anything else is ignored
+    /// and the engine keeps its default.
+    static func enginePort(environment: [String: String] = ProcessInfo.processInfo.environment) -> Int? {
+        guard let raw = environment["CIAOBOT_MAC_TEST_ENGINE_PORT"],
+              !raw.isEmpty, raw.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }),
+              let port = Int(raw), (1024...65535).contains(port) else { return nil }
+        return port
+    }
+
     /// The `UserDefaults` suite that holds the stored engine mode, last
     /// server, and saved hosts of a test launch. While it is set the app's
     /// own defaults domain is never read or written.

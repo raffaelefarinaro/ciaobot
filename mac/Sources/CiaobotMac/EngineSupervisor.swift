@@ -131,6 +131,8 @@ final class EngineSupervisor: ObservableObject {
     private let clock: () -> Date
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
     private let environment: [String: String]
+    /// The DEBUG test launch's `--port`; nil in a release build.
+    private let enginePort: Int?
 
     /// Invalidates every timer and probe callback scheduled before a spawn or stop.
     private var generation = 0
@@ -152,6 +154,7 @@ final class EngineSupervisor: ObservableObject {
         processes: EngineProcessRunning,
         identity: EngineIdentityChecking,
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        enginePort: Int? = nil,
         clock: @escaping () -> Date = Date.init,
         schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
@@ -162,6 +165,7 @@ final class EngineSupervisor: ObservableObject {
         self.processes = processes
         self.identityChecker = identity
         self.environment = environment
+        self.enginePort = enginePort
         self.clock = clock
         self.schedule = schedule
         processes.onExit = { [weak self] pid, status in
@@ -342,7 +346,7 @@ final class EngineSupervisor: ObservableObject {
         reaping = nil
         var parent = environment
         parent["HOME"] = home.home.path
-        let launch = engine.launch(.run(["--app-engine"]), parentEnvironment: parent, workingDirectory: home.home)
+        let launch = engine.launch(.run(["--app-engine"]), port: enginePort, parentEnvironment: parent, workingDirectory: home.home)
         do {
             try prepareLog()
             let pid = try processes.spawn(launch, log: home.logFile)

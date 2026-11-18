@@ -319,10 +319,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static func makeSupervisor() -> EngineSupervisor {
         let resourceDirectory: URL?
         let home: URL
+        let enginePort: Int?
         #if DEBUG
+        enginePort = TestLaunch.enginePort()
         resourceDirectory = TestLaunch.engineResources() ?? Bundle.main.resourceURL
         home = TestLaunch.engineHome() ?? FileManager.default.homeDirectoryForCurrentUser
         #else
+        enginePort = nil
         resourceDirectory = Bundle.main.resourceURL
         home = FileManager.default.homeDirectoryForCurrentUser
         #endif
@@ -331,7 +334,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             engine: engine,
             home: EngineHome(home: home),
             processes: FoundationEngineProcesses(),
-            identity: EngineIdentityProbe()
+            identity: EngineIdentityProbe(),
+            enginePort: enginePort
         )
     }
 
