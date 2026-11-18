@@ -84,9 +84,17 @@ scripts/package-notarized.sh
 
 The app embeds the engine, which `scripts/build-app.sh` builds from that exact
 commit; it needs a clean checkout, Python 3.12 or 3.13 (`python3.12`,
-`python3.13` or a `python3` of that version on `PATH`) and Node. Until #3128 G
-lands, `package-notarized.sh`, `make-dmg.sh --app` and `make-appcast.sh` all
-refuse an engine-bearing app or archive, so a release cannot be cut yet.
+`python3.13` or a `python3` of that version on `PATH`) and Node. 
+`package-notarized.sh` signs the engine's Mach-O files first
+(`scripts/engine_sign.py sign --distribution`: Developer ID, hardened runtime,
+timestamp, no entitlements, never `--deep`; the SDK's own `claude` keeps
+Anthropic's signature and is only verified), then Sparkle and the app. The
+Apple-facing credentials stay in the login keychain (the identity) and in the
+`0600` `.p8` outside the repository; they are passed only through the
+environment variables above. `make-dmg.sh` and `make-appcast.sh` refuse an
+engine that `engine_sign.py check --distribution` rejects. The Developer ID
+signing and notarization of the engine-bearing app were rehearsed on a scratch
+build (#3128 G); the publishing freeze above still applies.
 
 The API key path defaults to `~/.appstoreconnect/private_keys/AuthKey_<KEY_ID>.p8`;
 override it with `NOTARY_KEY`. A `notarytool` keychain profile works instead via
