@@ -1102,7 +1102,7 @@ async def test_opencode_inherits_owner_health_and_uses_dynamic_eligibility(
 
     # Live server with a session but no outstanding work: still ineligible.
     _attach_live(provider, "ses_a")
-    assert provider.has_live_server is True
+    assert provider.is_connected is True
     assert service.can_drain is False
     assert service.cli_connected is True
 

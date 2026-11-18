@@ -191,7 +191,6 @@ from ciao.os_support.locks import lock_exclusive, unlock
 from ciao import provider_registry
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
 from ciao.providers.base import BaseProvider, MoveToBackgroundOutcome, QuestionResponseResult
-from ciao.providers.opencode import OpencodeProvider
 from ciao.rate_limits import RateLimitStore, default_store_path
 from ciao.schedules import (
     ScheduleEntry,
@@ -5585,7 +5584,7 @@ class ProjectChatManager:
             raise ValueError(f"chat {chat_id} is not an active OpenCode chat")
         existing = self._providers.get(chat_id)
         live = existing.provider if existing is not None else None
-        if isinstance(live, BaseProvider) and live.is_connected:
+        if live is not None and live.is_connected:
             self._provider_last_used[chat_id] = time.monotonic()
             return live
         service = self._get_provider(chat_id)
@@ -10745,7 +10744,7 @@ class ProjectChatManager:
         # drain: ending the drain alone would leave it running (#1391).
         service = self._providers.get(chat_id)
         live = service.provider if service is not None else None
-        if isinstance(live, BaseProvider) and live.current_session_id:
+        if live is not None and live.current_session_id:
             try:
                 await asyncio.wait_for(
                     live.abort_session(live.current_session_id),

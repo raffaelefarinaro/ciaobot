@@ -315,7 +315,7 @@ async def test_sign_in_after_the_idle_sweep_starts_the_chat_server(
     assert len(started) == 1
     assert started[0].extra_env[AGENT_TOKEN_ENV] == "tok-test"
     provider = manager._providers[chat.chat_id].provider
-    assert isinstance(provider, OpencodeProvider) and provider.has_live_server
+    assert isinstance(provider, OpencodeProvider) and provider.is_connected
     assert chat.chat_id in manager._provider_last_used
     runtime._polls[action_id].cancel()
 
