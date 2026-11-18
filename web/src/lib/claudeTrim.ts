@@ -16,6 +16,7 @@ const GROUP_LABELS: Record<string, string> = {
   features: 'Features',
   review: 'Review',
   skills: 'Bundled skills',
+  Connectors: 'Connectors',
 }
 
 export interface ClaudeTrimGroup {

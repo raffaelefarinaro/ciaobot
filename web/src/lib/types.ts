@@ -63,7 +63,7 @@ export interface ClaudeTrimOption {
   name: string
   label: string
   reason: string
-  group: string          // "scheduling" | "plan" | "notifications" | "design" | "review" | "skills" | "features" (open set)
+  group: string          // "scheduling" | "plan" | "notifications" | "design" | "review" | "skills" | "features" | "Connectors" (open set)
   default_trimmed: boolean
 }
 
@@ -72,8 +72,6 @@ export interface WorkspaceInfo {
   vault_root: string
   default_provider: WorkspaceProvider
   disallowed_tools?: string[] | null
-  // Whether the workspace's Claude chats load the claude.ai connectors. Missing → on.
-  claude_ai_connectors?: boolean
   /** Operator-only; absent or 'off': shadow verdicts only. */
   memory_handover?: MemoryHandover
   gws_profile: string

@@ -271,7 +271,19 @@ TRIM_OPTIONS: tuple[TrimOption, ...] = (
         default_trimmed=False,
         covers=("Workflow", "deep-research", "workflow-authoring"),
     ),
+    _setting(
+        "claude_ai_connectors",
+        "claude.ai connectors",
+        "Your Claude account's connectors (Slack, Jira, …); hide them to keep those remote tools out of this workspace's Claude chats.",
+        "Connectors",
+        default_trimmed=False,
+        covers=(),
+    ),
 )
+
+# Stored workspaces used to carry this as its own field. The trim key above
+# replaced it. Only the load conversion below still names the old field.
+CONNECTORS_TRIM_KEY = "setting:claude_ai_connectors"
 
 _BY_KEY: dict[str, TrimOption] = {option.key: option for option in TRIM_OPTIONS}
 
@@ -350,6 +362,26 @@ def load_claude_trim(raw: object) -> dict[str, bool]:
     return {o.key: valid[o.key] for o in TRIM_OPTIONS if o.key in valid}
 
 
+def absorb_legacy_claude_ai_connectors(
+    stored: Mapping[str, Any], trim: Mapping[str, bool]
+) -> dict[str, bool]:
+    """Read a retired ``claude_ai_connectors: false`` as the connectors trim, once.
+
+    A workspace file (or an archive entry) that still has boolean false, and
+    whose trim map does not already name the connectors option, is trimmed
+    (connectors off). True, a missing field, and any other value add nothing.
+    The caller does not write the old field back, so the next save drops it.
+    """
+    out = dict(trim)
+    raw_trim = stored.get("claude_trim")
+    if isinstance(raw_trim, dict) and CONNECTORS_TRIM_KEY in raw_trim:
+        return out
+    if stored.get("claude_ai_connectors") is False:
+        out[CONNECTORS_TRIM_KEY] = True
+        return {o.key: out[o.key] for o in TRIM_OPTIONS if o.key in out}
+    return out
+
+
 def effective_trim(overrides: Mapping[str, bool]) -> dict[str, bool]:
     """Every catalog key mapped to trimmed or not."""
     return {o.key: overrides.get(o.key, o.default_trimmed) for o in TRIM_OPTIONS}
@@ -372,7 +404,9 @@ def trim_tool_denies(overrides: Mapping[str, bool]) -> list[str]:
 def claude_settings_layer(overrides: Mapping[str, bool]) -> dict[str, Any]:
     """The inline CLI settings layer: ``skillOverrides`` plus ``disable*`` keys set to True.
 
-    Untrimmed settings are omitted rather than written as False.
+    Untrimmed settings are omitted rather than written as False. The connectors
+    option is not a CLI settings key: a trimmed one sets
+    ``ENABLE_CLAUDEAI_MCP_SERVERS=false`` on the spawned process instead.
     """
     effective = effective_trim(overrides)
     layer: dict[str, Any] = {"skillOverrides": {}}
@@ -381,7 +415,7 @@ def claude_settings_layer(overrides: Mapping[str, bool]) -> dict[str, Any]:
             continue
         if o.kind == "skill":
             layer["skillOverrides"][o.name] = "off"
-        elif o.kind == "setting":
+        elif o.kind == "setting" and o.key != CONNECTORS_TRIM_KEY:
             layer[o.name] = True
     return layer
 

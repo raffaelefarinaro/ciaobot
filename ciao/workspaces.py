@@ -122,7 +122,6 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
             if getattr(workspace, "disallowed_tools", None) is not None
             else None
         ),
-        "claude_ai_connectors": bool(getattr(workspace, "claude_ai_connectors", True)),
         "claude_trim": dict(getattr(workspace, "claude_trim", None) or {}),
         "gws_profile": getattr(workspace, "gws_profile", ""),
         "color": color,
@@ -214,15 +213,6 @@ def workspace_from_request(
         disallowed_tools = existing.disallowed_tools
     else:
         disallowed_tools = None
-    if "claude_ai_connectors" in data:
-        connectors = data.get("claude_ai_connectors")
-        if not isinstance(connectors, bool):
-            raise ValueError("claude_ai_connectors must be true or false")
-        claude_ai_connectors = connectors
-    elif existing is not None:
-        claude_ai_connectors = existing.claude_ai_connectors
-    else:
-        claude_ai_connectors = True
     if "claude_trim" in data:
         claude_trim = coerce_claude_trim(data.get("claude_trim"))
     elif existing is not None:
@@ -283,7 +273,6 @@ def workspace_from_request(
         ),
         default_provider=provider,
         disallowed_tools=disallowed_tools,
-        claude_ai_connectors=claude_ai_connectors,
         claude_trim=claude_trim,
         gws_profile=gws_profile,
         color=color,

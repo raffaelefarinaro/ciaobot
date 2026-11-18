@@ -24,8 +24,6 @@ export type WorkspaceForm = {
   default_provider: WorkspaceProvider
   gws_profile: string
   disallowed_tools: string
-  // Whether the workspace's Claude chats load the claude.ai connectors.
-  claude_ai_connectors: boolean
   color: WorkspaceColorId
   // '' is "no choice": the key is left out of a create, and an update sends
   // null, so the engine keeps or returns the workspace to its default.
@@ -97,7 +95,6 @@ export function useWorkspaceAdmin(deps: {
       default_provider: defaultWorkspaceProvider(),
       gws_profile: '',
       disallowed_tools: '',
-      claude_ai_connectors: true,
       color: DEFAULT_WORKSPACE_COLOR,
       agent_fs_scope: '',
       provider_overrides: {},
@@ -127,7 +124,6 @@ export function useWorkspaceAdmin(deps: {
       default_provider: normalizeWorkspaceProvider(ws.default_provider),
       gws_profile: ws.gws_profile || '',
       disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
-      claude_ai_connectors: ws.claude_ai_connectors !== false,
       color: normalizeWorkspaceColor(ws.color),
       agent_fs_scope: fsScopeChoice(ws.agent_fs_scope),
       provider_overrides: normalizeOverrides(ws.provider_overrides),
@@ -260,7 +256,6 @@ export function useWorkspaceAdmin(deps: {
         vault_root: form.vault_root.trim() || target,
         default_provider: form.default_provider,
         disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
-        claude_ai_connectors: form.claude_ai_connectors,
         color: form.color,
         // Sent only when File access was changed. Picking the default again goes
         // as null, which clears an earlier explicit choice.
