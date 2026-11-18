@@ -360,7 +360,7 @@ def _takeover_state_unsafe() -> bool:
 
 def _read_journal_file(entry: Path) -> dict[str, Any] | None:
     """The entry's journal through the strict private reader, or ``None``."""
-    return app_engine._read_private_json(entry / "journal.json", label="the takeover journal")
+    return app_engine.read_private_json(entry / "journal.json", label="the takeover journal")
 
 
 def _entry_state(entry: Path) -> str | None:
@@ -2002,7 +2002,7 @@ def _health_snapshot(journal: dict[str, Any]) -> tuple[str | None, tuple[Any, ..
         or not _same_dir(pointer.runtime_root, runtime_root)
     ):
         return "pointer", ()
-    ready = app_engine._read_private_json(
+    ready = app_engine.read_private_json(
         state_dir() / app_engine.READY_RECORD_NAME, label="the app engine ready record"
     )
     if ready is None:
@@ -2323,7 +2323,7 @@ def _lock_is_old_engine(journal: dict[str, Any], runner: Runner) -> bool:
     owner = read_lock_owner(_journal_runtime(journal))
     if not isinstance(owner, dict) or not _pid_in_job(owner.get("pid"), job_pid, journal):
         return False
-    ready = app_engine._read_private_json(
+    ready = app_engine.read_private_json(
         state_dir() / app_engine.READY_RECORD_NAME, label="the app engine ready record"
     )
     return ready is None or ready.get("pid") != owner.get("pid")
