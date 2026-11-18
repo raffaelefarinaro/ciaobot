@@ -2,6 +2,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -176,3 +177,217 @@ def test_unit_workspace_takes_the_last_assignment_and_ignores_relative_paths(tmp
 
     unit.write_text('Environment="CIAO_WORKSPACE=/srv/first"\nEnvironment="CIAO_WORKSPACE=rel/dir"\n', encoding="utf-8")
     assert unit_workspace(unit) is None
+
+
+# --- #3131 L1: `ciao service install` (install planning) --------------------
+
+
+def test_install_script_is_constant_and_targets_unit_path():
+    from ciao.linux_service import INSTALL_SCRIPT, installed_unit_python
+
+    assert "{" not in INSTALL_SCRIPT and "}" not in INSTALL_SCRIPT
+    # The suite's conftest monkeypatches UNIT_PATH per test, so compare against
+    # the module's def-time default (the real /etc/... unit) instead.
+    unit_path = installed_unit_python.__defaults__[0]
+    assert str(unit_path) in INSTALL_SCRIPT
+    assert unit_path == Path("/etc/systemd/system/ciaobot.service")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX paths in rendered unit")
+def test_plan_install_passes_the_unit_only_on_stdin(tmp_path):
+    from ciao.linux_service import INSTALL_SCRIPT, plan_install
+
+    workspace = tmp_path / 'ws $ %x "q'
+    python = Path("/opt/venv/bin/python")
+    plan = plan_install(
+        workspace=workspace, user="ciaobot", home=tmp_path, python=python,
+        unit_path=tmp_path / "absent.service",
+    )
+    assert plan.commands[0][0] == ("sudo", "sh", "-c", INSTALL_SCRIPT)
+    assert plan.commands[0][1] == render_service(
+        workspace=workspace, user="ciaobot", home=tmp_path, python=python,
+    )
+    assert plan.commands[1][1] is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX paths in rendered unit")
+def test_plan_install_refuses_a_source_install_unit(tmp_path):
+    from ciao.linux_service import UnitConflict, plan_install
+
+    unit = tmp_path / "ciaobot.service"
+    unit.write_text(render_service(
+        workspace=tmp_path / "srv/ciaobot", user="ciaobot", home=Path("/home/ciaobot"),
+        python=Path("/opt/ciaobot/venv/bin/python"),
+    ), encoding="utf-8")
+    with pytest.raises(UnitConflict):
+        plan_install(
+            workspace=tmp_path / "ws", user="ciaobot", home=Path("/home/ciaobot"),
+            python=Path("/home/ciaobot/.local/share/uv/tools/ciaobot/bin/python"),
+            unit_path=unit,
+        )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX paths in rendered unit")
+def test_plan_install_replaces_its_own_unit_without_flag(tmp_path):
+    from ciao.linux_service import plan_install
+
+    unit = tmp_path / "ciaobot.service"
+    python = Path("/home/ciaobot/.local/share/uv/tools/ciaobot/bin/python")
+    unit.write_text(render_service(
+        workspace=Path("/srv/ciaobot"), user="ciaobot", home=Path("/home/ciaobot"),
+        python=python,
+    ), encoding="utf-8")
+    plan = plan_install(
+        workspace=Path("/srv/ciaobot"), user="ciaobot", home=Path("/home/ciaobot"),
+        python=python, unit_path=unit,
+    )
+    assert len(plan.commands) == 4
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX paths in rendered unit")
+def test_replace_overrides_conflict(tmp_path):
+    from ciao.linux_service import plan_install
+
+    unit = tmp_path / "ciaobot.service"
+    unit.write_text(render_service(
+        workspace=Path("/srv/ciaobot"), user="ciaobot", home=Path("/home/ciaobot"),
+        python=Path("/opt/ciaobot/venv/bin/python"),
+    ), encoding="utf-8")
+    plan = plan_install(
+        workspace=Path("/srv/ciaobot"), user="ciaobot", home=Path("/home/ciaobot"),
+        python=Path("/home/ciaobot/.local/share/uv/tools/ciaobot/bin/python"),
+        replace=True, unit_path=unit,
+    )
+    assert len(plan.commands) == 4
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX paths in rendered unit")
+def test_no_start_omits_restart(tmp_path):
+    from ciao.linux_service import INSTALL_SCRIPT, plan_install
+
+    def plan(**overrides):
+        kwargs = dict(
+            workspace=Path("/srv/ciaobot"), user="ciaobot", home=Path("/home/ciaobot"),
+            python=Path("/opt/venv/bin/python"), unit_path=tmp_path / "absent.service",
+        )
+        kwargs.update(overrides)
+        return plan_install(**kwargs)
+
+    quiet = plan(start=False)
+    assert [argv for argv, _ in quiet.commands] == [
+        ("sudo", "sh", "-c", INSTALL_SCRIPT),
+        ("sudo", "systemctl", "daemon-reload"),
+        ("sudo", "systemctl", "enable", "ciaobot.service"),
+    ]
+    assert all("restart" not in argv for argv, _ in quiet.commands)
+    started = plan()
+    assert started.commands[-1][0] == ("sudo", "systemctl", "restart", "ciaobot.service")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX paths in rendered unit")
+@pytest.mark.parametrize("python", [
+    Path("/opt/cia venv/bin/python"),
+    Path("/opt/cia venv $HOME/bin/python"),
+    Path("/opt/cia venv %n $BIN/bin/python"),
+    Path('/opt/cia "venv"/bin/python'),
+    Path("/opt/cia venv$/bin/python"),
+])
+def test_installed_unit_python_round_trips_quoting(python, tmp_path):
+    from ciao.linux_service import installed_unit_python
+
+    unit = tmp_path / "ciaobot.service"
+    unit.write_text(render_service(
+        workspace=Path("/srv/ciaobot"), user="ciaobot", home=Path("/home/ciaobot"),
+        python=python,
+    ), encoding="utf-8")
+    assert installed_unit_python(unit) == python
+
+
+def test_installed_unit_python_missing_or_garbled_is_none(tmp_path):
+    from ciao.linux_service import installed_unit_python
+
+    assert installed_unit_python(tmp_path / "absent.service") is None
+    unit = tmp_path / "ciaobot.service"
+    unit.write_text("[Service]\nUser=ciaobot\n", encoding="utf-8")
+    assert installed_unit_python(unit) is None
+    unit.write_text('[Service]\nExecStart="/opt/venv/bin/python -m ciao.cli run\n', encoding="utf-8")
+    assert installed_unit_python(unit) is None  # a quote that never closes
+    unit.write_text("[Service]\nExecStart=\n", encoding="utf-8")
+    assert installed_unit_python(unit) is None
+
+
+@pytest.mark.skipif(shutil.which("systemd-analyze") is None, reason="systemd is not installed")
+def test_systemd_accepts_planned_unit(tmp_path):
+    from ciao.linux_service import plan_install
+
+    plan = plan_install(
+        workspace=tmp_path / 'workspace "quoted" %n', user="nobody",
+        home=tmp_path, python=Path(sys.executable),
+        unit_path=tmp_path / "absent.service",
+    )
+    unit = tmp_path / "ciaobot.service"
+    unit.write_text(plan.unit, encoding="utf-8")
+    result = subprocess.run(["systemd-analyze", "verify", str(unit)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+# --- #3131 L1: `ciao service install` (CLI) ---------------------------------
+
+
+def _act_as_linux_account(monkeypatch, tmp_path):
+    """Run `ciao service install` as user ciaobot (uid 1000), never root."""
+    monkeypatch.setattr(cli.sys, "platform", "linux")
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 1000)
+    accounts = {1000: SimpleNamespace(pw_name="ciaobot", pw_dir=str(tmp_path / "home"))}
+    monkeypatch.setitem(sys.modules, "pwd", SimpleNamespace(getpwuid=lambda uid: accounts[uid]))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.geteuid, pwd and POSIX paths")
+def test_cli_service_install_dry_run_runs_nothing(capsys, monkeypatch, tmp_path):
+    calls: list[list[str]] = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda argv, **kwargs: calls.append(list(argv)))
+    _act_as_linux_account(monkeypatch, tmp_path)
+
+    assert cli.main(["service", "install", "--workspace", str(tmp_path / "ws"), "--dry-run"]) == 0
+    assert calls == []
+    out = capsys.readouterr().out
+    assert out.startswith("[Unit]\n")
+    would_run = [line for line in out.splitlines() if line.startswith("# would run: ")]
+    assert len(would_run) == 4
+    assert would_run[0].startswith("# would run: sudo sh -c ")
+    assert "# would run: sudo systemctl daemon-reload" in would_run
+    assert "# would run: sudo systemctl enable ciaobot.service" in would_run
+    assert "# would run: sudo systemctl restart ciaobot.service" in would_run
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.geteuid does not exist")
+def test_cli_service_install_refuses_root(monkeypatch, capsys):
+    monkeypatch.setattr(cli.sys, "platform", "linux")
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    assert cli.main(["service", "install"]) == 2
+    assert "not root" in capsys.readouterr().err
+
+
+def test_cli_service_install_refuses_non_linux(monkeypatch, capsys):
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    assert cli.main(["service", "install"]) == 2
+    assert "Linux only" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.geteuid, pwd and POSIX paths")
+def test_cli_service_install_conflict_exits_3(monkeypatch, capsys, tmp_path):
+    from ciao import linux_service
+
+    unit = tmp_path / "ciaobot.service"
+    unit.write_text(render_service(
+        workspace=Path("/srv/ciaobot"), user="ciaobot", home=Path("/home/ciaobot"),
+        python=Path("/opt/ciaobot/venv/bin/python"),
+    ), encoding="utf-8")
+    monkeypatch.setattr(linux_service, "UNIT_PATH", unit)
+    _act_as_linux_account(monkeypatch, tmp_path)
+
+    assert cli.main(["service", "install", "--workspace", str(tmp_path / "ws")]) == 3
+    err = capsys.readouterr().err
+    assert "/opt/ciaobot/venv/bin/python" in err
+    assert "docs/LINUX.md#existing-source-installs" in err
+    assert "--replace" in err

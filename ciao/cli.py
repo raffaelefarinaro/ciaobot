@@ -10,11 +10,13 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import sqlite3
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, replace
 from importlib import resources
 from pathlib import Path, PurePosixPath
@@ -7752,7 +7754,7 @@ def _register_launchd_service(workspace: Path) -> Path:
         raise RuntimeError(str(exc)) from exc
 
 
-def _service_command(args: argparse.Namespace) -> int:
+def _macos_service_command(args: argparse.Namespace) -> int:
     from ciao import macos_service
 
     action = args.service_action
@@ -7924,6 +7926,58 @@ def _linux_service_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _service_command(args: argparse.Namespace) -> int:
+    if getattr(args, "deprecated_alias", False):
+        print("`ciao desktop-service` is deprecated; use `ciao service`.", file=sys.stderr)
+    if not sys.platform.startswith("linux"):
+        print("Error: ciao service is Linux only.", file=sys.stderr)
+        return 2
+    if os.geteuid() == 0:
+        print("Error: run as the account that will own Ciaobot, not root.", file=sys.stderr)
+        return 2
+    import pwd  # noqa: PLC0415  # POSIX-only module: lives in the Linux branch.
+
+    from ciao import linux_service  # noqa: PLC0415
+
+    # The account is who the unit will run as, not whoever holds $HOME (#3131 D2).
+    identity = pwd.getpwuid(os.geteuid())
+    # Do not resolve python (see render_service's comment).
+    python = Path(sys.prefix) / "bin" / "python"
+    workspace = args.workspace or linux_service.unit_workspace(linux_service.UNIT_PATH)
+    if workspace is None:
+        print(
+            "Error: pass --workspace: no installed unit records a workspace for this account.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        plan = linux_service.plan_install(
+            workspace=workspace, user=identity.pw_name, home=Path(identity.pw_dir),
+            python=python, replace=args.replace, start=not args.no_start,
+            unit_path=linux_service.UNIT_PATH,
+        )
+    except linux_service.UnitConflict as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 3
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if args.dry_run:
+        print(plan.unit, end="")
+        for argv, stdin in plan.commands:
+            print(f"# would run: {shlex.join(argv)}")
+        return 0
+
+    def run(argv: Sequence[str], stdin: str | None) -> None:
+        subprocess.run(argv, input=stdin, text=True, check=True)
+
+    try:
+        linux_service.run_plan(plan, run=run)
+    except subprocess.CalledProcessError:
+        return 1
+    return 0
+
+
 def _desktop_command(args: argparse.Namespace) -> int:
     from ciao import desktop_install
 
@@ -8062,13 +8116,40 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Register the LaunchAgent for this workspace first if it is not installed.",
                 )
             action_parser.set_defaults(
-                func=_service_command,
+                func=_macos_service_command,
                 deprecated_alias=deprecated,
             )
         login_parser = service_sub.add_parser("login")
         login_parser.add_argument("login_action", choices=("enable", "disable"))
         login_parser.add_argument("--json", action="store_true", dest="as_json")
         login_parser.set_defaults(
+            func=_macos_service_command,
+            deprecated_alias=deprecated,
+        )
+        # #3131: the Linux system-service install shares this group so
+        # `ciao service install` reads like the other service verbs. The
+        # handler refuses non-Linux and root invocations itself.
+        install_parser = service_sub.add_parser(
+            "install",
+            help="Install the Linux systemd service for this account.",
+        )
+        install_parser.add_argument(
+            "--workspace", type=Path,
+            help="Workspace directory (default: the one the installed unit records).",
+        )
+        install_parser.add_argument(
+            "--replace", action="store_true",
+            help="Take over an existing unit that runs another interpreter (a source install).",
+        )
+        install_parser.add_argument(
+            "--no-start", action="store_true",
+            help="Install and enable the unit, but do not restart the service.",
+        )
+        install_parser.add_argument(
+            "--dry-run", action="store_true",
+            help="Print the unit and the commands without running anything.",
+        )
+        install_parser.set_defaults(
             func=_service_command,
             deprecated_alias=deprecated,
         )

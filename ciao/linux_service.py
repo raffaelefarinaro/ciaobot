@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 import re
@@ -97,3 +99,94 @@ def render_service(*, workspace: Path, user: str, home: Path, python: Path) -> s
         python=_quoted(str(python)).replace("$", "$$"),
         nofile=SERVER_NOFILE_TARGET,
     )
+
+
+INSTALL_SCRIPT = (  # constant: no user data is ever interpolated; the unit arrives on stdin
+    'umask 022; stage=$(mktemp -d) || exit 1; '
+    'cat > "$stage/ciaobot.service" && '
+    'systemd-analyze verify "$stage/ciaobot.service" && '
+    'install -m 644 "$stage/ciaobot.service" /etc/systemd/system/ciaobot.service; '
+    'rc=$?; rm -rf "$stage"; exit $rc'
+)
+
+
+class UnitConflict(ValueError):
+    """An existing unit runs another interpreter (a source install)."""
+
+
+@dataclass(frozen=True)
+class ServicePlan:
+    """The rendered unit and the privileged commands that install it."""
+
+    unit: str
+    commands: tuple[tuple[tuple[str, ...], str | None], ...]  # (argv, stdin)
+
+
+def _first_exec_token(value: str) -> str | None:
+    """The value's first ExecStart token, keeping a quoted token whole."""
+    if value.startswith('"'):
+        escaped = False
+        for index, char in enumerate(value[1:], start=1):
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                return value[: index + 1]
+        return None
+    return next(iter(value.split()), None)
+
+
+def installed_unit_python(path: Path = UNIT_PATH) -> Path | None:
+    """The interpreter in the unit's ExecStart (first token, `_unquote`d, `$$`→`$`), or None."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    for line in text.splitlines():
+        key, sep, value = line.strip().partition("=")
+        if not sep or key.strip() != "ExecStart":
+            continue
+        token = _first_exec_token(value.strip())
+        if token is None:
+            return None
+        return Path(_unquote(token).replace("$$", "$"))
+    return None
+
+
+def plan_install(*, workspace: Path, user: str, home: Path, python: Path,
+                 replace: bool = False, start: bool = True,
+                 unit_path: Path = UNIT_PATH) -> ServicePlan:
+    """Render the unit for the invoking account and plan its privileged install.
+
+    Raises :class:`UnitConflict` when ``unit_path`` already exists and its
+    ``ExecStart`` interpreter is not this env's ``python`` (a source install)
+    and ``replace`` is not set: taking such a unit over silently would strand
+    an install people already have (#3131 D3).
+    """
+    unit = render_service(workspace=workspace, user=user, home=home, python=python)
+    if unit_path.exists() and not replace:
+        installed = installed_unit_python(unit_path)
+        if installed != python:
+            shown = str(installed) if installed else "an interpreter that cannot be read"
+            raise UnitConflict(
+                f"{unit_path} exists and runs Ciaobot with {shown}, but this "
+                f"install runs {python}: that unit belongs to a source install, "
+                "and installing over it would break that install. See "
+                "docs/LINUX.md#existing-source-installs, or pass --replace to "
+                "take the unit over."
+            )
+    commands: list[tuple[tuple[str, ...], str | None]] = [
+        (("sudo", "sh", "-c", INSTALL_SCRIPT), unit),
+        (("sudo", "systemctl", "daemon-reload"), None),
+        (("sudo", "systemctl", "enable", "ciaobot.service"), None),
+    ]
+    if start:
+        commands.append((("sudo", "systemctl", "restart", "ciaobot.service"), None))
+    return ServicePlan(unit=unit, commands=tuple(commands))
+
+
+def run_plan(plan: ServicePlan, *, run: Callable[[Sequence[str], str | None], None]) -> None:
+    """Run the plan's commands in order; ``run`` receives ``(argv, stdin)``."""
+    for argv, stdin in plan.commands:
+        run(argv, stdin)
