@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from ciao.claude_trim import (
+    CONNECTORS_TRIM_KEY,
     TRIM_OPTIONS,
     catalog_payload,
     claude_settings_layer,
@@ -68,6 +69,24 @@ def test_default_settings_layer() -> None:
     assert layer["skillOverrides"] == {name: "off" for name in _OLD_HIDDEN_SKILLS}
     assert layer["disableArtifact"] is True
     assert "disableWorkflows" not in layer
+    # Connectors stay on by default, and trimming them is an env var, not a CLI key.
+    assert "claude_ai_connectors" not in layer
+    trimmed = claude_settings_layer({CONNECTORS_TRIM_KEY: True})
+    assert "claude_ai_connectors" not in trimmed
+    assert effective_trim({})[CONNECTORS_TRIM_KEY] is False
+    assert effective_trim({CONNECTORS_TRIM_KEY: True})[CONNECTORS_TRIM_KEY] is True
+
+
+def test_connectors_option_is_an_editable_setting() -> None:
+    entry = option(CONNECTORS_TRIM_KEY)
+    assert entry.kind == "setting"
+    assert entry.name == "claude_ai_connectors"
+    assert entry.label == "claude.ai connectors"
+    assert entry.group == "Connectors"
+    assert entry.default_trimmed is False
+    assert coerce_claude_trim({CONNECTORS_TRIM_KEY: True}) == {CONNECTORS_TRIM_KEY: True}
+    assert coerce_claude_trim({CONNECTORS_TRIM_KEY: False}) == {}
+    assert any(row["key"] == CONNECTORS_TRIM_KEY for row in catalog_payload())
 
 
 def test_override_untrims_and_trims() -> None:
