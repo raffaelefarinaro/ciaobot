@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-from ciao.providers.opencode import McpOAuthUnavailable
+from ciao.models import AgentRequest
+from ciao.providers.base import ActiveHandle, BaseProvider, McpOAuthUnavailable
 from tests.test_chat_actions_runtime import (
     ATTEMPT_ID,
     ATTEMPT_PATH,
@@ -160,3 +162,28 @@ async def test_cancel_mcp_oauth_deletes_the_attempt(tmp_path: Path) -> None:
     await provider.cancel_mcp_oauth(INTEGRATION_ID, ATTEMPT_ID)
 
     assert client.calls == [("DELETE", ATTEMPT_PATH, None)]
+
+
+class _NoOAuthProvider(BaseProvider):
+    def run_streaming(
+        self, request: Any, register_handle: Callable[[ActiveHandle | None], None]
+    ) -> AsyncGenerator[Any, None]:
+        raise AssertionError("defaults must not start a turn")
+
+    async def disconnect(self) -> None:
+        raise AssertionError("defaults must not disconnect")
+
+
+@pytest.mark.asyncio
+async def test_base_mcp_oauth_defaults(tmp_path: Path) -> None:
+    provider = _NoOAuthProvider(tmp_path)
+
+    with pytest.raises(McpOAuthUnavailable) as started:
+        await provider.start_mcp_oauth("linear")
+    with pytest.raises(McpOAuthUnavailable) as read:
+        await provider.read_mcp_oauth_attempt(INTEGRATION_ID, ATTEMPT_ID)
+
+    assert started.value.reason == "unsupported"
+    assert read.value.reason == "unsupported"
+    await provider.cancel_mcp_oauth(INTEGRATION_ID, ATTEMPT_ID)
+    await provider.ensure_server(cast(AgentRequest, object()))

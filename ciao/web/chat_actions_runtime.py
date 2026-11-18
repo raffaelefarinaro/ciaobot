@@ -27,8 +27,7 @@ from ciao.chat_actions import ChatAction, ChatActionError, action_key, action_pa
 from ciao.mcp_names import is_claudeai_connector
 from ciao.oauth_callback import CallbackTarget, validate_pasted_callback
 from ciao.provider_service import ProviderImpl
-from ciao.providers.base import BaseProvider
-from ciao.providers.opencode import McpOAuthUnavailable, OpencodeProvider
+from ciao.providers.base import BaseProvider, McpOAuthUnavailable
 from ciao.web.chat_actions_base import ActionContext, ActionHandler
 from ciao.web.device_code_auth import DeviceCodeFlow
 from ciao.web.gws_auth_action import GwsAuthHandler
@@ -165,7 +164,7 @@ class OpencodeMcpAuthFlow(ActionHandler):
     def __init__(self) -> None:
         # Action id -> (the provider that opened it, integration id, attempt id).
         # The provider is kept so a cancel after a lifecycle clear still reaches OpenCode.
-        self._attempts: dict[str, tuple[OpencodeProvider, str, str]] = {}
+        self._attempts: dict[str, tuple[BaseProvider, str, str]] = {}
 
     async def start(self, ctx: ActionContext, action: ChatAction, body: Mapping[str, object]) -> None:
         cid = ctx.chat.chat_id
@@ -218,7 +217,7 @@ class OpencodeMcpAuthFlow(ActionHandler):
     async def poll(self, ctx: ActionContext, action: ChatAction) -> None:
         cid = ctx.chat.chat_id
         provider = ctx.provider
-        if not isinstance(provider, OpencodeProvider) or not provider.has_live_server:
+        if provider is None or not provider.is_connected:
             self._attempts.pop(action.id, None)
             ctx.pcm.update_action(cid, action.id, state="failed", error=STOPPED_ERROR)
             return
