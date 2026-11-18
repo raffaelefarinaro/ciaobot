@@ -177,7 +177,7 @@ export const NoteAwaitingReview: Story = {
     await dialog()
     await userEvent.click(button(/Complete task/))
     await waitFor(() => screen.getByLabelText('How was this completed? (optional)'))
-    expect(screen.getByRole('dialog').textContent).toContain('Approve it and archive this chat')
+    expect(screen.getByRole('dialog').textContent).toContain('Approving "Storybook task" completes the task and archives this chat.')
     expect(button('Approve Done').textContent?.trim()).toBe('Approve Done')
   },
 }
