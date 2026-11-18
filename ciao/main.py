@@ -484,21 +484,18 @@ def _ensure_tool_dirs_on_path() -> None:
     notably nvm's ``node/*/bin``, the most common way node is installed.
     """
     from ciao.os_support.tool_path import dedupe_path
+    from ciao.package_version import app_engine_root, ensure_ciao_shim
     from ciao.tool_path import common_tool_dirs
 
     parts = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d]
     seen = set(parts)
     missing = [d for d in common_tool_dirs() if d not in seen]
-    if os.environ.get("CIAO_BUNDLED_APP") == "1":
-        # The bundled launcher puts its own bin first on purpose, so child
-        # `ciao` commands resolve to the interpreter that owns the bundled
-        # site-packages, and stay on the same engine and version as the app.
-        # Appending still finds npm/node/git. This is no longer load-bearing
-        # for importability - the bundled interpreter attaches its own
-        # dependency tree via its ciao_bundled_site hook rather than through an
-        # exported PYTHONPATH, so a child on a different CPython is merely a
-        # different install now, not a crash.
-        composed = [*parts, *missing]
+    engine_root = app_engine_root()
+    if engine_root is not None:
+        # A shim directory holding only `ciao` goes first, so child `ciao`
+        # commands run the bundled engine and stay on the app's version. The
+        # engine's own bin is not exposed: it would shadow `python3`.
+        composed = [str(ensure_ciao_shim(engine_root)), *parts, *missing]
     else:
         composed = [*missing, *parts]
     # Deduped even when nothing was missing: an inherited PATH that already
