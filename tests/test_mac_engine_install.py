@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import packaging
@@ -21,11 +22,13 @@ SPEC = importlib.util.spec_from_file_location("engine_install", MODULE_PATH)
 assert SPEC and SPEC.loader
 ei = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ei)
+REAL_RUN = ei._run
 
 HOST = "https://files.pythonhosted.org/packages"
 RUNTIME_NAME = "cpython-3.12.16+20261110-aarch64-apple-darwin-install_only.tar.gz"
 RUNTIME_URL = f"{ei.engine_fetch.RUNTIME_PREFIX}20261110/cpython-3.12.16%2B20261110-aarch64-apple-darwin-install_only.tar.gz"
 DERIVED_WHEEL = "http_ece-1.2.1-py2.py3-none-any.whl"
+D1_NOISE_FAKE = b'{"name": "http-ece", "version": "1.2.1", "wheel": {"filename": "x", "size": 1, "sha256": "0"}}'
 PYPROJECT = '[project]\nname = "x"\nversion = "1"\ndependencies = ["foo==1.0"]\n'
 
 
@@ -159,8 +162,13 @@ def env(tmp_path, monkeypatch):
     state = type("Env", (), {})()
     state.house, state.out, state.report, state.report_path = house, out, report, report_path
     state.hashes, state.pin, state.derived_bytes = hashes, pin, derived_bytes
-    state.calls, state.extractions = [], []
+    state.calls, state.extractions, state.profiles = [], [], []
     state.d1_status, state.pip_status, state.check_status, state.smoke_status = 0, 0, 0, 0
+    state.verify_status = 0
+    state.d1_extra_file = False
+    state.d1_receipt_edit = None
+    state.d1_prefix_noise = b""
+    state.smoke_output = b"OpenSSL 3.0.99 1 Jan 2099\n"
     state.dists = {
         "foo": {"version": "1.0", "requires": ["bar>=2"], "scripts": ["foo-cli"]},
         "bar": {"version": "2.0",
@@ -180,20 +188,26 @@ def env(tmp_path, monkeypatch):
 
     def fake_run(argv, env_, cwd, timeout):
         state.calls.append((argv, env_, cwd, timeout))
-        if argv[0] == sys.executable:
-            if argv[3] == "build":
-                if state.d1_status:
-                    return state.d1_status, b""
-                destination = Path(argv[argv.index("--destination") + 1])
+        assert argv[:2] == [ei.SANDBOX_EXEC, "-p"]
+        state.profiles.append(argv[2])
+        inner = argv[3:]
+        if inner[0] == sys.executable:
+            if inner[3] == "build":
+                destination = Path(inner[inner.index("--destination") + 1])
                 destination.mkdir(mode=0o700)
                 (destination / DERIVED_WHEEL).write_bytes(derived_bytes)
+                if state.d1_extra_file:
+                    (destination / "extra.txt").write_bytes(b"x")
                 body = {"name": "http-ece", "version": "1.2.1",
                         "wheel": {"filename": DERIVED_WHEEL, "size": len(derived_bytes),
-                                  "sha256": _sha(derived_bytes)}}
-                return 0, (json.dumps(body, sort_keys=True, indent=2) + "\n").encode()
-            return 0, b""
-        assert argv[:3] == [ei.SANDBOX_EXEC, "-p", ei.SANDBOX_PROFILE]
-        inner = argv[3:]
+                                  "sha256": _sha(derived_bytes), "members": ["a", "b"]},
+                        "sdist_sha256": _sha(b"sdist-bytes"), "backend_sha256": _sha(b"setuptools-bytes"),
+                        "source_date_epoch": 1, "python": "3.99.9", "driver_sha256": "d" * 64}
+                if state.d1_receipt_edit:
+                    state.d1_receipt_edit(body)
+                text = (json.dumps(body, sort_keys=True, indent=2) + "\n").encode()
+                return state.d1_status, state.d1_prefix_noise + text
+            return state.verify_status, b""
         if "install" in inner:
             prefix = Path(inner[0]).parent.parent
             site = prefix / "lib/python3.12/site-packages"
@@ -206,12 +220,23 @@ def env(tmp_path, monkeypatch):
             return state.pip_status, b""
         if "check" in inner:
             return state.check_status, b""
-        return state.smoke_status, b"OpenSSL 3.0.99 1 Jan 2099\n"
+        return state.smoke_status, state.smoke_output
 
     monkeypatch.setattr(ei, "_run", fake_run)
     monkeypatch.setattr(ei.engine_runtime, "extract_pinned_runtime", fake_extract)
     state.install = lambda name="dest": ei.install(house, report_path, out / name)
     return state
+
+
+def _profile(*writable: Path) -> str:
+    paths = "".join(f'(subpath "{os.path.realpath(p)}")' for p in writable)
+    return ("(version 1)(allow default)(deny network*)(deny file-write*)"
+            f'(allow file-write* {paths}(literal "/dev/null")(literal "/dev/dtracehelper"))')
+
+
+def _inner(call) -> list[str]:
+    assert call[0][:2] == ["/usr/bin/sandbox-exec", "-p"]
+    return call[0][3:]
 
 
 def _leftovers(out: Path) -> list[str]:
@@ -246,7 +271,7 @@ def test_pip_argv_env_and_sandbox_are_exact(env):
     work = Path(environment["HOME"]).parent
     prefix = work / "prefix"
     assert argv == [
-        "/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)(deny network*)",
+        "/usr/bin/sandbox-exec", "-p", _profile(prefix, work / "home"),
         str(prefix / "bin/python3.12"), "-I", "-B", "-m", "pip", "install", "--isolated", "--no-index",
         "--find-links", str(work / "links"), "--only-binary", ":all:", "--require-hashes", "--no-compile",
         "--no-warn-script-location", "--disable-pip-version-check", "--no-input",
@@ -262,8 +287,9 @@ def test_pip_check_and_smoke_run_under_the_same_env_and_sandbox(env):
     pip = next(c for c in env.calls if "install" in c[0])
     check = next(c for c in env.calls if c[0][-2:] == ["pip", "check"])
     smoke = next(c for c in env.calls if "-c" in c[0])
+    home = Path(pip[1]["HOME"])
     for call in (check, smoke):
-        assert call[0][:3] == [ei.SANDBOX_EXEC, "-p", ei.SANDBOX_PROFILE]
+        assert call[0][:3] == [ei.SANDBOX_EXEC, "-p", _profile(home)]
         assert call[1] == pip[1]
         assert call[0][4:6] == ["-I", "-B"]
     code = smoke[0][smoke[0].index("-c") + 1]
@@ -272,20 +298,45 @@ def test_pip_check_and_smoke_run_under_the_same_env_and_sandbox(env):
     assert len(ei.SMOKE_MODULES) == 28
 
 
-def test_derived_wheel_runs_as_a_child_process_build_then_verify(env):
+def test_derived_wheel_runs_as_a_sandboxed_child_process_build_then_verify(env):
     receipt = env.install()
-    builds = [c for c in env.calls if c[0][0] == sys.executable]
-    assert [c[0][3] for c in builds] == ["build", "verify"]
+    builds = [c for c in env.calls if _inner(c)[0] == sys.executable]
+    assert [_inner(c)[3] for c in builds] == ["build", "verify"]
     work = Path(builds[0][1]["HOME"]).parent
+    home = work / "home"
     assert builds[0][0] == [
+        ei.SANDBOX_EXEC, "-p", _profile(work / "derived", home),
         sys.executable, "-I", str(ei.DERIVED_WHEEL_SCRIPT), "build", "--name", "http-ece",
         "--sdist", str(env.house / "http_ece-1.2.1.tar.gz"),
         "--backend-wheel", str(env.house / "setuptools-1.0-py3-none-any.whl"),
-        "--destination", str(work / "derived")]
+        "--destination", str(work / "derived/http-ece")]
+    assert builds[1][0][:3] == [ei.SANDBOX_EXEC, "-p", _profile(home)]
     assert builds[1][0][-4:-2] == ["--name", "http-ece"]
     assert receipt["derived"][0]["wheel"]["sha256"] == _sha(env.derived_bytes)
     assert builds[0][1] == {"PATH": "/usr/bin:/bin", "HOME": str(work / "home"),
                             "TMPDIR": str(work / "home"), "LANG": "C"}
+
+
+def test_sandbox_profile_denies_network_and_confines_writes(tmp_path):
+    real = tmp_path.resolve() / "a"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    assert ei.sandbox_profile([link]) == _profile(real)
+    profile = ei.sandbox_profile([real])
+    assert profile.index("(deny network*)") < profile.index("(deny file-write*)") < profile.index("(allow file-write*")
+
+
+@pytest.mark.parametrize("name", ['we"ird', "back\\slash", "new\nline"])
+def test_sandbox_profile_refuses_paths_that_need_escaping(tmp_path, name):
+    with pytest.raises(ei.InstallError):
+        ei.sandbox_profile([tmp_path / name])
+
+
+def test_every_child_runs_under_a_network_and_write_confining_profile(env):
+    env.install()
+    assert len(env.profiles) == len(env.calls) == 5
+    assert all("(deny network*)(deny file-write*)" in profile for profile in env.profiles)
 
 
 def test_module_never_imports_the_in_process_derived_wheel_builder():
@@ -413,7 +464,7 @@ def test_report_with_tampered_lock_row_is_refused(env):
 # ------------------------------------------------- failure => no output
 
 
-@pytest.mark.parametrize("flag", ["d1_status", "pip_status", "check_status", "smoke_status"])
+@pytest.mark.parametrize("flag", ["d1_status", "verify_status", "pip_status", "check_status", "smoke_status"])
 def test_a_failing_child_process_leaves_no_destination(env, flag):
     setattr(env, flag, 1)
     with pytest.raises(ei.InstallError):
@@ -421,28 +472,97 @@ def test_a_failing_child_process_leaves_no_destination(env, flag):
     assert _leftovers(env.out) == []
 
 
-def test_d1_exit_one_stops_before_pip(env):
-    env.d1_status = 1
+@pytest.mark.parametrize("flag", ["d1_status", "verify_status"])
+def test_d1_exit_one_stops_before_pip_and_publishes_nothing(env, flag):
+    # build exits 1 while still printing a valid receipt and leaving the pinned wheel behind.
+    setattr(env, flag, 1)
     with pytest.raises(ei.InstallError):
         env.install()
     assert not any("install" in c[0] for c in env.calls)
+    assert _leftovers(env.out) == []
 
 
-def test_d1_receipt_that_differs_from_the_pin_fails_the_install(env, monkeypatch):
-    real = ei._run
-
-    def lying(argv, env_, cwd, timeout):
-        status, out = real(argv, env_, cwd, timeout)
-        if argv[0] == sys.executable and argv[3] == "build":
-            body = json.loads(out)
-            body["wheel"]["sha256"] = "0" * 64
-            out = json.dumps(body, sort_keys=True, indent=2).encode()
-        return status, out
-
-    monkeypatch.setattr(ei, "_run", lying)
+@pytest.mark.parametrize("edit", [
+    lambda b: b["wheel"].update(sha256="0" * 64),
+    lambda b: b["wheel"].update(size=1),
+    lambda b: b["wheel"].update(filename="other-1.2.1-py3-none-any.whl"),
+    lambda b: b.update(name="other"),
+    lambda b: b.update(version="1.2.2"),
+    lambda b: b.update(sdist_sha256="0" * 64),
+    lambda b: b.update(backend_sha256="0" * 64),
+    lambda b: b.pop("sdist_sha256"),
+    lambda b: b.update(wheel="not-a-dict"),
+], ids=["sha", "size", "filename", "name", "version", "sdist-pin", "backend-pin", "no-sdist", "wheel-type"])
+def test_d1_receipt_that_differs_from_the_pin_fails_the_install(env, edit):
+    env.d1_receipt_edit = edit
     with pytest.raises(ei.InstallError):
         env.install()
     assert _leftovers(env.out) == []
+
+
+def test_extra_keys_in_the_d1_receipt_never_reach_the_install_receipt(env):
+    env.d1_receipt_edit = lambda body: body.update(extra={"path": str(env.out)}, python="3.13.0")
+    receipt = env.install()
+    assert receipt["derived"] == [{
+        "name": "http-ece", "version": "1.2.1",
+        "wheel": {"filename": DERIVED_WHEEL, "size": len(env.derived_bytes), "sha256": _sha(env.derived_bytes)}}]
+    saved = (env.out / "dest/install-receipt.json").read_text()
+    assert "3.13.0" not in saved and "members" not in saved and "driver_sha256" not in saved
+
+
+def test_the_real_receipt_wins_over_fake_objects_in_backend_noise(env):
+    fake_other = b'{\n  "name": "http-ece",\n  "unrelated": true\n}\n'
+    env.d1_prefix_noise = b"warn\n{\n" + D1_NOISE_FAKE + b"\n" + b"x\n" + fake_other
+    assert env.install()["derived"][0]["name"] == "http-ece"
+
+
+def test_a_fake_receipt_ahead_of_a_bad_real_one_cannot_rescue_it(env):
+    # rfind picks the last object, so a good-looking fake placed first never replaces a wrong real receipt.
+    good = json.dumps({"name": "http-ece", "version": "1.2.1", "sdist_sha256": _sha(b"sdist-bytes"),
+                       "backend_sha256": _sha(b"setuptools-bytes"),
+                       "wheel": {"filename": DERIVED_WHEEL, "size": len(env.derived_bytes),
+                                 "sha256": _sha(env.derived_bytes)}}, sort_keys=True, indent=2)
+    env.d1_prefix_noise = ("noise\n" + good + "\n").encode()
+    env.d1_receipt_edit = lambda body: body["wheel"].update(sha256="0" * 64)
+    with pytest.raises(ei.InstallError):
+        env.install()
+
+
+def test_an_extra_file_next_to_the_derived_wheel_is_refused(env):
+    env.d1_extra_file = True
+    with pytest.raises(ei.InstallError):
+        env.install()
+    assert not any("install" in c[0] for c in env.calls)
+    assert _leftovers(env.out) == []
+
+
+def test_a_destination_created_during_the_install_is_never_replaced(env, monkeypatch):
+    real = ei.engine_runtime.extract_pinned_runtime
+    target = env.out / "dest"
+
+    def extract_and_race(archive, destination):
+        real(archive, destination)
+        target.mkdir()
+
+    monkeypatch.setattr(ei.engine_runtime, "extract_pinned_runtime", extract_and_race)
+    with pytest.raises(ei.InstallError):
+        env.install()
+    assert list(target.iterdir()) == []
+    assert _leftovers(env.out) == ["dest"]
+
+
+@pytest.mark.parametrize("output", [b"Python 3.12\n", b"OpenSSL 3\nOpenSSL 3\n", b"OpenSSL " + b"x" * 200 + b"\n",
+                                    b"", b"OpenSSL 3.0.99\nextra"], ids=["not-openssl", "two-lines", "too-long", "empty", "trailing"])
+def test_smoke_output_shape_is_enforced(env, output):
+    env.smoke_output = output
+    with pytest.raises(ei.InstallError):
+        env.install()
+    assert _leftovers(env.out) == []
+
+
+def test_smoke_output_libressl_is_accepted(env):
+    env.smoke_output = b"LibreSSL 3.3.6\n"
+    assert env.install()["openssl_version"] == "LibreSSL 3.3.6"
 
 
 def test_a_derived_wheel_that_is_not_the_pinned_bytes_fails(env, monkeypatch):
@@ -450,7 +570,7 @@ def test_a_derived_wheel_that_is_not_the_pinned_bytes_fails(env, monkeypatch):
 
     def swapping(argv, env_, cwd, timeout):
         status, out = real(argv, env_, cwd, timeout)
-        if argv[0] == sys.executable and argv[3] == "build":
+        if argv[3] == sys.executable and argv[6] == "build":
             destination = Path(argv[argv.index("--destination") + 1])
             (destination / DERIVED_WHEEL).write_bytes(b"x" * len(env.derived_bytes))
         return status, out
@@ -573,6 +693,26 @@ def test_missing_distribution_from_the_report_is_refused(tmp_path):
     _dist(site, "foo", "1.0", [])
     with pytest.raises(ei.InstallError):
         _validate(site, _rows(foo="1.0", bar="2.0"))
+
+
+ROOTS = '[project]\nname = "x"\nversion = "1"\ndependencies = ["foo==1.0", %s]\n'
+
+
+def test_a_root_whose_marker_is_false_for_the_target_need_not_be_installed(tmp_path):
+    site = _site(tmp_path)
+    _dist(site, "foo", "1.0", [])
+    pyproject = ROOTS % "'winonly>=1; sys_platform == \"win32\"'"
+    assert set(_validate(site, _rows(foo="1.0"), pyproject)) == {"pip", "foo"}
+
+
+def test_a_root_whose_marker_holds_must_be_installed(tmp_path):
+    site = _site(tmp_path)
+    _dist(site, "foo", "1.0", [])
+    pyproject = ROOTS % "'macdep>=1; sys_platform == \"darwin\"'"
+    with pytest.raises(ei.InstallError):
+        _validate(site, _rows(foo="1.0"), pyproject)
+    _dist(site, "macdep", "1.0", [])
+    assert "macdep" in _validate(site, _rows(foo="1.0", macdep="1.0"), pyproject)
 
 
 def test_root_requirement_must_be_satisfied(tmp_path):
@@ -700,14 +840,57 @@ def test_cli_sanitizes_unexpected_exceptions(monkeypatch, capsys):
     assert capsys.readouterr().err == "engine install failed\n"
 
 
-def test_derived_receipt_is_found_after_backend_stdout_noise(env, monkeypatch):
-    real = ei._run
-
-    def noisy(argv, env_, cwd, timeout):
-        status, out = real(argv, env_, cwd, timeout)
-        if argv[0] == sys.executable and argv[3] == "build":
-            out = b"warning line\n{ inline brace\n" + json.dumps(json.loads(out), sort_keys=True, indent=2).encode()
-        return status, out
-
-    monkeypatch.setattr(ei, "_run", noisy)
+def test_derived_receipt_is_found_after_backend_stdout_noise(env):
+    env.d1_prefix_noise = b"warning line\n{ inline brace\n"
     assert env.install()["derived"][0]["name"] == "http-ece"
+
+
+# --------------------------------------------------------- process seam (real)
+
+
+def _py(code: str) -> list[str]:
+    return [sys.executable, "-I", "-c", code]
+
+
+def _gone(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+def test_run_returns_status_and_output(tmp_path):
+    assert REAL_RUN(_py("print('hi')"), {"PATH": "/usr/bin:/bin"}, tmp_path, 30) == (0, b"hi\n")
+    assert REAL_RUN(_py("raise SystemExit(3)"), {"PATH": "/usr/bin:/bin"}, tmp_path, 30) == (3, b"")
+
+
+def test_run_deadline_covers_a_grandchild_holding_the_pipe(tmp_path):
+    pidfile = tmp_path / "grandchild.pid"
+    code = ("import os, subprocess, sys\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            f"open({str(pidfile)!r}, 'w').write(str(child.pid))\n")
+    started = time.monotonic()
+    with pytest.raises(ei.InstallError):
+        REAL_RUN(_py(code), {"PATH": "/usr/bin:/bin"}, tmp_path, 2)
+    assert time.monotonic() - started < 20
+    pid = int(pidfile.read_text())
+    for _ in range(100):
+        if _gone(pid):
+            break
+        time.sleep(0.05)
+    assert _gone(pid)
+
+
+def test_run_caps_output_while_streaming_and_kills_the_child(tmp_path, monkeypatch):
+    monkeypatch.setattr(ei, "MAX_OUTPUT", 100_000)
+    code = "import sys\nwhile True:\n    sys.stdout.write('x' * 65536)\n    sys.stdout.flush()\n"
+    started = time.monotonic()
+    with pytest.raises(ei.InstallError):
+        REAL_RUN(_py(code), {"PATH": "/usr/bin:/bin"}, tmp_path, 120)
+    assert time.monotonic() - started < 60
+
+
+def test_run_child_leads_its_own_process_group(tmp_path):
+    status, out = REAL_RUN(_py("import os; print(os.getpgrp() == os.getpid())"), {"PATH": "/usr/bin:/bin"}, tmp_path, 30)
+    assert (status, out) == (0, b"True\n")

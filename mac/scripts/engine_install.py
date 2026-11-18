@@ -23,18 +23,21 @@ import importlib.util
 import json
 import os
 import platform
+import selectors
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 from email.parser import BytesHeaderParser
 from pathlib import Path
 from typing import Any
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
-SANDBOX_PROFILE = "(version 1)(allow default)(deny network*)"
+SANDBOX_DEVICES = ("/dev/null", "/dev/dtracehelper")
 CHILD_PATH = "/usr/bin:/bin"
 RUNTIME_PIP = ("pip", "26.3")
 RECEIPT_NAME = "install-receipt.json"
@@ -100,20 +103,76 @@ def _child_env(home: Path) -> dict[str, str]:
     return {"PATH": CHILD_PATH, "HOME": os.fspath(home), "TMPDIR": os.fspath(home), "LANG": "C"}
 
 
-def _sandboxed(argv: list[str]) -> list[str]:
-    return [SANDBOX_EXEC, "-p", SANDBOX_PROFILE, *argv]
+def _sbpl_path(path: Path) -> str:
+    """A resolved absolute path as an SBPL string literal; anything needing escapes is refused."""
+    resolved = os.path.realpath(path)
+    _require(os.path.isabs(resolved) and all(c.isprintable() and c not in '"\\' for c in resolved))
+    return resolved
+
+
+def sandbox_profile(writable: list[Path]) -> str:
+    """Network denied; writes denied except under the given private directories and a few devices."""
+    allowed = "".join(f'(subpath "{_sbpl_path(path)}")' for path in writable)
+    allowed += "".join(f'(literal "{device}")' for device in SANDBOX_DEVICES)
+    return f"(version 1)(allow default)(deny network*)(deny file-write*)(allow file-write* {allowed})"
+
+
+def _sandboxed(argv: list[str], writable: list[Path]) -> list[str]:
+    return [SANDBOX_EXEC, "-p", sandbox_profile(writable), *argv]
+
+
+def _kill_group(proc: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _run(argv: list[str], env: dict[str, str], cwd: Path, timeout: int) -> tuple[int, bytes]:
-    """The single process seam: no shell, no inherited stdin or stderr, bounded output."""
+    """The single process seam: no shell, no inherited stdin or stderr.
+
+    The child leads its own process group. The deadline covers the whole group (a grandchild that
+    keeps the pipe open cannot outlive it) and output is capped while it is read, not afterwards.
+    """
+    deadline = time.monotonic() + timeout
     try:
-        completed = subprocess.run(
+        proc = subprocess.Popen(
             argv, env=env, cwd=cwd, shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, check=False, timeout=timeout)
+            stderr=subprocess.DEVNULL, start_new_session=True)
     except (OSError, subprocess.SubprocessError) as exc:
         raise InstallError("invalid install") from exc
-    _require(len(completed.stdout) <= MAX_OUTPUT)
-    return completed.returncode, completed.stdout
+    chunks: list[bytes] = []
+    total = 0
+    assert proc.stdout is not None
+    try:
+        fd = proc.stdout.fileno()
+        with selectors.DefaultSelector() as selector:
+            selector.register(fd, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                _require(remaining > 0)
+                if not selector.select(remaining):
+                    continue
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                _require(total <= MAX_OUTPUT)
+                chunks.append(chunk)
+        remaining = deadline - time.monotonic()
+        _require(remaining > 0)
+        proc.wait(timeout=remaining)
+    except (OSError, subprocess.SubprocessError) as exc:
+        _kill_group(proc)
+        proc.wait()
+        raise InstallError("invalid install") from exc
+    except BaseException:
+        _kill_group(proc)
+        proc.wait()
+        raise
+    finally:
+        proc.stdout.close()
+    return proc.returncode, b"".join(chunks)
 
 
 # ------------------------------------------------------------------ step 1
@@ -464,47 +523,61 @@ def refuse_build_path(prefix: Path, site: Path, baseline: set[str], build_path: 
 # ----------------------------------------------------------------- derive
 
 
+def _derived_receipt(output: bytes, pin: dict[str, Any], tool: dict[str, Any]) -> dict[str, Any]:
+    """Find D1's receipt in its stdout and rebuild it from validated fields only (identical on every host)."""
+    # The setuptools backend writes warnings to stdout before D1 prints its receipt, which is
+    # the one pretty-printed object that starts at column 0 and runs to the end. The last such
+    # object wins; the pin comparison below, not the position, is the authority.
+    found = output.rfind(b"\n{\n")
+    start = found + 1 if found >= 0 else 0
+    try:
+        _require(output[start:].startswith(b"{\n"))
+        receipt = json.loads(output[start:].decode("utf-8"), object_pairs_hook=_json_object,
+                             parse_constant=engine_fetch._reject_constant)
+    except (UnicodeError, ValueError, RecursionError) as exc:
+        raise InstallError("invalid install") from exc
+    wheel = pin["wheel"]
+    _require(type(receipt) is dict and receipt.get("name") == pin["name"]
+             and receipt.get("version") == pin["version"]
+             and receipt.get("sdist_sha256") == pin["sdist"]["sha256"]
+             and receipt.get("backend_sha256") == tool["sha256"])
+    built = receipt.get("wheel")
+    _require(type(built) is dict and built.get("filename") == wheel["filename"]
+             and built.get("size") == wheel["size"] and built.get("sha256") == wheel["sha256"])
+    return {"name": pin["name"], "version": pin["version"],
+            "wheel": {"filename": wheel["filename"], "size": wheel["size"], "sha256": wheel["sha256"]}}
+
+
 def derive_wheels(selection: _Selection, house: Path, work: Path, home: Path) -> list[dict[str, Any]]:
-    """Build and verify each derived wheel in the D1 child process; return the D1 receipts."""
+    """Build and verify each derived wheel in sandboxed D1 child processes; return the validated receipts."""
     receipts: list[dict[str, Any]] = []
     data = selection.inputs.build_inputs.data
     tools = [tool for tool in data["build_tools"] if tool["name"] == "setuptools"]
     _require(len(tools) == 1)
     env = _child_env(home)
+    derived = work / "derived"
+    derived.mkdir(mode=0o700)
     for row in selection.rows:
         if row["origin"] != "derived":
             continue
         pin = next((d for d in data["derived_wheels"] if d["name"] == row["name"]), None)
         _require(pin is not None)
-        destination = work / "derived"
+        destination = derived / row["name"]
         build = [sys.executable, "-I", os.fspath(DERIVED_WHEEL_SCRIPT), "build", "--name", row["name"],
                  "--sdist", os.fspath(house / pin["sdist"]["filename"]),
                  "--backend-wheel", os.fspath(house / tools[0]["filename"]),
                  "--destination", os.fspath(destination)]
-        status, output = _run(build, env, home, DERIVE_DEADLINE)
+        status, output = _run(_sandboxed(build, [derived, home]), env, home, DERIVE_DEADLINE)
         _require(status == 0)
-        # The setuptools backend writes warnings to stdout before D1 prints its receipt, which
-        # is the one pretty-printed object that starts at column 0 and runs to the end.
-        found = output.rfind(b"\n{\n")
-        start = found + 1 if found >= 0 else 0
-        try:
-            _require(output[start:].startswith(b"{\n"))
-            receipt = json.loads(output[start:].decode("utf-8"), object_pairs_hook=_json_object,
-                                 parse_constant=engine_fetch._reject_constant)
-        except (UnicodeError, ValueError, RecursionError) as exc:
-            raise InstallError("invalid install") from exc
+        receipt = _derived_receipt(output, pin, tools[0])
         wheel = pin["wheel"]
-        _require(type(receipt) is dict and receipt.get("name") == pin["name"]
-                 and receipt.get("version") == pin["version"])
-        built = receipt.get("wheel")
-        _require(type(built) is dict and built.get("filename") == wheel["filename"]
-                 and built.get("size") == wheel["size"] and built.get("sha256") == wheel["sha256"])
         wheel_path = destination / wheel["filename"]
-        status, _ = _run([sys.executable, "-I", os.fspath(DERIVED_WHEEL_SCRIPT), "verify", "--name",
-                          row["name"], "--wheel", os.fspath(wheel_path)], env, home, CHECK_DEADLINE)
+        verify = [sys.executable, "-I", os.fspath(DERIVED_WHEEL_SCRIPT), "verify", "--name", row["name"],
+                  "--wheel", os.fspath(wheel_path)]
+        status, _ = _run(_sandboxed(verify, [home]), env, home, CHECK_DEADLINE)
         _require(status == 0)
-        _require(sorted(entry.name for entry in destination.iterdir()) == [wheel["filename"]])
         try:
+            _require(sorted(entry.name for entry in destination.iterdir()) == [wheel["filename"]])
             _require(engine_fetch._verify_file(wheel_path, wheel["size"], wheel["sha256"]))
         except OSError as exc:
             raise InstallError("invalid install") from exc
@@ -519,7 +592,7 @@ def stage_links(selection: _Selection, house: Path, work: Path, links: Path) -> 
     for row in selection.rows:
         try:
             if row["origin"] == "derived":
-                source = work / "derived" / row["filename"]
+                source = work / "derived" / row["name"] / row["filename"]
             else:
                 _require(row["filename"] in lock_files)
                 source = house / row["filename"]
@@ -576,12 +649,13 @@ def install(wheelhouse: Path, audit_report: Path, destination: Path) -> dict[str
         requirements.write_text(requirements_text(selection.rows), encoding="utf-8")
         # Step 5: offline, sandboxed install into the prefix's own site-packages.
         env = _child_env(home)
-        status, _ = _run(_sandboxed(pip_argv(python, work / "links", requirements)), env, home, PIP_DEADLINE)
+        status, _ = _run(_sandboxed(pip_argv(python, work / "links", requirements), [prefix, home]), env, home,
+                         PIP_DEADLINE)
         _require(status == 0)
         # Step 6.
         target = engine_dependencies.Target(pin)
         installed = validate_installed(site, selection.rows, packaging, target, inputs.pyproject_bytes)
-        status, _ = _run(_sandboxed([os.fspath(python), "-I", "-B", "-m", "pip", "check"]), env, home,
+        status, _ = _run(_sandboxed([os.fspath(python), "-I", "-B", "-m", "pip", "check"], [home]), env, home,
                          CHECK_DEADLINE)
         _require(status == 0)
         check_added(prefix, baseline)
@@ -592,7 +666,7 @@ def install(wheelhouse: Path, audit_report: Path, destination: Path) -> dict[str
         # Step 8.
         code = ("import importlib, ssl\nfor name in %r:\n    importlib.import_module(name)\n"
                 "print(ssl.OPENSSL_VERSION)\n" % (SMOKE_MODULES,))
-        status, output = _run(_sandboxed([os.fspath(python), "-I", "-B", "-c", code]), env, home,
+        status, output = _run(_sandboxed([os.fspath(python), "-I", "-B", "-c", code], [home]), env, home,
                               SMOKE_DEADLINE)
         _require(status == 0)
         lines = output.decode("utf-8", "replace").splitlines()
@@ -614,6 +688,9 @@ def install(wheelhouse: Path, audit_report: Path, destination: Path) -> dict[str
             handle.write(json.dumps(receipt, sort_keys=True, indent=2) + "\n")
         shutil.rmtree(home)
         shutil.rmtree(work / "links")
+        # One rename, re-checked just before. A rename onto an existing empty directory succeeds
+        # on macOS, so the exclusively owned 0700 parent (nobody else can create the name) is the
+        # no-replace guarantee; this check only catches a mistaken caller.
         _require(not os.path.lexists(destination))
         os.rename(work, destination)
         work = None
