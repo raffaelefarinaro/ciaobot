@@ -43,6 +43,7 @@ _WATCH_FAST_POLLS = 40
 _WATCH_FAST_INTERVAL = 0.25
 _WATCH_SLOW_INTERVAL = 3.0
 _KILL_SETTLE_TIMEOUT = 3.0
+_EXIT_POLL_INTERVAL = 0.05
 # The ACP layer is POSIX-only for now; Windows gets the closest signal Python defines.
 if sys.platform == "win32":
     _SIGKILL = signal.SIGTERM
@@ -211,7 +212,10 @@ class AcpConnection:
             client_capabilities=capabilities,
             client_info={"name": "ciaobot", "version": __version__},
         ))
-        exited = asyncio.ensure_future(self._process.wait())
+        # Not Process.wait: on Python 3.12 that stays pending until every stdio
+        # pipe disconnects, and a grandchild that inherited them holds it open
+        # for the whole initialize timeout.
+        exited = asyncio.ensure_future(_wait_child_exit(self._process))
         try:
             done, _pending = await asyncio.wait(
                 {request, exited},
@@ -237,7 +241,9 @@ class AcpConnection:
                 # The stream closed on us: if the process is gone, say how.
                 with contextlib.suppress(asyncio.TimeoutError, TimeoutError):
                     await asyncio.wait_for(asyncio.shield(exited), timeout=0.5)
-            if exited.done():
+            # returncode is set when the child is reaped, even if exited is
+            # still in its poll sleep or stdio is still open.
+            if self._process.returncode is not None:
                 reason = f"the process exited with code {self._process.returncode}"
             elif request in done:
                 reason = str(request_error) or type(request_error).__name__
@@ -302,6 +308,23 @@ class AcpConnection:
         self._closed = True
         if not task.cancelled():
             task.exception()
+
+
+async def _wait_child_exit(process: asyncio.subprocess.Process) -> int:
+    """Return this process's exit code once the process itself has exited.
+
+    Python 3.12 wakes ``Process.wait`` only from ``_call_connection_lost``,
+    after every stdio pipe has disconnected. A descendant that inherited those
+    pipes (``close_fds`` still leaves 0, 1 and 2 open) keeps the wait pending
+    until the pipes close, so an agent that exits during initialize is reported
+    as the initialize timeout. The transport stores the return code as soon as
+    the child is reaped, while those pipes are still open.
+    """
+    while True:
+        code = process.returncode
+        if code is not None:
+            return code
+        await asyncio.sleep(_EXIT_POLL_INTERVAL)
 
 
 async def _drain_stderr(stream: asyncio.StreamReader, ring: StderrRing, agent_id: str) -> None:

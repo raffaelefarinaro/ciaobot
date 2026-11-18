@@ -155,6 +155,62 @@ async def test_exit_during_initialize_raises_with_stderr_tail_and_kills_orphans(
 
 
 @pytest.mark.asyncio
+async def test_exit_during_initialize_notices_child_while_grandchild_holds_stdio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The parent's exit is visible while a descendant still holds its stdio.
+
+    ``spawn_tree`` inherits fds 0, 1 and 2. Python 3.12's ``Process.wait``,
+    which Linux CI runs, does not finish until those pipes disconnect, so this
+    patches ``wait`` to that behaviour on every OS. Noticing the exit has to
+    happen before the pipes close, and the orphaned tree is still killed.
+    """
+
+    async def wait_until_stdio_closes(self: asyncio.subprocess.Process) -> int:
+        transport = self._transport
+        while True:
+            code = transport.get_returncode()
+            pipes_closed = all(
+                pipe is not None and pipe.disconnected for pipe in transport._pipes.values()
+            )
+            if code is not None and pipes_closed:
+                return code
+            await asyncio.sleep(0.05)
+
+    held_stdio = False
+    real_wait = connection_module._wait_child_exit
+
+    async def watch(process: asyncio.subprocess.Process) -> int:
+        nonlocal held_stdio
+        code = await real_wait(process)
+        held_stdio = any(
+            pipe is not None and not pipe.disconnected
+            for pipe in process._transport._pipes.values()
+        )
+        return code
+
+    monkeypatch.setattr(asyncio.subprocess.Process, "wait", wait_until_stdio_closes)
+    monkeypatch.setattr(connection_module, "_wait_child_exit", watch)
+    spec, _calls = write_scenario(
+        tmp_path, exit_during_initialize=True, initialize_delay_ms=1000,
+        stderr=["fatal: no login"], spawn_tree=True,
+    )
+    started = time.monotonic()
+    pids: dict[str, int] = {}
+    try:
+        with pytest.raises(AgentStartError) as excinfo:
+            await _open(spec, tmp_path)
+        pids = _tree_pids(tmp_path)
+        assert time.monotonic() - started < spec.initialize_timeout_s / 2
+        assert held_stdio
+        assert "exited" in str(excinfo.value)
+        assert "fatal: no login" in excinfo.value.stderr_tail
+        await _assert_tree_gone(pids)
+    finally:
+        _reap_leftovers(pids)
+
+
+@pytest.mark.asyncio
 async def test_exit_during_initialize_without_children(tmp_path: Path) -> None:
     spec, _calls = write_scenario(tmp_path, exit_during_initialize=True, stderr=["fatal: no login"])
     started = time.monotonic()
