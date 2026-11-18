@@ -447,8 +447,6 @@ export interface ChatMessage {
   // typed. Drives the ↻ marker on the bubble, so a self-driven turn is not
   // mistaken for something the reader sent. Only present on user messages.
   unattended?: boolean
-  // Sent into the running turn instead of starting its own (steered).
-  steered?: boolean
   // Set when the engine wrote this user turn (wake, automation, webhook, ...); drawn as a notice card.
   origin?: TurnOrigin
   // Engine-recorded context pack a provider handover sent; on the handover marker only.
@@ -533,11 +531,6 @@ export interface RunningSubagentsResponse {
 }
 
 // ── WebSocket events ────────────────────────────────────────────────────
-
-// What a queued message will do: wait for the next turn, or be handed to the
-// running one through the provider's native steering.
-export type QueueDelivery = 'queue' | 'steer'
-export type SteerFallbackReason = 'no_turn' | 'not_running' | 'finished' | 'stopped' | 'send_id_limit'
 
 export type WsEvent =
   // parent_tool_use_id is set when the event came from inside a Task
@@ -653,17 +646,12 @@ export type WsEvent =
       already_resolved?: boolean;
     }
   | { type: 'question_resolved'; request_id: string; session_id?: string }
-  | { type: 'queued'; id?: string; text: string; images?: string[]; delivery?: QueueDelivery; waiting?: boolean; send_id?: string }
-  | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[]; delivery?: QueueDelivery; steering?: boolean; waiting?: boolean }> }
+  | { type: 'queued'; id?: string; text: string; images?: string[]; waiting?: boolean; send_id?: string }
+  | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[]; waiting?: boolean }> }
   | { type: 'queue_take_result'; request_id: string; entry_id: string; ok: boolean; text: string; images: string[] }
-  // A steer reached the running turn: the entries leave the queue and the
-  // message becomes its own user turn.
-  | { type: 'steered'; entry_ids: string[]; text: string; images?: string[]; turn_index?: number; sent_at?: string; delivery_id?: string; origin?: TurnOrigin }
   // Stop cancelled a prompt before the provider picked it up: its user turn
   // never happened. The prompt comes back as a waiting queue entry.
   | { type: 'prompt_cancelled'; turn_index: number }
-  // A steer could not be delivered; the entries are back in the queue.
-  | { type: 'steer_fallback'; entry_ids: string[]; reason: SteerFallbackReason }
   | { type: 'error'; message: string }
   | { type: 'auth_required'; message?: string }
   // Server is draining for restart; client should show RestartNotice, not
@@ -677,8 +665,8 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string; background?: boolean }[]; background_agents?: Record<string, number>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; chat_actions?: Record<string, ChatAction[]>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; keyboard_revision?: string; appearance?: AppearancePayload | null }
-  | { type: 'keyboard_settings_changed'; keyboard_shortcuts: Record<string, string>; keyboard_send_mode: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; revision: string }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string; background?: boolean }[]; background_agents?: Record<string, number>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; chat_actions?: Record<string, ChatAction[]>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; keyboard_revision?: string; appearance?: AppearancePayload | null }
+  | { type: 'keyboard_settings_changed'; keyboard_shortcuts: Record<string, string>; keyboard_send_mode: 'modifier' | 'enter'; revision: string }
   | ({ type: 'appearance_settings_changed' } & AppearancePayload)
   | { type: 'chat_pin_changed'; chat_id: string; path: string; dismissed_paths: string[]; revision: number }
   | { type: 'chat_actions_changed'; chat_id: string; actions: ChatAction[] }

@@ -169,7 +169,7 @@ describe('ChatPanel needs-you card', () => {
     const composer = panel.get('.chat-input').element
     expect(comesBefore(card, composer)).toBe(true)
 
-    store.queuedMessages[CHAT_ID] = [{ id: 'q1', text: 'one', delivery: 'queue', steering: false }] as never
+    store.queuedMessages[CHAT_ID] = [{ id: 'q1', text: 'one' }] as never
     await flushPromises()
     const queue = panel.get('.queued-messages').element
     expect(comesBefore(card, queue)).toBe(true)

@@ -138,7 +138,7 @@ const send = vi.fn()
 let socket: FakeSocket
 
 function queue(store: ReturnType<typeof useProjectStore>, entries: Array<Record<string, unknown>>) {
-  store.queuedMessages['chat-1'] = entries.map(e => ({ delivery: 'queue', steering: false, ...e })) as never
+  store.queuedMessages['chat-1'] = entries.map(e => ({ ...e })) as never
 }
 
 class FakeSocket {
@@ -258,164 +258,55 @@ describe('ChatPanel queued messages', () => {
     wrapper.unmount()
   })
 
-  it('renders a Queue/Steer button group with aria-pressed and a labelled excerpt', async () => {
+  it('a running turn shows Queued chips with no mode buttons', async () => {
     const { wrapper } = await mountPanel((store) => {
       store.streaming['chat-1'] = true
-      queue(store, [{ id: 'a', text: 'one' }, { id: 'b', text: 'two', delivery: 'steer' }])
-    })
-    const groups = wrapper.findAll('.queued-mode')
-    expect(groups).toHaveLength(2)
-    expect(groups[0].attributes('role')).toBe('group')
-    expect(groups[0].attributes('aria-label')).toContain('one')
-    const first = groups[0].findAll('button')
-    expect(first.map(r => r.text())).toEqual(['Queue', 'Steer'])
-    expect(first.map(r => r.attributes('aria-pressed'))).toEqual(['true', 'false'])
-    const second = groups[1].findAll('button')
-    expect(second.map(r => r.attributes('aria-pressed'))).toEqual(['false', 'true'])
-    wrapper.unmount()
-  })
-
-  it('choosing Steer sends one queue_set_delivery frame for that entry', async () => {
-    const { wrapper, store } = await mountPanel((s) => {
-      s.streaming['chat-1'] = true
-      queue(s, [{ id: 'a', text: 'one' }])
-    })
-    openSocket(store)
-    await wrapper.findAll('.queued-mode button')[1].trigger('click')
-    expect(JSON.parse(send.mock.calls[0][0])).toEqual({ type: 'queue_set_delivery', entry_ids: ['a'], delivery: 'steer' })
-    wrapper.unmount()
-  })
-
-  it('steers a message with images', async () => {
-    const { wrapper, store } = await mountPanel((s) => {
-      s.streaming['chat-1'] = true
-      queue(s, [{ id: 'a', text: 'look', images: ['shot.png'] }])
-    })
-    openSocket(store)
-    const steer = wrapper.findAll('.queued-mode button')[1]
-    expect(steer.attributes('disabled')).toBeUndefined()
-    await steer.trigger('click')
-    expect(JSON.parse(send.mock.calls[0][0])).toMatchObject({ entry_ids: ['a'], delivery: 'steer' })
-    wrapper.unmount()
-  })
-
-  it('Steer is disabled when not streaming; a waiting chip offers Send now instead', async () => {
-    const { wrapper, store } = await mountPanel((s) => {
-      queue(s, [{ id: 'w', text: 'held' }])
+      queue(store, [{ id: 'a', text: 'one' }, { id: 'b', text: 'two', waiting: true }])
     })
     expect(wrapper.find('.queued-mode').exists()).toBe(false)
-    const sendNow = wrapper.get('.queued-send-now')
-    expect(sendNow.text()).toBe('Send now')
-    expect(wrapper.get('.queued-label').text()).toBe('Waiting')
-    openSocket(store)
-    await sendNow.trigger('click')
-    expect(JSON.parse(send.mock.calls[0][0])).toEqual({ type: 'queue_set_delivery', entry_ids: ['w'], delivery: 'steer' })
+    expect(wrapper.find('.queued-send-now').exists()).toBe(false)
+    expect(wrapper.find('.queued-send-all').exists()).toBe(false)
+    const labels = wrapper.findAll('.queued-chip .queued-label').map(l => l.text())
+    expect(labels).toEqual(['Queued', 'Waiting'])
     wrapper.unmount()
   })
 
-  it('Steer all appears with two queue entries and sends both ids in list order', async () => {
+  it('idle waiting chips offer Send now and Send all now', async () => {
     const { wrapper, store } = await mountPanel((s) => {
-      s.streaming['chat-1'] = true
-      queue(s, [{ id: 'a', text: 'one' }, { id: 'b', text: 'two' }, { id: 'c', text: 'three', steering: true, delivery: 'steer' }])
+      queue(s, [{ id: 'a', text: 'one', waiting: true }, { id: 'b', text: 'two', waiting: true }])
     })
     openSocket(store)
-    const all = wrapper.get('.queued-steer-all')
-    expect(all.text()).toBe('Steer all')
+    const all = wrapper.get('.queued-send-all')
+    expect(all.text()).toBe('Send all now')
     await all.trigger('click')
     expect(JSON.parse(send.mock.calls[0][0])).toEqual({ type: 'queue_set_delivery', entry_ids: ['a', 'b'], delivery: 'steer' })
+    send.mockClear()
+    const one = wrapper.findAll('.queued-send-now')
+    expect(one.map(b => b.text())).toEqual(['Send now', 'Send now'])
+    await one[1].trigger('click')
+    expect(JSON.parse(send.mock.calls[0][0])).toEqual({ type: 'queue_set_delivery', entry_ids: ['b'], delivery: 'steer' })
     wrapper.unmount()
   })
 
-  it('Steer all is absent with a single queue entry', async () => {
+  it('Send all now is absent with a single waiting entry', async () => {
     const { wrapper } = await mountPanel((s) => {
-      s.streaming['chat-1'] = true
-      queue(s, [{ id: 'a', text: 'one' }])
+      queue(s, [{ id: 'a', text: 'one', waiting: true }])
     })
-    expect(wrapper.find('.queued-steer-all').exists()).toBe(false)
+    expect(wrapper.find('.queued-send-all').exists()).toBe(false)
+    expect(wrapper.find('.queued-send-now').exists()).toBe(true)
     wrapper.unmount()
   })
 
-  it('in-flight chip shows Steering… and hides the edit, reorder, remove and mode controls', async () => {
-    const { wrapper } = await mountPanel((s) => {
-      s.streaming['chat-1'] = true
-      queue(s, [{ id: 'a', text: 'one', delivery: 'steer', steering: true }])
-    })
-    const status = wrapper.get('.queued-steering')
-    expect(status.text()).toContain('Steering')
-    // The locked row is gone rather than shown disabled.
-    expect(wrapper.find('.queued-actions').exists()).toBe(false)
-    expect(wrapper.find('.queued-mode').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('shows the fallback notice as a status line outside the queue block', async () => {
-    const { wrapper } = await mountPanel((s) => {
-      s.streaming['chat-1'] = true
-      queue(s, [{ id: 'a', text: 'one' }])
-      s.steerNotice['chat-1'] = 'The reply Steering missed the reply. It will be sent as the next message.'
-    })
-    const notice = wrapper.get('.steer-notice')
-    expect(notice.attributes('role')).toBe('status')
-    expect(notice.text()).toContain('Steering missed the reply')
-    expect(wrapper.find('.queued-messages .steer-notice').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('shows the notice with no chips left', async () => {
-    const { wrapper } = await mountPanel((s) => {
-      s.steerNotice['chat-1'] = 'Stopped before it was steered. It stays in the queue.'
-    })
-    expect(wrapper.find('.queued-messages').exists()).toBe(false)
-    expect(wrapper.get('.steer-notice').text()).toContain('Stopped')
-    wrapper.unmount()
-  })
-
-  it('a waiting chip during a running turn reads Waiting with a Steer button, not Queue/Steer', async () => {
+  it('focus moves to the chip when its Send now is clicked and the chip stays', async () => {
     const { wrapper, store } = await mountPanel((s) => {
-      s.streaming['chat-1'] = true
-      queue(s, [{ id: 'w', text: 'held', waiting: true }, { id: 'l', text: 'live' }])
-    })
-    const chips = wrapper.findAll('.queued-chip')
-    expect(chips[0].find('.queued-mode').exists()).toBe(false)
-    expect(chips[0].get('.queued-label').text()).toBe('Waiting')
-    const steer = chips[0].get('.queued-send-now')
-    expect(steer.text()).toBe('Steer')
-    expect(chips[1].find('.queued-mode').exists()).toBe(true)
-    openSocket(store)
-    await steer.trigger('click')
-    expect(JSON.parse(send.mock.calls[0][0])).toEqual({ type: 'queue_set_delivery', entry_ids: ['w'], delivery: 'steer' })
-    wrapper.unmount()
-  })
-
-  it('moves focus to the chip when the focused Steer button is replaced', async () => {
-    const { wrapper, store } = await mountPanel((s) => {
-      s.streaming['chat-1'] = true
-      queue(s, [{ id: 'a', text: 'one' }])
+      queue(s, [{ id: 'a', text: 'one', waiting: true }])
     })
     openSocket(store)
-    const steer = wrapper.findAll('.queued-mode button')[1]
-    ;(steer.element as HTMLElement).focus()
-    await steer.trigger('click')
+    const sendNow = wrapper.get('.queued-send-now')
+    ;(sendNow.element as HTMLElement).focus()
+    await sendNow.trigger('click')
     await nextTick()
     expect(document.activeElement).toBe(wrapper.get('.queued-chip').element)
-    wrapper.unmount()
-  })
-
-  it('announces steering through one persistent live region in the queue container', async () => {
-    const { wrapper, store } = await mountPanel((s) => {
-      s.streaming['chat-1'] = true
-    })
-    // The region exists before any chip does, so a later change is announced.
-    const live = wrapper.get('.queue-live')
-    expect(live.attributes('aria-live')).toBe('polite')
-    expect(live.text()).toBe('')
-    queue(store, [
-      { id: 'a', text: 'one', delivery: 'steer', steering: true },
-      { id: 'b', text: 'two', delivery: 'steer', steering: true },
-    ])
-    await nextTick()
-    expect(wrapper.get('.queue-live').text()).toBe('Steering 2 messages')
-    expect(wrapper.findAll('.queued-chip [aria-live]')).toHaveLength(0)
     wrapper.unmount()
   })
 
@@ -450,18 +341,5 @@ describe('ChatPanel queued messages', () => {
     } finally {
       Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
     }
-  })
-
-  it('steered user bubble shows the steered mark', async () => {
-    const { wrapper } = await mountPanel((s) => {
-      s.messages['chat-1'] = [
-        { role: 'user', content: 'go', timestamp: '', turn_index: 0 },
-        { role: 'user', content: 'actually do X', timestamp: '', turn_index: 1, steered: true },
-      ] as never
-    })
-    const marks = wrapper.findAll('.steered-mark')
-    expect(marks).toHaveLength(1)
-    expect(marks[0].text()).toBe('steered')
-    wrapper.unmount()
   })
 })

@@ -63,7 +63,7 @@ it('shows the common shortcuts and discloses the rest', async () => {
 })
 
 it('does not capture or cancel an IME composition, then captures an Option arrow', async () => {
-  const settings = { keyboard_shortcuts: {}, keyboard_send_mode: 'modifier', mid_turn_delivery: 'queue', revision: '' }
+  const settings = { keyboard_shortcuts: {}, keyboard_send_mode: 'modifier', revision: '' }
   vi.spyOn(api, 'get').mockResolvedValue(settings)
   const save = vi.spyOn(api, 'patch').mockResolvedValue(settings)
   const wrapper = mount(SettingsKeyboardShortcuts)
@@ -84,5 +84,21 @@ it('does not capture or cancel an IME composition, then captures an Option arrow
     await flushPromises()
     expect(arrow.defaultPrevented).toBe(true)
     expect(save).toHaveBeenCalledWith('/api/settings/keyboard', expect.objectContaining({ keyboard_shortcuts: { previousChat: 'Alt+ArrowLeft' } }))
+  } finally { wrapper.unmount() }
+})
+
+it('restore defaults sends only shortcuts and send mode', async () => {
+  const settings = { keyboard_shortcuts: {}, keyboard_send_mode: 'modifier', revision: '' }
+  vi.spyOn(api, 'get').mockResolvedValue(settings)
+  const save = vi.spyOn(api, 'patch').mockResolvedValue(settings)
+  const wrapper = mount(SettingsKeyboardShortcuts)
+  try {
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('While a reply is running')
+    await wrapper.get('.settings-disclosure').trigger('click')
+    await flushPromises()
+    expect(save).toHaveBeenCalledTimes(1)
+    const body = save.mock.calls[0][1] as Record<string, unknown>
+    expect(Object.keys(body).sort()).toEqual(['keyboard_send_mode', 'keyboard_shortcuts', 'revision'])
   } finally { wrapper.unmount() }
 })
