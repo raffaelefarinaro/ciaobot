@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, isAbsolute, join, posix as posixPath, relative, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Dirent } from 'node:fs'
 import { filterInventory, inventory } from '../stories/inventory'
 import type { InventoryEntry, InventoryFilters } from '../stories/inventory'
 import { checkStorybookIndex } from '../../scripts/check-storybook-index'
-import { readStoryIndex } from '../stories/storyIndex'
+import { assertStoryCoverage, importSpecifiers, parseStoryFile, readStoryIndex, storyFiles } from '../stories/storyIndex'
+import type { StoryClaim, StoryClaimState, StoryCoverageOptions, StoryModule } from '../stories/storyIndex'
 
 const src = fileURLToPath(new URL('../', import.meta.url))
 const root = resolve(src, '../..')
@@ -56,52 +57,26 @@ function assertSourcePath(base: string, path: string, ops: PathOps = fsOps) {
 
 // The CSF story index of the workshop (#3263): the story files are the single
 // source of story IDs. The guard derives them with Storybook's own CSF parser
-// (see web/src/stories/storyIndex.ts) instead of hand-written per-owner maps.
-const storyModules = readStoryIndex()
-const storyFileOf = new Map<string, string>()
-for (const module of storyModules) for (const id of module.storyIds) if (!storyFileOf.has(id)) storyFileOf.set(id, module.file)
-// The registry's story claims, inverted: story ID → the row states claiming it.
-const claimsOf = new Map<string, { entry: InventoryEntry; stateName: string }[]>()
-for (const entry of inventory) for (const state of entry.states) for (const id of state.storyIds) {
-  const claims = claimsOf.get(id) ?? []
-  claims.push({ entry, stateName: state.name })
-  claimsOf.set(id, claims)
+// and the pure coverage guard (see web/src/stories/storyIndex.ts) instead of
+// hand-written per-owner maps.
+const storyIndex = readStoryIndex()
+
+/** Fresh claim rows for the pure guard: entry ID → the row's owner and states. */
+function claimRows(): Map<string, StoryClaim> {
+  return new Map(inventory.map((entry) => [entry.id, { owner: entry.owner.path, states: entry.states.map((state) => ({ ...state, storyIds: [...state.storyIds] })) }]))
 }
 
-/** Every import specifier of a story file (via CSF) or a stories-local host file. */
-function importsOf(file: string): string[] {
-  const story = storyModules.find((module) => module.file === file)
-  if (story) return story.imports
-  const text = readFileSync(join(src, file.slice('web/src/'.length)), 'utf8')
-  return [...text.matchAll(/(?:\bfrom|\bimport)\s*['"]([^'"]+)['"]/g)].map((match) => match[1])
+/** The workshop's own page story, which no row claims: the guard's only exemption. */
+const exemptStoryIds = ['inventory--all']
+
+function guarded(claims: ReadonlyMap<string, StoryClaim>, options: StoryCoverageOptions = {}): void {
+  assertStoryCoverage(storyIndex.modules, claims, { hosts: storyIndex.hosts, exemptStoryIds, ...options })
 }
 
-function resolveImport(fromFile: string, specifier: string): string | null {
-  if (!specifier.startsWith('.') && !specifier.startsWith('@/')) return null
-  const target = specifier.startsWith('@/') ? `web/src/${specifier.slice(2)}` : posixPath.normalize(posixPath.join(posixPath.dirname(fromFile), specifier))
-  if (posixPath.isAbsolute(target) || target.split('/').some((part) => !part || part === '.' || part === '..')) return null
-  for (const candidate of [target, `${target}.ts`, `${target}.tsx`, `${target}.vue`, posixPath.join(target, 'index.ts')]) {
-    if (existsSync(join(src, candidate.slice('web/src/'.length)))) return candidate
-  }
-  return null
-}
-
-/** Production source paths a story file renders: relative imports resolved and walked through
- * files under `web/src/stories/` only, so a story never inherits reach from deep app imports. */
-function reachableImports(file: string): Set<string> {
-  const visited = new Set([file])
-  const reached = new Set<string>()
-  const visit = (file: string) => {
-    for (const specifier of importsOf(file)) {
-      const target = resolveImport(file, specifier)
-      if (!target || visited.has(target)) continue
-      visited.add(target)
-      if (target.startsWith('web/src/stories/')) visit(target)
-      else reached.add(target)
-    }
-  }
-  visit(file)
-  return reached
+function statesOf(claims: ReadonlyMap<string, StoryClaim>, entryId: string): StoryClaimState[] {
+  const states = claims.get(entryId)?.states
+  if (!states) throw new Error(`No claim row: ${entryId}`)
+  return states
 }
 
 function assertCoverage(entries: InventoryEntry[]) {
@@ -121,6 +96,7 @@ function assertCoverage(entries: InventoryEntry[]) {
     for (const state of entry.states) {
       expect(state.name.trim()).not.toBe(''); expect(state.note.trim()).not.toBe('')
       if (state.coverage !== 'covered' && state.storyIds.length) throw new Error(`Noncovered state has story IDs: ${entry.id}/${state.name}`)
+      if (state.coverage === 'covered' && entry.kind !== 'component') throw new Error(`Invalid covered state (kind ${entry.kind}): ${entry.id}/${state.name} may not claim story coverage`)
     }
   }
 }
@@ -209,40 +185,157 @@ describe('production ownership', () => {
     assertCoverage(inventory)
   })
 
-  it('claims every covered state only from stories that exist in the CSF story files', () => {
-    for (const entry of inventory) {
-      for (const state of entry.states) {
-        if (state.coverage !== 'covered') continue
-        for (const id of state.storyIds) {
-          expect(storyFileOf.has(id), `${entry.id}/${state.name}: ${id} is not a story in web/src/stories`).toBe(true)
-        }
-      }
+  it('claims story coverage only from component rows', () => {
+    const row = inventory.find((entry) => entry.id === 'components-confirm-dialog')!
+    for (const kind of ['css', 'inline', 'composition'] as const) {
+      const entry = { ...structuredClone(row), id: `fake-${kind}`, kind, rationale: 'Not a component owner' }
+      expect(() => assertCoverage([entry]), `Invalid covered state (kind ${kind})`).toThrow(`Invalid covered state (kind ${kind}): fake-${kind}/default`)
     }
+    expect(() => assertCoverage([structuredClone(row)])).not.toThrow()
   })
 
-  it('claims every CSF story except the inventory page exactly once', () => {
-    const declared = new Map<string, string>()
-    for (const module of storyModules) {
-      for (const id of module.storyIds) {
-        expect(declared.has(id), `story ${id} is declared by both ${declared.get(id)} and ${module.file}`).toBe(false)
-        declared.set(id, module.file)
+  describe('the CSF-derived story coverage guard', () => {
+    it('runs the real story index against the real registry, so it cannot pass vacuously', () => {
+      expect(storyIndex.modules.length).toBeGreaterThan(0)
+      expect(claimRows().size).toBeGreaterThan(0)
+      for (const id of exemptStoryIds) {
+        expect(storyIndex.modules.flatMap((module) => module.storyIds), id).toContain(id)
       }
-    }
-    for (const [id, claims] of claimsOf) {
-      expect(claims, `story ${id} is claimed by ${claims.map((claim) => `${claim.entry.id}/${claim.stateName}`).join(' and ')}`).toHaveLength(1)
-    }
-    const orphans = [...storyFileOf.keys()].filter((id) => id !== 'inventory--all' && !claimsOf.has(id))
-    expect(orphans, 'CSF stories that no inventory state claims (only inventory--all, the workshop page itself, is exempt)').toEqual([])
+      expect(() => guarded(claimRows())).not.toThrow()
+    })
+
+    it('fails when a covered state names a story ID no story file declares', () => {
+      const claims = claimRows()
+      statesOf(claims, 'components-settings-settings-switch')[0].storyIds.push('settings-switch--ghost')
+      expect(() => guarded(claims)).toThrow('settings-switch--ghost is not a story in the story files')
+    })
+
+    it('fails when a story is claimed twice, across rows or inside one state', () => {
+      const claims = claimRows()
+      statesOf(claims, 'components-prompt-dialog').find((state) => state.name === 'empty')!.storyIds.push('settings-switch--on')
+      expect(() => guarded(claims)).toThrow('Story settings-switch--on is claimed by both components-settings-settings-switch/default and components-prompt-dialog/empty')
+
+      const repeated = claimRows()
+      const narrow = statesOf(repeated, 'components-settings-settings-switch').find((state) => state.name === 'narrow')!
+      narrow.storyIds.push(narrow.storyIds[0])
+      expect(() => guarded(repeated)).toThrow(/Story settings-switch--narrow is claimed by both .* and components-settings-settings-switch\/narrow/)
+    })
+
+    it('fails when a story file is left unclaimed by every covered state', () => {
+      const claims = claimRows()
+      const states = statesOf(claims, 'components-settings-settings-switch')
+      states[0].storyIds = states[0].storyIds.filter((id) => id !== 'settings-switch--on')
+      expect(() => guarded(claims)).toThrow('Orphan story: settings-switch--on')
+    })
+
+    it('fails a confirm-dialog state that claims a prompt-dialog story, and the other way round', () => {
+      const claims = claimRows()
+      const confirm = statesOf(claims, 'components-confirm-dialog')
+      const prompt = statesOf(claims, 'components-prompt-dialog')
+      confirm.find((state) => state.name === 'default')!.storyIds = ['prompt-dialog--empty']
+      prompt.find((state) => state.name === 'empty')!.storyIds = []
+      expect(() => guarded(claims)).toThrow(/Story web\/src\/stories\/PromptDialog\.stories\.ts \(prompt-dialog\) does not render web\/src\/components\/ConfirmDialog\.vue/)
+
+      const reversed = claimRows()
+      const confirmReversed = statesOf(reversed, 'components-confirm-dialog')
+      const promptReversed = statesOf(reversed, 'components-prompt-dialog')
+      promptReversed.find((state) => state.name === 'empty')!.storyIds = ['confirm-dialog--normal']
+      confirmReversed.find((state) => state.name === 'default')!.storyIds = []
+      expect(() => guarded(reversed)).toThrow(/Story web\/src\/stories\/ConfirmDialog\.stories\.ts \(confirm-dialog\) does not render web\/src\/components\/PromptDialog\.vue/)
+    })
+
+    it('admits a host-based story only when the host renders the owner and the story self-identifies with it', () => {
+      const story: StoryModule = {
+        file: 'web/src/stories/Fake.stories.ts', id: 'fake-owner', title: 'Fakes/Fake owner', storyIds: ['fake-owner--default'],
+        renders: [], hosts: ['web/src/stories/FakeHost.vue'],
+      }
+      const claims = new Map<string, StoryClaim>([['fake', { owner: 'web/src/components/FakeOwner.vue', states: [{ name: 'default', coverage: 'covered', storyIds: ['fake-owner--default'] }] }]])
+      const hosts = new Map([['web/src/stories/FakeHost.vue', ['web/src/components/FakeOwner.vue']]])
+      expect(() => assertStoryCoverage([story], claims, { hosts })).not.toThrow()
+      const alien = { ...story, id: 'fake-alien' }
+      expect(() => assertStoryCoverage([alien], claims, { hosts })).toThrow(/Story web\/src\/stories\/Fake\.stories\.ts \(fake-alien\) does not render web\/src\/components\/FakeOwner\.vue/)
+      const wronglyTitled = { ...story, title: 'Fakes/Unrelated' }
+      expect(() => assertStoryCoverage([wronglyTitled], claims, { hosts })).toThrow('does not render')
+      const hostWithoutOwner = new Map([['web/src/stories/FakeHost.vue', ['web/src/components/Other.vue']]])
+      expect(() => assertStoryCoverage([story], claims, { hosts: hostWithoutOwner })).toThrow('does not render')
+      expect(() => assertStoryCoverage([story], claims)).toThrow('does not render')
+    })
+
+    it('fails when a noncovered state claims stories', () => {
+      const claims = claimRows()
+      statesOf(claims, 'components-settings-settings-switch')[0].coverage = 'unknown'
+      expect(() => guarded(claims)).toThrow('Noncovered state has story IDs: components-settings-settings-switch/default')
+    })
   })
 
-  it('renders each claimed row owner from its claiming story file', () => {
-    for (const [id, claims] of claimsOf) {
-      const file = storyFileOf.get(id)
-      if (!file) continue // a missing story fails the CSF existence test above
-      for (const claim of claims) {
-        expect(reachableImports(file).has(claim.entry.owner.path), `${claim.entry.id}/${claim.stateName}: story ${id} (${file}) does not render ${claim.entry.owner.path}`).toBe(true)
-      }
-    }
+  describe('story file discovery and import parsing', () => {
+    const writeHollowStory = (path: string) => writeFileSync(path, [
+      "import type { Meta, StoryObj } from '@storybook/vue3-vite'",
+      "const inString = \"import Ghost from '@/components/DecisionReason.vue'\"",
+      "const inTemplate = `import Ghost from '@/components/DecisionReason.vue'`",
+      "// import Ghost from '@/components/DecisionReason.vue'",
+      "/* import Ghost from '@/components/DecisionReason.vue' */",
+      "import type Ghost from '@/components/DecisionReason.vue'",
+      "const meta = { id: 'fake-hollow', title: 'Fakes/Hollow' } satisfies Meta<{}>",
+      'export default meta',
+      'type Story = StoryObj<typeof meta>',
+      'export const Default: Story = {}',
+    ].join('\n'))
+    const writeDirectStory = (path: string) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, [
+      "import type { Meta, StoryObj } from '@storybook/vue3-vite'",
+      "import DecisionReason from '@/components/DecisionReason.vue'",
+      "const meta = { id: 'fake-direct', title: 'Fakes/Direct', component: DecisionReason } satisfies Meta<typeof DecisionReason>",
+      'export default meta',
+      'type Story = StoryObj<typeof meta>',
+      'export const Default: Story = {}',
+    ].join('\n')) }
+    const directOwnerClaim: ReadonlyMap<string, StoryClaim> = new Map([['fake', {
+      owner: 'web/src/components/DecisionReason.vue',
+      states: [{ name: 'default', coverage: 'covered', storyIds: ['fake-direct--default'] }],
+    }]])
+
+    it('walks the storybook glob recursively and detects a nested story file', () => fixture((base) => {
+      writeHollowStory(join(base, 'Hollow.stories.ts'))
+      writeDirectStory(join(base, 'nested', 'Direct.stories.ts'))
+      expect(storyFiles(base)).toEqual(['Hollow.stories.ts', 'nested/Direct.stories.ts'])
+      expect(readStoryIndex(base).modules.flatMap((module) => module.storyIds)).toEqual(['fake-hollow--default', 'fake-direct--default'])
+      expect(readFileSync(join(src, '../.storybook/main.ts'), 'utf8')).toContain("stories: ['../src/stories/**/*.stories.ts']")
+    }))
+
+    it('parses import specifiers from the compiler AST: comments, string literals and type-only imports are not imports', () => {
+      const path = '@/components/DecisionReason.vue'
+      expect(importSpecifiers([
+        `// import LineComment from '${path}'`,
+        `/* import BlockComment from '${path}' */`,
+        `const inString = "import InString from '${path}'"`,
+        "const inTemplate = `import InTemplate from '" + path + "'`",
+        `import type TypeOnlyValue from '${path}'`,
+        `import type { TypeOnlyNamed } from '${path}'`,
+        `import { value, type MaybeType } from '${path}'`,
+        `import Default from '${path}'`,
+        `import { first, second } from '${path}'`,
+      ].join('\n'))).toEqual([path, path, path])
+      expect(importSpecifiers("export { Value } from '" + path + "'")).toEqual([path])
+      expect(importSpecifiers(`SideEffect('${path}')\nimport SideEffect from '${path}'`)).toEqual([path])
+    })
+
+    it('keeps commented, string-literal and type-only imports from claiming an owner', () => fixture((base) => {
+      const path = join(base, 'Hollow.stories.ts')
+      writeHollowStory(path)
+      const module = parseStoryFile(path)
+      expect(module.renders).toEqual([])
+      expect(module.hosts).toEqual([])
+      const claims = new Map<string, StoryClaim>([['fake', { owner: 'web/src/components/DecisionReason.vue', states: [{ name: 'default', coverage: 'covered', storyIds: ['fake-hollow--default'] }] }]])
+      expect(() => assertStoryCoverage([module], claims)).toThrow('(fake-hollow) does not render web/src/components/DecisionReason.vue')
+    }))
+
+    it('renders a nested story file through its valued direct import', () => fixture((base) => {
+      writeDirectStory(join(base, 'nested', 'Direct.stories.ts'))
+      const module = parseStoryFile(join(base, 'nested', 'Direct.stories.ts'))
+      expect(module.renders).toEqual(['web/src/components/DecisionReason.vue'])
+      expect(module.hosts).toEqual([])
+      expect(() => assertStoryCoverage([module], directOwnerClaim)).not.toThrow()
+    }))
   })
 
   it('checks built story existence and type independently of owner policy', () => {
