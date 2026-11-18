@@ -254,11 +254,12 @@ def package_changelog(
     }
 
 
-_APP_ENGINE_MARKER = re.compile(r"\.app/Contents/Resources/engine/")
+# The Mac app is always built as Ciaobot.app (mac/scripts/build-app.sh).
+_APP_ENGINE_MARKER = re.compile(r"Ciaobot\.app/Contents/Resources/engine/")
 
 
 def _inside_app_bundle(path: str | os.PathLike[str] | None) -> bool:
-    """Whether ``path`` resolves inside a Ciaobot.app bundled engine."""
+    """Whether ``path`` lies under ``Ciaobot.app/Contents/Resources/engine/``."""
     if not path:
         return False
     from pathlib import Path
@@ -287,8 +288,47 @@ def app_engine_root() -> Path | None:
     for candidate in (exe, exe.resolve()):
         root = candidate.parent.parent
         if _inside_app_bundle(root / "bin") and (root / "bin" / "ciao").is_file():
-            return root
+            return root.resolve()
     return None
+
+
+def ciao_shim_path() -> Path:
+    """Where the engine publishes its ``ciao`` shim (the S2 engine state dir)."""
+    from pathlib import Path
+
+    return Path.home() / "Library" / "Application Support" / "Ciaobot" / "engine" / "bin" / "ciao"
+
+
+def ensure_ciao_shim(engine_root: Path) -> Path:
+    """Write the ``ciao`` shim for ``engine_root`` and return its directory.
+
+    Only ``ciao`` is exposed to agent shells; putting the engine's whole ``bin``
+    on PATH would also make ``python3`` resolve to its pip-less CPython. The
+    file is replaced atomically (0755) and left alone when already current, so
+    it is regenerated at every start, including after the app moved.
+    """
+    import shlex
+    import tempfile
+    from pathlib import Path
+
+    shim = ciao_shim_path()
+    content = f'#!/bin/sh\nexec {shlex.quote(str(engine_root / "bin" / "ciao"))} "$@"\n'
+    try:
+        if shim.read_text(encoding="utf-8") == content and shim.stat().st_mode & 0o777 == 0o755:
+            return shim.parent
+    except OSError:
+        pass
+    shim.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=shim.parent, prefix=".ciao-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, shim)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    return shim.parent
 
 
 def _imported_ciao_file() -> str | None:
@@ -317,11 +357,9 @@ def running_from_app_bundle() -> bool:
     """Whether this process is the engine embedded in Ciaobot.app.
 
     Decided from where the ``ciao`` package and the interpreter actually live.
-
-    The imported package wins over the interpreter. The bundled engine's
-    ``bin`` is first on ``PATH`` in every shell a chat opens, so ``ciao dev``
-    run from an app shell can reuse the bundled interpreter while importing ``ciao`` from the
-    checkout it was started in; that server is a source checkout.
+    The imported package wins over the interpreter: ``ciao dev`` run from an
+    app shell can reuse the bundled interpreter while importing ``ciao`` from
+    the checkout it was started in, and that server is a source checkout.
     """
     ciao_file = _imported_ciao_file()
     if _inside_app_bundle(ciao_file):
@@ -335,8 +373,7 @@ def detect_install_mode() -> str:
     """Return the runtime distribution mode: bundled_app, editable, installer or unknown."""
     # Bundle location is authoritative when the package itself lives inside
     # the app bundle. A package imported from a git checkout is `editable`
-    # even on the bundled interpreter (see ``running_from_app_bundle``). An
-    # bundle location is what counts, no environment marker.
+    # even on the bundled interpreter (see ``running_from_app_bundle``).
     try:
         if running_from_app_bundle():
             return "bundled_app"

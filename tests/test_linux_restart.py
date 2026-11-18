@@ -90,8 +90,7 @@ async def _status_restart_only(monkeypatch, *, platform, dev_mode, app_repo, bun
 
     if bundled:
         _run_as_bundled_app(monkeypatch)
-    else:
-        monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(sys, "platform", platform)
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
         config=SimpleNamespace(app_repo=str(app_repo), dev_mode=dev_mode),
         local_session_manager=SimpleNamespace(status=lambda: {}),

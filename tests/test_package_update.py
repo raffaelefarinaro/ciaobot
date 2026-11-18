@@ -97,14 +97,6 @@ def test_detect_install_mode_bundled_package_on_bundled_interpreter(
     assert detect_install_mode() == "bundled_app"
 
 
-def test_bundled_marker_env_is_ignored(monkeypatch, tmp_path) -> None:
-    # The old launcher exported CIAO_BUNDLED_APP=1; only the path counts now.
-    monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
-    monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python3"))
-    _fake_ciao_module(monkeypatch, tmp_path / "site-packages" / "ciao" / "__init__.py")
-    assert detect_install_mode() == "unknown"
-
-
 def test_old_tauri_runtime_path_is_not_bundled(monkeypatch) -> None:
     old = "/Applications/Ciaobot.app/Contents/Resources/ciao-runtime"
     monkeypatch.setattr(sys, "executable", f"{old}/python/arm64/bin/python3.12")
@@ -123,7 +115,7 @@ def test_checkout_package_on_bundled_python_is_editable(monkeypatch, tmp_path) -
 
 
 def _engine_tree(tmp_path, *, with_ciao: bool = True):
-    root = tmp_path / "Ciaobot.app" / "Contents" / "Resources" / "engine"
+    root = tmp_path.resolve() / "Ciaobot.app" / "Contents" / "Resources" / "engine"
     (root / "bin").mkdir(parents=True)
     (root / "bin" / "python3.12").write_text("", encoding="utf-8")
     if with_ciao:
@@ -137,7 +129,43 @@ def test_app_engine_root_from_interpreter(monkeypatch, tmp_path) -> None:
     _fake_ciao_module(
         monkeypatch, root / "lib" / "python3.12" / "site-packages" / "ciao" / "__init__.py"
     )
-    assert app_engine_root() == root.resolve()
+    assert app_engine_root() == root
+
+
+import pytest
+
+
+@pytest.mark.parametrize("layout", [
+    "Ciaobot.app/Contents/Resources/engine-old/bin/python3.12",
+    "Ciaobot.app/Contents/Resources/engineX/bin/python3.12",
+    "Ciaobot.app/Contents/Resources/engine",
+    "Ciaobot/Contents/Resources/engine/bin/python3.12",
+    "Other.app/Contents/Resources/engine/bin/python3.12",
+])
+def test_bundle_regex_rejects_near_misses(monkeypatch, layout) -> None:
+    monkeypatch.setattr(sys, "executable", f"/Applications/{layout}")
+    _fake_ciao_module(monkeypatch, "/opt/site-packages/ciao/__init__.py")
+    assert detect_install_mode() != "bundled_app"
+
+
+def test_app_engine_root_follows_symlinked_interpreter(monkeypatch, tmp_path) -> None:
+    root = _engine_tree(tmp_path)
+    link_bin = tmp_path.resolve() / "elsewhere" / "bin"
+    link_bin.mkdir(parents=True)
+    (link_bin / "python3").symlink_to(root / "bin" / "python3.12")
+    monkeypatch.setattr(sys, "executable", str(link_bin / "python3"))
+    _fake_ciao_module(monkeypatch, "/opt/site-packages/ciao/__init__.py")
+    assert app_engine_root() == root
+
+
+def test_app_engine_root_rejects_bin_ciao_directory(monkeypatch, tmp_path) -> None:
+    root = _engine_tree(tmp_path, with_ciao=False)
+    (root / "bin" / "ciao").mkdir()
+    monkeypatch.setattr(sys, "executable", str(root / "bin" / "python3.12"))
+    _fake_ciao_module(
+        monkeypatch, root / "lib" / "python3.12" / "site-packages" / "ciao" / "__init__.py"
+    )
+    assert app_engine_root() is None
 
 
 def test_app_engine_root_needs_bin_ciao(monkeypatch, tmp_path) -> None:
@@ -341,22 +369,75 @@ def _compose_path(monkeypatch, tmp_path) -> list[str]:
     import os
 
     tool = tmp_path / "tools"
-    tool.mkdir()
+    tool.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setattr(tool_path, "common_tool_dirs", lambda: [str(tool)])
     main._ensure_tool_dirs_on_path()
     return os.environ["PATH"].split(os.pathsep)
 
 
-def test_bundled_child_path_puts_engine_bin_first(monkeypatch, tmp_path) -> None:
-    root = _engine_tree(tmp_path)
+def _as_bundled(monkeypatch, root) -> None:
     monkeypatch.setattr(sys, "executable", str(root / "bin" / "python3.12"))
     _fake_ciao_module(
         monkeypatch, root / "lib" / "python3.12" / "site-packages" / "ciao" / "__init__.py"
     )
+
+
+def _shim_dir(tmp_path):
+    return tmp_path / "home" / "Library" / "Application Support" / "Ciaobot" / "engine" / "bin"
+
+
+def test_bundled_child_path_puts_ciao_shim_dir_first(monkeypatch, tmp_path) -> None:
+    root = _engine_tree(tmp_path)
+    _as_bundled(monkeypatch, root)
     parts = _compose_path(monkeypatch, tmp_path)
-    assert parts[0] == str(root.resolve() / "bin")
+    assert parts[0] == str(_shim_dir(tmp_path))
+    # python3 must not resolve to the engine's pip-less CPython.
+    assert str(root / "bin") not in parts
     assert parts.index("/usr/bin") < parts.index(str(tmp_path / "tools"))
+
+
+def test_ciao_shim_content_mode_and_quoting(monkeypatch, tmp_path) -> None:
+    import stat
+    import subprocess
+
+    root = _engine_tree(tmp_path)
+    # An apostrophe, a space and a $  in the app path must survive quoting.
+    odd = tmp_path.resolve() / "it's $HOME here" / "Ciaobot.app" / "Contents" / "Resources" / "engine"
+    (odd / "bin").mkdir(parents=True)
+    (odd / "bin" / "python3.12").write_text("", encoding="utf-8")
+    ciao = odd / "bin" / "ciao"
+    ciao.write_text('#!/bin/sh\nprintf "%s" "$1"\n', encoding="utf-8")
+    ciao.chmod(0o755)
+    del root
+    _as_bundled(monkeypatch, odd)
+    _compose_path(monkeypatch, tmp_path)
+    shim = _shim_dir(tmp_path) / "ciao"
+    assert stat.S_IMODE(shim.stat().st_mode) == 0o755
+    assert shim.read_text(encoding="utf-8").startswith("#!/bin/sh\nexec ")
+    out = subprocess.run([str(shim), "hello"], capture_output=True, text=True, check=True)
+    assert out.stdout == "hello"
+    assert [p.name for p in shim.parent.iterdir()] == ["ciao"]
+
+
+def test_ciao_shim_is_idempotent_and_regenerated_when_app_moved(monkeypatch, tmp_path) -> None:
+    first = _engine_tree(tmp_path)
+    _as_bundled(monkeypatch, first)
+    _compose_path(monkeypatch, tmp_path)
+    shim = _shim_dir(tmp_path) / "ciao"
+    inode = shim.stat().st_ino
+    _compose_path(monkeypatch, tmp_path)
+    assert shim.stat().st_ino == inode  # current shim is left alone
+
+    moved = tmp_path.resolve() / "moved"
+    moved.mkdir()
+    second = _engine_tree(moved)
+    _as_bundled(monkeypatch, second)
+    _compose_path(monkeypatch, tmp_path)
+    text = shim.read_text(encoding="utf-8")
+    assert str(second / "bin" / "ciao") in text
+    assert str(first / "bin" / "ciao") not in text
 
 
 def test_unbundled_child_path_keeps_tool_dirs_first(monkeypatch, tmp_path) -> None:
@@ -364,3 +445,4 @@ def test_unbundled_child_path_keeps_tool_dirs_first(monkeypatch, tmp_path) -> No
     _fake_ciao_module(monkeypatch, tmp_path / "site-packages" / "ciao" / "__init__.py")
     parts = _compose_path(monkeypatch, tmp_path)
     assert parts == [str(tmp_path / "tools"), "/usr/bin"]
+    assert not _shim_dir(tmp_path).exists()

@@ -483,8 +483,8 @@ def _ensure_tool_dirs_on_path() -> None:
     this exact problem and includes what a hardcoded Homebrew pair misses -
     notably nvm's ``node/*/bin``, the most common way node is installed.
     """
-    from ciao.package_version import app_engine_root
     from ciao.os_support.tool_path import dedupe_path
+    from ciao.package_version import app_engine_root, ensure_ciao_shim
     from ciao.tool_path import common_tool_dirs
 
     parts = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d]
@@ -492,10 +492,10 @@ def _ensure_tool_dirs_on_path() -> None:
     missing = [d for d in common_tool_dirs() if d not in seen]
     engine_root = app_engine_root()
     if engine_root is not None:
-        # The bundled engine's bin goes first, so child `ciao` commands resolve
-        # to the interpreter that owns the bundled site-packages and stay on
-        # the same engine and version as the app.
-        composed = [str(engine_root / "bin"), *parts, *missing]
+        # A shim directory holding only `ciao` goes first, so child `ciao`
+        # commands run the bundled engine and stay on the app's version. The
+        # engine's own bin is not exposed: it would shadow `python3`.
+        composed = [str(ensure_ciao_shim(engine_root)), *parts, *missing]
     else:
         composed = [*missing, *parts]
     # Deduped even when nothing was missing: an inherited PATH that already
