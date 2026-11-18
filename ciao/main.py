@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -591,6 +592,7 @@ async def _async_main(
     installer_suggest_workspace: str | None = None,
     installer_native_fd: int | None = None,
     installer_native_workspace: str | None = None,
+    app_engine: bool = False,
 ) -> int:
     if installer_bootstrap:
         # Before anything is created: refuse to bootstrap over an install, then
@@ -643,6 +645,21 @@ async def _async_main(
                 installer_bootstrap=True,
                 installer_run_id=installer_run_id,
             )
+        if app_engine and not installer_bootstrap:
+            # App mode: publish the readiness record for the app's probe and
+            # hand the engine's lifetime to the parent watcher, which SIGTERMs
+            # this process when the app dies (the engine's graceful shutdown
+            # then runs; no engine-owned LaunchAgent exists in app mode).
+            from ciao import app_engine as app_engine_module
+
+            app_engine_module.write_ready_record(
+                pid=os.getpid(),
+                port=config.pwa_port,
+                startup_id=lock.startup_id or "",
+                workspace=config.workspace_root,
+                bootstrap=config.bootstrap_mode,
+            )
+            app_engine_module.watch_parent(lambda: os.kill(os.getpid(), signal.SIGTERM))
         if installer_bootstrap:
             return await _run_server_locked(
                 config,
@@ -1844,6 +1861,7 @@ def main(
     installer_suggest_workspace: str | None = None,
     installer_native_fd: int | None = None,
     installer_native_workspace: str | None = None,
+    app_engine: bool = False,
 ) -> None:
     """CLI entrypoint."""
     # INFO until the workspace's own log level (Settings) is known, which
@@ -1852,7 +1870,9 @@ def main(
     from ciao.instance_lock import WorkspaceAlreadyRunningError
 
     try:
-        if installer_native_fd is None:
+        if app_engine:
+            code = asyncio.run(_async_main(supervised=supervised, app_engine=True))
+        elif installer_native_fd is None:
             code = asyncio.run(_async_main(
                 supervised=supervised,
                 installer_bootstrap=installer_bootstrap,
