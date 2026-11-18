@@ -390,7 +390,7 @@ def test_watch_parent_calls_back_at_once_for_init() -> None:
     assert fired == [1]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="no kqueue on Windows")
+@pytest.mark.skipif(sys.platform != "darwin", reason="the watchdog needs select.kqueue (macOS)")
 def test_watch_parent_calls_back_at_once_when_the_parent_is_already_gone() -> None:
     gone = subprocess.Popen([sys.executable, "-c", "pass"])
     gone.wait()
