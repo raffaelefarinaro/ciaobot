@@ -101,6 +101,7 @@ def machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Machine:
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(home / "Library" / "LaunchAgents"))
     # The real account home is elsewhere, so this home counts as isolated.
     monkeypatch.setattr(mac_takeover, "_real_home", lambda: tmp_path / "real-home")
     monkeypatch.setattr(mac_takeover, "engine_identity", lambda port: None)
@@ -193,8 +194,17 @@ def test_non_macos_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 def make_journal(machine: Machine, name: str, state: str) -> None:
     directory = mac_takeover.state_dir() / "takeover" / name
-    directory.mkdir(parents=True)
-    (directory / "journal.json").write_text(json.dumps({"state": state}))
+    directory.mkdir(parents=True, exist_ok=True)
+    private_tree(directory)
+    journal = directory / "journal.json"
+    journal.write_text(json.dumps({"state": state}))
+    journal.chmod(0o600)
+
+
+def private_tree(directory: Path) -> None:
+    """Owner-only ``takeover/`` and entry, as the transaction creates them."""
+    directory.parent.chmod(0o700)
+    directory.chmod(0o700)
 
 
 def test_unfinished_journal_resumes_before_anything_else(machine: Machine) -> None:
@@ -214,7 +224,9 @@ def test_finished_and_rolled_back_journals_do_not_resume(machine: Machine) -> No
 def test_unreadable_journal_counts_as_unfinished(machine: Machine) -> None:
     directory = mac_takeover.state_dir() / "takeover" / "20261118T100000Z"
     directory.mkdir(parents=True)
+    private_tree(directory)
     (directory / "journal.json").write_text("{")
+    (directory / "journal.json").chmod(0o600)
     assert run_plan(machine).action == "resume"
 
 
@@ -736,9 +748,15 @@ def test_plan_writes_nothing(machine: Machine) -> None:
 
 
 def test_cli_prints_the_plan_as_json(
-    machine: Machine, capsys: pytest.CaptureFixture[str]
+    machine: Machine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     installer_install(machine)
+
+    def absent(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 113, "", "")
+
+    # The CLI passes no runner of its own: route plan's default to the fake.
+    monkeypatch.setitem(mac_takeover.plan.__kwdefaults__, "runner", absent)
     code = cli.main(
         ["mac-takeover", "plan", "--json", "--launch-agents-dir", str(machine.agents), "--label", LABEL]
     )

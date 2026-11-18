@@ -49,12 +49,16 @@ import json
 import os
 import plistlib
 import re
+import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -198,9 +202,15 @@ class TakeoverPlan:
     left_in_place: tuple[str, ...] = ()
     dropped_env: tuple[str, ...] = ()
     resume_id: str = ""
+    #: The plan-time protected paths, persisted in the journal so finish()
+    #: filters the Trash candidates against the same inputs plan() used. Not
+    #: part of the plan JSON the app reads.
+    protected: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        document = asdict(self)
+        document.pop("protected")
+        return document
 
 
 def _refuse(reason: str, label: str, **fields: Any) -> TakeoverPlan:
@@ -268,19 +278,90 @@ def _isolation_refusal(label: str) -> str:
 # --- journal -------------------------------------------------------------------
 
 
-def _unfinished_journal() -> str:
-    """The id of the newest takeover whose journal is not finished or rolled back."""
+_UNSAFE = "\x00unsafe"
+_UNREADABLE = "\x00unreadable"
+_JOURNALLESS = "\x00journal-less"
+#: States in which nothing of the old install was touched yet.
+STATE_CREATED = "created"
+_YOUNG_STATES = frozenset({STATE_CREATED, _JOURNALLESS})
+
+
+def _private_directory(path: Path) -> bool:
+    """A real (not symlinked) directory, this user's, with no group/world access."""
+    try:
+        status = os.lstat(path)
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(status.st_mode)
+        and status.st_uid == _getuid()
+        and status.st_mode & 0o077 == 0
+    )
+
+
+def _takeover_state_unsafe() -> bool:
+    """Whether ``takeover/`` exists but is a symlink, a file or not private."""
     root = state_dir() / "takeover"
     try:
-        entries = sorted((e for e in root.iterdir() if e.is_dir()), key=lambda e: e.name)
+        os.lstat(root)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return not _private_directory(root)
+
+
+def _read_journal_file(entry: Path) -> dict[str, Any] | None:
+    """The entry's journal through the strict private reader, or ``None``."""
+    return app_engine._read_private_json(entry / "journal.json", label="the takeover journal")
+
+
+def _entry_state(entry: Path) -> str | None:
+    """What a takeover entry holds: its journal state, a marker, or ``None``.
+
+    ``None`` is not an entry at all (a stray file). A symlinked or non-private
+    entry, and a journal that cannot be read strictly, are unfinished work: the
+    plan never trusts them and never clears them.
+    """
+    try:
+        status = os.lstat(entry)
+    except OSError:
+        return _UNSAFE
+    if stat.S_ISLNK(status.st_mode):
+        return _UNSAFE
+    if not stat.S_ISDIR(status.st_mode):
+        return None
+    if not _private_directory(entry):
+        return _UNSAFE
+    try:
+        os.lstat(entry / "journal.json")
+    except FileNotFoundError:
+        return _JOURNALLESS
+    except OSError:
+        return _UNSAFE
+    journal = _read_journal_file(entry)
+    state = journal.get("state") if journal is not None else None
+    return state if isinstance(state, str) else _UNREADABLE
+
+
+def _unfinished_journal() -> str:
+    """The id of the newest takeover whose journal is not finished or rolled back.
+
+    A journal-less entry and one still in its ``created`` skeleton state have
+    stopped nothing: they are not unfinished work (apply discards them).
+    """
+    root = state_dir() / "takeover"
+    try:
+        names = sorted(os.listdir(root))
     except OSError:
         return ""
-    for entry in reversed(entries):
-        journal = _read_json(entry / "journal.json")
-        state = journal.get("state") if journal is not None else None
-        # An unreadable journal is unfinished work, not a clean slate.
-        if state not in _FINISHED_STATES:
-            return entry.name
+    for name in reversed(names):
+        if re.fullmatch(r"[A-Za-z0-9-]{1,64}", name) is None:
+            continue
+        state = _entry_state(root / name)
+        if state is None or state in _FINISHED_STATES or state in _YOUNG_STATES:
+            continue
+        return name
     return ""
 
 
@@ -759,7 +840,9 @@ def plan(
     if refusal:
         return _refuse(refusal, label)
 
-    # 1. unfinished journal wins over everything.
+    # 1. unfinished journal wins over everything; an unsafe state dir refuses.
+    if _takeover_state_unsafe():
+        return _refuse("takeover_state_unsafe", label)
     resume_id = _unfinished_journal()
     if resume_id:
         return TakeoverPlan(action=ACTION_RESUME, label=label, resume_id=resume_id)
@@ -940,6 +1023,7 @@ def plan(
         trash=tuple(trash),
         left_in_place=left_in_place,
         dropped_env=dropped,
+        protected=tuple(str(path) for path in protected),
     )
 
 
@@ -970,6 +1054,12 @@ def _owns_listener(
 
 
 # --- the transaction: apply, finish, rollback ----------------------------------
+
+REF_BUSY = "busy"
+REF_STATE_UNSAFE = "takeover_state_unsafe"
+REF_PLIST_CHANGED = "plist_changed"
+REF_NOT_RESTARTED = "old_engine_not_restarted"
+REF_RESTORE_FAILED = "plist_restore_failed"
 
 
 def _refused(reason: str, **fields: Any) -> dict[str, Any]:
@@ -1006,34 +1096,167 @@ def _backup_path(entry: Path, label: str) -> Path:
     return entry / f"{label}.plist"
 
 
-def _load_journal(takeover_id: str) -> dict[str, Any] | None:
-    """The journal of ``takeover_id``, when it is intact and shaped right.
+class _Busy(Exception):
+    """Another takeover command holds the transaction lock."""
 
-    ``None`` for an unknown or malformed id, a missing, unreadable or foreign
-    journal, and one whose label, plist path, workspace, runtime root, port or
-    hash cannot name what a rollback would have to restore. A corrupt journal
-    is unfinished work plan() does not trust; nothing in the transaction is
-    allowed to act on one.
+
+class _StateUnsafe(Exception):
+    """``takeover/`` or its lock file is a symlink, foreign or not private."""
+
+
+class _NoState(Exception):
+    """``takeover/`` does not exist, so there is no journal to act on."""
+
+
+class _Settled(Exception):
+    """The journal on disk is no longer in the state this process read."""
+
+
+@contextmanager
+def _transaction_lock(*, create: bool) -> Iterator[None]:
+    """Hold the exclusive per-takeover lock for a whole apply/finish/rollback.
+
+    A non-blocking ``flock`` on ``takeover/.lock``: a second command sees
+    :class:`_Busy` instead of racing the first one's stop, unlink or restore.
+    Every mutation of the journal root, the entries and the journals happens
+    inside it, which is also why a young entry found under the lock is an
+    orphan and never another run's work in progress.
+    """
+    from ciao.os_support.locks import lock_exclusive, unlock
+    from ciao.os_support.private import is_private_descriptor_strict
+
+    root = _takeover_root()
+    if _takeover_state_unsafe():
+        raise _StateUnsafe()
+    if not os.path.lexists(root):
+        if not create:
+            raise _NoState()
+        _make_entry(root)
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(root / ".lock", flags, 0o600)
+    except OSError as exc:
+        raise _StateUnsafe() from exc
+    try:
+        if not is_private_descriptor_strict(fd):
+            raise _StateUnsafe()
+        try:
+            lock_exclusive(fd, blocking=False)
+        except OSError:
+            raise _Busy() from None
+        try:
+            yield
+        finally:
+            unlock(fd)
+    finally:
+        os.close(fd)
+
+
+def _guarded(action: Callable[[], dict[str, Any]], *, create: bool) -> dict[str, Any]:
+    """Run ``action`` under the transaction lock, mapping its refusals."""
+    try:
+        with _transaction_lock(create=create):
+            return action()
+    except _Busy:
+        return _refused(
+            REF_BUSY, message="another Ciaobot takeover command is running; try again in a moment"
+        )
+    except _StateUnsafe:
+        return _refused(REF_STATE_UNSAFE)
+    except _Settled:
+        return _refused(REF_ALREADY_SETTLED)
+
+
+def _agents_dir(launch_agents_dir: Path | None) -> Path:
+    if launch_agents_dir is None:
+        return macos_service.default_launch_agents_dir()
+    return Path(launch_agents_dir).expanduser()
+
+
+def _same_path(a: str | Path, b: str | Path) -> bool:
+    return os.path.abspath(a) == os.path.abspath(b)
+
+
+def _journal_matches_backup(entry: Path, journal: dict[str, Any]) -> bool:
+    """Whether the verified backup plist derives the journal's workspace, root and port.
+
+    The backup is hash-proven to be what the plan read, so what it says is the
+    independent witness of the journal's workspace, runtime root and port. A
+    missing or unverified backup is not judged here (the steps that use it
+    refuse with their own reason).
+    """
+    try:
+        read = read_definition(_backup_path(entry, str(journal["label"])))
+    except DefinitionReadError:
+        return True
+    if read.sha256 != journal["plist_sha256"]:
+        return True
+    try:
+        document = plistlib.loads(read.data)
+    except (ValueError, ExpatError):
+        return False
+    if not isinstance(document, dict):
+        return False
+    runtime = runtime_from_plist(
+        document,
+        plist_path=Path(str(journal["plist"])),
+        environ={},
+        read_env=lambda path: _read_dotenv(path) or {},
+    )
+    same: bool = (
+        runtime.workspace == journal["workspace"]
+        and runtime.runtime_root == journal["runtime_root"]
+        and runtime.port == journal["port"]
+    )
+    return same
+
+
+def _load_journal(
+    takeover_id: str, *, launch_agents_dir: Path | None = None, label: str | None = None
+) -> dict[str, Any] | None:
+    """The journal of ``takeover_id``, when it is intact, private and consistent.
+
+    ``None`` for an unknown or malformed id, a symlinked or non-private
+    ``takeover/`` directory or entry, a journal that is missing, unreadable,
+    foreign or not this user's owner-only file, and one that does not name what
+    a rollback would have to restore: the label (the plan's, when given, and
+    always one the isolation guard accepts), the plist at
+    ``<LaunchAgents>/<label>.plist`` (under the real home for the live label),
+    and the workspace, runtime root and port the verified backup derives. A
+    corrupt journal is unfinished work plan() does not trust; nothing in the
+    transaction is allowed to act on one.
     """
     if not _safe_takeover_id(takeover_id):
         return None
-    journal = _read_json(_journal_path(takeover_id))
+    root = _takeover_root()
+    entry = root / takeover_id
+    if not _private_directory(root) or not _private_directory(entry):
+        return None
+    journal = _read_journal_file(entry)
     if journal is None or journal.get("schema") != JOURNAL_SCHEMA:
         return None
-    label = journal.get("label")
+    jlabel = journal.get("label")
     plist = journal.get("plist")
     sha = journal.get("plist_sha256")
     workspace = journal.get("workspace")
     runtime_root = journal.get("runtime_root")
     port = journal.get("port")
     state = journal.get("state")
-    if not isinstance(label, str) or not label or "/" in label or label in (".", ".."):
+    if not isinstance(jlabel, str) or not jlabel or "/" in jlabel or jlabel in (".", ".."):
+        return None
+    if label is not None and jlabel != label:
+        return None
+    if _isolation_refusal(jlabel):
         return None
     if not isinstance(plist, str) or not _absolute(plist):
         return None
-    parts = PurePosixPath(plist)
-    if parts.name != f"{label}.plist" or parts.parent.name != "LaunchAgents":
+    agents = _agents_dir(launch_agents_dir)
+    if not _same_path(plist, agents / f"{jlabel}.plist"):
         return None
+    if jlabel == SERVER_LABEL:
+        real = _real_home()
+        if real is None or not _same_path(agents, real / "Library" / "LaunchAgents"):
+            return None
     if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{64}", sha) is None:
         return None
     if (
@@ -1047,11 +1270,13 @@ def _load_journal(takeover_id: str) -> dict[str, Any] | None:
         return None
     if not isinstance(state, str):
         return None
+    if not _journal_matches_backup(entry, journal):
+        return None
     return journal
 
 
 def _make_entry(entry: Path) -> None:
-    """Create the takeover entry and its parents inside the engine state dir.
+    """Create ``entry`` and its missing parents inside the engine state dir.
 
     Every directory this helper creates is owner-only (0700). A pre-existing
     directory is left alone; a symlink anywhere on the chain that is yet to be
@@ -1075,6 +1300,50 @@ def _make_entry(entry: Path) -> None:
         make_private_dir(fresh)
 
 
+def _create_entry() -> tuple[str, Path]:
+    """Atomically claim a fresh takeover id: ``mkdir`` of a name that must not exist.
+
+    A collision (another entry in the same second) retries with a ``-N`` suffix,
+    which keeps the lexicographic order of directory names. Only the directory
+    this call created is ever its to remove.
+    """
+    from ciao.os_support.private import make_private_dir
+
+    root = _takeover_root()
+    _make_entry(root)
+    stamp = _utc_stamp()
+    suffix = 1
+    while True:
+        candidate = stamp if suffix == 1 else f"{stamp}-{suffix}"
+        entry = root / candidate
+        try:
+            entry.mkdir(mode=0o700, exist_ok=False)
+        except FileExistsError:
+            suffix += 1
+            continue
+        make_private_dir(entry)
+        return candidate, entry
+
+
+def _discard_young_entries() -> None:
+    """Remove entries that stopped nothing: no journal, or the ``created`` skeleton.
+
+    Only ever called under the transaction lock, where such an entry is the
+    leftover of a crashed run rather than another run's work in progress.
+    """
+    root = _takeover_root()
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return
+    for name in names:
+        if re.fullmatch(r"[A-Za-z0-9-]{1,64}", name) is None:
+            continue
+        entry = root / name
+        if _entry_state(entry) in _YOUNG_STATES:
+            shutil.rmtree(entry, ignore_errors=True)
+
+
 def _write_journal(entry: Path, journal: dict[str, Any]) -> None:
     """Replace the journal in one atomic, owner-only, fsynced write."""
     from ciao.os_support.private import (
@@ -1083,7 +1352,9 @@ def _write_journal(entry: Path, journal: dict[str, Any]) -> None:
         mkstemp_private,
     )
 
-    payload = {"schema": JOURNAL_SCHEMA, "updated": _utc_stamp(), **journal}
+    # ``updated`` is stamped last: a journal dict read earlier must never carry
+    # its old stamp over this write.
+    payload = {"schema": JOURNAL_SCHEMA, **journal, "updated": _utc_stamp()}
     fd, tmp = mkstemp_private(dir=entry, prefix=f".{JOURNAL_NAME}.")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
@@ -1101,6 +1372,27 @@ def _write_journal(entry: Path, journal: dict[str, Any]) -> None:
     make_private(entry / JOURNAL_NAME)
 
 
+def _advance(entry: Path, expected: str, to: str, **extra: Any) -> None:
+    """Move the journal from ``expected`` to ``to`` on a fresh read, or raise.
+
+    The journal is re-read at the write, under the lock, so a dict held since
+    an earlier step can never write an old state back; a journal that is no
+    longer in ``expected`` means something settled it and raises
+    :class:`_Settled`.
+    """
+    current = _read_journal_file(entry)
+    if current is None or current.get("state") != expected:
+        raise _Settled()
+    current.update(extra)
+    current["state"] = to
+    _write_journal(entry, current)
+
+
+def _note(entry: Path, state: str, **extra: Any) -> None:
+    """Record fields on the journal without changing its state."""
+    _advance(entry, state, state, **extra)
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -1116,14 +1408,65 @@ def _fsync_copy(source: Path, target: Path) -> None:
         os.fsync(handle.fileno())
 
 
-def _run_launchctl(arguments: list[str], runner: Runner) -> subprocess.CompletedProcess[str]:
-    """One ``launchctl`` call: fixed absolute argv, captured output, a timeout."""
-    return runner(
-        [LAUNCHCTL, *arguments],
-        capture_output=True,
-        text=True,
-        timeout=_LAUNCHCTL_TIMEOUT_S,
-        check=False,
+def _atomic_restore(source: Path, target: Path, *, sha256: str) -> None:
+    """Put ``source`` at ``target`` in one rename: temp file, fsync, ``os.replace``.
+
+    A crash or a full disk mid-copy leaves ``target`` exactly as it was (absent)
+    and no temp file behind; the content is hashed before it can replace.
+    """
+    from ciao.os_support.private import mkstemp_private
+
+    fd, tmp = mkstemp_private(dir=target.parent, prefix=f".{target.name}.")
+    os.close(fd)
+    try:
+        _fsync_copy(source, Path(tmp))
+        if _sha256_file(Path(tmp)) != sha256:
+            raise OSError(errno.EIO, f"the restored definition did not verify: {tmp}")
+        os.replace(tmp, target)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def _launchctl(arguments: list[str], runner: Runner) -> int | None:
+    """One ``launchctl`` call: fixed absolute argv, captured output, a timeout.
+
+    The return code, or ``None`` when launchctl could not run or did not answer
+    in time — a timeout and a missing binary are outcomes, never exceptions.
+    """
+    try:
+        completed = runner(
+            [LAUNCHCTL, *arguments],
+            capture_output=True,
+            text=True,
+            timeout=_LAUNCHCTL_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return completed.returncode
+
+
+def _job_confirmed_loaded(label: str, runner: Runner) -> bool:
+    """Only an explicit success of ``launchctl print`` counts as loaded."""
+    return _launchctl(["print", f"gui/{_getuid()}/{label}"], runner) == 0
+
+
+def _restart_command(journal: dict[str, Any]) -> str:
+    return f"{LAUNCHCTL} bootstrap gui/{_getuid()} {shlex.quote(str(journal['plist']))}"
+
+
+def _not_restarted(takeover_id: str, journal: dict[str, Any], state: str) -> dict[str, Any]:
+    command = _restart_command(journal)
+    return _refused(
+        REF_NOT_RESTARTED,
+        id=takeover_id,
+        state=state,
+        command=command,
+        message=(
+            "The previous Ciaobot engine could not be started again automatically. "
+            f"Start it yourself with: {command}"
+        ),
     )
 
 
@@ -1184,50 +1527,34 @@ class _ShaMismatch(Exception):
     """The plist changed under the takeover between plan() and the copy."""
 
 
-def _new_takeover_id() -> str:
-    stamp = _utc_stamp()
-    candidate = stamp
-    suffix = 1
-    while _journal_path(candidate).parent.exists():
-        suffix += 1
-        candidate = f"{stamp}-{suffix}"
-    return candidate
+def _backup_unusable(entry: Path, journal: dict[str, Any]) -> bool:
+    """Whether the plist backup is missing, not a regular file or not the journal's hash."""
+    backup = _backup_path(entry, str(journal["label"]))
+    try:
+        return (
+            backup.is_symlink()
+            or not backup.is_file()
+            or _sha256_file(backup) != str(journal["plist_sha256"])
+        )
+    except OSError:
+        return True
 
 
 def _begin_takeover(current: TakeoverPlan) -> str:
-    """Create the takeover entry, back up the plist, journal ``started``.
+    """Create the takeover entry, journal ``created``, back up the plist, journal ``started``.
 
-    Returns the takeover id. The backup exists — copied with metadata and
-    fsynced, and verified against the hash the app approved — before any
-    engine is stopped: if the takeover never gets past this point, nothing of
-    the old install was touched.
-
-    A journal id is the UTC stamp; a collision (two takes in one second) gets
-    a ``-N`` suffix, which keeps the lexicographic order of directory names.
+    Returns the takeover id. The journal skeleton is written before anything
+    else, so no journal-less entry exists. The backup exists — copied with
+    metadata and fsynced, and verified against the hash the app approved —
+    before any engine is stopped: if the takeover never gets past this point,
+    nothing of the old install was touched, and a crash leaves a ``created``
+    skeleton that the next apply discards.
     """
-    takeover_id = _new_takeover_id()
-    entry = _takeover_root() / takeover_id
-    _make_entry(entry)
+    takeover_id, entry = _create_entry()
     label = current.label
-    try:
-        backup = _backup_path(entry, label)
-        plist_path = Path(current.plist)
-        if plist_path.is_symlink() or not plist_path.is_file():
-            raise DefinitionReadError(f"the service definition is not a regular file: {plist_path}")
-        _fsync_copy(plist_path, backup)
-        copied_sha = _sha256_file(backup)
-    except BaseException:
-        shutil.rmtree(entry, ignore_errors=True)
-        raise
-    if copied_sha != current.plist_sha256:
-        # The plist changed between plan() and this copy, so the hash the app
-        # approved no longer names what is on disk. Remove the young journal
-        # again: leaving it would pin every later plan() on a resume.
-        shutil.rmtree(entry, ignore_errors=True)
-        raise _ShaMismatch()
     journal: dict[str, Any] = {
         "id": takeover_id,
-        "state": STATE_STARTED,
+        "state": STATE_CREATED,
         "created": _utc_stamp(),
         "label": label,
         "plist": current.plist,
@@ -1241,9 +1568,27 @@ def _begin_takeover(current: TakeoverPlan) -> str:
         "trash": [asdict(item) for item in current.trash],
         "left_in_place": list(current.left_in_place),
         "dropped_env": list(current.dropped_env),
+        "protected": list(current.protected),
         "app_version": ciao.__version__,
     }
-    _write_journal(entry, journal)
+    try:
+        _write_journal(entry, journal)
+        backup = _backup_path(entry, label)
+        plist_path = Path(current.plist)
+        if plist_path.is_symlink() or not plist_path.is_file():
+            raise DefinitionReadError(f"the service definition is not a regular file: {plist_path}")
+        _fsync_copy(plist_path, backup)
+        copied_sha = _sha256_file(backup)
+    except BaseException:
+        shutil.rmtree(entry, ignore_errors=True)
+        raise
+    if copied_sha != current.plist_sha256:
+        # The plist changed between plan() and this copy, so the hash the app
+        # approved no longer names what is on disk. Remove the young entry
+        # again (this run created it): leaving it would pin every later plan.
+        shutil.rmtree(entry, ignore_errors=True)
+        raise _ShaMismatch()
+    _advance(entry, STATE_CREATED, STATE_STARTED)
     return takeover_id
 
 
@@ -1254,10 +1599,17 @@ def _stop_old_engine(
     clock: Callable[[], float],
     sleep: Callable[[float], None],
 ) -> str | None:
-    """Boot the old job out and wait for silence. A fixed refusal on timeout."""
+    """Boot the old job out and wait for silence.
+
+    ``None`` when the old engine is gone; :data:`REF_DID_NOT_STOP` when it did
+    not stop and the job was put back; :data:`REF_NOT_RESTARTED` when it did not
+    stop and putting it back failed too.
+    """
     uid = _getuid()
     label = str(journal["label"])
-    _run_launchctl(["bootout", f"gui/{uid}/{label}"], runner=runner)
+    # A bootout that times out or cannot run is not decisive: the wait below
+    # verifies the job, the port and the lock itself.
+    _launchctl(["bootout", f"gui/{uid}/{label}"], runner)
     if _wait_until(
         lambda: _old_engine_gone(
             label=label,
@@ -1272,21 +1624,54 @@ def _stop_old_engine(
         return None
     # Put the old service back exactly as it was found: the job definition is
     # still in LaunchAgents (the unlink never happened), so bootstrapping it
-    # restores what launchd was running.
-    _run_launchctl(["bootstrap", f"gui/{uid}", str(journal["plist"])], runner=runner)
-    return REF_DID_NOT_STOP
+    # restores what launchd was running. "Already loaded" is as good as a
+    # clean bootstrap; anything unconfirmed is reported, never assumed.
+    code = _launchctl(["bootstrap", f"gui/{uid}", str(journal["plist"])], runner)
+    if code == 0 or _job_confirmed_loaded(label, runner):
+        return REF_DID_NOT_STOP
+    return REF_NOT_RESTARTED
 
 
 def _remove_plist(entry: Path, journal: dict[str, Any]) -> str | None:
-    """Unlink the LaunchAgents definition once the backup is proven. ``None`` ok."""
-    backup = _backup_path(entry, str(journal["label"]))
-    if backup.is_symlink() or not backup.is_file() or _sha256_file(backup) != str(journal["plist_sha256"]):
+    """Unlink the LaunchAgents definition once the backup is proven. ``None`` ok.
+
+    The live file must still be what the journal approved: its hash equals the
+    journal's and the backup's. Anything else is the user's new edit, which is
+    never unlinked. An already-absent file is the finished unlink of a crashed
+    run.
+    """
+    if _backup_unusable(entry, journal):
         # Without the verified backup a rollback could not restore this file,
         # so the unlink is refused: the takeover stays resumable instead.
         return REF_BACKUP_UNUSABLE
     plist = Path(str(journal["plist"]))
+    if not os.path.lexists(plist):
+        return None
+    backup_sha = _sha256_file(_backup_path(entry, str(journal["label"])))
+    try:
+        if plist.is_symlink() or not plist.is_file():
+            return REF_PLIST_CHANGED
+        live = _sha256_file(plist)
+    except OSError:
+        return REF_PLIST_CHANGED
+    if live != str(journal["plist_sha256"]) or live != backup_sha:
+        return REF_PLIST_CHANGED
     plist.unlink(missing_ok=True)
     return None
+
+
+def _live_plist_problem(journal: dict[str, Any], expect_sha256: str) -> str | None:
+    """On a resume before the unlink: the live plist must hash to what was approved."""
+    plist = Path(str(journal["plist"]))
+    if not os.path.lexists(plist):
+        return REF_PLIST_CHANGED if journal.get("state") == STATE_STARTED else None
+    try:
+        if plist.is_symlink() or not plist.is_file():
+            return REF_PLIST_CHANGED
+        live = _sha256_file(plist)
+    except OSError:
+        return REF_PLIST_CHANGED
+    return None if live == expect_sha256 else REF_PLIST_CHANGED
 
 
 def apply(
@@ -1305,18 +1690,48 @@ def apply(
     ``expect_sha256`` — the hash the caller saw in the plan JSON it acted on,
     so what is on disk now is what was approved. Every step is journalled and
     idempotent on a resume; a successful apply ends at ``pointer_written``,
-    leaving the old plist backed up and the old job gone.
+    leaving the old plist backed up and the old job gone. The whole transaction
+    holds the per-takeover lock: a concurrent command answers ``busy``.
     """
+    if _isolation_refusal(label):
+        return _refused(REF_NOT_TAKEOVER, action=ACTION_REFUSE)
+    return _guarded(
+        lambda: _apply_locked(
+            expect_sha256=expect_sha256,
+            launch_agents_dir=launch_agents_dir,
+            label=label,
+            runner=runner,
+            clock=clock,
+            sleep=sleep,
+        ),
+        create=True,
+    )
+
+
+def _apply_locked(
+    *,
+    expect_sha256: str,
+    launch_agents_dir: Path | None,
+    label: str,
+    runner: Runner,
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+) -> dict[str, Any]:
+    _discard_young_entries()
     current = plan(launch_agents_dir=launch_agents_dir, label=label, runner=runner)
     if current.action == ACTION_RESUME:
         takeover_id = current.resume_id
-        journal = _load_journal(takeover_id)
+        journal = _load_journal(takeover_id, launch_agents_dir=launch_agents_dir, label=label)
         if journal is None:
             return _refused(REF_NO_JOURNAL, id=takeover_id)
         if journal.get("state") in _FINISHED_STATES or journal.get("state") not in _KNOWN_STATES:
             return _refused(REF_ALREADY_SETTLED, id=takeover_id, state=journal.get("state"))
         if journal.get("plist_sha256") != expect_sha256:
             return _refused(REF_SHA_MISMATCH, id=takeover_id)
+        if journal.get("state") in (STATE_STARTED, STATE_STOPPING):
+            problem = _live_plist_problem(journal, expect_sha256)
+            if problem is not None:
+                return _refused(problem, id=takeover_id, state=journal.get("state"))
     elif current.action == ACTION_TAKEOVER:
         if current.plist_sha256 != expect_sha256:
             return _refused(REF_SHA_MISMATCH, id="")
@@ -1328,7 +1743,7 @@ def apply(
         return _refused(REF_NOT_TAKEOVER, action=current.action)
 
     while True:
-        journal = _load_journal(takeover_id)
+        journal = _load_journal(takeover_id, launch_agents_dir=launch_agents_dir, label=label)
         if journal is None:
             return _refused(REF_NO_JOURNAL, id=takeover_id)
         entry = _takeover_root() / takeover_id
@@ -1338,25 +1753,27 @@ def apply(
             # running; the journal on disk wins over this process's plan.
             return _refused(REF_ALREADY_SETTLED, id=takeover_id, state=state)
         if state == STATE_STARTED:
-            refusal = _stop_old_engine(journal, runner=runner, clock=clock, sleep=sleep)
-            if refusal is not None:
-                journal["state"] = STATE_ROLLED_BACK
-                _write_journal(entry, journal)
-                return _refused(refusal, id=takeover_id, state=STATE_ROLLED_BACK)
-            journal["state"] = STATE_STOPPING
-            _write_journal(entry, journal)
+            # The backup is proven again before every stop, resumed or fresh.
+            if _backup_unusable(entry, journal):
+                return _refused(REF_BACKUP_UNUSABLE, id=takeover_id, state=state)
+            outcome = _stop_old_engine(journal, runner=runner, clock=clock, sleep=sleep)
+            if outcome == REF_NOT_RESTARTED:
+                _note(entry, state, problem=REF_NOT_RESTARTED)
+                return _not_restarted(takeover_id, journal, state)
+            if outcome is not None:
+                _advance(entry, state, STATE_ROLLED_BACK)
+                return _refused(outcome, id=takeover_id, state=STATE_ROLLED_BACK)
+            _advance(entry, state, STATE_STOPPING)
         elif state == STATE_STOPPING:
             refusal = _remove_plist(entry, journal)
             if refusal is not None:
                 return _refused(refusal, id=takeover_id, state=state)
-            journal["state"] = STATE_PLIST_REMOVED
-            _write_journal(entry, journal)
+            _advance(entry, state, STATE_PLIST_REMOVED)
         elif state == STATE_PLIST_REMOVED:
             app_engine.write_pointer(
                 Path(str(journal["workspace"])), Path(str(journal["runtime_root"]))
             )
-            journal["state"] = STATE_POINTER_WRITTEN
-            _write_journal(entry, journal)
+            _advance(entry, state, STATE_POINTER_WRITTEN)
         elif state == STATE_POINTER_WRITTEN:
             return {"ok": True, "id": takeover_id, "state": STATE_POINTER_WRITTEN}
         else:
@@ -1377,16 +1794,23 @@ def _health_problem(journal: dict[str, Any]) -> str | None:
     """The bundled engine's health proof, as the first check that fails.
 
     All of these must hold: the app-owned pointer names the journal's
-    workspace; the ready record names a live pid and the same workspace and
-    port; whatever answers the port identifies itself with that pid and
-    startup id; and the runtime lock is held by that pid.
+    workspace and runtime root; the ready record names a live pid and the same
+    workspace and port; whatever answers the port identifies itself with that
+    pid and startup id; and the runtime lock is actually held, by that pid.
     """
     workspace = Path(str(journal["workspace"]))
+    runtime_root = Path(str(journal["runtime_root"]))
     port = int(journal["port"])
     pointer = app_engine.read_pointer()
-    if pointer is None or not _same_dir(pointer.workspace, workspace):
+    if (
+        pointer is None
+        or not _same_dir(pointer.workspace, workspace)
+        or not _same_dir(pointer.runtime_root, runtime_root)
+    ):
         return "pointer"
-    ready = _read_json(state_dir() / app_engine.READY_RECORD_NAME)
+    ready = app_engine._read_private_json(
+        state_dir() / app_engine.READY_RECORD_NAME, label="the app engine ready record"
+    )
     if ready is None:
         return "ready"
     pid = ready.get("pid")
@@ -1408,27 +1832,81 @@ def _health_problem(journal: dict[str, Any]) -> str | None:
     identity = engine_identity(port)
     if identity is None or identity.get("startup_id") != startup_id or identity.get("pid") != pid:
         return "listener"
+    if not _runtime_lock_held(runtime_root):
+        return "lock"
     owner = read_lock_owner(_journal_runtime(journal))
     if not isinstance(owner, dict) or owner.get("pid") != pid:
         return "lock"
     return None
 
 
+def _candidate_proven(path: Path, proof: str, env_roots: list[Path]) -> bool:
+    """Whether the candidate still carries the proof that earned it a place in the plan.
+
+    The plan proved each one when it listed it; a leftover could have been
+    swapped for something else since, so the proof is checked again.
+    """
+    home = Path.home()
+    try:
+        if proof == "receipt_env":
+            return path.name == _ENV_ROOT_NAME and path.is_dir() and not path.is_symlink()
+        if proof == "receipt":
+            state = home.joinpath(*_STATE_ROOT)
+            return (
+                path.parent == state or state in path.parents
+            ) and path.is_file() and not path.is_symlink() and path.name in (
+                "install-receipt.json",
+                _UV_NAME,
+            )
+        if proof == "installer_shim":
+            if path.is_symlink() or not path.is_file() or path != home / ".local" / "bin" / "ciao":
+                return False
+            text = read_definition(path, max_bytes=_MAX_SMALL_FILE).data.decode("utf-8", "replace")
+            return SHIM_MARKER in text
+        if proof == "uv_tool_symlink":
+            if not path.is_symlink() or path != home / ".local" / "bin" / "ciao":
+                return False
+            return any(_inside(path.resolve(), env.resolve()) for env in env_roots)
+        if proof == "server_host_program":
+            return path == home / "Applications" / _HOST_APP_NAME and path.exists()
+        if proof == "server_host_record":
+            record = _read_json(path)
+            host = home / "Applications" / _HOST_APP_NAME
+            return bool(record is not None and record.get("bundle_path") == str(host))
+    except (OSError, DefinitionReadError, RuntimeError):
+        return False
+    return False
+
+
 def _finish_trash(journal: dict[str, Any]) -> list[dict[str, str]]:
     """The journal's candidates that may still be trashed, re-filtered.
 
-    Every candidate passes ``_safe`` again against the workspace and runtime
-    root this journal took over, and must still exist — a candidate the app
-    already trashed on an earlier finish drops out, so a lost answer can be
-    re-fetched harmlessly.
+    Every candidate passes ``_safe`` again against the SAME protected paths the
+    plan used (persisted in the journal; a journal without them offers nothing),
+    still carries its proof, and must still exist — a candidate the app already
+    trashed on an earlier finish drops out, so a lost answer can be re-fetched
+    harmlessly.
     """
+    persisted = journal.get("protected")
+    if not isinstance(persisted, list) or not all(isinstance(item, str) for item in persisted):
+        return []
     workspace = Path(str(journal["workspace"]))
     runtime_root = Path(str(journal["runtime_root"]))
-    protected = [workspace, runtime_root, Path.home() / ".ciao", state_dir()]
+    protected = [
+        workspace,
+        runtime_root,
+        Path.home() / ".ciao",
+        state_dir(),
+        *(Path(item) for item in persisted),
+    ]
+    items = [item for item in journal.get("trash") or [] if isinstance(item, dict)]
+    env_roots = [
+        Path(str(item["path"]))
+        for item in items
+        if item.get("proof") == "receipt_env" and isinstance(item.get("path"), str)
+    ]
     found: list[dict[str, str]] = []
-    for item in journal.get("trash") or []:
-        if not isinstance(item, dict):
-            continue
+    for item in items:
         raw_path = item.get("path")
         proof = item.get("proof")
         if not isinstance(raw_path, str) or not isinstance(proof, str) or proof not in _PROOF_ROOTS:
@@ -1440,6 +1918,8 @@ def _finish_trash(journal: dict[str, Any]) -> list[dict[str, str]]:
             allow_symlink=proof in _SYMLINK_PROOFS,
         )
         if checked is None or not os.path.lexists(checked):
+            continue
+        if not _candidate_proven(checked, proof, env_roots):
             continue
         path = str(checked)
         if all(existing["path"] != path for existing in found):
@@ -1459,6 +1939,13 @@ def finish(*, takeover_id: str, done: bool = False, runner: Runner = subprocess.
     ``trash.json`` itself): the journal ends ``finished``. Any missing proof
     keeps the journal open and refuses ``not_healthy``.
     """
+    try:
+        return _guarded(lambda: _finish_locked(takeover_id, done), create=False)
+    except _NoState:
+        return _refused(REF_NO_JOURNAL, id=takeover_id)
+
+
+def _finish_locked(takeover_id: str, done: bool) -> dict[str, Any]:
     journal = _load_journal(takeover_id)
     if journal is None:
         return _refused(REF_NO_JOURNAL, id=takeover_id)
@@ -1475,16 +1962,14 @@ def finish(*, takeover_id: str, done: bool = False, runner: Runner = subprocess.
     if done:
         if state != STATE_HEALTHY:
             return _refused(REF_NOT_HEALTHY, id=takeover_id, state=state)
-        journal["state"] = STATE_FINISHED
-        _write_journal(entry, journal)
+        _advance(entry, state, STATE_FINISHED)
         return settled
     if state not in (STATE_POINTER_WRITTEN, STATE_HEALTHY):
         return _refused(REF_NOT_HEALTHY, id=takeover_id, state=state)
     problem = _health_problem(journal)
     if problem is not None:
         return _refused(REF_NOT_HEALTHY, id=takeover_id, state=state, check=problem)
-    journal["state"] = STATE_HEALTHY
-    _write_journal(entry, journal)
+    _advance(entry, state, STATE_HEALTHY)
     return {
         "ok": True,
         "id": takeover_id,
@@ -1503,11 +1988,26 @@ def rollback(
     """Restore the old service for a takeover that never became healthy.
 
     The app has already stopped its bundled engine (this refuses while its
-    lock is still held), removes the workspace pointer if it names the
-    journal's workspace, restores the old plist byte-identical from the
-    verified backup, bootstraps the old job and waits for the old engine to
-    answer. Ends with the journal ``rolled_back`` either way.
+    lock is still held). The old plist is restored byte-identical from the
+    verified backup (atomically), the old job is bootstrapped, and only once
+    the old engine answers does the workspace pointer go and the journal end
+    ``rolled_back``. If the old engine cannot be confirmed back the journal and
+    pointer stay as they were and the answer carries the command to run.
     """
+    try:
+        return _guarded(
+            lambda: _rollback_locked(takeover_id, runner, clock, sleep), create=False
+        )
+    except _NoState:
+        return _refused(REF_NO_JOURNAL, id=takeover_id)
+
+
+def _rollback_locked(
+    takeover_id: str,
+    runner: Runner,
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+) -> dict[str, Any]:
     journal = _load_journal(takeover_id)
     if journal is None:
         return _refused(REF_NO_JOURNAL, id=takeover_id)
@@ -1520,35 +2020,56 @@ def rollback(
     runtime_root = Path(str(journal["runtime_root"]))
     plist = Path(str(journal["plist"]))
     label = str(journal["label"])
+    sha = str(journal["plist_sha256"])
     if _runtime_lock_held(runtime_root):
         return _refused(REF_BUNDLED_RUNNING, id=takeover_id, state=state)
     # Every refusal comes before the first mutation: a rollback that cannot
-    # restore the old plist must not have cleared the pointer already.
-    restore_from: Path | None = None
+    # restore the old plist must not have changed anything.
+    backup = _backup_path(entry, label)
+    backup_ok = not _backup_unusable(entry, journal)
+    restore = False
     if os.path.lexists(plist):
-        if plist.is_symlink() or not plist.is_file() or _sha256_file(plist) != str(journal["plist_sha256"]):
+        try:
+            if plist.is_symlink() or not plist.is_file():
+                return _refused(REF_PLIST_CONFLICT, id=takeover_id, state=state)
+            live = _sha256_file(plist)
+        except OSError:
+            return _refused(REF_PLIST_CONFLICT, id=takeover_id, state=state)
+        # Equal to the journal's (or the backup's) hash is "already restored";
+        # differing from both is somebody else's definition.
+        if live != sha and not (backup_ok and live == _sha256_file(backup)):
             return _refused(REF_PLIST_CONFLICT, id=takeover_id, state=state)
     else:
-        restore_from = _backup_path(entry, label)
-        if (
-            restore_from.is_symlink()
-            or not restore_from.is_file()
-            or _sha256_file(restore_from) != str(journal["plist_sha256"])
-        ):
+        if not backup_ok:
             return _refused(REF_BACKUP_UNUSABLE, id=takeover_id, state=state)
-    app_engine.clear_pointer(expected_workspace=Path(str(journal["workspace"])))
-    if restore_from is not None:
-        _fsync_copy(restore_from, plist)
-    _run_launchctl(["bootstrap", f"gui/{_getuid()}", str(plist)], runner=runner)
-    journal["state"] = STATE_ROLLED_BACK
-    _write_journal(entry, journal)
+        restore = True
+    if restore:
+        try:
+            _atomic_restore(backup, plist, sha256=sha)
+        except OSError as exc:
+            return _refused(
+                REF_RESTORE_FAILED,
+                id=takeover_id,
+                state=state,
+                message=f"the previous service definition could not be restored: {exc}",
+            )
+    if not _job_confirmed_loaded(label, runner):
+        code = _launchctl(["bootstrap", f"gui/{_getuid()}", str(plist)], runner)
+        if code != 0 and not _job_confirmed_loaded(label, runner):
+            _note(entry, state, problem=REF_NOT_RESTARTED)
+            return _not_restarted(takeover_id, journal, state)
     if not _wait_until(
         lambda: engine_identity(int(journal["port"])) is not None,
         timeout_s=_ROLLBACK_START_S,
         clock=clock,
         sleep=sleep,
     ):
-        return _refused(REF_DID_NOT_START, id=takeover_id, state=STATE_ROLLED_BACK)
+        # Neither the pointer nor the journal moves until the old engine
+        # answers; a second rollback repeats from here.
+        _note(entry, state, problem=REF_DID_NOT_START)
+        return _refused(REF_DID_NOT_START, id=takeover_id, state=state)
+    app_engine.clear_pointer(expected_workspace=Path(str(journal["workspace"])))
+    _advance(entry, state, STATE_ROLLED_BACK)
     return {"ok": True, "id": takeover_id, "state": STATE_ROLLED_BACK}
 
 
