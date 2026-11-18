@@ -94,11 +94,9 @@ _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.task_decisions import clean_reason
 from ciao.core_prompt import system_prompt_payload
 from ciao.tool_path import resolve_command
-from ciao.providers.base import live_for_session
-from ciao.providers.claude import ClaudeProvider
+from ciao.providers.base import BaseProvider, live_for_session
 from ciao.native_task_types import is_process_task
 from ciao.providers.opencode import (
-    OpencodeProvider,
     opencode_child_status,
     running_opencode_child_ids,
 )
@@ -3033,10 +3031,8 @@ async def chat_background_task_stop(request: Request) -> JSONResponse:
     provider = service.provider if service is not None else None
     stopped = False
     try:
-        if isinstance(provider, ClaudeProvider):
+        if isinstance(provider, BaseProvider):
             stopped = await provider.stop_background_task(task_id)
-        elif isinstance(provider, OpencodeProvider):
-            stopped = await provider.stop_background_shell(task_id)
     except Exception:  # noqa: BLE001 - a provider failure must answer, not 500
         logger.warning("stopping background task %s failed", task_id, exc_info=True)
         return JSONResponse(
@@ -3642,8 +3638,8 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
     # task is not listed twice.
     provider_service = pcm._providers.get(chat.chat_id)
     live_provider = provider_service.provider if provider_service is not None else None
-    live_claude = live_provider if isinstance(live_provider, ClaudeProvider) else None
-    if path is None and live_claude is None:
+    live = live_provider if isinstance(live_provider, BaseProvider) else None
+    if path is None and live is None:
         return []
 
     def _scan() -> tuple[
@@ -3657,7 +3653,7 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
             return [], []
         state = subagent_tracking.parse_session_subagents(path)
         agents = subagent_tracking.running_agents(path, state)
-        tasks = [] if live_claude is not None else subagent_tracking.running_tasks(state)
+        tasks = [] if live is not None else subagent_tracking.running_tasks(state)
         return agents, tasks
 
     agents, tasks = await asyncio.to_thread(_scan)
@@ -3686,8 +3682,8 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
         }
         for info in tasks
     )
-    if live_claude is not None:
-        for task in live_claude.background_shell_rows():
+    if live is not None:
+        for task in live.background_shell_rows():
             task_type = str(task["task_type"])
             if not is_process_task(task):
                 # Background agents already have their own rows above.

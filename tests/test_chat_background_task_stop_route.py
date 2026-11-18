@@ -178,12 +178,12 @@ def test_stop_requires_the_session_cookie(tmp_path: Path) -> None:
     assert sdk.stopped == []
 
 
-def test_opencode_stop_background_shell_deletes_the_shell(tmp_path: Path) -> None:
+def test_opencode_stop_background_task_deletes_the_shell(tmp_path: Path) -> None:
     sdk = _OpencodeClient()
     provider = _opencode_provider(tmp_path, sdk)
 
-    assert asyncio.run(provider.stop_background_shell("sh_1")) is True
-    assert asyncio.run(provider.stop_background_shell("sh_x")) is False
+    assert asyncio.run(provider.stop_background_task("sh_1")) is True
+    assert asyncio.run(provider.stop_background_task("sh_x")) is False
     assert sdk.deleted == ["/api/shell/sh_1"]
 
 
@@ -236,5 +236,5 @@ def test_opencode_stop_percent_encodes_the_shell_id(tmp_path: Path) -> None:
     provider = _opencode_provider(tmp_path, sdk)
     provider._background_shells = {"a/b?c"}
 
-    assert asyncio.run(provider.stop_background_shell("a/b?c")) is True
+    assert asyncio.run(provider.stop_background_task("a/b?c")) is True
     assert sdk.deleted == ["/api/shell/a%2Fb%3Fc"]

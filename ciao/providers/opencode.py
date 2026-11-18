@@ -2181,7 +2181,7 @@ class OpencodeProvider(BaseSDKProvider):
         """Session ids of the background subagents tracked for this chat, sorted."""
         return sorted(self._background_children)
 
-    async def stop_background_shell(self, shell_id: str) -> bool:
+    async def stop_background_task(self, shell_id: str) -> bool:
         """Terminate one tracked background shell (``DELETE /api/shell/:id``).
 
         False when the shell is not tracked here or the server refused. The
