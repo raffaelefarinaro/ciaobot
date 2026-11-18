@@ -1,0 +1,10 @@
+{"sessionUpdate":"config_option_update","configOptions":[{"id":"model","category":"model","type":"select","currentValue":"gpt-5.5","options":[{"value":"gpt-5.5","name":"GPT 5.5"}]},{"id":"mode","category":"mode","type":"select","currentValue":"agent","options":[]}]}
+{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Reasoning."}}
+{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Running tests. "}}
+{"sessionUpdate":"tool_call","toolCallId":"call_1","kind":"execute","title":"Run tests","status":"in_progress","rawInput":{"command":"cd /work/app && pytest -q"}}
+{"sessionUpdate":"tool_call_update","toolCallId":"call_1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"ok"}}]}
+{"sessionUpdate":"tool_call","toolCallId":"call_2","kind":"read","title":"Read README.md","status":"completed","locations":[{"path":"/work/app/README.md"}]}
+{"sessionUpdate":"tool_call_update","toolCallId":"call_2","status":"completed"}
+{"sessionUpdate":"plan","entries":[{"content":"Run tests","priority":"high","status":"completed"}]}
+{"sessionUpdate":"usage_update","used":1200,"size":400000,"cost":{"amount":0.0123,"currency":"USD"}}
+{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"All green."}}
