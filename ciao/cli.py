@@ -7799,6 +7799,12 @@ def _register_launchd_service(workspace: Path) -> Path:
         raise RuntimeError(str(exc)) from exc
 
 
+def _mac_takeover_command(args: argparse.Namespace) -> int:
+    from ciao import mac_takeover
+
+    return mac_takeover.run_cli(args)
+
+
 def _service_command(args: argparse.Namespace) -> int:
     from ciao import macos_service
 
@@ -8157,6 +8163,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     desktop_uninstall_parser.add_argument("--json", action="store_true", dest="as_json")
     desktop_uninstall_parser.set_defaults(func=_desktop_command)
+
+    takeover_parser = subparsers.add_parser(
+        "mac-takeover",
+        help="Ciaobot.app only: classify this Mac's 1.x engine for takeover (read-only).",
+    )
+    takeover_sub = takeover_parser.add_subparsers(
+        dest="mac_takeover_action", required=True
+    )
+    takeover_plan_parser = takeover_sub.add_parser(
+        "plan", help="Print the takeover plan as JSON; changes nothing."
+    )
+    takeover_plan_parser.add_argument("--json", action="store_true", dest="as_json")
+    takeover_plan_parser.add_argument(
+        "--launch-agents-dir", type=Path, default=None
+    )
+    takeover_plan_parser.add_argument("--label", default="com.ciao.server")
+    takeover_plan_parser.set_defaults(func=_mac_takeover_command)
 
     installer_parser = subparsers.add_parser(
         "installer",
