@@ -2255,6 +2255,7 @@ def _parent_pid(pid: int) -> int | None:
             [_PS, "-o", "ppid=", "-p", str(pid)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=5,
             check=False,
         )
