@@ -60,9 +60,11 @@ final class ClientUpdateInstallDelegate: NSObject, SPUUpdaterDelegate {
     )
 
     private let immediateInstall: ImmediateInstallScheduler
+    private let updateQuit: UpdateQuitIntent
 
-    init(immediateInstall: ImmediateInstallScheduler? = nil) {
+    init(immediateInstall: ImmediateInstallScheduler? = nil, updateQuit: UpdateQuitIntent? = nil) {
         self.immediateInstall = immediateInstall ?? ImmediateInstallScheduler()
+        self.updateQuit = updateQuit ?? UpdateQuitIntent()
         super.init()
     }
 
@@ -76,7 +78,19 @@ final class ClientUpdateInstallDelegate: NSObject, SPUUpdaterDelegate {
         willInstallUpdateOnQuit item: SUAppcastItem,
         immediateInstallationBlock immediateInstallHandler: @escaping () -> Void
     ) -> Bool {
-        immediateInstall.takeControl(immediateInstallHandler)
+        takeControl(of: immediateInstallHandler)
+    }
+
+    /// Sparkle's handler terminates the app. Mark that terminate as an update
+    /// install first, so the quit path treats it as a system quit (no
+    /// confirmation dialog, bounded engine drain) instead of asking. The
+    /// update is the user's own choice already, and a dialog could leave
+    /// Sparkle's installer waiting behind it.
+    func takeControl(of immediateInstallHandler: @escaping () -> Void) -> Bool {
+        immediateInstall.takeControl { [updateQuit] in
+            updateQuit.beginInstall()
+            immediateInstallHandler()
+        }
     }
 }
 
@@ -174,14 +188,16 @@ final class ClientUpdater: ClientUpdateControlling {
     /// its Info.plist.
     convenience init(
         bundle: Bundle = .main,
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        updateQuit: UpdateQuitIntent? = nil
     ) {
         self.init(
             configuration: Configuration(
                 bundle: bundle,
                 allowsUpdates: Self.isReleaseBuild,
                 isTestProcess: Self.isTestProcess(environment: environment)
-            )
+            ),
+            makeEngine: { SparkleUpdaterEngine(installDelegate: ClientUpdateInstallDelegate(updateQuit: updateQuit)) }
         )
     }
 
