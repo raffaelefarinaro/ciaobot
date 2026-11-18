@@ -6,9 +6,12 @@ import pytest
 
 from ciao.claude_trim import (
     TRIM_OPTIONS,
+    catalog_payload,
     claude_settings_layer,
     coerce_claude_trim,
+    effective_trim,
     load_claude_trim,
+    option,
     trim_tool_denies,
 )
 
@@ -32,8 +35,6 @@ def test_catalog_keys_unique_and_well_formed() -> None:
     assert len({option.label for option in TRIM_OPTIONS}) == len(TRIM_OPTIONS)
     for option in TRIM_OPTIONS:
         assert option.key == f"{option.kind}:{option.name}"
-        if option.locked:
-            assert option.default_trimmed is True
         if option.covers:
             assert option.kind == "setting"
 
@@ -81,15 +82,46 @@ def test_override_untrims_and_trims() -> None:
     assert claude_settings_layer(overrides)["disableWorkflows"] is True
 
 
-def test_coerce_rejects_locked_unknown_and_non_bool() -> None:
+def test_coerce_rejects_unknown_and_non_bool() -> None:
     for raw in (
-        {"tool:CronCreate": False},
         {"tool:Nope": True},
         {"tool:NotebookEdit": "no"},
         ["x"],
     ):
         with pytest.raises(ValueError):
             coerce_claude_trim(raw)
+
+
+SCHEDULING_KEYS = [o.key for o in TRIM_OPTIONS if o.group == "scheduling"]
+
+
+def test_scheduling_options_are_trimmed_by_default_and_not_special() -> None:
+    assert SCHEDULING_KEYS
+    assert not hasattr(TRIM_OPTIONS[0], "locked")
+    assert all(option(key).default_trimmed for key in SCHEDULING_KEYS)
+    # A map that never mentions them keeps them trimmed.
+    assert all(effective_trim({})[key] for key in SCHEDULING_KEYS)
+    assert all(effective_trim({"tool:NotebookEdit": False})[key] for key in SCHEDULING_KEYS)
+
+
+def test_untrimming_a_scheduling_option_is_accepted_and_sparse() -> None:
+    assert coerce_claude_trim({"tool:CronCreate": False}) == {"tool:CronCreate": False}
+    assert coerce_claude_trim({"tool:CronCreate": True}) == {}
+    assert load_claude_trim({"skill:loop": False}) == {"skill:loop": False}
+
+
+def test_scheduling_option_reaches_denies_only_while_trimmed() -> None:
+    assert "CronCreate" in trim_tool_denies({})
+    assert "CronCreate" not in trim_tool_denies({"tool:CronCreate": False})
+    assert "CronDelete" in trim_tool_denies({"tool:CronCreate": False})
+    assert "Skill(loop)" in trim_tool_denies({})
+    assert "Skill(loop)" not in trim_tool_denies({"skill:loop": False})
+    assert claude_settings_layer({})["skillOverrides"]["loop"] == "off"
+    assert "loop" not in claude_settings_layer({"skill:loop": False})["skillOverrides"]
+
+
+def test_catalog_payload_has_no_locked_field() -> None:
+    assert all("locked" not in entry for entry in catalog_payload())
 
 
 def test_coerce_is_sparse() -> None:
@@ -105,5 +137,5 @@ def test_load_is_lenient() -> None:
             "tool:CronCreate": False,
             "tool:NotebookEdit": False,
         }
-    ) == {"tool:NotebookEdit": False}
+    ) == {"tool:CronCreate": False, "tool:NotebookEdit": False}
     assert load_claude_trim("junk") == {}

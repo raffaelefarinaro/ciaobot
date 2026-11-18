@@ -11,7 +11,8 @@ Ciaobot does not want in a chat. Two reasons:
 
 Each option has a default. A workspace stores only the options it changed, as a
 sparse ``claude_trim`` map of option key -> trimmed. Scheduling options are
-locked: Ciaobot's own surfaces replace them, so they are always trimmed.
+trimmed by default like the rest; un-trimming one lets Claude create its own
+routines and loops outside Ciaobot's schedules.
 
 Two levers apply to bundled skills. ``skillOverrides`` in the CLI settings layer
 hides a skill from the model's listing and slash-command picker. A
@@ -40,7 +41,6 @@ class TrimOption:
     reason: str  # one sentence: what it is and why trim it
     group: str
     default_trimmed: bool
-    locked: bool = False  # always trimmed; cannot be un-trimmed
     covers: tuple[str, ...] = ()  # setting options only: tool/skill names the setting removes
 
 
@@ -50,9 +50,8 @@ def _tool(
     reason: str,
     group: str,
     default_trimmed: bool = True,
-    locked: bool = False,
 ) -> TrimOption:
-    return TrimOption(f"tool:{name}", "tool", name, label, reason, group, default_trimmed, locked)
+    return TrimOption(f"tool:{name}", "tool", name, label, reason, group, default_trimmed)
 
 
 def _skill(
@@ -61,9 +60,8 @@ def _skill(
     reason: str,
     group: str,
     default_trimmed: bool = True,
-    locked: bool = False,
 ) -> TrimOption:
-    return TrimOption(f"skill:{name}", "skill", name, label, reason, group, default_trimmed, locked)
+    return TrimOption(f"skill:{name}", "skill", name, label, reason, group, default_trimmed)
 
 
 def _setting(
@@ -75,7 +73,7 @@ def _setting(
     covers: tuple[str, ...],
 ) -> TrimOption:
     return TrimOption(
-        f"setting:{name}", "setting", name, label, reason, group, default_trimmed, False, covers
+        f"setting:{name}", "setting", name, label, reason, group, default_trimmed, covers
     )
 
 
@@ -85,49 +83,42 @@ TRIM_OPTIONS: tuple[TrimOption, ...] = (
         "Create cloud routines",
         "Creates Claude cloud routines that bypass Ciaobot's schedules.",
         "scheduling",
-        locked=True,
     ),
     _tool(
         "CronDelete",
         "Delete cloud routines",
         "Deletes Claude cloud routines; Ciaobot's schedules replace them.",
         "scheduling",
-        locked=True,
     ),
     _tool(
         "CronList",
         "List cloud routines",
         "Lists Claude cloud routines; Ciaobot's schedules replace them.",
         "scheduling",
-        locked=True,
     ),
     _tool(
         "ScheduleWakeup",
         "Interval wakeups",
         "Harness-local interval loop that bypasses Ciaobot's schedules.",
         "scheduling",
-        locked=True,
     ),
     _tool(
         "RemoteTrigger",
         "Remote triggers",
         "Fires claude.ai routines outside Ciaobot's schedules.",
         "scheduling",
-        locked=True,
     ),
     _skill(
         "schedule",
         "/schedule skill",
         "Creates cloud routines; Ciaobot's schedules replace it.",
         "scheduling",
-        locked=True,
     ),
     _skill(
         "loop",
         "/loop skill",
         "Harness-local interval loop; Ciaobot's schedules replace it.",
         "scheduling",
-        locked=True,
     ),
     _tool(
         "EnterPlanMode",
@@ -328,7 +319,7 @@ def coerce_claude_trim(raw: object) -> dict[str, bool]:
     """Strictly validate a ``claude_trim`` object and return it sparse, in catalog order.
 
     Entries equal to the catalog default are dropped. Raises ValueError on a bad
-    shape, an unknown key, a non-bool value, or an attempt to un-trim a locked option.
+    shape, an unknown key, a non-bool value.
     """
     if raw is None:
         return {}
@@ -341,8 +332,6 @@ def coerce_claude_trim(raw: object) -> dict[str, bool]:
             raise ValueError(f"unknown claude_trim option: {key}")
         if not isinstance(value, bool):
             raise ValueError(f"claude_trim {key} must be true or false")
-        if entry.locked and not value:
-            raise ValueError(f"{key} is always trimmed: Ciaobot's own schedules replace it")
         if value != entry.default_trimmed:
             picked[entry.key] = value
     return {o.key: picked[o.key] for o in TRIM_OPTIONS if o.key in picked}
@@ -362,11 +351,8 @@ def load_claude_trim(raw: object) -> dict[str, bool]:
 
 
 def effective_trim(overrides: Mapping[str, bool]) -> dict[str, bool]:
-    """Every catalog key mapped to trimmed or not. Locked options are always trimmed."""
-    return {
-        o.key: True if o.locked else overrides.get(o.key, o.default_trimmed)
-        for o in TRIM_OPTIONS
-    }
+    """Every catalog key mapped to trimmed or not."""
+    return {o.key: overrides.get(o.key, o.default_trimmed) for o in TRIM_OPTIONS}
 
 
 def trim_tool_denies(overrides: Mapping[str, bool]) -> list[str]:
@@ -411,7 +397,6 @@ def catalog_payload() -> list[dict[str, Any]]:
             "reason": o.reason,
             "group": o.group,
             "default_trimmed": o.default_trimmed,
-            "locked": o.locked,
         }
         for o in TRIM_OPTIONS
     ]

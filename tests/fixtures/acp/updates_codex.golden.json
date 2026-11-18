@@ -1,0 +1,10 @@
+[
+  ["model_changed", null, null],
+  ["thinking", null, null],
+  ["text", null, null],
+  ["tool_use", "call_1", null],
+  ["tool_result", "call_1", null],
+  ["tool_use", "call_2", null],
+  ["tool_result", "call_2", null],
+  ["text", null, null]
+]
