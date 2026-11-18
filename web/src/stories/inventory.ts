@@ -44,8 +44,8 @@ export const inventory: InventoryEntry[] = [
       { name: 'disabled', coverage: 'covered', storyIds: ['settings-switch--disabled-on', 'settings-switch--disabled-off'], note: 'DisabledOn renders checked and disabled; DisabledOff renders unchecked and disabled.' },
       { name: 'busy', coverage: 'covered', storyIds: ['settings-switch--busy'], note: 'Busy renders checked, aria-busy and an ellipsis; the native button remains enabled.' },
       { name: 'narrow', coverage: 'covered', storyIds: ['settings-switch--narrow'], note: 'Narrow renders checked in a maximum 390px container.' },
-      { name: 'keyboard-focus', coverage: 'uncovered', storyIds: [], note: 'Native keyboard activation and focus styling exist; no dedicated rendered focus story.' },
-      { name: 'reduced-motion', coverage: 'uncovered', storyIds: [], note: 'Track transitions stop under reduced motion; no dedicated rendered-state story.' },
+      { name: 'keyboard-focus', coverage: 'covered', storyIds: ['settings-switch--keyboard-focus'], note: 'Tab lands on the switch with visible :focus-visible; Enter toggles aria-checked.' },
+      { name: 'reduced-motion', coverage: 'covered', storyIds: ['settings-switch--reduced-motion'], note: 'Wrapper mirrors the production reduced-motion track rule; play asserts zero transition and a toggle.' },
     ],
     loading: { status: 'none', detail: 'No initial or refresh fetch. Busy is supplied by a parent, not owner-level loading coverage.' },
     migration: { status: 'migrated', note: 'Approved shared-switch slice 1: restart resume is the remaining Settings consumer; other native Settings switches are not migrated.' },
@@ -109,25 +109,35 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ShellRows.vue",
       "web/src/components/SubagentPanel.vue"
     ],
-    "variants": [],
-    "variantNotes": "Alert/run/rest shapes from real kind branches. Detailed variants are unassessed.",
+    "variants": [
+      "working",
+      "run",
+      "alert"
+    ],
+    "variantNotes": "One mark per kind: working is a 3x3 pixel grid with one lit pixel chasing the perimeter, run is a drawn shell prompt with a blinking cursor, alert is a filled still triangle. Shape and motion carry the meaning, never hue.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ActivityGlyph.vue implements this render; no rendered-state story exists."
+        "name": "working",
+        "coverage": "covered",
+        "storyIds": ["activity-glyph--working"],
+        "note": "Working renders the nine-cell grid with one fixed dim centre; its reduced-motion frame is the checker."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "run",
+        "coverage": "covered",
+        "storyIds": ["activity-glyph--run"],
+        "note": "Run renders the drawn prompt and the block cursor, with no pixel grid."
+      },
+      {
+        "name": "alert",
+        "coverage": "covered",
+        "storyIds": ["activity-glyph--alert"],
+        "note": "Alert renders the filled triangle and the two knocked-out marks, still."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in ActivityGlyph.vue has not yet been audited."
+      "status": "none",
+      "detail": "Static SVG marks with no fetch, so there is no initial, refresh, failure or stale state. The working grid and the run cursor animate."
     },
     "migration": {
       "status": "unassessed",
@@ -194,25 +204,161 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/TaskOriginNote.vue",
       "web/src/components/needs-you/registry.ts"
     ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variants": [
+      "name",
+      "size",
+      "label"
+    ],
+    "variantNotes": "Name selects one of 22 drawn shape branches; size sets the pixel box (default 16); label makes the icon an accessible image, otherwise it is decorative and hidden.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in AppIcon.vue implements this render; no rendered-state story exists."
+        "name": "image",
+        "coverage": "covered",
+        "storyIds": ["app-icon--image"],
+        "note": "Image renders the framed picture, decorative at 16px."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "doc",
+        "coverage": "covered",
+        "storyIds": ["app-icon--doc"],
+        "note": "Doc renders the ruled page, decorative at 16px."
+      },
+      {
+        "name": "file",
+        "coverage": "covered",
+        "storyIds": ["app-icon--file"],
+        "note": "File renders the clipped-corner page, decorative at 16px."
+      },
+      {
+        "name": "model",
+        "coverage": "covered",
+        "storyIds": ["app-icon--model"],
+        "note": "Model renders the chip, decorative at 16px."
+      },
+      {
+        "name": "question",
+        "coverage": "covered",
+        "storyIds": ["app-icon--question"],
+        "note": "Question renders the framed query, decorative at 16px."
+      },
+      {
+        "name": "comment",
+        "coverage": "covered",
+        "storyIds": ["app-icon--comment"],
+        "note": "Comment renders the log window with a tail, decorative at 16px."
+      },
+      {
+        "name": "clock",
+        "coverage": "covered",
+        "storyIds": ["app-icon--clock"],
+        "note": "Clock renders the marked clock face, decorative at 16px."
+      },
+      {
+        "name": "activity",
+        "coverage": "covered",
+        "storyIds": ["app-icon--activity"],
+        "note": "Activity renders the step signal, decorative at 16px."
+      },
+      {
+        "name": "shield",
+        "coverage": "covered",
+        "storyIds": ["app-icon--shield"],
+        "note": "Shield renders the permission shield, decorative at 16px."
+      },
+      {
+        "name": "spark",
+        "coverage": "covered",
+        "storyIds": ["app-icon--spark"],
+        "note": "Spark renders the four-point star, decorative at 16px."
+      },
+      {
+        "name": "check",
+        "coverage": "covered",
+        "storyIds": ["app-icon--check"],
+        "note": "Check renders the stroke tick, decorative at 16px."
+      },
+      {
+        "name": "terminal",
+        "coverage": "covered",
+        "storyIds": ["app-icon--terminal"],
+        "note": "Terminal renders the prompt window, decorative at 16px."
+      },
+      {
+        "name": "arrow",
+        "coverage": "covered",
+        "storyIds": ["app-icon--arrow"],
+        "note": "Arrow renders the navigation arrow, decorative at 16px."
+      },
+      {
+        "name": "chevron",
+        "coverage": "covered",
+        "storyIds": ["app-icon--chevron"],
+        "note": "Chevron renders the disclosure chevron, decorative at 16px."
+      },
+      {
+        "name": "skill",
+        "coverage": "covered",
+        "storyIds": ["app-icon--skill"],
+        "note": "Skill renders the five-point star, decorative at 16px."
+      },
+      {
+        "name": "plug",
+        "coverage": "covered",
+        "storyIds": ["app-icon--plug"],
+        "note": "Plug renders the connector, decorative at 16px."
+      },
+      {
+        "name": "folder",
+        "coverage": "covered",
+        "storyIds": ["app-icon--folder"],
+        "note": "Folder renders the folder outline, decorative at 16px."
+      },
+      {
+        "name": "branch",
+        "coverage": "covered",
+        "storyIds": ["app-icon--branch"],
+        "note": "Branch renders the git branch, decorative at 16px."
+      },
+      {
+        "name": "code",
+        "coverage": "covered",
+        "storyIds": ["app-icon--code"],
+        "note": "Code renders the angle brackets, decorative at 16px."
+      },
+      {
+        "name": "copy",
+        "coverage": "covered",
+        "storyIds": ["app-icon--copy"],
+        "note": "Copy renders the overlapping sheets, decorative at 16px."
+      },
+      {
+        "name": "warning",
+        "coverage": "covered",
+        "storyIds": ["app-icon--warning"],
+        "note": "Warning renders the triangle, decorative at 16px."
+      },
+      {
+        "name": "task",
+        "coverage": "covered",
+        "storyIds": ["app-icon--task"],
+        "note": "Task renders the checked box, decorative at 16px."
+      },
+      {
+        "name": "labelled",
+        "coverage": "covered",
+        "storyIds": ["app-icon--labelled"],
+        "note": "Labelled renders role img with the label as its accessible name and no aria-hidden."
+      },
+      {
+        "name": "sized",
+        "coverage": "covered",
+        "storyIds": ["app-icon--sized"],
+        "note": "Sized renders the warning artwork in a 24px box, still on the 24-unit viewBox."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in AppIcon.vue has not yet been audited."
+      "status": "none",
+      "detail": "Static SVG glyphs with no fetch and no asynchronous state."
     },
     "migration": {
       "status": "unassessed",
@@ -271,19 +417,13 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ProjectSidebar.vue"
     ],
     "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variantNotes": "No configurable variants: a fixed 30px box around the production CiaoMark; the mark's dots follow the accent.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "BrandMark.vue wraps CiaoMark.vue in an accessible image; the inline SVG uses currentColor for the C and --accent for its dots. No rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "coverage": "covered",
+        "storyIds": ["brand-mark--default"],
+        "note": "Default renders the 30px brand box with the accessible name Ciaobot around the production CiaoMark."
       }
     ],
     "loading": {
@@ -311,20 +451,41 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/StartupView.vue",
       "web/src/components/UpdateProgressView.vue"
     ],
-    "variants": [],
-    "variantNotes": "Detailed text and size variants remain unassessed; no variants have been enumerated.",
+    "variants": [
+      "text",
+      "size"
+    ],
+    "variantNotes": "Text replaces the brand name (every `o`, in any case, becomes an accent dot; other characters stay letters); size is sm, md or lg.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "Wordmark.vue renders the brand text and accent dots; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["wordmark--default"],
+        "note": "Default renders Ciaobot at md, with the two `o` characters as accent dots and the full text as the accessible name."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Additional wordmark text and size states have not been audited."
+        "name": "size-small",
+        "coverage": "covered",
+        "storyIds": ["wordmark--small"],
+        "note": "Small renders the brand text at the sm size."
+      },
+      {
+        "name": "size-large",
+        "coverage": "covered",
+        "storyIds": ["wordmark--large"],
+        "note": "Large renders the brand text at the lg size."
+      },
+      {
+        "name": "no-dots",
+        "coverage": "covered",
+        "storyIds": ["wordmark--no-dots"],
+        "note": "NoDots renders a synthetic text without an `o`, so every character is a letter and no accent dot appears."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["wordmark--narrow"],
+        "note": "Narrow renders the brand text in a maximum 390px column, still on one line."
       }
     ],
     "loading": {
@@ -838,19 +999,13 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/SettingsView.vue"
     ],
     "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variantNotes": "No configurable variants: one inline SVG whose C follows currentColor and whose two dots use the accent.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "CiaoMark.vue renders the inline SVG mark; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "coverage": "covered",
+        "storyIds": ["ciao-mark--default"],
+        "note": "Default renders the decorative inline mark in a sized box; the C is a currentColor stroke and both dots use --accent."
       }
     ],
     "loading": {
@@ -3372,24 +3527,18 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ChatSignals.vue"
     ],
     "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variantNotes": "No configurable variants: one decorative 12px SVG scaled by --font-scale; the caller owns the accessible name.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ScheduleGlyph.vue implements this render; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "coverage": "covered",
+        "storyIds": ["schedule-glyph--default"],
+        "note": "Default renders the clock-face mark beside its row text; it is decorative and never focusable."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in ScheduleGlyph.vue has not yet been audited."
+      "status": "none",
+      "detail": "Static SVG mark with no fetch and no asynchronous state."
     },
     "migration": {
       "status": "unassessed",
@@ -3990,24 +4139,18 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ProjectSidebar.vue"
     ],
     "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variantNotes": "No configurable variants: one decorative 12px SVG scaled by --font-scale; the caller owns the accessible name.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in TaskGlyph.vue implements this render; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "coverage": "covered",
+        "storyIds": ["task-glyph--default"],
+        "note": "Default renders the ticked-box mark beside its row text; it is decorative and never focusable."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TaskGlyph.vue has not yet been audited."
+      "status": "none",
+      "detail": "Static SVG mark with no fetch and no asynchronous state."
     },
     "migration": {
       "status": "unassessed",
@@ -4475,21 +4618,33 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Grid/project/model variants and empty data. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in UsageBreakdown.vue implements this render; no rendered-state story exists."
+        "name": "loaded",
+        "coverage": "covered",
+        "storyIds": [
+          "usage-breakdown--loaded"
+        ],
+        "note": "Heatmap, projects, pipeline, hours and model bars with synthetic stats props; no fetch."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "empty-data",
+        "coverage": "covered",
+        "storyIds": [
+          "usage-breakdown--empty-data"
+        ],
+        "note": "Null stats: activity, projects and models empty captions; pipeline and hours show dashes."
+      },
+      {
+        "name": "heatmap-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "usage-breakdown--heatmap-focus"
+        ],
+        "note": "The activity scroll region is keyboard-focusable for narrow viewports."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in UsageBreakdown.vue has not yet been audited."
+      "status": "none",
+      "detail": "Presentational child: UsageView owns fetch and loading; this owner has no loading UI."
     },
     "migration": {
       "status": "unassessed",
@@ -4500,7 +4655,7 @@ export const inventory: InventoryEntry[] = [
     "id": "components-usage-view",
     "name": "UsageView",
     "family": "Memory and usage",
-    "kind": "composition",
+    "kind": "component",
     "owner": {
       "path": "web/src/components/UsageView.vue",
       "anchor": "<template>"
@@ -4513,27 +4668,54 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "First-load/error/KPI page composition. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in UsageView.vue implements this render; no rendered-state story exists."
+        "name": "initial-loading",
+        "coverage": "covered",
+        "storyIds": [
+          "usage-view--initial-loading"
+        ],
+        "note": "First load before answered: SkeletonLoader cards only; range picker stays usable."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "loaded",
+        "coverage": "covered",
+        "storyIds": [
+          "usage-view--loaded"
+        ],
+        "note": "KPI grid, deltas and UsageBreakdown after a synthetic GET fixture resolves."
+      },
+      {
+        "name": "load-failed",
+        "coverage": "covered",
+        "storyIds": [
+          "usage-view--load-failed"
+        ],
+        "note": "role=alert error with retry; KPI values show dashes until a successful read."
+      },
+      {
+        "name": "refresh-loading",
+        "coverage": "covered",
+        "storyIds": [
+          "usage-view--refresh-loading"
+        ],
+        "note": "After the first answer, a new range keeps the grid and shows dashes, not the skeleton."
+      },
+      {
+        "name": "range-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "usage-view--range-focus"
+        ],
+        "note": "Range toggles are buttons with aria-pressed; focus stays on the selected control."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in UsageView.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load uses SkeletonLoader variant cards (count 3) which does not match the loaded eight-tile KPI grid geometry; refresh and workspace changes keep the grid with dashes. Failure shows a distinct alert with retry. Covered: initial-loading, refresh-loading, load-failed, loaded."
     },
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
-    },
-    "rationale": "Connected route or host composition; isolate its seam before rendering it in the workshop."
+    }
   },
   {
     "id": "components-vault-review-panel",
@@ -4717,25 +4899,37 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsAllWorkspaces.vue",
       "web/src/components/settings/SettingsWorkspaceOverview.vue"
     ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variants": ["name"],
+    "variantNotes": "One required workspace name prop; identity reads projectStore.workspaceOptions for sidebar 1-9 keys and workspaceAccent for tint.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in WorkspaceTile.vue implements this render; no rendered-state story exists."
+        "name": "shortcut-key",
+        "coverage": "covered",
+        "storyIds": ["workspace-tile--shortcut-key"],
+        "note": "Positions 1-9 render the numeric sidebar shortcut and the workspace preset accent."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "initial",
+        "coverage": "covered",
+        "storyIds": ["workspace-tile--initial"],
+        "note": "The tenth registry slot falls back to the label initial instead of a numeric key."
+      },
+      {
+        "name": "accent",
+        "coverage": "covered",
+        "storyIds": ["workspace-tile--accent"],
+        "note": "A non-active workspace keeps its own data-workspace-color tint."
+      },
+      {
+        "name": "neutral-accent",
+        "coverage": "covered",
+        "storyIds": ["workspace-tile--neutral-accent"],
+        "note": "An empty registry yields the neutral accent and the name initial before options load."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in WorkspaceTile.vue has not yet been audited."
+      "status": "none",
+      "detail": "Synchronous read from a seeded Pinia project store; consumers own registry fetches, not the tile."
     },
     "migration": {
       "status": "unassessed",
@@ -6591,9 +6785,9 @@ export const inventory: InventoryEntry[] = [
       },
       {
         "name": "keyboard-focus",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "Arrow wraparound, Home/End and focus movement are interactive behavior, not a dedicated rendered focus story."
+        "coverage": "covered",
+        "storyIds": ["settings-radio-group--keyboard-focus"],
+        "note": "Tab reaches the checked option with :focus-visible; ArrowRight moves focus and selects the next option."
       }
     ],
     "loading": {
