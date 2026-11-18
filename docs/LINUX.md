@@ -123,6 +123,18 @@ Settings → Restart drains active chat work and re-executes the backend. A dire
 `systemctl stop/restart` is an administrative stop, not that application drain:
 wait for active work to finish first. Systemd allows up to 120 seconds for shutdown.
 
+## Existing source installs
+
+`ciao service install` refuses a unit that belongs to a different install: one
+whose `ExecStart` interpreter is not this environment's Python (the source
+checkout install described under Install), or one that records a different
+`CIAO_WORKSPACE` or `User=` than the unit it would write. Overwriting it would
+repoint (or break) an install that already exists. Either keep the source
+install and continue administering it as the Service and Updates sections
+describe, or take the unit over deliberately with `ciao service install
+--replace`; removing the old checkout and virtualenv once nothing else uses
+them is then up to the administrator.
+
 ## Moving the workspace
 
 Editing `CIAO_WORKSPACE` in the workspace `.env` cannot move it: the engine

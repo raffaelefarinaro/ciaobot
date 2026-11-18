@@ -7973,7 +7973,15 @@ def _service_command(args: argparse.Namespace) -> int:
 
     try:
         linux_service.run_plan(plan, run=run)
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as exc:
+        # Earlier steps ran and later ones did not, so the operator must be
+        # told which step died and that the unit may be half installed.
+        shown = shlex.join([str(part) for part in (exc.cmd or ())][:3])
+        print(f"Error: {shown} failed with exit code {exc.returncode}.", file=sys.stderr)
+        print(
+            "The install may be half applied: inspect it with `systemctl status ciaobot`.",
+            file=sys.stderr,
+        )
         return 1
     return 0
 
@@ -8127,36 +8135,39 @@ def build_parser() -> argparse.ArgumentParser:
             deprecated_alias=deprecated,
         )
         # #3131: the Linux system-service install shares this group so
-        # `ciao service install` reads like the other service verbs. The
-        # handler refuses non-Linux and root invocations itself.
-        install_parser = service_sub.add_parser(
-            "install",
-            help="Install the Linux systemd service for this account.",
-        )
-        install_parser.add_argument(
-            "--workspace", type=Path,
-            help="Workspace directory (default: the one the installed unit records).",
-        )
-        install_parser.add_argument(
-            "--replace", action="store_true",
-            help="Take over an existing unit that runs another interpreter (a source install).",
-        )
-        install_parser.add_argument(
-            "--no-start", action="store_true",
-            help="Install and enable the unit, but do not restart the service.",
-        )
-        install_parser.add_argument(
-            "--dry-run", action="store_true",
-            help="Print the unit and the commands without running anything.",
-        )
-        install_parser.set_defaults(
-            func=_service_command,
-            deprecated_alias=deprecated,
-        )
+        # `ciao service install` reads like the other service verbs. It is
+        # registered only on `service`: `desktop-service` is the deprecated
+        # macOS alias, and the handler refuses non-Linux and root invocations
+        # itself.
+        if not deprecated:
+            install_parser = service_sub.add_parser(
+                "install",
+                help="Install the Linux systemd service for this account.",
+            )
+            install_parser.add_argument(
+                "--workspace", type=Path,
+                help="Workspace directory (default: the one the installed unit records).",
+            )
+            install_parser.add_argument(
+                "--replace", action="store_true",
+                help="Take over an existing unit that runs another interpreter (a source install).",
+            )
+            install_parser.add_argument(
+                "--no-start", action="store_true",
+                help="Install and enable the unit, but do not restart the service.",
+            )
+            install_parser.add_argument(
+                "--dry-run", action="store_true",
+                help="Print the unit and the commands without running anything.",
+            )
+            install_parser.set_defaults(
+                func=_service_command,
+                deprecated_alias=deprecated,
+            )
 
     add_service_parser(
         "service",
-        "Start, stop and inspect the launchd-managed Ciaobot engine (macOS).",
+        "Service control: start, stop and inspect on macOS (launchd), and install the Linux systemd unit.",
         deprecated=False,
     )
     add_service_parser(

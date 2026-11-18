@@ -6,6 +6,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
+import os
 import re
 
 from ciao.os_support.limits import SERVER_NOFILE_TARGET
@@ -154,18 +155,60 @@ def installed_unit_python(path: Path = UNIT_PATH) -> Path | None:
     return None
 
 
+def _unit_user(path: Path) -> str | None:
+    """The last ``User=`` assignment in the unit, ``None`` when unreadable."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    found: str | None = None
+    for line in text.splitlines():
+        key, sep, value = line.strip().partition("=")
+        if not sep or key.strip() != "User":
+            continue
+        found = _unquote(value.strip())
+    return found
+
+
+def _existing_unit(path: Path) -> bool:
+    """Whether ``path`` names anything, counting a dangling symlink.
+
+    ``Path.exists`` follows the link and answers False when it dangles, but a
+    link sitting at the unit path still blocks a fresh install, so this probes
+    the link itself (``lstat`` never follows symlinks). A permission failure is
+    not "absent": refusing beats planning an install this account cannot inspect.
+    """
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except PermissionError as exc:
+        raise ValueError(
+            f"Cannot check {path}: permission denied. Refusing to install over a "
+            "unit this account cannot inspect."
+        ) from exc
+    return True
+
+
+def _readable(value: object) -> str:
+    """A conflict message's rendering of a recorded value that may be unreadable."""
+    return "nothing readable" if value is None else str(value)
+
+
 def plan_install(*, workspace: Path, user: str, home: Path, python: Path,
                  replace: bool = False, start: bool = True,
                  unit_path: Path = UNIT_PATH) -> ServicePlan:
     """Render the unit for the invoking account and plan its privileged install.
 
-    Raises :class:`UnitConflict` when ``unit_path`` already exists and its
-    ``ExecStart`` interpreter is not this env's ``python`` (a source install)
-    and ``replace`` is not set: taking such a unit over silently would strand
-    an install people already have (#3131 D3).
+    Raises :class:`UnitConflict` when ``unit_path`` exists, ``replace`` is not
+    set, and the existing unit is not what this install would write: either its
+    ``ExecStart`` interpreter is not this env's ``python`` (a source install),
+    or, with the same interpreter, it records a different ``CIAO_WORKSPACE`` or
+    ``User``. Taking such a unit over silently would strand an install people
+    already have (#3131 D3).
     """
     unit = render_service(workspace=workspace, user=user, home=home, python=python)
-    if unit_path.exists() and not replace:
+    if _existing_unit(unit_path) and not replace:
         installed = installed_unit_python(unit_path)
         if installed != python:
             shown = str(installed) if installed else "an interpreter that cannot be read"
@@ -173,6 +216,27 @@ def plan_install(*, workspace: Path, user: str, home: Path, python: Path,
                 f"{unit_path} exists and runs Ciaobot with {shown}, but this "
                 f"install runs {python}: that unit belongs to a source install, "
                 "and installing over it would break that install. See "
+                "docs/LINUX.md#existing-source-installs, or pass --replace to "
+                "take the unit over."
+            )
+        recorded_workspace = unit_workspace(unit_path)
+        recorded_user = _unit_user(unit_path)
+        differences: list[str] = []
+        if recorded_workspace != workspace:
+            differences.append(
+                f"its CIAO_WORKSPACE is {_readable(recorded_workspace)} but this "
+                f"install would write CIAO_WORKSPACE={workspace}"
+            )
+        if recorded_user != user:
+            differences.append(
+                f"its User is {_readable(recorded_user)} but this install would "
+                f"write User={user}"
+            )
+        if differences:
+            raise UnitConflict(
+                f"{unit_path} exists and already runs {python}, but "
+                + "; ".join(differences)
+                + ". Installing over it would repoint that install. See "
                 "docs/LINUX.md#existing-source-installs, or pass --replace to "
                 "take the unit over."
             )

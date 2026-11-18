@@ -228,17 +228,20 @@ def test_plan_install_refuses_a_source_install_unit(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX paths in rendered unit")
-def test_plan_install_replaces_its_own_unit_without_flag(tmp_path):
+def test_plan_install_replaces_its_own_unit_without_flag(tmp_path, monkeypatch):
+    # Same python plus the same recorded workspace and user: not a conflict.
     from ciao.linux_service import plan_install
 
     unit = tmp_path / "ciaobot.service"
     python = Path("/home/ciaobot/.local/share/uv/tools/ciaobot/bin/python")
+    workspace = Path("/srv/ciaobot")
     unit.write_text(render_service(
-        workspace=Path("/srv/ciaobot"), user="ciaobot", home=Path("/home/ciaobot"),
+        workspace=workspace, user="ciaobot", home=Path("/home/ciaobot"),
         python=python,
     ), encoding="utf-8")
+    _trust_own_uid(monkeypatch, unit)
     plan = plan_install(
-        workspace=Path("/srv/ciaobot"), user="ciaobot", home=Path("/home/ciaobot"),
+        workspace=workspace, user="ciaobot", home=Path("/home/ciaobot"),
         python=python, unit_path=unit,
     )
     assert len(plan.commands) == 4
@@ -259,6 +262,127 @@ def test_replace_overrides_conflict(tmp_path):
         replace=True, unit_path=unit,
     )
     assert len(plan.commands) == 4
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX paths in rendered unit")
+def test_plan_install_conflicts_when_the_same_python_repoints_the_workspace(tmp_path, monkeypatch):
+    # Same interpreter, but the existing unit records another workspace:
+    # overwrite would repoint that install, so refuse and name both paths.
+    from ciao.linux_service import UnitConflict, plan_install
+
+    unit = tmp_path / "ciaobot.service"
+    python = Path("/home/ciaobot/.local/share/uv/tools/ciaobot/bin/python")
+    unit.write_text(render_service(
+        workspace=Path("/srv/ciaobot"), user="ciaobot", home=Path("/home/ciaobot"),
+        python=python,
+    ), encoding="utf-8")
+    _trust_own_uid(monkeypatch, unit)
+    with pytest.raises(UnitConflict) as conflict:
+        plan_install(
+            workspace=Path("/srv/elsewhere"), user="ciaobot",
+            home=Path("/home/ciaobot"), python=python, unit_path=unit,
+        )
+    message = str(conflict.value)
+    assert "/srv/ciaobot" in message and "/srv/elsewhere" in message
+    assert "CIAO_WORKSPACE" in message
+    assert "--replace" in message
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX paths in rendered unit")
+def test_plan_install_conflicts_when_the_same_python_changes_the_user(tmp_path, monkeypatch):
+    from ciao.linux_service import UnitConflict, plan_install
+
+    unit = tmp_path / "ciaobot.service"
+    python = Path("/home/ciaobot/.local/share/uv/tools/ciaobot/bin/python")
+    unit.write_text(render_service(
+        workspace=Path("/srv/ciaobot"), user="ciaobot", home=Path("/home/ciaobot"),
+        python=python,
+    ), encoding="utf-8")
+    _trust_own_uid(monkeypatch, unit)
+    with pytest.raises(UnitConflict) as conflict:
+        plan_install(
+            workspace=Path("/srv/ciaobot"), user="otherbot",
+            home=Path("/home/otherbot"), python=python, unit_path=unit,
+        )
+    message = str(conflict.value)
+    assert "User=" in message and "ciaobot" in message and "otherbot" in message
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX paths in rendered unit")
+def test_plan_install_conflicts_on_an_existing_garbled_unit(tmp_path, monkeypatch):
+    """A unit whose interpreter cannot be read is not "probably ours".
+
+    Its workspace and user lines parse here, so only the interpreter check can
+    raise: dropping that because `installed` is None would silently plan over
+    a unit this machine cannot vouch for.
+    """
+    from ciao.linux_service import UnitConflict, plan_install
+
+    unit = tmp_path / "ciaobot.service"
+    unit.write_text(
+        '[Service]\nUser=ciaobot\nEnvironment="CIAO_WORKSPACE=/srv/ciaobot"\n'
+        'ExecStart="/opt/venv/bin/python -m ciao.cli run\n',  # a quote that never closes
+        encoding="utf-8",
+    )
+    _trust_own_uid(monkeypatch, unit)
+    with pytest.raises(UnitConflict, match="cannot be read"):
+        plan_install(
+            workspace=Path("/srv/ciaobot"), user="ciaobot",
+            home=Path("/home/ciaobot"),
+            python=Path("/home/ciaobot/.local/share/uv/tools/ciaobot/bin/python"),
+            unit_path=unit,
+        )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks exist everywhere but the dangling case is POSIX-shaped")
+def test_plan_install_treats_a_dangling_symlink_as_existing(tmp_path):
+    from ciao.linux_service import UnitConflict, plan_install
+
+    unit = tmp_path / "ciaobot.service"
+    unit.symlink_to(tmp_path / "gone.service")  # dangling: exists() is False
+    with pytest.raises(UnitConflict):
+        plan_install(
+            workspace=tmp_path / "ws", user="ciaobot", home=tmp_path,
+            python=Path("/opt/venv/bin/python"), unit_path=unit,
+        )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.lstat permission semantics")
+def test_plan_install_refuses_a_unit_it_cannot_stat(tmp_path, monkeypatch):
+    from ciao import linux_service
+    from ciao.linux_service import plan_install
+
+    unit = tmp_path / "ciaobot.service"
+    unit.write_text("[Service]\nUser=ciaobot\n", encoding="utf-8")
+    real_lstat = linux_service.os.lstat
+
+    def denied(path, *args, **kwargs):
+        if Path(path) == unit:
+            raise PermissionError(13, "Permission denied")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(linux_service.os, "lstat", denied)
+    with pytest.raises(ValueError, match="permission denied"):
+        plan_install(
+            workspace=tmp_path / "ws", user="ciaobot", home=tmp_path,
+            python=Path("/opt/venv/bin/python"), unit_path=unit,
+        )
+
+
+def test_run_plan_runs_the_commands_in_order():
+    from ciao.linux_service import INSTALL_SCRIPT, ServicePlan, run_plan
+
+    commands = (
+        (("sudo", "sh", "-c", INSTALL_SCRIPT), "[Unit]\n"),
+        (("sudo", "systemctl", "daemon-reload"), None),
+        (("sudo", "systemctl", "enable", "ciaobot.service"), None),
+        (("sudo", "systemctl", "restart", "ciaobot.service"), None),
+    )
+    seen: list[tuple[tuple[str, ...], str | None]] = []
+    run_plan(ServicePlan(unit="[Unit]\n", commands=commands), run=lambda argv, stdin: seen.append((argv, stdin)))
+    assert seen == list(commands)
+    # The unit travels exactly once: on the first step's stdin, never again.
+    assert [stdin for _, stdin in seen] == ["[Unit]\n", None, None, None]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX paths in rendered unit")
@@ -391,3 +515,126 @@ def test_cli_service_install_conflict_exits_3(monkeypatch, capsys, tmp_path):
     assert "/opt/ciaobot/venv/bin/python" in err
     assert "docs/LINUX.md#existing-source-installs" in err
     assert "--replace" in err
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.geteuid, pwd and POSIX paths")
+def test_cli_service_install_reports_a_failed_step(capsys, monkeypatch, tmp_path):
+    """A step dying mid-plan must name the command and the half-applied risk.
+
+    The fake runner succeeds twice and fails on the third step (the enable),
+    so the message names its argv prefix and the returned code instead of
+    exiting silently.
+    """
+    from ciao.linux_service import INSTALL_SCRIPT
+
+    calls: list[tuple[list[str], dict]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        if len(calls) == 3:
+            raise subprocess.CalledProcessError(1, argv)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    _act_as_linux_account(monkeypatch, tmp_path)
+
+    assert cli.main([
+        "service", "install", "--workspace", str(tmp_path / "ws"), "--no-start",
+    ]) == 1
+    assert [argv[:3] for argv, _ in calls] == [
+        ["sudo", "sh", "-c"],
+        ["sudo", "systemctl", "daemon-reload"],
+        ["sudo", "systemctl", "enable"],
+    ]
+    assert calls[0][0][3] == INSTALL_SCRIPT
+    assert calls[0][1]["check"] is True
+    err = capsys.readouterr().err
+    assert "sudo systemctl enable" in err
+    assert "exit code 1" in err
+    assert "half applied" in err
+    assert "systemctl status ciaobot" in err
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.geteuid, pwd and POSIX paths")
+def test_cli_service_install_plumbing_reaches_plan(monkeypatch, capsys, tmp_path):
+    """--replace and --no-start must reach plan_install, not be dropped by the CLI."""
+    from ciao import linux_service
+
+    seen: list[dict[str, object]] = []
+    real_plan = linux_service.plan_install
+
+    def spy(**kwargs):
+        seen.append(dict(kwargs))
+        return real_plan(**kwargs)
+
+    monkeypatch.setattr(linux_service, "plan_install", spy)
+    _act_as_linux_account(monkeypatch, tmp_path)
+
+    argv = ["service", "install", "--workspace", str(tmp_path / "ws")]
+    assert cli.main([*argv, "--replace", "--no-start", "--dry-run"]) == 0
+    assert seen[-1]["replace"] is True
+    assert seen[-1]["start"] is False
+    assert cli.main([*argv, "--dry-run"]) == 0
+    assert seen[-1]["replace"] is False
+    assert seen[-1]["start"] is True
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.geteuid, pwd and POSIX paths")
+def test_cli_service_install_defaults_to_the_units_workspace(monkeypatch, capsys, tmp_path):
+    from ciao import linux_service
+
+    # The installed unit records the workspace, so --workspace can be omitted.
+    python = Path(sys.prefix) / "bin" / "python"
+    unit = tmp_path / "ciaobot.service"
+    unit.write_text(render_service(
+        workspace=tmp_path / "recorded", user="ciaobot",
+        home=Path("/home/ciaobot"), python=python,
+    ), encoding="utf-8")
+    _trust_own_uid(monkeypatch, unit)
+    monkeypatch.setattr(linux_service, "UNIT_PATH", unit)
+    _act_as_linux_account(monkeypatch, tmp_path)
+
+    seen: list[dict[str, object]] = []
+    real_plan = linux_service.plan_install
+
+    def spy(**kwargs):
+        seen.append(dict(kwargs))
+        return real_plan(**kwargs)
+
+    monkeypatch.setattr(linux_service, "plan_install", spy)
+    assert cli.main(["service", "install", "--dry-run"]) == 0
+    assert seen[-1]["workspace"] == tmp_path / "recorded"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.geteuid, pwd and POSIX paths")
+def test_cli_service_install_without_workspace_or_unit_exits_2(monkeypatch, capsys, tmp_path):
+    from ciao import linux_service
+
+    # conftest's UNIT_PATH points at a path no test writes a unit to, so no
+    # workspace is recorded anywhere and the only way out is --workspace.
+    monkeypatch.setattr(linux_service, "UNIT_PATH", tmp_path / "absent.service")
+    _act_as_linux_account(monkeypatch, tmp_path)
+    assert cli.main(["service", "install"]) == 2
+    assert "pass --workspace" in capsys.readouterr().err
+
+
+def test_cli_desktop_service_alias_has_no_install(monkeypatch, capsys):
+    # `install` is the Linux systemd verb: the deprecated macOS-only alias
+    # keeps offering only the macOS verbs.
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["desktop-service", "install", "--dry-run"])
+    assert exc.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_cli_service_group_help_is_not_macos_only(monkeypatch, capsys):
+    monkeypatch.setenv("COLUMNS", "400")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--help"])
+    assert exc.value.code == 0
+    service_line = next(
+        line for line in capsys.readouterr().out.splitlines()
+        if line.strip().startswith("service ")
+    )
+    assert "macOS" in service_line
+    assert "Linux" in service_line
