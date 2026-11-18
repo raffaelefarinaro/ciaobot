@@ -251,7 +251,7 @@ def _direct_python(argv: list[str]) -> str | None:
     if name == "ciao" and rest == ["run"]:
         return str(PurePosixPath(argv[0]).parent / "python")
     if re.fullmatch(r"python(?:3(?:\.\d+)?)?", name):
-        if rest[:1] == ["-I"]:
+        if rest and rest[0] == "-I":
             rest = rest[1:]
         if len(rest) == 3 and rest[0] == "-m" and rest[1] in ("ciao", "ciao.cli") and rest[2] == "run":
             return argv[0]
