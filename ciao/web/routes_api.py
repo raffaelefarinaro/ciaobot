@@ -7889,6 +7889,7 @@ def _workspace_move_guard(request: Request) -> JSONResponse | None:
 async def workspace_move_status_endpoint(request: Request) -> JSONResponse:
     """Where the workspace is, whether this browser may move it, and the last move."""
     from ciao import workspace_move
+    from ciao.package_version import running_from_app_bundle
     from ciao.setup_status import cloud_sync_warning
 
     op = await asyncio.to_thread(workspace_move.read_operation)
@@ -7901,6 +7902,9 @@ async def workspace_move_status_endpoint(request: Request) -> JSONResponse:
             # On Linux the service account cannot stop its own root-owned
             # unit; the administrator moves it with `sudo ciao workspace-move`.
             "admin_only": sys.platform.startswith("linux"),
+            # In Ciaobot for Mac the engine moves the workspace itself: it
+            # drains, restarts in place and repoints the app-owned pointer.
+            "app": running_from_app_bundle(),
             "operation": asdict(op) if op is not None else None,
         }
     )
@@ -7961,6 +7965,35 @@ async def workspace_move_start_endpoint(request: Request) -> JSONResponse:
     move_plan = await asyncio.to_thread(workspace_move.plan_for, source, target)
     if not move_plan.ok:
         return JSONResponse({**move_plan.as_dict(), "error": " ".join(move_plan.refusals)}, status_code=409)
+    from ciao.package_version import running_from_app_bundle
+
+    if running_from_app_bundle():
+        # In Ciaobot for Mac no launchd job is ever started: the engine
+        # performs the move itself in the gap of its own restart. Record the
+        # move (holding move.lock) off the event loop, then drain chats and
+        # scheduled work as a task; the drain records `stopping` and requests
+        # the engine's own restart, whose pre-boot pass moves the folder and
+        # whose verify marks the record `done` once this engine is ready.
+        from ciao import workspace_move_app
+
+        try:
+            op, handle = await asyncio.to_thread(
+                workspace_move_app.record,
+                move_plan,
+                port=request.app.state.config.pwa_port,
+            )
+        except workspace_move.MoveError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+        request.app.state.workspace_move_task = asyncio.create_task(
+            workspace_move_app.drain_then_restart(
+                op,
+                handle,
+                pcm=request.app.state.project_chat_manager,
+                schedules=getattr(request.app.state, "schedule_manager", None),
+                request_restart=request.app.state.request_restart,
+            )
+        )
+        return JSONResponse({"operation": asdict(op)}, status_code=202)
     try:
         op = await asyncio.to_thread(
             workspace_move.start, move_plan, port=request.app.state.config.pwa_port

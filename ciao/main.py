@@ -696,6 +696,31 @@ def _enter_installer_bootstrap_environment(*, config_root: Path) -> None:
     os.chdir(launcher)
 
 
+def _start_workspace_move_verify(
+    app: Any, config: CiaoConfig, tracker: StartupTracker, request_restart: Any
+) -> None:
+    """The booted app-mode engine confirms its workspace move.
+
+    In Ciaobot for Mac a move's record says ``verifying`` after the pre-boot
+    pass moved the folder: this task marks it ``done`` once this engine really
+    is ready (never before — an ordinary restart must find a finished move
+    finished), and on a timeout records ``rolling_back`` plus the restart
+    whose pre-boot pass rolls the move back. The reference stays on
+    ``app.state`` so the task cannot be collected while it polls.
+    """
+    from ciao import package_version
+
+    if not package_version.running_from_app_bundle():
+        return
+    from ciao import workspace_move_app
+
+    app.state.workspace_move_verify = asyncio.create_task(
+        workspace_move_app.verify_after_boot(
+            config.workspace_root, tracker, request_restart
+        )
+    )
+
+
 async def _run_server_locked(
     config: CiaoConfig,
     *,
@@ -1701,6 +1726,8 @@ async def _run_server_locked(
         restart_task[0] = asyncio.create_task(_restart_when_idle())
 
     app.state.request_restart = request_restart
+
+    _start_workspace_move_verify(app, config, tracker, request_restart)
 
     # ── Startup error triage ─────────────────────────────────
     # Cap the append-only launchd service logs, then — when the error log

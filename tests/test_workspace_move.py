@@ -17,7 +17,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao import workspace_move
+from ciao import workspace_move, workspace_move_app
 from ciao.agent_paths import claude_project_slug
 from ciao.server_host import (
     BUNDLE_ID,
@@ -30,6 +30,7 @@ from ciao.server_host import (
 from ciao.web.routes_api import (
     workspace_move_dirs_endpoint,
     workspace_move_plan_endpoint,
+    workspace_move_start_endpoint,
     workspace_move_status_endpoint,
 )
 
@@ -880,15 +881,33 @@ def test_run_move_waits_for_the_engine_to_release_its_lock(tmp_path: Path) -> No
 # ── routes ───────────────────────────────────────────────────────────
 
 
-def _client(tmp_path: Path, *, peer: str) -> TestClient:
+def _client(
+    tmp_path: Path,
+    *,
+    peer: str,
+    pcm: Any = None,
+    schedules: Any = None,
+    restarts: Any = None,
+    workspace_root: Path | None = None,
+) -> TestClient:
+    """The move routes; the app-mode drain wiring arrives as its state."""
     app = Starlette(
         routes=[
             Route("/api/workspace-move", workspace_move_status_endpoint, methods=["GET"]),
             Route("/api/workspace-move/dirs", workspace_move_dirs_endpoint, methods=["GET"]),
             Route("/api/workspace-move/plan", workspace_move_plan_endpoint, methods=["POST"]),
+            Route("/api/workspace-move", workspace_move_start_endpoint, methods=["POST"]),
         ]
     )
-    app.state.config = SimpleNamespace(workspace_root=str(tmp_path), pwa_port=8443)
+    app.state.config = SimpleNamespace(
+        workspace_root=str(workspace_root or tmp_path), pwa_port=8443
+    )
+    if pcm is not None:
+        app.state.project_chat_manager = pcm
+    if schedules is not None:
+        app.state.schedule_manager = schedules
+    if restarts is not None:
+        app.state.request_restart = restarts
     return TestClient(app, base_url="http://localhost:8443", client=(peer, 50000))
 
 
@@ -920,6 +939,121 @@ def test_plan_route_returns_the_dry_run(tmp_path: Path, monkeypatch: pytest.Monk
     ).json()
     assert body["ok"] is False
     assert any("inside the current workspace" in r for r in body["refusals"])
+
+
+def test_status_route_reports_app_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(workspace_move, "default_state_dir", lambda: tmp_path / "state")
+    client = _client(tmp_path, peer="127.0.0.1")
+    monkeypatch.setattr("ciao.package_version.running_from_app_bundle", lambda: True)
+    assert client.get("/api/workspace-move").json()["app"] is True
+    monkeypatch.setattr("ciao.package_version.running_from_app_bundle", lambda: False)
+    assert client.get("/api/workspace-move").json()["app"] is False
+
+
+def test_start_route_app_mode_schedules_drain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In Ciaobot for Mac the route records the move and wires the engine's own drain."""
+    monkeypatch.setattr("ciao.package_version.running_from_app_bundle", lambda: True)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    ws = tmp_path / "ws"
+    ws.mkdir(parents=True)
+    monkeypatch.setattr(workspace_move, "registered_workspace", lambda: ws)
+    monkeypatch.setattr(workspace_move, "update_in_flight", lambda: False)
+    monkeypatch.setattr(workspace_move, "engine_running", lambda: True)
+    monkeypatch.setattr(workspace_move, "default_state_dir", lambda: tmp_path / "state")
+    monkeypatch.setattr(
+        workspace_move,
+        "start",
+        lambda *args, **kwargs: pytest.fail("the launchd-job start must not run in app mode"),
+    )
+    monkeypatch.setattr(
+        workspace_move,
+        "_spawn_mac_job",
+        lambda *args, **kwargs: pytest.fail("no move job is ever installed in app mode"),
+    )
+    monkeypatch.setattr(
+        "ciao.macos_service._launchctl",
+        lambda *args, **kwargs: pytest.fail("launchctl is never called in app mode"),
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_drain(op: Any, handle: Any, **kwargs: Any) -> Any:
+        captured["op"] = op
+        captured["handle"] = handle
+        captured["pcm"] = kwargs["pcm"]
+        captured["schedules"] = kwargs["schedules"]
+        captured["request_restart"] = kwargs["request_restart"]
+
+        async def drained() -> None:
+            return None
+
+        return drained()
+
+    monkeypatch.setattr(workspace_move_app, "drain_then_restart", fake_drain)
+    pcm = SimpleNamespace(restart_draining=False)
+    schedules = SimpleNamespace(work_count=lambda: 0)
+    restarts: list[int] = []
+
+    def request_restart(code: int) -> None:
+        restarts.append(code)
+
+    response = _client(
+        tmp_path,
+        peer="127.0.0.1",
+        pcm=pcm,
+        schedules=schedules,
+        restarts=request_restart,
+        workspace_root=ws,
+    ).post("/api/workspace-move", json={"target": str(tmp_path / "moved")})
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["operation"]["app"] is True
+    assert body["operation"]["phase"] == "queued"
+    # The record is on disk, written by `record`, and the move lock is held
+    # for the exec that ends the engine.
+    stored = workspace_move.read_operation(tmp_path / "state")
+    assert stored is not None and stored.app is True and stored.phase == "queued"
+    assert workspace_move.job_running(tmp_path / "state") is True
+    # The drain is wired to this engine's pieces; the restart request is the
+    # drain's (which has not run yet), not the route's.
+    assert captured["pcm"] is pcm
+    assert captured["schedules"] is schedules
+    assert captured["request_restart"] is request_restart
+    assert restarts == []
+    captured["handle"].close()
+
+
+def test_cli_apply_refused_in_app_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import cli
+
+    monkeypatch.setattr("ciao.package_version.running_from_app_bundle", lambda: True)
+    monkeypatch.setattr(
+        workspace_move,
+        "plan_for",
+        lambda source, target: workspace_move.MovePlan(
+            source=str(source), target=str(target)
+        ),
+    )
+    args = SimpleNamespace(
+        workspace=None, target=str(tmp_path / "moved"), apply=True, json=False
+    )
+
+    assert cli._workspace_move_command(args) == 1
+
+    captured_out, captured_err = capsys.readouterr()
+    # The plan still prints; the refusal is the app's Settings path.
+    assert "Move " in captured_out
+    assert (
+        "In Ciaobot for Mac, move the workspace from Settings → Ciaobot folder → Move…"
+        in captured_err
+    )
+    # Not `start`'s refusal: that would mean the launchd job was attempted.
+    assert "Error:" not in captured_err
+    assert "workspace_move_app" not in captured_err
 
 
 # ── Linux: the systemd unit ──────────────────────────────────────────
