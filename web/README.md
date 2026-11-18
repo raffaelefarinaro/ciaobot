@@ -321,6 +321,16 @@ only in the component's state and is cleared on dismiss and unmount. Only the
 engine decides `on_host` (from `GET /api/welcome`); the PWA never infers it.
 The X dismisses engine-wide through `/api/welcome/dismiss`, not per browser.
 
+The *Switch to the new Ciaobot app* row in *Needs you* is an engine operator
+action (`mac-app-switch`, `ciao/operator_actions.py`): only an installer-managed
+engine on an Apple-silicon Mac emits it, so a Linux engine, the app's bundled
+engine and a checkout never do, and the PWA never decides its eligibility. The
+PWA does not filter the row either: a 0.5.x Mac app user viewing their old
+engine's PWA is exactly its audience, so the row shows there too. *Not now*
+snoozes it engine-wide through `/api/housekeeping/mac-app-switch/dismiss` for 30
+days, and the *Download for Mac* link is `MAC_APP_DOWNLOAD_URL` in
+`ciao/package_version.py`.
+
 Phone setup lives permanently in Settings → Access & devices → Other devices
 (`settings/SettingsDevices.vue`, anchor `#other-devices` on `/settings/access`); on the computer running
 Ciaobot, the Home setup card keeps its three phone instructions and that link
