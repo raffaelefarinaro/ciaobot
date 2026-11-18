@@ -111,6 +111,47 @@ describe('connected stats transport boundary', () => {
     expect(boundary.violations).toHaveLength(7)
   })
 
+  it('permits only the runner control socket, and only its own birpc envelopes', () => {
+    const nativeSend = vi.fn()
+    const socket = vi.fn(function () {})
+    socket.prototype.send = nativeSend
+    vi.stubGlobal('WebSocket', socket)
+    const boundary = installStatsBoundary('default')
+    cleanups.push(boundary.dispose)
+    const origin = location.origin.replace(/^http/, 'ws')
+    const runner = { url: `${origin}/__vitest_browser_api__?type=tester&rpcId=rpc-1&sessionId=session-1&projectName=&method=tasks&token=0` }
+    const send = socket.prototype.send
+    const request = '[{"m":"1","a":"2","t":"3","i":"4"},"onCollected",["5"],"q","synthetic-id","synthetic"]'
+    const response = '[{"t":"1","i":"2","r":"3"},"s","synthetic-id",null]'
+    // birpc events carry no `i`; optional calls add `o:true`.
+    const event = '[{"m":"1","a":"2","t":"3"},"onUserConsoleLog",["4"],"q","synthetic"]'
+    const optional = '[{"m":"1","a":"2","t":"3","i":"4","o":true},"onTaskUpdate",[],"q","synthetic-id"]'
+    send.call(runner, request)
+    send.call(runner, response)
+    send.call(runner, event)
+    send.call(runner, optional)
+    expect(nativeSend).toHaveBeenCalledTimes(4)
+    expect(boundary.violations).toEqual([])
+    for (const [target, data] of [
+      [{ ...runner, url: runner.url.replace(origin, 'wss://example.com') }, request],
+      [{ ...runner, url: runner.url.replace('/__vitest_browser_api__', '/api/write') }, request],
+      [{ ...runner, url: runner.url.replace('&token=0', '&page=preview') }, request],
+      [{ ...runner, url: runner.url.replace('type=tester&', '') }, request],
+      [runner, '{"type":"saveStory"}'],
+      [runner, '[{"m":"1","t":"2","i":"3"},0,"q","id"]'],
+      [runner, '[{"m":"1","t":"2","i":"3"},"onCollected","s","id"]'],
+      [runner, '[{"m":"1","a":"2","t":"3","i":"4","x":"5"},"onCollected",[],"q","id","extra"]'],
+      [runner, '[{"m":"1","a":"2","t":"3"},"saveStory",[],"q"]'],
+      [runner, '[{"m":"1","a":"2","t":"3"},"__proto__",[],"q"]'],
+      [runner, '[{"m":"1","a":"2","t":"3","o":false},"onCollected",[],"q"]'],
+      [runner, '[{"m":"1","a":"2","t":"3","o":"4"},"onCollected",[],"q","yes"]'],
+      [runner, '[{"m":"1","a":"2","t":"3","i":7},"onCollected",[],"q"]'],
+      [runner, '[{"t":"1","r":"2"},"s",null]'],
+    ] as const) expect(() => send.call(target, data)).toThrow('Story network violation')
+    expect(nativeSend).toHaveBeenCalledTimes(4)
+    expect(boundary.violations).toHaveLength(14)
+  })
+
   it('permits only established same-origin workshop lifecycle/heartbeat sends, never custom or write events', () => {
     const nativeSend = vi.fn()
     const socket = vi.fn(function () {})
