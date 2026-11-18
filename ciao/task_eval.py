@@ -48,6 +48,7 @@ import yaml
 import ciao
 from ciao import agent_paths, behavioral_eval, gws_auth
 from ciao.config import PERMISSION_MODES
+from ciao.os_support.processes import python_isolation_flags
 from ciao.os_support.tool_path import dedupe_path
 from ciao.tool_path import common_tool_dirs
 
@@ -1289,7 +1290,11 @@ class IsolatedEngine(EngineSession):
         self._mode = resolve_mode(provider, mode)
         self._log = self._log_path.open("wb")
         script = Path(sys.executable).with_name("ciao")
-        command = [str(script), "run"] if script.exists() else [sys.executable, "-m", "ciao", "run"]
+        command = (
+            [str(script), "run"]
+            if script.exists()
+            else [sys.executable, *python_isolation_flags(), "-m", "ciao", "run"]
+        )
         # engine_env drops every CIAO_* variable first; the fake's variables go in after it.
         env = engine_env(_BASE_ENV, self.workdir, self.ws)
         if task.gws_fake is not None:

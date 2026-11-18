@@ -24,10 +24,23 @@ import errno
 import selectors
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Sequence
 from typing import Any
+
+
+def python_isolation_flags() -> list[str]:
+    """Interpreter flags a re-exec must repeat to keep this process's isolation.
+
+    Only an isolated interpreter (the bundled engine runs ``-I -B``) gets any:
+    ``-I`` ignores the environment, so ``-B`` must be explicit too. Every other
+    interpreter returns [] and the re-exec argv is unchanged.
+    """
+    if not sys.flags.isolated:
+        return []
+    return ["-I", "-B"] if sys.flags.dont_write_bytecode else ["-I"]
 
 
 def pid_alive(pid: int) -> bool:

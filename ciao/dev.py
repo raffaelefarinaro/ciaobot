@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
+from ciao.os_support.processes import python_isolation_flags
+
 
 @dataclass(frozen=True)
 class DevEnvironment:
@@ -26,7 +28,7 @@ class DevEnvironment:
 
 def _backend_command() -> list[str]:
     """Run the dev backend through the CLI's restart supervisor."""
-    return [sys.executable, "-m", "ciao.cli", "run"]
+    return [sys.executable, *python_isolation_flags(), "-m", "ciao.cli", "run"]
 
 
 def _load_env_file(path: Path) -> dict[str, str]:

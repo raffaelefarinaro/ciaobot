@@ -38,6 +38,7 @@ from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir, hosted_service_python, load_server_plist
 from ciao.jsonio import write_private_text
 from ciao.os_support.private import make_private, open_private
+from ciao.os_support.processes import python_isolation_flags
 from ciao.git_proc import EXACT_BYTES
 from ciao.os_support.shell_hints import path_hint
 from ciao.os_support.tool_path import dedupe_path
@@ -70,7 +71,7 @@ def _workspace_name_arg(value: str) -> str:
 def _relaunch_argv() -> list[str]:
     """argv for re-execing the CLI: a fresh interpreter picks up new code
     after a package update."""
-    return [sys.executable, "-m", "ciao.cli", *sys.argv[1:]]
+    return [sys.executable, *python_isolation_flags(), "-m", "ciao.cli", *sys.argv[1:]]
 
 
 def _run_command(args: argparse.Namespace) -> int:
@@ -135,7 +136,16 @@ def _resume_installer_bootstrap(suggestion: str | None) -> int:
     import uuid
 
     run_id = str(uuid.uuid4())
-    argv = [sys.executable, "-m", "ciao.cli", "run", "--installer-bootstrap", "--installer-run-id", run_id]
+    argv = [
+        sys.executable,
+        *python_isolation_flags(),
+        "-m",
+        "ciao.cli",
+        "run",
+        "--installer-bootstrap",
+        "--installer-run-id",
+        run_id,
+    ]
     if suggestion is not None:
         # `--flag=value`, so a suggestion that begins with a dash stays a path.
         argv.append(f"--installer-suggest-workspace={suggestion}")
