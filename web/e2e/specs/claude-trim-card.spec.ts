@@ -41,8 +41,8 @@ test.describe('Claude context trimming card', () => {
     const notebook = page.getByRole('switch', { name: 'Notebook editing' })
     await expect(notebook).toHaveAttribute('aria-checked', 'false')
 
-    // Reachable by Tab: walk forward from the claude.ai connectors switch above the card.
-    await page.locator('.trim-card').locator('xpath=preceding::button[@role="switch"][1]').focus()
+    // Reachable by Tab: walk forward from File access, the control above the card.
+    await page.locator('#workspace-file-access-alpha').focus()
     let reached = false
     for (let i = 0; i < 6 && !reached; i++) {
       await page.keyboard.press('Tab')

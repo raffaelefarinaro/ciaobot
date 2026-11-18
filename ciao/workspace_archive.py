@@ -198,7 +198,6 @@ def _registry_entry(config: Any, workspace: WorkspaceConfig) -> dict[str, Any]:
         "vault_root": workspace.vault_root,
         "default_provider": config.default_provider_for_workspace(workspace.name),
         "disallowed_tools": workspace.disallowed_tools,
-        "claude_ai_connectors": workspace.claude_ai_connectors,
         "claude_trim": workspace.claude_trim,
         "gws_profile": workspace.gws_profile,
         "color": workspace.color,
@@ -576,7 +575,10 @@ def restored_settings(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
     un-hide a tool or skill — the operator re-enables it in Settings after restore.
     """
     from ciao import provider_registry  # noqa: PLC0415
-    from ciao.claude_trim import load_claude_trim  # noqa: PLC0415
+    from ciao.claude_trim import (  # noqa: PLC0415
+        absorb_legacy_claude_ai_connectors,
+        load_claude_trim,
+    )
     from ciao.config import DEFAULT_WORKSPACE_COLOR, coerce_workspace_color  # noqa: PLC0415
 
     entry = _workspace_entry(metadata)
@@ -585,11 +587,10 @@ def restored_settings(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
         provider = "claude"
     raw_denied = entry.get("disallowed_tools")
     disallowed = None if raw_denied is None else _string_list(raw_denied, _TOOL_NAME_RE)
-    # An archive written before the switch existed has no key and restores to
-    # the default (on); a stored value that is not a boolean restores off.
-    connectors = entry.get("claude_ai_connectors", True)
-    if not isinstance(connectors, bool):
-        connectors = False
+    # A retired claude_ai_connectors: false with no trim entry is read as trimmed.
+    claude_trim = absorb_legacy_claude_ai_connectors(
+        entry, load_claude_trim(entry.get("claude_trim"))
+    )
     profile = entry.get("gws_profile")
     if not isinstance(profile, str) or not (
         profile == "" or _GWS_PROFILE_RE.fullmatch(profile)
@@ -602,8 +603,7 @@ def restored_settings(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
     return {
         "default_provider": provider,
         "disallowed_tools": disallowed,
-        "claude_ai_connectors": connectors,
-        "claude_trim": {k: v for k, v in load_claude_trim(entry.get("claude_trim")).items() if v},
+        "claude_trim": {k: v for k, v in claude_trim.items() if v},
         "gws_profile": profile,
         "color": color,
     }
@@ -891,7 +891,6 @@ def register_restored(
         vault_root=vault_root,
         default_provider=settings["default_provider"],
         disallowed_tools=settings["disallowed_tools"],
-        claude_ai_connectors=settings["claude_ai_connectors"],
         claude_trim=settings["claude_trim"],
         gws_profile=settings["gws_profile"],
         color=settings["color"],

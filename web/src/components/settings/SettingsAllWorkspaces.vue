@@ -18,7 +18,7 @@
         <div>
           <p class="workspace-title">New workspace</p>
           <p class="hint hint--compact">
-            Saved to <code>.runtime/workspaces.json</code> and applied immediately. Google and claude.ai connectors are set afterwards in the cards above, once the new workspace is open.
+            Saved to <code>.runtime/workspaces.json</code> and applied immediately. Google and Claude context trimming are set afterwards in the cards above, once the new workspace is open.
           </p>
         </div>
       </div>

@@ -17,7 +17,12 @@ from typing import TYPE_CHECKING, Any, cast
 # so the stock workspace-evidence set below can be derived from it (see
 # `_WORKSPACE_EVIDENCE_DIRS`) without a cycle.
 from ciao.entity_types import stock_entity_type_registry
-from ciao.claude_trim import claude_settings_layer, load_claude_trim, trim_tool_denies
+from ciao.claude_trim import (
+    absorb_legacy_claude_ai_connectors,
+    claude_settings_layer,
+    load_claude_trim,
+    trim_tool_denies,
+)
 from ciao.execution_modes import credential_path_deny_rules
 from ciao.fs_sandbox import AGENT_FS_SCOPES
 from ciao.models import THINKING_LEVELS, BridgeMode
@@ -516,11 +521,6 @@ class WorkspaceConfig:
     default_provider: str = "claude"
     # Extra tools to deny on top of the trim catalog. None, [] and 'none' all mean no extras.
     disallowed_tools: list[str] | None = None
-    # Whether this workspace's Claude chats load the Claude account's claude.ai
-    # connectors (remote MCP servers). Off sets ENABLE_CLAUDEAI_MCP_SERVERS=false
-    # on the spawned Claude Code process. True keeps the behavior from before
-    # this switch existed, so a workspace that never set it is unchanged.
-    claude_ai_connectors: bool = True
     gws_profile: str = ""
     # PWA accent preset id. Defaults to Ciao orange (amber).
     color: str = DEFAULT_WORKSPACE_COLOR
@@ -555,14 +555,6 @@ def _coerce_workspace_disallowed(raw: object) -> list[str] | None:
     return None
 
 
-def _coerce_claude_ai_connectors(raw: object) -> bool:
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str):
-        return raw.strip().lower() not in {"false", "0", "no", "off"}
-    return True
-
-
 def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
     name = str(data.get("name", "")).strip()
     if not name:
@@ -592,10 +584,9 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         vault_root=vault_root,
         default_provider=str(data.get("default_provider", "claude")).strip() or "claude",
         disallowed_tools=_coerce_workspace_disallowed(data.get("disallowed_tools")),
-        claude_ai_connectors=_coerce_claude_ai_connectors(
-            data.get("claude_ai_connectors")
+        claude_trim=absorb_legacy_claude_ai_connectors(
+            data, load_claude_trim(data.get("claude_trim"))
         ),
-        claude_trim=load_claude_trim(data.get("claude_trim")),
         gws_profile=str(data.get("gws_profile", "")).strip(),
         color=color,
         agent_fs_scope=agent_fs_scope,
@@ -1309,7 +1300,6 @@ class CiaoConfig:
                     workspace.name
                 ),
                 "disallowed_tools": workspace.disallowed_tools,
-                "claude_ai_connectors": workspace.claude_ai_connectors,
                 "gws_profile": workspace.gws_profile,
                 "color": workspace.color,
             }
