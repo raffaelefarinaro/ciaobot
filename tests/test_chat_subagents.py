@@ -2617,7 +2617,6 @@ def test_opencode_subagent_list_picks_live_or_ephemeral(
     if kind == "non_provider":
         pcm._providers["chat-1"] = SimpleNamespace(
             provider=SimpleNamespace(
-                has_live_server=True,
                 is_connected=True,
                 current_session_id="ses_parent",
                 read_live_collab_tree=live_tree,

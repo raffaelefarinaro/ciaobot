@@ -641,7 +641,6 @@ def test_opencode_running_rows_pick_live_or_ephemeral(
     provider: object
     if kind == "non_provider":
         provider = SimpleNamespace(
-            has_live_server=True,
             is_connected=True,
             current_session_id="ses_parent",
             read_live_collab_tree=live_tree,

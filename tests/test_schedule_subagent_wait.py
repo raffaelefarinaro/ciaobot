@@ -241,7 +241,6 @@ async def test_await_opencode_subagents_picks_live_or_ephemeral(
     monkeypatch.setattr(OpencodeProvider, "read_collab_tree", ephemeral_read)
     if kind == "non_provider":
         live: object = SimpleNamespace(
-            has_live_server=True,
             is_connected=True,
             current_session_id="ses_parent",
             read_live_collab_tree=live_read,
