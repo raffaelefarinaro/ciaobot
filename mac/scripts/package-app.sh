@@ -31,7 +31,9 @@ directory that contains the source app or lives inside it. Use a fresh
 directory for each run; the default is always fresh.
 
 The bundle is copied into DIR, signed ad-hoc (Sparkle's nested helpers
-inside-out first), verified with codesign --verify --deep --strict,
+inside-out first, and the bundled engine's Mach-O files signed ad-hoc,
+inside-out, before the app; the SDK's vendor-signed CLI is verified, not
+re-signed), verified with codesign --verify --deep --strict,
 archived without dereferencing symlinks, extracted again and verified,
 then described in MANIFEST.txt and SHA256SUMS. The bundle identifier,
 version, and architecture are read from the built app, so
@@ -178,6 +180,19 @@ if [ -d "$sparkle" ]; then
     scripts/sign-sparkle.sh --adhoc "$sparkle"
 fi
 
+# The bundled engine (#3128). Its Mach-O files are signed inside-out before the
+# app, so the app's seal covers already-signed code. The SDK's own CLI keeps its
+# vendor signature. Ad-hoc mode adds no hardened runtime and no entitlements.
+engine=$bundle/Contents/Resources/engine
+[ -d "$engine" ] && [ ! -L "$engine" ] || die "the app has no bundled engine at Contents/Resources/engine"
+command -v python3 >/dev/null \
+    && python3 -I -S -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' \
+    || die "python3 3.12 or newer is required to sign the bundled engine"
+python3 -I -S scripts/engine_sign.py sign --adhoc "$engine" || die "could not sign the bundled engine"
+engine_version=$(python3 -I -S -c 'import json, sys; print(json.load(open(sys.argv[1]))["engine"]["version"])' "$engine/provenance.json")
+[ "$(env -i "$engine/bin/ciao" --version)" = "ciao $engine_version" ] \
+    || die "the signed engine does not report version $engine_version"
+
 # Ad-hoc sign the whole bundle, so the signature seals Info.plist and the
 # bundled artwork instead of only the linker-signed executable. codesign takes
 # the identifier from CFBundleIdentifier; that identity is checked below.
@@ -241,6 +256,10 @@ ditto -x -k "$archive" "$verify_root"
 extracted=$verify_root/Ciaobot.app
 [ -d "$extracted" ] || die "the archive does not contain Ciaobot.app at its top level"
 codesign --verify --deep --strict --verbose=2 "$extracted"
+python3 -I -S scripts/engine_sign.py check "$extracted/Contents/Resources/engine" \
+    || die "the archived engine is not fully signed"
+[ "$(env -i "$extracted/Contents/Resources/engine/bin/ciao" --version)" = "ciao $engine_version" ] \
+    || die "the archived engine does not report version $engine_version"
 extracted_signature=$(codesign --display --verbose=4 "$extracted" 2>&1)
 extracted_cdhash=$(printf '%s\n' "$extracted_signature" | sed -n 's/^CDHash=//p' | head -n 1)
 [ "$extracted_cdhash" = "$cdhash" ] || die "the extracted app has a different signature"
@@ -268,6 +287,7 @@ fi
 
 archive_sha=$(shasum -a 256 "$archive" | awk '{print $1}')
 executable_sha=$(shasum -a 256 "$bundle/Contents/MacOS/$executable_name" | awk '{print $1}')
+engine_provenance_sha=$(shasum -a 256 "$engine/provenance.json" | awk '{print $1}')
 
 cat > "$output_dir/MANIFEST.txt" <<EOF
 bundle_identifier=$identifier
@@ -283,6 +303,8 @@ gatekeeper_assessment=$gatekeeper
 zip=$archive_name
 zip_sha256=$archive_sha
 executable_sha256=$executable_sha
+engine_version=$engine_version
+engine_provenance_sha256=$engine_provenance_sha
 source_bundle=local build (path omitted)
 created_by=scripts/package-app.sh
 EOF

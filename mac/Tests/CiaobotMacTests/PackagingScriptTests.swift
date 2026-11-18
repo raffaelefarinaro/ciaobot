@@ -142,6 +142,43 @@ final class PackagingScriptTests: XCTestCase {
         XCTAssertEqual(check.status, 0, check.output)
     }
 
+    func testPackagingSignsTheEngineAndRecordsIt() throws {
+        let app = scratch.appendingPathComponent("Build/Ciaobot.app", isDirectory: true)
+        try makeApp(at: app)
+        let output = scratch.appendingPathComponent("out", isDirectory: true)
+
+        let result = try runPackaging(["--no-build", "--app", app.path, "--output", output.path])
+
+        XCTAssertEqual(result.status, 0, result.output)
+        let manifest = try String(contentsOf: output.appendingPathComponent("MANIFEST.txt"), encoding: .utf8)
+        XCTAssertTrue(manifest.contains("engine_version=1.2.3\n"), manifest)
+        let line = try XCTUnwrap(manifest.split(separator: "\n").first { $0.hasPrefix("engine_provenance_sha256=") })
+        XCTAssertEqual(line.count, "engine_provenance_sha256=".count + 64, String(line))
+        XCTAssertFalse(manifest.contains("/Contents/Resources/engine"), "the manifest must not record a path")
+        let extracted = scratch.appendingPathComponent("extracted", isDirectory: true)
+        try fileManager.createDirectory(at: extracted, withIntermediateDirectories: true)
+        let unzip = try run("/usr/bin/ditto", ["-x", "-k",
+                                               output.appendingPathComponent("Ciaobot-1.2.3-adhoc.zip").path, extracted.path])
+        XCTAssertEqual(unzip.status, 0, unzip.output)
+        let python = extracted.appendingPathComponent("Ciaobot.app/Contents/Resources/engine/bin/python3.12")
+        let display = try run("/usr/bin/codesign", ["-d", "--verbose=4", python.path])
+        XCTAssertTrue(display.output.contains("Signature=adhoc"), display.output)
+    }
+
+    func testPackagingRefusesAnAppWithoutEngine() throws {
+        let app = scratch.appendingPathComponent("Build/Ciaobot.app", isDirectory: true)
+        try makeApp(at: app, withEngine: false)
+        let output = scratch.appendingPathComponent("out", isDirectory: true)
+
+        let result = try runPackaging(["--no-build", "--app", app.path, "--output", output.path])
+
+        XCTAssertEqual(result.status, 1, result.output)
+        XCTAssertTrue(result.output.contains("no bundled engine"), result.output)
+        XCTAssertFalse(fileManager.fileExists(atPath: output.appendingPathComponent("MANIFEST.txt").path))
+        let leftovers = (try? fileManager.contentsOfDirectory(atPath: output.path)) ?? []
+        XCTAssertFalse(leftovers.contains { $0.hasSuffix(".zip") || $0 == "SHA256SUMS" }, "\(leftovers)")
+    }
+
     // MARK: - Helpers
 
     private var packageRoot: URL {
@@ -155,7 +192,7 @@ final class PackagingScriptTests: XCTestCase {
         packageRoot.appendingPathComponent("scripts")
     }
 
-    private func makeApp(at url: URL, executable: URL? = nil) throws {
+    private func makeApp(at url: URL, executable: URL? = nil, withEngine: Bool = true) throws {
         let contents = url.appendingPathComponent("Contents", isDirectory: true)
         let macos = contents.appendingPathComponent("MacOS", isDirectory: true)
         try fileManager.createDirectory(at: macos, withIntermediateDirectories: true)
@@ -174,10 +211,38 @@ final class PackagingScriptTests: XCTestCase {
         let executableURL = macos.appendingPathComponent("Scratch")
         if let executable {
             try fileManager.copyItem(at: executable, to: executableURL)
+            // A clone of a platform binary keeps Apple's platform signature, and macOS then hangs any exec inside the
+            // bundle. Dropping the signature makes it an ordinary unsigned Mach-O.
+            let unsigned = try run("/usr/bin/codesign", ["--remove-signature", executableURL.path])
+            XCTAssertEqual(unsigned.status, 0, unsigned.output)
         } else {
             try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executableURL)
         }
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executableURL.path)
+        if withEngine { try makeFixtureEngine(in: url) }
+    }
+
+    /// A thin arm64 Mach-O stand-in: `/bin/echo` is fat and may carry several arm64 slices, which the engine audit refuses.
+    private func thinArm64Binary(at destination: URL) throws {
+        let result = try run("/usr/bin/lipo", ["/bin/echo", "-thin", "arm64e", "-output", destination.path])
+        XCTAssertEqual(result.status, 0, result.output)
+        // A clone of a platform binary keeps Apple's platform signature, and macOS then hangs any exec inside the
+        // bundle. Dropping the signature makes it an ordinary unsigned Mach-O.
+        let unsigned = try run("/usr/bin/codesign", ["--remove-signature", destination.path])
+        XCTAssertEqual(unsigned.status, 0, unsigned.output)
+    }
+
+    /// A fixture engine: a launcher script, a Mach-O stand-in for the interpreter and the provenance record.
+    private func makeFixtureEngine(in app: URL) throws {
+        let engine = app.appendingPathComponent("Contents/Resources/engine", isDirectory: true)
+        let bin = engine.appendingPathComponent("bin", isDirectory: true)
+        try fileManager.createDirectory(at: bin, withIntermediateDirectories: true)
+        try Data("#!/bin/sh\necho \"ciao 1.2.3\"\n".utf8).write(to: bin.appendingPathComponent("ciao"))
+        try thinArm64Binary(at: bin.appendingPathComponent("python3.12"))
+        try Data(#"{"kind":"ciaobot-engine-provenance","engine":{"version":"1.2.3"}}"#.utf8)
+            .write(to: engine.appendingPathComponent("provenance.json"))
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bin.appendingPathComponent("ciao").path)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bin.appendingPathComponent("python3.12").path)
     }
 
     @discardableResult
