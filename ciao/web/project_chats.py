@@ -5948,7 +5948,7 @@ class ProjectChatManager:
             if self._workspace_for_chat(chat_id) != workspace:
                 continue
             provider = getattr(provider_service, "_provider", None)
-            if bool(getattr(provider, "is_connected", False)):
+            if provider is not None and provider.is_connected:
                 sessions.append((chat_id, chat.provider, provider))
 
         async def read(
