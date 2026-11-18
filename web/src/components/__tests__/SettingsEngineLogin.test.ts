@@ -92,6 +92,7 @@ beforeEach(() => {
 afterEach(() => {
   while (mounted.length) mounted.pop()!.unmount()
   document.body.innerHTML = ''
+  delete (globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__
   vi.useRealTimers()
 })
 
@@ -231,6 +232,17 @@ describe('SettingsEngineLogin when the host has an answer', () => {
     // Neither a promise of an always-running engine nor of offline use.
     expect(text.toLowerCase()).not.toContain('offline')
     expect(text.toLowerCase()).not.toContain('always')
+  })
+
+  it('points at the Mac app Start at Login inside Ciaobot for Mac', async () => {
+    ;(globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__ = true
+    const view = await mountPanel()
+    const text = view.text()
+
+    expect(text).toContain('Start at Login')
+    expect(text).toContain('menu bar')
+    expect(text).not.toContain('Use Ciaobot as an app')
+    expect(text).toContain('That is the next sign-in')
   })
 })
 

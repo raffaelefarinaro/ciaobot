@@ -309,9 +309,10 @@
           </div>
         </div>
 
-        <!-- Installing is optional and the guidance is permanent: the Home setup
-             reminder can be closed for good, so Settings keeps the steps. -->
-        <SettingsAppInstall :expand-steps="route.hash === '#install-app'" />
+        <!-- Installing is optional and the guidance is permanent in a browser: the
+             Home setup reminder can be closed for good, so Settings keeps the
+             steps. Ciaobot for Mac is the installed app, so it shows no card. -->
+        <SettingsAppInstall v-if="!desktopClient" :expand-steps="route.hash === '#install-app'" />
 
         <!-- Notifications. -->
         <SettingsNotifications />
@@ -1404,6 +1405,7 @@ import { formatConnectorLabel } from '../lib/mcpLabels'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch, provide } from 'vue'
 import { isNavigationFailure, NavigationFailureType, useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
+import { isDesktopClient } from '../lib/pwaPlatform'
 import { describeInterruptedCards, type RestartBlocker } from '../lib/restartBlockers'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
 import { formatRelative, formatTime } from '../lib/time'
@@ -1506,6 +1508,8 @@ import { assetOriginClass, assetOriginLabel, commandOrigin, subagentOrigin } fro
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
 const route = useRoute()
+/** Read once: the marker never changes while the page lives. */
+const desktopClient = isDesktopClient()
 const router = useRouter()
 const fileViewer = useFileViewerStore()
 const projectStore = useProjectStore()
