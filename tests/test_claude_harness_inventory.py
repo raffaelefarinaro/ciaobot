@@ -42,6 +42,9 @@ pytestmark = [
 ]
 
 
+INIT_DEADLINE_SECONDS = 300
+
+
 @pytest.fixture(scope="module")
 def cli() -> str:
     path = get_bundled_claude_path()
@@ -81,7 +84,9 @@ def _init_payload(cli: str, tmp_path: Path, settings: dict | None = None) -> dic
         text=True,
     )
     # readline blocks, so the deadline must kill the process from outside: a stuck CLI then hits EOF.
-    timer = threading.Timer(60, proc.kill)
+    # A healthy start takes about 2 s; under a loaded machine (parallel suites) it stretches
+    # several-fold, so the deadline only guards a hung CLI and sits far above any loaded start.
+    timer = threading.Timer(INIT_DEADLINE_SECONDS, proc.kill)
     timer.start()
     try:
         assert proc.stdout is not None
