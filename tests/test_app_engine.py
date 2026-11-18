@@ -170,15 +170,18 @@ def test_a_failed_pointer_write_leaves_no_temp_file_behind(
     def broken_replace(src: object, dst: object) -> None:
         raise OSError("no rename")
 
-    monkeypatch.setattr(app_engine.os, "replace", broken_replace)
-    with pytest.raises(OSError):
-        app_engine.write_pointer(tmp_path / "other", tmp_path / "other" / ".runtime")
+    # A nested context undoes only this patch. ``monkeypatch.undo()`` would
+    # also undo conftest's HOME isolation and write the last pointer into the
+    # real home.
+    with monkeypatch.context() as patched:
+        patched.setattr(app_engine.os, "replace", broken_replace)
+        with pytest.raises(OSError):
+            app_engine.write_pointer(tmp_path / "other", tmp_path / "other" / ".runtime")
 
     # The temp file was cleaned up, and the old pointer still stands.
     assert [entry.name for entry in app_engine.state_dir().iterdir()] == [
         "workspace.json"
     ]
-    monkeypatch.undo()
     app_engine.write_pointer(tmp_path / "other", tmp_path / "other" / ".runtime")
     assert [entry.name for entry in app_engine.state_dir().iterdir()] == ["workspace.json"]
 
