@@ -22,8 +22,10 @@ Scenario JSON (every key optional):
 - ``stderr``: lines written to stderr at startup.
 - ``initialize_delay_ms``: sleep before answering ``initialize``.
 - ``exit_during_initialize``: exit 1 when ``initialize`` arrives.
-- ``spawn_child``: start ``sleep 60`` at startup and write ``{"pid", "child"}``
-  to ``<scenario>.pids.json``; on SIGTERM the fake stops its child and exits.
+- ``spawn_tree``: at startup start a process tree and write ``{"pid", "child",
+  "grandchild", "great"}`` to ``<scenario>.pids.json``: ``child`` is a plain
+  ``sleep 60``; ``grandchild`` is a separate Python process that ignores SIGTERM
+  and has its own SIGTERM-ignoring child ``great``. The fake never signals them.
 - ``ignore_sigterm``: ignore SIGTERM (only SIGKILL ends the process).
 - ``record_env``: environment variable names whose values are logged.
 
@@ -40,6 +42,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -88,10 +91,14 @@ class FakeAgent:
         env = {name: os.environ.get(name) for name in self.scenario.get("record_env", [])}
         if env:
             params["env"] = env
+        params["cwd"] = os.getcwd()
+        params["pid"] = os.getpid()
+        params["pgid"] = os.getpgrp()
+        params["sid"] = os.getsid(0)
         self.log("initialize", params)
+        await asyncio.sleep(self.scenario.get("initialize_delay_ms", 0) / 1000)
         if self.scenario.get("exit_during_initialize"):
             os._exit(1)
-        await asyncio.sleep(self.scenario.get("initialize_delay_ms", 0) / 1000)
         from acp.schema import InitializeResponse
         return InitializeResponse(
             protocol_version=1,
@@ -204,22 +211,39 @@ class FakeAgent:
         self.log(f"_{method}", params)
 
 
+_GRANDCHILD = """
+import json, os, signal, subprocess, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+great = subprocess.Popen([sys.executable, "-c",
+    "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"])
+with open(sys.argv[1], "w") as handle:
+    json.dump({"grandchild": os.getpid(), "great": great.pid}, handle)
+time.sleep(60)
+"""
+
+
+def _spawn_tree(scenario_path: Path) -> None:
+    child = subprocess.Popen(["sleep", "60"])
+    inner = Path(str(scenario_path) + ".inner.json")
+    subprocess.Popen([sys.executable, "-c", _GRANDCHILD, str(inner)])
+    while True:
+        try:
+            grand = json.loads(inner.read_text(encoding="utf-8"))
+            break
+        except (OSError, ValueError):
+            time.sleep(0.01)
+    pids = {"pid": os.getpid(), "child": child.pid, **grand}
+    Path(str(scenario_path) + ".pids.json").write_text(json.dumps(pids), encoding="utf-8")
+
+
 async def main(scenario_path: Path) -> None:
     agent = FakeAgent(scenario_path)
     for line in agent.scenario.get("stderr", []):
         print(line, file=sys.stderr, flush=True)
-    child: subprocess.Popen[bytes] | None = None
-    if agent.scenario.get("spawn_child"):
-        child = subprocess.Popen(["sleep", "60"])
-        Path(str(scenario_path) + ".pids.json").write_text(
-            json.dumps({"pid": os.getpid(), "child": child.pid}), encoding="utf-8")
+    if agent.scenario.get("spawn_tree"):
+        _spawn_tree(scenario_path)
     if agent.scenario.get("ignore_sigterm"):
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    elif child is not None:
-        def _terminate(_signum: int, _frame: Any) -> None:
-            child.kill()
-            os._exit(0)
-        signal.signal(signal.SIGTERM, _terminate)
     await acp.run_agent(agent)
 
 

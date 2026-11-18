@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import stat
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -39,6 +41,41 @@ async def _wait_gone(pid: int, timeout: float = 5.0) -> bool:
             return True
         await asyncio.sleep(0.05)
     return not _pid_alive(pid)
+
+
+_TREE_KEYS = ("pid", "child", "grandchild", "great")
+
+
+def _tree_pids(tmp_path: Path) -> dict[str, int]:
+    return json.loads((tmp_path / "scenario.json.pids.json").read_text(encoding="utf-8"))
+
+
+async def _wait_for_pids(tmp_path: Path, timeout: float = 10.0) -> dict[str, int]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            return _tree_pids(tmp_path)
+        except (OSError, ValueError):
+            await asyncio.sleep(0.05)
+    raise AssertionError("the fake agent never wrote its pids")
+
+
+async def _assert_tree_gone(pids: dict[str, int]) -> None:
+    for key in _TREE_KEYS:
+        assert await _wait_gone(pids[key]), f"{key} ({pids[key]}) survived"
+
+
+def _reap_leftovers(pids: dict[str, int]) -> None:
+    for pid in pids.values():
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+
+
+@pytest.fixture(autouse=True)
+def _fast_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(connection_module, "_SHUTDOWN_TIMEOUT", 0.5)
 
 
 async def _open(spec: AgentSpec, tmp_path: Path, env: dict[str, str] | None = None) -> AcpConnection:
@@ -80,57 +117,132 @@ async def test_initialize_timeout_closes_process_and_reports_stderr(tmp_path: Pa
         tmp_path,
         initialize_delay_ms=30000,
         stderr=["warming up the fake agent"],
-        spawn_child=True,
-        spec_initialize_timeout_s=4.0,
+        spawn_tree=True,
+        spec_initialize_timeout_s=5.0,
     )
-    with pytest.raises(AgentStartError) as excinfo:
-        await _open(spec, tmp_path)
-    assert str(excinfo.value).startswith("fake agent did not start: ")
-    assert "warming up the fake agent" in excinfo.value.stderr_tail
-    pids = json.loads((tmp_path / "scenario.json.pids.json").read_text(encoding="utf-8"))
-    assert await _wait_gone(pids["pid"])
-    assert await _wait_gone(pids["child"])
+    pids: dict[str, int] = {}
+    try:
+        with pytest.raises(AgentStartError) as excinfo:
+            await _open(spec, tmp_path)
+        pids = _tree_pids(tmp_path)
+        assert str(excinfo.value).startswith("fake agent did not start: ")
+        assert "warming up the fake agent" in excinfo.value.stderr_tail
+        await _assert_tree_gone(pids)
+    finally:
+        _reap_leftovers(pids)
 
 
 @pytest.mark.asyncio
-async def test_exit_during_initialize_raises_with_stderr_tail(tmp_path: Path) -> None:
+async def test_exit_during_initialize_raises_with_stderr_tail_and_kills_orphans(tmp_path: Path) -> None:
+    # The agent dies and leaves its tree re-parented to pid 1; the watch still knows it.
     spec, _calls = write_scenario(
-        tmp_path, exit_during_initialize=True, stderr=["fatal: no login"],
+        tmp_path, exit_during_initialize=True, initialize_delay_ms=1000,
+        stderr=["fatal: no login"], spawn_tree=True,
     )
+    started = time.monotonic()
+    pids: dict[str, int] = {}
+    try:
+        with pytest.raises(AgentStartError) as excinfo:
+            await _open(spec, tmp_path)
+        pids = _tree_pids(tmp_path)
+        # The exit is noticed at once, not after the initialize timeout.
+        assert time.monotonic() - started < spec.initialize_timeout_s / 2
+        assert "exited" in str(excinfo.value)
+        assert "fatal: no login" in excinfo.value.stderr_tail
+        await _assert_tree_gone(pids)
+    finally:
+        _reap_leftovers(pids)
+
+
+@pytest.mark.asyncio
+async def test_exit_during_initialize_without_children(tmp_path: Path) -> None:
+    spec, _calls = write_scenario(tmp_path, exit_during_initialize=True, stderr=["fatal: no login"])
     started = time.monotonic()
     with pytest.raises(AgentStartError) as excinfo:
         await _open(spec, tmp_path)
-    # The exit is noticed at once, not after the initialize timeout.
     assert time.monotonic() - started < spec.initialize_timeout_s / 2
-    assert "exited" in str(excinfo.value)
     assert "fatal: no login" in excinfo.value.stderr_tail
 
 
 @pytest.mark.asyncio
-async def test_close_is_idempotent_and_kills_tree(tmp_path: Path) -> None:
-    spec, _calls = write_scenario(tmp_path, spawn_child=True)
-    connection = await _open(spec, tmp_path)
-    pids = json.loads((tmp_path / "scenario.json.pids.json").read_text(encoding="utf-8"))
-    assert _pid_alive(pids["pid"]) and _pid_alive(pids["child"])
-    await connection.close()
-    await connection.close()
-    assert not connection.alive
-    assert await _wait_gone(pids["pid"])
-    assert await _wait_gone(pids["child"])
+async def test_cancelled_open_kills_whole_tree(tmp_path: Path) -> None:
+    spec, _calls = write_scenario(tmp_path, initialize_delay_ms=30000, spawn_tree=True)
+    pids: dict[str, int] = {}
+    try:
+        task = asyncio.create_task(_open(spec, tmp_path))
+        pids = await _wait_for_pids(tmp_path)
+        await asyncio.sleep(0.3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await _assert_tree_gone(pids)
+    finally:
+        _reap_leftovers(pids)
 
 
 @pytest.mark.asyncio
-async def test_close_kills_an_agent_that_ignores_sigterm(
+async def test_close_kills_whole_descendant_tree_and_is_idempotent(tmp_path: Path) -> None:
+    spec, _calls = write_scenario(tmp_path, spawn_tree=True)
+    connection = await _open(spec, tmp_path)
+    pids = _tree_pids(tmp_path)
+    try:
+        assert all(_pid_alive(pid) for pid in pids.values())
+        await connection.close()
+        await connection.close()
+        assert not connection.alive
+        await _assert_tree_gone(pids)
+    finally:
+        _reap_leftovers(pids)
+
+
+@pytest.mark.asyncio
+async def test_close_kills_tree_of_an_agent_that_ignores_sigterm(tmp_path: Path) -> None:
+    spec, _calls = write_scenario(tmp_path, spawn_tree=True, ignore_sigterm=True)
+    connection = await _open(spec, tmp_path)
+    pids = _tree_pids(tmp_path)
+    try:
+        await connection.close()
+        await _assert_tree_gone(pids)
+    finally:
+        _reap_leftovers(pids)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_after", [0.0, 0.2])
+async def test_cancelled_close_still_kills_tree_and_second_close_finishes(
+    tmp_path: Path, cancel_after: float
+) -> None:
+    spec, _calls = write_scenario(tmp_path, spawn_tree=True)
+    connection = await _open(spec, tmp_path)
+    pids = _tree_pids(tmp_path)
+    try:
+        task = asyncio.create_task(connection.close())
+        await asyncio.sleep(cancel_after)
+        task.cancel()
+        # The cancel may land before or after the conn.close step finishes.
+        await asyncio.gather(task, return_exceptions=True)
+        await connection.close()
+        assert connection._closed
+        assert connection._stderr_task.done()
+        await _assert_tree_gone(pids)
+    finally:
+        _reap_leftovers(pids)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_initialize_request_is_an_agent_start_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(connection_module, "_SHUTDOWN_TIMEOUT", 0.5)
-    spec, _calls = write_scenario(tmp_path, spawn_child=True, ignore_sigterm=True)
-    connection = await _open(spec, tmp_path)
-    pids = json.loads((tmp_path / "scenario.json.pids.json").read_text(encoding="utf-8"))
-    await connection.close()
-    assert await _wait_gone(pids["pid"])
-    # The fake ignores SIGTERM, so it never reaches its child; clean the child up.
-    os.kill(pids["child"], 9)
+    # The SDK cancels the pending response future when it tears the connection down;
+    # the real agent process and the real _initialize run, only the request future is cancelled.
+    spec, _calls = write_scenario(tmp_path, initialize_delay_ms=30000, spec_initialize_timeout_s=10.0)
+
+    async def cancelled(self: acp.ClientSideConnection, *args: Any, **kwargs: Any) -> Any:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(acp.ClientSideConnection, "initialize", cancelled)
+    with pytest.raises(AgentStartError, match="initialize request was cancelled"):
+        await _open(spec, tmp_path)
 
 
 def test_stderr_ring_bounds_lines_and_bytes() -> None:
@@ -161,3 +273,65 @@ async def test_env_has_engine_path_first(tmp_path: Path, monkeypatch: pytest.Mon
     assert env["EXTRA"] == "yes"
     assert env["PWA_AUTH_TOKEN"] is None
     assert env["CIAO_X"] is None
+
+
+@pytest.mark.asyncio
+async def test_cwd_reaches_the_child(tmp_path: Path) -> None:
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    spec, calls = write_scenario(tmp_path)
+    connection = await AcpConnection.open(spec, cwd=workdir, env={}, client=_Client())
+    await connection.close()
+    params = next(c for c in read_calls(calls) if c["method"] == "initialize")["params"]
+    assert Path(params["cwd"]).resolve() == workdir.resolve()
+
+
+@pytest.mark.asyncio
+async def test_env_layers_spec_over_terminal_and_argument_over_spec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ACP_TEST_LAYER", "engine")
+    monkeypatch.setenv("ACP_TEST_ARG", "engine")
+    spec, calls = write_scenario(
+        tmp_path,
+        record_env=["ACP_TEST_LAYER", "ACP_TEST_ARG"],
+        spec_env={"ACP_TEST_LAYER": "spec", "ACP_TEST_ARG": "spec"},
+    )
+    connection = await _open(spec, tmp_path, env={"ACP_TEST_ARG": "argument"})
+    await connection.close()
+    env = next(c for c in read_calls(calls) if c["method"] == "initialize")["params"]["env"]
+    assert env["ACP_TEST_LAYER"] == "spec"
+    assert env["ACP_TEST_ARG"] == "argument"
+
+
+@pytest.mark.asyncio
+async def test_relative_path_entry_cannot_resolve_binary_to_relative_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.os_support.tool_path import resolve_executable
+
+    marker = tmp_path / "marker"
+    script = tmp_path / "relagent"
+    script.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.chdir(tmp_path)
+    assert resolve_executable("relagent", path=".") is not None
+    assert not os.path.isabs(resolve_executable("relagent", path=".") or "")
+    monkeypatch.setattr(connection_module, "resolve_tool", lambda cmd: resolve_executable(cmd, path="."))
+    with pytest.raises(AgentStartError, match="relative path"):
+        await _open(AgentSpec(id="fake", binary="relagent"), tmp_path)
+    await asyncio.sleep(0.3)
+    assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_agent_stays_in_the_engine_process_group(tmp_path: Path) -> None:
+    spec, calls = write_scenario(tmp_path)
+    connection = await _open(spec, tmp_path)
+    try:
+        params = next(c for c in read_calls(calls) if c["method"] == "initialize")["params"]
+        assert params["pid"] != os.getpid()
+        assert params["pgid"] == os.getpgrp()
+        assert params["sid"] == os.getsid(0)
+    finally:
+        await connection.close()
