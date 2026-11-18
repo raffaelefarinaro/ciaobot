@@ -406,20 +406,13 @@ class RealRunnerReached(BaseException):
 def never_the_real_launchctl(monkeypatch: pytest.MonkeyPatch) -> None:
     """A takeover test that forgets to inject its runner must fail, not drive launchd.
 
-    The runners are keyword-only defaults bound at import time, so patching
-    ``subprocess.run`` would not reach them.
+    Every public entry point and every helper resolves a missing runner through
+    ``mac_takeover._default_runner``, the one place the real ``subprocess.run``
+    is chosen; replacing it covers helper-built runners too.
     """
     from ciao import mac_takeover
 
     def refuse(*args: Any, **kwargs: Any) -> Any:
         raise RealRunnerReached(f"a test reached the real subprocess runner: {args}")
 
-    for function in (
-        mac_takeover.plan,
-        mac_takeover.apply,
-        mac_takeover.finish,
-        mac_takeover.rollback,
-    ):
-        defaults = function.__kwdefaults__
-        if defaults is not None and "runner" in defaults:
-            monkeypatch.setitem(defaults, "runner", refuse)
+    monkeypatch.setattr(mac_takeover, "_default_runner", lambda: refuse)

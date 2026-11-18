@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 import pytest
 
+import ciao
 from ciao import app_engine, cli, mac_takeover
 from ciao.macos_service import LAUNCHCTL
 from tests.test_mac_takeover_plan import LABEL, Machine, installer_install, machine  # noqa: F401
@@ -33,6 +34,7 @@ class Launchd:
         self.calls: list[list[str]] = []
         self.statuses: dict[str, int] = {"print": 113}
         self.on_verb: dict[str, Callable[[], None]] = {}
+        self.print_stdout = ""
 
     def __call__(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         verb = argv[1] if len(argv) > 1 else ""
@@ -40,7 +42,9 @@ class Launchd:
         hook = self.on_verb.get(verb)
         if hook is not None:
             hook()
-        return subprocess.CompletedProcess(argv, self.statuses.get(verb, 0), "", "")
+        code = self.statuses.get(verb, 0)
+        out = self.print_stdout if verb == "print" and code == 0 else ""
+        return subprocess.CompletedProcess(argv, code, out, "")
 
     def argv_of(self, verb: str) -> list[str]:
         matches = [call for call in self.calls if len(call) > 1 and call[1] == verb]
@@ -91,6 +95,35 @@ def answer_engine(monkeypatch: pytest.MonkeyPatch, machine: Machine) -> dict[str
     monkeypatch.setattr(mac_takeover, "engine_identity", engine_identity)
     monkeypatch.setattr(mac_takeover, "read_lock_owner", lambda runtime: dict(owner))
     return stopped
+
+
+def old_engine_answers(
+    monkeypatch: pytest.MonkeyPatch,
+    machine: Machine,
+    launchd: Launchd,
+    *,
+    pid: int = 5,
+    job_pid: int | None = None,
+    owner_pid: int | None = None,
+    startup_id: str = "old",
+    loaded_after_bootstrap: bool = True,
+) -> None:
+    """The restored old job: loaded with ``job_pid``, answering on the port, owning the lock record."""
+    monkeypatch.setattr(mac_takeover, "_pid_alive", lambda check: True)
+    identity = {"startup_id": startup_id, "pid": pid, "version": "1.10.0"}
+    owner = {
+        "pid": pid if owner_pid is None else owner_pid,
+        "workspace": str(machine.workspace),
+        "runtime": str(machine.workspace / ".runtime"),
+        "port": 8443,
+        "status": "running",
+        "startup_id": startup_id,
+    }
+    monkeypatch.setattr(mac_takeover, "engine_identity", lambda port: dict(identity))
+    monkeypatch.setattr(mac_takeover, "read_lock_owner", lambda runtime: dict(owner))
+    launchd.print_stdout = f"pid = {pid if job_pid is None else job_pid}\n"
+    if loaded_after_bootstrap:
+        launchd.on_verb["bootstrap"] = lambda: launchd.statuses.__setitem__("print", 0)
 
 
 def journal_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -172,6 +205,7 @@ def seed_takeover(
         "trash": [{"path": str(machine.env_root), "proof": "receipt_env"}],
         "left_in_place": [],
         "dropped_env": [],
+        "protected": [str(machine.workspace)],
     }
     (entry / mac_takeover.JOURNAL_NAME).write_text(json.dumps(journal, indent=2))
     (entry / mac_takeover.JOURNAL_NAME).chmod(0o600)
@@ -208,7 +242,7 @@ def healthy_engine(
     app_engine.write_ready_record(
         pid=pid, port=port, startup_id=startup_id, workspace=machine.workspace, bootstrap=False
     )
-    identity = {"startup_id": startup_id, "pid": pid, "version": "1.10.0"}
+    identity = {"startup_id": startup_id, "pid": pid, "version": ciao.__version__}
     monkeypatch.setattr(mac_takeover, "engine_identity", lambda check: dict(identity))
     owner = {
         "pid": pid if owner_pid is None else owner_pid,
@@ -223,6 +257,11 @@ def healthy_engine(
 
 
 HELD_LOCKS: list[Any] = []
+
+
+@pytest.fixture(autouse=True)
+def no_health_pause(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mac_takeover, "_HEALTH_RECHECK_S", 0.0)
 
 
 @pytest.fixture(autouse=True)
@@ -459,7 +498,7 @@ def test_resume_skips_the_stop_once_the_plist_is_gone(
     sha = _plist_sha(machine)
     seed_takeover(machine, "plist_removed", with_plist=False)
     launchd = Launchd()
-    launchd.statuses["print"] = 0  # even a "loaded" launchd answer is not consulted
+    launchd.statuses["print"] = 113
 
     result = mac_takeover.apply(
         expect_sha256=sha,
@@ -642,8 +681,7 @@ def test_rollback_restores_the_plist_and_clears_the_pointer(
     assert app_engine.read_pointer() is not None
     assert not _plist_path(machine).exists()
     launchd = Launchd()
-    identity = {"startup_id": "old", "pid": 5, "version": "1.10.0"}
-    monkeypatch.setattr(mac_takeover, "engine_identity", lambda port: dict(identity))
+    old_engine_answers(monkeypatch, machine, launchd)
 
     result = mac_takeover.rollback(
         takeover_id=takeover_id, runner=launchd, clock=ticking(), sleep=no_sleep
@@ -669,8 +707,7 @@ def test_rollback_works_before_the_plist_was_removed(
     original = machine.write_plist().read_bytes()
     seed_takeover(machine, "started")
     launchd = Launchd()
-    identity = {"startup_id": "old", "pid": 5, "version": "1.10.0"}
-    monkeypatch.setattr(mac_takeover, "engine_identity", lambda port: dict(identity))
+    old_engine_answers(monkeypatch, machine, launchd)
 
     result = mac_takeover.rollback(
         takeover_id=TAKEOVER_ID, runner=launchd, clock=ticking(), sleep=no_sleep
@@ -700,7 +737,7 @@ def test_rollback_refuses_while_a_bundled_engine_holds_the_lock(
     assert (result["ok"], result["reason"]) == (False, "bundled_engine_running")
     journal = mac_takeover._load_journal(takeover_id)
     assert journal is not None and journal["state"] == "pointer_written"
-    assert launchd.calls == []
+    assert launchd.destructive() == []
     assert not _plist_path(machine).exists()
     # Nothing was undone before the refusal: the pointer still stands.
     assert app_engine.read_pointer() is not None
@@ -785,9 +822,8 @@ def test_rollback_keeps_the_pointer_until_the_old_engine_answers(
     # The retry finds the job loaded, does not bootstrap again, and settles
     # once the old engine answers.
     launchd.calls.clear()
+    old_engine_answers(monkeypatch, machine, launchd)
     launchd.statuses["print"] = 0
-    identity = {"startup_id": "old", "pid": 5, "version": "1.10.0"}
-    monkeypatch.setattr(mac_takeover, "engine_identity", lambda port: dict(identity))
     again = mac_takeover.rollback(
         takeover_id=takeover_id, runner=launchd, clock=ticking(), sleep=no_sleep
     )
@@ -814,7 +850,7 @@ def test_cli_apply_finish_and_rollback(
     launchd = Launchd()
     launchd.on_verb["bootout"] = lambda: stopped.__setitem__("stopped", True)
     # The CLI passes no runner of its own: route apply's default to the fake.
-    monkeypatch.setitem(mac_takeover.apply.__kwdefaults__, "runner", launchd)
+    monkeypatch.setattr(mac_takeover, "_default_runner", lambda: launchd)
 
     code = cli.main(
         [
@@ -856,7 +892,7 @@ def test_cli_apply_refusal_exits_three(
     answer_engine(monkeypatch, machine)
     launchd = Launchd()
     # The CLI passes no runner of its own: route apply's default to the fake.
-    monkeypatch.setitem(mac_takeover.apply.__kwdefaults__, "runner", launchd)
+    monkeypatch.setattr(mac_takeover, "_default_runner", lambda: launchd)
 
     code = cli.main(
         [
@@ -912,7 +948,7 @@ def test_a_second_apply_while_the_first_runs_answers_busy(
         stopped["stopped"] = True
         second.append(run_apply(machine, launchd))
         second.append(mac_takeover.rollback(takeover_id=TAKEOVER_ID, runner=launchd))
-        second.append(mac_takeover.finish(takeover_id=TAKEOVER_ID, runner=launchd))
+        second.append(mac_takeover.finish(takeover_id=TAKEOVER_ID))
 
     launchd.on_verb["bootout"] = at_bootout
 
@@ -1153,7 +1189,7 @@ def test_a_forged_journal_is_not_acted_on(
 
     assert mac_takeover._load_journal(TAKEOVER_ID) is None
     assert mac_takeover.rollback(takeover_id=TAKEOVER_ID, runner=launchd)["reason"] == "no_journal"
-    assert mac_takeover.finish(takeover_id=TAKEOVER_ID, runner=launchd)["reason"] == "no_journal"
+    assert mac_takeover.finish(takeover_id=TAKEOVER_ID)["reason"] == "no_journal"
     assert launchd.calls == []
     assert app_engine.read_pointer() is not None
     assert not _plist_path(machine).exists()
@@ -1191,7 +1227,7 @@ def test_a_symlinked_takeover_directory_is_refused_everywhere(
     planned = mac_takeover.plan(launch_agents_dir=machine.agents, label=LABEL, runner=launchd)
     results = [
         run_apply(machine, launchd),
-        mac_takeover.finish(takeover_id=TAKEOVER_ID, runner=launchd),
+        mac_takeover.finish(takeover_id=TAKEOVER_ID),
         mac_takeover.rollback(takeover_id=TAKEOVER_ID, runner=launchd),
     ]
 
@@ -1343,8 +1379,7 @@ def test_a_crash_mid_restore_leaves_a_retryable_state(
     assert journal is not None and journal["state"] == "pointer_written"
 
     monkeypatch.setattr(shutil, "copy2", real_copy)
-    identity = {"startup_id": "old", "pid": 5, "version": "1.10.0"}
-    monkeypatch.setattr(mac_takeover, "engine_identity", lambda port: dict(identity))
+    old_engine_answers(monkeypatch, machine, launchd)
     retry = mac_takeover.rollback(
         takeover_id=takeover_id, runner=launchd, clock=ticking(), sleep=no_sleep
     )
@@ -1422,17 +1457,25 @@ def test_finish_rechecks_the_shim_marker_and_the_receipt(
     assert [item["proof"] for item in result["trash"]] == ["receipt_env"]
 
 
-def test_finish_offers_nothing_when_the_journal_has_no_protected_list(
+def test_finish_refuses_a_journal_without_a_protected_list(
     machine: Machine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     takeover_id = apply_to_pointer_written(machine, monkeypatch)
     healthy_engine(monkeypatch, machine)
-    journal = json.loads(mac_takeover._journal_path(takeover_id).read_text())
-    journal.pop("protected")
-    mac_takeover._journal_path(takeover_id).write_text(json.dumps(journal))
-    mac_takeover._journal_path(takeover_id).chmod(0o600)
+    for value in ([], None):
+        journal = json.loads(mac_takeover._journal_path(takeover_id).read_text())
+        journal.pop("protected", None)
+        if value is not None:
+            journal["protected"] = value
+        mac_takeover._journal_path(takeover_id).write_text(json.dumps(journal))
+        mac_takeover._journal_path(takeover_id).chmod(0o600)
 
-    assert mac_takeover.finish(takeover_id=takeover_id)["trash"] == []
+        result = mac_takeover.finish(takeover_id=takeover_id)
+
+        assert (result["ok"], result["reason"]) == (False, "protected_missing")
+        assert "trash" not in result
+        loaded = mac_takeover._load_journal(takeover_id)
+        assert loaded is not None and loaded["state"] == "pointer_written"
 
 
 def test_run_cli_does_not_swallow_the_real_runner_guard(
@@ -1447,3 +1490,425 @@ def test_run_cli_does_not_swallow_the_real_runner_guard(
         cli.main(
             ["mac-takeover", "plan", "--json", "--launch-agents-dir", str(machine.agents), "--label", LABEL]
         )
+
+
+# --- second security review ---------------------------------------------------------
+
+
+def test_the_journal_never_reads_the_live_dotenv(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    takeover_id = apply_to_pointer_written(machine, monkeypatch)
+    # A later PWA_PORT edit, then an oversized and unreadable .env: the plist is
+    # gone, yet the journal stays readable and finish and rollback still work.
+    env = machine.workspace / ".env"
+    for content in ("PWA_PORT=9191\n", "X=" + "a" * (2 * 1024 * 1024), None):
+        if content is None:
+            env.unlink()
+            env.symlink_to(machine.workspace / "nowhere")
+        else:
+            env.write_text(content)
+        assert mac_takeover._load_journal(takeover_id) is not None
+    env.unlink()
+    healthy_engine(monkeypatch, machine)
+    assert mac_takeover.finish(takeover_id=takeover_id)["ok"] is True
+
+
+def release_held_locks_now() -> None:
+    while HELD_LOCKS:
+        HELD_LOCKS.pop().close()
+
+
+def test_rollback_works_after_the_dotenv_changed_and_grew_unreadable(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    takeover_id = apply_to_pointer_written(machine, monkeypatch)
+    (machine.workspace / ".env").write_text("PWA_PORT=9191\n" + "#" * (2 * 1024 * 1024))
+    launchd = Launchd()
+    old_engine_answers(monkeypatch, machine, launchd)
+    result = mac_takeover.rollback(
+        takeover_id=takeover_id, runner=launchd, clock=ticking(), sleep=no_sleep
+    )
+    assert result["ok"] is True, result
+
+
+def test_a_stopping_resume_with_the_old_engine_back_refuses_and_changes_nothing(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answer_engine(monkeypatch, machine)  # the old engine answers on the port
+    seed_takeover(machine, "stopping")
+    launchd = Launchd()
+
+    result = run_apply(machine, launchd)
+
+    assert (result["ok"], result["reason"], result["state"]) == (
+        False,
+        "old_engine_back",
+        "stopping",
+    )
+    assert result["id"] == TAKEOVER_ID
+    assert _plist_path(machine).exists()
+    assert launchd.destructive() == []
+    journal = mac_takeover._load_journal(TAKEOVER_ID)
+    assert journal is not None and journal["state"] == "stopping"
+    assert app_engine.read_pointer() is None
+
+
+def test_a_stopping_resume_with_the_job_loaded_again_refuses(machine: Machine) -> None:
+    seed_takeover(machine, "stopping")
+    launchd = Launchd()
+    launchd.statuses["print"] = 0
+
+    result = run_apply(machine, launchd)
+
+    assert (result["ok"], result["reason"]) == (False, "old_engine_back")
+    assert _plist_path(machine).exists()
+    assert launchd.destructive() == []
+
+
+@pytest.mark.parametrize("state", ["plist_removed", "pointer_written"])
+def test_a_resume_after_an_interrupted_rollback_refuses(machine: Machine, state: str) -> None:
+    # Rollback restored the plist and the job, then died before rolled_back.
+    seed_takeover(machine, state, with_plist=True, with_pointer=state == "pointer_written")
+    launchd = Launchd()
+
+    result = run_apply(machine, launchd)
+
+    assert (result["ok"], result["reason"], result["state"]) == (False, "old_engine_back", state)
+    assert _plist_path(machine).exists()
+    assert launchd.destructive() == []
+    journal = mac_takeover._load_journal(TAKEOVER_ID)
+    assert journal is not None and journal["state"] == state
+    # The takeover is not wedged: a rollback is still possible.
+    assert (
+        mac_takeover.rollback(
+            takeover_id=TAKEOVER_ID, runner=launchd, clock=ticking(), sleep=no_sleep
+        )["reason"]
+        == "old_engine_did_not_start"
+    )
+
+
+@pytest.mark.parametrize("state", ["plist_removed", "pointer_written"])
+def test_a_resume_with_the_old_job_loaded_but_no_plist_refuses(
+    machine: Machine, state: str
+) -> None:
+    machine.write_plist()
+    sha = _plist_sha(machine)
+    seed_takeover(machine, state, with_plist=False, with_pointer=state == "pointer_written")
+    launchd = Launchd()
+    launchd.statuses["print"] = 0
+
+    result = run_apply(machine, launchd, sha=sha)
+
+    assert (result["ok"], result["reason"]) == (False, "old_engine_back")
+    assert (app_engine.read_pointer() is None) == (state == "plist_removed")
+
+
+def test_apply_on_a_healthy_journal_succeeds_with_its_state(machine: Machine) -> None:
+    machine.write_plist()
+    sha = _plist_sha(machine)
+    seed_takeover(machine, "healthy", with_plist=False, with_pointer=True)
+
+    result = run_apply(machine, Launchd(), sha=sha)
+
+    assert result == {"ok": True, "id": TAKEOVER_ID, "state": "healthy"}
+
+
+def test_rollback_tells_the_old_engine_lock_from_the_bundled_one(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    takeover_id = apply_to_pointer_written(machine, monkeypatch)
+    launchd = Launchd()
+    old_engine_answers(monkeypatch, machine, launchd)
+    launchd.statuses["print"] = 0  # the old job is loaded again and holds the lock
+    HELD_LOCKS.append(hold_server_lock(machine))
+
+    # The ready record names the bundled engine's pid: that is the engine to stop.
+    app_engine.write_ready_record(
+        pid=5, port=8443, startup_id="old", workspace=machine.workspace, bootstrap=False
+    )
+    bundled = mac_takeover.rollback(
+        takeover_id=takeover_id, runner=launchd, clock=ticking(), sleep=no_sleep
+    )
+    assert (bundled["ok"], bundled["reason"]) == (False, "bundled_engine_running")
+
+    # With the ready record naming another pid, pid 5 is the old engine's own.
+    app_engine.write_ready_record(
+        pid=99, port=8443, startup_id="new", workspace=machine.workspace, bootstrap=False
+    )
+    old = mac_takeover.rollback(
+        takeover_id=takeover_id, runner=launchd, clock=ticking(), sleep=no_sleep
+    )
+    assert old["ok"] is True, old
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["another_engine_answers", "owner_pid_differs", "job_without_pid", "other_startup"],
+)
+def test_rollback_needs_the_restored_job_to_be_the_listener_and_lock_owner(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch, variant: str
+) -> None:
+    takeover_id = apply_to_pointer_written(machine, monkeypatch)
+    launchd = Launchd()
+    old_engine_answers(
+        monkeypatch,
+        machine,
+        launchd,
+        pid=5,
+        job_pid=6 if variant == "another_engine_answers" else 5,
+        owner_pid=8 if variant == "owner_pid_differs" else None,
+    )
+    if variant == "job_without_pid":
+        launchd.print_stdout = ""
+    if variant == "other_startup":
+        monkeypatch.setattr(
+            mac_takeover,
+            "engine_identity",
+            lambda port: {"startup_id": "someone-else", "pid": 5, "version": "1.10.0"},
+        )
+
+    result = mac_takeover.rollback(
+        takeover_id=takeover_id, runner=launchd, clock=ticking(100.0), sleep=no_sleep
+    )
+
+    assert (result["ok"], result["reason"], result["state"]) == (
+        False,
+        "old_engine_did_not_start",
+        "pointer_written",
+    )
+    assert app_engine.read_pointer() is not None
+
+
+def test_rollback_refuses_when_the_pointer_cannot_be_cleared(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    takeover_id = apply_to_pointer_written(machine, monkeypatch)
+    pointer = mac_takeover.state_dir() / app_engine.WORKSPACE_POINTER_NAME
+    pointer.chmod(0o644)  # no longer a private record: clear_pointer cannot read it
+    launchd = Launchd()
+    old_engine_answers(monkeypatch, machine, launchd)
+
+    result = mac_takeover.rollback(
+        takeover_id=takeover_id, runner=launchd, clock=ticking(), sleep=no_sleep
+    )
+
+    assert (result["ok"], result["reason"], result["state"]) == (
+        False,
+        "pointer_not_cleared",
+        "pointer_written",
+    )
+    assert pointer.exists()
+    journal = mac_takeover._load_journal(takeover_id)
+    assert journal is not None and journal["state"] == "pointer_written"
+
+    # An already-cleared pointer (a crash between the clear and the journal) is fine.
+    pointer.unlink()
+    again = mac_takeover.rollback(
+        takeover_id=takeover_id, runner=launchd, clock=ticking(), sleep=no_sleep
+    )
+    assert again["ok"] is True, again
+
+
+def test_rollback_refuses_after_the_trash_list_was_handed_out(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    takeover_id = apply_to_pointer_written(machine, monkeypatch)
+    healthy_engine(monkeypatch, machine)
+    offered = mac_takeover.finish(takeover_id=takeover_id)
+    assert offered["ok"] is True and offered["trash"]
+    journal = mac_takeover._load_journal(takeover_id)
+    assert journal is not None and journal["trash_offered"] is True
+    release_held_locks_now()
+    launchd = Launchd()
+    old_engine_answers(monkeypatch, machine, launchd)
+
+    result = mac_takeover.rollback(
+        takeover_id=takeover_id, runner=launchd, clock=ticking(), sleep=no_sleep
+    )
+
+    assert (result["ok"], result["reason"], result["state"]) == (False, "trash_offered", "healthy")
+    assert launchd.destructive() == []
+    assert not _plist_path(machine).exists()
+    assert app_engine.read_pointer() is not None
+
+
+def test_the_trash_mark_is_journalled_before_the_list_leaves(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    takeover_id = apply_to_pointer_written(machine, monkeypatch)
+    healthy_engine(monkeypatch, machine)
+    marks: list[Any] = []
+    real = mac_takeover._finish_trash
+
+    def spy(journal: dict[str, Any]) -> list[dict[str, str]]:
+        found = real(journal)
+        current = json.loads(mac_takeover._journal_path(takeover_id).read_text())
+        marks.append(current.get("trash_offered"))  # not yet written when the list is built
+        return found
+
+    monkeypatch.setattr(mac_takeover, "_finish_trash", spy)
+    mac_takeover.finish(takeover_id=takeover_id)
+    final = json.loads(mac_takeover._journal_path(takeover_id).read_text())
+    assert marks == [None] and final["trash_offered"] is True
+
+
+def test_a_finish_with_nothing_to_trash_leaves_rollback_open(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    takeover_id = apply_to_pointer_written(machine, monkeypatch)
+    healthy_engine(monkeypatch, machine)
+    monkeypatch.setattr(mac_takeover, "_finish_trash", lambda journal: [])
+    assert mac_takeover.finish(takeover_id=takeover_id)["trash"] == []
+    journal = mac_takeover._load_journal(takeover_id)
+    assert journal is not None and "trash_offered" not in journal
+
+
+def test_an_oserror_writing_the_pointer_is_answered_with_id_and_state(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stopped = answer_engine(monkeypatch, machine)
+    launchd = Launchd()
+    launchd.on_verb["bootout"] = lambda: stopped.__setitem__("stopped", True)
+
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(app_engine, "write_pointer", boom)
+
+    result = run_apply(machine, launchd)
+
+    assert (result["ok"], result["reason"], result["state"]) == (
+        False,
+        "takeover_error",
+        "plist_removed",
+    )
+    assert result["id"] and "No space" in result["message"]
+    assert not _plist_path(machine).exists()
+
+
+def test_an_oserror_advancing_the_journal_is_answered_with_id_and_state(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stopped = answer_engine(monkeypatch, machine)
+    launchd = Launchd()
+    launchd.on_verb["bootout"] = lambda: stopped.__setitem__("stopped", True)
+    real = mac_takeover._advance
+
+    def advance(entry: Path, expected: str, to: str, **extra: Any) -> None:
+        if to == "plist_removed":
+            raise OSError(5, "I/O error")
+        real(entry, expected, to, **extra)
+
+    monkeypatch.setattr(mac_takeover, "_advance", advance)
+
+    result = run_apply(machine, launchd)
+
+    assert (result["reason"], result["state"]) == ("takeover_error", "stopping")
+    assert result["id"]
+
+
+def test_the_cli_names_the_takeover_when_finish_or_rollback_errors(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    takeover_id = apply_to_pointer_written(machine, monkeypatch)
+
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(mac_takeover, "_health_problem", boom)
+    code = cli.main(["mac-takeover", "finish", "--json", "--id", takeover_id])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert (payload["id"], payload["state"]) == (takeover_id, "pointer_written")
+
+
+def test_a_journal_too_large_to_read_back_is_refused_before_any_stop(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answer_engine(monkeypatch, machine)
+    monkeypatch.setattr(app_engine, "_MAX_RECORD_BYTES", 4096 + 1024)
+    launchd = Launchd()
+
+    result = run_apply(machine, launchd)
+
+    assert (result["ok"], result["reason"]) == (False, "journal_too_large")
+    assert launchd.destructive() == []
+    assert _plist_path(machine).exists()
+    root = mac_takeover.state_dir() / "takeover"
+    assert all(entry.name.startswith(".") for entry in root.iterdir())
+
+
+def test_the_journal_writer_itself_refuses_past_the_readers_limit(machine: Machine) -> None:
+    entry = mac_takeover.state_dir() / "takeover" / TAKEOVER_ID
+    entry.mkdir(parents=True)
+    huge = {"state": "started", "blob": "x" * app_engine._MAX_RECORD_BYTES}
+    with pytest.raises(mac_takeover._JournalTooLarge):
+        mac_takeover._write_journal(entry, huge)
+    assert list(entry.iterdir()) == []
+
+
+def test_a_healthy_engine_of_another_version_is_not_healthy(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    takeover_id = apply_to_pointer_written(machine, monkeypatch)
+    healthy_engine(monkeypatch, machine)
+    monkeypatch.setattr(
+        mac_takeover,
+        "engine_identity",
+        lambda port: {"startup_id": "abc", "pid": 77, "version": "0.0.1"},
+    )
+
+    result = mac_takeover.finish(takeover_id=takeover_id)
+
+    assert (result["ok"], result["reason"], result["check"]) == (False, "not_healthy", "version")
+
+
+@pytest.mark.parametrize("change", ["other_pid", "gone", "other_owner"])
+def test_health_must_be_stable_across_two_reads(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    takeover_id = apply_to_pointer_written(machine, monkeypatch)
+    healthy_engine(monkeypatch, machine)
+    base = {"startup_id": "abc", "pid": 77, "version": ciao.__version__}
+    owner = {
+        "pid": 77,
+        "workspace": str(machine.workspace),
+        "runtime": str(machine.workspace / ".runtime"),
+        "port": 8443,
+        "status": "running",
+        "startup_id": "abc",
+    }
+    pauses: list[float] = []
+
+    def pause(seconds: float) -> None:
+        pauses.append(seconds)
+        if change == "gone":
+            monkeypatch.setattr(mac_takeover, "engine_identity", lambda port: None)
+        elif change == "other_owner":
+            monkeypatch.setattr(
+                mac_takeover, "read_lock_owner", lambda runtime: {**owner, "startup_id": "zzz"}
+            )
+        else:
+            monkeypatch.setattr(mac_takeover, "_pid_alive", lambda pid: True)
+            monkeypatch.setattr(
+                mac_takeover, "engine_identity", lambda port: {**base, "startup_id": "abc2"}
+            )
+
+    result = mac_takeover.finish(takeover_id=takeover_id, sleep=pause)
+
+    assert len(pauses) == 1
+    assert (result["ok"], result["reason"]) == (False, "not_healthy")
+    assert result["check"] in ("unstable", "listener")
+    journal = mac_takeover._load_journal(takeover_id)
+    assert journal is not None and journal["state"] == "pointer_written"
+
+
+def test_a_helper_that_builds_its_own_runner_hits_the_guard(machine: Machine) -> None:
+    from tests.conftest import RealRunnerReached
+
+    with pytest.raises(RealRunnerReached):
+        mac_takeover._default_runner()(["/bin/launchctl", "print", "x"])
+    # The public entry points and helpers fall back to the same factory.
+    with pytest.raises(RealRunnerReached):
+        mac_takeover._job_state(LABEL, mac_takeover._default_runner())
