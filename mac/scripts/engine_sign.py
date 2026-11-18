@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
-"""Sign (ad-hoc) and check the Mach-O files of the bundled engine inside a Ciaobot app (#3128 F).
+"""Sign and check the Mach-O files of the bundled engine inside a Ciaobot app (#3128 F, G).
 
     python3 -I -S scripts/engine_sign.py sign --adhoc ENGINE
+    python3 -I -S scripts/engine_sign.py sign --distribution TEAM IDENTITY ENGINE
     python3 -I -S scripts/engine_sign.py check ENGINE
+    python3 -I -S scripts/engine_sign.py check --distribution TEAM ENGINE
+    python3 -I -S scripts/engine_sign.py inventory ENGINE
 
 ENGINE is ``<app>/Contents/Resources/engine``. ``sign`` signs every engine Mach-O (found by magic,
 never by extension) except the SDK's own CLI, deepest path first, one file at a time: never
 ``--deep``, no hardened runtime and no entitlements (an ad-hoc hardened binary cannot load an
-ad-hoc dylib, and ad-hoc code has no Team ID). The SDK CLI keeps Anthropic's Developer ID
+ad-hoc dylib, and ad-hoc code has no Team ID). ``--distribution`` signs with a Developer ID
+Application IDENTITY of team TEAM, hardened runtime and a secure timestamp, still with no
+entitlements and never ``--deep``; ``check --distribution`` is the gate that makes an engine-bearing
+app eligible for notarization, an image or an appcast. The SDK CLI keeps Anthropic's Developer ID
 signature, which is verified (pinned to Apple's CA and Anthropic's team with a codesign
 requirement) and never replaced. ``check`` writes nothing. An outer ad-hoc seal
 passes ``codesign --verify --deep --strict`` even over unsigned engine files, so only this check
-proves the engine itself is signed.
+proves the engine itself is signed. ``inventory`` writes nothing and prints the engine's full
+path/size/sha256 inventory as one JSON array on stdout, so a caller can compare two reads.
 
-Stdlib only. Exit 0 silent on success, 1 with ``engine sign failed`` on a refusal, 2 on usage.
+Stdlib only. Exit 0 silent on success (``inventory`` prints the JSON), 1 with ``engine sign failed``
+on a refusal, 2 on usage.
 """
 
 from __future__ import annotations
@@ -180,12 +188,32 @@ def _inventory(engine: Path) -> list[dict[str, Any]]:
         raise SignError() from exc
 
 
-def check(engine: Path) -> None:
+def _check_distribution_file(path: str, team: str) -> None:
+    """A distribution-signed file: this team's Developer ID, hardened runtime and a secure timestamp."""
+    code, _out = _run([CODESIGN, "--verify", "--strict", f"-R={_vendor_requirement(team)}", path])
+    _require(code == 0)
+    code, out = _run([CODESIGN, "-d", "--verbose=4", path])
+    _require(code == 0)
+    lines = out.splitlines()
+    _require("Signature=adhoc" not in lines)
+    authorities = [line for line in lines if line.startswith("Authority=")]
+    _require(bool(authorities) and authorities[0].startswith("Authority=Developer ID Application:"))
+    _require(f"TeamIdentifier={team}" in lines)
+    flags = [line for line in lines if line.startswith("CodeDirectory ") and "flags=" in line]
+    _require(any("runtime" in line.split("flags=", 1)[1].split(" ", 1)[0] for line in flags))
+    _require(any(line.startswith("Timestamp=") for line in lines))
+
+
+def check(engine: Path, team: str | None = None) -> None:
+    """Every non-vendor Mach-O is signed (ad-hoc, or with ``team``'s distribution identity); the vendor rule holds."""
     check_layout(engine)
     for rel in macho_files(engine):
         if rel in VENDOR_SIGNED:
             continue
         path = os.fspath(engine / rel)
+        if team is not None:
+            _check_distribution_file(path, team)
+            continue
         code, _out = _run([CODESIGN, "--verify", "--strict", path])
         _require(code == 0)
         code, out = _run([CODESIGN, "-d", "--verbose=4", path])
@@ -193,13 +221,25 @@ def check(engine: Path) -> None:
     _check_vendor_paths(engine)
 
 
-def sign_adhoc(engine: Path) -> list[str]:
+def _team_of(team: str, identity: str) -> None:
+    """The identity must be a Developer ID Application identity of exactly this team."""
+    _require(re.fullmatch(r"[A-Z0-9]{10}", team) is not None)
+    _require(identity.startswith("Developer ID Application: ") and identity.endswith(f" ({team})"))
+
+
+def sign_engine(engine: Path, distribution: tuple[str, str] | None = None) -> list[str]:
+    """Sign every non-vendor Mach-O: ad-hoc, or ``distribution = (team, identity)`` with runtime and timestamp."""
+    if distribution is not None:
+        _team_of(*distribution)
+        sign_args = ["--force", "--sign", distribution[1], "--options", "runtime", "--timestamp"]
+    else:
+        sign_args = ["--force", "--sign", "-", "--timestamp=none"]
     check_layout(engine)
     before = _inventory(engine)
     targets = signing_order([p for p in macho_files(engine) if p not in VENDOR_SIGNED])
     _check_vendor_paths(engine)
     for rel in targets:
-        code, _out = _run([CODESIGN, "--force", "--sign", "-", "--timestamp=none", os.fspath(engine / rel)])
+        code, _out = _run([CODESIGN, *sign_args, os.fspath(engine / rel)])
         _require(code == 0)
     for rel in targets:
         code, _out = _run([CODESIGN, "--verify", "--strict", "--verbose=2", os.fspath(engine / rel)])
@@ -213,26 +253,51 @@ def sign_adhoc(engine: Path) -> list[str]:
     _require(all("sha256" in new[path] for path in targets))
     changed = {path for path in old if old[path] != new[path]}
     _require(changed <= set(targets))
-    check(engine)
+    check(engine, distribution[0] if distribution is not None else None)
     return targets
+
+
+def sign_adhoc(engine: Path) -> list[str]:
+    return sign_engine(engine)
+
+
+def inventory(engine: Path) -> list[dict[str, Any]]:
+    """The engine's full path/size/sha256 inventory, read-only (symlinks record their target)."""
+    return _inventory(engine)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    distribution: tuple[str, str] | None = None
+    check_team: str | None = None
+    inventory_only = False
     if len(args) == 3 and args[0] == "sign" and args[1] == "--adhoc":
         mode, engine_arg = "sign", args[2]
+    elif len(args) == 5 and args[0] == "sign" and args[1] == "--distribution":
+        mode, engine_arg = "sign", args[4]
+        distribution = (args[2], args[3])
     elif len(args) == 2 and args[0] == "check":
         mode, engine_arg = "check", args[1]
+    elif len(args) == 4 and args[0] == "check" and args[1] == "--distribution":
+        mode, engine_arg = "check", args[3]
+        check_team = args[2]
+    elif len(args) == 2 and args[0] == "inventory":
+        mode, engine_arg = "inventory", args[1]
+        inventory_only = True
     else:
         print(f"{FAILED}: usage", file=sys.stderr)
         return 2
     try:
         _platform_check()
         engine = check_path(engine_arg)
+        if check_team is not None:
+            _require(re.fullmatch(r"[A-Z0-9]{10}", check_team) is not None)
         if mode == "sign":
-            sign_adhoc(engine)
+            sign_engine(engine, distribution)
+        elif inventory_only:
+            print(json.dumps(inventory(engine)))
         else:
-            check(engine)
+            check(engine, check_team)
     except SignError:
         print(FAILED, file=sys.stderr)
         return 1
