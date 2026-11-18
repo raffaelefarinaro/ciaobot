@@ -39,17 +39,21 @@ async function mountCard(
     throw new Error('Unrelated settings data unavailable in this test')
   })
   const post = vi.spyOn(api, 'post').mockResolvedValue({ ok: true } as never)
-  vi.spyOn(useProjectStore(), 'beginServerRestart').mockImplementation(() => {})
+  const beginRestart = vi.spyOn(useProjectStore(), 'beginServerRestart').mockImplementation(() => {})
   const wrapper = mount(SettingsView, {
     global: { plugins: [router], stubs: { Teleport: true } },
     attachTo: attach ? document.body : undefined,
   })
   await flushPromises()
-  return { wrapper, getSpy, post }
+  return { wrapper, getSpy, post, beginRestart }
 }
 
 function buttonLabels(wrapper: Awaited<ReturnType<typeof mountCard>>['wrapper']) {
   return wrapper.findAll('button').map(b => b.text())
+}
+
+function button(wrapper: Awaited<ReturnType<typeof mountCard>>['wrapper'], label: string) {
+  return wrapper.findAll('button').find(b => b.text() === label)
 }
 
 /** The paths the card requested, for assertions against a route it dropped. */
@@ -77,7 +81,7 @@ it('says the app updates the engine together with Ciaobot for Mac, and offers no
 })
 
 it('says an installer engine no longer updates itself, and never asks the coordinator', async () => {
-  const { wrapper, getSpy } = await mountCard(
+  const { wrapper, getSpy, post } = await mountCard(
     { mode: 'installer', current_version: '1.10.0', update_available: true, latest_version: '1.11.0' },
   )
   try {
@@ -92,6 +96,9 @@ it('says an installer engine no longer updates itself, and never asks the coordi
     // The engine updater is gone from the card: it asks nothing about a run,
     // staged or otherwise, and nothing here can start one behind the copy.
     expect(requestedPaths(getSpy)).not.toContain('/api/update/status')
+    // And nothing the card does in installer mode writes: no update POST can
+    // ride along with a card that offers no update.
+    expect(post).not.toHaveBeenCalled()
   } finally {
     wrapper.unmount()
   }
@@ -109,6 +116,34 @@ it('keeps the pip guidance and the Update button on an editable install', async 
     expect(labels).toContain('Update to 0.20.0')
     expect(labels).not.toContain('Update & restart')
     expect(post).not.toHaveBeenCalled()
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('shows the update progress overlay while the run is going, then hands over to the restart notice', async () => {
+  const { wrapper, post, beginRestart } = await mountCard(
+    { mode: 'editable', current_version: '0.19.0', update_available: true, latest_version: '0.20.0' },
+  )
+  try {
+    await button(wrapper, 'Update to 0.20.0')!.trigger('click')
+    await flushPromises()
+    // Hold the run open so the in-flight state is observable: a package
+    // update reports itself through the full-window overlay, not only
+    // through the disabled buttons on the card behind it.
+    let resolveUpdate!: (value: { ok: boolean }) => void
+    post.mockImplementation(() => new Promise((resolve) => { resolveUpdate = resolve }))
+    await button(wrapper, 'Update & Restart')!.trigger('click')
+    expect(post).toHaveBeenCalledWith('/api/package/update')
+    expect(beginRestart).not.toHaveBeenCalled()
+    const overlay = wrapper.get('.update-progress-overlay')
+    expect(overlay.text()).toContain('update · v0.20.0')
+    // Success ends the run: the overlay gives way and the app-level restart
+    // notice takes over, which waits for the restarted engine and reloads.
+    resolveUpdate({ ok: true })
+    await flushPromises()
+    expect(beginRestart).toHaveBeenCalledWith('Update complete. Restarting Ciaobot with the latest version…')
+    expect(wrapper.find('.update-progress-overlay').exists()).toBe(false)
   } finally {
     wrapper.unmount()
   }

@@ -309,7 +309,8 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/LoginView.vue",
       "web/src/components/RestartNotice.vue",
-      "web/src/components/StartupView.vue"
+      "web/src/components/StartupView.vue",
+      "web/src/components/UpdateProgressView.vue"
     ],
     "variants": [],
     "variantNotes": "Detailed text and size variants remain unassessed; no variants have been enumerated.",
@@ -4421,6 +4422,44 @@ export const inventory: InventoryEntry[] = [
     }
   },
   {
+    "id": "components-update-progress-view",
+    "name": "UpdateProgressView",
+    "family": "Root, navigation and common presentation",
+    "kind": "component",
+    "owner": {
+      "path": "web/src/components/UpdateProgressView.vue",
+      "anchor": "<template>"
+    },
+    "sources": [],
+    "consumers": [
+      "web/src/components/SettingsView.vue"
+    ],
+    "variants": [],
+    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "states": [
+      {
+        "name": "default",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "<template> in UpdateProgressView.vue implements this render; no rendered-state story exists."
+      },
+      {
+        "name": "other states",
+        "coverage": "unknown",
+        "storyIds": [],
+        "note": "Further state branches and their coverage have not yet been audited."
+      }
+    ],
+    "loading": {
+      "status": "unknown",
+      "detail": "Initial and refresh loading fidelity in UpdateProgressView.vue has not yet been audited."
+    },
+    "migration": {
+      "status": "unassessed",
+      "note": "Inventory admission does not approve a design migration."
+    }
+  },
+  {
     "id": "components-usage-breakdown",
     "name": "UsageBreakdown",
     "family": "Memory and usage",
@@ -8303,7 +8342,8 @@ export const inventory: InventoryEntry[] = [
     "sources": [
       "web/src/components/LoginView.vue",
       "web/src/components/RestartNotice.vue",
-      "web/src/components/StartupView.vue"
+      "web/src/components/StartupView.vue",
+      "web/src/components/UpdateProgressView.vue"
     ],
     "consumers": [],
     "variants": [

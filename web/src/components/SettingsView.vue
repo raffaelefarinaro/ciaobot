@@ -1,5 +1,9 @@
 <template>
   <div class="settings-pane">
+    <!-- The package update's progress view. While `/api/package/update` runs
+         it is the whole window; a failed run returns to the card, and a
+         settled one hands over to the app-level restart notice. -->
+    <UpdateProgressView v-if="packageUpdating" :version="packageStatus?.latest_version" />
     <PaneHeader :page-tag="pageTag" @open-sidebar="emit('open-sidebar')" />
     <div ref="bodyEl" class="pane-body" @scroll.passive="onBodyScroll">
       <div class="page-grid settings-grid">
@@ -1186,6 +1190,7 @@
 <script setup lang="ts">
 import CiaoMark from './CiaoMark.vue'
 import SkeletonLoader from './SkeletonLoader.vue'
+import UpdateProgressView from './UpdateProgressView.vue'
 import SettingsAllWorkspaces from './settings/SettingsAllWorkspaces.vue'
 import { formatConnectorLabel } from '../lib/mcpLabels'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch, provide } from 'vue'
