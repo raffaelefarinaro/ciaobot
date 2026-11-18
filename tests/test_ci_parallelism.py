@@ -63,7 +63,7 @@ def test_mac_app_waits_only_for_fast_mac_scope_detection() -> None:
         "run: swift test\n",
         "run: swift build\n",
         "run: scripts/build-app.sh",
-        "run: swift test --filter AppAssetsTests",
+        "run: swift test --filter AppAssetsTests --filter BundledEngineTests",
         "run: plutil -lint .build/Ciaobot.app/Contents/Info.plist",
     ]
     found = [app.index(step) for step in steps]
