@@ -30,43 +30,56 @@ Safety rules, because this renames the user's folder:
   repaired from a ``finally``, so a failed record write can never strand the
   data or prevent the rename back;
 * never rename while an engine is alive: a held ``server.lock`` skips, and a
-  ``verifying`` record younger than ``VERIFY_GRACE_S`` is left alone (an engine
-  may still be starting, or may have restarted on the new folder). S3b-2's
-  ``verify_after_boot`` writes ``done`` once the booted engine is ready; until
-  it lands, a ``verifying`` record older than the grace is rolled back by the
-  next boot.
+  ``verifying`` record younger than ``VERIFY_GRACE_S`` is left alone (an
+  engine may still be starting, or has restarted on the new folder ahead of
+  ``verify_after_boot``, which writes ``done`` once the booted engine is
+  ready — never before — and requests the rollback restart on a timeout).
 
 The channel across boots is the operation record and the pointer. The record
 also carries ``app``: a 1.x record written by a launchd move job is never
 acted on here, and the LaunchAgent plist is never read or written in app mode.
 
-S3b-1 ALONE IS INERT IN PRODUCTION. :func:`before_boot` acts only on a record
-with ``app=true`` and nothing in this slice writes one: with no record (every
-install today) it takes the lock, finds nothing and returns ``"none"``. The
-request side — the Settings move route that records ``stopping`` with
-``app=true`` and restarts the engine — is S3b-2, and S3b-2 MUST ALSO WRITE
-``done`` once the booted engine is ready (``verify_after_boot``). Without that
-write every ``verifying`` record older than ``VERIFY_GRACE_S`` is rolled back by
-the next ordinary restart, undoing a move that worked. Do not enable the route
-without it (docs/DEVELOPMENT.md lists this requirement too).
+The request side lives here too: :func:`record` is the only writer of an
+app-mode record (the Settings move route; a source-scan test in
+``tests/test_workspace_move_app.py`` allows exactly this one module), taking
+the move lock it hands to :func:`drain_then_restart`, which drains chats and
+scheduled work, writes ``stopping`` and requests the engine's own restart —
+the lock's descriptor dies with the ``execv`` and the fresh process's
+``before_boot`` takes it for the move. :func:`verify_after_boot`, started by
+the booted engine, writes ``done`` once the engine is ready and never before:
+without it every ``verifying`` record older than ``VERIFY_GRACE_S`` would be
+rolled back by the next ordinary restart, undoing a move that worked, but a
+restart that finds ``done`` is just an ordinary restart. When the ``done``
+write keeps failing, the same verified writer records a ready marker
+(``move-ready.json``, the operation id) that ``before_boot`` reads as ``done``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import os
 import signal
 import sys
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator, NamedTuple
+from typing import IO, Any, Awaitable, Callable, Iterator, NamedTuple
 
 from ciao import app_engine, workspace_move
+from ciao.config import RESTART_EXIT_CODE
 from ciao.os_support.locks import unlock
 
-__all__ = ["before_boot", "STALE_STOPPING_S", "VERIFY_GRACE_S"]
+__all__ = [
+    "STALE_STOPPING_S",
+    "VERIFY_GRACE_S",
+    "before_boot",
+    "drain_then_restart",
+    "record",
+    "verify_after_boot",
+]
 
 # A `stopping` record older than this was written by a boot that died before
 # it could move anything (drain, or the exec itself): waiting longer cannot
@@ -81,6 +94,17 @@ VERIFY_GRACE_S = workspace_move._READY_TIMEOUT + 60.0
 
 # A record stamped further ahead than this is not trusted: it reads as ancient.
 _FUTURE_SKEW_S = 60.0
+
+# How often the booted engine's verify polls readiness.
+_VERIFY_POLL_S = 1.0
+
+# How long the booted engine keeps retrying to record that the moved folder
+# became ready (the `done` write, then the ready marker) before it logs that it
+# could not, and the marker the retries fall back on: written by the same
+# verified private writer as the record, it names the operation that reached
+# ready, and a later `before_boot` reads `verifying` + this marker as `done`.
+_DONE_RETRY_S = 60.0
+READY_MARKER_NAME = "move-ready.json"
 
 # How long a boot waits for another boot's move.lock before leaving it alone.
 _LOCK_WAIT_S = 20.0
@@ -279,6 +303,11 @@ def _before_boot(
                 _heal_from_unreadable_record(root)
             return "none"
         if not op.app or op.phase in workspace_move.TERMINAL_PHASES:
+            return "none"
+        if op.phase == "verifying" and _ready_marked(root, op.id):
+            # The booted engine reached ready but could not write `done`: the
+            # move worked and is in use, never roll it back.
+            _advance_quiet(op, root, "done")
             return "none"
         recover = op.phase in _RECOVER_PHASES
         mode = "forward" if op.phase == "stopping" else "recover" if recover else "light"
@@ -516,6 +545,30 @@ def _advance_quiet(
     except Exception as exc:  # noqa: BLE001 — a failed write must not stop recovery
         print(
             f"workspace move: could not record phase {phase}: "
+            f"{str(exc) or exc.__class__.__name__}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def _ready_marked(root: Path, op_id: str) -> bool:
+    """True when the ready marker names ``op_id`` (read as strictly as the record)."""
+    try:
+        parsed = app_engine.read_private_json(
+            root / READY_MARKER_NAME, label="the workspace move ready marker"
+        )
+    except Exception:  # noqa: BLE001 — an unreadable marker is no marker
+        return False
+    return parsed is not None and parsed.get("id") == op_id
+
+
+def _mark_ready(root: Path, op_id: str) -> bool:
+    try:
+        app_engine.write_private_json(root / READY_MARKER_NAME, {"id": op_id})
+    except Exception as exc:  # noqa: BLE001 — advisory, like the record
+        print(
+            f"workspace move: could not write the ready marker: "
             f"{str(exc) or exc.__class__.__name__}",
             file=sys.stderr,
         )
@@ -762,3 +815,301 @@ def _signals_ignored() -> Iterator[None]:
                 signal.signal(sig, handler)
             except (ValueError, OSError):
                 pass
+
+
+# ── the request side: record the move, drain, restart, verify ────────
+
+
+#: Lock handles the drain deliberately keeps open across the restart: the
+#: ``execv`` that ends the engine is what closes the descriptor (Python fds
+#: are close-on-exec), and :func:`before_boot` in the fresh process takes the
+#: lock itself. Without a live reference, the drain coroutine ending would let
+#: the file object be collected and the lock released while the engine is
+#: still winding down to re-exec.
+_HELD_LOCKS: list[IO[str]] = []
+
+
+def _release(handle: IO[str]) -> None:
+    if handle in _HELD_LOCKS:
+        _HELD_LOCKS.remove(handle)
+    """Unlock and close ``handle``; the record of the failure is already written."""
+    try:
+        unlock(handle.fileno())
+        handle.close()
+    except OSError:
+        pass
+
+
+def record(
+    move_plan: workspace_move.MovePlan, *, port: int, state_dir: Path | None = None
+) -> tuple[workspace_move.MoveOperation, IO[str]]:
+    """Record the app-mode move and hold its lock until the exec closes it.
+
+    Called off the event loop by the move route: taking the lock and writing
+    the record block. Raises :class:`workspace_move.MoveError` when the plan
+    is not ``ok`` — nothing is written, nothing taken — or when another move
+    already holds the lock. On success the record is ``queued`` with
+    ``app`` set (the strict private writer, like the pointer), and the lock
+    stays open: the caller hands it to :func:`drain_then_restart`.
+    """
+    if not move_plan.ok:
+        raise workspace_move.MoveError(" ".join(move_plan.refusals))
+    root = state_dir or workspace_move.default_state_dir()
+    from ciao.os_support.private import make_private_dir
+
+    root.mkdir(parents=True, exist_ok=True)
+    make_private_dir(root)
+    handle = workspace_move._lock(root)
+    try:
+        pointer = app_engine.read_pointer()
+        # The pointer's runtime root before the move: the rollback and the
+        # forward rewrite both need it spelled for the old folder.
+        if pointer is None:
+            raise workspace_move.MoveError(
+                "Ciaobot's workspace pointer disappeared while the move was being "
+                "recorded; nothing was moved. Try again."
+            )
+        runtime_root = str(pointer.runtime_root)
+        stamp = workspace_move._now()
+        op = workspace_move.MoveOperation(
+            id=f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:6]}",
+            phase="queued",
+            source=move_plan.source,
+            target=move_plan.target,
+            started_at=stamp,
+            updated_at=stamp,
+            port=port,
+            python=sys.executable,
+            app=True,
+            runtime_root=runtime_root,
+        )
+        workspace_move.write_operation(op, root)
+    except BaseException:
+        # The lock must not outlive this call on a failure: it was taken to
+        # hand a live record to the drain, and a failed record hands nothing.
+        _release(handle)
+        raise
+    return op, handle
+
+
+async def drain_then_restart(
+    op: workspace_move.MoveOperation,
+    lock_handle: IO[str],
+    *,
+    pcm: Any,
+    schedules: Any,
+    request_restart: Callable[[int], None],
+    state_dir: Path | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Drain chats and scheduled work, record ``stopping``, restart the engine.
+
+    Runs as a task on the live engine, spawned by the move route after
+    :func:`record`. Admission closes under this drain's owner
+    (``server_restarting`` reaches the PWA as the restart overlay), work is
+    polled until it has been idle for ``_IDLE_POLLS_REQUIRED`` consecutive
+    polls or ``_DRAIN_TIMEOUT`` passes, and only then is ``stopping`` written
+    and the engine's own restart requested: ``request_restart`` drains the
+    rest, the process re-execs with the same pid, and ``before_boot`` — the
+    fresh process's first duty — takes the lock this drain deliberately keeps
+    open and moves the folder.
+
+    Every failure reopens admission, records ``failed`` (nothing was moved)
+    and releases the lock. On success the lock is never released here: the
+    ``execv`` closes the descriptor.
+    """
+    root = state_dir or workspace_move.default_state_dir()
+    owner = f"move-{op.id}"
+
+    if getattr(pcm, "restart_draining", False):
+        # A Settings restart or an update is already draining: starting a move
+        # on top would wait for work that that drain is about to kill, and
+        # both would restart the engine as rivals.
+        _advance_quiet(
+            op, root, "failed", "Ciaobot is already restarting. Try again when it is back."
+        )
+        _release(lock_handle)
+        return
+    if schedules is None:
+        # Refuse before admission closes: whether scheduled work is idle is
+        # unanswerable without a schedule manager, and
+        # `workspace_move._schedule_work_idle` owns the operator copy for that
+        # answer (an empty body has no count — exactly what None cannot give).
+        try:
+            workspace_move._schedule_work_idle({})
+            message = "the schedule manager is unavailable"
+        except workspace_move.MoveError as exc:
+            message = str(exc)
+        # A fire-and-forget task: raising here would leave the record `queued`
+        # forever (the status shows a move in flight and plan() refuses new
+        # ones), so the refusal is recorded instead.
+        _advance_quiet(op, root, "failed", f"{message}; nothing was moved")
+        _release(lock_handle)
+        return
+    try:
+        _advance_quiet(op, root, "draining")
+        pcm.begin_restart_drain(owner)
+        idle = 0
+        deadline = clock() + workspace_move._DRAIN_TIMEOUT
+        while True:
+            idle = (
+                0
+                if pcm.active_chat_ids() or schedules.work_count()
+                else idle + 1
+            )
+            if idle >= workspace_move._IDLE_POLLS_REQUIRED:
+                break
+            if clock() >= deadline:
+                pcm.cancel_restart_drain(owner)
+                _advance_quiet(
+                    op,
+                    root,
+                    "failed",
+                    f"chats were still running after {int(workspace_move._DRAIN_TIMEOUT)}s; "
+                    "nothing was moved",
+                )
+                _release(lock_handle)
+                return
+            await sleep(workspace_move._POLL_INTERVAL)
+        # Written before the restart it names: the exec is what follows, and
+        # the fresh boot's first duty is to act on exactly this record. A write
+        # that fails is not restarted on: no record, no move.
+        if not _advance_quiet(op, root, "stopping"):
+            pcm.cancel_restart_drain(owner)
+            _advance_quiet(
+                op, root, "failed", "could not record the move; nothing was moved"
+            )
+            _release(lock_handle)
+            return
+        # Deliberately not released: the exec closes the descriptor, and the
+        # fresh process's before_boot takes the lock for the move. The holder
+        # keeps the fd open until then.
+        _HELD_LOCKS.append(lock_handle)
+        request_restart(RESTART_EXIT_CODE)
+    except asyncio.CancelledError:
+        # The engine is shutting down (an app quit, or a server restart
+        # cancelled this task): reopen admission, mark the move failed —
+        # nothing moved — and let the cancellation finish.
+        pcm.cancel_restart_drain(owner)
+        _advance_quiet(
+            op, root, "failed", "the move was cancelled while draining; nothing was moved"
+        )
+        _release(lock_handle)
+        raise
+    except Exception as exc:  # noqa: BLE001 — a drain failure must reopen admission
+        pcm.cancel_restart_drain(owner)
+        _advance_quiet(
+            op, root, "failed", f"{str(exc) or exc.__class__.__name__}; nothing was moved"
+        )
+        _release(lock_handle)
+
+
+async def verify_after_boot(
+    workspace_root: Path | str,
+    tracker: Any,
+    request_restart: Callable[[int], None],
+    *,
+    state_dir: Path | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Confirm the moved folder became ready; mark ``done``, or undo the move.
+
+    Started by the booted engine (``main``) as a task. The record must be this
+    app's ``verifying`` move for the folder this engine is serving; anything
+    else is not this boot's duty. ``done`` is written only once the engine
+    really is ready — never before, so a restart that finds ``done`` can be an
+    ordinary restart, and a ``verifying`` record an engine left behind by
+    dying is still the next boot's signal to undo the move. On a timeout the
+    record says ``rolling_back`` and the restart is requested whose pre-boot
+    pass rolls the move back.
+    """
+    from ciao import package_version
+
+    if not package_version.running_from_app_bundle():
+        return
+    root = state_dir or workspace_move.default_state_dir()
+    op = await _read_for_verify(root, clock, sleep)
+    if (
+        op is None
+        or not op.app
+        or op.phase != "verifying"
+        or Path(op.target).resolve() != Path(workspace_root).resolve()
+    ):
+        return
+    deadline = clock() + workspace_move._READY_TIMEOUT
+    ready = bool(tracker.overall_ready)
+    while not ready and clock() < deadline:
+        await sleep(_VERIFY_POLL_S)
+        ready = bool(tracker.overall_ready)
+    if ready:
+        await _record_done(op, root, clock, sleep)
+        return
+    _advance_quiet(
+        op,
+        root,
+        "rolling_back",
+        f"the engine did not become ready within {int(workspace_move._READY_TIMEOUT)}s",
+    )
+    request_restart(RESTART_EXIT_CODE)
+
+
+async def _read_for_verify(
+    root: Path,
+    clock: Callable[[], float],
+    sleep: Callable[[float], Awaitable[None]],
+) -> workspace_move.MoveOperation | None:
+    """The record, retrying a read that raises (a transient I/O error) for a bounded time."""
+    deadline: float | None = None
+    while True:
+        try:
+            return workspace_move.read_operation_strict(root)
+        except Exception as exc:  # noqa: BLE001 — verify must not die on a bad read
+            print(
+                f"workspace move: could not read the move record to verify it: "
+                f"{str(exc) or exc.__class__.__name__}",
+                file=sys.stderr,
+            )
+            if deadline is None:
+                deadline = clock() + _DONE_RETRY_S
+            if clock() >= deadline:
+                return None
+            await sleep(_VERIFY_POLL_S)
+
+
+async def _record_done(
+    op: workspace_move.MoveOperation,
+    root: Path,
+    clock: Callable[[], float],
+    sleep: Callable[[float], Awaitable[None]],
+) -> None:
+    """Record that the ready engine's move worked: `done`, else the ready marker.
+
+    The `done` write is retried at the poll interval for ``_DONE_RETRY_S``. A
+    ``verifying`` record that stays would be rolled back by a later restart
+    for a good, in-use workspace, so the first failed write also writes the
+    ready marker (``before_boot`` reads `verifying` plus the marker as `done`).
+    If neither lands the log says so loudly: the move is left in place and the
+    next boot, finding only an old ``verifying`` record, will undo it.
+    """
+    deadline = clock() + _DONE_RETRY_S
+    marked = False
+    while True:
+        if _advance_quiet(op, root, "done"):
+            return
+        if not marked:
+            marked = _mark_ready(root, op.id)
+        if clock() >= deadline:
+            break
+        await sleep(_VERIFY_POLL_S)
+    outcome = (
+        "the ready marker is written, so the next start keeps the move"
+        if marked
+        else "NOTHING could be written: the next start may undo a move that worked"
+    )
+    print(
+        f"workspace move: ERROR the engine is ready on the new folder but the "
+        f"record could not be marked done after {int(_DONE_RETRY_S)}s; {outcome}",
+        file=sys.stderr,
+    )
