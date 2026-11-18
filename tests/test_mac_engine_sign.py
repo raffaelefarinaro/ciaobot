@@ -15,7 +15,14 @@ es = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(es)
 
 THIN = bytes.fromhex("cffaedfe") + b"\x0c\x00\x00\x01" + b"\0" * 40
+# A thin 64-bit Mach-O whose cputype is x86_64, so not an arm64 file.
+THIN_X86 = bytes.fromhex("cffaedfe") + (0x01000007).to_bytes(4, "little") + b"\0" * 40
 VENDOR = "lib/python3.12/site-packages/claude_agent_sdk/_bundled/claude"
+VENDOR_REQUIREMENT = (
+    "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6]"
+    " and certificate leaf[field.1.2.840.113635.100.6.1.13]"
+    ' and certificate leaf[subject.OU] = "Q6L2SF6YDW"'
+)
 GOOD_VENDOR = (
     "CodeDirectory v=20500 size=623333 flags=0x10000(runtime) hashes=19468+7 location=embedded\n"
     "Authority=Developer ID Application: Anthropic PBC (Q6L2SF6YDW)\nAuthority=Apple Root CA\n"
@@ -128,6 +135,17 @@ def test_vendor_binary_is_verified_not_signed(rig):
     assert any(c[-1] == vendor and "-d" in c for c in fake.calls)
 
 
+def test_vendor_verify_pins_the_signer_to_apple_and_the_team(rig):
+    """codesign --verify --strict must carry the -R requirement: the pin is not a text match."""
+    engine, fake = rig
+    assert es.main(["sign", "--adhoc", str(engine)]) == 0
+    vendor = str(engine / VENDOR)
+    expected = [es.CODESIGN, "--verify", "--strict", "-R=" + VENDOR_REQUIREMENT, vendor]
+    # once in the sign flow and once in the final check
+    verify_calls = [c for c in fake.calls if c[-1] == vendor and "--verify" in c]
+    assert verify_calls == [expected, expected]
+
+
 @pytest.mark.parametrize("case", ["wrong-team", "adhoc", "no-runtime", "verify-fails", "not-developer-id"])
 def test_vendor_signature_must_match(rig, case):
     engine, fake = rig
@@ -153,9 +171,10 @@ def test_every_signed_file_is_verified(rig):
     assert str(engine / "lib/b.dylib") in verified
 
 
-@pytest.mark.parametrize("case", ["provenance-touched", "new-file", "vendor-touched"])
+@pytest.mark.parametrize("case", ["provenance-touched", "new-file", "vendor-touched", "target-symlinked"])
 def test_signing_may_change_only_signed_files(rig, case):
     engine, fake = rig
+    step = [0]
 
     def sneaky():
         if case == "provenance-touched":
@@ -163,15 +182,35 @@ def test_signing_may_change_only_signed_files(rig, case):
                 handle.write(" ")
         elif case == "new-file":
             (engine / "lib/a.so.cstemp").write_bytes(b"x")
-        else:
+        elif case == "vendor-touched":
             with open(engine / VENDOR, "ab") as handle:
                 handle.write(b"x")
+        else:
+            # A target that stops being a regular file mid-signing, with the symlink pointing at
+            # an already-signed target: the path set stays the same, the codesign calls all
+            # "succeed", and only the regular-file rule catches it.
+            step[0] += 1
+            if step[0] == 2:  # bin/python3.12 has just been signed; lib/b.dylib comes next
+                (engine / "lib/b.dylib").unlink()
+                os.symlink("../bin/python3.12", engine / "lib/b.dylib")
 
     fake.also = sneaky
     assert es.main(["sign", "--adhoc", str(engine)]) == 1
 
 
-@pytest.mark.parametrize("case", ["missing-ciao", "ciao-symlink", "ciao-0644", "python-not-macho", "bad-kind", "bad-version"])
+def test_symlinked_vendor_path_is_refused(rig):
+    engine, fake = rig
+    vendor = engine / VENDOR
+    vendor.unlink()
+    os.symlink("claude-elsewhere", vendor)
+    assert es.main(["sign", "--adhoc", str(engine)]) == 1
+    assert fake.signs() == []
+    assert es.main(["check", str(engine)]) == 1
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["missing-ciao", "ciao-symlink", "ciao-0644", "python-not-macho", "python-x86", "bad-kind", "bad-version"])
 def test_layout_is_checked_before_any_codesign(rig, case):
     engine, fake = rig
     ciao = engine / "bin/ciao"
@@ -185,6 +224,9 @@ def test_layout_is_checked_before_any_codesign(rig, case):
         ciao.chmod(0o644)
     elif case == "python-not-macho":
         (engine / "bin/python3.12").write_bytes(b"#!/bin/sh\n")
+    elif case == "python-x86":
+        # A thin Mach-O is still a Mach-O of the wrong architecture: refused at layout.
+        (engine / "bin/python3.12").write_bytes(THIN_X86)
     else:
         data = json.loads((engine / "provenance.json").read_text())
         if case == "bad-kind":
@@ -206,6 +248,24 @@ def test_engine_path_shape(rig, tmp_path):
     linked.mkdir(parents=True)
     os.symlink(engine.parent, linked / "Resources")
     assert es.main(["sign", "--adhoc", str(linked / "Resources/engine")]) == 1
+    # a symlinked app bundle
+    linked_app = tmp_path / "AppLink.app"
+    os.symlink(engine.parent.parent.parent, linked_app)
+    assert es.main(["sign", "--adhoc", str(linked_app / "Contents/Resources/engine")]) == 1
+    # a symlinked Contents directory
+    linked_contents = tmp_path / "ContentsLink.app"
+    linked_contents.mkdir()
+    os.symlink(engine.parent.parent, linked_contents / "Contents")
+    assert es.main(["sign", "--adhoc", str(linked_contents / "Contents/Resources/engine")]) == 1
+    assert fake.calls == []
+
+
+def test_engine_path_shape_refused_in_check_mode(rig, tmp_path):
+    engine, fake = rig
+    linked_contents = tmp_path / "ContentsLink.app"
+    linked_contents.mkdir()
+    os.symlink(engine.parent.parent, linked_contents / "Contents")
+    assert es.main(["check", str(linked_contents / "Contents/Resources/engine")]) == 1
     assert fake.calls == []
 
 
@@ -221,6 +281,20 @@ def test_check_refuses_an_unsigned_macho(rig):
     assert es.main(["check", str(engine)]) == 0
     fake.display_override = {"lib/x/deep/a.so": "CodeDirectory v=20400 flags=0x0(none)\nSignature=none\n"}
     assert es.main(["check", str(engine)]) == 1
+
+
+@pytest.mark.parametrize("case", ["adhoc", "wrong-team", "verify-fails"])
+def test_check_refuses_a_swapped_vendor(rig, case):
+    """A swapped claude is caught in check mode by the vendor guard, not only by signing."""
+    engine, fake = rig
+    if case == "adhoc":
+        fake.vendor_display = ADHOC
+    elif case == "wrong-team":
+        fake.vendor_display = GOOD_VENDOR.replace("TeamIdentifier=Q6L2SF6YDW", "TeamIdentifier=ZZZZZZZZZZ")
+    else:
+        fake.vendor_verify = 1
+    assert es.main(["check", str(engine)]) == 1
+    assert fake.signs() == []
 
 
 def test_check_refuses_a_failing_verify_and_writes_nothing(rig):

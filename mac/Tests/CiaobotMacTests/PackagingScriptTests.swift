@@ -177,6 +177,42 @@ final class PackagingScriptTests: XCTestCase {
         XCTAssertFalse(fileManager.fileExists(atPath: output.appendingPathComponent("MANIFEST.txt").path))
         let leftovers = (try? fileManager.contentsOfDirectory(atPath: output.path)) ?? []
         XCTAssertFalse(leftovers.contains { $0.hasSuffix(".zip") || $0 == "SHA256SUMS" }, "\(leftovers)")
+        XCTAssertFalse(fileManager.fileExists(atPath: output.appendingPathComponent("Ciaobot.app").path),
+                       "a failed run must not leave the partial bundle")
+    }
+
+    /// A failure after the bundle and the archive were created must leave nothing behind: the
+    /// script's trap removes the partial Ciaobot.app and the ZIP it created from the output
+    /// directory. A fake `codesign` shadows the real one through PATH and fails its fourth
+    /// invocation: the bundle seal, its verification and its display pass, the archive is already
+    /// written, and the verification of the extracted copy is the failure.
+    func testAStubFailureLeavesNothingBehind() throws {
+        let app = scratch.appendingPathComponent("Build/Ciaobot.app", isDirectory: true)
+        try makeApp(at: app)
+        let output = scratch.appendingPathComponent("out", isDirectory: true)
+        let stub = scratch.appendingPathComponent("stub", isDirectory: true)
+        try fileManager.createDirectory(at: stub, withIntermediateDirectories: true)
+        let countFile = stub.appendingPathComponent("count")
+        let script = """
+        #!/bin/sh
+        count=$(cat '\(countFile.path)' 2>/dev/null || echo 0)
+        count=$((count + 1))
+        echo "$count" > '\(countFile.path)'
+        if [ "$count" -ge 4 ]; then exit 1; fi
+        exec /usr/bin/codesign "$@"
+        """
+        try Data(script.utf8).write(to: stub.appendingPathComponent("codesign"))
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub.appendingPathComponent("codesign").path)
+
+        let result = try runPackaging(["--no-build", "--app", app.path, "--output", output.path],
+                                      stubPath: stub.path)
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        let countText = String(decoding: try XCTUnwrap(try? Data(contentsOf: countFile)), as: UTF8.self)
+        let count = Int(countText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        XCTAssertGreaterThanOrEqual(count, 4, "the stub must fail after the archive was written")
+        let leftovers = (try? fileManager.contentsOfDirectory(atPath: output.path)) ?? []
+        XCTAssertEqual(leftovers, [], "a failed run must leave nothing behind: \(leftovers)")
     }
 
     // MARK: - Helpers
@@ -246,20 +282,31 @@ final class PackagingScriptTests: XCTestCase {
     }
 
     @discardableResult
-    private func runPackaging(_ arguments: [String]) throws -> (status: Int32, output: String) {
-        try run("/bin/sh", [scriptsDirectory.appendingPathComponent("package-app.sh").path] + arguments)
+    private func runPackaging(_ arguments: [String], stubPath: String? = nil) throws -> (status: Int32, output: String) {
+        var environment = ProcessInfo.processInfo.environment
+        if let stubPath {
+            // Only codesign is shadowed; everything else, python3 notably, resolves exactly
+            // as it does for the other packaging tests.
+            environment["PATH"] = "\(stubPath):" + (environment["PATH"] ?? "/usr/bin:/bin")
+        }
+        return try run("/bin/sh", [scriptsDirectory.appendingPathComponent("package-app.sh").path] + arguments,
+                       environment: environment)
     }
 
     @discardableResult
     private func run(
         _ executable: String,
         _ arguments: [String],
-        directory: URL? = nil
+        directory: URL? = nil,
+        environment: [String: String]? = nil
     ) throws -> (status: Int32, output: String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.currentDirectoryURL = directory ?? packageRoot
+        if let environment {
+            process.environment = environment
+        }
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe

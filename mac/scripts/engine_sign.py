@@ -8,7 +8,8 @@ ENGINE is ``<app>/Contents/Resources/engine``. ``sign`` signs every engine Mach-
 never by extension) except the SDK's own CLI, deepest path first, one file at a time: never
 ``--deep``, no hardened runtime and no entitlements (an ad-hoc hardened binary cannot load an
 ad-hoc dylib, and ad-hoc code has no Team ID). The SDK CLI keeps Anthropic's Developer ID
-signature, which is verified and never replaced. ``check`` writes nothing. An outer ad-hoc seal
+signature, which is verified (pinned to Apple's CA and Anthropic's team with a codesign
+requirement) and never replaced. ``check`` writes nothing. An outer ad-hoc seal
 passes ``codesign --verify --deep --strict`` even over unsigned engine files, so only this check
 proves the engine itself is signed.
 
@@ -140,7 +141,7 @@ def signing_order(paths: list[str]) -> list[str]:
 def check_vendor(engine: Path, rel: str, team: str) -> None:
     """The vendor-signed file must verify and still carry the vendor's Developer ID, team and runtime flag."""
     path = os.fspath(engine / rel)
-    code, _out = _run([CODESIGN, "--verify", "--strict", path])
+    code, _out = _run([CODESIGN, "--verify", "--strict", f"-R={_vendor_requirement(team)}", path])
     _require(code == 0)
     code, out = _run([CODESIGN, "-d", "--verbose=4", path])
     _require(code == 0)
@@ -150,6 +151,26 @@ def check_vendor(engine: Path, rel: str, team: str) -> None:
     _require(f"TeamIdentifier={team}" in lines)
     flags = [line for line in lines if line.startswith("CodeDirectory ") and "flags=" in line]
     _require(any("runtime" in line.split("flags=", 1)[1].split(" ", 1)[0] for line in flags))
+
+
+def _vendor_requirement(team: str) -> str:
+    """A codesign requirement pinning the signer to Apple's CA chain, the Developer ID leaf and the team.
+
+    Passed as ``-R=<requirement>`` so codesign itself validates the certificate chain; text-matching
+    the ``-d`` display alone would accept a locally forged Authority line.
+    """
+    return ('anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6]'
+            ' and certificate leaf[field.1.2.840.113635.100.6.1.13]'
+            f' and certificate leaf[subject.OU] = "{team}"')
+
+
+def _check_vendor_paths(engine: Path) -> None:
+    """Verify each present vendor file; a symlinked vendor path is a refusal."""
+    for rel, team in VENDOR_SIGNED.items():
+        vendor = engine / rel
+        _require(not vendor.is_symlink())
+        if vendor.is_file():
+            check_vendor(engine, rel, team)
 
 
 def _inventory(engine: Path) -> list[dict[str, Any]]:
@@ -169,18 +190,14 @@ def check(engine: Path) -> None:
         _require(code == 0)
         code, out = _run([CODESIGN, "-d", "--verbose=4", path])
         _require(code == 0 and "Signature=adhoc" in out.splitlines())
-    for rel, team in VENDOR_SIGNED.items():
-        if (engine / rel).is_file():
-            check_vendor(engine, rel, team)
+    _check_vendor_paths(engine)
 
 
 def sign_adhoc(engine: Path) -> list[str]:
     check_layout(engine)
     before = _inventory(engine)
     targets = signing_order([p for p in macho_files(engine) if p not in VENDOR_SIGNED])
-    for rel, team in VENDOR_SIGNED.items():
-        if (engine / rel).is_file():
-            check_vendor(engine, rel, team)
+    _check_vendor_paths(engine)
     for rel in targets:
         code, _out = _run([CODESIGN, "--force", "--sign", "-", "--timestamp=none", os.fspath(engine / rel)])
         _require(code == 0)
@@ -191,6 +208,9 @@ def sign_adhoc(engine: Path) -> list[str]:
     old = {row["path"]: row for row in before}
     new = {row["path"]: row for row in after}
     _require(old.keys() == new.keys())
+    # A target that is no longer a regular file after signing (a symlink row has a target, not a
+    # sha256) is not the file the codesign calls verified, so the whole run is refused.
+    _require(all("sha256" in new[path] for path in targets))
     changed = {path for path in old if old[path] != new[path]}
     _require(changed <= set(targets))
     check(engine)
