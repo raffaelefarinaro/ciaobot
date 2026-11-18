@@ -231,7 +231,7 @@ def read_operation_strict(state_dir: Path) -> MoveOperation | None:
     """
     from ciao import app_engine
 
-    parsed = app_engine._read_private_json(
+    parsed = app_engine.read_private_json(
         state_dir / OPERATION_NAME, label="the workspace move record"
     )
     return _parse_operation(parsed)
@@ -266,6 +266,15 @@ def _parse_operation(parsed: Any) -> MoveOperation | None:
 
 def write_operation(op: MoveOperation, state_dir: Path | None = None) -> None:
     root = state_dir or default_state_dir()
+    if op.app:
+        # An app-mode record drives a rename, and `read_operation_strict`
+        # refuses anything but this user's own `0o600`, ACL-free file: write
+        # it with the same verified writer the workspace pointer uses, so a
+        # record this process writes is always one it can read back.
+        from ciao import app_engine
+
+        app_engine.write_private_json(root / OPERATION_NAME, asdict(op))
+        return
     root.mkdir(parents=True, exist_ok=True)
     _write_text_atomic(root / OPERATION_NAME, json.dumps(asdict(op), indent=2) + "\n", private=True)
 

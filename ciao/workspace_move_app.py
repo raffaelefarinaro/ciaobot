@@ -39,6 +39,16 @@ Safety rules, because this renames the user's folder:
 The channel across boots is the operation record and the pointer. The record
 also carries ``app``: a 1.x record written by a launchd move job is never
 acted on here, and the LaunchAgent plist is never read or written in app mode.
+
+S3b-1 ALONE IS INERT IN PRODUCTION. :func:`before_boot` acts only on a record
+with ``app=true`` and nothing in this slice writes one: with no record (every
+install today) it takes the lock, finds nothing and returns ``"none"``. The
+request side — the Settings move route that records ``stopping`` with
+``app=true`` and restarts the engine — is S3b-2, and S3b-2 MUST ALSO WRITE
+``done`` once the booted engine is ready (``verify_after_boot``). Without that
+write every ``verifying`` record older than ``VERIFY_GRACE_S`` is rolled back by
+the next ordinary restart, undoing a move that worked. Do not enable the route
+without it (docs/DEVELOPMENT.md lists this requirement too).
 """
 
 from __future__ import annotations
@@ -71,6 +81,9 @@ VERIFY_GRACE_S = workspace_move._READY_TIMEOUT + 60.0
 
 # A record stamped further ahead than this is not trusted: it reads as ancient.
 _FUTURE_SKEW_S = 60.0
+
+# How long a boot waits for another boot's move.lock before leaving it alone.
+_LOCK_WAIT_S = 20.0
 
 # Phases in which the folder may already have been moved: a boot finding one
 # of these (the previous boot died mid-step, or was killed before ready) undoes
@@ -137,22 +150,95 @@ def before_boot(
         return "skipped"
 
 
+def _take_lock(root: Path) -> Any:
+    """``move.lock``, waiting a bounded time for another boot's hold to end.
+
+    Raises :class:`workspace_move.MoveError` when it stays held: that boot owns
+    the move (and its pointer), and this one touches nothing.
+    """
+    deadline = time.monotonic() + _LOCK_WAIT_S
+    while True:
+        try:
+            return workspace_move._lock(root)
+        except workspace_move.MoveError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
 def _emergency_repair(state_dir: Path | None) -> None:
-    """After an unexpected error: still make the pointer follow the disk."""
+    """After an unexpected error: still make the pointer follow the disk.
+
+    Same rules as the main paths: under ``move.lock`` (never racing another
+    boot), never under a live engine, signals ignored.
+    """
+    handle = None
     try:
         root = state_dir or workspace_move.default_state_dir()
+        try:
+            handle = workspace_move._lock(root)
+        except Exception:  # noqa: BLE001 — held by another boot, or no state dir
+            return
         op = workspace_move.read_operation_strict(root)
         if op is None or not op.app or op.phase in workspace_move.TERMINAL_PHASES:
             return
         if op.phase not in _RECOVER_PHASES and op.phase != "stopping":
             return
         paths = _validate(op, "recover")
+        if _engine_alive(paths):
+            return
         errors: list[str] = []
-        _repair_pointer(paths, errors)
+        with _signals_ignored():
+            _repair_pointer(paths, errors)
         if errors:
             print(f"workspace move: {'; '.join(errors)}", file=sys.stderr)
     except Exception:  # noqa: BLE001 — best effort on top of best effort
         return
+    finally:
+        if handle is not None:
+            try:
+                unlock(handle.fileno())
+                handle.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _heal_pointer(paths: _Paths) -> None:
+    """Under ``move.lock``: a pointer naming a vanished folder follows the data.
+
+    For the returns that do not move anything (an engine is up, a verify is
+    young, the record is unreadable): the pointer must still name a folder that
+    exists, or the next boot reads it as no pointer and shows the setup wizard.
+    """
+    try:
+        pointed = app_engine.read_pointer_record()
+        if pointed is None or pointed.workspace.is_dir():
+            return
+        errors: list[str] = []
+        with _signals_ignored():
+            _repair_pointer(paths, errors)
+        if errors:
+            print(f"workspace move: {'; '.join(errors)}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 — advisory on top of a skip
+        print(f"workspace move: {exc}", file=sys.stderr)
+
+
+def _heal_from_unreadable_record(root: Path) -> None:
+    """A record that fails the strict read: use it only to keep the pointer usable.
+
+    The lenient parse names the folders; the pointer must already name one of
+    them (the recover validation) and the repair only ever points it at a
+    folder that exists and holds the data, so a forged record gains nothing.
+    """
+    op = workspace_move.read_operation(root)
+    if op is None or not op.app or op.phase not in _RECOVER_PHASES:
+        return
+    try:
+        paths = _validate(op, "recover")
+    except _Refused:
+        return
+    if not _engine_alive(paths):
+        _heal_pointer(paths)
 
 
 def _before_boot(
@@ -174,7 +260,7 @@ def _before_boot(
     root.mkdir(parents=True, exist_ok=True)
     make_private_dir(root)
     try:
-        handle = workspace_move._lock(root)
+        handle = _take_lock(root)
     except workspace_move.MoveError:
         # Another move (or a drain) holds the lock: touch nothing.
         return "skipped"
@@ -190,6 +276,7 @@ def _before_boot(
                     "file or is unreadable; ignoring it",
                     file=sys.stderr,
                 )
+                _heal_from_unreadable_record(root)
             return "none"
         if not op.app or op.phase in workspace_move.TERMINAL_PHASES:
             return "none"
@@ -203,6 +290,8 @@ def _before_boot(
             # Another engine owns one of the folders — an old service-mode
             # engine, or the one that just booted. Never move a folder out
             # from under a live engine.
+            if recover:
+                _heal_pointer(paths)
             return "skipped"
         if op.phase in ("queued", "draining"):
             # The engine died before the drain finished: nothing moved yet.
@@ -213,10 +302,11 @@ def _before_boot(
             return _forward(op, root, paths, claude_home)
         if not recover:
             return "none"
-        if op.phase == "verifying" and _age(now, op.updated_at) < VERIFY_GRACE_S:
+        if op.phase == "verifying" and _verifying_age(now, op, root) < VERIFY_GRACE_S:
             # An engine may still be starting on the new folder (it holds no
             # lock yet), or restarted on it before `done` was written. Rolling
             # the folder back under it would be the one unsafe outcome.
+            _heal_pointer(paths)
             return "skipped"
         # A recover phase: the previous boot died mid-move, or died on the new
         # folder before it was ready. Undo the move and boot the old folder.
@@ -226,9 +316,7 @@ def _before_boot(
             else "Ciaobot stopped in the middle of the move"
         )
         denied = False
-        from ciao import workspace_access
-
-        denial = workspace_access.read_denial()
+        denial = _denial_for(op)
         if denial:
             denied = True
             reason = denial
@@ -257,21 +345,10 @@ def _pointer_workspace() -> Path | None:
 
     ``app_engine.read_pointer`` reads a pointer to a vanished folder as no
     pointer, which is exactly the state after the rename; this read keeps the
-    same strict file checks but not the directory requirement.
+    same strict file and schema checks but not the directory requirement.
     """
-    raw = app_engine._read_private_json(
-        app_engine.state_dir() / app_engine.WORKSPACE_POINTER_NAME,
-        label="the app engine workspace pointer",
-    )
-    if raw is None:
-        return None
-    schema = raw.get("schema")
-    if isinstance(schema, bool) or schema != app_engine.SCHEMA:
-        return None
-    workspace = raw.get("workspace")
-    if not isinstance(workspace, str) or not Path(workspace).is_absolute():
-        return None
-    return Path(workspace).resolve()
+    pointer = app_engine.read_pointer_record()
+    return pointer.workspace.resolve() if pointer is not None else None
 
 
 def _validate(op: workspace_move.MoveOperation, mode: str) -> _Paths:
@@ -376,6 +453,51 @@ def _age(now: Callable[[], float], stamp: str) -> float:
     return max(age, 0.0)
 
 
+def _verifying_age(
+    now: Callable[[], float], op: workspace_move.MoveOperation, root: Path
+) -> float:
+    """Seconds since a ``verifying`` record was written, erring toward young.
+
+    The reverse of :func:`_age`: rolling back under a live engine is the unsafe
+    outcome, so a stamp that cannot be trusted (empty, unparsable, in the
+    future, or the clock stepped backward) is young, never ancient. The record
+    file's own mtime bounds the stamp: whichever says the record is newer wins.
+    """
+    try:
+        stamp_age = now() - datetime.fromisoformat(op.updated_at).timestamp()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return 0.0
+    if stamp_age < 0:
+        return 0.0
+    try:
+        file_age = now() - (root / workspace_move.OPERATION_NAME).stat().st_mtime
+    except OSError:
+        return stamp_age
+    if file_age < 0:
+        return 0.0
+    return min(stamp_age, file_age)
+
+
+def _denial_for(op: workspace_move.MoveOperation) -> str:
+    """The recorded macOS denial, only when it was recorded during ``op``.
+
+    The denial file is shared and has no operation id; one written before this
+    operation started is somebody else's, and must not replace the reason this
+    rollback has.
+    """
+    from ciao import workspace_access
+
+    text = workspace_access.read_denial()
+    if not text:
+        return ""
+    try:
+        started = datetime.fromisoformat(op.started_at).timestamp()
+        recorded = workspace_access.denial_path().stat().st_mtime
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+    return text if recorded >= started else ""
+
+
 def _advance(
     op: workspace_move.MoveOperation, root: Path, phase: str, error: str = ""
 ) -> None:
@@ -464,11 +586,16 @@ def _forward(
                     )
                 _advance_quiet(op, root, "failed", reason)
                 return "failed"
-            if workspace_move._is_privacy_denial(exc):
-                op.denied = True
-                reason = workspace_move._record_denied_folder(
-                    workspace_move._denied_folder(source, target), app=True
-                )
+            # Nothing here may raise before the rollback runs: the folder is
+            # renamed and only the rollback puts it back.
+            try:
+                if workspace_move._is_privacy_denial(exc):
+                    op.denied = True
+                    reason = workspace_move._record_denied_folder(
+                        workspace_move._denied_folder(source, target), app=True
+                    )
+            except Exception as describe_exc:  # noqa: BLE001
+                reason = f"{reason}; recording the denial failed: {describe_exc}"
             return _rollback(op, root, paths, reason)
 
 
@@ -493,6 +620,12 @@ def _exact(path: Path) -> bool:
 
 def _undo_rename(paths: _Paths, errors: list[str]) -> None:
     source, target = paths.source, paths.target
+    if not os.path.lexists(target) and source.is_dir() and not os.path.islink(source):
+        # The folder is already back: a boot that died after the rename back,
+        # before the paths were rewritten (or the move never got that far).
+        # The rewrite is idempotent, so finish it.
+        _rewrite_back(paths, errors)
+        return
     if not target.is_dir() or os.path.islink(target):
         return
     if source.exists() and _same_folder(source, target):
@@ -512,8 +645,17 @@ def _undo_rename(paths: _Paths, errors: list[str]) -> None:
     except Exception as exc:  # noqa: BLE001 — every step runs, errors are collected
         errors.append(f"moving the folder back: {exc}")
         return
+    _rewrite_back(paths, errors)
+
+
+def _rewrite_back(paths: _Paths, errors: list[str]) -> None:
+    """Rewrite the target's paths to the source's. Both spellings of the source
+    were rewritten to the one target spelling going forward, so they come back
+    as the one resolved source spelling (the same folder)."""
     try:
-        workspace_move.rewrite_workspace_state(source, str(target), str(source))
+        workspace_move.rewrite_workspace_state(
+            paths.source, str(paths.target), str(paths.source)
+        )
     except Exception as exc:  # noqa: BLE001
         errors.append(f"rewriting the folder's paths back: {exc}")
 
