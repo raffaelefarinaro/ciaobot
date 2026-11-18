@@ -573,3 +573,55 @@ def test_opencode_subagents_derive_status_and_turn_index(
     assert rows[0]["turn_index"] == 1
     assert rows[1]["status"] == "failed"
     assert rows[1]["turn_index"] == 0
+
+
+def test_opencode_chat_messages_read_each_lineage_session_through_the_registry(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """The host reaches ``read_thread`` via the descriptor factory, not the adapter."""
+    from ciao.provider_registry import ProviderDescriptor
+    from ciao.providers.base import BaseProvider
+
+    calls: list[tuple[Path, str]] = []
+
+    class StubProvider(BaseProvider):
+        @classmethod
+        async def read_thread(cls, workspace_root, session_id):
+            calls.append((workspace_root, session_id))
+            return {
+                "info": {"id": session_id},
+                "messages": [
+                    {
+                        "info": {"role": "user"},
+                        "parts": [{"type": "text", "text": f"q {session_id}"}],
+                    },
+                    {
+                        "info": {"role": "assistant"},
+                        "parts": [{"type": "text", "text": f"a {session_id}"}],
+                    },
+                ],
+            }
+
+    real_factory = ProviderDescriptor.factory
+
+    def factory(self):
+        return StubProvider if self.id == "opencode" else real_factory(self)
+
+    pcm = _manager(tmp_path)
+    chat = _opencode_chat(pcm, "ses_new")
+    chat.previous_session_ids = ["ses_old", "ses_mid"]
+    pcm._save()
+    monkeypatch.setattr(ProviderDescriptor, "factory", factory)
+
+    response = asyncio.run(chat_messages(_request(
+        f"/api/chats/{chat.chat_id}/messages",
+        _app(pcm),
+        chat_id=chat.chat_id,
+    )))
+    rows = json.loads(response.body)
+
+    root = pcm._agent_root_for_chat(chat.chat_id)
+    assert calls == [(root, "ses_old"), (root, "ses_mid"), (root, "ses_new")]
+    assert [r["content"] for r in rows if r["role"] == "assistant"] == [
+        "a ses_old", "a ses_mid", "a ses_new",
+    ]

@@ -40,7 +40,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
-from ciao import cli_envelopes, subagent_tracking
+from ciao import cli_envelopes, provider_registry, subagent_tracking
 from ciao.tool_summary import (
     opencode_file_touches,
     summarize_claude_tool_input,
@@ -52,7 +52,6 @@ from ciao.background_notice import (
     native_wake_run,
 )
 from ciao.models import ChatContext
-from ciao.providers.opencode import OpencodeProvider
 from ciao.rate_limits import is_rate_limit_telemetry
 from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
 
@@ -761,7 +760,7 @@ def _render_opencode_thread(
 ) -> list[dict]:
     """Render opencode session messages into the provider-neutral PWA row shape.
 
-    ``thread`` is :meth:`OpencodeProvider.read_thread`'s ``{"info", "messages"}``
+    ``thread`` is :meth:`BaseProvider.read_thread`'s ``{"info", "messages"}``
     payload; each message is ``{"info": {role, ...}, "parts": [...]}``.
 
     ``metadata`` overlays ``chat``'s per-turn images/timings/unattended/origin flags
@@ -1563,9 +1562,10 @@ async def _assemble_chat_messages(
             session_ids.append(sid_str)
         rendered: list[dict] = []
         start_user_idx = chat.turn_index_base
+        provider_cls = provider_registry.require(provider).factory()
         for sid in session_ids:
             try:
-                opencode_thread = await OpencodeProvider.read_thread(
+                opencode_thread = await provider_cls.read_thread(
                     session_root, sid
                 )
                 if not opencode_thread:
