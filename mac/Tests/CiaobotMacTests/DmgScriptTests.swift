@@ -34,6 +34,32 @@ final class DmgScriptTests: XCTestCase {
             *--verify*) exit "${FAKE_CODESIGN_VERIFY_STATUS:-0}" ;;
         esac
         [ -n "$describe" ] || exit 0
+        last=
+        for argument in "$@"; do last=$argument; done
+        case $last in
+            */Contents/Resources/engine/*)
+                # Engine fixtures carry their own verdict: a marker in the file
+                # makes the double report the ad-hoc, team-less signature the
+                # distribution check must refuse; any other engine file reports
+                # a full distribution signature of the team in
+                # release/update-config.env.
+                if /usr/bin/grep -aq 'CIAOBOT-TEST-ADHOC' "$last" 2>/dev/null; then
+                    printf '%s\\n' 'CodeDirectory v=20400 size=999 flags=0x2(adhoc) hashes=3+7 location=embedded' >&2
+                    printf '%s\\n' 'Signature=adhoc' >&2
+                    printf '%s\\n' 'TeamIdentifier=not set' >&2
+                else
+                    printf '%s\\n' 'Identifier=local.ciaobot.mac' >&2
+                    printf '%s\\n' 'CodeDirectory v=20500 size=1000 flags=0x10000(runtime) hashes=3+7 location=embedded' >&2
+                    printf '%s\\n' 'Authority=Developer ID Application: Test Signer (AXBFS96Y9F)' >&2
+                    printf '%s\\n' 'Authority=Developer ID Certification Authority' >&2
+                    printf '%s\\n' 'Authority=Apple Root CA' >&2
+                    printf '%s\\n' 'Timestamp=Nov 18, 2026 at 10:00:00' >&2
+                    printf '%s\\n' 'TeamIdentifier=AXBFS96Y9F' >&2
+                fi
+                exit 0
+                ;;
+            *) ;;
+        esac
         printf '%s\\n' "Identifier=local.ciaobot.mac" >&2
         printf '%s\\n' "Authority=${FAKE_CODESIGN_AUTHORITY:-Developer ID Application: Test Signer (AXBFS96Y9F)}" >&2
         if [ "${FAKE_CODESIGN_NO_TEAM:-0}" = 1 ]; then
@@ -42,6 +68,16 @@ final class DmgScriptTests: XCTestCase {
             printf '%s\\n' "TeamIdentifier=${FAKE_CODESIGN_TEAM:-AXBFS96Y9F}" >&2
         fi
         exit 0
+        """)
+        try makeTool("ditto", body: """
+        #!/bin/sh
+        /usr/bin/ditto "$@" || exit 1
+        [ "${FAKE_DITTO_SWAP_ENGINE:-0}" = 1 ] || exit 0
+        # A swap between the source engine check and the copy: the staged engine
+        # file ends up with bytes the codesign double reports as ad-hoc signed.
+        staged_engine_file=$2/Contents/Resources/engine/bin/python3.12
+        [ -f "$staged_engine_file" ] || exit 0
+        printf 'CIAOBOT-TEST-ADHOC\\n' >> "$staged_engine_file"
         """)
         try makeTool("xcrun", body: """
         #!/bin/sh
@@ -109,8 +145,8 @@ final class DmgScriptTests: XCTestCase {
         XCTAssertNil(try hdiutilLogIfAny(), "an unstapled app must be refused before any image work")
     }
 
-    /// Until the engine is distribution-signed (#3128 G) no image may carry it,
-    /// including through a dangling symlink standing in for it.
+    /// A bundled engine that is not distribution-signed (#3128 G; here an empty directory) or is not a real
+    /// directory (a dangling symlink standing in for it) must not become an image.
     func testRefusesAnEngineBearingApp() throws {
         for dangling in [false, true] {
             let app = try makeApp()
@@ -126,11 +162,136 @@ final class DmgScriptTests: XCTestCase {
             let result = try runScript(["--app", app.path, "--output", output, "--identity", identity])
 
             XCTAssertNotEqual(result.status, 0, "dangling=\(dangling): \(result.output)")
-            XCTAssertTrue(result.output.contains("#3128 G"), result.output)
+            XCTAssertTrue(
+                result.output.contains(dangling ? "not a real directory" : "not distribution-signed"), result.output)
             XCTAssertFalse(fileManager.fileExists(atPath: output))
             XCTAssertNil(try hdiutilLogIfAny())
             try fileManager.removeItem(at: app.deletingLastPathComponent())
         }
+    }
+
+    // MARK: - The bundled engine
+
+    /// An engine-bearing app whose engine is only ad-hoc signed must not become
+    /// an image: the fake codesign reports `Signature=adhoc` and no team for the
+    /// engine files, so `engine_sign.py check --distribution` refuses it
+    /// (#3128 G). Weakening that check to a plain `check` — which accepts
+    /// ad-hoc — or dropping the team argument makes this test fail.
+    func testRefusesAnEngineBearingAppWhoseEngineIsOnlyAdHocSigned() throws {
+        let app = try makeApp()
+        try makeEngine(at: app, adHocSigned: true)
+        let repo = try makeScriptRepo()
+        let output = try outputPath()
+
+        let result = try runScript(
+            ["--app", app.path, "--output", output, "--identity", identity],
+            scriptsRoot: repo
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("not distribution-signed"), result.output)
+        XCTAssertTrue(result.output.contains("AXBFS96Y9F"), result.output)
+        XCTAssertFalse(fileManager.fileExists(atPath: output), "a refused engine must publish no image")
+        XCTAssertNil(try hdiutilLogIfAny(), "the source engine is refused before any image work")
+    }
+
+    /// The positive half of the gate: an engine that is a full distribution
+    /// signature (team, hardened runtime, secure timestamp per file) is accepted
+    /// end to end. This is the path that exercises the real `python3 >= 3.12`
+    /// lookup and the team plumbing from `release/update-config.env`, and it
+    /// fails if `--distribution` is weakened to a plain `check` (which demands
+    /// an ad-hoc signature instead) or the team argument is dropped.
+    func testAcceptsAnEngineBearingAppWhoseEngineIsDistributionSigned() throws {
+        let app = try makeApp()
+        try makeEngine(at: app)
+        let repo = try makeScriptRepo()
+        let output = try outputPath()
+
+        let result = try runScript(
+            ["--app", app.path, "--output", output, "--identity", identity],
+            scriptsRoot: repo
+        )
+
+        XCTAssertEqual(result.status, 0, result.output)
+        XCTAssertTrue(fileManager.fileExists(atPath: output), result.output)
+        // The engine was checked where the bytes are used: the source app, the
+        // staged copy right before the image, and the app on the mounted image.
+        let describes = try codesignCalls().filter {
+            $0.contains("-d") && ($0.last ?? "").contains("/Contents/Resources/engine/")
+        }
+        let allCalls = try codesignCalls()
+        XCTAssertGreaterThanOrEqual(
+            describes.count, 6,
+            "both engine Mach-O files are described by the source, staged and mounted checks: \(allCalls)"
+        )
+    }
+
+    /// The image is built from a fresh `ditto` copy staged after the source
+    /// engine check, so the staged copy is checked again right before the image
+    /// is created. When the double mutates the staged engine between the two,
+    /// the swap must be refused and nothing may be published.
+    func testRefusesAStagedEngineWhoseBytesChangedAfterTheCheck() throws {
+        let app = try makeApp()
+        try makeEngine(at: app)
+        let repo = try makeScriptRepo()
+        let output = try outputPath()
+
+        let result = try runScript(
+            ["--app", app.path, "--output", output, "--identity", identity],
+            environment: ["FAKE_DITTO_SWAP_ENGINE": "1"],
+            scriptsRoot: repo
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(
+            result.output.contains("the staged engine is not distribution-signed"), result.output)
+        XCTAssertFalse(fileManager.fileExists(atPath: output), "a swapped staged engine must publish no image")
+        XCTAssertNil(try hdiutilLogIfAny(), "a refused staging tree is caught before any image work")
+    }
+
+    /// The image's own copy is what a user mounts, so the mounted app is
+    /// engine-checked too: when the mounted engine differs from the staged one
+    /// (the double mutates the mounted file), the run refuses and detaches.
+    func testRefusesAMountedEngineWhoseBytesChanged() throws {
+        let app = try makeApp()
+        try makeEngine(at: app)
+        let repo = try makeScriptRepo()
+        let output = try outputPath()
+
+        let result = try runScript(
+            ["--app", app.path, "--output", output, "--identity", identity],
+            environment: ["FAKE_HDIUTIL_SWAP_ENGINE": "1"],
+            scriptsRoot: repo
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(
+            result.output.contains("the image's engine is not distribution-signed"), result.output)
+        XCTAssertFalse(fileManager.fileExists(atPath: output), "a swapped mounted engine must publish no image")
+        let calls = try hdiutilCalls()
+        XCTAssertEqual(calls.filter { $0.first == "detach" }.count, 1,
+                       "the failure path must still detach: \(calls)")
+    }
+
+    /// The engine checks are driven by a real `python3` with the same gate the
+    /// operator's runs face: a `python3` that is older than 3.12 on PATH is
+    /// refused before any image work.
+    func testRefusesAnEngineCheckWithATooOldPython() throws {
+        try makeTool("python3", body: "#!/bin/sh\nexit 1\n")
+        let app = try makeApp()
+        try makeEngine(at: app)
+        let repo = try makeScriptRepo()
+        let output = try outputPath()
+
+        let result = try runScript(
+            ["--app", app.path, "--output", output, "--identity", identity],
+            scriptsRoot: repo
+        )
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("python3 3.12 or newer is required"), result.output)
+        XCTAssertFalse(fileManager.fileExists(atPath: output))
+        XCTAssertNil(try hdiutilLogIfAny())
     }
 
     func testRefusesAnAppInsideAnApplicationsFolder() throws {
@@ -557,6 +718,86 @@ final class DmgScriptTests: XCTestCase {
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
     }
 
+    /// A thin 64-bit arm64 Mach-O header: enough for the engine scripts' magic
+    /// test, and bytes no one executes, so no real identity is ever used.
+    private static let machoBytes = Data([
+        0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ])
+    /// Marks an engine fixture file the codesign double must describe as an
+    /// ad-hoc, team-less signature instead of a distribution one.
+    private static let adHocMarker = "CIAOBOT-TEST-ADHOC\n"
+    private static let provenance = #"{"kind":"ciaobot-engine-provenance","engine":{"version":"1.2.3"}}"#
+
+    /// A bundled engine whose two Mach-O files carry, per file, either a full
+    /// distribution signature description (the default) or, with `adHocSigned`
+    /// (encoded by the marker the fake codesign reads out of the file), the
+    /// ad-hoc signature the distribution gate must refuse.
+    @discardableResult
+    private func makeEngine(at app: URL, adHocSigned: Bool = false) throws -> URL {
+        let engine = app.appendingPathComponent("Contents/Resources/engine", isDirectory: true)
+        try fileManager.createDirectory(
+            at: engine.appendingPathComponent("bin"), withIntermediateDirectories: true)
+        try Data("#!/bin/sh\necho \"ciao 1.2.3\"\n".utf8)
+            .write(to: engine.appendingPathComponent("bin/ciao"))
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: engine.appendingPathComponent("bin/ciao").path)
+        for rel in ["bin/python3.12", "lib/a.so"] {
+            let target = engine.appendingPathComponent(rel)
+            try fileManager.createDirectory(
+                at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            var bytes = Self.machoBytes
+            if adHocSigned { bytes.append(contentsOf: Data(Self.adHocMarker.utf8)) }
+            try bytes.write(to: target)
+            if rel == "bin/python3.12" {
+                try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
+            }
+        }
+        try Data(Self.provenance.utf8).write(to: engine.appendingPathComponent("provenance.json"))
+        return engine
+    }
+
+    /// A scratch checkout of the scripts and release inputs the engine tests
+    /// need. `engine_sign.py` pins `/usr/bin/codesign` by path on purpose, so
+    /// the copied module is pointed at this suite's fake instead — the same
+    /// seam the packaging fixture uses. No test touches the real scripts.
+    /// Returns the copied scripts directory, the root `runScript` wants.
+    private func makeScriptRepo() throws -> URL {
+        let repo = scratch.appendingPathComponent("repo", isDirectory: true)
+        let scripts = repo.appendingPathComponent("scripts", isDirectory: true)
+        try fileManager.createDirectory(at: scripts, withIntermediateDirectories: true)
+        try fileManager.copyItem(
+            at: scriptsDirectory.appendingPathComponent("make-dmg.sh"), to: scripts.appendingPathComponent("make-dmg.sh"))
+        // engine_sign.py loads its sibling helpers by path, transitively; copy
+        // every one of them, exactly like the packaging fixture does.
+        let helpers = try fileManager.contentsOfDirectory(atPath: scriptsDirectory.path)
+            .filter { $0 == "dmg_layout.py" || ($0.hasPrefix("engine_") && $0.hasSuffix(".py")) }
+        for name in helpers {
+            try fileManager.copyItem(
+                at: scriptsDirectory.appendingPathComponent(name), to: scripts.appendingPathComponent(name))
+        }
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: scripts.appendingPathComponent("make-dmg.sh").path)
+        try fileManager.createDirectory(
+            at: repo.appendingPathComponent("release", isDirectory: true), withIntermediateDirectories: true)
+        try fileManager.copyItem(
+            at: packageRoot.appendingPathComponent("release/dmg"),
+            to: repo.appendingPathComponent("release/dmg", isDirectory: true))
+        try fileManager.copyItem(
+            at: packageRoot.appendingPathComponent("release/update-config.env"),
+            to: repo.appendingPathComponent("release/update-config.env"))
+        let signer = scripts.appendingPathComponent("engine_sign.py")
+        let pinned = #"CODESIGN = "/usr/bin/codesign""#
+        let source = try String(contentsOf: signer, encoding: .utf8)
+        XCTAssertTrue(source.contains(pinned), "engine_sign.py's pinned codesign path is the patch seam")
+        try source.replacingOccurrences(
+            of: pinned, with: "CODESIGN = \"\(tools.appendingPathComponent("codesign").path)\"")
+            .write(to: signer, atomically: true, encoding: .utf8)
+        return scripts
+    }
+
     /// A minimal staged app with the real bundle identifier. `inside` chooses a
     /// parent directory name, so an Applications folder can be simulated.
     @discardableResult
@@ -592,10 +833,13 @@ final class DmgScriptTests: XCTestCase {
     private func runScript(
         _ arguments: [String],
         extraPath: String? = nil,
-        environment: [String: String] = [:]
+        environment: [String: String] = [:],
+        scriptsRoot: URL? = nil
     ) throws -> (status: Int32, output: String) {
         var childEnvironment = ProcessInfo.processInfo.environment
-        var path = tools.path + ":/usr/bin:/bin:/usr/sbin:/sbin"
+        // The ambient PATH follows the fakes so python3 (3.12 or newer, for the engine check) resolves as it
+        // does for the operator; the fakes still shadow codesign, hdiutil and xcrun.
+        var path = tools.path + ":" + (childEnvironment["PATH"] ?? "/usr/bin:/bin") + ":/usr/bin:/bin:/usr/sbin:/sbin"
         if let extraPath { path = extraPath + ":/usr/bin:/bin:/usr/sbin:/sbin" }
         childEnvironment["PATH"] = path
         childEnvironment["FAKE_CODESIGN_LOG"] = codesignLog.path
@@ -613,7 +857,7 @@ final class DmgScriptTests: XCTestCase {
         try fileManager.createDirectory(at: hdiutilState, withIntermediateDirectories: true)
         return try run(
             "/bin/sh",
-            [scriptsDirectory.appendingPathComponent("make-dmg.sh").path] + arguments,
+            [(scriptsRoot ?? scriptsDirectory).appendingPathComponent("make-dmg.sh").path] + arguments,
             environment: childEnvironment
         )
     }
