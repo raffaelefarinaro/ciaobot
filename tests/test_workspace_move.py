@@ -957,11 +957,14 @@ def test_start_route_app_mode_schedules_drain(
     monkeypatch.setattr("ciao.package_version.running_from_app_bundle", lambda: True)
     monkeypatch.setattr(sys, "platform", "darwin")
     ws = tmp_path / "ws"
-    ws.mkdir(parents=True)
+    (ws / ".runtime").mkdir(parents=True)
     monkeypatch.setattr(workspace_move, "registered_workspace", lambda: ws)
     monkeypatch.setattr(workspace_move, "update_in_flight", lambda: False)
     monkeypatch.setattr(workspace_move, "engine_running", lambda: True)
     monkeypatch.setattr(workspace_move, "default_state_dir", lambda: tmp_path / "state")
+    from ciao import app_engine
+
+    app_engine.write_pointer(ws, ws / ".runtime")
     monkeypatch.setattr(
         workspace_move,
         "start",
@@ -1007,7 +1010,7 @@ def test_start_route_app_mode_schedules_drain(
         workspace_root=ws,
     ).post("/api/workspace-move", json={"target": str(tmp_path / "moved")})
 
-    assert response.status_code == 202
+    assert response.status_code == 202, response.json()
     body = response.json()
     assert body["operation"]["app"] is True
     assert body["operation"]["phase"] == "queued"
@@ -1023,6 +1026,63 @@ def test_start_route_app_mode_schedules_drain(
     assert captured["request_restart"] is request_restart
     assert restarts == []
     captured["handle"].close()
+
+
+def _app_route_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setattr("ciao.package_version.running_from_app_bundle", lambda: True)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    ws = tmp_path / "ws"
+    (ws / ".runtime").mkdir(parents=True)
+    monkeypatch.setattr(workspace_move, "registered_workspace", lambda: ws)
+    monkeypatch.setattr(workspace_move, "update_in_flight", lambda: False)
+    monkeypatch.setattr(workspace_move, "engine_running", lambda: True)
+    monkeypatch.setattr(workspace_move, "default_state_dir", lambda: tmp_path / "state")
+    return ws
+
+
+def test_start_route_app_mode_refuses_a_remote_browser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = _app_route_setup(tmp_path, monkeypatch)
+    response = _client(
+        tmp_path,
+        peer="203.0.113.9",
+        pcm=SimpleNamespace(restart_draining=False),
+        schedules=SimpleNamespace(work_count=lambda: 0),
+        restarts=lambda code: None,
+        workspace_root=ws,
+    ).post("/api/workspace-move", json={"target": str(tmp_path / "moved")})
+
+    assert response.status_code == 403
+    # Nothing was recorded and no lock was taken.
+    assert workspace_move.read_operation(tmp_path / "state") is None
+
+
+def test_start_route_app_mode_returns_409_when_another_move_holds_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = _app_route_setup(tmp_path, monkeypatch)
+    from ciao import app_engine
+
+    app_engine.write_pointer(ws, ws / ".runtime")
+    state = tmp_path / "state"
+    state.mkdir(parents=True)
+    held = workspace_move._lock(state)
+    try:
+        response = _client(
+            tmp_path,
+            peer="127.0.0.1",
+            pcm=SimpleNamespace(restart_draining=False),
+            schedules=SimpleNamespace(work_count=lambda: 0),
+            restarts=lambda code: None,
+            workspace_root=ws,
+        ).post("/api/workspace-move", json={"target": str(tmp_path / "moved")})
+    finally:
+        held.close()
+
+    assert response.status_code == 409
+    assert "pointer" not in response.json()["error"]
+    assert workspace_move.read_operation(state) is None
 
 
 def test_cli_apply_refused_in_app_mode(

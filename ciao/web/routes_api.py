@@ -7944,7 +7944,14 @@ async def workspace_move_plan_endpoint(request: Request) -> JSONResponse:
 
 
 async def workspace_move_start_endpoint(request: Request) -> JSONResponse:
-    """Start the move. The engine stops, moves and restarts; the page reloads."""
+    """Start the move. The engine stops, moves and restarts; the page reloads.
+
+    In Ciaobot for Mac the move is recorded (409 when another move holds
+    ``move.lock``) and drained as a task. There is no cancel while it drains:
+    up to 600 s, with new-chat admission closed. Chats paused on a question
+    form are not counted by ``active_chat_ids`` (same as the Settings restart
+    drain), so the restart can interrupt them.
+    """
     from ciao import workspace_move
 
     guard = _workspace_move_guard(request)
@@ -7983,7 +7990,8 @@ async def workspace_move_start_endpoint(request: Request) -> JSONResponse:
                 port=request.app.state.config.pwa_port,
             )
         except workspace_move.MoveError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=500)
+            # Another move holds move.lock, or the pointer vanished: a conflict.
+            return JSONResponse({"error": str(exc)}, status_code=409)
         request.app.state.workspace_move_task = asyncio.create_task(
             workspace_move_app.drain_then_restart(
                 op,
