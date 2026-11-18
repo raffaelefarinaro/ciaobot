@@ -769,12 +769,6 @@ async def test_manager_private_streaming_state_is_collaborator_views() -> None:
     manager._turn_perf_started = {("chat-2", 1): 2.5}
     assert manager._streaming.turn_perf_started == {("chat-2", 1): 2.5}
 
-    manager._last_drain_result["chat-1"] = ("summary", False)
-    assert manager._streaming.last_drain_results["chat-1"] == ("summary", False)
-
-    manager._last_drain_result = {"chat-2": ("error", True)}
-    assert manager._streaming.last_drain_results == {"chat-2": ("error", True)}
-
     task = asyncio.create_task(asyncio.sleep(0))
     manager._between_turn_drains["chat-1"] = task
     assert manager._streaming.between_turn_drains["chat-1"] is task
@@ -1811,7 +1805,6 @@ async def test_superseded_drain_event_has_no_side_effects(
         ]
         assert chat.last_response == "before"
         assert chat.last_response_status == "success"
-        assert chat.chat_id not in manager._streaming.last_drain_results
         await _ticks()
         assert seen.memory == []
         probe.release.set()
@@ -1863,7 +1856,6 @@ def _assert_drain_left_no_trace(manager, chat, seen) -> None:
     assert seen.published == []
     assert chat.last_response == "before"
     assert chat.last_response_status == "success"
-    assert chat.chat_id not in manager._streaming.last_drain_results
 
 
 async def test_a_cancelled_drain_with_no_foreground_owner_has_no_side_effects(

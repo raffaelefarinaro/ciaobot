@@ -201,7 +201,7 @@
                  5-minute grace, and this row names the failure rather than
                  leaving it to a badge. -->
             <div
-              v-if="isIntervalSchedule(schedule) || schedule.last_status === 'error' || schedule.last_status === 'skipped' || schedule.last_status === 'unfinished' || schedule.last_status === 'retrying'"
+              v-if="isIntervalSchedule(schedule) || schedule.last_status === 'error' || schedule.last_status === 'skipped' || schedule.last_status === 'retrying'"
               class="prop-row"
             >
               <dt>Status</dt><dd>{{ intervalStatusLabel(schedule) }}</dd>
@@ -1054,7 +1054,6 @@ function scheduleNeedsAttention(s: Schedule): boolean {
   return Boolean(s.missed)
     || s.last_status === 'error'
     || s.last_status === 'skipped'
-    || s.last_status === 'unfinished'
     || s.last_status === 'missing-chat'
 }
 
@@ -1068,11 +1067,11 @@ function scheduleStateLabel(s: Schedule): string {
   return 'Scheduled'
 }
 
-// A row whose label sends you to the run's chat ("check the chat", subagents
-// never summarised) opens that chat. Everything else (a missed slot, a failed
-// run, a missing target) is explained on the automation's own page.
+// A row whose label sends you to the run's chat ("check the chat") opens that
+// chat. Everything else (a missed slot, a failed run, a missing target) is
+// explained on the automation's own page.
 function needsLookTarget(s: Schedule): string {
-  const chatStatus = s.last_status === 'skipped' || s.last_status === 'unfinished'
+  const chatStatus = s.last_status === 'skipped'
   if (!s.missed && chatStatus && s.last_run_chat_id) return `/chat/${s.last_run_chat_id}`
   return `/schedules/${s.schedule_id}`
 }
@@ -1270,9 +1269,6 @@ function intervalStatusLabel(s: Schedule): string {
   // had run many times and was blocked on a prompt read as one that had never
   // run at all.
   if (s.last_status === 'skipped') return 'last run needs you — check the chat'
-  // Split out of "skipped" server-side: the run ended with background
-  // subagents unsettled, so its chat has no question or approval to answer.
-  if (s.last_status === 'unfinished') return 'last run didn’t finish — subagent results never summarised'
   // schedules.RUN_STATUS_RETRYING: a network retry is armed in the run chat.
   if (s.last_status === 'retrying') return 'retrying — a service was unreachable, trying again'
   if (s.last_status === 'ok') return 'ok'

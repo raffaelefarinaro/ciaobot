@@ -835,7 +835,6 @@ async def test_drain_announces_only_the_follow_up_final_segment(
     # The complete execution text still reaches the handover and the schedule
     # classifier, which judges the finished synthesis rather than a preview.
     assert chat.last_response == whole
-    assert pcm._last_drain_result[chat.chat_id] == (whole, False)
 
 
 async def test_drain_uses_provider_final_text_without_text_events(
@@ -870,7 +869,6 @@ async def test_drain_uses_provider_final_text_without_text_events(
 
     ready = [ev for ev in published if ev.get("type") == "chat_result_ready"]
     assert [ev["snippet"] for ev in ready] == ["Final answer in file.md."]
-    assert pcm._last_drain_result[chat.chat_id] == (whole, False)
 
 
 async def test_drain_resets_the_final_segment_for_each_result(
@@ -1928,7 +1926,6 @@ async def test_an_empty_follow_up_result_is_skipped(tmp_path: Path) -> None:
     types = {ev.get("type") for ev in published}
     assert "chat_streaming_started" not in types
     assert "chat_streaming_done" not in types
-    assert "chat-1" not in pcm._last_drain_result
     assert calls == []
 
 
@@ -1951,10 +1948,6 @@ async def test_follow_ups_announce_once_when_the_count_reaches_zero(
     assert len(calls) == 1
     assert "Both agents reported" in calls[0][3]
     assert "chat-1" not in pcm._parked_result_announce
-    assert pcm._last_drain_result["chat-1"] == (
-        "Both agents reported. The bug is in routes_api.py.",
-        False,
-    )
 
 
 @pytest.mark.asyncio
@@ -1982,7 +1975,6 @@ async def test_a_follow_up_while_agents_still_run_replaces_the_park(
 
     assert calls == []
     assert pcm._parked_result_announce["chat-1"][2].startswith("Agent A reported")
-    assert "chat-1" not in pcm._last_drain_result
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
