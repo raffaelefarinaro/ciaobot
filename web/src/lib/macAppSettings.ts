@@ -31,8 +31,17 @@ export const MAC_APP_SETTINGS_CHANGED = 'ciaobot-app-settings-changed'
 
 const HANDLER = 'ciaobotAppSettings'
 const MAX_STRING = 300
-const STATES: readonly string[] = ['off', 'on', 'denied', 'deliveryOff', 'unavailable']
-const ACTIONS: readonly string[] = ['toggle', 'openSystemSettings', 'none']
+/** The only state/action pairs the app can send; any other pair is a
+ *  contradiction (a switch on an unavailable row, say) and reads as null. */
+const ACTION_FOR_STATE: Readonly<Record<MacNotificationState, MacNotificationAction>> = {
+  off: 'toggle',
+  on: 'toggle',
+  denied: 'openSystemSettings',
+  deliveryOff: 'openSystemSettings',
+  unavailable: 'none',
+}
+// C0/C1 controls plus the bidi marks, embeddings, overrides and isolates.
+const UNSAFE_CHARS = /[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g
 
 interface Handler {
   postMessage(request: { op: string }): Promise<unknown>
@@ -48,18 +57,25 @@ export function hasMacAppSettings(): boolean {
 }
 
 function cap(value: unknown): string | null {
-  return typeof value === 'string' ? value.slice(0, MAX_STRING) : null
+  if (typeof value !== 'string') return null
+  const clean = value.replace(UNSAFE_CHARS, '')
+  if (clean.length <= MAX_STRING) return clean
+  const last = clean.charCodeAt(MAX_STRING - 1)
+  // Do not cut between the halves of a surrogate pair.
+  const end = last >= 0xd800 && last <= 0xdbff ? MAX_STRING - 1 : MAX_STRING
+  return clean.slice(0, end)
 }
 
 function parseNotifications(raw: unknown): MacNotificationSettings | null | undefined {
   if (raw === null) return null
-  if (typeof raw !== 'object' || raw === undefined) return undefined
+  if (typeof raw !== 'object') return undefined
   const n = raw as Record<string, unknown>
   const title = cap(n.title)
   const detail = cap(n.detail)
-  if (typeof n.state !== 'string' || !STATES.includes(n.state)) return undefined
-  if (typeof n.action !== 'string' || !ACTIONS.includes(n.action)) return undefined
+  if (typeof n.state !== 'string' || !Object.hasOwn(ACTION_FOR_STATE, n.state)) return undefined
+  if (ACTION_FOR_STATE[n.state as MacNotificationState] !== n.action) return undefined
   if (typeof n.ready !== 'boolean' || title === null || detail === null) return undefined
+  if (title.trim() === '') return undefined
   return {
     state: n.state as MacNotificationState,
     ready: n.ready,

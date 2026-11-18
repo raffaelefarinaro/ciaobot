@@ -99,9 +99,18 @@ const macBusy = ref(false)
 const macError = ref('')
 const MAC_REFUSED = 'Ciaobot for Mac did not change notifications. Use the menu bar: Ciaobot \u2192 Settings.'
 
+// Each read or action takes a ticket; only the latest ticket may write, so an
+// older reply that lands late cannot overwrite a newer snapshot.
+let macSeq = 0
+
 async function refreshMac() {
+  const ticket = ++macSeq
   const snapshot = await readMacAppSettings()
-  if (snapshot?.notifications) mac.value = snapshot.notifications
+  if (ticket !== macSeq) return
+  // No usable snapshot (bridge gone, refused, malformed): the last state is not
+  // trustworthy any more, so drop back to the static text.
+  mac.value = snapshot?.notifications ?? null
+  if (snapshot?.notifications) macError.value = ''
 }
 
 async function macAction() {
@@ -109,7 +118,9 @@ async function macAction() {
   macBusy.value = true
   macError.value = ''
   try {
+    const ticket = ++macSeq
     const snapshot = await requestMacNotificationAction()
+    if (ticket !== macSeq) return
     if (snapshot?.notifications) mac.value = snapshot.notifications
     else macError.value = MAC_REFUSED
   } finally {

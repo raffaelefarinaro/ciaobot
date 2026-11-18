@@ -53,6 +53,17 @@ describe('macAppSettings', () => {
     ['missing notifications', { v: 1 }],
     ['not an object', 'refused'],
     ['null', null],
+    ['array reply', [{ v: 1, notifications: note }]],
+    ['notifications as array', { v: 1, notifications: [note] }],
+    ['notifications as string', { v: 1, notifications: 'on' }],
+    ['toggle action on an unavailable state', { v: 1, notifications: { ...note, state: 'unavailable', action: 'toggle' } }],
+    ['none action on an on state', { v: 1, notifications: { ...note, action: 'none' } }],
+    ['openSystemSettings on an off state', { v: 1, notifications: { ...note, state: 'off', action: 'openSystemSettings' } }],
+    ['toggle action on a denied state', { v: 1, notifications: { ...note, state: 'denied', action: 'toggle' } }],
+    ['empty title', { v: 1, notifications: { ...note, title: '' } }],
+    ['whitespace title', { v: 1, notifications: { ...note, title: '  \t ' } }],
+    ['title of only control characters', { v: 1, notifications: { ...note, title: '\u0001\u202E' } }],
+    ['inherited state name', { v: 1, notifications: { ...note, state: 'toString' } }],
   ])('treats %s as null', async (_label, reply) => {
     install(async () => reply)
     expect(await readMacAppSettings()).toBeNull()
@@ -62,6 +73,39 @@ describe('macAppSettings', () => {
     install(async () => ({ v: 1, notifications: { ...note, title: 'x'.repeat(500), detail: 'y'.repeat(500) } }))
     const out = await readMacAppSettings()
     expect(out?.notifications?.title).toHaveLength(300)
+    expect(out?.notifications?.detail).toHaveLength(300)
+  })
+
+  it.each([
+    ['on', 'toggle'], ['off', 'toggle'],
+    ['denied', 'openSystemSettings'], ['deliveryOff', 'openSystemSettings'],
+    ['unavailable', 'none'],
+  ])('accepts the %s/%s pair', async (state, action) => {
+    install(async () => ({ v: 1, notifications: { ...note, state, action } }))
+    const out = await readMacAppSettings()
+    expect(out?.notifications?.state).toBe(state)
+    expect(out?.notifications?.action).toBe(action)
+  })
+
+  it('strips control and bidi-override characters from title and detail', async () => {
+    install(async () => ({
+      v: 1,
+      notifications: { ...note, title: 'a\u0000b\u202Ec\u2066d\u200Fe\u0085f', detail: 'x\u0007y\u061Cz\u007F' },
+    }))
+    const out = await readMacAppSettings()
+    expect(out?.notifications?.title).toBe('abcdef')
+    expect(out?.notifications?.detail).toBe('xyz')
+  })
+
+  it('does not split a surrogate pair when truncating', async () => {
+    const emoji = '\u{1F600}'
+    install(async () => ({
+      v: 1,
+      notifications: { ...note, title: 'x'.repeat(299) + emoji, detail: 'y'.repeat(298) + emoji + 'z' },
+    }))
+    const out = await readMacAppSettings()
+    expect(out?.notifications?.title).toBe('x'.repeat(299))
+    expect(out?.notifications?.detail).toBe('y'.repeat(298) + emoji)
     expect(out?.notifications?.detail).toHaveLength(300)
   })
 
