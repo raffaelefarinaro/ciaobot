@@ -48,7 +48,7 @@ import yaml
 import ciao
 from ciao import agent_paths, behavioral_eval, gws_auth
 from ciao.config import PERMISSION_MODES
-from ciao.os_support.processes import python_isolation_flags
+from ciao.os_support.processes import isolated_probe_flags, python_isolation_flags
 from ciao.os_support.tool_path import dedupe_path
 from ciao.tool_path import common_tool_dirs
 
@@ -2497,7 +2497,7 @@ def cli_package_mismatch() -> str | None:
     script sees.
     """
     harness = Path(__file__).resolve().parent
-    probe = [sys.executable, "-I", "-c", "import ciao; print(ciao.__file__)"]
+    probe = [sys.executable, *isolated_probe_flags(), "-c", "import ciao; print(ciao.__file__)"]
     try:
         proc = subprocess.run(
             probe, capture_output=True, encoding="utf-8", errors="replace", timeout=60, check=False, env=_BASE_ENV

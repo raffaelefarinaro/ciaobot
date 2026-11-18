@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     pass
 
 from ciao import __version__, install_receipt
+from ciao.os_support.processes import isolated_probe_flags
 
 
 DEFAULT_GITHUB_REPO = "raffaelefarinaro/ciaobot"
@@ -357,7 +358,7 @@ def installed_version(timeout_s: float = 10.0) -> str | None:
 
     try:
         result = subprocess.run(
-            [sys.executable, "-I", "-c", "import ciao; print(ciao.__version__)"],
+            [sys.executable, *isolated_probe_flags(), "-c", "import ciao; print(ciao.__version__)"],
             capture_output=True,
             text=True, encoding="utf-8",
             timeout=timeout_s,

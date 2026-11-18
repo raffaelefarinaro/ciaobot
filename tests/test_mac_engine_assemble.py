@@ -62,9 +62,9 @@ def _dist(site: Path, name: str, version: str, requires=(), scripts=(), prefix: 
 
 def _macho(cputype=ARM64, filetype=2, minos=(13, 0), dylibs=("/usr/lib/libSystem.B.dylib",), rpaths=(),
            fat=None, version_cmd="build", ncmds=None, first_cmdsize=None, magic=b"\xcf\xfa\xed\xfe", platform=1,
-           bad_cmd=None) -> bytes:
+           bad_cmd=None, fat_kwargs=None, dyld_env=False, pad=0) -> bytes:
     if fat is not None:
-        slices = [(ct, _macho(cputype=ct)) for ct in fat]
+        slices = [(ct, _macho(cputype=ct, **(fat_kwargs or {}))) for ct in fat]
         header = b"\xca\xfe\xba\xbe" + struct.pack(">I", len(slices))
         offset = 8 + 20 * len(slices)
         offset += -offset % 16
@@ -89,6 +89,10 @@ def _macho(cputype=ARM64, filetype=2, minos=(13, 0), dylibs=("/usr/lib/libSystem
         size = 12 + len(raw)
         size += -size % 8
         cmds.append(struct.pack("<III", 0x8000001C, size, 12) + raw.ljust(size - 12, b"\0"))
+    if dyld_env:
+        cmds.append(struct.pack("<III", 0x27, 16, 12) + b"A=b\0")
+    if pad:
+        cmds.append(struct.pack("<II", 0x1B, pad) + b"\0" * (pad - 8))
     if bad_cmd is not None:
         cmds.append(struct.pack("<II", 0x1B, bad_cmd) + b"\0" * 8)
     if first_cmdsize is not None and cmds:
@@ -185,10 +189,20 @@ def env(tmp_path, monkeypatch):
         sha256=hashes["build_inputs_sha256"],
         data={"build_tools": [tool],
               "derived_wheels": [{"name": "http-ece", "version": "1.2.1",
+                                  "wheel": {"filename": "http-ece-1.2.1.whl", "size": 10, "sha256": "d" * 64},
                                   "license": {"text_file": {"size": len(http_licence),
                                                             "sha256": _sha(http_licence)}}}]})
-    inputs = SimpleNamespace(hashes=hashes, pin=pin, build_inputs=build_inputs)
+    def lock_wheel(name, version, filename):
+        match = [row for row in rows if row["origin"] == "lock" and (row["name"], row["version"], row["filename"])
+                 == (name, version, filename)]
+        if len(match) != 1:
+            raise ea.AssembleError()
+        return {key: match[0][key] for key in ("filename", "size", "sha256")}
+
+    inputs = SimpleNamespace(hashes=hashes, pin=pin, build_inputs=build_inputs, lock_wheel=lock_wheel)
     monkeypatch.setattr(ea, "_platform_check", lambda: None)
+    pristine = _macho()
+    monkeypatch.setattr(ea, "_extract_runtime", lambda archive, dest: _write(dest / ea.PYTHON_REL, pristine))
     monkeypatch.setattr(ea, "_inputs", lambda: inputs)
     monkeypatch.setattr(ei, "_load_packaging", lambda house: packaging)
 
@@ -555,6 +569,52 @@ def test_build_path_anywhere_is_refused(env, needle):
     env.refused()
 
 
+@pytest.mark.parametrize("needle", ["source", "build", "house"])
+def test_input_paths_anywhere_are_refused(env, needle):
+    def hook(engine):
+        value = {"source": env.export, "build": env.build, "house": env.house}[needle]
+        with (engine / SITE / "ciao/__init__.py").open("ab") as handle:
+            handle.write(os.fsencode(os.fspath(value)))
+
+    env.pip_hook = hook
+    env.refused()
+
+
+def _rewrite_receipt(env, mutate):
+    path = env.install / "install-receipt.json"
+    receipt = json.loads(path.read_text())
+    mutate(receipt)
+    path.write_text(json.dumps(receipt))
+    (env.install / "requirements.txt").write_text(ei.requirements_text(receipt["selected"]))
+
+
+@pytest.mark.parametrize("change", [
+    lambda row: row.update(sha256="f" * 64),
+    lambda row: row.update(size=11),
+    lambda row: row.update(filename="other-1.0.whl"),
+    lambda row: row.update(version="9.9"),
+])
+def test_selected_rows_must_equal_the_lock(env, change):
+    _rewrite_receipt(env, lambda receipt: change(receipt["selected"][1]))
+    env.refused(calls=0)
+
+
+def test_derived_row_must_equal_the_pin(env):
+    _rewrite_receipt(env, lambda receipt: receipt["selected"][2].update(sha256="f" * 64))
+    env.refused(calls=0)
+
+
+def test_selected_rows_must_cover_the_derived_pins(env):
+    _rewrite_receipt(env, lambda receipt: receipt["selected"].pop(2))
+    env.refused(calls=0)
+
+
+def test_tampered_interpreter_with_a_matching_receipt_is_refused(env):
+    (env.prefix / ea.PYTHON_REL).write_bytes(_macho() + b"trojan")
+    env.refresh_install()
+    env.refused(calls=0)
+
+
 def test_provenance_is_deterministic_and_path_free(env, tmp_path):
     other = env.root / "out2"
     other.mkdir()
@@ -645,6 +705,33 @@ def test_macho_accepts_system_and_loader_paths(tmp_path):
     assert by_path["lib/c.so"]["filetype"] == "bundle"
 
 
+def test_fat_file_with_many_arches_is_audited_not_skipped(tmp_path):
+    many = [0x01000007] * 44 + [ARM64]
+    good = _macho(fat=many)
+    assert len(good) > 0
+    audited = ea.macho_audit(_engine(tmp_path, {"lib/big.dylib": good}))
+    assert "lib/big.dylib" in [row["path"] for row in audited]
+    bad = _macho(fat=many, fat_kwargs={"dylibs": ["/opt/homebrew/lib/libx.dylib"]})
+    with pytest.raises(ea.AssembleError):
+        ea.macho_audit(_engine(tmp_path / "b", {"lib/big.dylib": bad}))
+
+
+def test_fat_arch_count_is_capped(tmp_path):
+    blob = _macho(fat=[0x01000007] * ea.MAX_FAT_ARCHES + [ARM64])
+    with pytest.raises(ea.AssembleError):
+        ea.macho_audit(_engine(tmp_path, {"lib/big.dylib": blob}))
+
+
+def test_rpath_resolution_follows_dyld_order(tmp_path):
+    _write(tmp_path / "outside.dylib", _macho(filetype=6))
+    inside = _macho(filetype=6)
+    outside_first = _macho(dylibs=["@rpath/outside.dylib"], rpaths=["@loader_path/../..", "@loader_path/../lib"])
+    inside_first = _macho(dylibs=["@rpath/outside.dylib"], rpaths=["@loader_path/../lib", "@loader_path/../.."])
+    with pytest.raises(ea.AssembleError):
+        ea.macho_audit(_engine(tmp_path, {"lib/outside.dylib": inside, "lib/probe.dylib": outside_first}))
+    ea.macho_audit(_engine(tmp_path / "ok", {"lib/outside.dylib": inside, "lib/probe.dylib": inside_first}))
+
+
 def test_macho_executable_path_and_rpath_variants(tmp_path):
     cases = {
         "bin/helper.dylib": _macho(filetype=6),
@@ -673,6 +760,8 @@ def test_macho_executable_path_and_rpath_variants(tmp_path):
     ("absolute-with-system-rpath", _macho(dylibs=["/opt/homebrew/lib/libssl.dylib"], rpaths=["/usr/lib/"])),
     ("fat-no-arm64", _macho(fat=[0x01000007, 7])),
     ("object", _macho(filetype=1)),
+    ("dyld-environment", _macho(dyld_env=True)),
+    ("sizeofcmds-over-cap", _macho(pad=(1 << 20) + 8)),
     ("system-escape", _macho(dylibs=["/usr/lib/../../opt/x.dylib"])),
     ("absolute-missing", _macho(dylibs=["/Library/x.dylib"])),
 ])
@@ -737,12 +826,13 @@ UNSET = ("PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONINSPECT PYTHONUSERBASE PYTHO
          "PYTHONBREAKPOINT PYTHONWARNINGS PYTHONPYCACHEPREFIX DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH "
          "DYLD_FRAMEWORK_PATH DYLD_FALLBACK_LIBRARY_PATH DYLD_FALLBACK_FRAMEWORK_PATH DYLD_VERSIONED_LIBRARY_PATH "
          "DYLD_VERSIONED_FRAMEWORK_PATH DYLD_IMAGE_SUFFIX DYLD_ROOT_PATH DYLD_SHARED_REGION DYLD_SHARED_CACHE_DIR "
-         "DYLD_FORCE_FLAT_NAMESPACE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE").split()
+         "DYLD_FORCE_FLAT_NAMESPACE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE OPENSSL_CONF OPENSSL_MODULES "
+         "OPENSSL_ENGINES SSLKEYLOGFILE NODE_EXTRA_CA_CERTS NODE_OPTIONS NODE_TLS_REJECT_UNAUTHORIZED").split()
 
 
 def test_launcher_sanitises_the_environment(launcher):
     names = UNSET
-    assert set(_unset_names()) == set(names)
+    assert set(names) <= set(_unset_names())
     given = [f"{name}=/x" for name in names] + ["SSL_CERT_FILE=/evil", "KEEP=1"]
     # DYLD_* is also removed by SIP for /bin/sh on macOS; the unset list is what protects non-SIP hosts
     # (the Linux CI run), so that part of this test is mutation-effective there.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess
@@ -75,6 +76,60 @@ def test_no_reexec_argv_bypasses_the_helper() -> None:
         if pattern.search(path.read_text(encoding="utf-8"))
     ]
     assert hits == []
+
+
+# Interpreters that are an installed tool env or a service-manager plist, never the
+# bundled engine's own sys.executable, so they cannot inherit its -B.
+_FOREIGN_INTERPRETER_FILES = {
+    "ciao/native_repair.py",
+    "ciao/engine_update.py",
+    "ciao/update_host.py",
+    "ciao/native_installer.py",
+}
+
+
+def _bare_isolated_argvs(source: str) -> list[int]:
+    """Line numbers of argv lists/tuples with a literal "-I" and neither "-B" nor a flags helper."""
+    bad = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, (ast.List, ast.Tuple)):
+            continue
+        consts = [e.value for e in node.elts if isinstance(e, ast.Constant)]
+        if "-I" not in consts or "-B" in consts:
+            continue
+        helper = any(
+            isinstance(e, ast.Starred) and isinstance(e.value, ast.Call) and "flags" in ast.unparse(e.value.func)
+            for e in node.elts
+        )
+        if not helper:
+            bad.append(node.lineno)
+    return bad
+
+
+def test_no_interpreter_argv_passes_dash_i_without_dash_b() -> None:
+    # -I ignores PYTHONDONTWRITEBYTECODE, so a bare "-I" argv would write __pycache__ into the bundle.
+    hits = []
+    for path in (REPO / "ciao").rglob("*.py"):
+        rel = path.relative_to(REPO).as_posix()
+        if rel in _FOREIGN_INTERPRETER_FILES or rel == "ciao/os_support/processes.py":
+            continue
+        hits += [f"{rel}:{n}" for n in _bare_isolated_argvs(path.read_text(encoding="utf-8"))]
+    assert hits == []
+
+
+def test_bare_dash_i_detector_flags_a_bad_site() -> None:
+    assert _bare_isolated_argvs('x = [sys.executable, "-I", "-c", "pass"]\n') == [1]
+    assert _bare_isolated_argvs('x = [sys.executable, *isolated_probe_flags(), "-c", "p"]\n') == []
+    assert _bare_isolated_argvs('x = [sys.executable, "-I", "-B", "-c", "p"]\n') == []
+
+
+def test_probe_flags_repeat_dash_b_only_when_bytecode_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao.os_support.processes import isolated_probe_flags
+
+    _flags(monkeypatch, 0, 1)
+    assert isolated_probe_flags() == ["-I", "-B"]
+    _flags(monkeypatch, 0, 0)
+    assert isolated_probe_flags() == ["-I"]
 
 
 def test_isolated_reexec_ignores_a_hostile_environment(tmp_path: Path) -> None:

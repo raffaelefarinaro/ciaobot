@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from ciao.jsonio import read_json_dict
+from ciao.os_support.processes import isolated_probe_flags
 import re
 import subprocess
 import sys
@@ -958,7 +959,7 @@ def _probe_bundled_claude(root: Path) -> ProviderProbe:
         proc = subprocess.run(
             [
                 sys.executable,
-                "-I",
+                *isolated_probe_flags(),
                 "-c",
                 "import json, claude_agent_sdk._version as v, "
                 "claude_agent_sdk._cli_version as c; "

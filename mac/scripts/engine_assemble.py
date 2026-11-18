@@ -55,6 +55,8 @@ RUNTIME_STATEMENT = (
 MAX_RECEIPT_BYTES = 64 * 1024 * 1024
 MAX_LAUNCHER_BYTES = 64 * 1024
 MAX_MACHO_COMMANDS = 4096
+MAX_SIZEOFCMDS = 1 << 20
+MAX_FAT_ARCHES = 4096
 THIN_MAGIC_64 = b"\xcf\xfa\xed\xfe"
 FAT_MAGIC = b"\xca\xfe\xba\xbe"
 FAT_MAGIC_64 = b"\xca\xfe\xba\xbf"
@@ -65,6 +67,7 @@ FILETYPES = {2: "execute", 6: "dylib", 8: "bundle"}
 LC_BUILD_VERSION = 0x32
 LC_VERSION_MIN_MACOSX = 0x24
 LC_RPATH = 0x8000001C
+LC_DYLD_ENVIRONMENT = 0x27
 LC_LOAD_DYLIBS = (0xC, 0x80000018, 0x8000001F, 0x20, 0x80000023)
 SYSTEM_PREFIXES = ("/usr/lib/", "/System/Library/")
 SYSTEM_PREFIXES_BARE = ("/usr/lib", "/System/Library")
@@ -181,6 +184,42 @@ def load_install(install: Path, inputs: Any) -> dict[str, Any]:
     _require(requirements == engine_install.requirements_text(selected))
     receipt["prefix"] = prefix
     return receipt
+
+
+def bind_selected(receipt: dict[str, Any], inputs: Any) -> None:
+    """Each receipt row must equal the lock wheel (origin lock) or the D1 derived pin (origin derived)."""
+    derived_pins = {d["name"]: d for d in inputs.build_inputs.data["derived_wheels"]}
+    names: set[str] = set()
+    for row in receipt["selected"]:
+        _require(row["name"] not in names)
+        names.add(row["name"])
+        if row["origin"] == "derived":
+            pin = derived_pins.get(row["name"])
+            _require(pin is not None and row["version"] == pin["version"])
+            wheel = pin["wheel"]
+            expected = {"filename": wheel["filename"], "size": wheel["size"], "sha256": wheel["sha256"]}
+        else:
+            lock = inputs.lock_wheel(row["name"], row["version"], row["filename"])
+            expected = {key: lock[key] for key in ("filename", "size", "sha256")}
+        _require(all(row[key] == value for key, value in expected.items()))
+    _require(names >= set(derived_pins))
+
+
+def _extract_runtime(archive: Path, destination: Path) -> None:
+    """The seam that unpacks the pinned runtime archive; tests patch it."""
+    engine_runtime.extract_pinned_runtime(archive, destination)
+
+
+def check_interpreter(python: Path, house: Path, pin: dict[str, Any], scratch: Path) -> None:
+    """The prefix's interpreter must be byte-identical to the one in the pinned runtime archive."""
+    try:
+        _extract_runtime(house / pin["filename"], scratch)
+        pristine = scratch / PYTHON_REL
+        _require(pristine.is_file() and not pristine.is_symlink())
+        _require(engine_install._file_digest(pristine) == engine_install._file_digest(python))
+    except (engine_artifact.ArtifactError, engine_runtime.RuntimePinError, OSError) as exc:
+        raise AssembleError() from exc
+    shutil.rmtree(scratch)
 
 
 def load_project(source_root: Path, build_dir: Path, receipt_path: Path, inputs: Any,
@@ -428,6 +467,15 @@ def assert_no_installer(engine: Path) -> None:
         _require(rel != f"{STDLIB_REL}/ensurepip" and not rel.startswith(f"{STDLIB_REL}/ensurepip/"))
 
 
+def build_needles(*paths: Path) -> list[Path]:
+    """Every input and build path, as given and fully resolved, deduplicated in order."""
+    found: dict[str, Path] = {}
+    for path in paths:
+        for variant in (Path(os.path.abspath(path)), Path(os.path.realpath(path))):
+            found.setdefault(os.fspath(variant), variant)
+    return list(found.values())
+
+
 def refuse_needles(engine: Path, needles: list[Path]) -> None:
     """No file content and no symlink target in the whole tree names a build or input path."""
     encoded = [os.fsencode(os.fspath(needle)) for needle in needles]
@@ -458,6 +506,11 @@ def _format_minos(value: int) -> str:
     return f"{major}.{minor}" + (f".{patch}" if patch else "")
 
 
+def _plausible_cputype(cputype: int) -> bool:
+    """A Mach-O cputype: a small id with at most the 64-bit ABI flags; a Java constant pool is not."""
+    return (cputype & 0x00FFFF00) == 0 and (cputype >> 24) in (0, 1, 2)
+
+
 def _slice_bounds(handle: Any, size: int) -> tuple[int, int] | None:
     """(offset, length) of the arm64 slice, or None when the file is not Mach-O at all."""
     handle.seek(0)
@@ -473,7 +526,13 @@ def _slice_bounds(handle: Any, size: int) -> tuple[int, int] | None:
         return None
     count = struct.unpack(">I", magic[4:8])[0]
     if count >= JAVA_CLASS_FAT_COUNT:
-        return None
+        # A Java class file shares the fat magic and reads as a huge arch count. Only a first entry that
+        # is not a plausible cputype proves that; a plausible one is audited like any other fat file.
+        first = handle.read(4)
+        if len(first) < 4 or not _plausible_cputype(struct.unpack(">I", first)[0]):
+            return None
+        _require(count <= MAX_FAT_ARCHES)
+        handle.seek(8)
     _require(count > 0)
     wide = head == FAT_MAGIC_64
     width = 32 if wide else 20
@@ -537,6 +596,8 @@ def _audit_slice(engine_real: str, path: Path, filetype: str, blob: bytes) -> di
             offset = struct.unpack("<I", body[8:12])[0]
             _require(24 <= offset < cmdsize)
             dylibs.append(_cstring(body, offset))
+        elif cmd == LC_DYLD_ENVIRONMENT:
+            raise AssembleError()  # dyld would apply an environment variable the launcher cannot sanitise
         elif cmd == LC_RPATH:
             _require(cmdsize >= 12)
             offset = struct.unpack("<I", body[8:12])[0]
@@ -559,14 +620,17 @@ def _audit_slice(engine_real: str, path: Path, filetype: str, blob: bytes) -> di
             continue
         _require(name.startswith("@rpath/"))
         rest = name[len("@rpath/"):]
+        # dyld takes the first rpath whose expansion exists, so that match must be inside the prefix.
         resolved = False
         for rpath in rpaths:
             if _system(rpath):
                 resolved = True
-                continue
+                break
             base = _resolve_base(rpath, loader_dir, executable_dir)
-            if base is not None and _under(engine_real, f"{base}/{rest}"):
+            if base is not None and os.path.isfile(os.path.realpath(f"{base}/{rest}")):
+                _require(_under(engine_real, f"{base}/{rest}"))
                 resolved = True
+                break
         _require(resolved)
     return {"filetype": filetype, "arch": "arm64", "minos": _format_minos(max(versions)), "dylibs": dylibs,
             "rpaths": rpaths}
@@ -590,7 +654,7 @@ def macho_audit(engine: Path) -> list[dict[str, Any]]:
             header = handle.read(32)
             _require(len(header) == 32 and header[:4] == THIN_MAGIC_64)
             _magic, _cpu, _sub, kind_id, _ncmds, sizeofcmds, _flags, _res = struct.unpack("<IiiIIIII", header)
-            _require(32 + sizeofcmds <= length and kind_id in FILETYPES)
+            _require(sizeofcmds <= MAX_SIZEOFCMDS and 32 + sizeofcmds <= length and kind_id in FILETYPES)
             blob = header + handle.read(sizeofcmds)
             _require(len(blob) == 32 + sizeofcmds)
         entry = _audit_slice(engine_real, path, FILETYPES[kind_id], blob)
@@ -685,12 +749,14 @@ def assemble(wheelhouse: Path, install: Path, source: Path, project_build: Path,
         pin = inputs.pin
         _require(".".join(pin["python_version"].split(".")[:2]) == PY_MM)
         receipt = load_install(install, inputs)
+        bind_selected(receipt, inputs)
         project = load_project(source, project_build, project_receipt, inputs, links)
         version = project["version"]
         engine = work / "engine"
         copy_prefix(receipt["prefix"], engine, receipt["inventory"])
         python, site = engine / PYTHON_REL, engine / SITE_REL
         _require(python.is_file() and site.is_dir())
+        check_interpreter(python, house, pin, work / "pristine")
         licences = check_licences_and_cafile(engine, inputs)
         baseline = engine_install._paths(engine)
         bin_baseline = {rel for rel in baseline if rel.startswith("bin/")}
@@ -752,7 +818,7 @@ def assemble(wheelhouse: Path, install: Path, source: Path, project_build: Path,
         now_bin = {rel for rel in engine_install._paths(engine) if rel.startswith("bin/")}
         _require(now_bin == (bin_baseline - set(PIP_SCRIPTS)) | {LAUNCHER_REL})
         _require(set(engine_install._read_dists(site, packaging)) == {row["name"] for row in rows})
-        refuse_needles(engine, [work, Path(os.path.realpath(install))])
+        refuse_needles(engine, build_needles(work, install, source, project_build, wheelhouse))
         # Step 13-14.
         macho = macho_audit(engine)
         provenance = build_provenance(inputs, receipt, project, licences, launcher, removed, removed_dirs, scripts)
