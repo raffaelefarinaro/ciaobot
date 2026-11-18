@@ -345,8 +345,8 @@ final class AppcastScriptTests: XCTestCase {
 
     // MARK: - Refusals about the archive's contents
 
-    /// Until the engine is distribution-signed (#3128 G) no update may carry it,
-    /// including through a dangling symlink standing in for it.
+    /// A bundled engine that is not distribution-signed (#3128 G; here an empty directory) or is not a real
+    /// directory (a dangling symlink standing in for it) must not become an update.
     func testRefusesAnArchiveThatBundlesTheEngine() throws {
         for dangling in [false, true] {
             let archive = try makeDmg(version: "0.1.2")
@@ -364,7 +364,8 @@ final class AppcastScriptTests: XCTestCase {
             )
 
             XCTAssertNotEqual(result.status, 0, "dangling=\(dangling): \(result.output)")
-            XCTAssertTrue(result.output.contains("#3128 G"), result.output)
+            XCTAssertTrue(
+                result.output.contains(dangling ? "not a real directory" : "not distribution-signed"), result.output)
             XCTAssertNil(try recordedArgumentsIfAny())
             try fileManager.removeItem(at: engine)
         }

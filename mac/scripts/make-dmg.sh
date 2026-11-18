@@ -127,10 +127,6 @@ esac
 if in_applications "$app"; then
     die "refusing an app inside an Applications folder: $app"
 fi
-# Distribution signing of the bundled engine is #3128 G. Until it lands an
-# engine-bearing bundle cannot be notarized, so it must not become an image.
-[ ! -e "$app/Contents/Resources/engine" ] && [ ! -L "$app/Contents/Resources/engine" ] \
-    || die "the bundled engine has no distribution signing yet (#3128 G); refusing to build an image of it"
 app_name=$(basename -- "$app")
 
 plist=$app/Contents/Info.plist
@@ -157,6 +153,19 @@ update_config=release/update-config.env
 case $UPDATE_TEAM_ID in
     *[!A-Z0-9]*) die "UPDATE_TEAM_ID must be a plain Apple team identifier: $UPDATE_TEAM_ID" ;;
 esac
+
+# A bundled engine (#3128 G) must be distribution-signed by this team before it
+# becomes an image: every non-vendor Mach-O with Developer ID, hardened runtime
+# and a secure timestamp, and the SDK's CLI still verifying as Anthropic's.
+engine=$app/Contents/Resources/engine
+if [ -e "$engine" ] || [ -L "$engine" ]; then
+    [ -d "$engine" ] && [ ! -L "$engine" ] || die "the bundled engine is not a real directory: $engine"
+    command -v python3 >/dev/null \
+        && python3 -I -S -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' \
+        || die "python3 3.12 or newer is required to check the bundled engine"
+    python3 -I -S scripts/engine_sign.py check --distribution "$UPDATE_TEAM_ID" "$engine" \
+        || die "the bundled engine is not distribution-signed by team $UPDATE_TEAM_ID; refusing to build an image of it"
+fi
 
 signature=$(codesign -d --verbose=4 "$app" 2>&1) \
     || die "could not read the app's code signature: $app"

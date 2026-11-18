@@ -29,6 +29,13 @@ GOOD_VENDOR = (
     "TeamIdentifier=Q6L2SF6YDW\n"
 )
 ADHOC = "CodeDirectory v=20400 flags=0x2(adhoc)\nSignature=adhoc\nTeamIdentifier=not set\n"
+TEAM = "AXBFS96Y9F"
+IDENTITY = f"Developer ID Application: Someone Example ({TEAM})"
+DIST = (
+    "CodeDirectory v=20500 size=1000 flags=0x10000(runtime) hashes=3+7 location=embedded\n"
+    f"Authority={IDENTITY}\nAuthority=Developer ID Certification Authority\nAuthority=Apple Root CA\n"
+    f"Timestamp=Nov 18, 2026 at 10:00:00\nTeamIdentifier={TEAM}\n"
+)
 SIGNED_SET = ["bin/python3.12", "lib/b.dylib", "lib/mislabelled.txt", "lib/x/deep/a.so"]
 
 
@@ -47,6 +54,7 @@ class Fake:
         self.vendor_verify = 0
         self.verify_fail: set[str] = set()
         self.display_override: dict[str, str] = {}
+        self.default_display = ADHOC
         self.also = None  # callable run while signing
 
     def __call__(self, argv):
@@ -66,7 +74,7 @@ class Fake:
         if "-d" in argv:
             if rel == VENDOR:
                 return 0, self.vendor_display
-            return 0, self.display_override.get(rel, ADHOC)
+            return 0, self.display_override.get(rel, self.default_display)
         raise AssertionError(argv)
 
     def signs(self):
@@ -306,7 +314,9 @@ def test_check_refuses_a_failing_verify_and_writes_nothing(rig):
 
 def test_cli(rig, capsys):
     engine, _fake = rig
-    assert es.main(["sign", "--distribution", "X", str(engine)]) == 2
+    assert es.main(["sign", "--distribution", str(engine)]) == 2
+    assert es.main(["sign", "--distribution", TEAM, str(engine)]) == 2
+    assert es.main(["check", "--distribution", str(engine)]) == 2
     assert es.main(["sign", "--adhoc"]) == 2
     assert es.main([]) == 2
     assert "engine sign failed: usage" in capsys.readouterr().err
@@ -314,3 +324,108 @@ def test_cli(rig, capsys):
     assert capsys.readouterr().err == "engine sign failed\n"
     assert es.main(["check", str(engine)]) == 0
     assert capsys.readouterr().err == ""
+
+
+def dist_requirement(team):
+    return (
+        "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6]"
+        " and certificate leaf[field.1.2.840.113635.100.6.1.13]"
+        f' and certificate leaf[subject.OU] = "{team}"')
+
+
+def test_distribution_argv_is_exact(rig):
+    engine, fake = rig
+    fake.default_display = DIST
+    assert es.main(["sign", "--distribution", TEAM, IDENTITY, str(engine)]) == 0
+    sign_calls = [c for c in fake.calls if "--force" in c]
+    assert sorted(rels(engine, [c[-1] for c in sign_calls])) == SIGNED_SET
+    for call in sign_calls:
+        assert call == [es.CODESIGN, "--force", "--sign", IDENTITY, "--options", "runtime", "--timestamp", call[-1]]
+    for call in fake.calls:
+        assert not {"--deep", "--entitlements", "--timestamp=none"} & set(call)
+    assert rels(engine, [c[-1] for c in sign_calls]) == [
+        "lib/x/deep/a.so", "bin/python3.12", "lib/b.dylib", "lib/mislabelled.txt"]
+    assert str(engine / VENDOR) not in fake.signs()
+
+
+def test_distribution_verification_pins_the_team(rig):
+    engine, fake = rig
+    fake.default_display = DIST
+    assert es.main(["check", "--distribution", TEAM, str(engine)]) == 0
+    target = str(engine / "bin/python3.12")
+    assert [es.CODESIGN, "--verify", "--strict", "-R=" + dist_requirement(TEAM), target] in fake.calls
+    assert fake.signs() == []
+
+
+@pytest.mark.parametrize("case", [
+    "adhoc", "adhoc-line-on-an-otherwise-full-signature", "wrong-team", "no-runtime", "no-timestamp",
+    "not-developer-id", "verify-fails"])
+def test_distribution_check_refuses_a_weak_signature(rig, case):
+    engine, fake = rig
+    fake.default_display = DIST
+    assert es.main(["check", "--distribution", TEAM, str(engine)]) == 0
+    bad = {
+        "adhoc": ADHOC,
+        "adhoc-line-on-an-otherwise-full-signature": DIST + "Signature=adhoc\n",
+        "wrong-team": DIST.replace(f"TeamIdentifier={TEAM}", "TeamIdentifier=ZZZZZZZZZZ"),
+        "no-runtime": DIST.replace("0x10000(runtime)", "0x0(none)"),
+        "no-timestamp": DIST.replace("Timestamp=Nov 18, 2026 at 10:00:00\n", ""),
+        "not-developer-id": DIST.replace(f"Authority={IDENTITY}", "Authority=Apple Development: X"),
+        "verify-fails": DIST,
+    }[case]
+    fake.display_override = {"lib/x/deep/a.so": bad}
+    if case == "verify-fails":
+        fake.verify_fail = {"lib/x/deep/a.so"}
+    assert es.main(["check", "--distribution", TEAM, str(engine)]) == 1
+
+
+def test_adhoc_engine_fails_the_distribution_check(rig):
+    engine, _fake = rig
+    assert es.main(["check", str(engine)]) == 0
+    assert es.main(["check", "--distribution", TEAM, str(engine)]) == 1
+
+
+def test_distribution_check_still_guards_the_vendor_file(rig):
+    engine, fake = rig
+    fake.default_display = DIST
+    fake.vendor_display = ADHOC
+    assert es.main(["check", "--distribution", TEAM, str(engine)]) == 1
+
+
+@pytest.mark.parametrize("identity", [
+    "-", "Apple Development: Someone (AXBFS96Y9F)", f"Developer ID Application: Someone ({TEAM.lower()})",
+    "Developer ID Application: Someone (ZZZZZZZZZZ)"])
+def test_distribution_sign_refuses_a_wrong_identity_before_codesign(rig, identity):
+    engine, fake = rig
+    assert es.main(["sign", "--distribution", TEAM, identity, str(engine)]) == 1
+    assert fake.calls == []
+
+
+def test_distribution_sign_refuses_a_malformed_team(rig):
+    engine, fake = rig
+    assert es.main(["sign", "--distribution", "team", "Developer ID Application: X (team)", str(engine)]) == 1
+    assert es.main(["check", "--distribution", "team", str(engine)]) == 1
+    assert fake.calls == []
+
+
+def test_distribution_sign_refuses_a_signature_that_does_not_check(rig):
+    """The post-sign check uses the distribution rule: an ad-hoc display after signing is refused."""
+    engine, fake = rig
+    fake.default_display = ADHOC
+    assert es.main(["sign", "--distribution", TEAM, IDENTITY, str(engine)]) == 1
+
+
+@pytest.mark.parametrize("case", ["provenance-touched", "new-file"])
+def test_distribution_signing_may_change_only_signed_files(rig, case):
+    engine, fake = rig
+    fake.default_display = DIST
+
+    def sneaky():
+        if case == "provenance-touched":
+            with open(engine / "provenance.json", "a") as handle:
+                handle.write(" ")
+        else:
+            (engine / "lib/a.so.cstemp").write_bytes(b"x")
+
+    fake.also = sneaky
+    assert es.main(["sign", "--distribution", TEAM, IDENTITY, str(engine)]) == 1

@@ -214,10 +214,6 @@ else
 fi
 [ -d "$app" ] && [ ! -L "$app" ] \
     || die "archive does not contain a real Ciaobot.app directory"
-# Distribution signing of the bundled engine is #3128 G; until it lands no
-# engine-bearing archive may be advertised as an update.
-[ ! -e "$app/Contents/Resources/engine" ] && [ ! -L "$app/Contents/Resources/engine" ] \
-    || die "archive bundles the engine, which has no distribution signing yet (#3128 G); refusing to advertise it"
 plist=$app/Contents/Info.plist
 [ -f "$plist" ] && [ ! -L "$plist" ] || die "archive has no Ciaobot.app/Contents/Info.plist"
 
@@ -243,6 +239,18 @@ architectures=$(lipo -archs "$app/Contents/MacOS/$executable" 2>/dev/null || tru
 [ "$architectures" = "arm64" ] \
     || die "archive must be a thin arm64 build, got: '${architectures:-unknown}'"
 
+# A bundled engine (#3128 G) must be distribution-signed by this team before the
+# archive may be advertised: every non-vendor Mach-O with Developer ID, hardened
+# runtime and a secure timestamp, and the SDK's CLI still Anthropic's.
+engine=$app/Contents/Resources/engine
+if [ -e "$engine" ] || [ -L "$engine" ]; then
+    [ -d "$engine" ] && [ ! -L "$engine" ] || die "archive's bundled engine is not a real directory"
+    command -v python3 >/dev/null \
+        && python3 -I -S -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' \
+        || die "python3 3.12 or newer is required to check the bundled engine"
+    python3 -I -S scripts/engine_sign.py check --distribution "$UPDATE_TEAM_ID" "$engine" \
+        || die "archive's bundled engine is not distribution-signed by team $UPDATE_TEAM_ID; refusing to advertise it"
+fi
 # An update the client cannot launch is not an update. The signature has to
 # verify inside the archive and the notarization ticket has to be stapled, so
 # Sparkle's verification and Gatekeeper agree on the same code.

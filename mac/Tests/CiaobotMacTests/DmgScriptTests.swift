@@ -109,8 +109,8 @@ final class DmgScriptTests: XCTestCase {
         XCTAssertNil(try hdiutilLogIfAny(), "an unstapled app must be refused before any image work")
     }
 
-    /// Until the engine is distribution-signed (#3128 G) no image may carry it,
-    /// including through a dangling symlink standing in for it.
+    /// A bundled engine that is not distribution-signed (#3128 G; here an empty directory) or is not a real
+    /// directory (a dangling symlink standing in for it) must not become an image.
     func testRefusesAnEngineBearingApp() throws {
         for dangling in [false, true] {
             let app = try makeApp()
@@ -126,7 +126,8 @@ final class DmgScriptTests: XCTestCase {
             let result = try runScript(["--app", app.path, "--output", output, "--identity", identity])
 
             XCTAssertNotEqual(result.status, 0, "dangling=\(dangling): \(result.output)")
-            XCTAssertTrue(result.output.contains("#3128 G"), result.output)
+            XCTAssertTrue(
+                result.output.contains(dangling ? "not a real directory" : "not distribution-signed"), result.output)
             XCTAssertFalse(fileManager.fileExists(atPath: output))
             XCTAssertNil(try hdiutilLogIfAny())
             try fileManager.removeItem(at: app.deletingLastPathComponent())
@@ -595,7 +596,9 @@ final class DmgScriptTests: XCTestCase {
         environment: [String: String] = [:]
     ) throws -> (status: Int32, output: String) {
         var childEnvironment = ProcessInfo.processInfo.environment
-        var path = tools.path + ":/usr/bin:/bin:/usr/sbin:/sbin"
+        // The ambient PATH follows the fakes so python3 (3.12 or newer, for the engine check) resolves as it
+        // does for the operator; the fakes still shadow codesign, hdiutil and xcrun.
+        var path = tools.path + ":" + (childEnvironment["PATH"] ?? "/usr/bin:/bin") + ":/usr/bin:/bin:/usr/sbin:/sbin"
         if let extraPath { path = extraPath + ":/usr/bin:/bin:/usr/sbin:/sbin" }
         childEnvironment["PATH"] = path
         childEnvironment["FAKE_CODESIGN_LOG"] = codesignLog.path
