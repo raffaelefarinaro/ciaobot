@@ -27,6 +27,8 @@ struct BundledEngine: Equatable {
     static let strippedPrefixes = ["CIAO_", "PWA_", "PYTHON", "DYLD_"]
     static let strippedNames: Set<String> = [
         "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+        "OPENSSL_CONF", "OPENSSL_MODULES", "OPENSSL_ENGINES", "SSLKEYLOGFILE",
+        "NODE_EXTRA_CA_CERTS", "NODE_OPTIONS", "NODE_TLS_REJECT_UNAUTHORIZED",
     ]
 
     static var hostIsArm64: Bool {

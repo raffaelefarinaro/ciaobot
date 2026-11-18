@@ -168,22 +168,51 @@ final class BundledEngineTests: XCTestCase {
         XCTAssertFalse(lines.contains { $0.hasPrefix("CIAO_X=") || $0.hasPrefix("PYTHONPATH=") })
     }
 
-    func testSourceAvoidsInstallerPathsAndShells() throws {
-        let text = try String(contentsOf: Self.sourcesDirectory.appendingPathComponent("BundledEngine.swift"))
-        for banned in ["NativeInstaller", "EngineUpdater", "EngineRelease", "/usr/bin/env", "Process(", "which"] {
-            XCTAssertFalse(text.contains(banned), "BundledEngine.swift mentions \(banned)")
+    func testEnvironmentStripsExactlyTheExpectedNames() {
+        let stripped = [
+            "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+            "OPENSSL_CONF", "OPENSSL_MODULES", "OPENSSL_ENGINES", "SSLKEYLOGFILE",
+            "NODE_EXTRA_CA_CERTS", "NODE_OPTIONS", "NODE_TLS_REJECT_UNAUTHORIZED",
+            "PYTHONDONTWRITEBYTECODE", "PYTHONPATH", "DYLD_LIBRARY_PATH",
+            "CIAO_HOME", "PWA_PORT",
+        ]
+        let kept = ["MYCIAO_X": "1", "pythonpath": "2", "XDYLD_FOO": "3", "HOME": "/h"]
+        var parent = kept
+        for name in stripped { parent[name] = "v" }
+        XCTAssertEqual(BundledEngine.environment(from: parent), kept)
+    }
+
+    func testLaunchExecutableIsTheLauncherNotAShell() throws {
+        let engine = try locate()
+        for command in [BundledEngine.Command.version, .run(["x"])] {
+            let launch = engine.launch(command, parentEnvironment: [:], workingDirectory: scratch)
+            XCTAssertEqual(launch.executable.path, engine.root.appendingPathComponent("bin/ciao").path)
+            XCTAssertNotEqual(launch.executable.path, "/bin/sh")
+            XCTAssertFalse(launch.arguments.contains("-c"))
         }
     }
 
-    func testNotWiredIntoTheAppYet() throws {
-        let dir = Self.sourcesDirectory
-        let files = try FileManager.default.contentsOfDirectory(atPath: dir.path)
-            .filter { $0.hasSuffix(".swift") && $0 != "BundledEngine.swift" }
-        XCTAssertFalse(files.isEmpty)
-        for name in files {
-            let text = try String(contentsOf: dir.appendingPathComponent(name))
-            XCTAssertFalse(text.contains("BundledEngine"), "\(name) references BundledEngine")
+    func testSourceAvoidsInstallerPathsAndShells() throws {
+        let text = try String(contentsOf: Self.sourcesDirectory.appendingPathComponent("BundledEngine.swift"))
+        for banned in ["NativeInstaller", "EngineUpdater", "EngineRelease", "/usr/bin/env", "Process(",
+                       "NSTask", "posix_spawn", "/bin/sh", "/bin/zsh", "/bin/bash"] {
+            XCTAssertFalse(text.contains(banned), "BundledEngine.swift mentions \(banned)")
         }
+        XCTAssertNil(text.range(of: "\\bwhich\\b", options: .regularExpression), "mentions which")
+    }
+
+    func testNotWiredIntoTheAppYet() throws {
+        let enumerator = try XCTUnwrap(FileManager.default.enumerator(atPath: Self.sourcesDirectory.path))
+        var checked = 0
+        while let rel = enumerator.nextObject() as? String {
+            guard rel.hasSuffix(".swift"), URL(fileURLWithPath: rel).lastPathComponent != "BundledEngine.swift" else { continue }
+            checked += 1
+            let text = try String(contentsOf: Self.sourcesDirectory.appendingPathComponent(rel))
+            let code = text.split(separator: "\n", omittingEmptySubsequences: false)
+                .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            XCTAssertFalse(code.contains { $0.contains("BundledEngine") }, "\(rel) references BundledEngine")
+        }
+        XCTAssertGreaterThan(checked, 0)
     }
 
     func testBuiltAppEngineReportsItsProvenanceVersion() throws {
