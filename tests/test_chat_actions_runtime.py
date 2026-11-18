@@ -25,6 +25,7 @@ from ciao.chat_actions import ChatAction, ChatActionError, _VALIDATORS
 from ciao.config import CiaoConfig
 from ciao.models import AssistantTextDelta, ResultEvent
 from ciao.provider_service import ProviderService
+from ciao.providers.base import BaseProvider
 from ciao.providers.claude import ClaudeProvider
 from ciao.providers.opencode import OpencodeProvider
 from ciao.sessions import StateStore
@@ -1254,3 +1255,29 @@ async def test_detection_leaves_a_waiting_action_waiting(tmp_path: Path) -> None
 
     assert [a.id for a in chat.actions] == [action_id]
     assert _state(manager, chat, action_id) == "waiting"
+
+
+@pytest.mark.asyncio
+async def test_detection_skips_non_provider_objects(tmp_path: Path) -> None:
+    """An object that is not a BaseProvider is never asked, even if it looks connected."""
+    manager = make_manager(tmp_path)
+    project = manager.create_project("Claude", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Claude", provider="claude")
+    fake = SimpleNamespace(is_connected=True, read_mcp_status=lambda: {"linear": "needs_auth"})
+    manager._providers[chat.chat_id] = cast(Any, SimpleNamespace(provider=fake))
+    runtime = make_runtime(manager)
+
+    assert runtime.detection_provider(chat.chat_id) is None
+    await runtime.detect_mcp_auth(chat.chat_id)
+
+    assert chat.actions == []
+
+
+def test_mcp_sign_in_exempt_matrix(tmp_path: Path) -> None:
+    claude = ClaudeProvider(tmp_path)
+    opencode = OpencodeProvider(tmp_path)
+    assert claude.mcp_sign_in_exempt("claude.ai Gmail") is True
+    assert claude.mcp_sign_in_exempt("Gmail") is False
+    assert opencode.mcp_sign_in_exempt("claude.ai Gmail") is False
+    assert opencode.mcp_sign_in_exempt("Gmail") is False
+    assert BaseProvider.mcp_sign_in_exempt(opencode, "claude.ai Gmail") is False

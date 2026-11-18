@@ -18,7 +18,7 @@ def _manager(chats, providers, workspaces):
 @pytest.mark.asyncio
 async def test_runtime_mcp_status_is_workspace_scoped():
     class OpenCode:
-        has_live_server = True
+        is_connected = True
 
         async def read_mcp_status(self):
             return {"notion": "connected"}
@@ -44,7 +44,7 @@ async def test_runtime_mcp_status_is_workspace_scoped():
 @pytest.mark.asyncio
 async def test_runtime_mcp_status_failure_is_unknown_and_safe():
     class OpenCode:
-        has_live_server = True
+        is_connected = True
 
         async def read_mcp_status(self):
             raise TimeoutError("credential=must-not-escape")
@@ -71,7 +71,7 @@ async def test_runtime_mcp_status_failure_is_unknown_and_safe():
 @pytest.mark.asyncio
 async def test_no_live_provider_is_unchecked():
     class OpenCode:
-        has_live_server = False
+        is_connected = False
 
     manager = _manager(
         {"chat": SimpleNamespace(provider="opencode")},
@@ -87,7 +87,7 @@ async def test_no_live_provider_is_unchecked():
 @pytest.mark.asyncio
 async def test_runtime_only_account_connector_is_included_without_configured_names():
     class Claude:
-        _connected = True
+        is_connected = True
 
         async def read_mcp_status(self):
             return {"account-connector": "connected"}
