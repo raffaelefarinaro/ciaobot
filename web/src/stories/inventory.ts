@@ -734,24 +734,24 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ChatLayout.vue"
     ],
     "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variantNotes": "Prop-less: one loading render and no configurable variants.",
     "states": [
       {
         "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ChatPaneSkeleton.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["chat-pane-skeleton--loading"],
+        "note": "ChatPaneSkeleton.vue's one render: a role=status named Loading conversation with aria-busy, the pane header rule, two assistant placeholders, one user placeholder and a collapsed trace row, all aria-hidden. The story asserts no focusable element exists."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["chat-pane-skeleton--narrow"],
+        "note": "The loading render in a 390px containing block: the body keeps its reading measure inside the block. The phone header grid is a max-width 768px viewport media query the 390px wrapper does not trigger."
       }
     ],
     "loading": {
       "status": "known",
-      "detail": "ChatPaneSkeleton.vue renders the prop-less lazy route shell; ChatPanel.vue separately owns history-skeleton-stack."
+      "detail": "Initial loading only: the shell covers the lazy ChatPanel chunk and a chat route whose catalog entry has not arrived. It has no loaded, empty, filtered empty, failure, refresh or stale state of its own, and no interactive surface. Geometry is copied from ChatPanel.vue's .history-skeleton-stack so the handover fills in rather than jumps; the placeholder shapes are not the loaded transcript's content."
     },
     "migration": {
       "status": "unassessed",
@@ -3723,8 +3723,13 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ProjectSidebar.vue",
       "web/src/components/SidebarListSkeleton.vue"
     ],
-    "variants": [],
-    "variantNotes": "Link/button, placeholder, pending title, meta. Detailed variants are unassessed.",
+    "variants": [
+      "link",
+      "placeholder",
+      "pending",
+      "meta"
+    ],
+    "variantNotes": "A `to` route renders a RouterLink with active-class; without it the row is a plain element. pending swaps the title for the naming shimmer, meta is the muted mono badge, and placeholder is the loading stand-in bar.",
     "states": [
       {
         "name": "default",
@@ -3763,15 +3768,27 @@ export const inventory: InventoryEntry[] = [
         "note": "Long title and 09:00 meta in a 240px wrapper; production ellipsis, not a navigation or keyboard story."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "link",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "SidebarRow.vue's v-if `to` branch renders a RouterLink with active-class and the same title, shimmer and meta marks; no story exists. The Rows and titles slice owns link rows and their host controls."
+      },
+      {
+        "name": "placeholder",
+        "coverage": "covered",
+        "storyIds": ["sidebar-row-placeholder--default", "sidebar-row-placeholder--narrow"],
+        "note": "The loading branch: a plain sidebar-row--placeholder box, aria-hidden, not focusable, with one shimmer bar at the given width and no title or meta. SidebarListSkeleton draws lists of these on a first load; the narrow story keeps it inside a 390px block."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": ":focus-visible draws the row's 2px accent outline; no rendered focus story exists. The Rows and titles slice owns the keyboard path."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SidebarRow.vue has not yet been audited."
+      "status": "known",
+      "detail": "The placeholder branch is the row's own first-load shape, drawn in groups by SidebarListSkeleton while a sidebar list is loading; pending (Naming conversation) is a naming state, not loading. Initial load is the placeholder bar, loaded rows replace it, refresh over rows already on screen keeps them (each list's own load-state rule), and the row itself has no failure, empty or stale state. The placeholder bar is a 10px line, not the loaded title and meta geometry."
     },
     "migration": {
       "status": "unassessed",
@@ -3809,24 +3826,48 @@ export const inventory: InventoryEntry[] = [
       "board",
       "graph"
     ],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variantNotes": "variant selects the shape (rows is the default), count sets rows and cards (per column for board) and label is the one status name. Board draws four placeholder columns of max(1, count - column % 3) cards; graph draws the Memory Map's node and link sketch.",
     "states": [
       {
-        "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SkeletonLoader.vue implements this render; no rendered-state story exists."
+        "name": "rows",
+        "coverage": "covered",
+        "storyIds": ["skeleton-loader--rows"],
+        "note": "Default variant with count: bordered row shapes, two lines each, aria-hidden behind one role=status named by label. The story asserts the row count, the two lines per row and no card, column or graph shape."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "cards",
+        "coverage": "covered",
+        "storyIds": ["skeleton-loader--cards"],
+        "note": "Cards variant: count stacked card shapes with a heading, a full line and a short line each, aria-hidden; no rows render."
+      },
+      {
+        "name": "board",
+        "coverage": "covered",
+        "storyIds": ["skeleton-loader--board"],
+        "note": "Board variant: four named columns, a heading bar and max(1, count - column % 3) cards per column, four equal grid tracks above the 940px container query."
+      },
+      {
+        "name": "board-narrow",
+        "coverage": "covered",
+        "storyIds": ["skeleton-loader--board-narrow"],
+        "note": "The same board inside a 390px chat-pane container: the @container (max-width: 940px) rule collapses it to one track and hides columns two to four."
+      },
+      {
+        "name": "graph",
+        "coverage": "covered",
+        "storyIds": ["skeleton-loader--graph"],
+        "note": "Graph variant: the 200x140 node and link drawing for the Memory Map, eleven nodes and twelve edges, aria-hidden inside the status; no rows or cards render."
+      },
+      {
+        "name": "reduced-motion",
+        "coverage": "covered",
+        "storyIds": ["skeleton-loader--reduced-motion"],
+        "note": "Reduced motion is a CSS media query, not an arg: the same rows render and the play asserts the owner's shipped prefers-reduced-motion rule, which replaces the sweep with the slow skeleton-pulse. The runner does not emulate the media query."
       }
     ],
     "loading": {
       "status": "known",
-      "detail": "SkeletonLoader.vue renders rows, cards, board or graph, with count and label. Board has four placeholder columns and collapses in the named chat-pane container at 940px; parity with 310px board lanes is not established."
+      "detail": "First-load placeholder only: initial loading is this component's one state, named by label; loaded content replaces it, and empty, filtered empty, initial failure, refresh and refresh failure or stale are each consuming page's own load-state rule, not drawn here (a refresh over data already on screen keeps the data). Rows, cards and graph are generic placeholder shapes rather than the consumed rows, cards or nodes, so the placeholder geometry does not match the loaded geometry; board draws four placeholder columns and collapses to one in the named chat-pane container at 940px, and parity with the 310px board lanes is not established."
     },
     "migration": {
       "status": "unassessed",
