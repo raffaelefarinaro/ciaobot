@@ -7601,12 +7601,17 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             return JSONResponse({"error": str(exc)}, status_code=400)
         _publish_setup_environment(resolved_workspace, port, password)
     # Only the real per-user LaunchAgents dir may be registered with launchd —
-    # scripted/test setups pass a custom dir and must not touch it. Nothing
+    # scripted/test setups pass a custom dir and must not touch it. App mode is
+    # the third exclusion: the Mac app owns the bundled engine, so setup must
+    # not hand it to launchd on restart. Nothing
     # menu-bar related happens here any more: Ciaobot.app is the menu bar, and
     # setup_workspace above has just retired the old `com.ciao.menubar` agent.
+    from ciao.package_version import running_from_app_bundle
+
     real_launch_agents = (
         sys.platform == "darwin"
         and not str(body.get("launch_agents_dir", "")).strip()
+        and not running_from_app_bundle()
     )
 
     if native_context is None and installer_mode:
