@@ -1,11 +1,10 @@
 import { createApp, type Component, h } from 'vue'
 import { createPinia, disposePinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter, RouterView, type RouteRecordRaw } from 'vue-router'
-import { installFixtureBoundary, type FixtureBoundary, type FixtureRoute } from './fixtureBoundary'
+import { activeFixtureBoundary, type FixtureBoundary } from './fixtureBoundary'
 
 export type ConnectedFixtureConfig = {
   component: Component
-  routes: FixtureRoute[]
   /** Extra vue-router destinations (must be inert: no bootstrap, no fetches). */
   routerRoutes?: RouteRecordRaw[]
   seed?: (pinia: Pinia) => void
@@ -22,11 +21,13 @@ export type ConnectedFixture = {
 /**
  * A separate Vue app prevents fixture plugins leaking into Storybook's app.
  * The connected owner mounts as the `/` route of a fresh memory router with a
- * fresh Pinia; the fixture boundary answers only the routes declared here and
- * every other transport fails closed.
+ * fresh Pinia. It never installs a boundary: the preview decorator fences every
+ * story from `parameters.fixture`, and the routes that story declared there are
+ * the only ones answered. Mounting with no active boundary is a story bug.
  */
 export function mountConnected(host: HTMLElement, config: ConnectedFixtureConfig): ConnectedFixture {
-  const boundary = installFixtureBoundary({ routes: config.routes })
+  const boundary = activeFixtureBoundary()
+  if (!boundary) throw new Error('mountConnected needs the fixture boundary the preview installs from parameters.fixture')
   const pinia = createPinia()
   const router = createRouter({
     history: createMemoryHistory(),
@@ -46,7 +47,6 @@ export function mountConnected(host: HTMLElement, config: ConnectedFixtureConfig
         disposePinia(pinia)
       } finally {
         setActivePinia(undefined)
-        boundary.dispose()
       }
     }
   }

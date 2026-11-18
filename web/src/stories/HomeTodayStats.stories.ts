@@ -6,10 +6,9 @@ import { useProjectStore } from '../stores/projects'
 import { mountConnected } from './mountConnected'
 import { statsRoutes, statsWorkspaces, type StatsState, usageRoute } from './homeTodayStatsFixture'
 
-function mountStats(host: HTMLElement, state: StatsState) {
+function mountStats(host: HTMLElement) {
   return mountConnected(host, {
     component: HomeTodayStats,
-    routes: statsRoutes(state),
     routerRoutes: [usageRoute()],
     seed: pinia => { useProjectStore(pinia).activeWorkspace = 'storybook-alpha' },
   })
@@ -22,7 +21,7 @@ function renderState(state: StatsState) {
       const fixture = shallowRef<ReturnType<typeof mountStats>>()
       const error = ref('')
       onMounted(() => {
-        try { fixture.value = mountStats(host.value!, state) }
+        try { fixture.value = mountStats(host.value!) }
         catch (cause) { error.value = String(cause) }
       })
       onBeforeUnmount(() => fixture.value?.dispose())
@@ -51,9 +50,6 @@ const meta = {
   component: HomeTodayStats,
   tags: ['!autodocs'],
   parameters: {
-    // The story's own mountConnected installs the fixture boundary; the
-    // preview's default fence must not mount over it.
-    fixture: true,
     docs: { disable: true, story: { inline: false } },
     controls: { disable: true },
   },
@@ -73,7 +69,23 @@ const playSettled: Story['play'] = async ({ canvas }) => {
   expect(canvas.queryAllByRole('alert')).toHaveLength(0)
   expect(canvas.queryByText(/Story network violation/)).toBeNull()
 }
-export const Default: Story = { render: () => renderState('default'), play: playSettled }
-export const Loading: Story = { render: () => renderState('loading'), play: playSettled }
-export const Failed: Story = { render: () => renderState('failed'), play: playSettled }
-export const Partial: Story = { render: () => renderState('partial'), play: playSettled }
+export const Default: Story = {
+  parameters: { fixture: { routes: statsRoutes('default') } },
+  render: () => renderState('default'),
+  play: playSettled,
+}
+export const Loading: Story = {
+  parameters: { fixture: { routes: statsRoutes('loading') } },
+  render: () => renderState('loading'),
+  play: playSettled,
+}
+export const Failed: Story = {
+  parameters: { fixture: { routes: statsRoutes('failed') } },
+  render: () => renderState('failed'),
+  play: playSettled,
+}
+export const Partial: Story = {
+  parameters: { fixture: { routes: statsRoutes('partial') } },
+  render: () => renderState('partial'),
+  play: playSettled,
+}

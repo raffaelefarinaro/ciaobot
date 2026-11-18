@@ -138,13 +138,23 @@ script fails the construction instead of half-opening the socket. Declared
 sockets must be same-origin at an exact path; anything else — including the
 engine's `/ws/events` — is refused without a fake.
 
-The preview installs an empty fixture boundary for every story that does not
-opt in through `parameters.fixture`, so a presentational story that attempts
-fetch, XHR, WebSocket, EventSource or beacon records a violation and the
-browser runner fails it. Connected stories set `parameters.fixture` and
-mount their own declared boundary. Stories render under story view only; a
-docs page renders many stories at once, which the single-mount guard
-forbids, so docs pages are unfenced. The only native send exceptions are
+The preview decorator installs the boundary for every story and docs page
+from `parameters.fixture`, a typed `{ routes, sockets }` config (empty when
+absent). There is no skip flag: a story cannot opt out of the fence, it can
+only declare what it may reach, and a connected story declares its routes
+there (`parameters: { fixture: { routes: statsRoutes('default') } }`).
+`mountConnected` never installs a boundary of its own; it mounts into the one
+the preview built and throws when none is active, so nothing double-mounts.
+Duplicate routes (same method and path) or socket paths, a malformed config,
+and a non-array routes list are `TypeError`s. A docs page renders many stories
+at once, so docs mode shares one empty boundary between them; a docs story
+that declares routes or sockets is refused by the single-mount guard.
+Violations are also asserted at teardown: the preview's global `afterEach`
+fails the story when the boundary recorded any violation, even if the
+component swallowed the thrown error (`fetch(...).catch(() => {})`, a
+try/catch around XHR, WebSocket or beacon). Not fenced: `localStorage`,
+`sessionStorage`, IndexedDB and service workers; a story that touches them is
+not isolated by this boundary. The only native send exceptions are
 Vite's exact HMR ping on its same-origin established `vite-hmr` socket, and
 render lifecycle/heartbeat events plus preview keyboard reports
 (`previewKeydown`) on Storybook's established same-origin

@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { nextTick } from 'vue'
+import { createApp, nextTick } from 'vue'
 import HomeTodayStats from '../components/HomeTodayStats.vue'
 import { useProjectStore } from '../stores/projects'
-import { installFixtureBoundary, type FixtureSocket } from './fixtureBoundary'
+import preview from '../../.storybook/preview'
+import { activeFixtureBoundary, assertNoFixtureViolations, fenceStory, installFixtureBoundary, type FixtureRoute, type FixtureSocket } from './fixtureBoundary'
 import { mountConnected } from './mountConnected'
 import { statsRoutes, type StatsState, usageRoute } from './homeTodayStatsFixture'
 
@@ -234,7 +235,9 @@ describe('connected fixture transport boundary', () => {
     await settleQueue()
     expect(fake.readyState).toBe(WebSocket.CLOSED)
     expect(closes).toEqual([{ code: 1000, reason: 'done' }])
-    expect(() => fake.send('late')).toThrow()
+    expect(() => fake.send('late')).not.toThrow()
+    expect(driven[0].sent).toEqual(['hello'])
+    driven[0].serverMessage('late server frame')
     driven[0].serverClose(1001)
     await settleQueue()
     expect(closes).toEqual([{ code: 1000, reason: 'done' }])
@@ -266,13 +269,13 @@ describe('connected fixture transport boundary', () => {
 async function mount(state: StatsState, declared = true) {
   const host = document.createElement('div')
   document.body.append(host)
+  const boundary = installFixtureBoundary({ routes: statsRoutes(state) })
   const fixture = mountConnected(host, {
     component: HomeTodayStats,
-    routes: statsRoutes(state),
     routerRoutes: [usageRoute()],
     seed: pinia => { useProjectStore(pinia).activeWorkspace = declared ? 'storybook-alpha' : 'undeclared' },
   })
-  cleanups.push(() => { fixture.dispose(); host.remove() })
+  cleanups.push(() => { fixture.dispose(); boundary.dispose(); host.remove() })
   await fixture.router.isReady()
   await new Promise(resolve => setTimeout(resolve, 0))
   await nextTick()
@@ -295,6 +298,7 @@ describe('real connected owner', () => {
     expect(first.host.textContent).toContain('Inert Usage destination')
     expect(first.boundary.violations).toEqual([])
     first.dispose()
+    first.boundary.dispose()
     const second = await mount('default')
     expect(second.pinia).not.toBe(first.pinia)
     expect(useProjectStore(second.pinia).activeWorkspace).toBe('storybook-alpha')
@@ -321,5 +325,203 @@ describe('real connected owner', () => {
     expect(fixture.host.querySelector('strong')?.textContent).toBe('—')
     expect(fixture.boundary.violations).toHaveLength(1)
     expect(fixture.boundary.violations[0]).toContain('undeclared')
+  })
+})
+
+const writeRoute = (method: FixtureRoute['method'], path = '/api/things'): FixtureRoute => ({
+  method, path, respond: () => new Response('{"ok":true}', { status: 201 }),
+})
+
+describe('boundary configuration', () => {
+  it.each([
+    ['routes not an array', { routes: 'x' }],
+    ['route without respond', { routes: [{ method: 'GET', path: '/a' }] }],
+    ['relative path', { routes: [{ method: 'GET', path: 'a', respond: () => new Response() }] }],
+    ['unknown method', { routes: [{ method: 'TRACE', path: '/a', respond: () => new Response() }] }],
+    ['null route', { routes: [null] }],
+    ['socket without script', { routes: [], sockets: [{ path: '/ws/a' }] }],
+    ['relative socket path', { routes: [], sockets: [{ path: 'ws/a', script: () => {} }] }],
+    ['sockets not an array', { routes: [], sockets: 'x' }],
+  ])('rejects %s without installing anything', (_name, config) => {
+    const before = Object.getOwnPropertyDescriptor(globalThis, 'fetch')
+    expect(() => installFixtureBoundary(config as never)).toThrow(TypeError)
+    expect(Object.getOwnPropertyDescriptor(globalThis, 'fetch')).toEqual(before)
+    expect(activeFixtureBoundary()).toBeUndefined()
+  })
+
+  it('rejects duplicate routes and duplicate socket paths', () => {
+    expect(() => installFixtureBoundary({ routes: [writeRoute('POST'), writeRoute('POST')] })).toThrow('duplicate route POST /api/things')
+    expect(() => installFixtureBoundary({
+      routes: [],
+      sockets: [{ path: '/ws/a', script: () => {} }, { path: '/ws/a', script: () => {} }],
+    })).toThrow('duplicate socket path')
+    // The same path under two methods is two routes, not a duplicate.
+    const boundary = installFixtureBoundary({ routes: [writeRoute('POST'), writeRoute('GET')] })
+    boundary.dispose()
+  })
+})
+
+describe('declared write routes', () => {
+  it.each(['POST', 'PUT', 'PATCH', 'DELETE'] as const)('accepts %s only when declared', async method => {
+    const boundary = installFixtureBoundary({ routes: [writeRoute(method)] })
+    cleanups.push(boundary.dispose)
+    expect((await fetch('/api/things', { method, body: '{}' })).status).toBe(201)
+    expect(boundary.requests).toEqual(['/api/things'])
+    for (const other of (['POST', 'PUT', 'PATCH', 'DELETE'] as const).filter(candidate => candidate !== method)) {
+      await expect(fetch('/api/things', { method: other })).rejects.toThrow('Story network violation')
+    }
+    expect(boundary.violations).toHaveLength(3)
+  })
+
+  it('refuses a GET against a POST-only route', async () => {
+    const boundary = installFixtureBoundary({ routes: [writeRoute('POST')] })
+    cleanups.push(boundary.dispose)
+    await expect(fetch('/api/things')).rejects.toThrow('Story network violation')
+    expect(boundary.violations).toHaveLength(1)
+    expect(boundary.requests).toEqual([])
+  })
+
+  it('holds a never-resolving write until teardown settles it', async () => {
+    const boundary = installFixtureBoundary({
+      routes: [{ method: 'POST', path: '/api/things', respond: () => new Promise<never>(() => {}) }],
+    })
+    const pending = fetch('/api/things', { method: 'POST', body: '{}' })
+    const settled = vi.fn()
+    pending.then(settled, settled)
+    await settleQueue()
+    expect(settled).not.toHaveBeenCalled()
+    const rejection = expect(pending).rejects.toThrow('Fixture disposed')
+    boundary.dispose()
+    await rejection
+  })
+})
+
+describe('fake socket semantics', () => {
+  function open(script: (socket: FixtureSocket) => void = () => {}) {
+    const boundary = installFixtureBoundary({ routes: [], sockets: [{ path: '/ws/a', script }] })
+    cleanups.push(boundary.dispose)
+    return new WebSocket(`${wsOrigin()}/ws/a`)
+  }
+
+  it('drops a server message after close silently, like a real server', async () => {
+    const driven: FixtureSocket[] = []
+    const fake = open(socket => { driven.push(socket); socket.serverOpen() })
+    const received = vi.fn()
+    fake.onmessage = received
+    fake.close()
+    expect(() => driven[0].serverMessage('late')).not.toThrow()
+    await settleQueue()
+    expect(received).not.toHaveBeenCalled()
+  })
+
+  it('throws InvalidStateError for send while CONNECTING', () => {
+    const fake = open()
+    expect(fake.readyState).toBe(WebSocket.CONNECTING)
+    expect(() => fake.send('early')).toThrowError(expect.objectContaining({ name: 'InvalidStateError' }))
+  })
+
+  it('exposes protocol, extensions, binaryType and dispatchEvent', async () => {
+    const fake = open()
+    expect(fake.protocol).toBe('')
+    expect(fake.extensions).toBe('')
+    expect(fake.binaryType).toBe('blob')
+    fake.binaryType = 'arraybuffer'
+    expect(fake.binaryType).toBe('arraybuffer')
+    fake.binaryType = 'nonsense' as BinaryType
+    expect(fake.binaryType).toBe('arraybuffer')
+    const heard: string[] = []
+    const listener = (event: Event) => heard.push(event.type)
+    fake.addEventListener('ping', listener)
+    fake.onerror = event => heard.push(`on${event.type}`)
+    expect(fake.dispatchEvent(new Event('ping'))).toBe(true)
+    fake.dispatchEvent(new Event('error'))
+    fake.removeEventListener('ping', listener)
+    fake.dispatchEvent(new Event('ping'))
+    expect(heard).toEqual(['ping', 'onerror'])
+    expect(fake.readyState).toBe(WebSocket.CONNECTING)
+    expect(fake).toBeInstanceOf(WebSocket)
+  })
+})
+
+describe('swallowed violations still fail the story', () => {
+  it('records a violation the component catches, and the teardown assertion throws', async () => {
+    const boundary = installFixtureBoundary({ routes: [] })
+    cleanups.push(boundary.dispose)
+    await fetch('/api/secret').catch(() => {})
+    try { new XMLHttpRequest() } catch { /* swallowed */ }
+    try { navigator.sendBeacon('/api/beacon') } catch { /* swallowed */ }
+    expect(boundary.violations).toHaveLength(3)
+    expect(() => assertNoFixtureViolations(boundary)).toThrow('3 fixture boundary violation')
+    expect(() => assertNoFixtureViolations()).toThrow('/api/secret')
+  })
+
+  it('passes a clean boundary and no boundary', () => {
+    expect(() => assertNoFixtureViolations()).not.toThrow()
+    const boundary = installFixtureBoundary({ routes: [] })
+    cleanups.push(boundary.dispose)
+    expect(() => assertNoFixtureViolations()).not.toThrow()
+  })
+
+  it('the preview afterEach is wired to the assertion', async () => {
+    const boundary = installFixtureBoundary({ routes: [] })
+    cleanups.push(boundary.dispose)
+    const afterEach = preview.afterEach as unknown as () => void
+    expect(afterEach).not.toThrow()
+    await fetch('/api/swallowed').catch(() => {})
+    expect(afterEach).toThrow('fixture boundary violation')
+  })
+})
+
+describe('preview decorator fences every story', () => {
+  type Decorator = (story: unknown, context: unknown) => Parameters<typeof createApp>[0]
+  function render(parameters: Record<string, unknown>, viewMode: 'story' | 'docs') {
+    const decorator = (preview.decorators as unknown as Decorator[])[0]
+    const host = document.createElement('div')
+    const app = createApp(decorator(undefined, { parameters, viewMode }))
+    app.mount(host)
+    cleanups.push(() => app.unmount())
+    return app
+  }
+
+  it('fences a story with no parameters.fixture', async () => {
+    render({}, 'story')
+    const boundary = activeFixtureBoundary()!
+    expect(boundary).toBeDefined()
+    await expect(fetch('/api/stats?workspace=storybook-alpha&range=30')).rejects.toThrow('Story network violation')
+    expect(() => new WebSocket(`${wsOrigin()}/ws/events`)).toThrow('Story network violation')
+    expect(boundary.violations).toHaveLength(2)
+  })
+
+  it('a bare `fixture: true` flag is not an opt-out and not a config', () => {
+    expect(() => render({ fixture: true }, 'story')).toThrow()
+  })
+
+  it('gives a story with config only its declared routes', async () => {
+    render({ fixture: { routes: statsRoutes('default') } }, 'story')
+    expect((await fetch(path)).status).toBe(200)
+    await expect(fetch('/api/stats?workspace=personal&range=30')).rejects.toThrow('Story network violation')
+    await expect(fetch('/api/tasks')).rejects.toThrow('Story network violation')
+    expect(activeFixtureBoundary()!.violations).toHaveLength(2)
+  })
+
+  it('fences docs pages, sharing one empty boundary between stories', async () => {
+    const first = render({}, 'docs')
+    const second = render({}, 'docs')
+    const boundary = activeFixtureBoundary()!
+    await expect(fetch('/api/anything')).rejects.toThrow('Story network violation')
+    expect(boundary.violations).toHaveLength(1)
+    first.unmount()
+    expect(activeFixtureBoundary()).toBe(boundary)
+    second.unmount()
+    expect(activeFixtureBoundary()).toBeUndefined()
+  })
+
+  it('a docs story that declares routes does not share a boundary', () => {
+    render({}, 'docs')
+    expect(() => fenceStory({ routes: statsRoutes('default') }, true)).toThrow('already mounted')
+  })
+
+  it('mountConnected refuses to mount without a boundary', () => {
+    expect(() => mountConnected(document.createElement('div'), { component: HomeTodayStats })).toThrow('needs the fixture boundary')
   })
 })

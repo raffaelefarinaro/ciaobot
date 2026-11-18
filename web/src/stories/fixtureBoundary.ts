@@ -16,6 +16,9 @@ export type FixtureSocket = {
   readonly url: string
   readyState: number
   bufferedAmount: number
+  readonly protocol: string
+  readonly extensions: string
+  binaryType: BinaryType
   readonly sent: ReadonlyArray<string | ArrayBufferLike | ArrayBufferView | Blob>
   onopen: ((event: Event) => void) | null
   onmessage: ((event: MessageEvent) => void) | null
@@ -23,6 +26,7 @@ export type FixtureSocket = {
   onclose: ((event: CloseEvent) => void) | null
   addEventListener(type: string, listener: (event: Event | MessageEvent | CloseEvent) => void): void
   removeEventListener(type: string, listener: (event: Event | MessageEvent | CloseEvent) => void): void
+  dispatchEvent(event: Event): boolean
   send(data: string | ArrayBufferLike | ArrayBufferView | Blob): void
   close(code?: number, reason?: string): void
   serverOpen(): void
@@ -45,6 +49,55 @@ export type FixtureBoundary = {
 }
 
 let active = false
+let current: FixtureBoundary | undefined
+
+/** The boundary currently installed, if any; connected mounts and the teardown assertion read it. */
+export function activeFixtureBoundary(): FixtureBoundary | undefined {
+  return current
+}
+
+/**
+ * Fails when the active boundary recorded a violation, even if the component
+ * swallowed the error the boundary threw (`.catch(() => {})`, try/catch).
+ */
+export function assertNoFixtureViolations(boundary: FixtureBoundary | undefined = current): void {
+  if (boundary && boundary.violations.length > 0) {
+    throw new Error(`Story recorded ${boundary.violations.length} fixture boundary violation(s):\n${boundary.violations.join('\n')}`)
+  }
+}
+
+let shared: { boundary: FixtureBoundary, refs: number } | undefined
+
+/**
+ * The preview's entry point: every story and docs page is fenced from its
+ * `parameters.fixture` config (empty when absent). A docs page renders many
+ * stories at once, so docs mode shares one empty boundary between them; a
+ * docs story that declares routes or sockets cannot share and is refused by
+ * the single-mount guard.
+ */
+export function fenceStory(config: FixtureConfig | undefined, docs: boolean): FixtureBoundary {
+  const declared = config ?? { routes: [] }
+  const empty = !declared.routes?.length && !declared.sockets?.length
+  if (!docs || !empty) return installFixtureBoundary(declared)
+  if (shared) {
+    shared.refs++
+  } else {
+    shared = { boundary: installFixtureBoundary(declared), refs: 1 }
+  }
+  const entry = shared
+  let released = false
+  return {
+    violations: entry.boundary.violations,
+    requests: entry.boundary.requests,
+    dispose() {
+      if (released) return
+      released = true
+      if (--entry.refs > 0) return
+      shared = undefined
+      entry.boundary.dispose()
+    },
+  }
+}
 const lifecycleEvents = new Set([
   'storyRenderPhaseChanged', 'storyRendered', 'storyFinished', 'storyUnmounted',
   'storyErrored', 'storyThrewException', 'storyMissing', 'currentStoryWasSet',
@@ -158,6 +211,7 @@ function createFixtureSocket(
   const queue: Array<[string, Event | MessageEvent | CloseEvent]> = []
   let state = CONNECTING
   let bufferedAmount = 0
+  let binaryType: BinaryType = 'blob'
   let scheduled = false
   function fire(type: string, event: Event | MessageEvent | CloseEvent) {
     const property = `on${type}` as 'onopen' | 'onmessage' | 'onerror' | 'onclose'
@@ -190,6 +244,10 @@ function createFixtureSocket(
     get readyState() { return state },
     get bufferedAmount() { return bufferedAmount },
     get sent() { return [...sent] },
+    protocol: '',
+    extensions: '',
+    get binaryType() { return binaryType },
+    set binaryType(value: BinaryType) { if (value === 'blob' || value === 'arraybuffer') binaryType = value },
     onopen: null,
     onmessage: null,
     onerror: null,
@@ -202,8 +260,15 @@ function createFixtureSocket(
     removeEventListener(type: string, listener: (event: Event | MessageEvent | CloseEvent) => void) {
       listeners.get(type)?.delete(listener)
     },
+    dispatchEvent(event: Event) {
+      fire(event.type, event)
+      return !event.defaultPrevented
+    },
     send(data: string | ArrayBufferLike | ArrayBufferView | Blob) {
-      if (state !== OPEN) throw new Error(`Fixture socket send in readyState ${state}`)
+      // Native semantics: only CONNECTING throws; a closing or closed socket
+      // discards the frame silently.
+      if (state === CONNECTING) throw new DOMException('Fixture socket send while CONNECTING', 'InvalidStateError')
+      if (state !== OPEN) return
       sent.push(data)
       bufferedAmount += frameSize(data)
     },
@@ -214,6 +279,8 @@ function createFixtureSocket(
       deliver('open', new Event('open'))
     },
     serverMessage(data: string | ArrayBufferLike | ArrayBufferView | Blob) {
+      // A real server's late frame to a closed socket is dropped, not an error.
+      if (state === CLOSING || state === CLOSED) return
       if (state !== OPEN) throw new Error('Fixture socket serverMessage before serverOpen')
       deliver('message', new MessageEvent('message', { data }))
     },
@@ -252,6 +319,15 @@ export function installFixtureBoundary(config: FixtureConfig): FixtureBoundary {
     || !socket.path.startsWith('/') || typeof socket.script !== 'function')) {
     throw new TypeError('installFixtureBoundary sockets must each declare an absolute path and script()')
   }
+  const seen = new Set<string>()
+  for (const route of config.routes) {
+    const key = `${route.method} ${route.path}`
+    if (seen.has(key)) throw new TypeError(`installFixtureBoundary duplicate route ${key}`)
+    seen.add(key)
+  }
+  if (new Set(sockets.map(socket => socket.path)).size !== sockets.length) {
+    throw new TypeError('installFixtureBoundary duplicate socket path')
+  }
   active = true
   const violations = shallowReactive<string[]>([])
   const requests = shallowReactive<string[]>([])
@@ -278,6 +354,7 @@ export function installFixtureBoundary(config: FixtureConfig): FixtureBoundary {
     held.clear()
     restore.reverse().forEach(fn => fn())
     active = false
+    if (current?.dispose === dispose) current = undefined
   }
   function settle(response: Response | Promise<never>): Response | Promise<Response> {
     if (response instanceof Response) return response
@@ -358,5 +435,7 @@ export function installFixtureBoundary(config: FixtureConfig): FixtureBoundary {
     dispose()
     throw error
   }
-  return { violations, requests, dispose }
+  const boundary: FixtureBoundary = { violations, requests, dispose }
+  current = boundary
+  return boundary
 }
