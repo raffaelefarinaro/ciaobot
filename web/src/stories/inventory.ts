@@ -44,8 +44,8 @@ export const inventory: InventoryEntry[] = [
       { name: 'disabled', coverage: 'covered', storyIds: ['settings-switch--disabled-on', 'settings-switch--disabled-off'], note: 'DisabledOn renders checked and disabled; DisabledOff renders unchecked and disabled.' },
       { name: 'busy', coverage: 'covered', storyIds: ['settings-switch--busy'], note: 'Busy renders checked, aria-busy and an ellipsis; the native button remains enabled.' },
       { name: 'narrow', coverage: 'covered', storyIds: ['settings-switch--narrow'], note: 'Narrow renders checked in a maximum 390px container.' },
-      { name: 'keyboard-focus', coverage: 'uncovered', storyIds: [], note: 'Native keyboard activation and focus styling exist; no dedicated rendered focus story.' },
-      { name: 'reduced-motion', coverage: 'uncovered', storyIds: [], note: 'Track transitions stop under reduced motion; no dedicated rendered-state story.' },
+      { name: 'keyboard-focus', coverage: 'covered', storyIds: ['settings-switch--keyboard-focus'], note: 'Tab lands on the switch with visible :focus-visible; Enter toggles aria-checked.' },
+      { name: 'reduced-motion', coverage: 'covered', storyIds: ['settings-switch--reduced-motion'], note: 'Wrapper mirrors the production reduced-motion track rule; play asserts zero transition and a toggle.' },
     ],
     loading: { status: 'none', detail: 'No initial or refresh fetch. Busy is supplied by a parent, not owner-level loading coverage.' },
     migration: { status: 'migrated', note: 'Approved shared-switch slice 1: restart resume is the remaining Settings consumer; other native Settings switches are not migrated.' },
@@ -4756,25 +4756,37 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsAllWorkspaces.vue",
       "web/src/components/settings/SettingsWorkspaceOverview.vue"
     ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variants": ["name"],
+    "variantNotes": "One required workspace name prop; identity reads projectStore.workspaceOptions for sidebar 1-9 keys and workspaceAccent for tint.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in WorkspaceTile.vue implements this render; no rendered-state story exists."
+        "name": "shortcut-key",
+        "coverage": "covered",
+        "storyIds": ["workspace-tile--shortcut-key"],
+        "note": "Positions 1-9 render the numeric sidebar shortcut and the workspace preset accent."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "initial",
+        "coverage": "covered",
+        "storyIds": ["workspace-tile--initial"],
+        "note": "The tenth registry slot falls back to the label initial instead of a numeric key."
+      },
+      {
+        "name": "accent",
+        "coverage": "covered",
+        "storyIds": ["workspace-tile--accent"],
+        "note": "A non-active workspace keeps its own data-workspace-color tint."
+      },
+      {
+        "name": "neutral-accent",
+        "coverage": "covered",
+        "storyIds": ["workspace-tile--neutral-accent"],
+        "note": "An empty registry yields the neutral accent and the name initial before options load."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in WorkspaceTile.vue has not yet been audited."
+      "status": "none",
+      "detail": "Synchronous read from a seeded Pinia project store; consumers own registry fetches, not the tile."
     },
     "migration": {
       "status": "unassessed",
@@ -6630,9 +6642,9 @@ export const inventory: InventoryEntry[] = [
       },
       {
         "name": "keyboard-focus",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "Arrow wraparound, Home/End and focus movement are interactive behavior, not a dedicated rendered focus story."
+        "coverage": "covered",
+        "storyIds": ["settings-radio-group--keyboard-focus"],
+        "note": "Tab reaches the checked option with :focus-visible; ArrowRight moves focus and selects the next option."
       }
     ],
     "loading": {
