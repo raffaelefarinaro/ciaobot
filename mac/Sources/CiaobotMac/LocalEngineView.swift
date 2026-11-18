@@ -12,9 +12,9 @@ struct LocalEngineView: View {
     let connection: LocalConnectionModel.Phase
     let canRetry: Bool
     let onTryAgain: () -> Void
-    /// **Connect to Another Server…** stops the engine, saves the external
-    /// choice and shows the ordinary connection screen. S6 adds the
-    /// confirmation dialog and the menu command around this.
+    /// **Connect to Another Server…** runs through the mode-switch
+    /// confirmation (S6) and then stops the engine, saves the external choice
+    /// and shows the ordinary connection screen.
     let onConnectExternal: () -> Void
     /// Opens the engine log. The default opens it with the system handler.
     var openLog: (URL) -> Void = { NSWorkspace.shared.open($0) }
