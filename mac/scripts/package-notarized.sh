@@ -59,10 +59,47 @@ bundle=$output/Ciaobot.app
 ditto .build/Ciaobot.app "$bundle"
 chmod -R u+w "$bundle"
 xattr -cr "$bundle" 2>/dev/null || true
-# Distribution signing of the bundled engine is #3128 G. Until it lands, an
-# engine-bearing bundle would be rejected by notarization; refuse it here.
-[ ! -e "$bundle/Contents/Resources/engine" ] && [ ! -L "$bundle/Contents/Resources/engine" ] \
-    || die "the bundled engine has no distribution signing yet (#3128 G); refusing to notarize"
+# The bundled engine (#3128 G). Its Mach-O files are signed inside-out with the
+# Developer ID identity, hardened runtime and a secure timestamp, no entitlements,
+# before Sparkle and the app, so the app's seal covers already-signed code. The
+# SDK's own CLI keeps Anthropic's signature (verified, not re-signed). The check
+# afterwards is the gate: an outer seal alone passes `codesign --verify --deep`
+# over unsigned engine files, and notarization would reject them.
+engine=$bundle/Contents/Resources/engine
+[ -d "$engine" ] && [ ! -L "$engine" ] || die "the app has no bundled engine at Contents/Resources/engine"
+command -v python3 >/dev/null \
+    && python3 -I -S -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' \
+    || die "python3 3.12 or newer is required to sign the bundled engine"
+update_config=release/update-config.env
+[ -f "$update_config" ] && [ ! -L "$update_config" ] || die "release/update-config.env is missing"
+# Only UPDATE_TEAM_ID is read, and only by name: the public config is never
+# sourced here, so assigning PATH or SIGNING_IDENTITY in it cannot redirect
+# signing or tool lookup in this run. The identifier must stay a plain team id.
+UPDATE_TEAM_ID=$(sed -n 's/^UPDATE_TEAM_ID=//p' "$update_config")
+[ -n "$UPDATE_TEAM_ID" ] || die "release/update-config.env has no UPDATE_TEAM_ID"
+case $UPDATE_TEAM_ID in
+    *[!A-Z0-9]*) die "UPDATE_TEAM_ID must be a plain Apple team identifier: $UPDATE_TEAM_ID" ;;
+esac
+python3 -I -S scripts/engine_sign.py sign --distribution "$UPDATE_TEAM_ID" "$SIGNING_IDENTITY" "$engine" \
+    || die "could not distribution-sign the bundled engine"
+engine_version=$(python3 -I -S -c 'import json, sys; print(json.load(open(sys.argv[1]))["engine"]["version"])' "$engine/provenance.json")
+
+# The engine version probe runs the real launcher under `env -i`: an empty
+# environment of its own, with PYTHONDONTWRITEBYTECODE=1 re-asserted so a
+# bytecode-writing python could not drop __pycache__ into the bundle. The probe
+# must change nothing: the engine's full inventory (path, size, sha256 of every
+# file, via `scripts/engine_sign.py inventory`) is read before and after, and
+# any difference refuses the run.
+inventory() {
+    python3 -I -S scripts/engine_sign.py inventory "$engine" > "$1" \
+        || die "could not inventory the bundled engine"
+}
+inventory "$output/engine-inventory-before.json"
+[ "$(env -i PYTHONDONTWRITEBYTECODE=1 "$engine/bin/ciao" --version)" = "ciao $engine_version" ] \
+    || die "the signed engine does not report version $engine_version"
+inventory "$output/engine-inventory-after.json"
+cmp -s "$output/engine-inventory-before.json" "$output/engine-inventory-after.json" \
+    || die "the engine version check changed the bundled engine"
 # Sign Sparkle's nested helpers inside-out before the app. Signing the app
 # first would make the framework's later re-signing invalidate the app seal.
 sparkle=$bundle/Contents/Frameworks/Sparkle.framework

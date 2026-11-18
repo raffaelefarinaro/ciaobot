@@ -96,6 +96,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let appSettings = AppSettingsBridge()
     // One engine updater shared by the connection screen and the menu bar.
     let engineUpdater: EngineUpdater
+    /// The stored engine-mode choice (`CiaobotEngineMode`).
+    let engineMode: EngineModeStoring
+    /// The engine mode this launch runs in: `local` owns the bundled engine
+    /// (started at launch, below), `external` is the unchanged connection
+    /// screen. Resolved once at construction; a mid-session switch is view
+    /// state until the next launch.
+    let mode: EngineMode
+    /// The app-owned engine and everything needed to run it. Never started in
+    /// external mode. The test initializer leaves it out unless injected.
+    let supervisor: EngineSupervisor?
+    /// The launch's last-server and saved-host stores, handed to the
+    /// connection view so one defaults domain (or one DEBUG test suite) holds
+    /// all three stored decisions.
+    let lastServer: LastServerStoring
+    let hostStore: HostListStoring
 
     typealias MenuBarFactory = @MainActor (AppSessionStatus, ClientUpdateControlling?, EngineUpdateMenuProviding?,
                                            @escaping () -> Void, @escaping () -> Void) -> MenuBarControlling
@@ -131,6 +146,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         let session = AppSessionStatus(workspaceIcon: workspaceIcon)
         let engineUpdater = EngineUpdater()
+        // One launch defaults domain for the stored engine mode, last server
+        // and saved hosts. A DEBUG test launch with an isolated suite keeps
+        // all three away from the app's own defaults; every other launch uses
+        // the standard domain, as before.
+        let launchDefaults: UserDefaults
+        #if DEBUG
+        launchDefaults = TestLaunch.storedDefaults()
+        #else
+        launchDefaults = .standard
+        #endif
+        let modeStore = UserDefaultsEngineModeStore(defaults: launchDefaults)
+        let lastServerStore = UserDefaultsLastServerStore(defaults: launchDefaults)
+        let addressedTestLaunch: Bool
+        #if DEBUG
+        addressedTestLaunch = TestLaunch.addressed()
+        #else
+        addressedTestLaunch = false
+        #endif
         self.init(
             session: session,
             presenter: presenter,
@@ -149,7 +182,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             dockBadge: DockTileBadge(),
             systemSettings: WorkspaceSystemSettings(
                 presentHelper: { SettingsHelperPanel.shared.present(for: $0) }
-            )
+            ),
+            engineMode: modeStore,
+            mode: Self.launchEngineMode(
+                saved: modeStore.mode?.rawValue,
+                lastOrigin: lastServerStore.savedOrigin,
+                addressedTestLaunch: addressedTestLaunch
+            ),
+            supervisor: Self.makeSupervisor(),
+            lastServer: lastServerStore,
+            hostStore: UserDefaultsHostListStore(defaults: launchDefaults, lastServer: lastServerStore)
         )
     }
 
@@ -170,7 +212,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The test initializer leaves the Dock badge out, so no test can write
         // the real `NSApp.dockTile`.
         dockBadge: DockBadgeApplying? = nil,
-        systemSettings: SystemSettingsOpening? = nil
+        systemSettings: SystemSettingsOpening? = nil,
+        engineMode: EngineModeStoring? = nil,
+        // The resolved engine mode, or the injected store's choice, else
+        // external: an ordinary test launch runs no engine.
+        mode: EngineMode? = nil,
+        supervisor: EngineSupervisor? = nil,
+        lastServer: LastServerStoring? = nil,
+        hostStore: HostListStoring? = nil
     ) {
         self.session = session
         self.presenter = presenter
@@ -183,7 +232,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.workspaceIcon = workspaceIcon
         self.dockBadge = dockBadge
         self.systemSettings = systemSettings
+        self.engineMode = engineMode ?? TransientEngineModeStore()
+        self.mode = mode ?? self.engineMode.mode ?? .external
+        self.supervisor = supervisor
+        let lastServer = lastServer ?? UserDefaultsLastServerStore()
+        self.lastServer = lastServer
+        self.hostStore = hostStore ?? UserDefaultsHostListStore(lastServer: lastServer)
         super.init()
+    }
+
+    /// The engine mode for this launch: a stored choice wins over the default
+    /// `EngineMode.initial` rule (loopback or no last connection is local), and
+    /// a launch addressed at a DEBUG test fixture stays external — a fixture
+    /// launch must never run the bundled engine.
+    static func launchEngineMode(
+        saved: String?,
+        lastOrigin: Origin?,
+        addressedTestLaunch: Bool
+    ) -> EngineMode {
+        if addressedTestLaunch { return .external }
+        return EngineMode.initial(saved: saved, lastOrigin: lastOrigin, hostIsArm64: BundledEngine.hostIsArm64)
+    }
+
+    /// The bundled engine with the app's own supervisor surfaces, or a
+    /// supervisor that reports the fixed unavailable copy when this launch
+    /// has no usable `Contents/Resources/engine`. A DEBUG test launch can
+    /// point both the home and the engine resources somewhere isolated.
+    private static func makeSupervisor() -> EngineSupervisor {
+        let resourceDirectory: URL?
+        let home: URL
+        #if DEBUG
+        resourceDirectory = TestLaunch.engineResources() ?? Bundle.main.resourceURL
+        home = TestLaunch.engineHome() ?? FileManager.default.homeDirectoryForCurrentUser
+        #else
+        resourceDirectory = Bundle.main.resourceURL
+        home = FileManager.default.homeDirectoryForCurrentUser
+        #endif
+        let engine = try? BundledEngine.locate(resourceDirectory: resourceDirectory)
+        return EngineSupervisor(
+            engine: engine,
+            home: EngineHome(home: home),
+            processes: FoundationEngineProcesses(),
+            identity: EngineIdentityProbe()
+        )
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -218,6 +309,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             testWindowReporter = reporter
         }
         #endif
+
+        // Local mode owns the engine's lifetime, so the app starts it here and
+        // not from a view: a login launch with no window still runs the
+        // engine. External mode runs nothing (S6 adds the closed-window and
+        // quit handling).
+        if mode == .local {
+            supervisor?.start()
+        }
 
         // A saved "Hide Dock Icon" choice applies after the initial SwiftUI
         // window has had a chance to appear. It hides the Dock only while the

@@ -201,13 +201,15 @@ final class BundledEngineTests: XCTestCase {
         XCTAssertNil(text.range(of: "\\bwhich\\b", options: .regularExpression), "mentions which")
     }
 
-    func testNotWiredIntoTheAppYet() throws {
+    func testOnlyTheSupervisorAndAppDelegateReferenceTheBundledEngine() throws {
         let enumerator = try XCTUnwrap(FileManager.default.enumerator(atPath: Self.sourcesDirectory.path))
         var checked = 0
         while let rel = enumerator.nextObject() as? String {
-            // EngineSupervisor (#3129 S5a) is the one sanctioned consumer until S5b wires it into the app.
+            // EngineSupervisor runs the engine; AppDelegate (#3129 S5b) locates it
+            // and hands it over. The installer, updater and views stay clear of it.
             let name = URL(fileURLWithPath: rel).lastPathComponent
-            guard rel.hasSuffix(".swift"), name != "BundledEngine.swift", name != "EngineSupervisor.swift" else { continue }
+            guard rel.hasSuffix(".swift"),
+                  !["BundledEngine.swift", "EngineSupervisor.swift", "AppDelegate.swift"].contains(name) else { continue }
             checked += 1
             let text = try String(contentsOf: Self.sourcesDirectory.appendingPathComponent(rel))
             let code = text.split(separator: "\n", omittingEmptySubsequences: false)
