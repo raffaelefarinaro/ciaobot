@@ -70,6 +70,12 @@ struct SystemStatusItemFactory: StatusItemFactory {
 protocol MenuBarControlling: AnyObject {
     func start()
     func stop()
+    /// Shows the fixed stopping line while the quit path stops the engine;
+    /// connection and chat updates keep it until the item is stopped.
+    func setQuittingTitle()
+    /// The engine mode changed in this session; the rows that only make sense
+    /// with an app-owned engine follow it.
+    func setLocalEngineMode(_ local: Bool)
 }
 
 /// Bounds and cleans untrusted server text before it reaches AppKit. Chat
@@ -127,10 +133,12 @@ enum MenuTextSanitizer {
 
 /// A deliberately small status item: the connection fact, an attention badge,
 /// a truthful chat list from the selected server, Open, an engine-update row
-/// for the local engine below Open, one compact Settings
+/// for the local engine below Open, a restart row when that engine is
+/// stopped, one compact Settings
 /// submenu (which owns the notification state and every recovery action), and
-/// Quit. It never owns the server, never quits the server, and never invents
-/// chats, counts, or lifecycle state.
+/// Quit. The quit item sends this app through its own confirmation and stops
+/// the app-owned engine with it; it never invents chats, counts, or lifecycle
+/// state beyond what the supervisor reports.
 @MainActor
 final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     /// While the menu is actually open, re-read the feed on this cadence so a
@@ -139,6 +147,11 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     static let menuRefreshInterval: TimeInterval = 5
     static let openTitle = "Open Ciaobot"
     static let quitTitle = "Quit Ciaobot"
+    /// Shown while the quit path stops the engine (S6): quitting ends this
+    /// app's own engine, and the tray says so instead of the connection line.
+    static let stoppingTitle = "Stopping Ciaobot…"
+    /// The recovery row for a local engine that is not running (S6).
+    static let engineStoppedRowTitle = "Ciaobot engine stopped — Restart"
     static let disconnectedTitle = "Not connected"
     static let connectedTitlePrefix = "Connected to "
     static let toolTip = "Ciaobot"
@@ -206,6 +219,13 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     /// recorder so no test shows a modal alert.
     private let loginItemExplanation: (LoginItemUnavailability) -> Void
     private let changeHost: (() -> Void)?
+    /// The app-owned engine, present when the app runs in local mode (S6):
+    /// it drives the restart row and keeps the change-server row usable
+    /// before a connection exists.
+    private let engineSupervisor: EngineSupervisor?
+    /// True when this app runs the bundled engine: the change-server row
+    /// switches the engine mode itself, so it works without a connection.
+    private var localEngineMode: Bool
     private let updates: ClientUpdateControlling?
     private let engineUpdates: EngineUpdateMenuProviding?
     private let now: () -> Date
@@ -225,9 +245,15 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     private var notificationStateSubscription: AnyCancellable?
     private var notificationStreamSubscription: AnyCancellable?
     private var engineUpdateSubscription: AnyCancellable?
+    /// Rebuilds the menu when the local engine's state changes, so the restart
+    /// row appears with the failure and goes when the engine starts again.
+    private var engineStateSubscription: AnyCancellable?
     /// Whether the open menu showed a finished engine outcome, so the close
     /// acknowledges it exactly once.
     private var engineOutcomeShown = false
+    /// Whether the tray shows the fixed stopping line while the quit path
+    /// stops the engine.
+    private var quitting = false
     private var statusEntry: NSMenuItem?
     private var menuIsOpen = false
     private var needsChatRebuild = false
@@ -267,6 +293,10 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         changeHost: (() -> Void)? = nil,
         updates: ClientUpdateControlling? = nil,
         engineUpdates: EngineUpdateMenuProviding? = nil,
+        // Local-mode surfaces (S6). Nil/external keeps the external tray as it
+        // was: no restart row, and the change-server row only when connected.
+        engineSupervisor: EngineSupervisor? = nil,
+        localEngineMode: Bool = false,
         now: @escaping () -> Date = Date.init,
         reduceMotion: @escaping () -> Bool = {
             NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -292,6 +322,8 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         self.systemSettings = systemSettings
         self.loginItemExplanation = loginItemExplanation ?? Self.presentLoginItemUnavailable
         self.changeHost = changeHost
+        self.engineSupervisor = engineSupervisor
+        self.localEngineMode = localEngineMode
         self.updates = updates
         self.engineUpdates = engineUpdates
         self.now = now
@@ -374,6 +406,10 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
             // next main-loop turn so the row reads the settled state.
             DispatchQueue.main.async { self?.chatStateChanged() }
         }
+        engineStateSubscription = engineSupervisor?.$state.sink { [weak self] _ in
+            // Same settlement rule as every `@Published` rebuild above.
+            DispatchQueue.main.async { self?.chatStateChanged() }
+        }
         chatList?.start()
         activity?.start()
         fleet?.start()
@@ -383,6 +419,8 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
 
     func stop() {
         stopMenuTickers()
+        engineStateSubscription?.cancel()
+        engineStateSubscription = nil
         engineUpdateSubscription?.cancel()
         engineUpdateSubscription = nil
         engineUpdates?.stop()
@@ -409,6 +447,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         menuIsOpen = false
         needsChatRebuild = false
         engineOutcomeShown = false
+        quitting = false
         chatRowItems.removeAll()
         animatedRows.removeAll()
         badgeOrigin = nil
@@ -417,6 +456,24 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     /// Exposed for tests and for the menu item itself; reading it is the only
     /// way the status line is produced.
     var statusTitle: String? { statusEntry?.title }
+
+    /// The line the tray currently shows: the quitting line while the quit
+    /// path stops the engine, else the connection fact.
+    var currentTitle: String? { quitting ? Self.stoppingTitle : statusTitle }
+
+    /// The fixed stopping line, for the whole stop the quit path drives (S6).
+    /// Connection and chat updates keep it until the item is stopped, so a
+    /// republished connection cannot overwrite it mid-drain.
+    func setLocalEngineMode(_ local: Bool) {
+        guard localEngineMode != local else { return }
+        localEngineMode = local
+        rebuildMenu()
+    }
+
+    func setQuittingTitle() {
+        quitting = true
+        statusEntry?.title = Self.stoppingTitle
+    }
 
     static func statusTitle(for connection: AppSessionStatus.Connection) -> String {
         switch connection {
@@ -572,7 +629,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     }
 
     private func statusChanged(_ connection: AppSessionStatus.Connection) {
-        statusEntry?.title = Self.statusTitle(for: connection)
+        statusEntry?.title = quitting ? Self.stoppingTitle : Self.statusTitle(for: connection)
         // `@Published` sends before the stored connection is updated. A genuine
         // disconnect or origin switch clears the badge from the emitted fact
         // now, so the previous origin's count cannot survive even one frame. A
@@ -732,7 +789,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         animatedRows.removeAll()
 
         let entry = NSMenuItem(
-            title: Self.statusTitle(for: status.connection),
+            title: quitting ? Self.stoppingTitle : Self.statusTitle(for: status.connection),
             action: nil,
             keyEquivalent: ""
         )
@@ -768,6 +825,10 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
 
         for row in engineUpdates?.rows ?? [] {
             menu.addItem(engineUpdateItem(row))
+        }
+
+        if let restart = engineRestartItem() {
+            menu.addItem(restart)
         }
 
         if hasSettingsControls {
@@ -1174,16 +1235,22 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     }
 
     private func changeHostItem() -> NSMenuItem {
+        // In local mode the row switches the engine mode itself (S6): the
+        // confirmation stops the app-owned engine, so it works before a
+        // connection exists too. External mode stays exactly as it was.
+        let available = status.isConnected || localEngineMode
         let item = NSMenuItem(
             title: Self.changeHostTitle,
-            action: status.isConnected ? #selector(changeConnectedHost(_:)) : nil,
+            action: available ? #selector(changeConnectedHost(_:)) : nil,
             keyEquivalent: ""
         )
-        item.target = status.isConnected ? self : nil
-        item.isEnabled = status.isConnected
-        item.toolTip = status.isConnected
-            ? "Return to the connection screen without contacting or restarting the server. Sign-in consent is asked again for the new host."
-            : "Connect to a server first."
+        item.target = available ? self : nil
+        item.isEnabled = available
+        item.toolTip = !available
+            ? "Connect to a server first."
+            : localEngineMode && !status.isConnected
+                ? "Connect to another server; the Ciaobot engine on this Mac stops."
+                : "Return to the connection screen without contacting or restarting the server. Sign-in consent is asked again for the new host."
         return item
     }
 
@@ -1231,6 +1298,41 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
             item.isEnabled = true
             item.toolTip = EngineUpdateMenuCopy.actionToolTip
             return item
+        }
+    }
+
+    /// The recovery row for a local engine that is down (S6): a failed or
+    /// port-in-use engine is not running, and the tray row restarts it without
+    /// opening the window. Any other state adds no row.
+    private func engineRestartItem() -> NSMenuItem? {
+        guard localEngineMode, let engineSupervisor else { return nil }
+        switch engineSupervisor.state {
+        case .failed, .portInUse:
+            break
+        default:
+            return nil
+        }
+        let item = NSMenuItem(
+            title: Self.engineStoppedRowTitle,
+            action: #selector(restartEngine(_:)),
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.isEnabled = true
+        item.toolTip = "Starts the Ciaobot engine on this Mac again."
+        return item
+    }
+
+    /// The only path that restarts a local engine from the menu. The state is
+    /// re-checked at the click, so a row rebuilt moments before cannot start
+    /// an engine that is already running or starting.
+    @objc func restartEngine(_ sender: Any?) {
+        guard localEngineMode, let engineSupervisor else { return }
+        switch engineSupervisor.state {
+        case .failed, .portInUse:
+            engineSupervisor.start()
+        default:
+            break
         }
     }
 
@@ -1452,8 +1554,10 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         }
     }
 
-    /// `NSApp.terminate` stops this process only; the client has no server
-    /// lifecycle call and the separately installed server keeps running.
+    /// Quitting asks once (S6): the tray item and Cmd-Q both reach
+    /// `applicationShouldTerminate`, which confirms before this app-owned
+    /// engine stops, and skips the ask when macOS is itself ending the session.
+    /// `NSApp.terminate` starts that flow; it owns nothing else.
     @objc func quitCiaobot(_ sender: Any?) {
         quit()
     }

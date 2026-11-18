@@ -11,6 +11,7 @@ here touches the operator's real home, real LaunchAgents or live install.
 from __future__ import annotations
 
 import errno
+import asyncio
 import json
 import os
 import plistlib
@@ -19,12 +20,13 @@ import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Callable
+from types import SimpleNamespace
+from typing import IO, Any, Awaitable, Callable
 
 import pytest
 
 from ciao import app_engine, workspace_move, workspace_move_app
-from ciao.config import reset_exported_dotenv
+from ciao.config import RESTART_EXIT_CODE, reset_exported_dotenv
 
 
 def _workspace(root: Path) -> Path:
@@ -1069,9 +1071,9 @@ def test_no_record_means_before_boot_does_nothing(
     assert {p.name for p in tmp_path.iterdir()} - {"home"} == {"state", "ws"}
 
 
-# Modules allowed to write an app-mode operation record. S3b-2's move route
-# is added here when it lands; until then nothing in ciao/ may.
-_APP_RECORD_WRITERS: frozenset[str] = frozenset()
+# Modules allowed to write an app-mode operation record: `record` in
+# workspace_move_app.py (the Settings move route) is the only writer.
+_APP_RECORD_WRITERS: frozenset[str] = frozenset({"workspace_move_app.py"})
 
 
 def test_nothing_in_ciao_writes_an_app_record() -> None:
@@ -1764,3 +1766,856 @@ def test_app_run_calls_before_boot_before_server_main(
 
     # The move (or its rollback) happens before any configuration loads.
     assert order == ["before_boot", "server_main"]
+
+
+# ── S3b-2: the request side ──────────────────────────────────────────
+
+
+class _Pcm:
+    """The parts of the chat manager a drain touches."""
+
+    def __init__(
+        self, chats: list[list[str]] | None = None, draining: bool = False
+    ) -> None:
+        self.chats = list(chats or [])
+        self.restart_draining = draining
+        self.drains: list[str] = []
+        self.cancels: list[str | None] = []
+
+    def begin_restart_drain(self, owner: str = "") -> None:
+        self.drains.append(owner)
+        self.restart_draining = True
+
+    def cancel_restart_drain(self, owner: str | None = None) -> bool:
+        self.cancels.append(owner)
+        self.restart_draining = False
+        return True
+
+    def active_chat_ids(self) -> list[str]:
+        return self.chats.pop(0) if self.chats else []
+
+
+class _Schedules:
+    """``work_count()`` answers each entry once, then zero."""
+
+    def __init__(self, counts: list[int]) -> None:
+        self.counts = list(counts)
+
+    def work_count(self) -> int:
+        return self.counts.pop(0) if self.counts else 0
+
+
+class _Restarts:
+    """The engine's request_restart, recording the moment it was called."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.calls: list[int] = []
+        self.phases: list[str] = []
+        self.locks: list[bool] = []
+
+    def __call__(self, code: int) -> None:
+        op = workspace_move.read_operation(self.root)
+        self.calls.append(code)
+        self.phases.append(op.phase if op is not None else "missing")
+        self.locks.append(workspace_move.job_running(self.root))
+
+
+def _clock(times: list[float]) -> Callable[[], float]:
+    """Answers each entry once, then repeats the last one."""
+    seq = iter(times)
+
+    def tick() -> float:
+        value = next(seq, times[-1] if times else 0.0)
+        return value
+
+    return tick
+
+
+def _recorded_sleep(called: list[float]) -> Callable[[float], Awaitable[None]]:
+    async def fake_sleep(seconds: float) -> None:
+        called.append(seconds)
+
+    return fake_sleep
+
+
+def _record(
+    tmp_path: Path, source: Path, target: Path
+) -> tuple[workspace_move.MoveOperation, IO[str], Path]:
+    """Via `record`: the queued app record, its lock, and the state dir."""
+    app_engine.write_pointer(source, source / ".runtime")
+    root = tmp_path / "state"
+    plan_obj = workspace_move.MovePlan(source=str(source), target=str(target))
+    op, handle = workspace_move_app.record(plan_obj, port=8443, state_dir=root)
+    return op, handle, root
+
+
+def _ready_move(tmp_path: Path) -> tuple[workspace_move.MoveOperation, IO[str], Path]:
+    source = _workspace(tmp_path / "ws")
+    return _record(tmp_path, source, tmp_path / "moved")
+
+
+async def test_drain_waits_for_chats_and_schedules_then_restarts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    op, handle, root = _ready_move(tmp_path)
+    # Two polls find chats, two more find scheduled work, then three idle
+    # polls in a row end the drain.
+    pcm = _Pcm(chats=[["c"], ["c"]])
+    schedules = _Schedules([1, 1])
+    restarts = _Restarts(root)
+    sleeps: list[float] = []
+
+    await workspace_move_app.drain_then_restart(
+        op,
+        handle,
+        pcm=pcm,
+        schedules=schedules,
+        request_restart=restarts,
+        state_dir=root,
+        clock=time.monotonic,
+        sleep=_recorded_sleep(sleeps),
+    )
+
+    assert pcm.drains == [f"move-{op.id}"]
+    assert sleeps == [1.0] * 6
+    # The restart came exactly once, with the engine's restart code, only
+    # after the record had already been advanced to `stopping`, while the
+    # move lock was still held for the exec to close.
+    assert restarts.calls == [RESTART_EXIT_CODE]
+    assert restarts.phases == ["stopping"]
+    assert restarts.locks == [True]
+    assert workspace_move.job_running(root) is True
+    handle.close()
+
+
+async def test_drain_ignores_work_count_only_for_the_idle_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation check: a drain that ignores `work_count` restarts too early."""
+    _app_mode(monkeypatch)
+    op, handle, root = _ready_move(tmp_path)
+    pcm = _Pcm()
+    schedules = _Schedules([1])
+    restarts = _Restarts(root)
+    sleeps: list[float] = []
+
+    await workspace_move_app.drain_then_restart(
+        op,
+        handle,
+        pcm=pcm,
+        schedules=schedules,
+        request_restart=restarts,
+        state_dir=root,
+        clock=time.monotonic,
+        sleep=_recorded_sleep(sleeps),
+    )
+
+    # The first poll found scheduled work, so only the next three count as
+    # idle: a drain that ignored `work_count` would restart after two.
+    assert sleeps == [1.0, 1.0, 1.0]
+    assert restarts.calls == [RESTART_EXIT_CODE]
+    handle.close()
+
+
+async def test_drain_timeout_reopens_and_fails_without_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    source = _workspace(tmp_path / "ws")
+    op, handle, root = _record(tmp_path, source, tmp_path / "moved")
+    pcm = _Pcm()
+    schedules = _Schedules([1] * 5)
+    restarts = _Restarts(root)
+    sleeps: list[float] = []
+    fake_now = _clock([0.0, workspace_move._DRAIN_TIMEOUT + 5.0])
+
+    await workspace_move_app.drain_then_restart(
+        op,
+        handle,
+        pcm=pcm,
+        schedules=schedules,
+        request_restart=restarts,
+        state_dir=root,
+        clock=fake_now,
+        sleep=_recorded_sleep(sleeps),
+    )
+
+    # Nothing restarts; the drain is cancelled under its owner; the record
+    # names the timeout; the lock is released. Nothing was moved.
+    assert restarts.calls == []
+    assert pcm.cancels == [f"move-{op.id}"]
+    final = workspace_move.read_operation(root)
+    assert final is not None and final.phase == "failed"
+    assert final.error == (
+        f"chats were still running after {int(workspace_move._DRAIN_TIMEOUT)}s; "
+        "nothing was moved"
+    )
+    assert sleeps == []
+    assert workspace_move.job_running(root) is False
+
+
+async def test_drain_refuses_while_another_restart_drains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    op, handle, root = _ready_move(tmp_path)
+    pcm = _Pcm(draining=True)
+    restarts = _Restarts(root)
+
+    await workspace_move_app.drain_then_restart(
+        op,
+        handle,
+        pcm=pcm,
+        schedules=_Schedules([]),
+        request_restart=restarts,
+        state_dir=root,
+        clock=time.monotonic,
+        sleep=_recorded_sleep([]),
+    )
+
+    assert pcm.drains == []
+    assert pcm.cancels == []
+    assert restarts.calls == []
+    final = workspace_move.read_operation(root)
+    assert final is not None and final.phase == "failed"
+    assert final.error == "Ciaobot is already restarting. Try again when it is back."
+    assert workspace_move.job_running(root) is False
+
+
+async def test_move_lock_held_while_draining(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    op, handle, root = _ready_move(tmp_path)
+    pcm = _Pcm(chats=[["c"], ["c"]])
+    schedules = _Schedules([1, 1])
+    restarts = _Restarts(root)
+    held: list[bool] = []
+
+    async def checking_sleep(seconds: float) -> None:
+        held.append(workspace_move.job_running(root))
+
+    await workspace_move_app.drain_then_restart(
+        op,
+        handle,
+        pcm=pcm,
+        schedules=schedules,
+        request_restart=restarts,
+        state_dir=root,
+        clock=time.monotonic,
+        sleep=checking_sleep,
+    )
+
+    # No poll of the drain runs with the move lock free: another move (or
+    # boot) cannot start while chats are draining.
+    assert held and all(held)
+    assert restarts.calls == [RESTART_EXIT_CODE]
+    handle.close()
+
+
+async def test_drain_failure_releases_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Companion to the held-lock test: every failure path unlocks and records."""
+    _app_mode(monkeypatch)
+    op, handle, root = _ready_move(tmp_path)
+
+    # No schedule manager: the drain cannot know whether scheduled work is
+    # idle. It records `failed` (a fire-and-forget task cannot raise).
+    assert workspace_move.job_running(root) is True
+    await workspace_move_app.drain_then_restart(
+        op,
+        handle,
+        pcm=_Pcm(),
+        schedules=None,
+        request_restart=_Restarts(root),
+        state_dir=root,
+        clock=time.monotonic,
+        sleep=_recorded_sleep([]),
+    )
+    final = workspace_move.read_operation(root)
+    assert final is not None and final.phase == "failed"
+    assert "scheduled work" in final.error and "nothing was moved" in final.error
+    assert workspace_move.job_running(root) is False
+
+
+async def _failed_drain(
+    root: Path, op: workspace_move.MoveOperation, handle: IO[str], pcm: _Pcm, restart: Any
+) -> None:
+    await workspace_move_app.drain_then_restart(
+        op,
+        handle,
+        pcm=pcm,
+        schedules=_Schedules([]),
+        request_restart=restart,
+        state_dir=root,
+        clock=time.monotonic,
+        sleep=_recorded_sleep([]),
+    )
+
+
+async def test_drain_request_restart_raising_fails_and_releases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    op, handle, root = _ready_move(tmp_path)
+    pcm = _Pcm()
+
+    def boom(code: int) -> None:
+        raise RuntimeError("restart refused")
+
+    await _failed_drain(root, op, handle, pcm, boom)
+
+    final = workspace_move.read_operation(root)
+    assert final is not None and final.phase == "failed"
+    assert final.error == "restart refused; nothing was moved"
+    assert pcm.cancels == [f"move-{op.id}"]
+    assert workspace_move.job_running(root) is False
+    assert handle not in workspace_move_app._HELD_LOCKS
+
+
+async def test_drain_cancelled_fails_releases_and_reraises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    op, handle, root = _ready_move(tmp_path)
+    pcm = _Pcm(chats=[["c"]])
+
+    async def cancelled(seconds: float) -> None:
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await workspace_move_app.drain_then_restart(
+            op,
+            handle,
+            pcm=pcm,
+            schedules=_Schedules([]),
+            request_restart=lambda code: pytest.fail("a cancelled drain must not restart"),
+            state_dir=root,
+            clock=time.monotonic,
+            sleep=cancelled,
+        )
+
+    final = workspace_move.read_operation(root)
+    assert final is not None and final.phase == "failed"
+    assert "cancelled" in final.error
+    assert pcm.cancels == [f"move-{op.id}"]
+    assert workspace_move.job_running(root) is False
+
+
+async def test_drain_failing_stopping_write_does_not_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation check: ignoring the `stopping` write result restarts with no move record."""
+    _app_mode(monkeypatch)
+    op, handle, root = _ready_move(tmp_path)
+    pcm = _Pcm()
+    real = workspace_move.write_operation
+
+    def write(o: workspace_move.MoveOperation, state_dir: Path | None = None) -> None:
+        if o.phase == "stopping":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        real(o, state_dir)
+
+    monkeypatch.setattr(workspace_move, "write_operation", write)
+
+    await _failed_drain(
+        root, op, handle, pcm, lambda code: pytest.fail("no stopping record, no restart")
+    )
+
+    final = workspace_move.read_operation(root)
+    assert final is not None and final.phase == "failed"
+    assert pcm.cancels == [f"move-{op.id}"]
+    assert workspace_move.job_running(root) is False
+
+
+def test_record_refuses_when_the_pointer_vanished(tmp_path: Path) -> None:
+    source = _workspace(tmp_path / "ws")
+    root = tmp_path / "state"
+    app_engine.clear_pointer(expected_workspace=source)
+    plan_obj = workspace_move.MovePlan(source=str(source), target=str(tmp_path / "moved"))
+
+    with pytest.raises(workspace_move.MoveError, match="pointer"):
+        workspace_move_app.record(plan_obj, port=8443, state_dir=root)
+
+    assert not (root / workspace_move.OPERATION_NAME).exists()
+    assert workspace_move.job_running(root) is False
+
+
+async def test_verify_marks_done_when_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    source, target = _workspace(tmp_path / "ws"), tmp_path / "moved"
+    root = _store(
+        tmp_path / "state",
+        _op(source, target, phase="verifying", runtime_root=str(source / ".runtime")),
+    )
+    sleeps: list[float] = []
+
+    await workspace_move_app.verify_after_boot(
+        target,
+        SimpleNamespace(overall_ready=True),
+        lambda code: pytest.fail("a ready engine must not restart"),
+        state_dir=root,
+        clock=time.monotonic,
+        sleep=_recorded_sleep(sleeps),
+    )
+
+    final = workspace_move.read_operation(root)
+    assert final is not None and final.phase == "done"
+    assert final.error == ""
+    assert sleeps == []
+
+
+async def test_verify_timeout_requests_rollback_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    source, target = _workspace(tmp_path / "ws"), tmp_path / "moved"
+    root = _store(
+        tmp_path / "state",
+        _op(source, target, phase="verifying", runtime_root=str(source / ".runtime")),
+    )
+    restarts: list[int] = []
+    fake_now = _clock([0.0, workspace_move._READY_TIMEOUT + 1.0])
+
+    await workspace_move_app.verify_after_boot(
+        target,
+        SimpleNamespace(overall_ready=False),
+        restarts.append,
+        state_dir=root,
+        clock=fake_now,
+        sleep=_recorded_sleep([]),
+    )
+
+    final = workspace_move.read_operation(root)
+    assert final is not None and final.phase == "rolling_back"
+    assert final.error == (
+        f"the engine did not become ready within {int(workspace_move._READY_TIMEOUT)}s"
+    )
+    # The rollback itself is the next boot's `before_boot`: this restart is
+    # what brings that boot.
+    assert restarts == [RESTART_EXIT_CODE]
+
+
+async def test_verify_ignores_other_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    source = _workspace(tmp_path / "ws")
+    moved, elsewhere = tmp_path / "moved", tmp_path / "elsewhere"
+    restarts: list[int] = []
+
+    # Not this folder.
+    root = _store(
+        tmp_path / "state",
+        _op(source, moved, phase="verifying", runtime_root=str(source / ".runtime")),
+    )
+    await workspace_move_app.verify_after_boot(
+        elsewhere,
+        SimpleNamespace(overall_ready=True),
+        restarts.append,
+        state_dir=root,
+        clock=time.monotonic,
+        sleep=_recorded_sleep([]),
+    )
+    final = workspace_move.read_operation(root)
+    assert final is not None and final.phase == "verifying"
+
+    # Not a verifying record.
+    root = _store(
+        tmp_path / "state-done",
+        _op(source, moved, phase="stopping", runtime_root=str(source / ".runtime")),
+    )
+    await workspace_move_app.verify_after_boot(
+        moved,
+        SimpleNamespace(overall_ready=True),
+        restarts.append,
+        state_dir=root,
+        clock=time.monotonic,
+        sleep=_recorded_sleep([]),
+    )
+    assert workspace_move.read_operation(root).phase == "stopping"
+
+    # Not a record of this mechanism (a 1.x launchd-job record).
+    old = _op(source, moved, phase="verifying")
+    old.app = False
+    root = _store(tmp_path / "state-old", old)
+    await workspace_move_app.verify_after_boot(
+        moved,
+        SimpleNamespace(overall_ready=True),
+        restarts.append,
+        state_dir=root,
+        clock=time.monotonic,
+        sleep=_recorded_sleep([]),
+    )
+    assert workspace_move.read_operation(root).phase == "verifying"
+
+    assert restarts == []
+
+
+def test_plan_app_mode_warns_for_protected_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The maintainer's warn-but-undo answer: the rollback is the protection."""
+    _app_mode(monkeypatch)
+    source = _workspace(tmp_path / "ws")
+    monkeypatch.setattr(
+        "ciao.setup_status.tcc_protected_location", lambda folder: "Documents"
+    )
+
+    result = workspace_move.plan(
+        source,
+        str(tmp_path / "moved"),
+        registered=source,
+        python=sys.executable,
+        platform="darwin",
+        engine_running=True,
+        host=None,
+        app_mode=True,
+        state_dir=tmp_path / "state",
+    )
+
+    assert result.ok, result.refusals
+    assert any(
+        "macOS may ask Ciaobot for access to your Documents folder" in w
+        and "the move is undone" in w
+        for w in result.warnings
+    ), result.warnings
+    # The service-mode refusal copy appears only in service mode.
+    assert not any("background job" in r for r in result.refusals)
+
+
+def test_plan_app_mode_refuses_without_pointer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    source = _workspace(tmp_path / "ws")
+
+    result = workspace_move.plan(
+        source,
+        str(tmp_path / "moved"),
+        registered=None,
+        python=sys.executable,
+        platform="darwin",
+        engine_running=True,
+        app_mode=True,
+        state_dir=tmp_path / "state",
+    )
+
+    assert not result.ok
+    assert any(
+        "has no workspace recorded yet. Finish setup first." in r
+        for r in result.refusals
+    ), result.refusals
+    assert not any("ciao setup --workspace" in r for r in result.refusals)
+
+
+def test_plan_for_app_mode_refuses_a_stopped_engine_with_app_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    source = _workspace(tmp_path / "ws")
+    app_engine.write_pointer(source, source / ".runtime")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(workspace_move, "registered_workspace", lambda: source)
+    monkeypatch.setattr(workspace_move, "update_in_flight", lambda: False)
+    monkeypatch.setattr(workspace_move, "engine_running", lambda: False)
+
+    result = workspace_move.plan_for(source, str(tmp_path / "moved"))
+
+    assert not result.ok
+    assert any(
+        "Ciaobot is not running. Open Ciaobot, then move it." in r
+        for r in result.refusals
+    ), result.refusals
+    # The service-mode copy is service-mode only.
+    assert not any("ciao service start" in r for r in result.refusals)
+
+
+def test_plan_refuses_during_unfinished_takeover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    source = _workspace(tmp_path / "ws")
+    app_engine.write_pointer(source, source / ".runtime")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(workspace_move, "registered_workspace", lambda: source)
+    monkeypatch.setattr(workspace_move, "update_in_flight", lambda: False)
+    monkeypatch.setattr(workspace_move, "engine_running", lambda: True)
+    monkeypatch.setattr("ciao.mac_takeover._unfinished_journal", lambda: "pending-id")
+
+    result = workspace_move.plan_for(source, str(tmp_path / "moved"))
+
+    assert not result.ok
+    assert any(
+        "still moving your existing install into the app" in r
+        for r in result.refusals
+    ), result.refusals
+
+
+async def test_app_mode_main_starts_the_verify_task(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The booted app-mode engine starts its verify; other boots do not."""
+    from ciao import main, workspace_move_app
+
+    _app_mode(monkeypatch)
+    source, target = _workspace(tmp_path / "ws"), tmp_path / "moved"
+    root = _store(
+        tmp_path / "state",
+        _op(source, target, phase="verifying", runtime_root=str(source / ".runtime")),
+    )
+    monkeypatch.setattr(workspace_move, "default_state_dir", lambda: root)
+    calls: list[tuple[Path, Any, Any]] = []
+
+    async def fake_verify(workspace_root: Path, tracker: Any, request_restart: Any) -> None:
+        calls.append((workspace_root, tracker, request_restart))
+
+    monkeypatch.setattr(workspace_move_app, "verify_after_boot", fake_verify)
+    config = SimpleNamespace(workspace_root=tmp_path / "moved")
+    tracker = main.StartupTracker()
+    restarts: list[int] = []
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    # The task is created on the running loop and wired to this boot's pieces.
+    main._start_workspace_move_verify(app, config, tracker, restarts.append)
+    task = app.state.workspace_move_verify
+    assert isinstance(task, asyncio.Task)
+    await asyncio.sleep(0)
+    assert calls == [(tmp_path / "moved", tracker, restarts.append)]
+
+    # Outside the app this boot has no move duty: nothing is created.
+    monkeypatch.setattr("ciao.package_version.running_from_app_bundle", lambda: False)
+    external = SimpleNamespace(state=SimpleNamespace())
+    main._start_workspace_move_verify(external, config, tracker, restarts.append)
+    assert "workspace_move_verify" not in external.state.__dict__
+
+
+def test_start_refuses_in_app_mode_and_never_spawns_a_launchd_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    monkeypatch.setattr(
+        workspace_move,
+        "_spawn_mac_job",
+        lambda *args: pytest.fail("no move job is ever installed in app mode"),
+    )
+    monkeypatch.setattr(
+        "ciao.macos_service._launchctl",
+        lambda *args: pytest.fail("launchctl is never called in app mode"),
+    )
+    plan_obj = workspace_move.MovePlan(
+        source=str(tmp_path / "ws"), target=str(tmp_path / "moved")
+    )
+
+    with pytest.raises(
+        workspace_move.MoveError,
+        match="In Ciaobot for Mac the engine moves the workspace itself",
+    ):
+        workspace_move.start(plan_obj, port=8443, state_dir=tmp_path / "state")
+
+    # Nothing was recorded either: the refusal precedes the record write.
+    assert (tmp_path / "state" / workspace_move.OPERATION_NAME).exists() is False
+
+
+# ── verify_after_boot: the `done` write can fail ─────────────────────
+
+
+def _verifying_root(tmp_path: Path) -> tuple[Path, Path, Path]:
+    source, target = _workspace(tmp_path / "ws"), tmp_path / "moved"
+    root = _store(
+        tmp_path / "state",
+        _op(source, target, phase="verifying", runtime_root=str(source / ".runtime")),
+    )
+    return source, target, root
+
+
+class _SteppedClock:
+    """A clock that only moves when the fake sleep is called."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _fail_done(monkeypatch: pytest.MonkeyPatch, times: int | None) -> list[int]:
+    """Fail the `done` write ``times`` times (always when None); returns the attempt count."""
+    real = workspace_move.write_operation
+    attempts = [0]
+
+    def write(o: workspace_move.MoveOperation, state_dir: Path | None = None) -> None:
+        if o.phase == "done":
+            attempts[0] += 1
+            if times is None or attempts[0] <= times:
+                raise OSError(errno.EIO, "I/O error")
+        real(o, state_dir)
+
+    monkeypatch.setattr(workspace_move, "write_operation", write)
+    return attempts
+
+
+async def test_verify_retries_a_failing_done_write_until_it_lands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    _source, target, root = _verifying_root(tmp_path)
+    attempts = _fail_done(monkeypatch, 3)
+    clock = _SteppedClock()
+
+    await workspace_move_app.verify_after_boot(
+        target,
+        SimpleNamespace(overall_ready=True),
+        lambda code: pytest.fail("a ready engine must not restart"),
+        state_dir=root,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+
+    final = workspace_move.read_operation(root)
+    assert final is not None and final.phase == "done"
+    assert attempts[0] == 4
+
+
+async def test_verify_never_landing_done_leaves_a_marker_that_stops_the_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Mutation check: without the marker an old `verifying` record is rolled back."""
+    _app_mode(monkeypatch)
+    source, target, root = _verifying_root(tmp_path)
+    # The move really happened: data at the target, pointer on it.
+    source.rename(target)
+    app_engine.write_pointer(target, target / ".runtime")
+    attempts = _fail_done(monkeypatch, None)
+    clock = _SteppedClock()
+
+    await workspace_move_app.verify_after_boot(
+        target,
+        SimpleNamespace(overall_ready=True),
+        lambda code: pytest.fail("a ready engine must not restart"),
+        state_dir=root,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+
+    assert attempts[0] > 1
+    assert "ERROR" in capsys.readouterr().err
+    op = workspace_move.read_operation(root)
+    assert op is not None and op.phase == "verifying"
+    assert workspace_move_app._ready_marked(root, op.id)
+
+    # A much later restart finds the old `verifying` record plus the marker:
+    # an ordinary boot, the folder stays.
+    monkeypatch.undo()
+    _app_mode(monkeypatch)
+    result = workspace_move_app.before_boot(
+        state_dir=root, now=lambda: time.time() + 10 * workspace_move_app.VERIFY_GRACE_S
+    )
+    assert result == "none"
+    assert (target / ".env").is_file() and not (tmp_path / "ws").exists()
+    final = workspace_move.read_operation(root)
+    assert final is not None and final.phase == "done"
+
+
+async def test_a_ready_marker_for_another_operation_does_not_save_the_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    source, target, root = _verifying_root(tmp_path)
+    source.rename(target)
+    app_engine.write_pointer(target, target / ".runtime")
+    app_engine.write_private_json(
+        root / workspace_move_app.READY_MARKER_NAME, {"id": "some-other-op"}
+    )
+
+    result = workspace_move_app.before_boot(
+        state_dir=root, now=lambda: time.time() + 10 * workspace_move_app.VERIFY_GRACE_S
+    )
+
+    assert result == "rolled_back"
+
+
+async def test_verify_with_nothing_writable_logs_loudly_and_returns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _app_mode(monkeypatch)
+    _source, target, root = _verifying_root(tmp_path)
+    _fail_done(monkeypatch, None)
+
+    def no_marker(path: Path, payload: dict[str, Any]) -> None:
+        raise OSError(errno.EROFS, "Read-only file system")
+
+    monkeypatch.setattr(app_engine, "write_private_json", no_marker)
+    clock = _SteppedClock()
+
+    await workspace_move_app.verify_after_boot(
+        target,
+        SimpleNamespace(overall_ready=True),
+        lambda code: pytest.fail("a ready engine must not restart"),
+        state_dir=root,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+
+    err = capsys.readouterr().err
+    assert "NOTHING could be written" in err
+    assert clock.now >= workspace_move_app._DONE_RETRY_S
+
+
+async def test_verify_survives_a_raising_record_read_and_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    _source, target, root = _verifying_root(tmp_path)
+    real = workspace_move.read_operation_strict
+    calls = [0]
+
+    def read(state_dir: Path) -> workspace_move.MoveOperation | None:
+        calls[0] += 1
+        if calls[0] <= 2:
+            raise OSError(errno.EIO, "I/O error")
+        return real(state_dir)
+
+    monkeypatch.setattr(workspace_move, "read_operation_strict", read)
+    clock = _SteppedClock()
+
+    await workspace_move_app.verify_after_boot(
+        target,
+        SimpleNamespace(overall_ready=True),
+        lambda code: pytest.fail("a ready engine must not restart"),
+        state_dir=root,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+
+    final = workspace_move.read_operation(root)
+    assert final is not None and final.phase == "done"
+    assert calls[0] == 3
+
+
+async def test_verify_with_a_corrupt_record_does_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app_mode(monkeypatch)
+    _source, target, root = _verifying_root(tmp_path)
+    (root / workspace_move.OPERATION_NAME).write_text("{not json", encoding="utf-8")
+    (root / workspace_move.OPERATION_NAME).chmod(0o600)
+
+    await workspace_move_app.verify_after_boot(
+        target,
+        SimpleNamespace(overall_ready=True),
+        lambda code: pytest.fail("a corrupt record is not this boot's move"),
+        state_dir=root,
+        clock=time.monotonic,
+        sleep=_recorded_sleep([]),
+    )
+
+    assert (root / workspace_move.OPERATION_NAME).read_text() == "{not json"

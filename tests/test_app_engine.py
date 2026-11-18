@@ -776,3 +776,170 @@ def test_async_main_writes_no_ready_record_outside_app_mode(
     assert asyncio.run(ciao_main._async_main()) == 0
 
     assert not (app_engine.state_dir() / "ready.json").exists()
+
+
+# --- the app engine's port, advice and bootstrap bind (#3277) -------------------
+
+
+def test_port_flag_is_hidden_and_parses() -> None:
+    from ciao import cli
+
+    assert cli.build_parser().parse_args(["run", "--app-engine", "--port", "9100"]).port == 9100
+    assert cli.build_parser().parse_args(["run"]).port is None
+    help_text = cli.build_parser()._subparsers._group_actions[0].choices["run"].format_help()  # type: ignore[union-attr]
+    assert "--port" not in help_text
+
+
+def test_port_dispatch_carries_the_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao import cli, package_version
+
+    monkeypatch.setattr(package_version, "running_from_app_bundle", lambda: True)
+    dispatched: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "_run_server", lambda **kwargs: dispatched.append(kwargs) or 0)
+
+    assert cli.main(["run", "--app-engine", "--port", "9100"]) == 0
+
+    assert dispatched == [{"supervised": False, "app_engine": True, "app_engine_port": 9100}]
+
+
+def test_port_is_refused_without_app_engine(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import cli, package_version
+
+    monkeypatch.setattr(package_version, "running_from_app_bundle", lambda: True)
+    dispatched: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "_run_server", lambda **kwargs: dispatched.append(kwargs) or 0)
+
+    assert cli.main(["run", "--port", "9100"]) == 2
+
+    assert dispatched == []
+    assert "--app-engine" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("bad", ["1023", "0", "65536", "-5"])
+def test_port_outside_1024_65535_is_refused(
+    bad: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import cli, package_version
+
+    monkeypatch.setattr(package_version, "running_from_app_bundle", lambda: True)
+    dispatched: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "_run_server", lambda **kwargs: dispatched.append(kwargs) or 0)
+
+    assert cli.main(["run", "--app-engine", f"--port={bad}"]) == 2
+
+    assert dispatched == []
+    assert "1024" in capsys.readouterr().err
+
+
+def test_run_server_hands_the_port_to_the_server_main(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao import cli
+    from ciao import main as ciao_main
+
+    seen: list[dict[str, object]] = []
+    monkeypatch.setattr(ciao_main, "main", lambda **kw: seen.append(kw))
+
+    cli._run_server(app_engine=True, app_engine_port=9100)
+    cli._run_server(app_engine=True)
+
+    assert seen == [
+        {"supervised": False, "app_engine": True, "app_engine_port": 9100},
+        {"supervised": False, "app_engine": True},
+    ]
+
+
+def test_the_ready_record_and_the_lock_carry_the_overridden_port(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import asyncio
+
+    from ciao import app_engine
+    from ciao import main as ciao_main
+
+    config = _recording_config(tmp_path)
+    lock_ports: list[object] = []
+
+    class _Lock(_RecordingLock):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__()
+            lock_ports.append(kwargs.get("port"))
+
+    async def run_server_locked(_config: object, **kwargs: object) -> int:
+        return 0
+
+    monkeypatch.setattr(ciao_main.CiaoConfig, "from_env", lambda **_: config)
+    monkeypatch.setattr("ciao.instance_lock.WorkspaceInstanceLock", _Lock)
+    monkeypatch.setattr(ciao_main, "_run_server_locked", run_server_locked)
+    monkeypatch.setattr(app_engine, "watch_parent", lambda _cb: None)
+
+    assert asyncio.run(ciao_main._async_main(app_engine=True, app_engine_port=9100)) == 0
+
+    record = json.loads((app_engine.state_dir() / "ready.json").read_text(encoding="utf-8"))
+    assert record["port"] == 9100
+    assert config.pwa_port == 9100
+    assert lock_ports == [9100]
+
+
+def test_the_port_advice_in_app_mode_does_not_mention_pwa_port(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from ciao import package_version
+    from ciao.port_in_use import port_in_use_message
+
+    monkeypatch.setattr(package_version, "running_from_app_bundle", lambda: True)
+    message = port_in_use_message(8443, tmp_path)
+
+    assert "8443" in message
+    assert "PWA_PORT" not in message
+    assert ".env" not in message
+    assert "Try Again" in message
+
+    monkeypatch.setattr(package_version, "running_from_app_bundle", lambda: False)
+    assert "PWA_PORT" in port_in_use_message(8443, tmp_path)
+
+
+def _settings_with_host(tmp_path: Path, host: str) -> "object":
+    from ciao.app_settings import AppSettingsStore
+
+    path = tmp_path / "app_settings.json"
+    path.write_text(json.dumps({"pwa_host": host}), encoding="utf-8")
+    return AppSettingsStore(path)
+
+
+@pytest.mark.parametrize(
+    ("bootstrap", "app_engine", "expected"),
+    [
+        pytest.param(True, True, "127.0.0.1", id="app-bootstrap-is-loopback"),
+        pytest.param(False, True, "0.0.0.0", id="configured-app-uses-the-configured-host"),
+        pytest.param(True, False, "0.0.0.0", id="not-the-app-engine-is-untouched"),
+    ],
+)
+def test_app_engine_bootstrap_binds_loopback(
+    bootstrap: bool, app_engine: bool, expected: str, tmp_path: Path
+) -> None:
+    from ciao import main as ciao_main
+
+    config = SimpleNamespace(pwa_host="", bootstrap_mode=bootstrap)
+    store = _settings_with_host(tmp_path, "0.0.0.0")
+    store.apply_to_config(config)  # type: ignore[attr-defined]
+    assert config.pwa_host == "0.0.0.0"
+
+    ciao_main._pin_app_engine_bootstrap_host(config, app_engine=app_engine)
+
+    assert config.pwa_host == expected
+
+
+def test_the_server_applies_the_bootstrap_pin_after_the_settings_overlay() -> None:
+    """The pin has to run in `_run_server_locked`, after `apply_to_config`
+    (which would otherwise set the stored host), and the app-engine path has
+    to hand the flag down."""
+    import inspect
+
+    from ciao import main as ciao_main
+
+    source = inspect.getsource(ciao_main._run_server_locked)
+    assert source.index("app_settings.apply_to_config(config)") < source.index(
+        "_pin_app_engine_bootstrap_host(config, app_engine=app_engine)"
+    )
+    assert "app_engine=True," in inspect.getsource(ciao_main._async_main)
