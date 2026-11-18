@@ -420,6 +420,7 @@ def plan(
     service_can_reach: Callable[[Path], bool] | None = None,
     state_dir: Path | None = None,
     host: HostOwnership | None = None,
+    app_mode: bool = False,
 ) -> MovePlan:
     """Whether ``source`` can move to ``target_raw``, and what to know first.
 
@@ -431,6 +432,12 @@ def plan(
     is none. The move job runs under that host, so a macOS folder grant the
     user gave the host covers the move too; without a host the job is a bare
     interpreter macOS never prompts for, and a protected folder stays refused.
+
+    ``app_mode`` is the Ciaobot-for-Mac engine moving its own folder: it runs
+    under the app, so there is no detached job and no host to verify, a
+    protected folder warns instead of refusing (a denial is probed before the
+    rename and undone, see ``ciao.workspace_move_app``), and the refusals
+    name the app's setup rather than the service's.
     """
     platform = platform or sys.platform
     source = source.expanduser().resolve()
@@ -509,7 +516,19 @@ def plan(
             protected = tcc_protected_location(path)
             if not protected:
                 continue
-            if through_host:
+            if app_mode:
+                # The engine itself moves the folder as Ciaobot.app's child, so
+                # macOS attributes the access to Ciaobot for Mac. The move
+                # probes the destination before anything is renamed and the
+                # boot-side rollback undoes a denied move, so a refusal would
+                # protect nothing the rollback does not already (the
+                # maintainer's warn-but-undo answer for the app).
+                result.warnings.append(
+                    f"The {label} is inside ~/{protected}. macOS may ask Ciaobot "
+                    f"for access to your {protected} folder; if access is "
+                    "denied, the move is undone."
+                )
+            elif through_host:
                 result.warnings.append(
                     f"The {label} is inside ~/{protected}. The move runs as the Ciaobot "
                     f"Server app. macOS may require access to your {protected} folder; "
@@ -526,6 +545,12 @@ def plan(
         result.refusals.append(
             f"No Ciaobot unit names a workspace in {LINUX_UNIT_DIR / LINUX_UNIT}, so there is "
             "nothing to repoint. Install it as docs/LINUX.md describes."
+        )
+    elif registered is None and app_mode:
+        # The app-mode engine repoints the app-owned pointer, not a service
+        # definition: nothing recorded means setup has not finished.
+        result.refusals.append(
+            "Ciaobot for Mac has no workspace recorded yet. Finish setup first."
         )
     elif registered is None:
         result.refusals.append(
@@ -544,11 +569,15 @@ def plan(
     if update_in_flight:
         result.refusals.append("An engine update is in progress. Try again when it has finished.")
     if not engine_running:
-        # The job drains running chats through the engine before it stops it,
-        # so a stopped engine is a refusal rather than a mid-move failure.
-        result.refusals.append(
-            "Ciaobot is not running. Start it with `ciao service start`, then move it."
-        )
+        # The detached job drains running chats through the engine before it
+        # stops it, and the app-mode engine IS the mover, so a stopped engine
+        # is a refusal rather than a mid-move failure.
+        if app_mode:
+            result.refusals.append("Ciaobot is not running. Open Ciaobot, then move it.")
+        else:
+            result.refusals.append(
+                "Ciaobot is not running. Start it with `ciao service start`, then move it."
+            )
     previous = read_operation(state_dir)
     if in_flight(previous):
         assert previous is not None
@@ -1056,6 +1085,17 @@ def start(
     spawn: Callable[[MoveOperation, Path], None] | None = None,
 ) -> MoveOperation:
     """Record the move and start the job that performs it. Raises ``MoveError``."""
+    from ciao import package_version
+
+    if package_version.running_from_app_bundle():
+        # Defence in depth: in app mode there is no launchd job and no service
+        # definition to repoint — the engine performs the move itself in the
+        # gap of its exec restart (ciao.workspace_move_app, whose move route
+        # records through `record`, never through this).
+        raise MoveError(
+            "In Ciaobot for Mac the engine moves the workspace itself; "
+            "use workspace_move_app."
+        )
     if not move_plan.ok:
         raise MoveError(" ".join(move_plan.refusals))
     root = state_dir or default_state_dir()
@@ -1718,6 +1758,9 @@ def _linux_service_can_reach() -> Callable[[Path], bool] | None:
 
 def plan_for(source: Path, target_raw: str) -> MovePlan:
     """:func:`plan` with this machine's service, engine, update and move state."""
+    from ciao import package_version
+
+    app_mode = package_version.running_from_app_bundle()
     result = plan(
         source,
         target_raw,
@@ -1727,8 +1770,22 @@ def plan_for(source: Path, target_raw: str) -> MovePlan:
         service_can_reach=_linux_service_can_reach(),
         # The move job runs under this machine's verified host, so the plan
         # knows whether a protected folder can be moved into or out of (#1658).
-        host=_verified_host_if_installed(),
+        # In app mode there is no host and no detached job: the engine is the
+        # mover, and a protected folder warns instead of refusing.
+        host=None if app_mode else _verified_host_if_installed(),
+        app_mode=app_mode,
     )
+    if app_mode:
+        # A takeover that has not finished may still be rewriting the very
+        # folders a move would rename. Private read of the journal; S4b owns
+        # mac_takeover.py, so nothing there is edited from here.
+        from ciao import mac_takeover
+
+        if mac_takeover._unfinished_journal():
+            result.refusals.append(
+                "Ciaobot is still moving your existing install into the app. "
+                "Try again once it has finished."
+            )
     if sys.platform.startswith("linux"):
         for conf in LinuxServiceDefinition().drop_ins_naming(source.expanduser().resolve()):
             result.refusals.append(

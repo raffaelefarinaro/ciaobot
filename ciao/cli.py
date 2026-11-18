@@ -116,6 +116,9 @@ def _run_command(args: argparse.Namespace) -> int:
     if args.installer_native_workspace is not None and args.installer_native_fd is None:
         print("--installer-native-workspace requires --installer-native-fd", file=sys.stderr)
         return 2
+    if args.port is not None and not args.app_engine:
+        print("--port requires --app-engine", file=sys.stderr)
+        return 2
     if args.app_engine:
         # App-mode: the Mac app owns this engine. The installer handshake has no
         # parent to hand off to here, and the bundle check keeps the flag out of
@@ -127,6 +130,13 @@ def _run_command(args: argparse.Namespace) -> int:
         if not package_version.running_from_app_bundle():
             print("--app-engine runs only from the engine inside Ciaobot.app", file=sys.stderr)
             return 2
+        if args.port is not None:
+            if not 1024 <= args.port <= 65535:
+                print("--port must be between 1024 and 65535", file=sys.stderr)
+                return 2
+            return _run_server(
+                supervised=args.supervised, app_engine=True, app_engine_port=args.port
+            )
         return _run_server(supervised=args.supervised, app_engine=True)
     if not args.installer_bootstrap:
         # Ordinary `ciao run` keeps its exact call shape.
@@ -229,6 +239,7 @@ def _run_server(
     installer_native_fd: int | None = None,
     installer_native_workspace: str | None = None,
     app_engine: bool = False,
+    app_engine_port: int | None = None,
 ) -> int:
     from ciao.config import RESTART_EXIT_CODE
     from ciao.main import main as server_main
@@ -251,6 +262,8 @@ def _run_server(
                 installer_native_fd=installer_native_fd,
                 installer_native_workspace=installer_native_workspace,
             )
+        elif app_engine and app_engine_port is not None:
+            server_main(supervised=supervised, app_engine=True, app_engine_port=app_engine_port)
         elif app_engine:
             # Before any configuration is loaded, no server, threads or locks
             # of its own: the recorded move (this boot is its restart) moves
@@ -3986,6 +3999,16 @@ def _workspace_move_command(args: argparse.Namespace) -> int:
     if not args.apply:
         print("Nothing changed. Re-run with --apply to move it.")
         return 0
+    from ciao.package_version import running_from_app_bundle
+
+    if running_from_app_bundle():
+        # `workspace_move.start` would refuse the launchd job anyway; say the
+        # actionable answer instead, before anything is recorded.
+        print(
+            "In Ciaobot for Mac, move the workspace from Settings → Ciaobot folder → Move…",
+            file=sys.stderr,
+        )
+        return 1
     if sys.platform.startswith("linux"):
         print("Moving. Ciaobot stops once running chats finish, and starts again from the new folder.")
     try:
@@ -8144,6 +8167,9 @@ def build_parser() -> argparse.ArgumentParser:
     # supervises the process itself. Not operator surface: hidden from --help,
     # and refused outside the bundle at dispatch.
     run_parser.add_argument("--app-engine", action="store_true", help=argparse.SUPPRESS)
+    # The app's DEBUG test launch picks the engine's port with this; it
+    # replaces the default for this process and is refused without --app-engine.
+    run_parser.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
     run_parser.set_defaults(func=_run_command)
 
     supervise_parser = subparsers.add_parser(

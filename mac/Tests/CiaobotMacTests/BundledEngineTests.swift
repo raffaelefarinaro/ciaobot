@@ -140,6 +140,10 @@ final class BundledEngineTests: XCTestCase {
         let run = engine.launch(.run(["--port", "1"]), parentEnvironment: [:], workingDirectory: home)
         XCTAssertEqual(run.arguments, ["run", "--port", "1"])
         XCTAssertEqual(run.executable, engine.launcher)
+        let withPort = engine.launch(.run(["--app-engine"]), port: 9100, parentEnvironment: [:], workingDirectory: home)
+        XCTAssertEqual(withPort.arguments, ["run", "--app-engine", "--port", "9100"])
+        let versionWithPort = engine.launch(.version, port: 9100, parentEnvironment: [:], workingDirectory: home)
+        XCTAssertEqual(versionWithPort.arguments, ["--version"], "a port belongs to a run only")
     }
 
     func testEnvironmentStripsEngineAndInterpreterVariables() {

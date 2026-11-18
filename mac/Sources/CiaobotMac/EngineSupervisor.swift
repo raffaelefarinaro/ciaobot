@@ -131,6 +131,8 @@ final class EngineSupervisor: ObservableObject {
     private let clock: () -> Date
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
     private let environment: [String: String]
+    /// The DEBUG test launch's `--port`; nil in a release build.
+    private let enginePort: Int?
 
     /// Invalidates every timer and probe callback scheduled before a spawn or stop.
     private var generation = 0
@@ -152,6 +154,7 @@ final class EngineSupervisor: ObservableObject {
         processes: EngineProcessRunning,
         identity: EngineIdentityChecking,
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        enginePort: Int? = nil,
         clock: @escaping () -> Date = Date.init,
         schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
@@ -162,6 +165,7 @@ final class EngineSupervisor: ObservableObject {
         self.processes = processes
         self.identityChecker = identity
         self.environment = environment
+        self.enginePort = enginePort
         self.clock = clock
         self.schedule = schedule
         processes.onExit = { [weak self] pid, status in
@@ -189,7 +193,22 @@ final class EngineSupervisor: ObservableObject {
         begin()
     }
 
+    /// True when this app carries a usable bundled engine; the connection
+    /// screen offers **Use Ciaobot on This Mac** only then.
+    var hasEngine: Bool { engine != nil }
+
+    /// Whether this Mac can run the bundled engine at all (arm64 only).
+    nonisolated static var hostIsArm64: Bool { BundledEngine.hostIsArm64 }
+
+    /// A stop while a stop is already draining joins it: it waits for the same
+    /// exit and renews nothing, so a second caller (a quit during a mode
+    /// switch) neither re-sends SIGTERM nor moves the first caller's SIGKILL
+    /// deadline.
     func stop(grace: TimeInterval = 35, completion: @escaping () -> Void) {
+        if state == .stopping {
+            stopCompletions.append(completion)
+            return
+        }
         generation += 1
         startQueued = false
         failedChildExiting = false
@@ -327,7 +346,7 @@ final class EngineSupervisor: ObservableObject {
         reaping = nil
         var parent = environment
         parent["HOME"] = home.home.path
-        let launch = engine.launch(.run(["--app-engine"]), parentEnvironment: parent, workingDirectory: home.home)
+        let launch = engine.launch(.run(["--app-engine"]), port: enginePort, parentEnvironment: parent, workingDirectory: home.home)
         do {
             try prepareLog()
             let pid = try processes.spawn(launch, log: home.logFile)
