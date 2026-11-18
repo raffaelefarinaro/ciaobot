@@ -8161,3 +8161,20 @@ async def test_concurrent_ensure_server_calls_start_one_server(tmp_path, monkeyp
     )
 
     assert len(starts) == 1
+
+
+def test_installed_status_row_carries_mcp_command(monkeypatch):
+    from types import SimpleNamespace
+
+    import ciao.providers.opencode as mod
+
+    def fake_run(cmd, *a, **k):
+        return SimpleNamespace(stdout="opencode v2.0.16\n", returncode=0)
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(mod, "_credential_count", lambda *a, **k: 0)
+
+    status = mod.opencode_login_status(inventory=False)
+
+    assert status["mcp_command"] == mod.OPENCODE_MCP_COMMAND == "opencode mcp"
