@@ -675,6 +675,7 @@ final class SparklePackagingTests: XCTestCase {
         let app = scratch.appendingPathComponent("Build/Ciaobot.app", isDirectory: true)
         let frameworks = app.appendingPathComponent("Contents/Frameworks", isDirectory: true)
         try makeApp(at: app)
+        try makeFixtureEngine(in: app)
         try fileManager.createDirectory(at: frameworks, withIntermediateDirectories: true)
         let installed = try run(
             "/bin/sh",
@@ -1235,7 +1236,34 @@ final class SparklePackagingTests: XCTestCase {
         try Data(plist.utf8).write(to: contents.appendingPathComponent("Info.plist"))
         let executable = macos.appendingPathComponent("Scratch")
         try fileManager.copyItem(at: URL(fileURLWithPath: "/bin/echo"), to: executable)
+        // A clone of a platform binary keeps Apple's platform signature, and macOS then hangs any exec inside the
+        // bundle. Dropping the signature makes it an ordinary unsigned Mach-O.
+        let unsigned = try run("/usr/bin/codesign", ["--remove-signature", executable.path])
+        XCTAssertEqual(unsigned.status, 0, unsigned.output)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+    }
+
+    /// A thin arm64 Mach-O stand-in: `/bin/echo` is fat and may carry several arm64 slices, which the engine audit refuses.
+    private func thinArm64Binary(at destination: URL) throws {
+        let result = try run("/usr/bin/lipo", ["/bin/echo", "-thin", "arm64e", "-output", destination.path])
+        XCTAssertEqual(result.status, 0, result.output)
+        // A clone of a platform binary keeps Apple's platform signature, and macOS then hangs any exec inside the
+        // bundle. Dropping the signature makes it an ordinary unsigned Mach-O.
+        let unsigned = try run("/usr/bin/codesign", ["--remove-signature", destination.path])
+        XCTAssertEqual(unsigned.status, 0, unsigned.output)
+    }
+
+    /// A fixture engine: a launcher script, a Mach-O stand-in for the interpreter and the provenance record.
+    private func makeFixtureEngine(in app: URL) throws {
+        let engine = app.appendingPathComponent("Contents/Resources/engine", isDirectory: true)
+        let bin = engine.appendingPathComponent("bin", isDirectory: true)
+        try fileManager.createDirectory(at: bin, withIntermediateDirectories: true)
+        try Data("#!/bin/sh\necho \"ciao 1.2.3\"\n".utf8).write(to: bin.appendingPathComponent("ciao"))
+        try thinArm64Binary(at: bin.appendingPathComponent("python3.12"))
+        try Data(#"{"kind":"ciaobot-engine-provenance","engine":{"version":"1.2.3"}}"#.utf8)
+            .write(to: engine.appendingPathComponent("provenance.json"))
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bin.appendingPathComponent("ciao").path)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bin.appendingPathComponent("python3.12").path)
     }
 
     @discardableResult
