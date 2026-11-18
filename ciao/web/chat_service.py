@@ -908,10 +908,6 @@ class ScheduleRunOutcome:
     retry_pending: bool = False
     final_text: str = ""
     archived_to: str = ""
-    # True when the run dispatched background subagents that had not finished
-    # by the time we stopped waiting. Such a run is not "done" yet, so it must
-    # stay visible rather than auto-archive on a half-complete result.
-    subagents_pending: bool = False
 
 
 def _schedule_run_clean(outcome: ScheduleRunOutcome) -> bool:
@@ -922,7 +918,6 @@ def _schedule_run_clean(outcome: ScheduleRunOutcome) -> bool:
         and not outcome.question_requested
         and not outcome.stream_error
         and not outcome.retry_pending
-        and not outcome.subagents_pending
     )
 
 
@@ -933,10 +928,6 @@ def _schedule_dispatch_status(
 
     A pending retry means the provider deferred the work, such as after a
     quota rejection. It remains unclean and visible, but is not an app error.
-    Unsettled background subagents (or a run that ended on an interim message
-    with no synthesis turn) mean the work is not done yet either — not a
-    failure to report as such, but not a healthy run either: recording "ok"
-    would clear a previous error while the follow-up never completed.
     An invalidated OAuth grant gets the provider and "sign in again" appended.
     """
     if outcome.retry_pending:
@@ -945,8 +936,6 @@ def _schedule_dispatch_status(
         error = (outcome.final_text or "stream error")[:1000]
         return "error", annotate_reauth(error, provider, model)
     if outcome.permission_requested or outcome.question_requested:
-        return "skipped", None
-    if outcome.subagents_pending:
         return "skipped", None
     return "ok", None
 

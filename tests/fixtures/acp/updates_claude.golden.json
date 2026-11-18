@@ -1,0 +1,15 @@
+[
+  ["thinking", null, null],
+  ["text", null, null],
+  ["tool_use", "toolu_write", null],
+  ["tool_use", "toolu_write", null],
+  ["tool_result", "toolu_write", null],
+  ["tool_use", "toolu_task", null],
+  ["text", null, "toolu_task"],
+  ["tool_use", "toolu_bash", "toolu_task"],
+  ["tool_use", "toolu_bash", "toolu_task"],
+  ["tool_result", "toolu_bash", "toolu_task"],
+  ["tool_result", "toolu_task", null],
+  ["system", null, null],
+  ["text", null, null]
+]

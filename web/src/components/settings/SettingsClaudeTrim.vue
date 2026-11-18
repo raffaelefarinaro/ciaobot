@@ -14,6 +14,7 @@
       <section v-for="group in groups" :key="group.id" class="trim-group" :aria-labelledby="`trim-group-${group.id}`">
         <details v-if="group.collapsible" class="trim-disclosure">
           <summary :id="`trim-group-${group.id}`">{{ group.label }} · {{ hidden(group.options) }} of {{ group.options.length }} hidden</summary>
+          <p v-if="claudeTrimGroupNote(group.id)" class="hint hint--compact trim-group-note">{{ claudeTrimGroupNote(group.id) }}</p>
           <template v-for="option in group.options" :key="option.key">
             <div class="settings-switch-row set-subrow trim-row">
               <span :id="`${claudeTrimDomId(option.key)}-label`" class="ws-label set-subrow-label">{{ option.label }}</span>
@@ -24,7 +25,7 @@
                 :aria-checked="enabled(option)"
                 :aria-labelledby="`${claudeTrimDomId(option.key)}-label`"
                 :aria-describedby="`${claudeTrimDomId(option.key)}-hint`"
-                :disabled="option.locked || saving"
+                :disabled="saving"
                 @click="toggle(option)"
               >
                 <span class="switch-word">{{ enabled(option) ? 'On' : 'Off' }}</span>
@@ -32,12 +33,13 @@
               </button>
             </div>
             <p :id="`${claudeTrimDomId(option.key)}-hint`" class="hint hint--compact set-subrow-hint">
-              {{ option.locked ? `Always hidden — ${option.reason}` : option.reason }}
+              {{ option.reason }}
             </p>
           </template>
         </details>
         <template v-else>
           <p :id="`trim-group-${group.id}`" class="subsection-title trim-group-title">{{ group.label }}</p>
+          <p v-if="claudeTrimGroupNote(group.id)" class="hint hint--compact trim-group-note">{{ claudeTrimGroupNote(group.id) }}</p>
           <template v-for="option in group.options" :key="option.key">
             <div class="settings-switch-row set-subrow trim-row">
               <span :id="`${claudeTrimDomId(option.key)}-label`" class="ws-label set-subrow-label">{{ option.label }}</span>
@@ -48,7 +50,7 @@
                 :aria-checked="enabled(option)"
                 :aria-labelledby="`${claudeTrimDomId(option.key)}-label`"
                 :aria-describedby="`${claudeTrimDomId(option.key)}-hint`"
-                :disabled="option.locked || saving"
+                :disabled="saving"
                 @click="toggle(option)"
               >
                 <span class="switch-word">{{ enabled(option) ? 'On' : 'Off' }}</span>
@@ -56,7 +58,7 @@
               </button>
             </div>
             <p :id="`${claudeTrimDomId(option.key)}-hint`" class="hint hint--compact set-subrow-hint">
-              {{ option.locked ? `Always hidden — ${option.reason}` : option.reason }}
+              {{ option.reason }}
             </p>
           </template>
         </template>
@@ -94,7 +96,7 @@ import { computed, inject } from 'vue'
 import { useProjectStore } from '../../stores/projects'
 import { WORKSPACE_ADMIN_KEY } from '../../composables/useWorkspaceAdmin'
 import {
-  claudeTrimDomId, groupClaudeTrimOptions, isTrimmed, setTrimmed, trimmedCount,
+  claudeTrimDomId, claudeTrimGroupNote, groupClaudeTrimOptions, isTrimmed, setTrimmed, trimmedCount,
 } from '../../lib/claudeTrim'
 import type { ClaudeTrimOption } from '../../lib/types'
 
@@ -111,12 +113,12 @@ const hasOverrides = computed(() => !!form.value && Object.keys(form.value.claud
 function trimmed(option: ClaudeTrimOption): boolean {
   return isTrimmed(option, form.value?.claude_trim ?? {})
 }
-// A switch shows what Claude can use: On is the opposite of trimmed. Locked rows are trimmed, so they read Off.
+// A switch shows what Claude can use: On is the opposite of trimmed.
 function enabled(option: ClaudeTrimOption): boolean {
   return !trimmed(option)
 }
 function toggle(option: ClaudeTrimOption): void {
-  if (!form.value || option.locked) return
+  if (!form.value) return
   form.value.claude_trim = setTrimmed(form.value.claude_trim, option, !trimmed(option))
 }
 function hidden(list: readonly ClaudeTrimOption[]): number {
@@ -134,6 +136,7 @@ function resetTrim(): void {
 .trim-body .set-subrow-hint { padding-left: 0; }
 .trim-body .set-subrow-label { flex: 1 1 auto; min-width: 0; }
 .trim-scope-note { margin: 0 0 var(--space-2); }
+.trim-group-note { margin: 0 0 var(--space-1); }
 .trim-group-title { margin: var(--space-3) 0 var(--space-1); }
 .trim-disclosure { margin-top: var(--space-2); }
 .trim-disclosure > summary {
