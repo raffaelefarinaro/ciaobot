@@ -8273,7 +8273,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     takeover_parser = subparsers.add_parser(
         "mac-takeover",
-        help="Ciaobot.app only: classify this Mac's 1.x engine for takeover (read-only).",
+        help="Ciaobot.app only: classify this Mac's 1.x engine for takeover "
+        "(plan is read-only; apply/finish/rollback are the journalled transaction).",
     )
     takeover_sub = takeover_parser.add_subparsers(
         dest="mac_takeover_action", required=True
@@ -8287,6 +8288,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     takeover_plan_parser.add_argument("--label", default="com.ciao.server")
     takeover_plan_parser.set_defaults(func=_mac_takeover_command)
+
+    takeover_apply_parser = takeover_sub.add_parser(
+        "apply",
+        help="Ciaobot.app only: back up the old plist, stop the old engine and "
+        "hand the workspace to the bundled engine (journalled).",
+    )
+    takeover_apply_parser.add_argument("--json", action="store_true", dest="as_json")
+    takeover_apply_parser.add_argument(
+        "--expect-sha256",
+        required=True,
+        help="The plist sha256 the plan reported, which must still match.",
+    )
+    takeover_apply_parser.add_argument(
+        "--launch-agents-dir", type=Path, default=None
+    )
+    takeover_apply_parser.add_argument("--label", default="com.ciao.server")
+    takeover_apply_parser.set_defaults(func=_mac_takeover_command)
+
+    takeover_finish_parser = takeover_sub.add_parser(
+        "finish",
+        help="Ciaobot.app only: prove the bundled engine is healthy and list the "
+        "leftovers it may trash; --done closes the takeover after trashing.",
+    )
+    takeover_finish_parser.add_argument("--json", action="store_true", dest="as_json")
+    takeover_finish_parser.add_argument(
+        "--id", required=True, dest="takeover_id", help="The takeover id that apply returned."
+    )
+    takeover_finish_parser.add_argument(
+        "--done",
+        action="store_true",
+        dest="done",
+        help="Close the takeover's journal (call after trashing).",
+    )
+    takeover_finish_parser.set_defaults(func=_mac_takeover_command)
+
+    takeover_rollback_parser = takeover_sub.add_parser(
+        "rollback",
+        help="Ciaobot.app only: restore the 1.x engine after an unfinished takeover.",
+    )
+    takeover_rollback_parser.add_argument("--json", action="store_true", dest="as_json")
+    takeover_rollback_parser.add_argument(
+        "--id", required=True, dest="takeover_id", help="The takeover id that apply returned."
+    )
+    takeover_rollback_parser.set_defaults(func=_mac_takeover_command)
 
     installer_parser = subparsers.add_parser(
         "installer",
