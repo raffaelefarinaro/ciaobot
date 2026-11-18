@@ -16,6 +16,41 @@ const lifecycleEvents = new Set([
   'storybook/instrumenter/sync', 'previewKeydown', 'pong',
 ])
 
+// The method names the vitest browser runner's page side calls over its
+// control socket (@vitest/browser client.js, tester and orchestrator bundles,
+// and vitest's runtime rpc: result reporting, console forwarding, module/mock
+// resolution, user-event commands). Anything else is refused.
+const runnerMethods = new Set([
+  'onCollected', 'onQueued', 'onTaskUpdate', 'onTaskArtifactRecord', 'onAfterSuiteRun',
+  'onUserConsoleLog', 'onUnhandledError', 'onAsyncLeaks', 'onOrchestratorReady', 'onCancel',
+  'getCountOfFailedTests', 'sendLog', 'debug', 'resolveId', 'resolveMock', 'resolve',
+  'registerMock', 'unregisterMock', 'clearMocks', 'invalidate', 'ensureModuleGraphEntry',
+  'snapshotSaved', 'resolveSnapshotPath', 'triggerCommand',
+])
+
+// The runner's birpc envelopes are flatted-encoded: a root object whose string
+// values index into the array (booleans stay inline). A request is
+// `{m, a, t:'q'}` with an optional string `i` (absent for events) and an
+// optional `o:true` (optional calls); m must be an allow-listed runner method.
+// A response is `{t:'s', i, r|e}`.
+function isRunnerEnvelope(data: unknown): boolean {
+  if (typeof data !== 'string') return false
+  try {
+    const flat = JSON.parse(data) as unknown
+    if (!Array.isArray(flat) || typeof flat[0] !== 'object' || flat[0] === null) return false
+    const root = flat[0] as Record<string, unknown>
+    if (!Object.keys(root).every(key => ['m', 'a', 't', 'i', 'r', 'e', 'o'].includes(key))) return false
+    const field = (key: string) => typeof root[key] === 'string' ? flat[Number(root[key])] : undefined
+    if ('i' in root && typeof field('i') !== 'string') return false
+    if ('o' in root && root.o !== true) return false
+    if (field('t') === 'q') {
+      const method = field('m')
+      return typeof method === 'string' && runnerMethods.has(method) && !('r' in root) && !('e' in root)
+    }
+    return field('t') === 's' && typeof field('i') === 'string' && !('m' in root) && !('o' in root)
+  } catch { return false }
+}
+
 // Only established workshop sockets can reach this seam: constructors below
 // reject all new connections. Never forward custom/invoke/save/editor events.
 function infrastructureMessage(socket: WebSocket, data: unknown): boolean {
@@ -27,6 +62,13 @@ function infrastructureMessage(socket: WebSocket, data: unknown): boolean {
     if (socket.protocol === 'vite-hmr') {
       return url.pathname === '/' && [...url.searchParams.keys()].every(key => key === 'token')
         && data === '{"type":"ping"}'
+    }
+    if (url.pathname === '/__vitest_browser_api__') {
+      // The browser interaction runner's page-load control socket; it does not
+      // exist outside `npm run test-storybook`. The exact query shape is pinned
+      // so a repurposed path fails.
+      return [...url.searchParams.keys()].sort().join(',') === 'method,projectName,rpcId,sessionId,token,type'
+        && isRunnerEnvelope(data)
     }
     const token = (globalThis as typeof globalThis & { CHANNEL_OPTIONS?: { wsToken?: string } }).CHANNEL_OPTIONS?.wsToken
     if (!token || url.pathname !== '/storybook-server-channel'

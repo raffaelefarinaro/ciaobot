@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/vue3-vite'
 import { ref } from 'vue'
+import { expect } from 'storybook/test'
 import SettingsSwitch from '../components/settings/SettingsSwitch.vue'
 
 const meta = {
@@ -19,7 +20,19 @@ const meta = {
 export default meta
 type Story = StoryObj<typeof meta>
 
-export const On: Story = {}
+// The story's own `@toggle` handler flips a local ref in response to the
+// production component's click event; this proves the click emits and
+// aria-checked follows the controlled prop, not a parent's persistence flow.
+// Focus stays on the switch.
+export const On: Story = {
+  play: async ({ canvas, userEvent }) => {
+    const button = canvas.getByRole('switch')
+    expect(button.getAttribute('aria-checked')).toBe('true')
+    await userEvent.click(button)
+    expect(button.getAttribute('aria-checked')).toBe('false')
+    expect(document.activeElement).toBe(button)
+  },
+}
 export const Off: Story = { args: { checked: false } }
 export const DisabledOn: Story = { args: { disabled: true } }
 export const DisabledOff: Story = { args: { checked: false, disabled: true } }

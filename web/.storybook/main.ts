@@ -10,7 +10,7 @@ const config: StorybookConfig = {
     },
   },
   stories: ['../src/stories/**/*.stories.ts'],
-  addons: ['@storybook/addon-docs'],
+  addons: ['@storybook/addon-docs', '@storybook/addon-vitest'],
   core: { disableTelemetry: true },
 }
 export default config

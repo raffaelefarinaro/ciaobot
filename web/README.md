@@ -115,7 +115,12 @@ XHR open/send and WebSocket send are fenced too. The only native send exceptions
 are Vite's exact HMR ping on its same-origin established `vite-hmr` socket, and
 render lifecycle/heartbeat events plus preview keyboard reports (`previewKeydown`)
 on Storybook's established same-origin `/storybook-server-channel` with its exact
-preview page/token. Custom/invoke/save events are not allowed. Storybook's
+preview page/token, and the vitest browser runner's own control socket
+(`/__vitest_browser_api__`, only under `npm run test-storybook`): birpc requests,
+events (no `i`) and optional calls (`o:true`) whose method is on an allow-list of
+the runner's page-side method names, plus responses. The four connected stories'
+play functions assert the violation ledger stays empty while the runner reports.
+Custom/invoke/save events are not allowed. Storybook's
 module/asset loading is infrastructure, not an API fixture.
 The visible request count and violation ledger remain observable when the owner
 catches an error. Teardown unmounts the isolated app, disposes its Pinia, settles
@@ -159,7 +164,11 @@ keyboard-focus and reduced-motion states do not gain story coverage.
 The Node tests check data and filters, not Vue interactions or manager links.
 Check filtering, keyboard access, narrow/zoom layouts and story links in both
 the development and built workshop in a browser; record screenshots and network
-evidence with the change. Automated Storybook browser interactions are future work.
+evidence with the change. `npm run test-storybook` runs the browser interaction
+runner (@storybook/addon-vitest, vitest browser mode with the Playwright
+provider): every story has to render in headless Chromium and its `play`
+functions execute there. Chromium must be installed locally
+(`npx playwright install chromium`).
 
 ConfirmDialog has normal, destructive, optional-reason, long-content and narrow
 stories; PromptDialog has empty, whitespace, prefilled, populated, validation-disabled
