@@ -1119,6 +1119,18 @@ that its configured model is supported; do not make Ciao CI pass or fail based
 on this advisory workflow. The GitHub Settings → Code security → Code scanning
 page provides the same toggle when the REST API is unavailable.
 
+### The pinned uv
+
+One uv version writes `uv.lock`: `[tool.uv] required-version = "==X.Y.Z"` in
+`pyproject.toml`. Every `astral-sh/setup-uv` step in `.github/workflows/` sets
+`version:` to the same number, and `tests/test_release.py` fails when they
+differ. A different uv can rewrite the lock header (0.12.17 turned revision 5
+into 3, #3188), and uv itself refuses to run against the pin. `prepare-release
+--apply` checks `uv --version` against the pin first and stops with the
+version to install. To bump uv, change the pin and every workflow `version:`
+together, run `uv lock` once and commit any lock change in the same PR. This is
+separate from the uv that `scripts/install-engine.sh` installs for users.
+
 ## Frontend build
 
 Node 22 is the supported version (`.nvmrc`, and what CI uses). The floor is

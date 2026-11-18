@@ -108,6 +108,11 @@ namespaces = false
   "update-tasks/**/*",
 ]
 
+[tool.uv]
+# One uv writes uv.lock, here, in CI (setup-uv `version:`) and in
+# `prepare-release`. A different uv rewrites the lock header (#3188).
+required-version = "==0.13.8"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

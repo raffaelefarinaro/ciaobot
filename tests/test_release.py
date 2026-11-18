@@ -20,6 +20,12 @@ from ciao.release import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _matching_uv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fixture trees pin uv 9.9.9; the machine's real uv is irrelevant."""
+    monkeypatch.setattr(release_mod, "_installed_uv_version", lambda root: "9.9.9")
+
+
 def test_resolve_source_prefers_remote_over_stale_local(tmp_path: Path, monkeypatch) -> None:
     # Cutting a release must use the freshly-fetched origin/<source>, not a
     # same-named local branch that may lag behind (which would silently ship a
@@ -63,7 +69,8 @@ def _write_release_tree(root: Path) -> None:
             encoding="utf-8",
         )
     (root / "pyproject.toml").write_text(
-        '[project]\nname = "ciao"\nversion = "0.2.0"\n',
+        '[project]\nname = "ciao"\nversion = "0.2.0"\n\n'
+        '[tool.uv]\nrequired-version = "==9.9.9"\n',
         encoding="utf-8",
     )
     (root / "ciao" / "__init__.py").write_text(
@@ -934,3 +941,59 @@ def test_probe_bundled_claude_reports_unreadable_sdk(
 
     assert probe.installed is None
     assert probe.note.startswith("claude_agent_sdk unreadable")
+
+
+def _apply_args(tmp_path: Path) -> list[str]:
+    return [str(tmp_path), "--apply", "--skip-dep-check", "--skip-gws-skills",
+            "--skip-provider-versions", "--allow-dirty", "--no-branch"]
+
+
+def test_main_apply_refuses_a_different_uv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_release_tree(tmp_path)
+    (tmp_path / "web" / "package.json").write_text(
+        '{"name": "ciaobot-pwa", "version": "0.2.0"}', encoding="utf-8"
+    )
+    (tmp_path / "web" / "package-lock.json").write_text(
+        '{"name": "ciaobot-pwa", "version": "0.2.0",'
+        ' "packages": {"": {"name": "ciaobot-pwa", "version": "0.2.0"}}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(release_mod, "_installed_uv_version", lambda root: "9.9.8")
+    with pytest.raises(ReleaseError, match=r"uv 9\.9\.8 is installed.*pins uv 9\.9\.9"):
+        release_mod.main(_apply_args(tmp_path))
+
+
+def test_ensure_pinned_uv_accepts_the_pinned_uv(tmp_path: Path) -> None:
+    _write_release_tree(tmp_path)
+    release_mod._ensure_pinned_uv(tmp_path)  # autouse fixture reports 9.9.9
+
+
+@pytest.mark.parametrize("spec", ["", '>=0.13', '"==0.13"'])
+def test_pinned_uv_version_requires_an_exact_pin(tmp_path: Path, spec: str) -> None:
+    body = f'[tool.uv]\nrequired-version = {spec if spec.startswith(chr(34)) else chr(34) + spec + chr(34)}\n'
+    if not spec:
+        body = "[project]\nname = 'x'\n"
+    (tmp_path / "pyproject.toml").write_text(body, encoding="utf-8")
+    with pytest.raises(ReleaseError, match="pin uv exactly"):
+        release_mod.pinned_uv_version(tmp_path)
+
+
+def test_repo_pins_uv_and_ci_workflows_use_the_same_version() -> None:
+    """setup-uv `version:` in every workflow must equal pyproject's pin."""
+    repo = Path(__file__).resolve().parent.parent
+    pinned = release_mod.pinned_uv_version(repo)
+    workflows = sorted((repo / ".github" / "workflows").glob("*.yml"))
+    seen = 0
+    for wf in workflows:
+        lines = wf.read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines):
+            if "astral-sh/setup-uv@" not in line:
+                continue
+            seen += 1
+            window = "\n".join(lines[i + 1 : i + 4])
+            m = re.search(r"version:\s*[\"']?([^\s\"']+)", window)
+            assert m, f"{wf.name}:{i + 1} setup-uv has no version input"
+            assert m.group(1) == pinned, f"{wf.name}:{i + 1} pins {m.group(1)}, pyproject pins {pinned}"
+    assert seen >= 3
