@@ -321,7 +321,7 @@ def ensure_ciao_shim(engine_root: Path) -> Path:
     shim.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=shim.parent, prefix=".ciao-")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(content)
         os.chmod(tmp, 0o755)
         os.replace(tmp, shim)
