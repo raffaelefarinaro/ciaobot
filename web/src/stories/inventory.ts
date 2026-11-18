@@ -4475,21 +4475,33 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Grid/project/model variants and empty data. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in UsageBreakdown.vue implements this render; no rendered-state story exists."
+        "name": "loaded",
+        "coverage": "covered",
+        "storyIds": [
+          "usage-breakdown--loaded"
+        ],
+        "note": "Heatmap, projects, pipeline, hours and model bars with synthetic stats props; no fetch."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "empty-data",
+        "coverage": "covered",
+        "storyIds": [
+          "usage-breakdown--empty-data"
+        ],
+        "note": "Null stats: activity, projects and models empty captions; pipeline and hours show dashes."
+      },
+      {
+        "name": "heatmap-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "usage-breakdown--heatmap-focus"
+        ],
+        "note": "The activity scroll region is keyboard-focusable for narrow viewports."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in UsageBreakdown.vue has not yet been audited."
+      "status": "none",
+      "detail": "Presentational child: UsageView owns fetch and loading; this owner has no loading UI."
     },
     "migration": {
       "status": "unassessed",
@@ -4500,7 +4512,7 @@ export const inventory: InventoryEntry[] = [
     "id": "components-usage-view",
     "name": "UsageView",
     "family": "Memory and usage",
-    "kind": "composition",
+    "kind": "component",
     "owner": {
       "path": "web/src/components/UsageView.vue",
       "anchor": "<template>"
@@ -4513,27 +4525,54 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "First-load/error/KPI page composition. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in UsageView.vue implements this render; no rendered-state story exists."
+        "name": "initial-loading",
+        "coverage": "covered",
+        "storyIds": [
+          "usage-view--initial-loading"
+        ],
+        "note": "First load before answered: SkeletonLoader cards only; range picker stays usable."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "loaded",
+        "coverage": "covered",
+        "storyIds": [
+          "usage-view--loaded"
+        ],
+        "note": "KPI grid, deltas and UsageBreakdown after a synthetic GET fixture resolves."
+      },
+      {
+        "name": "load-failed",
+        "coverage": "covered",
+        "storyIds": [
+          "usage-view--load-failed"
+        ],
+        "note": "role=alert error with retry; KPI values show dashes until a successful read."
+      },
+      {
+        "name": "refresh-loading",
+        "coverage": "covered",
+        "storyIds": [
+          "usage-view--refresh-loading"
+        ],
+        "note": "After the first answer, a new range keeps the grid and shows dashes, not the skeleton."
+      },
+      {
+        "name": "range-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "usage-view--range-focus"
+        ],
+        "note": "Range toggles are buttons with aria-pressed; focus stays on the selected control."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in UsageView.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load uses SkeletonLoader variant cards (count 3) which does not match the loaded eight-tile KPI grid geometry; refresh and workspace changes keep the grid with dashes. Failure shows a distinct alert with retry. Covered: initial-loading, refresh-loading, load-failed, loaded."
     },
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
-    },
-    "rationale": "Connected route or host composition; isolate its seam before rendering it in the workshop."
+    }
   },
   {
     "id": "components-vault-review-panel",

@@ -789,13 +789,11 @@ export interface Schedule {
   // far too late to be actionable — see project_chats.dispatch_schedule.
   // 'skipped' is what the dispatcher records when a run reached the provider
   // but stopped short of a result (approval card, AskUserQuestion, deferred
-  // retry) — see project_chats._schedule_dispatch_status. 'unfinished' is the
-  // case split out of it where background subagents never settled: nothing in
-  // the chat is waiting on the user (schedules.RUN_STATUS_UNFINISHED).
+  // retry) — see project_chats._schedule_dispatch_status.
   // 'retrying' means the agent could not reach an external service and armed a
   // network retry in the run chat; the retried turn writes 'ok' or 'error'
   // (schedules.RUN_STATUS_RETRYING).
-  last_status?: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat' | 'skipped' | 'unfinished' | 'retrying'
+  last_status?: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat' | 'skipped' | 'retrying'
   day_of_month: number | null
   run_at_date: string | null
   web_chat_id: string | null
@@ -1074,6 +1072,8 @@ export interface ProviderConnection {
   path_command?: string
   /** Terminal action that runs the command shown for this row, when the engine offers one. */
   terminal_action?: HostTerminalAction
+  /** The agent CLI's own MCP command (`claude mcp`), typed into the in-app terminal. Absent when the CLI is not installed. */
+  mcp_command?: string
   /** How the installed CLI compares with the version this release was tested with. */
   release_check?: ProviderReleaseCheck
   /** Desktop app found while the CLI is missing. */
