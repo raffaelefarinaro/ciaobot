@@ -252,6 +252,13 @@ def _run_server(
                 installer_native_workspace=installer_native_workspace,
             )
         elif app_engine:
+            # Before any configuration is loaded, no server, threads or locks
+            # of its own: the recorded move (this boot is its restart) moves
+            # the folder and repoints the pointer here, and an interrupted
+            # move is rolled back here. The engine boots either way.
+            from ciao import workspace_move_app
+
+            workspace_move_app.before_boot()
             server_main(supervised=supervised, app_engine=True)
         else:
             server_main(supervised=supervised)
@@ -281,6 +288,14 @@ def _run_server(
         from ciao.config import reset_exported_dotenv
 
         reset_exported_dotenv()
+        if app_engine:
+            # In app mode the pointer is the only workspace source
+            # (`installed_workspace_env` returns early for an exported
+            # CIAO_WORKSPACE): without this pop a post-move restart would pin
+            # the vanished pre-move folder, and the fresh process — reading
+            # os.environ before the pointer — would never boot the new one.
+            os.environ.pop("CIAO_WORKSPACE", None)
+            os.environ.pop("CIAO_RUNTIME_ROOT", None)
         os.execv(sys.executable, _relaunch_argv())
     return code
 

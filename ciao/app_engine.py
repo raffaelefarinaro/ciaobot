@@ -57,7 +57,7 @@ class WorkspacePointer:
 _MAX_RECORD_BYTES = 64 * 1024
 
 
-def _read_private_json(target: Path, *, label: str) -> dict[str, Any] | None:
+def read_private_json(target: Path, *, label: str) -> dict[str, Any] | None:
     """One strict, bounded read of an engine record, or ``None``.
 
     The record is read the way the repo reads its other owner-only state
@@ -87,21 +87,21 @@ def _read_private_json(target: Path, *, label: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def read_pointer(path: Path | None = None) -> WorkspacePointer | None:
-    """The pointer at ``path``, or ``None`` when nothing usable is stored there.
+def read_pointer_record(path: Path | None = None) -> WorkspacePointer | None:
+    """The pointer's recorded paths, whether or not they are directories now.
 
-    Fail-safe by design: a missing file, a symlink, a file that is not this
-    user's owner-only record, unparsable JSON, a foreign schema, a relative
-    path or a workspace/runtime root that is not a directory all read as
-    "there is no pointer" — the caller treats that as bootstrap instead of
-    adopting a half-remembered workspace from a damaged file.
+    The same strict file checks and schema test as :func:`read_pointer` (an
+    owner-only file, schema exactly ``1``, absolute paths), without the
+    directory requirement: after a workspace rename the pointer legitimately
+    names a folder that is gone, and the pre-boot move needs to see that.
     """
     target = state_dir() / WORKSPACE_POINTER_NAME if path is None else Path(path)
-    raw = _read_private_json(target, label="the app engine workspace pointer")
+    raw = read_private_json(target, label="the app engine workspace pointer")
     if raw is None:
         return None
     schema = raw.get("schema")
-    # ``bool`` is an ``int`` subclass: JSON `true` must not pass as schema 1.
+    # ``bool`` is an ``int`` subclass: JSON `true` must not pass as schema 1,
+    # and a float `1.0` compares equal to 1 but is not the schema.
     if isinstance(schema, bool) or not isinstance(schema, int) or schema != SCHEMA:
         return None
     workspace = raw.get("workspace")
@@ -112,9 +112,24 @@ def read_pointer(path: Path | None = None) -> WorkspacePointer | None:
     runtime_path = Path(runtime_root)
     if not workspace_path.is_absolute() or not runtime_path.is_absolute():
         return None
-    if not workspace_path.is_dir() or not runtime_path.is_dir():
-        return None
     return WorkspacePointer(workspace=workspace_path, runtime_root=runtime_path)
+
+
+def read_pointer(path: Path | None = None) -> WorkspacePointer | None:
+    """The pointer at ``path``, or ``None`` when nothing usable is stored there.
+
+    Fail-safe by design: a missing file, a symlink, a file that is not this
+    user's owner-only record, unparsable JSON, a foreign schema, a relative
+    path or a workspace/runtime root that is not a directory all read as
+    "there is no pointer" — the caller treats that as bootstrap instead of
+    adopting a half-remembered workspace from a damaged file.
+    """
+    pointer = read_pointer_record(path)
+    if pointer is None:
+        return None
+    if not pointer.workspace.is_dir() or not pointer.runtime_root.is_dir():
+        return None
+    return pointer
 
 
 def write_pointer(
@@ -133,7 +148,7 @@ def write_pointer(
         "workspace": str(Path(workspace).resolve()),
         "runtime_root": str(Path(runtime_root).resolve()),
     }
-    _write_private_json(target, payload)
+    write_private_json(target, payload)
     return target
 
 
@@ -183,7 +198,7 @@ def write_ready_record(
         "workspace": str(Path(workspace).resolve()),
         "bootstrap": bool(bootstrap),
     }
-    _write_private_json(target, payload)
+    write_private_json(target, payload)
     return target
 
 
@@ -312,7 +327,7 @@ def _ensure_state_dir(target: Path) -> None:
         make_private_dir(directory)
 
 
-def _write_private_json(target: Path, payload: dict[str, Any]) -> None:
+def write_private_json(target: Path, payload: dict[str, Any]) -> None:
     """Create-or-replace ``target`` atomically (0600 in the record directory).
 
     A private temp file is written, flushed and renamed in one step, so a

@@ -52,6 +52,7 @@ Before changing code:
 cd web && npm test                       # vitest
 cd web && npm run build                  # vue-tsc + vite build
 cd web && npm run test:e2e               # Playwright
+cd web && npm run build-storybook && npm run test-storybook  # Storybook workshop build + browser interaction runner
 ciao dev                                 # backend :8543 + Vite :5173
 scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
 ```
