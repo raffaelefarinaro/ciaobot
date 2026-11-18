@@ -779,15 +779,33 @@ def discover_runtime(
     service definition by passing the label its receipt names.
     """
 
-    env = os.environ if environ is None else environ
     agents = (
         default_launch_agents_dir()
         if launch_agents_dir is None
         else Path(launch_agents_dir).expanduser()
     )
-    plist_path = agents / f"{label}.plist"
-    plist: dict[str, Any] = load_server_plist(agents, label) or {}
+    return runtime_from_plist(
+        load_server_plist(agents, label) or {},
+        plist_path=agents / f"{label}.plist",
+        environ=environ,
+    )
 
+
+def runtime_from_plist(
+    plist: dict[str, Any],
+    *,
+    plist_path: Path,
+    environ: dict[str, str] | None = None,
+    read_env: Callable[[Path], dict[str, str]] = read_dotenv,
+) -> DesktopRuntime:
+    """:func:`discover_runtime` over an already parsed plist.
+
+    A caller that has to hash, classify and resolve the *same* document (the
+    takeover plan) parses it once and passes it here, instead of letting a
+    second read race a rewrite. ``read_env`` reads the workspace ``.env``.
+    """
+
+    env = os.environ if environ is None else environ
     plist_env = plist.get("EnvironmentVariables")
     if not isinstance(plist_env, dict):
         plist_env = {}
@@ -798,7 +816,7 @@ def discover_runtime(
         or ""
     ).strip()
     workspace = Path(workspace_raw).expanduser().resolve() if workspace_raw else None
-    dotenv = read_dotenv(workspace / ".env") if workspace else {}
+    dotenv = read_env(workspace / ".env") if workspace else {}
 
     raw_port = str(
         dotenv.get("PWA_PORT")
@@ -1018,15 +1036,24 @@ def _fresh_lock_owner(
     runtime: DesktopRuntime,
     previous_startup_id: str | None,
 ) -> dict[str, Any] | None:
-    """The lock owner, when it is a new run of *this* install's engine.
+    """The lock owner, when it is a new run of *this* install's engine."""
+    return lock_owner_is_fresh(read_lock_owner(runtime), runtime, previous_startup_id)
+
+
+def lock_owner_is_fresh(
+    owner: dict[str, Any] | None,
+    runtime: DesktopRuntime,
+    previous_startup_id: str | None,
+) -> dict[str, Any] | None:
+    """``owner``, when it is a run of *this* install's engine that is not the previous one.
 
     Fresh means: status ``running``, a ``startup_id`` that is not the one the
     previous run had, and the port and runtime directory this install is
     configured with. Another Ciaobot runtime that happens to be running, or
     the run that was there before the kickstart, is not evidence that the
-    engine just started.
+    engine just started. Split from the read so a caller with its own strict
+    reader (the takeover plan) applies the same rule.
     """
-    owner = read_lock_owner(runtime)
     if not owner or owner.get("status") != "running":
         return None
     startup_id = owner.get("startup_id")
