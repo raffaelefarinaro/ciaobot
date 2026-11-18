@@ -6,12 +6,23 @@ the Trash once the bundled engine has proven healthy? It never writes, stops,
 boots out or deletes anything; ``apply``/``finish``/``rollback`` are a later
 slice and own every mutation.
 
-Coupling rule (#3130 deletes the old installers): this module imports only
-``ciao.macos_service``, ``ciao.os_support.*``, ``ciao.package_version`` and
-``ciao.__version__``. The old-install paths, the shim marker, the receipt and
-the hosted ``Ciaobot Server serve --python <abs>`` argv are literal constants
-and are parsed locally, so deleting ``server_host``, ``install_receipt``,
-``install_discovery`` and friends leaves this module working.
+Coupling rule (#3130 deletes the old installers): this module's own imports
+are only ``ciao`` (for ``__version__``), ``ciao.macos_service``,
+``ciao.os_support.definition`` and ``ciao.package_version``. The old-install
+paths, the shim marker, the receipt and the hosted ``Ciaobot Server serve
+--python <abs>`` argv are literal constants parsed locally, so it never imports
+``server_host``, ``install_receipt``, ``install_discovery`` or friends itself.
+That is a statement about this file only: ``ciao.macos_service`` still imports
+``ciao.server_host`` (``parse_service_command``), so deleting ``server_host``
+also needs that import cut from ``macos_service`` first. The test checks the
+direct imports, not the transitive closure.
+
+Every read of a file the old install controls (plist, receipt, ``.env``, the
+engine lock, the registry) is a no-follow, bounded, regular-file-only read, and
+every HTTP probe goes to ``127.0.0.1`` with no proxy, no redirect, a bounded
+body and one overall deadline. A file that exists but cannot be read that way
+is a refusal, never an empty answer, because an empty answer would read as
+"nothing to protect".
 
 Every refusal is a fixed code in ``reason``; paths go in fields, never in the
 reason.
@@ -19,12 +30,16 @@ reason.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import plistlib
 import re
+import socket
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -35,17 +50,16 @@ from ciao import macos_service
 from ciao.macos_service import (
     LAUNCHCTL,
     SERVER_LABEL,
+    SERVER_LOCK_NAME,
     DesktopRuntime,
-    Runner,
     RestartBlockersUnavailable,
+    Runner,
     _getuid,
-    discover_runtime,
-    engine_identity,
-    read_dotenv,
-    read_lock_owner,
-    restart_blockers,
+    lock_owner_is_fresh,
+    parse_dotenv,
+    runtime_from_plist,
 )
-from ciao.os_support.definition import DefinitionReadError, read_definition
+from ciao.os_support.definition import DefinitionReadError, read_bounded_file, read_definition
 from ciao.package_version import _version_key
 
 #: The oldest engine whose startup-status and lock carry what the takeover
@@ -60,16 +74,26 @@ _LEGACY_DESKTOP_MARKER = "Ciaobot.app/Contents/Resources/ciao-runtime"
 _ENV_ROOT_NAME = "ciaobot"
 _DEFAULT_PORT = 8443
 _MAX_SMALL_FILE = 64 * 1024
+_MAX_DOTENV = 1024 * 1024
+_MAX_REGISTRY = 1024 * 1024
+#: One whole HTTP probe (connect, headers, body) must finish inside this.
+_PROBE_DEADLINE_S = 2.0
+#: The startup-status and restart-blockers answers are a few hundred bytes.
+_PROBE_MAX_BYTES = 64 * 1024
+#: ``launchctl print`` exit status for a job that is not loaded.
+_JOB_ABSENT_STATUS = 113
+_UV_NAME = "uv"
 
 #: Plist environment keys that move user data. Only safe when the workspace
-#: ``.env`` sets the same key, because the bundled engine reads the ``.env``
-#: and never this plist.
+#: ``.env`` sets the same VALUE, because the bundled engine reads the ``.env``
+#: and never this plist. ``CIAO_WORKSPACES`` is a legacy list, not a path.
 _DATA_LOCATION_KEYS = (
     "CIAO_VAULT_ROOT",
     "CIAO_MEMORY_DIR",
     "CIAO_VAULT_DIR",
     "CIAO_WORKSPACES",
 )
+_PATH_DATA_KEYS = ("CIAO_VAULT_ROOT", "CIAO_MEMORY_DIR", "CIAO_VAULT_DIR")
 _STANDARD_ENV_KEYS = frozenset(
     {"CIAO_WORKSPACE", "CIAO_RUNTIME_ROOT", "CIAO_PORT", "PATH", "HOME", "LANG"}
 )
@@ -148,9 +172,15 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 # --- isolation guard -----------------------------------------------------------
 
 
+def _is_darwin() -> bool:
+    return sys.platform == "darwin"
+
+
 def _real_home() -> Path | None:
     """This account's real home directory, ignoring ``$HOME``."""
-    if sys.platform != "darwin":
+    # The literal comparison narrows the platform for mypy; ``_is_darwin`` is the
+    # seam a test replaces without flipping ``sys.platform`` process-wide.
+    if sys.platform != "darwin" or not _is_darwin():
         return None
     import pwd
 
@@ -252,55 +282,247 @@ def _checkout_root(python: str) -> Path | None:
 
 def _read_receipt() -> dict[str, Any] | None:
     value = _read_json(Path.home() / ".local" / "state" / "ciaobot" / "install-receipt.json")
-    if value is None or not isinstance(value.get("python"), str) or not value["python"]:
+    # A relative interpreter would be resolved against the caller's cwd, so a
+    # receipt that names one proves nothing about any environment.
+    if value is None or not isinstance(value.get("python"), str) or not _absolute(value["python"]):
         return None
     return value
 
 
+# --- hardened reads and probes --------------------------------------------------
+
+
+def _read_optional(path: Path, *, max_bytes: int, label: str) -> bytes | None:
+    """The bytes of a regular file, ``None`` when there is no such entry.
+
+    Raises ``DefinitionReadError`` when something is there but is a symlink, a
+    FIFO or other special file, too large, or changing: an unreadable answer is
+    never allowed to read as an empty one.
+    """
+    if not os.path.lexists(path):
+        return None
+    return read_bounded_file(path, max_bytes=max_bytes, label=label).data
+
+
+def _read_dotenv(path: Path) -> dict[str, str] | None:
+    """The parsed workspace ``.env`` (``{}`` when absent), ``None`` when unreadable."""
+    try:
+        data = _read_optional(path, max_bytes=_MAX_DOTENV, label="the workspace .env")
+        return {} if data is None else parse_dotenv(data.decode("utf-8"))
+    except (DefinitionReadError, UnicodeDecodeError):
+        return None
+
+
+def _read_lock_owner(runtime: DesktopRuntime) -> dict[str, Any] | None:
+    """The engine's ``server.lock`` metadata, or ``None`` when absent or unreadable."""
+    try:
+        data = _read_optional(
+            Path(runtime.runtime_root) / SERVER_LOCK_NAME,
+            max_bytes=_MAX_SMALL_FILE,
+            label="the engine lock",
+        )
+        value = None if data is None else json.loads(data.decode("utf-8"))
+    except (DefinitionReadError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+read_lock_owner = _read_lock_owner
+
+
+class _ProbeFailed(Exception):
+    """The loopback answer was not a small 2xx JSON document in time."""
+
+
+def _get_json(port: int, path: str) -> Any:
+    """GET ``http://127.0.0.1:<port><path>`` as JSON.
+
+    ``http.client`` takes no proxy from the environment and follows no redirect
+    (a 3xx is just a non-2xx answer here). The body is capped, and one deadline
+    covers connect, headers and body: a timer shuts the socket at the deadline,
+    so a peer that drips bytes cannot keep the plan waiting.
+    """
+    deadline_s = _PROBE_DEADLINE_S
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=deadline_s)
+
+    def expire() -> None:
+        sock = connection.sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    timer = threading.Timer(deadline_s, expire)
+    timer.daemon = True
+    timer.start()
+    started = time.monotonic()
+    try:
+        connection.request("GET", path, headers={"Accept": "application/json"})
+        response = connection.getresponse()
+        if not 200 <= response.status < 300:
+            raise _ProbeFailed(f"HTTP {response.status}")
+        length = response.getheader("Content-Length")
+        if length is not None and (not length.isdigit() or int(length) > _PROBE_MAX_BYTES):
+            raise _ProbeFailed("unacceptable Content-Length")
+        body = bytearray()
+        while True:
+            chunk = response.read1(_PROBE_MAX_BYTES + 1 - len(body))
+            if not chunk:
+                break
+            body += chunk
+            if len(body) > _PROBE_MAX_BYTES:
+                raise _ProbeFailed("response too large")
+            if time.monotonic() - started > deadline_s:
+                raise _ProbeFailed("deadline passed")
+        if time.monotonic() - started > deadline_s:
+            raise _ProbeFailed("deadline passed")
+        return json.loads(bytes(body).decode("utf-8"))
+    finally:
+        timer.cancel()
+        connection.close()
+
+
+_PROBE_ERRORS = (_ProbeFailed, OSError, http.client.HTTPException, ValueError)
+
+
+def engine_identity(port: int) -> dict[str, Any] | None:
+    """The startup-status payload of whatever answers ``port``, if it is an engine."""
+    try:
+        payload = _get_json(port, "/api/startup-status")
+    except _PROBE_ERRORS:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    startup_id = payload.get("startup_id")
+    if not isinstance(startup_id, str) or not startup_id:
+        return None
+    return payload
+
+
+def restart_blockers(port: int) -> list[dict[str, Any]]:
+    """Chats a restart would interrupt; ``[]`` when nothing listens, else raise on doubt."""
+    try:
+        payload = _get_json(port, "/api/admin/restart-blockers")
+    except ConnectionRefusedError:
+        return []
+    except _PROBE_ERRORS as exc:
+        raise RestartBlockersUnavailable(str(exc) or type(exc).__name__) from exc
+    values = payload.get("restart_blockers") if isinstance(payload, dict) else None
+    if not isinstance(values, list):
+        raise RestartBlockersUnavailable("unexpected answer from the engine")
+    return [
+        {"chat_id": str(value["chat_id"]), "reasons": [str(r) for r in value.get("reasons") or []]}
+        for value in values
+        if isinstance(value, dict) and value.get("chat_id")
+    ]
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether ``pid`` is a live process. Signal 0 delivers nothing."""
+    if not _is_darwin() or pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _job_state(label: str, runner: Runner) -> tuple[bool, int | None]:
+    """``(loaded, pid)`` from a read-only ``launchctl print``.
+
+    Only a confirmed "not loaded" answer reads as not loaded: a probe that
+    cannot run or answers anything else is treated as loaded, because the
+    caller refuses on "loaded with no known version".
+    """
+    try:
+        completed = runner(
+            [LAUNCHCTL, "print", f"gui/{_getuid()}/{label}"],
+            capture_output=True,
+            text=True,
+            timeout=macos_service.JOB_PROBE_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True, None
+    if completed.returncode == _JOB_ABSENT_STATUS:
+        return False, None
+    if completed.returncode != 0:
+        return True, None
+    value = macos_service.launchctl_print_field(completed.stdout or "", "pid")
+    return True, int(value) if value.isdigit() else None
+
+
 # --- trash candidates ----------------------------------------------------------
+
+_STATE_ROOT = (".local", "state", "ciaobot")
+#: Where each proof's candidate must really live, relative to the real HOME.
+_PROOF_ROOTS: dict[str, tuple[str, ...]] = {
+    "server_host_program": ("Applications",),
+    "server_host_record": _STATE_ROOT,
+    "receipt": _STATE_ROOT,
+    "receipt_env": (".local", "share", "uv", "tools"),
+    "installer_shim": (".local", "bin"),
+    "uv_tool_symlink": (".local", "bin"),
+}
 
 
 def _inside(path: Path, other: Path) -> bool:
     return path == other or other in path.parents
 
 
-def _safe(path: Path, protected: list[Path], *, allow_symlink: bool = False) -> bool:
-    """Whether ``path`` may be offered for the Trash.
+def _safe(
+    path: Path,
+    protected: list[Path],
+    *,
+    expected_root: tuple[str, ...] = (),
+    allow_symlink: bool = False,
+) -> Path | None:
+    """The normalised ``path`` when it may be offered for the Trash, else ``None``.
 
-    Absolute, strictly under HOME, not a top-level symlink unless
-    the proof allows it, and neither equal to, inside, nor an ancestor of any
-    protected path.
+    Absolute, with no ``..`` (collapsing it lexically would name a different
+    place when an earlier component is a symlink), strictly under HOME and
+    strictly under ``expected_root`` (relative to the real HOME) AFTER every
+    intermediate component is resolved, not a top-level symlink unless the proof
+    allows it, and neither equal to, inside, nor an ancestor of any protected
+    path. The caller must emit the returned path: it is the one that was checked.
     """
-    if not path.is_absolute():
-        return False
-    home = Path.home()
+    if not path.is_absolute() or ".." in path.parts or "\x00" in str(path):
+        return None
+    home = Path(os.path.abspath(Path.home()))
     lexical = Path(os.path.abspath(path))
     if home not in lexical.parents:
-        return False
+        return None
     try:
+        home_real = home.resolve()
+        root_real = home_real.joinpath(*expected_root)
         is_link = lexical.is_symlink()
         if is_link and not allow_symlink:
-            return False
+            return None
         resolved = lexical.parent.resolve() / lexical.name if is_link else lexical.resolve()
-    except OSError:
-        return False
-    try:
-        for guarded in protected:
-            target = guarded.resolve()
-            if _inside(resolved, target) or _inside(target, resolved):
-                return False
-    except OSError:
-        return False
-    return True
+        targets = [guarded.resolve() for guarded in protected]
+    except (OSError, RuntimeError):
+        return None
+    if home_real not in resolved.parents or root_real not in resolved.parents:
+        return None
+    for target in targets:
+        if _inside(resolved, target) or _inside(target, resolved):
+            return None
+    return lexical
 
 
 def _server_host_candidates(program: str) -> list[TrashCandidate]:
     host = Path.home() / "Applications" / _HOST_APP_NAME
+    if ".." in PurePosixPath(program).parts:
+        return []
     bundle = PurePosixPath(program).parent.parent.parent
     if str(bundle) != str(host) or not host.exists():
         return []
     found = [TrashCandidate(str(host), "server_host_program")]
-    record_path = Path.home() / ".local" / "state" / "ciaobot" / "server-host.json"
+    record_path = Path.home().joinpath(*_STATE_ROOT, "server-host.json")
     record = _read_json(record_path)
     if record is not None and record.get("bundle_path") == str(host):
         found.append(TrashCandidate(str(record_path), "server_host_record"))
@@ -308,18 +530,27 @@ def _server_host_candidates(program: str) -> list[TrashCandidate]:
 
 
 def _installer_candidates(python: str, receipt: dict[str, Any]) -> list[TrashCandidate]:
+    if ".." in PurePosixPath(python).parts:
+        return []
     env = _env_root(python)
     if env.name != _ENV_ROOT_NAME or not env.is_dir():
         return []
     found = [TrashCandidate(str(env), "receipt_env")]
-    state = Path.home() / ".local" / "state" / "ciaobot"
+    state = Path.home().joinpath(*_STATE_ROOT)
     receipt_path = state / "install-receipt.json"
     if receipt_path.exists():
         found.append(TrashCandidate(str(receipt_path), "receipt"))
     uv = receipt.get("uv")
-    if isinstance(uv, str) and uv:
+    if isinstance(uv, str) and _absolute(uv):
         uv_path = Path(uv)
-        if uv_path.is_absolute() and state in Path(os.path.abspath(uv_path)).parents and uv_path.exists():
+        # The uv the installer built the env with: a regular file named ``uv``
+        # that the receipt places inside the installer state dir.
+        if (
+            uv_path.name == _UV_NAME
+            and state in Path(os.path.abspath(uv_path)).parents
+            and uv_path.is_file()
+            and not uv_path.is_symlink()
+        ):
             found.append(TrashCandidate(str(uv_path), "receipt"))
     shim = Path.home() / ".local" / "bin" / "ciao"
     if shim.is_symlink():
@@ -338,25 +569,115 @@ def _installer_candidates(python: str, receipt: dict[str, Any]) -> list[TrashCan
     return found
 
 
-# --- liveness ------------------------------------------------------------------
+# --- data locations --------------------------------------------------------------
 
 
-def _job_pid(label: str, runner: Runner) -> int | None:
-    """The pid launchd reports for the job, or ``None``. Read-only ``launchctl print``."""
+def _expand(value: str, base: Path) -> Path | None:
+    """``value`` as an absolute, normalised path: ``~`` expanded, relative to ``base``."""
+    value = value.strip()
+    if not value or "\x00" in value:
+        return None
     try:
-        completed = runner(
-            [LAUNCHCTL, "print", f"gui/{_getuid()}/{label}"],
-            capture_output=True,
-            text=True,
-            timeout=macos_service.JOB_PROBE_TIMEOUT_S,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if completed.returncode != 0:
-        return None
-    value = macos_service.launchctl_print_field(completed.stdout or "", "pid")
-    return int(value) if value.isdigit() else None
+        path = Path(value).expanduser()
+    except RuntimeError:
+        path = Path(value)
+    if not path.is_absolute():
+        path = base / path
+    return Path(os.path.abspath(path))
+
+
+def _registered_vaults(document: Any) -> list[str]:
+    """The ``vault_root`` (or the name) of each workspace a registry document lists."""
+    if isinstance(document, dict):
+        items = [{"name": name, **value} for name, value in document.items() if isinstance(value, dict)]
+    elif isinstance(document, list):
+        items = [item for item in document if isinstance(item, dict)]
+    else:
+        return []
+    found: list[str] = []
+    for item in items:
+        name = str(item.get("name", "")).strip()
+        vault = str(item.get("vault_root", name)).strip() or name
+        if vault:
+            found.append(vault)
+    return found
+
+
+def _data_location_conflict(
+    plist_env: dict[str, Any], dotenv: dict[str, str], workspace: Path
+) -> bool:
+    """Whether the bundled engine, which reads only the ``.env``, would see other data.
+
+    Compares VALUES, not keys: a ``.env`` key that is empty or differs from the
+    plist moves the data just as much as a missing one. A plist ``HOME`` that is
+    not this account's home moves every ``~`` path too.
+    """
+    home_value = plist_env.get("HOME")
+    if home_value is not None and not (
+        isinstance(home_value, str)
+        and _absolute(home_value)
+        and _same_dir(Path(home_value), Path.home())
+    ):
+        return True
+    for key in _DATA_LOCATION_KEYS:
+        if key not in plist_env:
+            continue
+        plist_value = str(plist_env[key]).strip()
+        if not plist_value:
+            continue  # an empty value is ignored by the engine: nothing is moved
+        env_value = dotenv.get(key, "").strip()
+        if not env_value:
+            return True
+        if key in _PATH_DATA_KEYS:
+            wanted, got = _expand(plist_value, workspace), _expand(env_value, workspace)
+            if wanted is None or got is None or not _same_dir(wanted, got):
+                return True
+        elif plist_value != env_value:
+            return True
+    return False
+
+
+def _protected_paths(
+    workspace: Path,
+    runtime_root: Path,
+    dotenv: dict[str, str],
+    plist_env: dict[str, Any],
+    registry: Any,
+) -> list[Path]:
+    """Everything a Trash candidate must never be, contain or sit inside.
+
+    The workspace, the runtime root, the vault (default, ``.env`` and plist
+    values, ``~`` and relative forms expanded against the right base), the
+    engine state dir, ``~/.ciao`` and every other workspace the registry (and a
+    legacy ``CIAO_WORKSPACES`` value) lists.
+    """
+    protected: list[Path] = [workspace, runtime_root, Path.home() / ".ciao", state_dir()]
+    vault_base = workspace / "memory-vault"
+    for key in _PATH_DATA_KEYS:
+        for source in (dotenv, plist_env):
+            raw = source.get(key)
+            expanded = _expand(raw, workspace) if isinstance(raw, str) else None
+            if expanded is not None:
+                protected.append(expanded)
+    dotenv_vault = _expand(dotenv.get("CIAO_VAULT_ROOT", ""), workspace)
+    if dotenv_vault is not None:
+        vault_base = dotenv_vault
+    protected.append(vault_base)
+    documents = [registry]
+    for source in (dotenv, plist_env):
+        legacy = source.get("CIAO_WORKSPACES")
+        if isinstance(legacy, str) and legacy.strip():
+            try:
+                documents.append(json.loads(legacy))
+            except ValueError:
+                pass
+    for document in documents:
+        for vault in _registered_vaults(document):
+            for base in (vault_base, workspace):
+                expanded = _expand(vault, base)
+                if expanded is not None:
+                    protected.append(expanded)
+    return protected
 
 
 # --- the plan ------------------------------------------------------------------
@@ -395,7 +716,8 @@ def plan(
             label=label,
         )
 
-    # 3. bounded, strict read.
+    # 3. one bounded, strict read. The hash, argv, environment, workspace,
+    # runtime root and port below all come from this one parsed document.
     try:
         read = read_definition(plist_path)
         document = plistlib.loads(read.data)
@@ -406,18 +728,33 @@ def plan(
     known: dict[str, Any] = {"plist": str(plist_path), "plist_sha256": read.sha256}
 
     # 4. workspace, runtime root and registry. environ={} means no shell fallback.
-    runtime: DesktopRuntime = discover_runtime(
-        launch_agents_dir=agents, environ={}, label=label
+    dotenv_state: dict[str, Any] = {"values": {}, "failed": False}
+
+    def read_env(path: Path) -> dict[str, str]:
+        values = _read_dotenv(path)
+        if values is None:
+            dotenv_state["failed"] = True
+            return {}
+        dotenv_state["values"] = values
+        return values
+
+    runtime: DesktopRuntime = runtime_from_plist(
+        document, plist_path=plist_path, environ={}, read_env=read_env
     )
     if not runtime.workspace:
         return _refuse("no_workspace", label, **known)
     workspace = Path(runtime.workspace)
     runtime_root = Path(runtime.runtime_root)
     known.update(workspace=str(workspace), runtime_root=str(runtime_root), port=runtime.port)
+    if dotenv_state["failed"]:
+        return _refuse("unreadable_dotenv", label, **known)
+    dotenv: dict[str, str] = dotenv_state["values"]
     if not workspace.is_dir() or not runtime_root.is_dir():
         return _refuse("no_registry", label, **known)
     try:
-        json.loads(read_definition(runtime_root / "workspaces.json").data.decode("utf-8"))
+        registry = json.loads(
+            read_definition(runtime_root / "workspaces.json", max_bytes=_MAX_REGISTRY).data.decode("utf-8")
+        )
     except (DefinitionReadError, ValueError):
         return _refuse("no_registry", label, **known)
 
@@ -451,10 +788,8 @@ def plan(
     # 6. data locations and non-standard environment.
     raw_env = document.get("EnvironmentVariables")
     plist_env: dict[str, Any] = raw_env if isinstance(raw_env, dict) else {}
-    dotenv = read_dotenv(workspace / ".env")
-    for key in _DATA_LOCATION_KEYS:
-        if key in plist_env and key not in dotenv:
-            return _refuse("custom_data_location", label, **known)
+    if _data_location_conflict(plist_env, dotenv, workspace):
+        return _refuse("custom_data_location", label, **known)
     dropped = tuple(
         sorted(
             str(key)
@@ -477,15 +812,20 @@ def plan(
 
     # 8. liveness, version and active chats.
     identity = engine_identity(runtime.port)
+    loaded, job_pid = _job_state(label, runner)
     old_version = ""
     if identity is not None:
         owner = read_lock_owner(runtime)
-        if not _owns_listener(owner, identity, workspace):
+        if not _owns_listener(owner, identity, runtime, workspace):
             return _refuse("foreign_listener", label, **known)
         version = identity.get("version")
         old_version = version if isinstance(version, str) else ""
     if not old_version and receipt is not None and isinstance(receipt.get("version"), str):
         old_version = receipt["version"]
+    if not old_version and (identity is not None or loaded):
+        # A running or loaded engine of unknown version cannot be shown to be
+        # new enough, or not a downgrade.
+        return _refuse("unknown_version", label, **known)
     if old_version:
         if _version_key(old_version) > _version_key(ciao.__version__):
             return _refuse("downgrade", label, old_version=old_version, **known)
@@ -495,7 +835,7 @@ def plan(
         active_chats = len(restart_blockers(runtime.port))
     except RestartBlockersUnavailable:
         return _refuse("blockers_unavailable", label, old_version=old_version, **known)
-    old_running = identity is not None or _job_pid(label, runner) is not None
+    old_running = identity is not None or job_pid is not None
 
     # 9. trash candidates, only with proof; a checkout is never trashed.
     candidates: list[TrashCandidate] = []
@@ -506,14 +846,22 @@ def plan(
         candidates = _installer_candidates(direct_python, receipt)
     elif program_kind == "checkout" and checkout is not None:
         left_in_place = (str(checkout),)
-    protected = _protected_paths(workspace, runtime_root, dotenv)
+    protected = _protected_paths(workspace, runtime_root, dotenv, plist_env, registry)
     symlink_proofs = {"uv_tool_symlink", "installer_shim"}
     trash: list[TrashCandidate] = []
     for candidate in candidates:
-        if candidate in trash:
+        checked = _safe(
+            Path(candidate.path),
+            protected,
+            expected_root=_PROOF_ROOTS[candidate.proof],
+            allow_symlink=candidate.proof in symlink_proofs,
+        )
+        if checked is None:
             continue
-        if _safe(Path(candidate.path), protected, allow_symlink=candidate.proof in symlink_proofs):
-            trash.append(candidate)
+        # Emit the path that was checked, not the one the proof was built from.
+        item = TrashCandidate(str(checked), candidate.proof)
+        if item not in trash:
+            trash.append(item)
 
     return TakeoverPlan(
         action=ACTION_TAKEOVER,
@@ -534,30 +882,29 @@ def plan(
 
 
 def _owns_listener(
-    owner: dict[str, Any] | None, identity: dict[str, Any], workspace: Path
+    owner: dict[str, Any] | None,
+    identity: dict[str, Any],
+    runtime: DesktopRuntime,
+    workspace: Path,
 ) -> bool:
-    """The lock names the same pid the listener reports, for this workspace."""
-    if owner is None:
+    """The listener is the live engine this plist started.
+
+    The lock must be a running, current-run record for this runtime and port
+    (the macos_service freshness rule), carry the same ``startup_id`` and pid
+    the listener reports, name this workspace, and the pid must be alive.
+    """
+    fresh = lock_owner_is_fresh(owner, runtime, None)
+    if fresh is None:
+        return False
+    if fresh.get("startup_id") != identity.get("startup_id"):
         return False
     pid = identity.get("pid")
-    owner_pid = owner.get("pid")
-    if not isinstance(pid, int) or isinstance(pid, bool) or owner_pid != pid:
+    if not isinstance(pid, int) or isinstance(pid, bool) or fresh.get("pid") != pid:
         return False
-    owner_workspace = owner.get("workspace")
+    owner_workspace = fresh.get("workspace")
     if not isinstance(owner_workspace, str) or not owner_workspace:
         return False
-    return _same_dir(Path(owner_workspace), workspace)
-
-
-def _protected_paths(
-    workspace: Path, runtime_root: Path, dotenv: dict[str, str]
-) -> list[Path]:
-    protected = [workspace, runtime_root, Path.home() / ".ciao", state_dir()]
-    for key in _DATA_LOCATION_KEYS:
-        value = dotenv.get(key, "")
-        if value and _absolute(value):
-            protected.append(Path(value))
-    return protected
+    return _same_dir(Path(owner_workspace), workspace) and _pid_alive(pid)
 
 
 # --- CLI -----------------------------------------------------------------------
