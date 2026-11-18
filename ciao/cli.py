@@ -10,11 +10,13 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import sqlite3
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, replace
 from importlib import resources
 from pathlib import Path, PurePosixPath
@@ -22,7 +24,7 @@ from typing import TYPE_CHECKING, Any, cast
 import urllib.error
 import urllib.request
 
-from ciao import dev, gws_wrapper, package_smoke, proposal_kinds, public_release, release, service_backend
+from ciao import dev, gws_wrapper, package_smoke, package_version, proposal_kinds, public_release, release, service_backend
 from ciao.install_discovery import trusted_registry
 from ciao.server_host import (
     BUNDLE_ID,
@@ -74,6 +76,24 @@ def _relaunch_argv() -> list[str]:
     return [sys.executable, *python_isolation_flags(), "-m", "ciao.cli", *sys.argv[1:]]
 
 
+def _app_engine_refuses_installer_flags(args: argparse.Namespace) -> bool:
+    """Whether ``--app-engine`` arrives with any installer flag provided.
+
+    The optional installer values are compared with ``is not None``, not
+    truthiness: ``--installer-native-fd 0`` names a real (stdio) descriptor,
+    and an empty run id is a provided value, not an absent one. Its own
+    function so the check is testable without the pre-block guards that
+    normally refuse most of these combinations first.
+    """
+    return bool(
+        args.installer_bootstrap
+        or args.installer_suggest_workspace is not None
+        or args.installer_run_id is not None
+        or args.installer_native_workspace is not None
+        or args.installer_native_fd is not None
+    )
+
+
 def _run_command(args: argparse.Namespace) -> int:
     if args.installer_suggest_workspace is not None and not args.installer_bootstrap:
         print("--installer-suggest-workspace requires --installer-bootstrap", file=sys.stderr)
@@ -96,6 +116,18 @@ def _run_command(args: argparse.Namespace) -> int:
     if args.installer_native_workspace is not None and args.installer_native_fd is None:
         print("--installer-native-workspace requires --installer-native-fd", file=sys.stderr)
         return 2
+    if args.app_engine:
+        # App-mode: the Mac app owns this engine. The installer handshake has no
+        # parent to hand off to here, and the bundle check keeps the flag out of
+        # reach everywhere else; the refusal helper treats every provided value
+        # (`--installer-native-fd 0` included) as one.
+        if _app_engine_refuses_installer_flags(args):
+            print("--app-engine cannot be combined with installer options", file=sys.stderr)
+            return 2
+        if not package_version.running_from_app_bundle():
+            print("--app-engine runs only from the engine inside Ciaobot.app", file=sys.stderr)
+            return 2
+        return _run_server(supervised=args.supervised, app_engine=True)
     if not args.installer_bootstrap:
         # Ordinary `ciao run` keeps its exact call shape.
         return _run_server(supervised=args.supervised)
@@ -196,6 +228,7 @@ def _run_server(
     installer_suggest_workspace: str | None = None,
     installer_native_fd: int | None = None,
     installer_native_workspace: str | None = None,
+    app_engine: bool = False,
 ) -> int:
     from ciao.config import RESTART_EXIT_CODE
     from ciao.main import main as server_main
@@ -218,6 +251,8 @@ def _run_server(
                 installer_native_fd=installer_native_fd,
                 installer_native_workspace=installer_native_workspace,
             )
+        elif app_engine:
+            server_main(supervised=supervised, app_engine=True)
         else:
             server_main(supervised=supervised)
     except SystemExit as exc:
@@ -1442,7 +1477,12 @@ def setup_workspace(
     # existing notes folder when the live LaunchAgent would be hijacked.
     # The later `_write_launchd_plist` guard is defense-in-depth; this one
     # makes refusal non-mutating for `setup_workspace` and `/api/setup/finish`.
-    write_launchd = _service_platform() or launch_agents_dir is not None
+    # In app mode the Mac app owns this engine, so it writes the app-owned
+    # workspace pointer below instead of planting a LaunchAgent — launchd
+    # would otherwise start a second engine at the next login.
+    write_launchd = (
+        _service_platform() or launch_agents_dir is not None
+    ) and not package_version.running_from_app_bundle()
     if write_launchd and not confirm_repoint:
         allow_env = os.environ.get("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", "").strip().lower() in (
             "1",
@@ -1600,6 +1640,15 @@ def setup_workspace(
                 encoding="utf-8", newline="",
             )
             written.append(env_path)
+    if package_version.running_from_app_bundle():
+        # The workspace pointer replaces the service definition in app mode:
+        # this bundled engine is restarted by the app, and the next start
+        # resolves CIAO_WORKSPACE/CIAO_RUNTIME_ROOT from this file instead of
+        # a LaunchAgent plist. Written after .env so the engine's next start
+        # reads the finished workspace.
+        from ciao import app_engine
+
+        written.append(app_engine.write_pointer(root, runtime_root))
     if first_setup or fresh_env:
         # First-time setup: stamp when this workspace was provisioned so the
         # post-setup restart can hold system-routine catch-up for a grace
@@ -7758,7 +7807,7 @@ def _mac_takeover_command(args: argparse.Namespace) -> int:
     return mac_takeover.run_cli(args)
 
 
-def _service_command(args: argparse.Namespace) -> int:
+def _macos_service_command(args: argparse.Namespace) -> int:
     from ciao import macos_service
 
     action = args.service_action
@@ -7930,6 +7979,66 @@ def _linux_service_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _service_command(args: argparse.Namespace) -> int:
+    if getattr(args, "deprecated_alias", False):
+        print("`ciao desktop-service` is deprecated; use `ciao service`.", file=sys.stderr)
+    if not sys.platform.startswith("linux"):
+        print("Error: ciao service is Linux only.", file=sys.stderr)
+        return 2
+    if os.geteuid() == 0:
+        print("Error: run as the account that will own Ciaobot, not root.", file=sys.stderr)
+        return 2
+    import pwd  # noqa: PLC0415  # POSIX-only module: lives in the Linux branch.
+
+    from ciao import linux_service  # noqa: PLC0415
+
+    # The account is who the unit will run as, not whoever holds $HOME (#3131 D2).
+    identity = pwd.getpwuid(os.geteuid())
+    # Do not resolve python (see render_service's comment).
+    python = Path(sys.prefix) / "bin" / "python"
+    workspace = args.workspace or linux_service.unit_workspace(linux_service.UNIT_PATH)
+    if workspace is None:
+        print(
+            "Error: pass --workspace: no installed unit records a workspace for this account.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        plan = linux_service.plan_install(
+            workspace=workspace, user=identity.pw_name, home=Path(identity.pw_dir),
+            python=python, replace=args.replace, start=not args.no_start,
+            unit_path=linux_service.UNIT_PATH,
+        )
+    except linux_service.UnitConflict as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 3
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if args.dry_run:
+        print(plan.unit, end="")
+        for argv, stdin in plan.commands:
+            print(f"# would run: {shlex.join(argv)}")
+        return 0
+
+    def run(argv: Sequence[str], stdin: str | None) -> None:
+        subprocess.run(argv, input=stdin, text=True, encoding="utf-8", check=True)
+
+    try:
+        linux_service.run_plan(plan, run=run)
+    except subprocess.CalledProcessError as exc:
+        # Earlier steps ran and later ones did not, so the operator must be
+        # told which step died and that the unit may be half installed.
+        shown = shlex.join([str(part) for part in (exc.cmd or ())][:3])
+        print(f"Error: {shown} failed with exit code {exc.returncode}.", file=sys.stderr)
+        print(
+            "The install may be half applied: inspect it with `systemctl status ciaobot`.",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def _desktop_command(args: argparse.Namespace) -> int:
     from ciao import desktop_install
 
@@ -8016,6 +8125,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=argparse.SUPPRESS,
     )
+    # App-owned engine mode (#3129): the Mac app launches this exact flag and
+    # supervises the process itself. Not operator surface: hidden from --help,
+    # and refused outside the bundle at dispatch.
+    run_parser.add_argument("--app-engine", action="store_true", help=argparse.SUPPRESS)
     run_parser.set_defaults(func=_run_command)
 
     supervise_parser = subparsers.add_parser(
@@ -8068,20 +8181,50 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Register the LaunchAgent for this workspace first if it is not installed.",
                 )
             action_parser.set_defaults(
-                func=_service_command,
+                func=_macos_service_command,
                 deprecated_alias=deprecated,
             )
         login_parser = service_sub.add_parser("login")
         login_parser.add_argument("login_action", choices=("enable", "disable"))
         login_parser.add_argument("--json", action="store_true", dest="as_json")
         login_parser.set_defaults(
-            func=_service_command,
+            func=_macos_service_command,
             deprecated_alias=deprecated,
         )
+        # #3131: the Linux system-service install shares this group so
+        # `ciao service install` reads like the other service verbs. It is
+        # registered only on `service`: `desktop-service` is the deprecated
+        # macOS alias, and the handler refuses non-Linux and root invocations
+        # itself.
+        if not deprecated:
+            install_parser = service_sub.add_parser(
+                "install",
+                help="Install the Linux systemd service for this account.",
+            )
+            install_parser.add_argument(
+                "--workspace", type=Path,
+                help="Workspace directory (default: the one the installed unit records).",
+            )
+            install_parser.add_argument(
+                "--replace", action="store_true",
+                help="Take over an existing unit that runs another interpreter (a source install).",
+            )
+            install_parser.add_argument(
+                "--no-start", action="store_true",
+                help="Install and enable the unit, but do not restart the service.",
+            )
+            install_parser.add_argument(
+                "--dry-run", action="store_true",
+                help="Print the unit and the commands without running anything.",
+            )
+            install_parser.set_defaults(
+                func=_service_command,
+                deprecated_alias=deprecated,
+            )
 
     add_service_parser(
         "service",
-        "Start, stop and inspect the launchd-managed Ciaobot engine (macOS).",
+        "Service control: start, stop and inspect on macOS (launchd), and install the Linux systemd unit.",
         deprecated=False,
     )
     add_service_parser(
