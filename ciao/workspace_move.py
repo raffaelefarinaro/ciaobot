@@ -172,6 +172,14 @@ class ServiceDefinition(Protocol):
 
 def default_state_dir() -> Path:
     """Beside the update state: outside every workspace, so it survives the move."""
+    from ciao import package_version
+
+    if package_version.running_from_app_bundle():
+        # The app-mode engine has no install receipt to hang the record beside
+        # (and no LaunchAgent at all): the app-owned engine state dir holds it.
+        from ciao import app_engine
+
+        return app_engine.state_dir() / "workspace-move"
     from ciao.engine_update import default_state_dir as update_state_dir
 
     return update_state_dir().parent / "workspace-move"
@@ -192,6 +200,12 @@ class MoveOperation:
     #: named in ``error`` and the job exits with ``ACCESS_DENIED_EXIT``.
     denied: bool = False
     startup_exit_code: int | None = None
+    #: Performed by the app-mode engine (``workspace_move_app.before_boot``),
+    #: never by a launchd job. Defaults off so 1.x records still parse.
+    app: bool = False
+    #: The pointer's runtime root before the move (app mode only), so a rollback
+    #: can repoint the record it came from. Defaults empty for the same reason.
+    runtime_root: str = ""
 
 
 def _now() -> str:
@@ -205,6 +219,25 @@ def read_operation(state_dir: Path | None = None) -> MoveOperation | None:
         parsed: Any = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    return _parse_operation(parsed)
+
+
+def read_operation_strict(state_dir: Path) -> MoveOperation | None:
+    """The record at ``state_dir``, read as strictly as the workspace pointer.
+
+    Used where the record drives a rename (app mode): the file must be this
+    user's own ``0o600`` regular file, not a symlink, and bounded in size —
+    anything else reads as "no record", never as an instruction.
+    """
+    from ciao import app_engine
+
+    parsed = app_engine.read_private_json(
+        state_dir / OPERATION_NAME, label="the workspace move record"
+    )
+    return _parse_operation(parsed)
+
+
+def _parse_operation(parsed: Any) -> MoveOperation | None:
     if not isinstance(parsed, dict) or parsed.get("phase") not in PHASES:
         return None
     try:
@@ -224,6 +257,8 @@ def read_operation(state_dir: Path | None = None) -> MoveOperation | None:
                 if parsed.get("startup_exit_code") is not None
                 else None
             ),
+            app=parsed.get("app") is True,
+            runtime_root=str(parsed.get("runtime_root", "")),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -231,6 +266,15 @@ def read_operation(state_dir: Path | None = None) -> MoveOperation | None:
 
 def write_operation(op: MoveOperation, state_dir: Path | None = None) -> None:
     root = state_dir or default_state_dir()
+    if op.app:
+        # An app-mode record drives a rename, and `read_operation_strict`
+        # refuses anything but this user's own `0o600`, ACL-free file: write
+        # it with the same verified writer the workspace pointer uses, so a
+        # record this process writes is always one it can read back.
+        from ciao import app_engine
+
+        app_engine.write_private_json(root / OPERATION_NAME, asdict(op))
+        return
     root.mkdir(parents=True, exist_ok=True)
     _write_text_atomic(root / OPERATION_NAME, json.dumps(asdict(op), indent=2) + "\n", private=True)
 
@@ -950,6 +994,21 @@ def _completed_detail(completed: Any) -> str:
     return str(getattr(completed, "stderr", "") or getattr(completed, "stdout", "") or "").strip()
 
 
+def _dotenv_port(workspace: Path) -> int:
+    """The port recorded in ``workspace``'s ``.env``, else the default one.
+
+    Read through the one helper both service definitions and the app-mode
+    pointer answer agree on: the port the engine serves is the workspace's own.
+    """
+    from ciao.macos_service import read_dotenv
+
+    raw = read_dotenv(workspace / ".env").get("PWA_PORT", "").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return 8443
+
+
 class LinuxEngineHost:
     """``systemctl`` for the engine's unit; the port from the workspace ``.env``."""
 
@@ -958,13 +1017,7 @@ class LinuxEngineHost:
         self._systemctl = systemctl or _systemctl
 
     def engine_port(self) -> int:
-        from ciao.macos_service import read_dotenv
-
-        raw = read_dotenv(self._workspace / ".env").get("PWA_PORT", "").strip()
-        try:
-            return int(raw)
-        except ValueError:
-            return 8443
+        return _dotenv_port(self._workspace)
 
     def start_engine(self) -> Any:
         completed = self._systemctl("start", LINUX_UNIT)
@@ -1269,6 +1322,11 @@ def _server_lock_held(workspace: Path) -> bool:
     runtime = Path(runtime_raw).expanduser() if runtime_raw else workspace / ".runtime"
     if not runtime.is_absolute():
         runtime = workspace / runtime
+    return _runtime_lock_held(runtime)
+
+
+def _runtime_lock_held(runtime: Path) -> bool:
+    """Whether a process holds the ``server.lock`` under runtime root ``runtime``."""
     try:
         handle = (runtime / "server.lock").open("rb")
     except OSError:
@@ -1314,7 +1372,7 @@ def _is_privacy_denial(exc: BaseException, platform: str | None = None) -> bool:
     )
 
 
-def _record_denied_folder(folder: Path) -> str:
+def _record_denied_folder(folder: Path, *, app: bool = False) -> str:
     """Record a macOS privacy denial of ``folder`` and name it for the operator.
 
     The move runs under the branded host, so a folder the user answered
@@ -1322,14 +1380,25 @@ def _record_denied_folder(folder: Path) -> str:
     recorded through the same machinery the engine's own probe uses, where
     ``ciao service status`` reads it, and the move's own record names the
     folder and the place to allow it.
+
+    In app mode the move is performed by the engine inside Ciaobot.app
+    itself, so the app names the folder and the app's own grant is the one
+    to allow.
     """
     from ciao.workspace_access import record_denial
 
-    message = (
-        f"macOS denied Ciaobot Server access to {folder}: allow it in System Settings "
-        "→ Privacy & Security → Files and Folders (Ciaobot Server), then move the "
-        "workspace again."
-    )
+    if app:
+        message = (
+            f"macOS denied Ciaobot access to {folder}: allow it in System Settings "
+            "→ Privacy & Security → Files and Folders (Ciaobot), then move the "
+            "workspace again."
+        )
+    else:
+        message = (
+            f"macOS denied Ciaobot Server access to {folder}: allow it in System Settings "
+            "→ Privacy & Security → Files and Folders (Ciaobot Server), then move the "
+            "workspace again."
+        )
     record_denial(message)
     return message
 
@@ -1589,6 +1658,17 @@ def run_move(
 
 
 def registered_workspace() -> Path | None:
+    """The workspace this engine is registered to serve, or ``None``."""
+    from ciao import package_version
+
+    if package_version.running_from_app_bundle():
+        # The app owns the workspace pointer. In app mode the LaunchAgent
+        # plist is never read (and never written), so no service definition
+        # is constructed here at all.
+        from ciao.app_engine import read_pointer
+
+        pointer = read_pointer()
+        return pointer.workspace if pointer is not None else None
     return current_service_definition().workspace()
 
 
@@ -1600,6 +1680,12 @@ def update_in_flight() -> bool:
 
 
 def engine_port() -> int:
+    from ciao import package_version
+
+    if package_version.running_from_app_bundle():
+        # In app mode there is no update host to ask: the pointer names the
+        # workspace and the workspace's own `.env` names the port.
+        return _dotenv_port(registered_workspace() or Path("."))
     workspace = registered_workspace() or Path(".")
     return current_engine_host(workspace).engine_port()
 
