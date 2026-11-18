@@ -172,7 +172,7 @@ _SYSTEM_SKILLS_TTL_SECONDS = 300.0
 
 # Session reads (`read_thread` / `read_collab_tree`) also cost a throwaway
 # `opencode serve`. A chat with a live provider attached reuses that server
-# instead (see `has_live_server` / `read_live_collab_tree`), so this classmethod
+# instead (see `is_connected` / `read_live_collab_tree`), so this classmethod
 # path and its cache now mainly cover reads with nothing attached (an archived
 # chat, or a chat viewed from another device). The PWA still polls the routes
 # they back on short intervals (15s status sync, 4s for /subagents while a
@@ -2026,7 +2026,7 @@ class OpencodeProvider(BaseSDKProvider):
         report uncertainty instead of claiming a connection.
         """
         client = self._client
-        if not self.has_live_server or client is None:
+        if not self.is_connected or client is None:
             return {}
         response = await client.get("/api/mcp", timeout=2.0)
         response.raise_for_status()
@@ -2054,7 +2054,7 @@ class OpencodeProvider(BaseSDKProvider):
     async def start_mcp_oauth(self, server: str) -> McpOAuthAttempt:
         """Start the OAuth sign-in for one MCP server through the V2 integration API."""
         client = self._client
-        if not self.has_live_server or client is None:
+        if not self.is_connected or client is None:
             raise McpOAuthUnavailable("not_running")
         listing = await client.get("/api/mcp", timeout=2.0)
         listing.raise_for_status()
@@ -2130,7 +2130,7 @@ class OpencodeProvider(BaseSDKProvider):
         await client.delete(path, timeout=2.0)
 
     @property
-    def has_live_server(self) -> bool:
+    def is_connected(self) -> bool:
         """True while this chat's own opencode server is still running.
 
         Lets read paths (the subagents poll) reuse this connection instead of
@@ -2142,10 +2142,6 @@ class OpencodeProvider(BaseSDKProvider):
             and self._process is not None
             and self._process.returncode is None
         )
-
-    @property
-    def is_connected(self) -> bool:
-        return self.has_live_server
 
     def interrupted_background_work(self) -> dict[str, Any] | None:
         return {
@@ -2304,7 +2300,7 @@ class OpencodeProvider(BaseSDKProvider):
         left unchanged.
         """
         client, session_id = self._client, self._session_id
-        if client is None or not session_id or not self.has_live_server:
+        if client is None or not session_id or not self.is_connected:
             return len(self._background_shells)
         try:
             shells = await _read_running_shells(client, session_id)
@@ -2341,7 +2337,7 @@ class OpencodeProvider(BaseSDKProvider):
         A read error leaves the sets as they are and never fails the turn.
         """
         client, session_id = self._client, self._session_id
-        if client is None or not session_id or not self.has_live_server:
+        if client is None or not session_id or not self.is_connected:
             return
         await self.refresh_background_shells()
         active = await self._active_or_none(client)
@@ -2367,7 +2363,7 @@ class OpencodeProvider(BaseSDKProvider):
         Same shape as the classmethod, but skips ``_EphemeralServer`` entirely:
         while a chat is attached, its own server is already up, so spawning a
         second one just to poll subagent transcripts every few seconds wastes
-        a process start each time. Callers should check ``has_live_server``
+        a process start each time. Callers should check ``is_connected``
         first and fall back to the classmethod otherwise (e.g. a chat with no
         attached provider, viewed from another device or after a restart).
 
@@ -2448,7 +2444,7 @@ class OpencodeProvider(BaseSDKProvider):
     def can_drain(self) -> bool:
         """True while the live server still owes this session a follow-up turn."""
         return (
-            self.has_live_server
+            self.is_connected
             and bool(self._session_id)
             and self.background_work_outstanding
         )
@@ -2514,7 +2510,7 @@ class OpencodeProvider(BaseSDKProvider):
         stream closes. The caller cancels it before starting a user turn.
         """
         client, session_id = self._client, self._session_id
-        if client is None or not session_id or not self.has_live_server:
+        if client is None or not session_id or not self.is_connected:
             return
         self._wake_runs = []
         queue: asyncio.Queue[Mapping[str, Any] | None] = asyncio.Queue()
@@ -3371,7 +3367,7 @@ class OpencodeProvider(BaseSDKProvider):
         a wake that `drain_events` streams. An idle session is a no-op (204).
         """
         client, session_id = self._client, self._session_id
-        if client is None or not session_id or not self.has_live_server:
+        if client is None or not session_id or not self.is_connected:
             return "not_running"
         eligible = any(name in _BACKGROUNDABLE_TOOLS for name in self._tool_calls.values())
         try:

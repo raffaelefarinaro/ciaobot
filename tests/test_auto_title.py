@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from ciao.providers import claude as claude_adapter
 from ciao.providers.base import BaseProvider
+from ciao.providers.opencode import OpencodeProvider
 from ciao.web.project_chats import ProjectChatManager
 
 
@@ -61,7 +62,7 @@ async def test_native_title_opencode(monkeypatch) -> None:
     async def fake_read_thread(_workspace, _sid):
         return {"info": {"title": "How hash tables work"}, "messages": []}
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
     assert await manager._native_chat_title(manager._chats["chat-1"]) == "How hash tables work"
 
 
@@ -74,7 +75,7 @@ async def test_native_title_opencode_missing(monkeypatch) -> None:
     async def fake_read_thread(_workspace, _sid):
         return {"info": {"title": ""}, "messages": []}
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
     assert await manager._native_chat_title(manager._chats["chat-1"]) is None
 
 
@@ -92,7 +93,7 @@ async def test_native_title_opencode_placeholder_is_not_final(monkeypatch) -> No
     async def fake_read_thread(_workspace, _sid):
         return {"info": {"title": "New session - 2026-08-18T12:20:10.198Z"}, "messages": []}
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
     assert await manager._native_chat_title(manager._chats["chat-1"]) is None
 
 
@@ -179,7 +180,7 @@ async def test_auto_title_if_default_sets_native_title(monkeypatch) -> None:
     async def fake_read_thread(_workspace, _sid):
         return {"info": {"title": "Native Title"}, "messages": []}
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
     assert await manager.auto_title_if_default("chat-1", "hello") == "Native Title"
     assert manager._chats["chat-1"].title == "Native Title"
 
@@ -193,7 +194,7 @@ async def test_auto_title_if_default_skips_when_not_default(monkeypatch) -> None
     async def fake_read_thread(_workspace, _sid):
         return {"info": {"title": "Native Title"}, "messages": []}
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
     assert await manager.auto_title_if_default("chat-1", "hello") is None
     assert manager._chats["chat-1"].title == "Already Named"
 
@@ -210,7 +211,7 @@ async def test_auto_title_if_default_skips_without_session(monkeypatch) -> None:
     async def failing_oneshot(*_args, **_kwargs):
         raise RuntimeError("model unavailable")
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
     # No session_id throughout the poll window -> native never reachable, and
     # the one-shot titler fails, so the deterministic fallback is used instead
@@ -231,7 +232,7 @@ async def test_auto_title_if_default_skips_when_native_missing(monkeypatch) -> N
     async def failing_oneshot(*_args, **_kwargs):
         raise RuntimeError("model unavailable")
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
     # Native title never arrives within the poll window and the one-shot
     # titler fails -> fallback from the prompt so the sidebar doesn't stay
@@ -402,7 +403,7 @@ async def test_auto_title_waits_for_late_provider_title(monkeypatch) -> None:
         title = "Late Native Title" if reads >= 3 else ""
         return {"info": {"title": title}, "messages": []}
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
     assert await manager.auto_title_if_default("chat-1", "hello") == "Late Native Title"
     assert manager._chats["chat-1"].title == "Late Native Title"
     assert reads == 3
@@ -424,7 +425,7 @@ async def test_auto_title_polls_until_session_exists(monkeypatch) -> None:
     async def grant_session(*_args, **_kwargs):
         chat.session_id = "sess-late"
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
     monkeypatch.setattr(pc.asyncio, "sleep", grant_session)
 
     assert await manager.auto_title_if_default("chat-1", "hello") == "Arrived Late"
@@ -445,7 +446,7 @@ async def test_auto_title_stops_when_user_renames_mid_poll(monkeypatch) -> None:
     async def rename_during_wait(*_args, **_kwargs):
         chat.title = "User Picked This"
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
     monkeypatch.setattr(pc.asyncio, "sleep", rename_during_wait)
 
     assert await manager.auto_title_if_default("chat-1", "hello") is None
@@ -532,7 +533,7 @@ async def test_native_title_opencode_also_reads_the_chats_agent_root(monkeypatch
         seen.append(str(workspace))
         return {"info": {"title": "Opencode Work Title"}}
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
 
     manager = _manager(
         config=_config({"personal": "/roots/personal", "work": "/roots/work"}),
@@ -639,7 +640,6 @@ async def test_opencode_native_title_candidates_extraction_matrix(monkeypatch) -
     """OpenCode forwards the exact read_thread args and extracts the old title."""
     from pathlib import Path
 
-    from ciao.providers.opencode import OpencodeProvider
 
     calls: list[tuple[Path, str]] = []
 
@@ -804,7 +804,6 @@ async def test_unregistered_provider_id_returns_none_without_any_read(monkeypatc
     descriptor however it was obtained.
     """
     from ciao import provider_registry
-    from ciao.providers.opencode import OpencodeProvider
 
     get_calls: list[str] = []
     require_calls: list[str] = []
@@ -1191,7 +1190,7 @@ async def test_llm_fallback_not_called_when_native_title_lands(monkeypatch) -> N
     async def fake_read_thread(_workspace, _sid):
         return {"info": {"title": "Native Title"}, "messages": []}
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", unexpected_oneshot)
 
     assert await manager.auto_title_if_default("chat-1", "hello") == "Native Title"

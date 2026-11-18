@@ -43,9 +43,11 @@ operations the service dispatches — `can_drain`, `cli_connected`,
 adapter implementing only `run_streaming` satisfies that contract. A
 missing override for any other row below still degrades to that row's
 base default, an unsupported-feature answer or a silent skip — check each
-row's last column before assuming one fits. Provider-specific manager
-access that remains duck-typed or id-branched is in the skip list below
-and is separate work, not something this table has finished.
+row's last column before assuming one fits. No code under `ciao/web`
+names `OpencodeProvider`, `ClaudeProvider` or a provider's private connection
+flag (`tests/test_provider_host_seam.py` fails if one appears). What is
+still branched on the provider id, not the class, is in the skip list
+below.
 
 ### Inbound: `AgentRequest`
 
@@ -96,7 +98,7 @@ set and nothing else.
 | `cli_connected` | `_cli_owner_alive` in the chat manager, for the orphan-CLI-task wake sweep. | Defaults to `True`: an adapter that keeps no long-lived subprocess reports no owner loss. A service holding no provider instance reports `False`. OpenCode inherits this default — inherited `True` says nothing about whether a server is running. |
 | `drain_events` | Claude and OpenCode, between turns, so a background agent or shell can wake the parent. | Defaults to an empty async generator with no side effects. The service forwards events unchanged — identity, order, exceptions and cancellation. Before starting another stream reader or a foreground turn, the caller cancels the running drain and awaits its full unwind; not every current host path is audited to enforce that obligation. |
 | `read_thread` | OpenCode transcript history and replay (the host branch is still gated on the OpenCode id). The host reaches it through `provider_registry.require(id).factory()` for every session in the chat's lineage and renders the `{"info", "messages"}` payload. Claude history uses its own SDK/JSONL helpers instead. Session reclaim no longer routes through this row. | Returns `{}`; the host then falls back to the local transcript or archived markdown. |
-| `is_connected` | Read paths that may query a live provider connection without starting one (MCP status, the live collab tree), and `live_for_session`. | Defaults to `False`. Claude returns its `_connected` flag; OpenCode returns whether its own server is running. Not `cli_connected`, which defaults to `True` and says nothing about a connection. |
+| `is_connected` | Read paths that may query a live provider connection without starting one (MCP status, the live collab tree), and `live_for_session`. | Defaults to `False`. Claude returns whether its client is connected; OpenCode returns whether its own server process is running. Not `cli_connected`, which defaults to `True` and says nothing about a connection. |
 | `read_mcp_status()` | MCP status rows, needs-auth detection and the Claude sign-in flow. | Defaults to `{}`. Claude and OpenCode override it and return `{}` without a live connection. |
 | `reconnect_mcp_server(server_name)` | The Claude sign-in flow, after `claude mcp login` exits, so the live CLI picks up the token. | Defaults to `False` (nothing reconnected). Only Claude overrides it; OpenCode inherits the default and its flow never calls it. |
 | `mcp_sign_in_exempt(server)` | `detect_mcp_auth`, which skips raising a sign-in card for an exempt server. | Defaults to `False`. Claude returns true for claude.ai connectors, which are connected on claude.ai. |
@@ -178,9 +180,9 @@ the inherited property now raises `AttributeError` (including during
 construction), and a getter that raises `AttributeError` propagates to the
 caller instead of being masked by the former duck-typed service probe.
 These preservation claims cover the inspected built-ins only. The
-remaining history, MCP, models, background and Stop paths and the other
-session probes stay provider-specific; this seam does not make the
-session lifecycle provider-neutral.
+remaining branches on the provider id (see the skip list) stay
+provider-specific; this seam does not make the session lifecycle
+provider-neutral.
 
 Permission and native-question replies use the shared `BaseProvider` response
 contract, so any adapter can participate without a provider-specific manager
@@ -192,9 +194,7 @@ boolean result in its adapter; the gate itself retains its boolean API.
 `structured_questions` covers intercepted `AskUserQuestion` events; it does
 not promise native-form response support. Native forms are a separate optional
 operation, and unsupported providers return the explicit default failure.
-Existing capability flags remain unchanged. This typed manager seam does not
-make unrelated session/history, drain/models, background, MCP/version or final
-audit paths provider-neutral; those are separate changes.
+Existing capability flags remain unchanged. The id-branched call sites that remain are listed in the skip list.
 
 Declare `capabilities = ProviderCapabilities(...)` honestly.
 `capabilities_for` serves it on `/api/models`. The PWA type says the UI
@@ -211,13 +211,12 @@ arm.
 
 | If you do nothing | What the user sees | Where |
 |---|---|---|
-| Subagent routes return `[]`. | No child transcripts, and the sidebar shows no running agents. | The `chat.provider == "opencode"` gate in `ciao/web/routes_api.py` chat subagents and `_running_subagent_rows`. Inside it the reads already go through `live_for_session` and `read_collab_tree`. |
-| The schedule archive wait returns "settled" immediately. | A schedule can archive while its background agents are still running. | The `chat.provider` gate in `ciao/web/schedule_dispatch.py` `_await_schedule_subagents`. Inside the opencode branch the reads go through `live_for_session` and `read_collab_tree`. |
-| The subagent watcher falls through to the Claude JSONL reader. | Only if `background_subagents` is true. The watcher then looks for a Claude session file and finds nothing. | The `chat.provider` gate in `ciao/web/subagent_watchers.py` `watch_inner`. Inside the opencode branch the reads go through `live_for_session` and `read_collab_tree`. The CLI-task orphan sweep is Claude-only and skips everyone else, which is safe. |
+| Subagent routes return `[]`. | No child transcripts, and the sidebar shows no running agents. | The `chat.provider == "opencode"` gate in `ciao/web/routes_api.py` chat subagents and `_running_subagent_rows`. The gate is the provider id. Inside it the reads dispatch to the shared `read_live_collab_tree` (guarded by `live_for_session`) and `read_collab_tree`. |
+| The schedule archive wait returns "settled" immediately. | A schedule can archive while its background agents are still running. | The `chat.provider` gate in `ciao/web/schedule_dispatch.py` `_await_schedule_subagents`. The gate is the provider id. Inside the opencode branch the reads dispatch to the shared `read_live_collab_tree` and `read_collab_tree`. |
+| The subagent watcher falls through to the Claude JSONL reader. | Only if `background_subagents` is true. The watcher then looks for a Claude session file and finds nothing. | The `chat.provider` gate in `ciao/web/subagent_watchers.py` `watch_inner`. The gate is the provider id. Inside the opencode branch the reads dispatch to the shared `read_live_collab_tree`, `read_collab_tree` and `wait_background_change`. The CLI-task orphan sweep is Claude-only and skips everyone else, which is safe. |
 | `disallowed_tools_for_chat` returns `[]`. | The harness denylist is not applied. Credential denies are also not applied unless the adapter sends them itself. | `ProjectChatManager.disallowed_tools_for_chat`. OpenCode applies the shared patterns from `execution_modes.opencode_credential_deny_rules` inside its own permission rules. |
-| Image preflight does work only for providers that report a catalog with `images`. | A model that cannot see images receives them anyway. Claude and current Anthropic/OpenAI models all accept images, and the base `model_catalog` default is empty, so only OpenCode ever asks. | `ProjectChatManager._catalog_image_support`. |
 | `native_title_candidates` is not overridden. | No native title: the chat keeps the deterministic title, then the one-shot titler. The read seam itself is id-neutral now — the remaining limitation is polling policy: `auto_title_if_default` still gives Claude one immediate native read and all other ids the existing delayed poll window. Polling neutrality is a separate follow-up. | `ProjectChatManager.auto_title_if_default`. |
-| Transcript reload uses the local markdown only. | The chat bubble history still renders from Ciaobot's own transcript. Provider-side history that never landed there does not. | `ciao/web/transcript_service.py`. |
+| Transcript reload uses the local markdown only. | The chat bubble history still renders from Ciaobot's own transcript. Provider-side history that never landed there does not. | The `provider == "opencode"` branch in `ciao/web/transcript_service.py`, which dispatches to the shared `read_thread` through `provider_registry`. Claude history uses its own SDK/JSONL helpers. |
 | Stop escalation disconnects only Claude. | A wedged CLI is not torn down on Stop unless `ActiveHandle.stop` already did it. | `ProjectChatManager` force-stop. |
 | One-shot raises `Unknown one-shot provider`. | Titles, doc folding, and routine-model calls fail. | `ciao/providers/oneshot.py`. This is a separate no-tools call, not `run_streaming`. |
 | Connect has no `<id>-login` action. | Settings → Connect answers 404. | `ACTION_IDS` and `action_command` in `ciao/host_terminal.py`; `tests/test_provider_connect_route.py::test_every_provider_has_a_login_action` fails until it is added. |
