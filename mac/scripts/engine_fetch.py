@@ -260,7 +260,7 @@ def _run(argv: list[str], env: dict[str, str], timeout: int) -> int:
 # --max-filesize only bounds a response that declares a Content-Length; a chunked
 # response is bounded by --max-time until _snapshot rejects the oversize file.
 def _curl_argv(url: str, size: int, output: Path) -> list[str]:
-    return [CURL, "-q", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "-fsS",
+    return [CURL, "-q", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "-fsSL",
             "--max-redirs", "5", "--max-filesize", str(size), "--connect-timeout", "30",
             "--max-time", "900", "-o", os.fspath(output), url]
 

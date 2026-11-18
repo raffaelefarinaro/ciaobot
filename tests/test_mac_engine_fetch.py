@@ -148,7 +148,7 @@ def test_curl_argv_and_env_are_exact(env):
     argv, environment, timeout = next(c for c in env.calls if c[0][-1].endswith("foo-1.0-py3-none-any.whl"))
     out = argv[argv.index("-o") + 1]
     assert argv == [
-        "/usr/bin/curl", "-q", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "-fsS",
+        "/usr/bin/curl", "-q", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "-fsSL",
         "--max-redirs", "5", "--max-filesize", str(env.foo["size"]), "--connect-timeout", "30",
         "--max-time", "900", "-o", out, f"{HOST}/aa/bb/foo-1.0-py3-none-any.whl",
     ]
