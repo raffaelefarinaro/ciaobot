@@ -65,7 +65,6 @@ export interface ClaudeTrimOption {
   reason: string
   group: string          // "scheduling" | "plan" | "notifications" | "design" | "review" | "skills" | "features" (open set)
   default_trimmed: boolean
-  locked: boolean
 }
 
 export interface WorkspaceInfo {

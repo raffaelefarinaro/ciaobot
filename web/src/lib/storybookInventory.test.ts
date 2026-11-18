@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Dirent } from 'node:fs'
+import { parse as parseSfc } from '@vue/compiler-sfc'
+import ts from 'typescript'
 import { filterInventory, inventory } from '../stories/inventory'
 import type { InventoryEntry, InventoryFilters } from '../stories/inventory'
 import { checkStorybookIndex } from '../../scripts/check-storybook-index'
@@ -53,6 +55,50 @@ function assertSourcePath(base: string, path: string, ops: PathOps = fsOps) {
   if (!ops.lstat(current).isFile()) throw new Error(`Not a source file: ${path}`)
   const rel = relative(ops.realpath(base), ops.realpath(current))
   if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error(`Source path escapes root: ${path}`)
+}
+
+/** Direct consumers of every production SFC: the production `.vue` and `.ts`
+ * files that import it, statically (type imports included) or as a literal
+ * dynamic `import('...')`, relative or `@/`, as repo paths. */
+function staticSpecifiers(code: string): string[] {
+  const specifiers: string[] = []
+  const visit = (node: ts.Node): void => {
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) specifiers.push(node.moduleSpecifier.text)
+    ts.forEachChild(node, visit)
+  }
+  visit(ts.createSourceFile('consumer.ts', code, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS))
+  return specifiers
+}
+function resolveSfcImport(from: string, specifier: string, base: string, prefix: string): string | null {
+  if (!specifier.startsWith('.') && !specifier.startsWith('@/')) return null
+  const target = specifier.startsWith('@/') ? join(base, specifier.slice(2)) : resolve(dirname(from), specifier)
+  return target.endsWith('.vue') && existsSync(target) ? `${prefix}${posix(relative(base, target))}` : null
+}
+function sfcConsumers(base: string, prefix = 'web/src/'): Map<string, string[]> {
+  const consumers = new Map<string, string[]>()
+  for (const path of [...walk(base), ...walk(base, undefined, '.ts')]) {
+    const absolute = join(base, path)
+    const code = readFileSync(absolute, 'utf8')
+    const script = path.endsWith('.vue')
+      ? [parseSfc(code).descriptor.script?.content, parseSfc(code).descriptor.scriptSetup?.content].filter(Boolean).join('\n')
+      : code
+    const dynamic = [...script.matchAll(/\bimport\(\s*['"]([^'"]+)['"]\s*\)/g)].map((match) => match[1])
+    for (const specifier of [...staticSpecifiers(script), ...dynamic]) {
+      const target = resolveSfcImport(absolute, specifier, base, prefix)
+      if (target === null || target === `${prefix}${path}`) continue
+      consumers.set(target, [...new Set([...(consumers.get(target) ?? []), `${prefix}${path}`])].sort())
+    }
+  }
+  return consumers
+}
+function assertConsumers(entries: InventoryEntry[], derived: Map<string, string[]>) {
+  const drift: string[] = []
+  for (const entry of entries) {
+    if (entry.kind !== 'component' && entry.kind !== 'composition') continue
+    const actual = derived.get(entry.owner.path) ?? []
+    if (JSON.stringify([...entry.consumers].sort()) !== JSON.stringify(actual)) drift.push(`${entry.id}: listed ${JSON.stringify(entry.consumers)}, imported by ${JSON.stringify(actual)}`)
+  }
+  if (drift.length) throw new Error(`Consumer drift:\n${drift.join('\n')}`)
 }
 
 // The CSF story index of the workshop (#3263): the story files are the single
@@ -179,6 +225,24 @@ describe('production ownership', () => {
     }
     expect(() => assertSourcePath(source, 'web/src/nested')).toThrow('Not a source file')
     expect(() => assertSourcePath(source, 'web/src/deleted.vue')).toThrow('deleted.vue')
+  }))
+
+  it('lists exactly the SFCs that import each component or composition owner', () => {
+    assertConsumers(inventory, sfcConsumers(src))
+  })
+
+  it('derives consumers from fixture imports and fails on a missing or extra consumer', () => fixture((base) => {
+    const write = (name: string, body: string) => { file(base, name); writeFileSync(join(base, name), body) }
+    write('components/Owner.vue', '<script setup lang="ts"></script>')
+    write('components/Host.vue', "<script setup lang=\"ts\">\nimport Owner from './Owner.vue'\n</script>")
+    const entry = (consumers: string[]) => [{ ...structuredClone(inventory[0]), kind: 'component', owner: { path: 'web/src/components/Owner.vue', anchor: 'x' }, consumers }] as InventoryEntry[]
+    const derived = () => sfcConsumers(base)
+    expect(() => assertConsumers(entry(['web/src/components/Host.vue']), derived())).not.toThrow()
+    expect(() => assertConsumers(entry([]), derived())).toThrow()
+    write('components/Other.vue', "<script setup lang=\"ts\">\nimport Owner from '@/components/Owner.vue'\n</script>")
+    expect(() => assertConsumers(entry(['web/src/components/Host.vue']), derived())).toThrow()
+    write('lazy.ts', "export const load = () => import('./components/Owner.vue')\nimport type Typed from './components/Owner.vue'\n")
+    expect(derived().get('web/src/components/Owner.vue')).toEqual(['web/src/components/Host.vue', 'web/src/components/Other.vue', 'web/src/lazy.ts'])
   }))
 
   it('keeps inventory shape, with story IDs on covered states only', () => {
