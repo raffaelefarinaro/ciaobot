@@ -804,6 +804,10 @@ class ClaudeProvider(BaseSDKProvider):
                 result[name] = "needs_auth" if state == "needs-auth" else state
         return result
 
+    def mcp_sign_in_exempt(self, server: str) -> bool:
+        """A claude.ai connector is connected on claude.ai, not with ``claude mcp login``."""
+        return is_claudeai_connector(server)
+
     async def reconnect_mcp_server(self, server_name: str) -> bool:
         """Reconnect one MCP server on the live CLI so a fresh sign-in takes effect.
 

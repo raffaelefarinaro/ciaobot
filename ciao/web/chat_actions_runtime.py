@@ -27,7 +27,7 @@ from ciao.chat_actions import ChatAction, ChatActionError, action_key, action_pa
 from ciao.mcp_names import is_claudeai_connector
 from ciao.oauth_callback import CallbackTarget, validate_pasted_callback
 from ciao.provider_service import ProviderImpl
-from ciao.providers.claude import ClaudeProvider
+from ciao.providers.base import BaseProvider
 from ciao.providers.opencode import McpOAuthUnavailable, OpencodeProvider
 from ciao.web.chat_actions_base import ActionContext, ActionHandler
 from ciao.web.device_code_auth import DeviceCodeFlow
@@ -601,18 +601,14 @@ class ChatActionsRuntime:
 
         task.add_done_callback(_forget)
 
-    def detection_provider(self, chat_id: str) -> OpencodeProvider | ClaudeProvider | None:
-        """The provider detection may ask: a live OpenCode server, or a connected Claude session."""
+    def detection_provider(self, chat_id: str) -> BaseProvider | None:
+        """The provider detection may ask: one with a live connection."""
         chat = self._pcm.get_chat(chat_id)
         if chat is None or chat.archived:
             return None
         service = self._pcm._providers.get(chat_id)
         provider: ProviderImpl | None = service.provider if service is not None else None
-        if isinstance(provider, OpencodeProvider) and provider.has_live_server:
-            return provider
-        if isinstance(provider, ClaudeProvider) and provider._connected:
-            return provider
-        return None
+        return provider if isinstance(provider, BaseProvider) and provider.is_connected else None
 
     def request_mcp_auth(self, chat_id: str, server: str) -> dict[str, object]:
         """Put the chat's sign-in card for ``server`` on the chat, or return the one already there.
@@ -658,7 +654,7 @@ class ChatActionsRuntime:
             return
         for server, state in sorted(states.items()):
             if state == "needs_auth":
-                if isinstance(provider, ClaudeProvider) and is_claudeai_connector(server):
+                if provider.mcp_sign_in_exempt(server):
                     # A claude.ai connector is in the account's (or the
                     # organization's) catalog whether or not the user ever
                     # connected it, and it is connected on claude.ai, not with

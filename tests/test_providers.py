@@ -156,7 +156,7 @@ async def test_claude_live_mcp_status_is_normalized_and_excludes_secrets(
 @pytest.mark.asyncio
 async def test_claude_mcp_status_timeout_becomes_unknown_in_runtime_status():
     class Claude:
-        _connected = True
+        is_connected = True
 
         async def read_mcp_status(self):
             raise TimeoutError("sensitive timeout detail")

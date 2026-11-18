@@ -375,6 +375,18 @@ class BaseProvider(ABC):
         """
         return True
 
+    async def read_mcp_status(self) -> dict[str, str]:
+        """Per-server MCP state (``connected``, ``needs_auth``, ...) from a live connection; ``{}`` when none."""
+        return {}
+
+    async def reconnect_mcp_server(self, server_name: str) -> bool:
+        """Reconnect one MCP server so a fresh sign-in takes effect; False when nothing was reconnected."""
+        return False
+
+    def mcp_sign_in_exempt(self, server: str) -> bool:
+        """True when ``server`` is signed in outside Ciao, so detection never raises a card for it."""
+        return False
+
     async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
         """Yield between-turn provider events until cancelled.
 

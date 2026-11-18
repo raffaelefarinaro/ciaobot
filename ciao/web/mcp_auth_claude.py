@@ -19,7 +19,7 @@ from pathlib import Path
 
 from ciao.chat_actions import ActionState, ChatAction
 from ciao.mcp_names import is_claudeai_connector
-from ciao.providers.claude import ClaudeProvider, get_bundled_claude_path
+from ciao.providers.claude import get_bundled_claude_path
 from ciao.terminal_scrape import first_https_url, last_error_line, strip_terminal_controls
 from ciao.terminal_sessions import TerminalSessionError
 from ciao.tool_path import resolve_tool
@@ -101,7 +101,7 @@ class ClaudeMcpAuthFlow(ActionHandler):
             self._set(ctx, action, "failed", error=CLAUDEAI_CONNECTOR)
             return
         provider = ctx.provider
-        if not isinstance(provider, ClaudeProvider) or not provider._connected:
+        if provider is None or not provider.is_connected:
             self._set(ctx, action, "failed", error=NOT_RUNNING)
             return
         try:
@@ -162,7 +162,7 @@ class ClaudeMcpAuthFlow(ActionHandler):
         if info.exit_code == 0:
             ok = True
             provider = ctx.provider
-            if isinstance(provider, ClaudeProvider):
+            if provider is not None:
                 try:
                     reconnected = await provider.reconnect_mcp_server(server)
                 except Exception:  # noqa: BLE001 - the status read below decides
