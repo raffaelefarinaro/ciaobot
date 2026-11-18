@@ -28,10 +28,14 @@ usage: scripts/package-app.sh [--output DIR] [--app PATH] [--no-build]
 Packaging never replaces anything. An --output directory that already holds
 Ciaobot.app, the ZIP, SHA256SUMS or MANIFEST.txt is refused, as is an output
 directory that contains the source app or lives inside it. Use a fresh
-directory for each run; the default is always fresh.
+directory for each run; the default is always fresh. A failed run removes the
+partial Ciaobot.app and the ZIP it created from the output directory, so a
+failure leaves nothing behind there.
 
 The bundle is copied into DIR, signed ad-hoc (Sparkle's nested helpers
-inside-out first), verified with codesign --verify --deep --strict,
+inside-out first, and the bundled engine's Mach-O files signed ad-hoc,
+inside-out, before the app; the SDK's vendor-signed CLI is verified, not
+re-signed), verified with codesign --verify --deep --strict,
 archived without dereferencing symlinks, extracted again and verified,
 then described in MANIFEST.txt and SHA256SUMS. The bundle identifier,
 version, and architecture are read from the built app, so
@@ -161,6 +165,24 @@ for artifact in "$bundle" "$output_dir/SHA256SUMS" "$output_dir/MANIFEST.txt"; d
     [ ! -e "$artifact" ] || die "refusing to overwrite existing artifact: $artifact"
 done
 
+# From here on, a failure must not leave a partial bundle or archive behind:
+# while `partial` is set, one cleanup trap removes the copy of Ciaobot.app and
+# the ZIP this run created from the output directory; the extraction working
+# copy is removed on every exit. Only the paths this script created are ever
+# removed, never the source app.
+archive=
+verify_root=
+partial=
+cleanup() {
+    if [ -n "$partial" ]; then
+        [ -z "$bundle" ] || rm -rf "$bundle" 2>/dev/null || :
+        [ -z "$archive" ] || rm -f "$archive" 2>/dev/null || :
+    fi
+    [ -z "$verify_root" ] || rm -rf "$verify_root" 2>/dev/null || :
+}
+trap cleanup EXIT INT TERM
+partial=1
+
 # Work on a copy so signing never rewrites the app the build produced (and
 # never a copy that is already running from somewhere else).
 ditto "$app" "$bundle"
@@ -177,6 +199,19 @@ sparkle=$bundle/Contents/Frameworks/Sparkle.framework
 if [ -d "$sparkle" ]; then
     scripts/sign-sparkle.sh --adhoc "$sparkle"
 fi
+
+# The bundled engine (#3128). Its Mach-O files are signed inside-out before the
+# app, so the app's seal covers already-signed code. The SDK's own CLI keeps its
+# vendor signature. Ad-hoc mode adds no hardened runtime and no entitlements.
+engine=$bundle/Contents/Resources/engine
+[ -d "$engine" ] && [ ! -L "$engine" ] || die "the app has no bundled engine at Contents/Resources/engine"
+command -v python3 >/dev/null \
+    && python3 -I -S -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' \
+    || die "python3 3.12 or newer is required to sign the bundled engine"
+python3 -I -S scripts/engine_sign.py sign --adhoc "$engine" || die "could not sign the bundled engine"
+engine_version=$(python3 -I -S -c 'import json, sys; print(json.load(open(sys.argv[1]))["engine"]["version"])' "$engine/provenance.json")
+[ "$(env -i "$engine/bin/ciao" --version)" = "ciao $engine_version" ] \
+    || die "the signed engine does not report version $engine_version"
 
 # Ad-hoc sign the whole bundle, so the signature seals Info.plist and the
 # bundled artwork instead of only the linker-signed executable. codesign takes
@@ -236,11 +271,14 @@ archive=$output_dir/$archive_name
 (cd "$output_dir" && zip -q -r -X -y "$archive_name" Ciaobot.app)
 
 verify_root=$(mktemp -d "$tmp/ciaobot-package-verify.XXXXXX")
-trap 'rm -rf "$verify_root"' EXIT INT TERM
 ditto -x -k "$archive" "$verify_root"
 extracted=$verify_root/Ciaobot.app
 [ -d "$extracted" ] || die "the archive does not contain Ciaobot.app at its top level"
 codesign --verify --deep --strict --verbose=2 "$extracted"
+python3 -I -S scripts/engine_sign.py check "$extracted/Contents/Resources/engine" \
+    || die "the archived engine is not fully signed"
+[ "$(env -i "$extracted/Contents/Resources/engine/bin/ciao" --version)" = "ciao $engine_version" ] \
+    || die "the archived engine does not report version $engine_version"
 extracted_signature=$(codesign --display --verbose=4 "$extracted" 2>&1)
 extracted_cdhash=$(printf '%s\n' "$extracted_signature" | sed -n 's/^CDHash=//p' | head -n 1)
 [ "$extracted_cdhash" = "$cdhash" ] || die "the extracted app has a different signature"
@@ -268,6 +306,7 @@ fi
 
 archive_sha=$(shasum -a 256 "$archive" | awk '{print $1}')
 executable_sha=$(shasum -a 256 "$bundle/Contents/MacOS/$executable_name" | awk '{print $1}')
+engine_provenance_sha=$(shasum -a 256 "$engine/provenance.json" | awk '{print $1}')
 
 cat > "$output_dir/MANIFEST.txt" <<EOF
 bundle_identifier=$identifier
@@ -283,9 +322,15 @@ gatekeeper_assessment=$gatekeeper
 zip=$archive_name
 zip_sha256=$archive_sha
 executable_sha256=$executable_sha
+engine_version=$engine_version
+engine_provenance_sha256=$engine_provenance_sha
 source_bundle=local build (path omitted)
 created_by=scripts/package-app.sh
 EOF
+
+# The bundle, archive, checksums and manifest are all complete; a failure from
+# here on must not delete them.
+partial=
 
 cat <<EOF
 Packaged $identifier $version ($build_number), ad-hoc signed.
