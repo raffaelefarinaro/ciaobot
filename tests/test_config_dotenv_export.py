@@ -340,3 +340,122 @@ def test_installed_workspace_env_still_discovers_on_macos(
 
     assert merged["CIAO_WORKSPACE"] == str(install)
     assert merged["FOO"] == "from-shell", "the process environment wins, as before"
+
+
+# --- app mode: the pointer replaces the LaunchAgent as the workspace source -----
+
+
+def _app_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Act as an app-bundled engine that must never read the LaunchAgent."""
+    monkeypatch.setattr(
+        "ciao.package_version.running_from_app_bundle", lambda: True
+    )
+
+    def _must_not_read_the_launch_agent(**_: object) -> None:
+        raise AssertionError("the LaunchAgent must not be read in app mode")
+
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime", _must_not_read_the_launch_agent
+    )
+
+
+def test_app_mode_prefers_the_pointer_over_the_old_plist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both sources exist before a takeover; the pointer is the app's answer.
+
+    The old plist still names the 1.x workspace until the app stops that
+    engine's job, and a bundled engine adopting it would collide with the old
+    engine's port and instance lock. Discovery answers with that workspace
+    here — a real, different install — on purpose: an ``AssertionError`` from
+    this seam would be swallowed by ``install_discovery``, so only a fixture
+    whose workspace the assertions can tell apart from the pointer's proves
+    which source the code actually used.
+    """
+    _app_mode(monkeypatch)
+    from ciao import app_engine
+
+    install = _workspace_with_env(tmp_path / "old-install", "PWA_AUTH_TOKEN=old\n")
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(install), runtime_root=str(install / ".runtime")
+        ),
+    )
+
+    workspace = _workspace_with_env(tmp_path / "pointer-ws", "PWA_AUTH_TOKEN=pointer\n")
+    runtime = tmp_path / "pointer-runtime-named"
+    runtime.mkdir()
+    app_engine.write_pointer(workspace, runtime)
+
+    merged = ciao_config.installed_workspace_env({"FOO": "from-shell"})
+
+    assert merged["CIAO_WORKSPACE"] == str(workspace.resolve()), (
+        "the pointer's workspace wins, not the old plist's"
+    )
+    assert merged["CIAO_RUNTIME_ROOT"] == str(runtime.resolve())
+    assert merged["PWA_AUTH_TOKEN"] == "pointer", "the pointer's workspace .env applies"
+    assert merged["FOO"] == "from-shell"
+
+
+def test_app_mode_bootstraps_when_nothing_but_the_plist_names_a_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After the takeover removed the plist source, no pointer means bootstrap.
+
+    The discovery layer still answers when asked — the plist fixture below
+    names a real workspace — but app mode must not even ask: falling through to
+    `install_discovery` would adopt the old engine's workspace before the
+    takeover has stopped it.
+    """
+    _app_mode(monkeypatch)
+    install = tmp_path / "old-install"
+    install.mkdir()
+    (install / ".env").write_text("PWA_AUTH_TOKEN=old\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(
+            workspace=str(install), runtime_root=str(install / ".runtime")
+        ),
+    )
+    base = {"FOO": "1"}
+
+    assert ciao_config.installed_workspace_env(base) == base
+
+
+def test_app_mode_bootstraps_with_an_unusable_pointer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A damaged pointer is not a workspace: the same fail-safe as a missing one."""
+    _app_mode(monkeypatch)
+    from ciao import app_engine
+
+    state = app_engine.state_dir()
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "workspace.json").write_text("{", encoding="utf-8")
+    base = {"FOO": "1"}
+
+    assert ciao_config.installed_workspace_env(base) == base
+
+
+def test_the_pointer_runtime_root_reaches_the_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pointer names both roots; the runtime one carries `state.json`."""
+    _app_mode(monkeypatch)
+    from ciao import app_engine
+
+    workspace = _workspace_with_env(
+        tmp_path / "pointer-ws", "PWA_AUTH_TOKEN=pointer\n"
+    )
+    runtime = tmp_path / "pointer-runtime"
+    runtime.mkdir()
+    app_engine.write_pointer(workspace, runtime)
+    monkeypatch.delenv("CIAO_WORKSPACE", raising=False)
+    monkeypatch.delenv("CIAO_RUNTIME_ROOT", raising=False)
+
+    config = CiaoConfig.from_env(export=False)
+
+    assert config.state_path.parent == runtime.resolve()
+    assert config.workspace_root == workspace.resolve()
+    assert config.bootstrap_mode is False

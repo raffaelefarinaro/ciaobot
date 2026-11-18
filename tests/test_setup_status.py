@@ -1052,6 +1052,97 @@ def test_setup_finish_handoff_goes_through_the_backend(
     assert restarts == [expected]
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="launchd handoff is macOS-only")
+def test_setup_finish_in_app_mode_never_hands_off_to_launchd(
+    tmp_path, monkeypatch
+) -> None:
+    """The Mac app owns the bundled engine: no plist, no handoff helper, and
+    the restart keeps the plain in-place restart code for the app to watch."""
+    import ciao.web.routes_api as routes_api
+    from ciao import package_version
+    from ciao.config import RESTART_EXIT_CODE
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CIAO_WORKSPACE", "")
+    monkeypatch.setenv("PWA_PORT", "")
+    monkeypatch.setattr(routes_api, "_interactive_foreground_run", lambda: True)
+    monkeypatch.setattr(
+        package_version, "running_from_app_bundle", lambda: True
+    )
+    # The app-mode finish must not even reach the launchd handoff seam, let
+    # alone the detached loader helper (Popen) or launchctl itself.
+    handoff_calls: list[bool] = []
+
+    class FakeBackend:
+        """Answers the handoff seam loudly; the rest stays real."""
+
+        name = "fake"
+
+        def agents_dir(self) -> Path:
+            return Path(home / "Library" / "LaunchAgents")
+
+        def live_agents_dir(self) -> Path:
+            return Path(home / "Library" / "LaunchAgents")
+
+        def is_live_agents_dir(self, path: Path) -> bool:
+            return Path(path) == self.live_agents_dir()
+
+        def schedule_server_handoff(self) -> bool:
+            handoff_calls.append(True)
+            return True
+
+    monkeypatch.setattr(
+        routes_api.service_backend, "current_backend", lambda: FakeBackend()
+    )
+    real_popen = routes_api.subprocess.Popen
+    popen_calls: list[list[str]] = []
+
+    def fake_popen(cmd, *a, **k):
+        if cmd and cmd[0] == "/bin/sh":
+            popen_calls.append(list(cmd))
+            return SimpleNamespace(pid=1)
+        return real_popen(cmd, *a, **k)
+
+    monkeypatch.setattr(routes_api.subprocess, "Popen", fake_popen)
+    real_run = routes_api.subprocess.run
+
+    def fake_run(cmd, *a, **k):
+        if cmd and cmd[0] == "launchctl":
+            pytest.fail("launchctl must not be called in app mode")
+        return real_run(cmd, *a, **k)
+
+    monkeypatch.setattr(routes_api.subprocess, "run", fake_run)
+
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    restarts: list[int] = []
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
+    app.state.serializer = serializer
+    app.state.request_restart = restarts.append
+
+    resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
+        "/api/setup/finish",
+        json={
+            "password": "wizard-pass",
+            "workspace": str(tmp_path / "workspace"),
+            "app_dir": str(tmp_path / "Applications"),
+        },
+    )
+
+    assert resp.status_code == 200
+    assert handoff_calls == [], "app mode must not reach the launchd handoff seam"
+    assert not (home / "Library" / "LaunchAgents" / "com.ciao.server.plist").is_file()
+    assert popen_calls == [], "no detached launchd loader in app mode"
+    assert restarts == [RESTART_EXIT_CODE]
+
+
 def test_setup_finish_requires_a_password(tmp_path) -> None:
     """Password protection is the default, so the wizard cannot skip it: the
     bootstrap token it would otherwise inherit is machine-generated and unusable
