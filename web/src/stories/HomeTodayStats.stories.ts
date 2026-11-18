@@ -2,17 +2,27 @@ import type { Meta, StoryObj } from '@storybook/vue3-vite'
 import { expect, waitFor } from 'storybook/test'
 import { defineComponent, h, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 import HomeTodayStats from '../components/HomeTodayStats.vue'
-import { mountConnectedStats } from './connectedStats'
-import { statsWorkspaces, type StatsState } from './statsBoundary'
+import { useProjectStore } from '../stores/projects'
+import { mountConnected } from './mountConnected'
+import { statsRoutes, statsWorkspaces, type StatsState, usageRoute } from './homeTodayStatsFixture'
+
+function mountStats(host: HTMLElement, state: StatsState) {
+  return mountConnected(host, {
+    component: HomeTodayStats,
+    routes: statsRoutes(state),
+    routerRoutes: [usageRoute()],
+    seed: pinia => { useProjectStore(pinia).activeWorkspace = 'storybook-alpha' },
+  })
+}
 
 function renderState(state: StatsState) {
   return defineComponent({
     setup() {
       const host = ref<HTMLElement>()
-      const fixture = shallowRef<ReturnType<typeof mountConnectedStats>>()
+      const fixture = shallowRef<ReturnType<typeof mountStats>>()
       const error = ref('')
       onMounted(() => {
-        try { fixture.value = mountConnectedStats(host.value!, state) }
+        try { fixture.value = mountStats(host.value!, state) }
         catch (cause) { error.value = String(cause) }
       })
       onBeforeUnmount(() => fixture.value?.dispose())
@@ -23,7 +33,7 @@ function renderState(state: StatsState) {
           h('select', {
             'aria-label': 'Fixture workspace',
             onChange: (event: Event) => {
-              if (fixture.value) fixture.value.projects.activeWorkspace = (event.target as HTMLSelectElement).value
+              if (fixture.value) useProjectStore(fixture.value.pinia).activeWorkspace = (event.target as HTMLSelectElement).value
             },
           }, statsWorkspaces.map(value => h('option', { value }, value))),
         ]),
@@ -41,6 +51,9 @@ const meta = {
   component: HomeTodayStats,
   tags: ['!autodocs'],
   parameters: {
+    // The story's own mountConnected installs the fixture boundary; the
+    // preview's default fence must not mount over it.
+    fixture: true,
     docs: { disable: true, story: { inline: false } },
     controls: { disable: true },
   },

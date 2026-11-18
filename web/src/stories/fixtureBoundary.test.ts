@@ -1,17 +1,26 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
-import { installStatsBoundary } from './statsBoundary'
-import { mountConnectedStats } from './connectedStats'
+import HomeTodayStats from '../components/HomeTodayStats.vue'
+import { useProjectStore } from '../stores/projects'
+import { installFixtureBoundary, type FixtureSocket } from './fixtureBoundary'
+import { mountConnected } from './mountConnected'
+import { statsRoutes, type StatsState, usageRoute } from './homeTodayStatsFixture'
 
 const cleanups: Array<() => void> = []
 afterEach(() => { cleanups.splice(0).reverse().forEach(cleanup => cleanup()); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 const path = '/api/stats?workspace=storybook-alpha&range=30'
+function wsOrigin(): string {
+  return location.origin.replace(/^http/, 'ws')
+}
+async function settleQueue(): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, 0))
+}
 
-describe('connected stats transport boundary', () => {
+describe('connected fixture transport boundary', () => {
   it('answers only exact declared synthetic GETs without native fetch', async () => {
     const native = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('native transport'))
-    const boundary = installStatsBoundary('default')
+    const boundary = installFixtureBoundary({ routes: statsRoutes('default') })
     cleanups.push(boundary.dispose)
     expect((await (await fetch(path)).json()).today.chats_opened).toBe(12)
     for (const url of [
@@ -39,7 +48,7 @@ describe('connected stats transport boundary', () => {
     vi.stubGlobal('EventSource', stream)
     Object.defineProperty(navigator, 'sendBeacon', { configurable: true, value: beacon })
     cleanups.push(() => { Reflect.deleteProperty(navigator, 'sendBeacon') })
-    const boundary = installStatsBoundary('default')
+    const boundary = installFixtureBoundary({ routes: [] })
     cleanups.push(boundary.dispose)
     for (const attempt of [
       () => xhr.open('GET', path), () => xhr.send(), () => new XMLHttpRequest(),
@@ -56,22 +65,22 @@ describe('connected stats transport boundary', () => {
 
   it('refuses overlap and restores descriptors; held requests settle on teardown', async () => {
     const fetchBefore = Object.getOwnPropertyDescriptor(globalThis, 'fetch')
-    const boundary = installStatsBoundary('loading')
-    expect(() => installStatsBoundary('default')).toThrow('already mounted')
+    const boundary = installFixtureBoundary({ routes: statsRoutes('loading') })
+    expect(() => installFixtureBoundary({ routes: statsRoutes('default') })).toThrow('already mounted')
     const pending = fetch(path)
     const rejection = expect(pending).rejects.toThrow('disposed')
     boundary.dispose()
     boundary.dispose()
     await rejection
     expect(Object.getOwnPropertyDescriptor(globalThis, 'fetch')).toEqual(fetchBefore)
-    const fresh = installStatsBoundary('default')
+    const fresh = installFixtureBoundary({ routes: statsRoutes('default') })
     cleanups.push(fresh.dispose)
     expect(fresh.violations).toEqual([])
   })
 
   it('records even a captured fixture fetch after teardown rather than falling through to native', async () => {
     const native = vi.spyOn(globalThis, 'fetch')
-    const boundary = installStatsBoundary('default')
+    const boundary = installFixtureBoundary({ routes: [] })
     const captured = fetch
     boundary.dispose()
     await expect(captured(path)).rejects.toThrow('disposed')
@@ -85,9 +94,9 @@ describe('connected stats transport boundary', () => {
     socket.prototype.send = nativeSend
     vi.stubGlobal('WebSocket', socket)
     vi.stubGlobal('CHANNEL_OPTIONS', { wsToken: 'synthetic-workshop-token' })
-    const boundary = installStatsBoundary('default')
+    const boundary = installFixtureBoundary({ routes: [] })
     cleanups.push(boundary.dispose)
-    const origin = location.origin.replace(/^http/, 'ws')
+    const origin = wsOrigin()
     const preview = { url: `${origin}/storybook-server-channel?token=synthetic-workshop-token&page=preview`, protocol: '' }
     const keyboard = JSON.stringify({
       type: 'previewKeydown',
@@ -116,9 +125,9 @@ describe('connected stats transport boundary', () => {
     const socket = vi.fn(function () {})
     socket.prototype.send = nativeSend
     vi.stubGlobal('WebSocket', socket)
-    const boundary = installStatsBoundary('default')
+    const boundary = installFixtureBoundary({ routes: [] })
     cleanups.push(boundary.dispose)
-    const origin = location.origin.replace(/^http/, 'ws')
+    const origin = wsOrigin()
     const runner = { url: `${origin}/__vitest_browser_api__?type=tester&rpcId=rpc-1&sessionId=session-1&projectName=&method=tasks&token=0` }
     const send = socket.prototype.send
     const request = '[{"m":"1","a":"2","t":"3","i":"4"},"onCollected",["5"],"q","synthetic-id","synthetic"]'
@@ -158,9 +167,9 @@ describe('connected stats transport boundary', () => {
     socket.prototype.send = nativeSend
     vi.stubGlobal('WebSocket', socket)
     vi.stubGlobal('CHANNEL_OPTIONS', { wsToken: 'synthetic-workshop-token' })
-    const boundary = installStatsBoundary('default')
+    const boundary = installFixtureBoundary({ routes: [] })
     cleanups.push(boundary.dispose)
-    const origin = location.origin.replace(/^http/, 'ws')
+    const origin = wsOrigin()
     const preview = { url: `${origin}/storybook-server-channel?token=synthetic-workshop-token&page=preview`, protocol: '' }
     const send = socket.prototype.send
     send.call(preview, '{"type":"storyRendered","args":["synthetic-story"]}')
@@ -178,12 +187,91 @@ describe('connected stats transport boundary', () => {
     expect(nativeSend).toHaveBeenCalledTimes(2)
     expect(boundary.violations).toHaveLength(7)
   })
+
+  it('mounts declared app sockets as in-memory fakes driven by the story script, never native', async () => {
+    const native = globalThis.WebSocket
+    const driven: FixtureSocket[] = []
+    const boundary = installFixtureBoundary({
+      routes: [],
+      sockets: [{
+        path: '/ws/chat/storybook-alpha',
+        script: socket => {
+          driven.push(socket)
+          socket.serverOpen()
+          socket.serverMessage('{"type":"keepalive"}')
+        },
+      }, {
+        path: '/ws/chat/storybook-quiet',
+        script: socket => { driven.push(socket); socket.serverMessage('too early') },
+      }],
+    })
+    cleanups.push(boundary.dispose)
+    const received: string[] = []
+    const opens: number[] = []
+    const closes: Array<{ code: number, reason: string }> = []
+    const fake = new WebSocket(`${wsOrigin()}/ws/chat/storybook-alpha`)
+    // The driver ran synchronously; state flips are synchronous, deliveries are
+    // queued for the next microtask, after the component assigned handlers.
+    expect(driven).toHaveLength(1)
+    expect(driven[0]).toBe(fake)
+    expect(fake).toBeInstanceOf(WebSocket)
+    expect(fake).not.toBeInstanceOf(native)
+    expect(fake.readyState).toBe(WebSocket.OPEN)
+    fake.onopen = () => opens.push(fake.readyState)
+    fake.onmessage = event => received.push(String((event as MessageEvent).data))
+    fake.onclose = event => closes.push({ code: (event as CloseEvent).code, reason: (event as CloseEvent).reason })
+    await settleQueue()
+    expect(opens).toEqual([WebSocket.OPEN])
+    expect(received).toEqual(['{"type":"keepalive"}'])
+    expect(closes).toEqual([])
+    fake.send('hello')
+    expect(driven[0].sent).toEqual(['hello'])
+    expect(driven[0].bufferedAmount).toBe(5)
+    driven[0].serverMessage('{"type":"ok"}')
+    await settleQueue()
+    expect(received).toEqual(['{"type":"keepalive"}', '{"type":"ok"}'])
+    fake.close(1000, 'done')
+    await settleQueue()
+    expect(fake.readyState).toBe(WebSocket.CLOSED)
+    expect(closes).toEqual([{ code: 1000, reason: 'done' }])
+    expect(() => fake.send('late')).toThrow()
+    driven[0].serverClose(1001)
+    await settleQueue()
+    expect(closes).toEqual([{ code: 1000, reason: 'done' }])
+    // A declared path with any deviation keeps failing closed, and a script
+    // that misuses the fake fails constructing instead of half-opening.
+    for (const bad of [
+      `${wsOrigin()}/ws/events`,
+      `${wsOrigin()}/ws/chat/storybook-alpha?extra=1`,
+      'wss://example.com/ws/chat/storybook-alpha',
+      '/ws/chat/storybook-alpha',
+    ]) expect(() => new WebSocket(bad)).toThrow('Story network violation')
+    // `/ws/events` is app infrastructure in the real engine: never auto-declared.
+    expect(() => new WebSocket(`${wsOrigin()}/ws/chat/storybook-quiet`))
+      .toThrow('socket script failed: Error: Fixture socket serverMessage before serverOpen')
+    expect(boundary.violations).toHaveLength(5)
+    expect(driven).toHaveLength(2)
+  })
+
+  it('refuses the undeclared /ws/events socket outright, with no fake and no native attempt', () => {
+    const boundary = installFixtureBoundary({ routes: [] })
+    cleanups.push(boundary.dispose)
+    expect(() => new WebSocket(`${wsOrigin()}/ws/events`)).toThrow('Story network violation')
+    expect(() => new WebSocket(`${wsOrigin()}/ws/events?type=none`)).toThrow('Story network violation')
+    expect(boundary.violations).toHaveLength(2)
+    expect(boundary.requests).toEqual([])
+  })
 })
 
-async function mount(state: 'default' | 'loading' | 'failed' | 'partial', declared = true) {
+async function mount(state: StatsState, declared = true) {
   const host = document.createElement('div')
   document.body.append(host)
-  const fixture = mountConnectedStats(host, state, declared ? 'storybook-alpha' : 'undeclared')
+  const fixture = mountConnected(host, {
+    component: HomeTodayStats,
+    routes: statsRoutes(state),
+    routerRoutes: [usageRoute()],
+    seed: pinia => { useProjectStore(pinia).activeWorkspace = declared ? 'storybook-alpha' : 'undeclared' },
+  })
   cleanups.push(() => { fixture.dispose(); host.remove() })
   await fixture.router.isReady()
   await new Promise(resolve => setTimeout(resolve, 0))
@@ -195,7 +283,8 @@ describe('real connected owner', () => {
   it('uses normalization, memory navigation, fresh store and workspace-scoped fixtures', async () => {
     const first = await mount('default')
     expect(first.host.querySelector('strong')?.textContent).toBe('12')
-    first.projects.activeWorkspace = 'storybook-beta'
+    const projects = useProjectStore(first.pinia)
+    projects.activeWorkspace = 'storybook-beta'
     await nextTick()
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(first.host.querySelector('strong')?.textContent).toBe('4')
@@ -208,7 +297,7 @@ describe('real connected owner', () => {
     first.dispose()
     const second = await mount('default')
     expect(second.pinia).not.toBe(first.pinia)
-    expect(second.projects.activeWorkspace).toBe('storybook-alpha')
+    expect(useProjectStore(second.pinia).activeWorkspace).toBe('storybook-alpha')
     expect(second.router.currentRoute.value.path).toBe('/')
     expect(second.host.querySelector('strong')?.textContent).toBe('12')
   })

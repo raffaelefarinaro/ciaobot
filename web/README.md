@@ -103,40 +103,73 @@ have rendered stories (52 stories total). Other states and owners remain
 unassessed or uncovered. Adding an SFC requires a separate
 inventory row (and a rationale for a composition), not a complete story suite.
 
-**Connected / Home Today stats** is the bounded connected proof. Its four stories
-mount the production `HomeTodayStats.vue`, fresh real Pinia/project stores, a fresh
-memory router and the real `usageStats`/`api` normalization. `/stats` is an inert
-destination, not the Usage page. No app bootstrap, engine, provider or socket is
-started. The two synthetic workspaces are `storybook-alpha` and `storybook-beta`.
-Only exact GET `/api/stats?workspace=<one of those names>&range=30` is answered in
-memory; every other fetch (including same-origin assets), write, XHR, new
-WebSocket/EventSource and beacon is rejected without native fallback. Existing
-XHR open/send and WebSocket send are fenced too. The only native send exceptions
-are Vite's exact HMR ping on its same-origin established `vite-hmr` socket, and
-render lifecycle/heartbeat events plus preview keyboard reports (`previewKeydown`)
-on Storybook's established same-origin `/storybook-server-channel` with its exact
-preview page/token, and the vitest browser runner's own control socket
-(`/__vitest_browser_api__`, only under `npm run test-storybook`): birpc requests,
-events (no `i`) and optional calls (`o:true`) whose method is on an allow-list of
-the runner's page-side method names, plus responses. The four connected stories'
-play functions assert the violation ledger stays empty while the runner reports.
-Custom/invoke/save events are not allowed. Storybook's
-module/asset loading is infrastructure, not an API fixture.
-The visible request count and violation ledger remain observable when the owner
-catches an error. Teardown unmounts the isolated app, disposes its Pinia, settles
-held reads and restores transport descriptors. Concurrent mounts are refused;
-autodocs/inline docs are disabled for this owner.
+**Connected fixtures** are the bounded way stories render owners that
+transport. `src/stories/fixtureBoundary.ts` installs a fail-closed network
+boundary from a declared route table: `installFixtureBoundary({ routes:
+[{ method, path, respond }], sockets: [{ path, script }] })`. Only exact
+declared reads and writes are answered in memory (path is pathname + search +
+hash; a body on GET/HEAD is a violation); every other fetch — new
+XMLHttpRequest, WebSocket, EventSource, beacon included — is rejected without
+native fallback, and existing XHR open/send and WebSocket send stay fenced.
+A route whose `respond()` never resolves holds the request until teardown,
+as native loading would; teardown unmounts the isolated app, disposes its
+Pinia, settles held requests and restores transport descriptors. The
+boundary mounts once: concurrent or inline-docs mounts are refused, so
+connected owners keep autodocs excluded. This is a trusted-component
+transport harness, not a security sandbox for hostile code (DOM resource
+loads, workers and saved native references outside this fixture are not
+sandboxed).
 
-Default, held initial loading, HTTP failure and partial normalized data are
-rendered-state coverage only. Loading and failure both render six dashes with no
-averages: the component has no separate status/error UI. The fixture workspace
+`src/stories/mountConnected.ts` is the connected mount for story files:
+`mountConnected(host, { component, routes, routerRoutes, seed })` mounts the
+owner into a separate Vue app (fixture plugins never leak into Storybook's
+app) with a fresh memory router and fresh Pinia, seeds store state only —
+never app orchestration — and adds inert extra destinations such as `/stats`,
+which is not the Usage page and runs no bootstrap. No engine, provider or
+app bootstrap is started by a connected story.
+
+A declared app socket never opens a native connection: the boundary hands
+the story an in-memory fake (send, close, readyState, the ready-state
+constants, `instanceof WebSocket`) whose far end is the story's `script`
+through `serverOpen`, `serverMessage`, `serverError` and `serverClose`.
+Deliveries flush on the next microtask, after the component assigned its
+handlers; what the component sends is recorded on the fake, and a faulty
+script fails the construction instead of half-opening the socket. Declared
+sockets must be same-origin at an exact path; anything else — including the
+engine's `/ws/events` — is refused without a fake.
+
+The preview installs an empty fixture boundary for every story that does not
+opt in through `parameters.fixture`, so a presentational story that attempts
+fetch, XHR, WebSocket, EventSource or beacon records a violation and the
+browser runner fails it. Connected stories set `parameters.fixture` and
+mount their own declared boundary. Stories render under story view only; a
+docs page renders many stories at once, which the single-mount guard
+forbids, so docs pages are unfenced. The only native send exceptions are
+Vite's exact HMR ping on its same-origin established `vite-hmr` socket, and
+render lifecycle/heartbeat events plus preview keyboard reports
+(`previewKeydown`) on Storybook's established same-origin
+`/storybook-server-channel` with its exact preview page/token, and the vitest
+browser runner's own control socket (`/__vitest_browser_api__`, only under
+`npm run test-storybook`): birpc requests, events (no `i`) and optional calls
+(`o:true`) whose method is on an allow-list of the runner's page-side method
+names, plus responses. Custom/invoke/save events are not allowed. Storybook's
+module/asset loading is infrastructure, not an API fixture. The visible
+request count and violation ledger remain observable when the owner catches
+an error.
+
+**Connected / Home Today stats** exercises this contract end to end: its four
+stories mount the production `HomeTodayStats.vue` with the real
+`usageStats`/`api` normalization, two synthetic workspaces
+(`storybook-alpha`, `storybook-beta`), and play functions that assert the
+violation ledger stays empty while the runner reports. Default, held initial
+loading, HTTP failure and partial normalized data are rendered-state
+coverage only. Loading and failure both render six dashes with no averages:
+the component has no separate status/error UI. The fixture workspace
 selector exercises its real workspace watcher without invoking app-level
-`switchWorkspace` orchestration. This is a trusted-component transport harness,
-not a security sandbox for hostile code (DOM resource loads, workers and saved
-native references outside this fixture are not sandboxed). It does not prove
-the Home composition, Usage page, live engine, stale-response races, keyboard,
-reduced-motion or responsive-state coverage. Focused tests live in
-`src/stories/connectedStats.test.ts`.
+`switchWorkspace` orchestration. It does not prove the Home composition,
+Usage page, live engine, stale-response races, keyboard, reduced-motion or
+responsive-state coverage. Focused tests live in
+`src/stories/fixtureBoundary.test.ts`.
 
 `npm run build-storybook` automatically runs `scripts/check-storybook-index.ts`
 after building. Every registry-linked ID must exist as a story, not Docs or
