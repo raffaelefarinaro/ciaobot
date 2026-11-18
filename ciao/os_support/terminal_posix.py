@@ -57,7 +57,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from ciao.os_support.processes import ProcessTree
+from ciao.os_support.processes import ProcessTree, isolated_probe_flags
 from ciao.os_support.terminal_child import CLAIM_FAILED as HELPER_CLAIM_FAILED
 from ciao.os_support.terminal_child import EXEC_FAILED as HELPER_EXEC_FAILED
 
@@ -466,7 +466,7 @@ def spawn_terminal(
     try:
         termios.tcsetwinsize(slave, (rows, cols))
         process = _spawn_process(
-            [sys.executable, "-I", "-S", str(CHILD_HELPER), *shell_argv],
+            [sys.executable, *isolated_probe_flags(), "-S", str(CHILD_HELPER), *shell_argv],
             stdin=slave,
             stdout=slave,
             stderr=slave,

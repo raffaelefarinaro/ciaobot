@@ -24,10 +24,33 @@ import errno
 import selectors
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Sequence
 from typing import Any
+
+
+def isolated_probe_flags() -> list[str]:
+    """``-I`` for a child interpreter, plus ``-B`` when this process writes no bytecode.
+
+    ``-I`` ignores PYTHONDONTWRITEBYTECODE, so a child launched from the bundled
+    engine must repeat ``-B`` itself or it would write __pycache__ into the
+    sealed prefix. A dev or venv process gets plain ``["-I"]``.
+    """
+    return ["-I", "-B"] if sys.flags.dont_write_bytecode else ["-I"]
+
+
+def python_isolation_flags() -> list[str]:
+    """Interpreter flags a re-exec must repeat to keep this process's isolation.
+
+    Only an isolated interpreter (the bundled engine runs ``-I -B``) gets any:
+    ``-I`` ignores the environment, so ``-B`` must be explicit too. Every other
+    interpreter returns [] and the re-exec argv is unchanged.
+    """
+    if not sys.flags.isolated:
+        return []
+    return isolated_probe_flags()
 
 
 def pid_alive(pid: int) -> bool:

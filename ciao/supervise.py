@@ -11,7 +11,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from ciao.config import RESTART_EXIT_CODE
-from ciao.os_support.processes import ProcessTree, tree_spawn_options
+from ciao.os_support.processes import ProcessTree, python_isolation_flags, tree_spawn_options
 from ciao.port_in_use import PORT_IN_USE_EXIT_CODE
 from ciao.workspace_access import ACCESS_DENIED_EXIT, check_workspace_access
 
@@ -24,7 +24,7 @@ STOP_GRACE_S = 30.0              # after forwarding a stop, kill the tree if the
 
 def default_child_argv(extra_args: Sequence[str] = ()) -> list[str]:
     """argv for the engine child: works without the console-script shim."""
-    return [sys.executable, "-m", "ciao.cli", "run", "--supervised", *extra_args]
+    return [sys.executable, *python_isolation_flags(), "-m", "ciao.cli", "run", "--supervised", *extra_args]
 
 
 def backoff_delay(consecutive_restarts: int) -> float:

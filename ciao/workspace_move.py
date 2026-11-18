@@ -49,6 +49,7 @@ from typing import IO, Any, Callable, Protocol
 
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.os_support.private import make_private, mkstemp_private
+from ciao.os_support.processes import isolated_probe_flags
 from ciao.server_host import (
     MOVE_HOST_PROTOCOL,
     HostOwnership,
@@ -1102,7 +1103,7 @@ def _job_argv(op: MoveOperation, state_dir: Path, host: HostOwnership | None = N
             ) from exc
     return [
         op.python,
-        "-I",
+        *isolated_probe_flags(),
         "-m",
         "ciao.workspace_move",
         "run",

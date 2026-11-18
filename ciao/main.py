@@ -578,9 +578,10 @@ def _restart_watchdog(
         # Same as ciao.cli._run_server: let the fresh process
         # reload the workspace .env instead of inheriting it.
         from ciao.config import reset_exported_dotenv
+        from ciao.os_support.processes import python_isolation_flags
 
         reset_exported_dotenv()
-        execv(sys.executable, [sys.executable, "-m", "ciao.cli", *sys.argv[1:]])
+        execv(sys.executable, [sys.executable, *python_isolation_flags(), "-m", "ciao.cli", *sys.argv[1:]])
     except OSError:
         exit_now(restart_code)
 
