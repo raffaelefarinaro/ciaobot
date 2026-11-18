@@ -474,6 +474,31 @@ final class PackagingTests: XCTestCase {
 
     // MARK: - Fake release repository
 
+    /// Until the engine is distribution-signed (#3128 G), notarization would
+    /// reject the bundle; the script refuses before any Apple call.
+    func testNotarizedPackagingRefusesAnEngineBearingBundle() throws {
+        let fixture = try makeFakePackageRepository(withEngine: true)
+
+        let result = try runPackaging(fixture)
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("#3128 G"), result.output)
+        let log = try? String(contentsOf: fixture.xcrunLog, encoding: .utf8)
+        XCTAssertFalse((log ?? "").contains("notarytool"), log ?? "")
+    }
+
+    /// A dangling engine symlink must be refused too, not mistaken for absent.
+    func testNotarizedPackagingRefusesADanglingEngineSymlink() throws {
+        let fixture = try makeFakePackageRepository(engineDanglingSymlink: true)
+
+        let result = try runPackaging(fixture)
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("#3128 G"), result.output)
+        let log = try? String(contentsOf: fixture.xcrunLog, encoding: .utf8)
+        XCTAssertFalse((log ?? "").contains("notarytool"), log ?? "")
+    }
+
     /// A scratch checkout with the real release scripts, a stand-in bundle
     /// builder and recording doubles for the tools that need an identity, an
     /// Apple credential or a real disk image. The bundle builder is a stub on
@@ -506,7 +531,7 @@ final class PackagingTests: XCTestCase {
         temporaryDirectories = []
     }
 
-    private func makeFakePackageRepository() throws -> PackageFixture {
+    private func makeFakePackageRepository(withEngine: Bool = false, engineDanglingSymlink: Bool = false) throws -> PackageFixture {
         let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("ciaobot-release-\(UUID().uuidString)", isDirectory: true)
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
@@ -524,7 +549,23 @@ final class PackagingTests: XCTestCase {
             at: scriptsDirectory.appendingPathComponent("dmg_layout.py"),
             to: scripts.appendingPathComponent("dmg_layout.py")
         )
-        try writeExecutable(Self.stubBundleBuilder, at: scripts.appendingPathComponent("build-app.sh"))
+        let engineLines = """
+            mkdir -p "$bundle/Contents/Resources/engine/bin"
+            printf '#!/bin/sh\\nexit 0\\n' > "$bundle/Contents/Resources/engine/bin/ciao"
+            chmod 755 "$bundle/Contents/Resources/engine/bin/ciao"
+
+            """
+        let danglingLines = """
+            mkdir -p "$bundle/Contents/Resources"
+            ln -s /nonexistent-engine-target "$bundle/Contents/Resources/engine"
+
+            """
+        try writeExecutable(
+            withEngine ? Self.stubBundleBuilder + "\n" + engineLines
+                : engineDanglingSymlink ? Self.stubBundleBuilder + "\n" + danglingLines
+                : Self.stubBundleBuilder,
+            at: scripts.appendingPathComponent("build-app.sh")
+        )
         let release = repo.appendingPathComponent("release", isDirectory: true)
         try fileManager.createDirectory(at: release, withIntermediateDirectories: true)
         try fileManager.copyItem(

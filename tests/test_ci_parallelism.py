@@ -3,6 +3,8 @@
 from pathlib import Path
 import re
 
+import yaml
+
 
 def _jobs() -> dict[str, str]:
     workflow = (Path(__file__).parents[1] / ".github/workflows/ci.yml").read_text()
@@ -50,7 +52,7 @@ def test_mac_app_waits_only_for_fast_mac_scope_detection() -> None:
         "|| steps.mac-full.outputs.mac_changed }}"
     ) in scope
     assert "swift" not in scope
-    assert '-- mac/ web/src/lib/workspaceColors.ts)"' in scope
+    assert '-- mac/ web/src/lib/workspaceColors.ts pyproject.toml uv.lock)"' in scope
     app = jobs["mac-app"]
     assert "needs: mac-scope" in app
     assert "if: ${{ !cancelled() }}" in app
@@ -58,8 +60,29 @@ def test_mac_app_waits_only_for_fast_mac_scope_detection() -> None:
     assert "macos-15" in app
     assert "working-directory: mac" in app
     assert "always()" not in app
-    assert app.count("if: needs.mac-scope.outputs.mac_changed == 'true'") == 7
+    # Every step but the scope check is gated, so an unrelated PR runs nothing
+    # on macOS and `mac-app` stays green on Linux. Parsed, not substring-matched:
+    # a gate that moved to a comment or another key must fail.
+    gate = "needs.mac-scope.outputs.mac_changed == 'true'"
+    app_steps = yaml.safe_load(
+        (Path(__file__).parents[1] / ".github/workflows/ci.yml").read_text()
+    )["jobs"]["mac-app"]["steps"]
+    assert app_steps[0]["name"] == "Require successful mac scope detection"
+    assert "if" not in app_steps[0]
+    assert [step.get("if") for step in app_steps[1:]] == [gate] * 11
+    assert "timeout-minutes: 60" in app
+    assert "python-version: '3.12'" in app
+    assert "path: mac/.build/engine-cache" in app
+    assert (
+        "key: mac-engine-wheelhouse-${{ hashFiles('pyproject.toml', 'uv.lock', "
+        "'mac/engine-runtime.json', 'mac/engine-build-inputs.json') }}"
+    ) in app
+    assert "restore-keys" not in app
     steps = [
+        'run: test "$(uname -m)" = arm64',
+        "actions/setup-python@v7",
+        "actions/setup-node@v7",
+        "actions/cache@v6",
         "run: swift test\n",
         "run: swift build\n",
         "run: scripts/build-app.sh",

@@ -73,14 +73,20 @@ commit that passed the suite.
 Build the release artifact from the merged commit, not from a dirty worktree:
 
 ```sh
-git archive <commit>:mac | tar -x -C "$SCRATCH"
-cd "$SCRATCH"
+git -c core.fsmonitor=false worktree add --detach "$SCRATCH" <commit>
+cd "$SCRATCH/mac"
 CIAOBOT_RELEASE_UPDATES=1 \
 SIGNING_IDENTITY='Developer ID Application: …' \
 NOTARY_KEY_ID='<App Store Connect key id>' \
 NOTARY_ISSUER='<App Store Connect issuer id>' \
 scripts/package-notarized.sh
 ```
+
+The app embeds the engine, which `scripts/build-app.sh` builds from that exact
+commit; it needs a clean checkout, Python 3.12 or 3.13 (`python3.12`,
+`python3.13` or a `python3` of that version on `PATH`) and Node. Until #3128 G
+lands, `package-notarized.sh`, `make-dmg.sh --app` and `make-appcast.sh` all
+refuse an engine-bearing app or archive, so a release cannot be cut yet.
 
 The API key path defaults to `~/.appstoreconnect/private_keys/AuthKey_<KEY_ID>.p8`;
 override it with `NOTARY_KEY`. A `notarytool` keychain profile works instead via

@@ -345,6 +345,31 @@ final class AppcastScriptTests: XCTestCase {
 
     // MARK: - Refusals about the archive's contents
 
+    /// Until the engine is distribution-signed (#3128 G) no update may carry it,
+    /// including through a dangling symlink standing in for it.
+    func testRefusesAnArchiveThatBundlesTheEngine() throws {
+        for dangling in [false, true] {
+            let archive = try makeDmg(version: "0.1.2")
+            let engine = scratch.appendingPathComponent("fixture/Ciaobot.app/Contents/Resources/engine")
+            try fileManager.createDirectory(at: engine.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if dangling {
+                try fileManager.createSymbolicLink(atPath: engine.path, withDestinationPath: "/nonexistent-engine")
+            } else {
+                try fileManager.createDirectory(at: engine, withIntermediateDirectories: true)
+            }
+            let output = try outputPath()
+
+            let result = try runScript(
+                ["--archive", archive.path, "--download-url", downloadPrefix, "--output", output.path]
+            )
+
+            XCTAssertNotEqual(result.status, 0, "dangling=\(dangling): \(result.output)")
+            XCTAssertTrue(result.output.contains("#3128 G"), result.output)
+            XCTAssertNil(try recordedArgumentsIfAny())
+            try fileManager.removeItem(at: engine)
+        }
+    }
+
     func testRefusesAForeignBundleIdentity() throws {
         let result = try runAgainstArchive(bundleIdentifier: "com.example.other")
 

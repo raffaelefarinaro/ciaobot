@@ -214,6 +214,10 @@ else
 fi
 [ -d "$app" ] && [ ! -L "$app" ] \
     || die "archive does not contain a real Ciaobot.app directory"
+# Distribution signing of the bundled engine is #3128 G; until it lands no
+# engine-bearing archive may be advertised as an update.
+[ ! -e "$app/Contents/Resources/engine" ] && [ ! -L "$app/Contents/Resources/engine" ] \
+    || die "archive bundles the engine, which has no distribution signing yet (#3128 G); refusing to advertise it"
 plist=$app/Contents/Info.plist
 [ -f "$plist" ] && [ ! -L "$plist" ] || die "archive has no Ciaobot.app/Contents/Info.plist"
 

@@ -59,6 +59,10 @@ bundle=$output/Ciaobot.app
 ditto .build/Ciaobot.app "$bundle"
 chmod -R u+w "$bundle"
 xattr -cr "$bundle" 2>/dev/null || true
+# Distribution signing of the bundled engine is #3128 G. Until it lands, an
+# engine-bearing bundle would be rejected by notarization; refuse it here.
+[ ! -e "$bundle/Contents/Resources/engine" ] && [ ! -L "$bundle/Contents/Resources/engine" ] \
+    || die "the bundled engine has no distribution signing yet (#3128 G); refusing to notarize"
 # Sign Sparkle's nested helpers inside-out before the app. Signing the app
 # first would make the framework's later re-signing invalidate the app seal.
 sparkle=$bundle/Contents/Frameworks/Sparkle.framework

@@ -109,6 +109,30 @@ final class DmgScriptTests: XCTestCase {
         XCTAssertNil(try hdiutilLogIfAny(), "an unstapled app must be refused before any image work")
     }
 
+    /// Until the engine is distribution-signed (#3128 G) no image may carry it,
+    /// including through a dangling symlink standing in for it.
+    func testRefusesAnEngineBearingApp() throws {
+        for dangling in [false, true] {
+            let app = try makeApp()
+            let engine = app.appendingPathComponent("Contents/Resources/engine")
+            try fileManager.createDirectory(at: engine.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if dangling {
+                try fileManager.createSymbolicLink(atPath: engine.path, withDestinationPath: "/nonexistent-engine")
+            } else {
+                try fileManager.createDirectory(at: engine.appendingPathComponent("bin"), withIntermediateDirectories: true)
+            }
+            let output = try outputPath()
+
+            let result = try runScript(["--app", app.path, "--output", output, "--identity", identity])
+
+            XCTAssertNotEqual(result.status, 0, "dangling=\(dangling): \(result.output)")
+            XCTAssertTrue(result.output.contains("#3128 G"), result.output)
+            XCTAssertFalse(fileManager.fileExists(atPath: output))
+            XCTAssertNil(try hdiutilLogIfAny())
+            try fileManager.removeItem(at: app.deletingLastPathComponent())
+        }
+    }
+
     func testRefusesAnAppInsideAnApplicationsFolder() throws {
         let app = try makeApp(inside: "Applications")
         let output = try outputPath()

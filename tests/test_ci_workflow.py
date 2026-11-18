@@ -656,6 +656,10 @@ def _run_mac_detector(
         ("rename_out", "true"),
         ("rename_in", "true"),
         ("engine_colors", "true"),
+        ("pyproject", "true"),
+        ("uv_lock", "true"),
+        ("ciao", "false"),
+        ("nested_pyproject", "false"),
         ("web", "false"),
         ("native", "false"),
         ("prefix", "false"),
@@ -673,6 +677,10 @@ def test_mac_change_detector_uses_pr_three_dot_diff(
         "native/a.swift": "n",
         "web/src/lib/other.ts": "w",
         "web/src/lib/workspaceColors.ts": "c",
+        "pyproject.toml": "p",
+        "uv.lock": "l",
+        "ciao/a.py": "c",
+        "web/pyproject.toml": "n",
     }
     for name, content in seed.items():
         _commit_file(repo, name, content, f"seed {name}")
@@ -697,6 +705,14 @@ def test_mac_change_detector_uses_pr_three_dot_diff(
         head = _commit_file(
             repo, "web/src/lib/workspaceColors.ts", "changed", "engine colours"
         )
+    elif change == "pyproject":
+        head = _commit_file(repo, "pyproject.toml", "changed", "pyproject change")
+    elif change == "uv_lock":
+        head = _commit_file(repo, "uv.lock", "changed", "lock change")
+    elif change == "ciao":
+        head = _commit_file(repo, "ciao/a.py", "changed", "engine change")
+    elif change == "nested_pyproject":
+        head = _commit_file(repo, "web/pyproject.toml", "changed", "nested pyproject")
     elif change == "web":
         head = _commit_file(repo, "web/src/lib/other.ts", "changed", "other web file")
     elif change == "native":

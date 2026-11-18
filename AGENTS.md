@@ -81,8 +81,9 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   also runs the conditional `linux-e2e` Chromium check alongside `linux-web`,
   after the fast `web-scope` detector. Its stable check fails if detection fails;
   non-web PRs run only that scope validation.
-  A develop PR whose diff changes `mac/` (or `web/src/lib/workspaceColors.ts`)
-  also runs `mac-app` (Swift tests, build and app bundle on macOS 15) after
+  A develop PR whose diff changes `mac/`, `pyproject.toml`, `uv.lock` (or
+  `web/src/lib/workspaceColors.ts`) also runs `mac-app` (Swift tests, the app
+  bundle with its full engine, on macOS 15) after
   the fast `mac-scope` detector; release PRs and manual runs always run it.
   `npm run test:e2e` invokes its npm prehook, which builds both the PWA and
   terminal harness before Playwright. Python 3.14

@@ -22,8 +22,12 @@ concurrency:
 # unit/build job, after the fast `web-scope` detector. The detector
 # uses the PR's base/head commits and full history from the merge checkout.
 # `mac-app` builds and tests the Swift Mac app in `mac/` on macOS 15; on
-# develop PRs only when the diff changes `mac/` or the engine colour table
-# it pins (the `mac-scope` detector), and always on release PRs and manual runs.
+# develop PRs only when the diff changes `mac/`, `pyproject.toml`, `uv.lock` or
+# the engine colour table it pins (the `mac-scope` detector), and always on
+# release PRs and manual runs. The app bundle includes the full engine, so
+# `mac-app` builds it whenever it runs on macOS. Changes under `ciao/` or
+# `web/` alone do not trigger `mac-app` on a develop PR (#3128 M4); the engine
+# build of such changes runs on release PRs and manual dispatch.
 # `linux-server-latest-python` runs the same backend gates
 # on the newest Python `requires-python` admits (3.14) on release and manual
 # runs; it is a required check on main. `test` is the macOS job —
@@ -170,8 +174,8 @@ jobs:
         retention-days: 7
         if-no-files-found: ignore
 
-  # Detection is separate so a develop PR that does not touch mac/ never
-  # waits for a macOS runner. Release PRs and manual runs always build it.
+  # Detection is separate so a develop PR that does not touch mac/,
+  # pyproject.toml or uv.lock never waits for a macOS runner. Release PRs and manual runs always build it.
   mac-scope:
     outputs:
       mac_changed: ${{ steps.mac-changes.outputs.mac_changed || steps.mac-full.outputs.mac_changed }}
@@ -200,7 +204,7 @@ jobs:
             exit 1
           fi
         done
-        mac_paths="$(git diff --no-renames --name-only "${PR_BASE_SHA}...${PR_HEAD_SHA}" -- mac/ web/src/lib/workspaceColors.ts)"
+        mac_paths="$(git diff --no-renames --name-only "${PR_BASE_SHA}...${PR_HEAD_SHA}" -- mac/ web/src/lib/workspaceColors.ts pyproject.toml uv.lock)"
         if [[ -n "$mac_paths" ]]; then
           printf 'mac_changed=true\n' >> "$GITHUB_OUTPUT"
         else
@@ -211,13 +215,13 @@ jobs:
       if: ${{ !(github.event_name == 'pull_request' && github.base_ref == 'develop') }}
       run: printf 'mac_changed=true\n' >> "$GITHUB_OUTPUT"
 
-  # Stable required check. Without a mac/ change it runs only the scope
-  # check, on Linux, so it never queues for a macOS runner.
+  # Stable required check. Without a mac/, pyproject.toml or uv.lock change it
+  # runs only the scope check, on Linux, so it never queues for a macOS runner.
   mac-app:
     needs: mac-scope
     if: ${{ !cancelled() }}
     runs-on: ${{ needs.mac-scope.outputs.mac_changed == 'true' && 'macos-15' || 'ubuntu-24.04' }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
     - name: Require successful mac scope detection
       env:
@@ -227,6 +231,23 @@ jobs:
       if: needs.mac-scope.outputs.mac_changed == 'true'
       with:
         persist-credentials: false
+    - name: Require an Apple silicon runner
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      run: test "$(uname -m)" = arm64
+    - uses: actions/setup-python@v7
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      with:
+        python-version: '3.12'
+    - uses: actions/setup-node@v7
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      with:
+        node-version: '22'
+    - name: Restore the engine wheelhouse
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      uses: actions/cache@v6
+      with:
+        path: mac/.build/engine-cache
+        key: mac-engine-wheelhouse-${{ hashFiles('pyproject.toml', 'uv.lock', 'mac/engine-runtime.json', 'mac/engine-build-inputs.json') }}
     - name: Toolchain
       if: needs.mac-scope.outputs.mac_changed == 'true'
       working-directory: mac

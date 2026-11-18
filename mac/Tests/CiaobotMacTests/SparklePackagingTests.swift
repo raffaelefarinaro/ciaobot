@@ -453,6 +453,157 @@ final class SparklePackagingTests: XCTestCase {
         )
     }
 
+    /// The build embeds the engine the driver produced and checks that its
+    /// `--version` matches provenance.json.
+    func testBuildEmbedsTheEngineAndChecksItsVersion() throws {
+        let fixture = try makeFakeBuildRepository(preExistingSymlinkedInfoPlist: false)
+        let log = scratch.appendingPathComponent("engine-\(UUID().uuidString).log")
+
+        let result = try runFakeBuild(fixture, tag: "engine", environment: ["FAKE_ENGINE_LOG": log.path])
+
+        XCTAssertEqual(result.status, 0, result.output)
+        let engine = fixture.repo.appendingPathComponent(".build/Ciaobot.app/Contents/Resources/engine/bin/ciao")
+        XCTAssertTrue(fileManager.isExecutableFile(atPath: engine.path), result.output)
+        XCTAssertTrue(result.output.contains("Engine: 3 files"), result.output)
+        let line = try String(contentsOf: log, encoding: .utf8)
+        let repoPath = fixture.repo.resolvingSymlinksInPath().path
+        let argv = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String], line)
+        XCTAssertEqual(argv.count, 4, line)
+        XCTAssertEqual(argv[0], "--cache", line)
+        XCTAssertTrue(argv[1].hasSuffix("\(repoPath)/.build/engine-cache"), line)
+        XCTAssertEqual(argv[2], "--destination", line)
+        XCTAssertTrue(argv[3].contains("\(repoPath)/.build/ciaobot-app."), line)
+        XCTAssertTrue(argv[3].hasSuffix("/engine-build"), line)
+    }
+
+    /// The driver runs under python3.12 even though `python3` is 3.15.
+    func testEngineBuildPrefersPython312OverPython3() throws {
+        let fixture = try makeFakeBuildRepository(preExistingSymlinkedInfoPlist: false)
+        try writePythonWrapper("python3.13", in: fixture.tools)
+        let log = scratch.appendingPathComponent("py-\(UUID().uuidString).log")
+
+        let result = try runFakeBuild(fixture, tag: "py312", environment: ["FAKE_PY_LOG": log.path])
+
+        XCTAssertEqual(result.status, 0, result.output)
+        let lines = try String(contentsOf: log, encoding: .utf8).split(separator: "\n").map(String.init)
+        XCTAssertFalse(lines.isEmpty)
+        XCTAssertEqual(Set(lines), ["python3.12"], "no other interpreter may run: \(lines)")
+    }
+
+    func testEngineBuildFallsBackToPython313() throws {
+        let fixture = try makeFakeBuildRepository(preExistingSymlinkedInfoPlist: false)
+        try fileManager.removeItem(at: fixture.tools.appendingPathComponent("python3.12"))
+        try writePythonWrapper("python3.13", in: fixture.tools)
+        let log = scratch.appendingPathComponent("py-\(UUID().uuidString).log")
+
+        let result = try runFakeBuild(fixture, tag: "py313",
+                                      environment: ["FAKE_PY_LOG": log.path, "PATH": hermeticPath(fixture)])
+
+        XCTAssertEqual(result.status, 0, result.output)
+        let lines = try String(contentsOf: log, encoding: .utf8).split(separator: "\n").map(String.init)
+        XCTAssertEqual(Set(lines), ["python3.13"], "\(lines)")
+    }
+
+    func testEngineBuildAcceptsPython3WhenItIsAnAllowedVersion() throws {
+        let fixture = try makeFakeBuildRepository(preExistingSymlinkedInfoPlist: false)
+        try fileManager.removeItem(at: fixture.tools.appendingPathComponent("python3.12"))
+
+        let result = try runFakeBuild(fixture, tag: "py3",
+                                      environment: ["FAKE_PYTHON3_VERSION": "3.13", "PATH": hermeticPath(fixture)])
+
+        XCTAssertEqual(result.status, 0, result.output)
+    }
+
+    /// A bare python3 that is not 3.12 or 3.13 fails first, before SwiftPM runs.
+    func testEngineBuildRefusesAnUnsupportedPythonBeforeTheSwiftBuild() throws {
+        let fixture = try makeFakeBuildRepository(preExistingSymlinkedInfoPlist: false)
+        try fileManager.removeItem(at: fixture.tools.appendingPathComponent("python3.12"))
+
+        let result = try runFakeBuild(fixture, tag: "py315", environment: ["PATH": hermeticPath(fixture)])
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("engine build needs Python 3.12 or 3.13 (found 3.15)"), result.output)
+        XCTAssertFalse(fileManager.fileExists(atPath: fixture.repo.appendingPathComponent(".build/out").path),
+                       "the Swift build must not have run")
+    }
+
+    func testEngineBuildRefusesMissingNodeBeforeTheSwiftBuild() throws {
+        let fixture = try makeFakeBuildRepository(preExistingSymlinkedInfoPlist: false)
+        try fileManager.removeItem(at: fixture.tools.appendingPathComponent("node"))
+
+        let result = try runFakeBuild(
+            fixture, tag: "nonode",
+            environment: ["PATH": hermeticPath(fixture)])
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("node and npm"), result.output)
+        XCTAssertFalse(fileManager.fileExists(atPath: fixture.repo.appendingPathComponent(".build/out").path))
+    }
+
+    func testEngineBuildRefusesADirtyTrackedTreeBeforeTheSwiftBuild() throws {
+        let fixture = try makeFakeBuildRepository(preExistingSymlinkedInfoPlist: false)
+        try Data("changed\n".utf8).write(
+            to: fixture.repo.appendingPathComponent("Sources/CiaobotMac/Resources/app-icon.png"))
+
+        let result = try runFakeBuild(fixture, tag: "dirty")
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("commit or stash tracked changes"), result.output)
+        XCTAssertFalse(fileManager.fileExists(atPath: fixture.repo.appendingPathComponent(".build/out").path))
+    }
+
+    func testEngineBuildRefusesSkipWorktreeAndAssumeUnchangedFiles() throws {
+        for flag in ["--skip-worktree", "--assume-unchanged"] {
+            let fixture = try makeFakeBuildRepository(preExistingSymlinkedInfoPlist: false)
+            let icon = "Sources/CiaobotMac/Resources/app-icon.png"
+            let marked = try run("/usr/bin/git", ["-c", "core.fsmonitor=false", "update-index", flag, icon],
+                                 directory: fixture.repo)
+            XCTAssertEqual(marked.status, 0, marked.output)
+            try Data("changed\n".utf8).write(to: fixture.repo.appendingPathComponent(icon))
+
+            let result = try runFakeBuild(fixture, tag: "hidden")
+
+            XCTAssertNotEqual(result.status, 0, "\(flag): \(result.output)")
+            XCTAssertTrue(result.output.contains("skip-worktree or assume-unchanged"), "\(flag): \(result.output)")
+            XCTAssertFalse(fileManager.fileExists(atPath: fixture.repo.appendingPathComponent(".build/out").path))
+        }
+    }
+
+    /// A moved engine that no longer equals its assembly receipt is never published.
+    func testEngineThatFailsReceiptVerificationIsNotPublished() throws {
+        let fixture = try makeFakeBuildRepository(preExistingSymlinkedInfoPlist: false)
+
+        let result = try runFakeBuild(fixture, tag: "badreceipt", environment: ["FAKE_VERIFY_STATUS": "1"])
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("does not match its assembly receipt"), result.output)
+        XCTAssertFalse(fileManager.fileExists(atPath: fixture.repo.appendingPathComponent(".build/Ciaobot.app").path))
+    }
+
+    /// A failing engine build publishes nothing and leaves the previous bundle alone.
+    func testFailedEngineBuildPublishesNothing() throws {
+        let fixture = try makeFakeBuildRepository(preExistingSymlinkedInfoPlist: false)
+        XCTAssertEqual(try runFakeBuild(fixture, tag: "first").status, 0)
+        let binary = fixture.repo.appendingPathComponent(".build/Ciaobot.app/Contents/MacOS/CiaobotMac")
+
+        let result = try runFakeBuild(fixture, tag: "second", environment: ["FAKE_ENGINE_STATUS": "1"])
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(try String(contentsOf: binary, encoding: .utf8).contains("# first"))
+        XCTAssertEqual(try quarantinedBundles(in: fixture.repo).count, 0)
+    }
+
+    func testEngineVersionMismatchIsRefused() throws {
+        let fixture = try makeFakeBuildRepository(preExistingSymlinkedInfoPlist: false)
+
+        let result = try runFakeBuild(fixture, tag: "mismatch", environment: ["FAKE_ENGINE_VERSION": "0.0.1"])
+
+        XCTAssertNotEqual(result.status, 0, result.output)
+        XCTAssertTrue(result.output.contains("bundled engine reports"), result.output)
+        XCTAssertFalse(fileManager.fileExists(atPath: fixture.repo.appendingPathComponent(".build/Ciaobot.app").path))
+    }
+
     /// The build refuses a symlinked .build before invoking the toolchain or
     /// writing anything through it.
     func testBuildRefusesSymlinkedBuildDirectoryBeforeWriting() throws {
@@ -465,6 +616,7 @@ final class SparklePackagingTests: XCTestCase {
             at: scriptsDirectory.appendingPathComponent("build-app.sh"),
             to: repo.appendingPathComponent("scripts/build-app.sh")
         )
+        try commitGitFixture(repo, paths: ["scripts"])
         let tools = scratch.appendingPathComponent("fake-tools-symlink", isDirectory: true)
         try makeFakeBuildTools(in: tools)
         let externalBuild = scratch.appendingPathComponent("External-Build-Dir", isDirectory: true)
@@ -748,6 +900,7 @@ final class SparklePackagingTests: XCTestCase {
             try fileManager.copyItem(at: scriptsDirectory.appendingPathComponent(name), to: destination)
             try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destination.path)
         }
+        try writeExecutable(fakeEngineDriver, at: scripts.appendingPathComponent("engine_build.py"))
         let resources = repo.appendingPathComponent("Sources/CiaobotMac/Resources", isDirectory: true)
         try fileManager.createDirectory(at: resources, withIntermediateDirectories: true)
         for name in ["app-icon.png", "mark_template.png", "dock-icon-ink.png", "dock-icon-dots.png",
@@ -767,6 +920,10 @@ final class SparklePackagingTests: XCTestCase {
             at: resolved,
             to: artifactSlice.appendingPathComponent("Sparkle.xcframework")
         )
+
+        // The build refuses an unclean checkout, so the fake repository is a
+        // committed git repository (.build stays untracked).
+        try commitGitFixture(repo, paths: ["scripts", "Sources"])
 
         let tools = scratch.appendingPathComponent("fake-tools-\(UUID().uuidString)", isDirectory: true)
         try makeFakeBuildTools(in: tools)
@@ -791,9 +948,40 @@ final class SparklePackagingTests: XCTestCase {
         return FakeBuildFixture(repo: repo, tools: tools, sentinel: sentinel)
     }
 
+    /// Stands in for scripts/engine_build.py (the real chain needs the network
+    /// and a clean committed tree): same CLI, same C2 layout, logs its argv.
+    private var fakeEngineDriver: String {
+        """
+        import json, os, sys
+        argv = sys.argv[1:]
+        if argv[:1] == ["--verify"]:
+            if os.environ.get("FAKE_VERIFY_STATUS", "0") != "0":
+                sys.exit(1)
+            print("ciao 9.9.9")
+            sys.exit(0)
+        log = os.environ.get("FAKE_ENGINE_LOG")
+        if log:
+            with open(log, "a") as handle:
+                handle.write(json.dumps(argv) + "\\n")
+        if os.environ.get("FAKE_ENGINE_STATUS", "0") != "0":
+            sys.exit(int(os.environ["FAKE_ENGINE_STATUS"]))
+        dest = dict(zip(argv[0::2], argv[1::2]))["--destination"]
+        os.makedirs(dest + "/engine/bin")
+        path = dest + "/engine/bin/ciao"
+        with open(path, "w") as handle:
+            handle.write("#!/bin/sh\\necho \\"ciao " + os.environ.get("FAKE_ENGINE_VERSION", "9.9.9") + "\\"\\n")
+        os.chmod(path, 0o755)
+        with open(dest + "/engine/provenance.json", "w") as handle:
+            json.dump({"engine": {"version": "9.9.9"}}, handle)
+        with open(dest + "/assembly-receipt.json", "w") as handle:
+            json.dump({"totals": {"files": 3, "macho_files": 0, "bytes": 10}}, handle)
+        """
+    }
+
     private func runFakeBuild(
         _ fixture: FakeBuildFixture,
-        tag: String
+        tag: String,
+        environment extra: [String: String] = [:]
     ) throws -> (status: Int32, output: String) {
         let bin = fixture.repo.appendingPathComponent(".build/out/Products/Release", isDirectory: true)
         return try run(
@@ -803,7 +991,7 @@ final class SparklePackagingTests: XCTestCase {
                 "PATH": fixture.tools.path + ":" + (ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"),
                 "FAKE_BIN_PATH": bin.path,
                 "FAKE_BUILD_TAG": tag,
-            ],
+            ].merging(extra) { _, new in new },
             directory: fixture.repo
         )
     }
@@ -870,6 +1058,47 @@ final class SparklePackagingTests: XCTestCase {
         [ -n "$out" ] && printf 'x' > "$out"
         """
         try writeExecutable(iconutil, at: directory.appendingPathComponent("iconutil"))
+
+        // Interpreter selection is hermetic: python3.12 wraps the system python3
+        // and logs its use; a bare python3 claims to be 3.15 unless told otherwise.
+        try writePythonWrapper("python3.12", in: directory)
+        let python3 = """
+        #!/bin/sh
+        case "$*" in
+            *version_info*) printf '%s\\n' "${FAKE_PYTHON3_VERSION:-3.15}" ;;
+            *) printf 'python3\\n' >> "${FAKE_PY_LOG:-/dev/null}"; exec /usr/bin/python3 "$@" ;;
+        esac
+        """
+        try writeExecutable(python3, at: directory.appendingPathComponent("python3"))
+        try writeExecutable("#!/bin/sh\nexit 0\n", at: directory.appendingPathComponent("node"))
+        try writeExecutable("#!/bin/sh\nexit 0\n", at: directory.appendingPathComponent("npm"))
+    }
+
+    private func commitGitFixture(_ repo: URL, paths: [String]) throws {
+        for arguments in [
+            ["init", "-q"],
+            ["add"] + paths,
+            ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
+             "commit", "-q", "-m", "fixture"],
+        ] {
+            let git = try run("/usr/bin/git", ["-c", "core.fsmonitor=false"] + arguments, directory: repo)
+            XCTAssertEqual(git.status, 0, git.output)
+        }
+    }
+
+    /// PATH with only the fake tools in front of the system directories, so a
+    /// python3.12 or node installed on the developer's machine cannot leak in.
+    private func hermeticPath(_ fixture: FakeBuildFixture) -> String {
+        fixture.tools.path + ":/usr/bin:/bin:/usr/sbin:/sbin"
+    }
+
+    private func writePythonWrapper(_ name: String, in directory: URL) throws {
+        let wrapper = """
+        #!/bin/sh
+        printf '\(name)\\n' >> "${FAKE_PY_LOG:-/dev/null}"
+        exec /usr/bin/python3 "$@"
+        """
+        try writeExecutable(wrapper, at: directory.appendingPathComponent(name))
     }
 
     private func writeExecutable(_ text: String, at url: URL) throws {
