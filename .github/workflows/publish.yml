@@ -20,6 +20,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Set up uv
         uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: "0.13.8"
       - name: Build PWA assets
         working-directory: web
         run: |
