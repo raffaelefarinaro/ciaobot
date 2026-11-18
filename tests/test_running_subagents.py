@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
@@ -617,3 +618,50 @@ def test_a_chat_with_only_provider_background_work_is_scanned(
     rows = client.get("/api/subagents/running").json()["chats"]["c1"]
 
     assert [r["agent_id"] for r in rows] == ["task:bsh1"]
+
+
+@pytest.mark.parametrize(
+    ("kind", "expect_live"),
+    [("non_provider", False), ("other_session", False), ("same_session", True)],
+)
+def test_opencode_running_rows_pick_live_or_ephemeral(
+    tmp_path: Path, monkeypatch, kind: str, expect_live: bool
+) -> None:
+    calls: list[str] = []
+
+    async def ephemeral(_root, _session) -> list[dict]:
+        calls.append("ephemeral")
+        return [{"info": {"id": "ses_eph", "title": "E"}, "active": True}]
+
+    async def live_tree() -> list[dict]:
+        calls.append("live")
+        return [{"info": {"id": "ses_live", "title": "L"}, "active": True}]
+
+    monkeypatch.setattr(OpencodeProvider, "read_collab_tree", staticmethod(ephemeral))
+    provider: object
+    if kind == "non_provider":
+        provider = SimpleNamespace(
+            has_live_server=True,
+            is_connected=True,
+            current_session_id="ses_parent",
+            read_live_collab_tree=live_tree,
+            background_shell_rows=lambda: [
+                {"id": "sh", "command": "x", "started_at": time.time()}
+            ],
+        )
+    else:
+        real = OpencodeProvider(tmp_path)
+        real._client = object()  # type: ignore[assignment]
+        real._process = SimpleNamespace(returncode=None)
+        real._session_id = "ses_parent" if kind == "same_session" else "ses_other"
+        monkeypatch.setattr(real, "read_live_collab_tree", live_tree)
+        provider = real
+
+    rows = _opencode_app(tmp_path, provider).get(  # type: ignore[arg-type]
+        "/api/subagents/running"
+    ).json()["chats"]["chat-1"]
+
+    assert calls == (["live"] if expect_live else ["ephemeral"])
+    assert [row["agent_id"] for row in rows] == [
+        "ses_live" if expect_live else "ses_eph"
+    ]

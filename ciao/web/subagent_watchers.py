@@ -47,7 +47,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from ciao import subagent_tracking
+from ciao import provider_registry
 from ciao.providers.base import BACKGROUND_WORK_MAX_S as _BACKGROUND_WORK_MAX_S
+from ciao.providers.base import BaseProvider, live_for_session
 from ciao.providers.opencode import (
     OpencodeProvider,
     opencode_collab_tree_counts,
@@ -191,7 +193,7 @@ class SubagentWatchers:
         if chat is not None and chat.provider == "opencode":
             service = self._host._providers.get(chat_id)
             live = service.provider if service is not None else None
-            if isinstance(live, OpencodeProvider) and live.has_live_server:
+            if isinstance(live, BaseProvider) and live.is_connected:
                 # The provider tracks shells and children from the event
                 # stream, so this is fresher than the published count.
                 return live.background_count
@@ -392,9 +394,7 @@ class SubagentWatchers:
                 )
                 live = (
                     live_provider
-                    if isinstance(live_provider, OpencodeProvider)
-                    and live_provider.has_live_server
-                    and live_provider.current_session_id == chat.session_id
+                    if live_for_session(live_provider, chat.session_id)
                     else None
                 )
                 if live is not None:
@@ -404,7 +404,7 @@ class SubagentWatchers:
                     tree = await live.read_live_collab_tree()
                     shells = await live.refresh_background_shells()
                 else:
-                    tree = await OpencodeProvider.read_collab_tree(
+                    tree = await provider_registry.require(chat.provider).factory().read_collab_tree(
                         self._host._agent_root_for_chat(chat_id), chat.session_id
                     )
                     # Background shells are child processes of the chat's
@@ -437,7 +437,7 @@ class SubagentWatchers:
                     # active_chat_ids() counts it and the restart drain has no
                     # timeout. Engine shutdown ends the background work anyway.
                     break
-                if live is not None:
+                if isinstance(live, OpencodeProvider):
                     # Republish as soon as the drain/pump sees a shell exit or
                     # a child end, so the count reaches zero before the
                     # follow-up result arrives.

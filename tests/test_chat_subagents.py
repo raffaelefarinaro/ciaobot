@@ -2591,3 +2591,47 @@ def test_interrupted_work_sweep_removes_an_unreadable_file(tmp_path: Path) -> No
 
     assert pcm.sweep_interrupted_background_work() == 0
     assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    ("kind", "expect_live"),
+    [("non_provider", False), ("other_session", False), ("same_session", True)],
+)
+def test_opencode_subagent_list_picks_live_or_ephemeral(
+    tmp_path: Path, monkeypatch, kind: str, expect_live: bool
+) -> None:
+    calls: list[str] = []
+
+    async def ephemeral(_root, _session) -> list[dict]:
+        calls.append("ephemeral")
+        return [{"info": {"id": "ses_eph", "title": "E"}, "messages": [], "active": True}]
+
+    async def live_tree(**_kwargs) -> list[dict]:
+        calls.append("live")
+        return [{"info": {"id": "ses_live", "title": "L"}, "messages": [], "active": True}]
+
+    monkeypatch.setattr(OpencodeProvider, "read_collab_tree", staticmethod(ephemeral))
+    client, _recorder = _opencode_client(tmp_path)
+    pcm = client.app.state.project_chat_manager  # type: ignore[attr-defined]
+    provider = pcm._providers["chat-1"].provider
+    if kind == "non_provider":
+        pcm._providers["chat-1"] = SimpleNamespace(
+            provider=SimpleNamespace(
+                has_live_server=True,
+                is_connected=True,
+                current_session_id="ses_parent",
+                read_live_collab_tree=live_tree,
+            )
+        )
+    else:
+        if kind == "other_session":
+            provider._session_id = "ses_other"
+        monkeypatch.setattr(provider, "read_live_collab_tree", live_tree)
+
+    resp = client.get("/api/chats/chat-1/subagents")
+
+    assert resp.status_code == 200
+    assert calls == (["live"] if expect_live else ["ephemeral"])
+    assert [entry["agent_id"] for entry in resp.json()] == [
+        "ses_live" if expect_live else "ses_eph"
+    ]
