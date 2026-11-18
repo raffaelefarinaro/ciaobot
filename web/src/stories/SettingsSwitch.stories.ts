@@ -20,8 +20,10 @@ const meta = {
 export default meta
 type Story = StoryObj<typeof meta>
 
-// Clicking toggles aria-checked through the production toggle flow and keeps
-// focus on the switch for keyboard use.
+// The story's own `@toggle` handler flips a local ref in response to the
+// production component's click event; this proves the click emits and
+// aria-checked follows the controlled prop, not a parent's persistence flow.
+// Focus stays on the switch.
 export const On: Story = {
   play: async ({ canvas, userEvent }) => {
     const button = canvas.getByRole('switch')

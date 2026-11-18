@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/vue3-vite'
+import { expect, waitFor } from 'storybook/test'
 import { defineComponent, h, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 import HomeTodayStats from '../components/HomeTodayStats.vue'
 import { mountConnectedStats } from './connectedStats'
@@ -46,7 +47,20 @@ const meta = {
 } satisfies Meta<typeof HomeTodayStats>
 export default meta
 type Story = StoryObj<typeof meta>
-export const Default: Story = { render: () => renderState('default') }
-export const Loading: Story = { render: () => renderState('loading') }
-export const Failed: Story = { render: () => renderState('failed') }
-export const Partial: Story = { render: () => renderState('partial') }
+// Under `npm run test-storybook` the vitest browser runner's own control socket
+// (/__vitest_browser_api__) is live while these stories render and report. The
+// fence sees that traffic: anything it does not recognize is rejected and
+// recorded as a "Story network violation" in the visible ledger (and throws on
+// the runner's socket). Each story therefore settles past the runner's
+// reporting and asserts the ledger is empty.
+const playSettled: Story['play'] = async ({ canvas }) => {
+  await waitFor(() => expect(canvas.getByText(/Fixture requests: [1-9]/)).toBeTruthy())
+  await new Promise(resolve => setTimeout(resolve, 500))
+  expect(canvas.getByText(/Violations: 0\./)).toBeTruthy()
+  expect(canvas.queryAllByRole('alert')).toHaveLength(0)
+  expect(canvas.queryByText(/Story network violation/)).toBeNull()
+}
+export const Default: Story = { render: () => renderState('default'), play: playSettled }
+export const Loading: Story = { render: () => renderState('loading'), play: playSettled }
+export const Failed: Story = { render: () => renderState('failed'), play: playSettled }
+export const Partial: Story = { render: () => renderState('partial'), play: playSettled }

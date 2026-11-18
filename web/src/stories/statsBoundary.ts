@@ -16,22 +16,38 @@ const lifecycleEvents = new Set([
   'storybook/instrumenter/sync', 'previewKeydown', 'pong',
 ])
 
-// The vitest browser runner's established control socket (result reporting,
-// console forwarding, user-event commands). Its birpc envelopes are
-// flatted-encoded: a root object whose values index into the array. Only a
-// request (t 'q' with a string method name) or a response (t 's' with a string
-// id) is permitted.
+// The method names the vitest browser runner's page side calls over its
+// control socket (@vitest/browser client.js, tester and orchestrator bundles,
+// and vitest's runtime rpc: result reporting, console forwarding, module/mock
+// resolution, user-event commands). Anything else is refused.
+const runnerMethods = new Set([
+  'onCollected', 'onQueued', 'onTaskUpdate', 'onTaskArtifactRecord', 'onAfterSuiteRun',
+  'onUserConsoleLog', 'onUnhandledError', 'onAsyncLeaks', 'onOrchestratorReady', 'onCancel',
+  'getCountOfFailedTests', 'sendLog', 'debug', 'resolveId', 'resolveMock', 'resolve',
+  'registerMock', 'unregisterMock', 'clearMocks', 'invalidate', 'ensureModuleGraphEntry',
+  'snapshotSaved', 'resolveSnapshotPath', 'triggerCommand',
+])
+
+// The runner's birpc envelopes are flatted-encoded: a root object whose string
+// values index into the array (booleans stay inline). A request is
+// `{m, a, t:'q'}` with an optional string `i` (absent for events) and an
+// optional `o:true` (optional calls); m must be an allow-listed runner method.
+// A response is `{t:'s', i, r|e}`.
 function isRunnerEnvelope(data: unknown): boolean {
   if (typeof data !== 'string') return false
   try {
     const flat = JSON.parse(data) as unknown
     if (!Array.isArray(flat) || typeof flat[0] !== 'object' || flat[0] === null) return false
     const root = flat[0] as Record<string, unknown>
-    if (!Object.keys(root).every(key => ['m', 'a', 't', 'i', 'r', 'e'].includes(key))) return false
+    if (!Object.keys(root).every(key => ['m', 'a', 't', 'i', 'r', 'e', 'o'].includes(key))) return false
     const field = (key: string) => typeof root[key] === 'string' ? flat[Number(root[key])] : undefined
-    if (typeof field('i') !== 'string') return false
-    if (field('t') === 'q') return typeof field('m') === 'string'
-    return field('t') === 's' && !('m' in root)
+    if ('i' in root && typeof field('i') !== 'string') return false
+    if ('o' in root && root.o !== true) return false
+    if (field('t') === 'q') {
+      const method = field('m')
+      return typeof method === 'string' && runnerMethods.has(method) && !('r' in root) && !('e' in root)
+    }
+    return field('t') === 's' && typeof field('i') === 'string' && !('m' in root) && !('o' in root)
   } catch { return false }
 }
 

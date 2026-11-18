@@ -17,11 +17,13 @@ export default meta
 type Story = StoryObj<typeof meta>
 
 // The host opens the dialog on mount; Escape resolves the request as a cancel.
+// Expected text is literal on purpose: changing the story's initial args (title,
+// message or confirm label) must fail this play, not follow the change.
 export const Normal: Story = {
   play: async ({ canvas, userEvent }) => {
-    const dialog = await waitFor(() => canvas.getByRole('dialog'))
-    expect(canvas.getByText('Archive this chat? You can reopen it from Archived.')).not.toBeNull()
-    expect(dialog.textContent).toContain('Archive chat')
+    const dialog = await waitFor(() => canvas.getByRole('dialog', { name: 'Archive chat' }))
+    expect(dialog.textContent).toContain('Archive this chat? You can reopen it from Archived.')
+    expect(canvas.getByRole('button', { name: 'Archive' }).textContent?.trim()).toBe('Archive')
     // role="status" is pruned from the accessibility tree while the modal is
     // open, so the host's answer line is reached by text.
     const status = canvas.getByText(/Waiting for an answer/)

@@ -14,21 +14,28 @@ export default meta
 type Story = StoryObj<typeof meta>
 
 export const Empty: Story = {}
-// Whitespace-only input is not a value: submission stays disabled and the
+// Whitespace-only input is not a value: the submit button is disabled, so
+// neither a click nor Enter in the field fires the form's submit event, and the
 // request keeps waiting for an answer.
 export const Whitespace: Story = {
   args: { value: '   ' },
   play: async ({ canvas, userEvent }) => {
     const input = await waitFor(() => canvas.getByLabelText('Project name')) as HTMLInputElement
     expect(input.value).toBe('   ')
-    const submit = await waitFor(() => canvas.getByRole('button', { name: 'Create' })) as HTMLButtonElement
+    const submit = canvas.getByRole('button', { name: 'Create' }) as HTMLButtonElement
     expect(submit.disabled).toBe(true)
+    const form = input.form!
+    let submitted = 0
+    form.addEventListener('submit', () => { submitted += 1 }, true)
     await userEvent.click(submit)
-    expect(submit.disabled).toBe(true)
+    input.focus()
+    await userEvent.keyboard('{Enter}')
+    expect(submitted).toBe(0)
+    expect(input.value).toBe('   ')
     // role="status" is pruned from the accessibility tree while the modal is
     // open, so the host's answer line is reached by text.
-    expect(canvas.getByText(/Waiting for an answer/)).not.toBeNull()
-    expect(canvas.queryByRole('dialog')).not.toBeNull()
+    expect(canvas.getByText(/Waiting for an answer/).textContent).toBe('Result: Waiting for an answer')
+    expect(canvas.getByRole('dialog')).toBe(form)
   },
 }
 export const Prefilled: Story = { args: { title: 'Rename project', confirmLabel: 'Rename', value: 'Kitchen renovation' } }
