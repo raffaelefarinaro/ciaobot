@@ -88,7 +88,7 @@ describe('Settings > Workspaces rows', () => {
     await router.isReady()
     const { default: SettingsView } = await import('../SettingsView.vue')
     const wrapper = mount(SettingsView, {
-      global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: Stub } },
+      global: { plugins: [router], stubs: { Teleport: true } },
     })
     await flushPromises()
     await nextTick()

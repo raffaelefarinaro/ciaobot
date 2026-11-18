@@ -24,7 +24,7 @@ it.each([true, false])('chooses the advertised restart action (restart_only=%s)'
   const post = vi.spyOn(api, 'post').mockResolvedValue({ ok: true, steps: [] })
   const confirm = vi.spyOn(confirmation, 'askConfirm').mockResolvedValue(true)
   const beginRestart = vi.spyOn(useProjectStore(), 'beginServerRestart').mockImplementation(() => {})
-  const wrapper = mount(SettingsView, { global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: stub } } })
+  const wrapper = mount(SettingsView, { global: { plugins: [router], stubs: { Teleport: true } } })
   try {
     await flushPromises()
     await wrapper.findAll('button').find(b => b.text() === 'Restart')!.trigger('click')
@@ -50,7 +50,7 @@ it('mentions open cards a restart would close', async () => {
   })
   vi.spyOn(api, 'post').mockResolvedValue({ ok: true, steps: [] })
   const confirm = vi.spyOn(confirmation, 'askConfirm').mockResolvedValue(false)
-  const wrapper = mount(SettingsView, { global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: stub } } })
+  const wrapper = mount(SettingsView, { global: { plugins: [router], stubs: { Teleport: true } } })
   try {
     await flushPromises()
     await wrapper.findAll('button').find(b => b.text() === 'Restart')!.trigger('click')
@@ -67,17 +67,18 @@ it('installer mode shows re-run guidance and no update button', async () => {
   const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings/:tab', component: stub }] })
   await router.push('/settings')
   await router.isReady()
-  // An engine installed by the terminal installer has no in-app update: the
-  // button would only ever return the 400 the guidance below describes.
+  // An engine installed by the 1.x installer no longer updates itself, and the
+  // card offers no in-app update button for it: the copy names the move to the
+  // Mac app instead.
   vi.spyOn(api, 'get').mockImplementation(async (path) => {
     if (path === '/api/local/status') return { git_repo: true, branch: 'main', dirty: false, restart_only: true } as never
     if (path === '/api/package/status') return { current_version: '0.18.1', latest_version: '0.19.0', update_available: true, mode: 'installer' } as never
     throw new Error('Unrelated settings data unavailable in this test')
   })
-  const wrapper = mount(SettingsView, { global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: stub } } })
+  const wrapper = mount(SettingsView, { global: { plugins: [router], stubs: { Teleport: true } } })
   try {
     await flushPromises()
-    expect(wrapper.text()).toContain('Installed with the Ciaobot engine installer')
+    expect(wrapper.text()).toContain('no longer updates itself')
     const labels = wrapper.findAll('button').map(b => b.text())
     expect(labels).not.toContain('Update to 0.19.0')
     expect(labels).not.toContain('Update & Restart')
@@ -96,7 +97,7 @@ it('fails closed when the server type cannot be determined', async () => {
   vi.spyOn(api, 'get').mockRejectedValue(new Error('status unavailable'))
   const post = vi.spyOn(api, 'post').mockResolvedValue({ ok: true, steps: [] })
   const confirm = vi.spyOn(confirmation, 'askConfirm')
-  const wrapper = mount(SettingsView, { global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: stub } } })
+  const wrapper = mount(SettingsView, { global: { plugins: [router], stubs: { Teleport: true } } })
   try {
     await flushPromises()
     await wrapper.findAll('button').find(b => b.text() === 'Restart')!.trigger('click')

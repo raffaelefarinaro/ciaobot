@@ -6,70 +6,31 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { api } from '../../lib/api'
 import { useProjectStore } from '../../stores/projects'
 import SettingsView from '../SettingsView.vue'
-import type { EngineUpdateOperation, EngineUpdateStatus } from '../../lib/types'
 
 afterEach(() => vi.restoreAllMocks())
 
-function operation(phase: string, extra: Partial<EngineUpdateOperation> = {}): EngineUpdateOperation {
-  return {
-    id: '20260926T101500Z-ab12',
-    phase,
-    from_version: '0.19.0',
-    to_version: '0.20.0',
-    started_at: '2026-09-26T10:15:00+00:00',
-    updated_at: '2026-09-26T10:15:20+00:00',
-    ...extra,
-  }
-}
-
-/** The automatic updater's answer, shaped the way `status()` serves it. */
-function autoUpdate(overrides: Record<string, unknown> = {}) {
-  return {
-    enabled: true,
-    supported: true,
-    unsupported_reason: '',
-    snooze_until: '',
-    outcome: '',
-    error: '',
-    attempted_at: '',
-    ...overrides,
-  }
-}
-
-/** How long the card waits between `/api/update/status` reads. */
-const POLL_MS = 2000
-
 /**
- * Mount the Updates card against one update-status answer and one package
- * answer. Everything else the view asks for is refused, exactly as the other
- * Settings tests do, so a test only ever sees the two it cares about.
+ * Mount the Updates card against one package answer. Everything else the view
+ * asks for is refused, exactly as the other Settings tests do, so a test only
+ * ever sees the answer it cares about. `packageStatus` may be a list: the card
+ * reads it in order and then keeps reading the last of it, for the reads a
+ * settled card makes.
  *
- * `update` may be a list, which the card reads in order and then keeps reading
- * the last of: that is how a run is driven forward across polls, one record at
- * a time. `packageStatus` takes a list the same way, for the reads a settled
- * record makes. `attach` puts the view in the document, which focus assertions
- * need.
+ * Every path the card requests is recorded on the spy, so a test can assert
+ * the card never asks a route it no longer owns.
  */
 async function mountCard(
-  update: EngineUpdateStatus | EngineUpdateStatus[],
-  packageStatus: Record<string, unknown> | Record<string, unknown>[] = { mode: 'installer', current_version: '0.19.0', update_available: true, latest_version: '0.20.0' },
+  packageStatus: Record<string, unknown> | Record<string, unknown>[] = { mode: 'installer', current_version: '2.0.0', update_available: false, latest_version: '2.0.0' },
   { attach = false }: { attach?: boolean } = {},
 ) {
   setActivePinia(createPinia())
   const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings', component: { template: '<div />' } }] })
   await router.push('/settings')
   await router.isReady()
-  const answers = Array.isArray(update) ? [...update] : [update]
   const packageAnswers = Array.isArray(packageStatus) ? [...packageStatus] : [packageStatus]
-  let reads = 0
   let packageReads = 0
-  vi.spyOn(api, 'get').mockImplementation(async (path) => {
+  const getSpy = vi.spyOn(api, 'get').mockImplementation(async (path) => {
     if (path === '/api/local/status') return { git_repo: true, branch: 'main', dirty: false, restart_only: true } as never
-    if (path === '/api/update/status') {
-      const answer = answers[Math.min(reads, answers.length - 1)]
-      reads += 1
-      return answer as never
-    }
     if (path === '/api/package/status') {
       const answer = packageAnswers[Math.min(packageReads, packageAnswers.length - 1)]
       packageReads += 1
@@ -77,532 +38,79 @@ async function mountCard(
     }
     throw new Error('Unrelated settings data unavailable in this test')
   })
-  const post = vi.spyOn(api, 'post').mockResolvedValue({ started: true } as never)
-  const patch = vi.spyOn(api, 'patch').mockResolvedValue(autoUpdate() as never)
-  const beginRestart = vi.spyOn(useProjectStore(), 'beginServerRestart').mockImplementation(() => {})
+  const post = vi.spyOn(api, 'post').mockResolvedValue({ ok: true } as never)
+  vi.spyOn(useProjectStore(), 'beginServerRestart').mockImplementation(() => {})
   const wrapper = mount(SettingsView, {
     global: { plugins: [router], stubs: { Teleport: true } },
     attachTo: attach ? document.body : undefined,
   })
   await flushPromises()
-  // How many times the card has read the status route, which is the poll's own
-  // scoreboard: a run whose record has not landed yet is only visible as a read
-  // that still happened.
-  const statusReads = () => reads
-  return { wrapper, post, patch, beginRestart, statusReads }
+  return { wrapper, getSpy, post }
 }
 
 function buttonLabels(wrapper: Awaited<ReturnType<typeof mountCard>>['wrapper']) {
   return wrapper.findAll('button').map(b => b.text())
 }
 
-function button(wrapper: Awaited<ReturnType<typeof mountCard>>['wrapper'], label: string) {
-  return wrapper.findAll('button').find(b => b.text() === label)
+/** The paths the card requested, for assertions against a route it dropped. */
+function requestedPaths(getSpy: Awaited<ReturnType<typeof mountCard>>['getSpy']) {
+  return getSpy.mock.calls.map(call => call[0])
 }
 
-/** Run the card's poll once, the way the clock would. */
-async function poll() {
-  await vi.advanceTimersByTimeAsync(POLL_MS)
-  await flushPromises()
-}
-
-it('offers one Update & restart button when a release is available (click posts start)', async () => {
-  const { wrapper, post } = await mountCard({ install_mode: 'installer', can_update: true, operation: null })
+it('says the app updates the engine together with Ciaobot for Mac, and offers no button', async () => {
+  const { wrapper } = await mountCard(
+    { mode: 'bundled_app', current_version: '2.0.0', update_available: true, latest_version: '2.0.1' },
+  )
   try {
-    expect(buttonLabels(wrapper)).toContain('Update & restart')
-    await button(wrapper, 'Update & restart')!.trigger('click')
-    await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/update/start')
-  } finally {
-    wrapper.unmount()
-  }
-})
-
-it('shows real progress from the persisted phase, with no invented timer', async () => {
-  vi.useFakeTimers()
-  try {
-    const { wrapper } = await mountCard({
-      install_mode: 'installer',
-      can_update: true,
-      operation: operation('swapping'),
-    })
-    // The record's phases, in the coordinator's order: eight behind the swap are
-    // done, the swap is live, and nothing advances behind it.
-    expect(wrapper.find('.update-progress-overlay').exists()).toBe(true)
-    expect(wrapper.findAll('.update-progress-log-row').map(r => r.classes().find(c => c.startsWith('is-'))))
-      .toEqual([
-        'is-done', 'is-done', 'is-done', 'is-done', 'is-done', 'is-done', 'is-done', 'is-done',
-        'is-in_progress', 'is-pending', 'is-pending', 'is-pending',
-      ])
-    expect(wrapper.find('.update-progress-phase').text()).toBe('Swapping in the new version')
-    expect(buttonLabels(wrapper)).not.toContain('Update & restart')
-    expect(buttonLabels(wrapper)).not.toContain('Update & restart')
-    wrapper.unmount()
-  } finally {
-    vi.useRealTimers()
-  }
-})
-
-it('shows the failure error and no success line for a rolled-back job', async () => {
-  const { wrapper } = await mountCard({
-    install_mode: 'installer',
-    can_update: true,
-    operation: operation('rolled_back', { error: 'the new engine never answered' }),
-  })
-  try {
-    expect(wrapper.text()).toContain('the new engine never answered')
-    expect(wrapper.text()).not.toContain('up to date')
-    expect(wrapper.find('.update-progress-overlay').exists()).toBe(false)
-    // A retry path, and the version the engine went back to.
-    expect(buttonLabels(wrapper)).toContain('Try again')
-    expect(wrapper.text()).toContain('Back on v0.19.0')
-  } finally {
-    wrapper.unmount()
-  }
-})
-
-it('offers a retry for a record that failed without a reason to show', async () => {
-  const { wrapper } = await mountCard({
-    install_mode: 'installer',
-    can_update: true,
-    operation: operation('failed'),
-  })
-  try {
-    expect(buttonLabels(wrapper)).toContain('Retry')
-    expect(wrapper.text()).not.toContain('up to date')
-  } finally {
-    wrapper.unmount()
-  }
-})
-
-it('applies a staged job through the same button and starts the restart overlay', async () => {
-  vi.useFakeTimers()
-  const { wrapper, post, beginRestart } = await mountCard([
-    { install_mode: 'installer', can_update: true, operation: operation('staged') },
-    { install_mode: 'installer', can_update: true, operation: operation('draining'), running: true },
-  ])
-  try {
-    expect(buttonLabels(wrapper)).toContain('Update & restart')
-    await button(wrapper, 'Update & restart')!.trigger('click')
-    await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/update/start')
-    expect(beginRestart).not.toHaveBeenCalled()
-    await poll()
-    // The apply drains and reboots the engine, so it needs the same overlay a
-    // Settings restart uses; a second one would be a second reload loop.
-    expect(beginRestart).toHaveBeenCalledWith('Updating Ciaobot… the engine will restart')
-    wrapper.unmount()
-  } finally {
-    vi.useRealTimers()
-  }
-})
-
-it('offers one Update & restart button for a staged job and no stage or apply button', async () => {
-  const { wrapper, post } = await mountCard({
-    install_mode: 'installer',
-    can_update: true,
-    operation: operation('staged'),
-  })
-  try {
+    const card = wrapper.get('.card')
+    expect(card.text()).toContain('Ciaobot for Mac updates this engine together with the app.')
+    // The one-line installer copy went with the engine updater. If it ever
+    // comes back, these two asserts name it directly.
+    expect(card.text()).not.toContain('install.sh')
+    expect(card.find('code').exists()).toBe(false)
     const labels = buttonLabels(wrapper)
-    expect(labels).toContain('Update & restart')
-    expect(labels.filter(label => /stage|apply/i.test(label))).toEqual([])
+    expect(labels).not.toContain('Update & restart')
+    expect(labels).not.toContain('Update to 2.0.1')
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('says an installer engine no longer updates itself, and never asks the coordinator', async () => {
+  const { wrapper, getSpy } = await mountCard(
+    { mode: 'installer', current_version: '1.10.0', update_available: true, latest_version: '1.11.0' },
+  )
+  try {
+    const card = wrapper.get('.card')
+    expect(card.text()).toContain('This engine was installed by the old Ciaobot installer')
+    expect(card.text()).toContain('no longer updates itself')
+    expect(card.text()).toContain('Install Ciaobot for Mac to keep it up to date.')
+    expect(card.find('code').exists()).toBe(false)
+    const labels = buttonLabels(wrapper)
+    expect(labels).not.toContain('Update & restart')
+    expect(labels).not.toContain('Update to 1.11.0')
+    // The engine updater is gone from the card: it asks nothing about a run,
+    // staged or otherwise, and nothing here can start one behind the copy.
+    expect(requestedPaths(getSpy)).not.toContain('/api/update/status')
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('keeps the pip guidance and the Update button on an editable install', async () => {
+  const { wrapper, post } = await mountCard(
+    { mode: 'editable', current_version: '0.19.0', update_available: true, latest_version: '0.20.0' },
+  )
+  try {
+    expect(wrapper.text()).toContain('Check the installed package version')
+    const labels = buttonLabels(wrapper)
+    // The pip card's own Update button, untouched by the engine updater's
+    // removal: the card still opens the changelog and offers the upgrade.
+    expect(labels).toContain('Update to 0.20.0')
+    expect(labels).not.toContain('Update & restart')
     expect(post).not.toHaveBeenCalled()
   } finally {
     wrapper.unmount()
-  }
-})
-
-it('keeps polling through the staged phase while the job is running', async () => {
-  vi.useFakeTimers()
-  // The record passes through the non-in-flight `staged` phase between the two
-  // halves; the server says the job is still alive, so it is not the run's end.
-  const { wrapper, statusReads } = await mountCard([
-    { install_mode: 'installer', can_update: true, operation: null },
-    { install_mode: 'installer', can_update: true, operation: operation('downloading'), running: true },
-    { install_mode: 'installer', can_update: true, operation: operation('staged'), running: true },
-    { install_mode: 'installer', can_update: true, operation: operation('draining'), running: true },
-  ])
-  try {
-    await button(wrapper, 'Update & restart')!.trigger('click')
-    await flushPromises()
-    await poll()
-    await poll()
-    expect(statusReads()).toBe(3)
-    // Staged with the job running: the poll is still alive.
-    await poll()
-    expect(statusReads()).toBe(4)
-    wrapper.unmount()
-  } finally {
-    vi.useRealTimers()
-  }
-})
-
-it('requests the restart overlay when this run enters the applying half', async () => {
-  vi.useFakeTimers()
-  const { wrapper, beginRestart } = await mountCard([
-    { install_mode: 'installer', can_update: true, operation: null },
-    { install_mode: 'installer', can_update: true, operation: operation('staged'), running: true },
-    { install_mode: 'installer', can_update: true, operation: operation('draining'), running: true },
-    { install_mode: 'installer', can_update: true, operation: operation('swapping'), running: true },
-  ])
-  try {
-    await button(wrapper, 'Update & restart')!.trigger('click')
-    await flushPromises()
-    await poll()
-    expect(beginRestart).not.toHaveBeenCalled()
-    await poll()
-    expect(beginRestart).toHaveBeenCalledTimes(1)
-    expect(beginRestart).toHaveBeenCalledWith('Updating Ciaobot… the engine will restart')
-    await poll()
-    expect(beginRestart).toHaveBeenCalledTimes(1)
-    wrapper.unmount()
-  } finally {
-    vi.useRealTimers()
-  }
-})
-
-it('updates a staged release behind a refusal with the same button', async () => {
-  vi.useFakeTimers()
-  // A refusal parked against a `staged` record is served for as long as that
-  // record is unchanged, and nothing the card can do moves a `staged` record, so
-  // the reason survives every reload. `/api/update/start` applies a staged record
-  // itself, so the one button is the way out of it.
-  const { wrapper, post, statusReads } = await mountCard({
-    install_mode: 'installer',
-    can_update: true,
-    operation: operation('staged'),
-    error: 'another engine update is already in progress',
-  })
-  try {
-    // The reason is the newer answer, and it is shown.
-    expect(wrapper.text()).toContain('another engine update is already in progress')
-    // The action is the one the record allows, and it is live: the poll stopped
-    // on the refusal, so nothing is holding the card busy.
-    const apply = button(wrapper, 'Update & restart')
-    expect(apply).toBeDefined()
-    expect(apply!.attributes('disabled')).toBeUndefined()
-    expect(buttonLabels(wrapper).filter(label => /stage|apply/i.test(label))).toEqual([])
-
-    await apply!.trigger('click')
-    await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/update/start')
-    // The apply is a run like any other, so it is watched to its own outcome.
-    const afterApply = statusReads()
-    await poll()
-    expect(statusReads()).toBeGreaterThan(afterApply)
-    wrapper.unmount()
-  } finally {
-    vi.useRealTimers()
-  }
-})
-
-it('keeps the restored version visible behind a later refusal', async () => {
-  // A rollback is still a rollback after a refusal is parked against its record,
-  // and the version the engine went back to is still the one running. An error
-  // branch that took the whole panel hid that line, so the card could not say
-  // which version the user was actually on.
-  const { wrapper } = await mountCard({
-    install_mode: 'installer',
-    can_update: true,
-    operation: operation('rolled_back', { error: 'the new engine never answered' }),
-    error: 'another engine update is already in progress',
-  })
-  try {
-    expect(wrapper.text()).toContain('another engine update is already in progress')
-    expect(wrapper.text()).toContain('Back on v0.19.0')
-    // Nothing claims success over a run that did not apply.
-    expect(wrapper.text()).not.toContain('up to date')
-  } finally {
-    wrapper.unmount()
-  }
-})
-
-it('recovers from a refusal that never wrote a record', async () => {
-  vi.useFakeTimers()
-  // A stage POST is answered 202 before the record exists, so release
-  // resolution or locking can fail with the card holding a null operation and a
-  // reason. Nothing will ever arrive on a poll for that, so the card has to stop
-  // polling and offer the action again.
-  const { wrapper, post } = await mountCard([
-    { install_mode: 'installer', can_update: true, operation: null },
-    { install_mode: 'installer', can_update: true, operation: null, error: 'the latest release could not be resolved' },
-  ])
-  try {
-    await button(wrapper, 'Update & restart')!.trigger('click')
-    await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/update/start')
-
-    await poll()
-    expect(wrapper.text()).toContain('the latest release could not be resolved')
-
-    // The retry is enabled, which is the whole point: the poll has stopped, so
-    // nothing is holding the card busy any more.
-    const retry = button(wrapper, 'Update & restart')
-    expect(retry).toBeDefined()
-    expect(retry!.attributes('disabled')).toBeUndefined()
-    await retry!.trigger('click')
-    await flushPromises()
-    expect(post.mock.calls.filter(call => call[0] === '/api/update/start')).toHaveLength(2)
-    wrapper.unmount()
-  } finally {
-    vi.useRealTimers()
-  }
-})
-
-it('moves focus into the overlay while it is up and back to the card when it settles', async () => {
-  vi.useFakeTimers()
-  // The applying half is the takeover: the engine is replacing itself, so the
-  // overlay is modal for as long as that lasts.
-  const { wrapper } = await mountCard([
-    { install_mode: 'installer', can_update: true, operation: null },
-    { install_mode: 'installer', can_update: true, operation: operation('draining') },
-    { install_mode: 'installer', can_update: true, operation: operation('staged') },
-  ], undefined, { attach: true })
-  try {
-    const stage = button(wrapper, 'Update & restart')!
-    // A keyboard activation leaves focus on the button it activated.
-    stage.element.focus()
-    await stage.trigger('click')
-    await flushPromises()
-    expect(wrapper.find('.engine-update-overlay').exists()).toBe(false)
-
-    await poll()
-    const overlay = wrapper.get('.engine-update-overlay').element as HTMLElement
-    const statusRegion = wrapper.get('.update-progress-content').element as HTMLElement
-    const body = wrapper.get('.pane-body').element as HTMLElement
-    // Focus lands on the overlay's status region, not on the inert layer.
-    expect(document.activeElement).toBe(statusRegion)
-    expect(statusRegion.getAttribute('role')).toBe('status')
-    // The Settings behind a full-window overlay are inert, so Tab cannot reach
-    // Restart or Deploy underneath it.
-    expect(body.inert).toBe(true)
-    expect(body.getAttribute('aria-hidden')).toBe('true')
-    expect(overlay).not.toBe(document.activeElement)
-
-    // Nothing in the overlay is actionable, so Tab stays on the status region
-    // rather than walking out into the background.
-    const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
-    window.dispatchEvent(tab)
-    expect(tab.defaultPrevented).toBe(true)
-    expect(document.activeElement).toBe(statusRegion)
-
-    // The record settles: the overlay goes, the background is live again, and
-    // focus lands on the action the run produced.
-    await poll()
-    expect(wrapper.find('.engine-update-overlay').exists()).toBe(false)
-    expect(body.inert).not.toBe(true)
-    const apply = button(wrapper, 'Update & restart')
-    expect(apply).toBeDefined()
-    expect(document.activeElement).toBe(apply!.element)
-    wrapper.unmount()
-  } finally {
-    vi.useRealTimers()
-  }
-})
-
-it('leaves the app usable while a run is staging', async () => {
-  vi.useFakeTimers()
-  // Staging is a release lookup, a download and a wheel build with the engine
-  // still serving, so the card's copy says Ciaobot keeps running until it is
-  // ready to apply. A full-window modal would contradict that for minutes, and
-  // `useModalFocus` makes the background inert all the way to `document.body` —
-  // so the staging half renders its progress in the card and takes nothing over.
-  const { wrapper, statusReads } = await mountCard([
-    { install_mode: 'installer', can_update: true, operation: null },
-    { install_mode: 'installer', can_update: true, operation: operation('downloading') },
-    { install_mode: 'installer', can_update: true, operation: operation('staged') },
-  ], undefined, { attach: true })
-  try {
-    await button(wrapper, 'Update & restart')!.trigger('click')
-    await flushPromises()
-    expect(wrapper.find('.engine-update-overlay').exists()).toBe(false)
-
-    await poll()
-    const body = wrapper.get('.pane-body').element as HTMLElement
-    // No takeover: no overlay, and nothing in the app behind it is inert, so
-    // Restart, Deploy and the other panes stay reachable.
-    expect(wrapper.find('.engine-update-overlay').exists()).toBe(false)
-    expect(body.inert).not.toBe(true)
-    expect(body.getAttribute('aria-hidden')).toBeNull()
-    expect(document.body.inert).not.toBe(true)
-    // The rows are the overlay's rows, in the card, driven by the record.
-    const progress = wrapper.get('.engine-update-panel .update-progress-content')
-    expect(progress.text()).toContain('Downloading the release')
-    expect(wrapper.findAll('.update-progress-log-row.is-in_progress').map(r => r.find('.update-progress-log-name').text()))
-      .toEqual(['downloading the release'])
-    // Focus went to the region that replaced the button, not to a takeover.
-    expect(document.activeElement).toBe(progress.element)
-    // Tab is not claimed: the card is one place in a live app again.
-    const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
-    window.dispatchEvent(tab)
-    expect(tab.defaultPrevented).toBe(false)
-
-    // The poll keeps running, and the run still ends on the staged panel.
-    const reads = statusReads()
-    await poll()
-    expect(statusReads()).toBeGreaterThan(reads)
-    expect(wrapper.find('.engine-update-overlay').exists()).toBe(false)
-    expect(buttonLabels(wrapper)).toContain('Update & restart')
-    wrapper.unmount()
-  } finally {
-    vi.useRealTimers()
-  }
-})
-
-it('does not pull focus for a run this tab did not start', async () => {
-  // A run can start on the CLI or on another device, in which case this tab's
-  // first read already finds it in flight. Staging is not a takeover, so it must
-  // not take the focus the user has either — the card shows the rows and leaves
-  // the keyboard where it was.
-  const { wrapper } = await mountCard(
-    { install_mode: 'installer', can_update: true, operation: operation('downloading') },
-    undefined, { attach: true },
-  )
-  // The control the user is on: any focusable element outside the update card
-  // (Restart, which used to be on this page, now lives on Advanced).
-  const elsewhere = document.createElement('button')
-  elsewhere.textContent = 'Elsewhere'
-  document.body.appendChild(elsewhere)
-  try {
-    elsewhere.focus()
-    expect(document.activeElement).toBe(elsewhere)
-
-    await flushPromises()
-    expect(wrapper.find('.update-progress-phase').text()).toBe('Downloading the release')
-    expect(wrapper.find('.engine-update-overlay').exists()).toBe(false)
-    expect(document.activeElement).toBe(elsewhere)
-  } finally {
-    elsewhere.remove()
-    wrapper.unmount()
-  }
-})
-
-it('keeps polling a run whose record has not landed yet', async () => {
-  vi.useFakeTimers()
-  // A stage POST is answered 202 before the coordinator has written anything, and
-  // it writes its first record only after the lock, the release lookup over the
-  // network and the removal of any previous staged environment. The first reads
-  // can therefore be serving the previous run's `failed` record — a record the
-  // card was already holding when it asked for this one. Reading that as the end
-  // of the run stops the poll, and the run then stages invisibly behind a panel
-  // with a re-enabled button and nothing watching it.
-  const { wrapper, post, statusReads } = await mountCard([
-    { install_mode: 'installer', can_update: true, operation: operation('failed', { error: 'the wheel could not be built' }) },
-    { install_mode: 'installer', can_update: true, operation: operation('failed', { error: 'the wheel could not be built' }) },
-    { install_mode: 'installer', can_update: true, operation: operation('downloading') },
-    { install_mode: 'installer', can_update: true, operation: operation('staged') },
-  ])
-  try {
-    expect(statusReads()).toBe(1)
-    await button(wrapper, 'Retry')!.trigger('click')
-    await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/update/start')
-
-    // Read two: the previous run's outcome, before the coordinator's first
-    // write. The poll has to still be alive afterwards.
-    await poll()
-    expect(statusReads()).toBe(2)
-
-    // Read three: this run's own record, in flight, in the card.
-    await poll()
-    expect(statusReads()).toBe(3)
-    expect(wrapper.find('.update-progress-phase').text()).toBe('Downloading the release')
-    // Staging is not a takeover, so the full-window overlay is not up.
-    expect(wrapper.find('.engine-update-overlay').exists()).toBe(false)
-
-    // Read four: the run's outcome, which ends the poll and the panel.
-    await poll()
-    expect(statusReads()).toBe(4)
-    expect(buttonLabels(wrapper)).toContain('Update & restart')
-
-    const settled = statusReads()
-    await poll()
-    expect(statusReads()).toBe(settled)
-    wrapper.unmount()
-  } finally {
-    vi.useRealTimers()
-  }
-})
-
-it('does not end a new run on the refusal the previous one left parked', async () => {
-  vi.useFakeTimers()
-  // A served `error` is not scoped to the run this card started: a parked reason
-  // lives on the server and is served for as long as the record it was parked
-  // against is unchanged. So run 1's refusal is still on the wire through run
-  // 2's pre-record window — the lock, the release lookup and the removal of any
-  // previous staged environment all happen before the coordinator's first write.
-  // Treating that reason as run 2's own answer stops the poll while the run goes
-  // on staging invisibly, behind a panel with a re-enabled button whose second
-  // click is a 409, because by then the run really is in flight.
-  const parked = 'another engine update is already in progress'
-  const { wrapper, post, statusReads } = await mountCard([
-    { install_mode: 'installer', can_update: true, operation: operation('failed', { error: 'the wheel could not be built' }), error: parked },
-    { install_mode: 'installer', can_update: true, operation: operation('failed', { error: 'the wheel could not be built' }), error: parked },
-    { install_mode: 'installer', can_update: true, operation: operation('downloading') },
-    { install_mode: 'installer', can_update: true, operation: operation('staged') },
-  ])
-  try {
-    expect(statusReads()).toBe(1)
-    // The parked reason offers the action, and the action is what starts run 2.
-    expect(buttonLabels(wrapper)).toContain('Update & restart')
-    await button(wrapper, 'Update & restart')!.trigger('click')
-    await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/update/start')
-
-    // Read two: the same parked reason against the same unchanged record. It is
-    // not this run's answer, so the poll has to still be alive afterwards.
-    await poll()
-    expect(statusReads()).toBe(2)
-
-    // Read three: this run's own record, in flight, in the card.
-    await poll()
-    expect(statusReads()).toBe(3)
-    expect(wrapper.find('.update-progress-phase').text()).toBe('Downloading the release')
-
-    // Read four: the run's outcome, which ends the poll and leaves the panel on
-    // the one action a staged record allows.
-    await poll()
-    expect(statusReads()).toBe(4)
-    expect(buttonLabels(wrapper)).toContain('Update & restart')
-
-    const settled = statusReads()
-    await poll()
-    expect(statusReads()).toBe(settled)
-    wrapper.unmount()
-  } finally {
-    vi.useRealTimers()
-  }
-})
-
-it('stops a pre-record poll at the grace bound, so it cannot run forever', async () => {
-  vi.useFakeTimers()
-  // The other end of the same window: a run that produces neither a record nor
-  // a refusal — a coordinator that died between the 202 and its first write.
-  // Waiting has to be bounded, or every button in the card stays disabled until
-  // the page is reloaded.
-  const { wrapper, statusReads } = await mountCard(
-    { install_mode: 'installer', can_update: true, operation: operation('failed') },
-  )
-  try {
-    await button(wrapper, 'Retry')!.trigger('click')
-    await flushPromises()
-    const afterClick = statusReads()
-
-    await vi.advanceTimersByTimeAsync(61_000)
-    await flushPromises()
-    const afterGrace = statusReads()
-    expect(afterGrace).toBeGreaterThan(afterClick)
-
-    await vi.advanceTimersByTimeAsync(10_000)
-    expect(statusReads()).toBe(afterGrace)
-    // The card is a way out again, which is the point of giving up.
-    const retry = button(wrapper, 'Retry')
-    expect(retry).toBeDefined()
-    expect(retry!.attributes('disabled')).toBeUndefined()
-    wrapper.unmount()
-  } finally {
-    vi.useRealTimers()
   }
 })
 
@@ -610,10 +118,9 @@ it('does not claim up to date when the version check failed', async () => {
   // `package_status` answers `update_available: false` with the reason in `error`
   // on a rate limit or any network failure, and the cached variant only papers
   // over that once a good answer has been seen. The card would then read "Up to
-  // date · 0.19.0" with "Update check failed" directly beneath it.
+  // date · 1.10.0" with "Update check failed" directly beneath it.
   const { wrapper } = await mountCard(
-    { install_mode: 'installer', can_update: true, operation: null },
-    { mode: 'installer', current_version: '0.19.0', update_available: false, latest_version: '', error: 'HTTP 403: rate limit exceeded' },
+    { mode: 'installer', current_version: '1.10.0', update_available: false, latest_version: '', error: 'HTTP 403: rate limit exceeded' },
   )
   try {
     expect(wrapper.text()).not.toContain('Up to date')
@@ -624,50 +131,14 @@ it('does not claim up to date when the version check failed', async () => {
   }
 })
 
-it('returns focus to the card itself when a run leaves it nothing to click', async () => {
-  vi.useFakeTimers()
-  // An `applied` record is the run's outcome and offers no action, so there is no
-  // button to focus: the panel is the target, and it carries `tabindex="-1"` so
-  // focus never lands on nothing at all.
-  const { wrapper } = await mountCard([
-    { install_mode: 'installer', can_update: true, operation: null },
-    { install_mode: 'installer', can_update: true, operation: operation('draining') },
-    { install_mode: 'installer', can_update: true, operation: operation('applied') },
-  ], [
-    { mode: 'installer', current_version: '0.19.0', update_available: true, latest_version: '0.20.0' },
-    // The apply succeeded, so the next check answers with the version that is
-    // now installed: the record is history, and there is nothing left to do.
-    { mode: 'installer', current_version: '0.20.0', update_available: false, latest_version: '0.20.0' },
-  ], { attach: true })
-  try {
-    await button(wrapper, 'Update & restart')!.trigger('click')
-    await flushPromises()
-    await poll()
-    expect(document.activeElement).toBe(wrapper.get('.update-progress-content').element)
-
-    await poll()
-    const panel = wrapper.get('.engine-update-panel')
-    expect(panel.attributes('tabindex')).toBe('-1')
-    expect(panel.findAll('button')).toHaveLength(0)
-    expect(document.activeElement).toBe(panel.element)
-    expect(wrapper.text()).toContain('ciaobot is up to date')
-    wrapper.unmount()
-  } finally {
-    vi.useRealTimers()
-  }
-})
-
-it('says up to date for an installer engine with no job and nothing newer', async () => {
+it('says up to date for an installer install with nothing newer', async () => {
   const { wrapper } = await mountCard(
-    { install_mode: 'installer', can_update: true, operation: null },
-    { mode: 'installer', current_version: '0.20.0', update_available: false, latest_version: '0.20.0' },
+    { mode: 'installer', current_version: '2.0.0', update_available: false, latest_version: '2.0.0' },
   )
   try {
-    // A status, not a disabled button, and nothing to click.
-    expect(wrapper.text()).toContain('Up to date · 0.20.0')
-    const labels = buttonLabels(wrapper)
-    expect(labels).not.toContain('Update & restart')
-    expect(labels).not.toContain('Update & restart')
+    // A status, not a button, and nothing to click.
+    expect(wrapper.text()).toContain('Up to date · 2.0.0')
+    expect(buttonLabels(wrapper)).not.toContain('Update & restart')
   } finally {
     wrapper.unmount()
   }
@@ -675,32 +146,14 @@ it('says up to date for an installer engine with no job and nothing newer', asyn
 
 it('collapses Updates to its title and an up-to-date badge when nothing is in progress', async () => {
   const { wrapper } = await mountCard(
-    { install_mode: 'installer', can_update: true, operation: null },
-    { mode: 'installer', current_version: '0.20.0', update_available: false, latest_version: '0.20.0' },
+    { mode: 'installer', current_version: '2.0.0', update_available: false, latest_version: '2.0.0' },
   )
   try {
     // The first card on General is Updates. Its title stays; the status sits in
-    // the corner as a badge, and the copy and the engine panel are not rendered at all.
+    // the corner as a badge, and the copy is not rendered at all.
     const card = wrapper.get('.card')
     expect(card.get('.section-title').text()).toBe('Updates')
-    expect(card.get('.settings-card-header .badge--success').text()).toBe('Up to date · 0.20.0')
-    expect(card.findAll('p.hint')).toHaveLength(0)
-    expect(card.text()).not.toContain('Installed with the Ciaobot engine installer')
-    expect(card.find('.engine-update-panel').exists()).toBe(false)
-    expect(card.find('.settings-form-panel').exists()).toBe(false)
-  } finally {
-    wrapper.unmount()
-  }
-})
-
-it('collapses a bundled app that is up to date, without the reinstall copy', async () => {
-  const { wrapper } = await mountCard(
-    { install_mode: 'bundled_app', can_update: false, operation: null },
-    { mode: 'bundled_app', current_version: '0.20.0', update_available: false, latest_version: '0.20.0' },
-  )
-  try {
-    const card = wrapper.get('.card')
-    expect(card.get('.settings-card-header .badge--success').text()).toBe('Up to date · 0.20.0')
+    expect(card.get('.settings-card-header .badge--success').text()).toBe('Up to date · 2.0.0')
     expect(card.findAll('p.hint')).toHaveLength(0)
     expect(card.find('code').exists()).toBe(false)
   } finally {
@@ -708,279 +161,15 @@ it('collapses a bundled app that is up to date, without the reinstall copy', asy
   }
 })
 
-it('keeps the full Updates card when an update is available', async () => {
-  const { wrapper } = await mountCard({ install_mode: 'installer', can_update: true, operation: null })
+it('collapses a bundled app that is up to date, without the reinstall copy', async () => {
+  const { wrapper } = await mountCard(
+    { mode: 'bundled_app', current_version: '2.0.0', update_available: false, latest_version: '2.0.0' },
+  )
   try {
     const card = wrapper.get('.card')
-    expect(card.find('.settings-card-header .badge').exists()).toBe(false)
-    expect(card.text()).toContain('Updating downloads and verifies')
-    expect(card.get('.engine-update-panel').text()).toContain('v0.20.0 is available')
-    expect(buttonLabels(wrapper)).toContain('Update & restart')
-  } finally {
-    wrapper.unmount()
-  }
-})
-
-it('keeps the full Updates card for an applied record with nothing newer', async () => {
-  const { wrapper } = await mountCard(
-    { install_mode: 'installer', can_update: true, operation: operation('applied') },
-    { mode: 'installer', current_version: '0.20.0', update_available: false, latest_version: '0.20.0' },
-  )
-  try {
-    // A `done` record is the last run's outcome, not an idle engine: the panel
-    // keeps its line and the corner carries no status of its own.
-    const card = wrapper.get('.card')
-    expect(card.find('.settings-card-header .badge').exists()).toBe(false)
-    expect(card.text()).toContain('ciaobot is up to date')
-    expect(card.findAll('p.hint').length).toBeGreaterThan(0)
-  } finally {
-    wrapper.unmount()
-  }
-})
-
-it('keeps the non-installer guidance', async () => {
-  const { wrapper, post } = await mountCard(
-    { install_mode: 'editable', can_update: false, operation: null },
-    { mode: 'editable', current_version: '0.19.0', update_available: true, latest_version: '0.20.0' },
-  )
-  try {
-    expect(wrapper.text()).toContain('Check the installed package version')
-    const labels = buttonLabels(wrapper)
-    expect(labels).not.toContain('Update & restart')
-    expect(labels).not.toContain('Update & restart')
-    expect(labels).toContain('Update to 0.20.0')
-    expect(post).not.toHaveBeenCalled()
-  } finally {
-    wrapper.unmount()
-  }
-})
-
-it('stages again when a later release follows an applied record', async () => {
-  // The record is never unlinked, so an `applied` record is the last run's
-  // outcome forever. The release page is read independently of it, so a newer
-  // release is the signal that the record is history — and the card has to offer
-  // Stage again rather than claim the engine is up to date.
-  const { wrapper, post } = await mountCard(
-    { install_mode: 'installer', can_update: true, operation: operation('applied') },
-    { mode: 'installer', current_version: '0.20.0', update_available: true, latest_version: '0.21.0' },
-  )
-  try {
-    expect(wrapper.text()).not.toContain('ciaobot is up to date')
-    expect(wrapper.text()).not.toContain('Up to date')
-    expect(wrapper.text()).toContain('v0.21.0 is available')
-    const stage = button(wrapper, 'Update & restart')
-    expect(stage).toBeDefined()
-    expect(stage!.attributes('disabled')).toBeUndefined()
-    await stage!.trigger('click')
-    await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/update/start')
-  } finally {
-    wrapper.unmount()
-  }
-})
-
-it('recovers from a refusal parked against an existing record', async () => {
-  vi.useFakeTimers()
-  // A terminal record is already not-busy, so nothing but the poll's own end
-  // condition can tell the card that the run it just asked for will never write
-  // a record of its own. The served reason is the newer answer, and it has to
-  // win over the previous run's own error.
-  const { wrapper, post } = await mountCard([
-    { install_mode: 'installer', can_update: true, operation: operation('failed', { error: 'the wheel could not be built' }) },
-    { install_mode: 'installer', can_update: true, operation: operation('failed', { error: 'the wheel could not be built' }), error: 'the latest release could not be resolved' },
-  ])
-  try {
-    await button(wrapper, 'Retry')!.trigger('click')
-    await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/update/start')
-
-    await poll()
-    expect(wrapper.text()).toContain('the latest release could not be resolved')
-    expect(wrapper.text()).not.toContain('the wheel could not be built')
-
-    const retry = button(wrapper, 'Update & restart')
-    expect(retry).toBeDefined()
-    expect(retry!.attributes('disabled')).toBeUndefined()
-    await retry!.trigger('click')
-    await flushPromises()
-    expect(post.mock.calls.filter(call => call[0] === '/api/update/start')).toHaveLength(2)
-    wrapper.unmount()
-  } finally {
-    vi.useRealTimers()
-  }
-})
-
-it('drops the in-flight line once the record settles', async () => {
-  vi.useFakeTimers()
-  const { wrapper } = await mountCard([
-    { install_mode: 'installer', can_update: true, operation: null },
-    { install_mode: 'installer', can_update: true, operation: operation('downloading') },
-    { install_mode: 'installer', can_update: true, operation: operation('failed', { error: 'the new engine never answered' }) },
-  ])
-  try {
-    await button(wrapper, 'Update & restart')!.trigger('click')
-    await flushPromises()
-    // "Updating. Ciaobot keeps running…" is true while the run is in flight.
-    expect(wrapper.text()).toContain('Updating. Ciaobot keeps running')
-
-    await poll()
-    expect(wrapper.text()).toContain('Updating. Ciaobot keeps running')
-
-    // The run stopped: the panel says why, and the in-flight line is gone rather
-    // than reading as the state under a settled panel.
-    await poll()
-    expect(wrapper.text()).toContain('the new engine never answered')
-    expect(wrapper.text()).not.toContain('Updating. Ciaobot keeps running')
-    wrapper.unmount()
-  } finally {
-    vi.useRealTimers()
-  }
-})
-
-/** The auto-update block on the Updates card, which is present on every state. */
-function autoPanel(wrapper: Awaited<ReturnType<typeof mountCard>>['wrapper']) {
-  return wrapper.get('.auto-update-panel')
-}
-
-it('shows automatic update policy and outcome', async () => {
-  // The policy is not a per-run detail: it stays on the card when the engine is
-  // up to date, which is exactly when the compact badge used to be all there was.
-  const attemptedAt = new Date(Date.now() - 5 * 60_000).toISOString()
-  const { wrapper } = await mountCard(
-    {
-      install_mode: 'installer',
-      can_update: true,
-      operation: null,
-      current_version: '0.20.0',
-      auto_update: autoUpdate({ outcome: 'applied', attempted_at: attemptedAt }),
-    },
-    { mode: 'installer', current_version: '0.20.0', update_available: false, latest_version: '0.20.0' },
-  )
-  try {
-    const panel = autoPanel(wrapper)
-    const switchControl = panel.get('[role="switch"]')
-    expect(switchControl.attributes('aria-checked')).toBe('true')
-    expect(switchControl.attributes('aria-label')).toBe('Automatic updates')
-    // The installed version is named from the update route, not a second read.
-    expect(panel.text()).toContain('Installed version')
-    expect(panel.text()).toContain('0.20.0')
-    // The last attempt says what happened, when, and that the engine restarted.
-    expect(panel.text()).toContain('Last automatic attempt: Updated')
-    expect(panel.text()).toContain('5 minutes ago')
-    expect(panel.text()).toContain('Ciaobot restarted after updating.')
-    // The compact Updates state still holds: the policy did not turn the card
-    // into a full panel.
-    expect(wrapper.get('.card').find('.engine-update-panel').exists()).toBe(false)
-  } finally {
-    wrapper.unmount()
-  }
-})
-
-it('persists toggle and snooze', async () => {
-  const { wrapper, patch } = await mountCard({
-    install_mode: 'installer',
-    can_update: true,
-    operation: null,
-    current_version: '0.20.0',
-    auto_update: autoUpdate(),
-  })
-  try {
-    patch.mockResolvedValueOnce(autoUpdate({ enabled: false }) as never)
-    await autoPanel(wrapper).get('[role="switch"]').trigger('click')
-    await flushPromises()
-    expect(patch).toHaveBeenCalledWith('/api/update/settings', { enabled: false })
-    expect(autoPanel(wrapper).get('[role="switch"]').attributes('aria-checked')).toBe('false')
-
-    // "Not now" is one PATCH of its own, and the card then waits out the hold
-    // rather than leaving a button that can only repeat it.
-    const snoozeUntil = new Date(Date.now() + 24 * 3600_000).toISOString()
-    patch.mockResolvedValueOnce(autoUpdate({ enabled: false, snooze_until: snoozeUntil }) as never)
-    await button(wrapper, 'Not now (24 hours)')!.trigger('click')
-    await flushPromises()
-    expect(patch).toHaveBeenLastCalledWith('/api/update/settings', { snooze: true })
-    expect(autoPanel(wrapper).text()).toContain('Snoozed until')
-    expect(buttonLabels(wrapper)).not.toContain('Not now (24 hours)')
-  } finally {
-    wrapper.unmount()
-  }
-})
-
-it('explains unsupported automatic updates', async () => {
-  const { wrapper } = await mountCard({
-    install_mode: 'editable',
-    can_update: false,
-    operation: null,
-    current_version: '0.20.0',
-    auto_update: autoUpdate({
-      enabled: true,
-      supported: false,
-      unsupported_reason: 'this Ciaobot was not installed by the installer',
-    }),
-  })
-  try {
-    const panel = autoPanel(wrapper)
-    const switchControl = panel.get('[role="switch"]')
-    // The server's enabled default is not a policy this engine can carry out.
-    expect(switchControl.attributes('aria-checked')).toBe('false')
-    expect(switchControl.attributes('disabled')).toBeDefined()
-    expect(panel.text()).toContain('this Ciaobot was not installed by the installer')
-    // Nothing to snooze either: hiding the control keeps a dead write off the card.
-    expect(buttonLabels(wrapper)).not.toContain('Not now (24 hours)')
-  } finally {
-    wrapper.unmount()
-  }
-})
-
-it('reports a failed settings write', async () => {
-  const { wrapper, patch } = await mountCard({
-    install_mode: 'installer',
-    can_update: true,
-    operation: null,
-    current_version: '0.20.0',
-    auto_update: autoUpdate(),
-  })
-  try {
-    patch.mockRejectedValueOnce(new Error('Failed to fetch'))
-    await autoPanel(wrapper).get('[role="switch"]').trigger('click')
-    await flushPromises()
-
-    // The write did not land, so the switch goes back to the confirmed state
-    // rather than showing a decision the engine never took.
-    expect(autoPanel(wrapper).get('[role="switch"]').attributes('aria-checked')).toBe('true')
-    expect(autoPanel(wrapper).get('.auto-update-error').text()).toContain('Failed to fetch')
-    const retry = button(wrapper, 'Try again')
-    expect(retry).toBeDefined()
-
-    // The retry repeats the same write, and a good answer clears the error.
-    patch.mockResolvedValueOnce(autoUpdate({ enabled: false }) as never)
-    await retry!.trigger('click')
-    await flushPromises()
-    expect(patch).toHaveBeenLastCalledWith('/api/update/settings', { enabled: false })
-    expect(autoPanel(wrapper).get('[role="switch"]').attributes('aria-checked')).toBe('false')
-    expect(autoPanel(wrapper).find('.auto-update-error').exists()).toBe(false)
-  } finally {
-    wrapper.unmount()
-  }
-})
-
-it('renders an unreadable settings error from the status', async () => {
-  // An unreadable settings file is served as `enabled: false` with the reason in
-  // `error`; the reason is the explanation for the switch beside it.
-  const { wrapper } = await mountCard({
-    install_mode: 'installer',
-    can_update: true,
-    operation: null,
-    current_version: '0.20.0',
-    auto_update: autoUpdate({
-      enabled: false,
-      error: 'could not read the automatic update settings: permission denied',
-    }),
-  })
-  try {
-    const panel = autoPanel(wrapper)
-    expect(panel.get('[role="switch"]').attributes('aria-checked')).toBe('false')
-    expect(panel.get('.auto-update-error').attributes('role')).toBe('alert')
-    expect(panel.get('.auto-update-error').text()).toContain('permission denied')
+    expect(card.get('.settings-card-header .badge--success').text()).toBe('Up to date · 2.0.0')
+    expect(card.findAll('p.hint')).toHaveLength(0)
+    expect(card.find('code').exists()).toBe(false)
   } finally {
     wrapper.unmount()
   }
