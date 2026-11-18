@@ -508,6 +508,43 @@ def _run(
     return result.stdout.strip() if capture and result.stdout else ""
 
 
+def pinned_uv_version(root: Path) -> str:
+    """The uv version ``pyproject.toml`` pins in ``[tool.uv] required-version``."""
+    pyproject = root / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    required = data.get("tool", {}).get("uv", {}).get("required-version")
+    match = re.fullmatch(r"==\s*(\d+\.\d+\.\d+)", required or "")
+    if not match:
+        raise ReleaseError(
+            f"{pyproject} must pin uv exactly with [tool.uv] required-version "
+            f'= "==X.Y.Z"; found {required!r}'
+        )
+    return match.group(1)
+
+
+def _installed_uv_version(root: Path) -> str:
+    try:
+        out = _run(["uv", "--version"], cwd=root, capture=True)
+    except (OSError, ReleaseError) as exc:
+        raise ReleaseError(f"cannot run `uv --version`: {exc}") from exc
+    match = re.match(r"uv (\d+\.\d+\.\d+)", out)
+    if not match:
+        raise ReleaseError(f"cannot parse `uv --version` output: {out!r}")
+    return match.group(1)
+
+
+def _ensure_pinned_uv(root: Path) -> None:
+    """Refuse a uv other than the pinned one: it would rewrite uv.lock."""
+    pinned = pinned_uv_version(root)
+    installed = _installed_uv_version(root)
+    if installed != pinned:
+        raise ReleaseError(
+            f"uv {installed} is installed but pyproject.toml pins uv {pinned}; "
+            f"a different uv rewrites uv.lock. Install uv {pinned} "
+            f"(e.g. `uv self update {pinned}` or `brew upgrade uv`) and retry."
+        )
+
+
 def _git(root: Path, args: list[str], *, check: bool = True) -> str:
     return _run(["git", *args], cwd=root, capture=True, check=check)
 
@@ -1329,6 +1366,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.apply:
         return 0
 
+    _ensure_pinned_uv(root)
     _ensure_clean(root, allow_dirty=args.allow_dirty)
     if not args.no_branch:
         _checkout_release_branch(root, branch=branch, source=args.source)
