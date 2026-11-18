@@ -1087,6 +1087,8 @@ export interface ProviderConnection {
   path_command?: string
   /** Terminal action that runs the command shown for this row, when the engine offers one. */
   terminal_action?: HostTerminalAction
+  /** The agent CLI's own MCP command (`claude mcp`), typed into the in-app terminal. Absent when the CLI is not installed. */
+  mcp_command?: string
   /** How the installed CLI compares with the version this release was tested with. */
   release_check?: ProviderReleaseCheck
   /** Desktop app found while the CLI is missing. */

@@ -635,6 +635,9 @@ OPENCODE_INSTALL_DOCS_URL = "https://opencode.ai/download"
 #: The sign-in command shown on the provider row and run by the host terminal.
 OPENCODE_LOGIN_COMMAND = "opencode auth login"
 
+#: Opens OpenCode's own MCP management; typed into the terminal by the PWA.
+OPENCODE_MCP_COMMAND = "opencode mcp"
+
 
 def opencode_install_command() -> str:
     """The documented one-line installer for this platform.
@@ -5821,6 +5824,7 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
         auth=auth,
         command=OPENCODE_LOGIN_COMMAND,
         terminal_action="opencode-login",
+        mcp_command=OPENCODE_MCP_COMMAND,
         detail=detail,
         version=version or "unknown",
         skills=found.skills,
