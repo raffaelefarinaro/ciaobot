@@ -99,13 +99,12 @@ def test_claude_is_connected_follows_flag(
 @pytest.mark.parametrize("returncode", [None, 0])
 @pytest.mark.parametrize("has_client", [True, False])
 @pytest.mark.parametrize("has_process", [True, False])
-def test_opencode_is_connected_equals_has_live_server(
+def test_opencode_is_connected_follows_its_server(
     tmp_path: Path, returncode: int | None, has_client: bool, has_process: bool
 ) -> None:
     p = OpencodeProvider(tmp_path)
     p._client = object() if has_client else None
     p._process = SimpleNamespace(returncode=returncode) if has_process else None
-    assert p.is_connected is p.has_live_server
     assert p.is_connected is (has_client and has_process and returncode is None)
 
 
