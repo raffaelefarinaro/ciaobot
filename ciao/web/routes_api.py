@@ -94,6 +94,7 @@ _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.task_decisions import clean_reason
 from ciao.core_prompt import system_prompt_payload
 from ciao.tool_path import resolve_command
+from ciao.providers.base import live_for_session
 from ciao.providers.claude import ClaudeProvider
 from ciao.native_task_types import is_process_task
 from ciao.providers.opencode import (
@@ -3366,11 +3367,7 @@ async def chat_subagents(request: Request) -> JSONResponse:
         opencode_entries: list[dict] = []
         provider_service = pcm._providers.get(chat_id)
         live_provider = provider_service.provider if provider_service is not None else None
-        if (
-            isinstance(live_provider, OpencodeProvider)
-            and live_provider.has_live_server
-            and live_provider.current_session_id == chat.session_id
-        ):
+        if live_for_session(live_provider, chat.session_id):
             # Metadata only, unless the caller asked for one child's
             # transcript: the list is polled every few seconds, and reading
             # every child's history on every poll is what made a chat with
@@ -3383,7 +3380,7 @@ async def chat_subagents(request: Request) -> JSONResponse:
         else:
             resolver = getattr(pcm, "_agent_root_for_chat", None)
             root = resolver(chat_id) if resolver is not None else config.workspace_root
-            collab_tree = await OpencodeProvider.read_collab_tree(
+            collab_tree = await provider_registry.require(chat.provider).factory().read_collab_tree(
                 root, chat.session_id
             )
         for item in collab_tree:
@@ -3585,11 +3582,7 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
     if provider == "opencode":
         provider_service = pcm._providers.get(chat.chat_id)
         live_provider = provider_service.provider if provider_service is not None else None
-        if (
-            isinstance(live_provider, OpencodeProvider)
-            and live_provider.has_live_server
-            and live_provider.current_session_id == chat.session_id
-        ):
+        if live_for_session(live_provider, chat.session_id):
             collab_tree = await live_provider.read_live_collab_tree()
         else:
             # Sessions are cwd-scoped: a chat in a non-primary workspace was
@@ -3600,7 +3593,7 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
             resolver = getattr(pcm, "_agent_root_for_chat", None)
             agent_root = resolver(chat.chat_id) if resolver is not None else None
             root = Path(agent_root) if agent_root else Path(config.workspace_root)
-            collab_tree = await OpencodeProvider.read_collab_tree(
+            collab_tree = await provider_registry.require(chat.provider).factory().read_collab_tree(
                 root, chat.session_id
             )
         rows: list[dict] = []
@@ -3619,11 +3612,7 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
                 "status": "running",
                 "turn_index": transcript_service._opencode_child_turn_index(info, chat),
             })
-        if (
-            isinstance(live_provider, OpencodeProvider)
-            and live_provider.has_live_server
-            and live_provider.current_session_id == chat.session_id
-        ):
+        if live_for_session(live_provider, chat.session_id):
             # Background shells are processes, not agents: the composer lists
             # them under Processes and never links them to a transcript.
             for shell in live_provider.background_shell_rows():

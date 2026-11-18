@@ -28,14 +28,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
-from ciao import job_runs, subagent_tracking
+from ciao import job_runs, provider_registry, subagent_tracking
 from ciao import schedules as schedule_support
 from ciao.config import CiaoConfig
 from ciao.curation_run import unstarted_run_reason
 from ciao.error_log import clear_error_log, tail_error_log
 from ciao.models import BridgeMode, ImageAttachment
 from ciao.provider_service import ProviderService, supported_providers
-from ciao.providers.opencode import OpencodeProvider, opencode_collab_tree_counts
+from ciao.providers.base import live_for_session
+from ciao.providers.opencode import opencode_collab_tree_counts
 from ciao.schedule_command import CommandRun, run_schedule_command
 from ciao.schedules import ScheduleEntry, ScheduleStore
 from ciao.web import chat_service
@@ -228,14 +229,10 @@ class ScheduleDispatcher:
                     if provider_service is not None
                     else None
                 )
-                if (
-                    isinstance(live_provider, OpencodeProvider)
-                    and live_provider.has_live_server
-                    and live_provider.current_session_id == chat.session_id
-                ):
+                if live_for_session(live_provider, chat.session_id):
                     tree = await live_provider.read_live_collab_tree()
                 else:
-                    tree = await OpencodeProvider.read_collab_tree(
+                    tree = await provider_registry.require(chat.provider).factory().read_collab_tree(
                         self._host._agent_root_for_chat(chat_id), chat.session_id
                     )
                 running, had_now = opencode_collab_tree_counts(tree)

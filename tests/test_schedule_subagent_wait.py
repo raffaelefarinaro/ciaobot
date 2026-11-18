@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
+
+import pytest
 
 from ciao.config import CiaoConfig
 from ciao.providers.opencode import OpencodeProvider
@@ -212,3 +215,47 @@ async def test_wait_for_drain_result_times_out_to_none(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     result = await pcm._wait_for_drain_result("chat-absent", timeout_s=0.05)
     assert result is None
+
+
+def _live_opencode(tmp_path: Path, session_id: str) -> OpencodeProvider:
+    provider = OpencodeProvider(tmp_path)
+    provider._client = object()  # type: ignore[assignment]
+    provider._process = SimpleNamespace(returncode=None)
+    provider._session_id = session_id
+    return provider
+
+
+@pytest.mark.parametrize(
+    ("kind", "expect_live"),
+    [("non_provider", False), ("other_session", False), ("same_session", True)],
+)
+async def test_await_opencode_subagents_picks_live_or_ephemeral(
+    tmp_path: Path, monkeypatch, kind: str, expect_live: bool
+) -> None:
+    pcm = _make_manager(tmp_path)
+    chat = _seed_chat(pcm, "ses_parent")
+    chat.provider = "opencode"
+
+    live_read = AsyncMock(return_value=[])
+    ephemeral_read = AsyncMock(return_value=[])
+    monkeypatch.setattr(OpencodeProvider, "read_collab_tree", ephemeral_read)
+    if kind == "non_provider":
+        live: object = SimpleNamespace(
+            is_connected=True,
+            current_session_id="ses_parent",
+            read_live_collab_tree=live_read,
+        )
+    else:
+        provider = _live_opencode(
+            tmp_path, "ses_parent" if kind == "same_session" else "ses_other"
+        )
+        monkeypatch.setattr(provider, "read_live_collab_tree", live_read)
+        live = provider
+    pcm._providers[chat.chat_id] = SimpleNamespace(provider=live)  # type: ignore[assignment]
+
+    settled, _ = await pcm._await_schedule_subagents(chat.chat_id)
+
+    assert settled is True
+    assert (live_read.await_count, ephemeral_read.await_count) == (
+        (1, 0) if expect_live else (0, 1)
+    )
