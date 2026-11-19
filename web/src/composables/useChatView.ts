@@ -17,7 +17,6 @@ export function useChatView(chatId: () => string) {
     currentStreamingText: computed(() => store.streamingTextFor(chatId())),
     currentStreamingThinking: computed(() => store.streamingThinkingFor(chatId())),
     currentQueued: computed(() => store.queuedFor(chatId())),
-    activeBackgroundAgents: computed(() => store.backgroundAgentsFor(chatId())),
     currentTimeline: timeline,
     currentDeniedToolUseIds: computed(() => store.deniedToolUseIdsFor(chatId())),
     currentStreamStartedAt: computed(() => store.streamStartedAtFor(chatId())),

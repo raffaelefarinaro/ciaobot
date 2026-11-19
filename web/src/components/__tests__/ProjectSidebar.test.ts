@@ -536,13 +536,7 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 
-  // Running subagents are listed in the Chat details rail, not as
-  // rows under the chat in this tree.
   it('does not list running subagents as rows in the tree', async () => {
-    const store = useProjectStore()
-    store.runningSubagents = {
-      [chatId]: [{ agent_id: 'a1b2c3d4', description: 'Sweep the callers', status: 'running' }],
-    }
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [

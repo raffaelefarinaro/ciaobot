@@ -35,7 +35,6 @@ function seed(count = 3) {
   store.workspaces = [{ name: 'personal', color: 'emerald' }] as unknown as typeof store.workspaces
   store.activeWorkspace = 'personal'
   store.projectStreaming = {}
-  store.backgroundAgents = {}
   store.bootstrapped = true
   const taskStore = useTaskStore()
   taskStore.schedules = [] as unknown as typeof taskStore.schedules

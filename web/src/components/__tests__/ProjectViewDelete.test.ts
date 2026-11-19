@@ -41,7 +41,6 @@ function seed() {
   }] as unknown as typeof store.chats
   store.workspaces = [{ name: 'personal', color: 'emerald' }] as unknown as typeof store.workspaces
   store.projectStreaming = {}
-  store.backgroundAgents = {}
   store.bootstrapped = true
   const taskStore = useTaskStore()
   taskStore.schedules = [] as unknown as typeof taskStore.schedules

@@ -35,7 +35,6 @@ function seed(ids: string[]) {
     local: true,
   })) as unknown as typeof store.chats
   store.projectStreaming = {}
-  store.backgroundAgents = {}
   const taskStore = useTaskStore()
   taskStore.schedules = [] as unknown as typeof taskStore.schedules
   return store
