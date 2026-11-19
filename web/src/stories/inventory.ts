@@ -490,25 +490,32 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ChatPanel.vue",
       "web/src/components/ProjectView.vue"
     ],
-    "variants": [],
-    "variantNotes": "Row/other button form. Detailed variants are unassessed.",
+    "variants": [
+      "link",
+      "row"
+    ],
+    "variantNotes": "Link (default) and row forms; both open the terminal store on click.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in BrowserTerminalButton.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "browser-terminal-button--default"
+        ],
+        "note": "Link form (Open in Terminal): tab focuses it, a click reads the engine status once and the button stays."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "row",
+        "coverage": "covered",
+        "storyIds": [
+          "browser-terminal-button--row"
+        ],
+        "note": "Row form (Open terminal) in the Chat details Open section; a click reads the engine status once."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in BrowserTerminalButton.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch on render. A click opens the terminal store, which reads status once; the story asserts that one declared request."
     },
     "migration": {
       "status": "unassessed",
@@ -4982,20 +4989,32 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in TerminalKeyRow.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-key-row--default"
+        ],
+        "note": "Enabled keys. A pointer tap reports the key with pointer true and leaves focus where it was."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "disabled",
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-key-row--disabled"
+        ],
+        "note": "Disabled until the screen is live: each key is disabled and a press is not reported."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-key-row--keyboard-focus"
+        ],
+        "note": "Focus on a key and Enter: the press is reported as a keyboard activation and focus stays on the key."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TerminalKeyRow.vue has not yet been audited."
+      "status": "none",
+      "detail": "Props only: no fetch, no store and no loading state."
     },
     "migration": {
       "status": "unassessed",
@@ -5026,78 +5045,140 @@ export const inventory: InventoryEntry[] = [
       "creating",
       "error"
     ],
-    "variantNotes": "Tile/drawer/chooser/connecting/reconnecting/takeover/ended/creating/truncated/error; no live socket fixtures here.",
+    "variantNotes": "Tile, drawer, chooser, connecting, reconnecting, takeover, ended, creating, truncated, unavailable, capacity and error. Connected stories use the real store with declared status, sessions and socket fixtures (synthetic storybook-alpha and storybook-beta names).",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in TerminalPane.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--default"
+        ],
+        "note": "Live shell in the drawer shape. The real open reads status and sessions, a declared socket replays fixed bytes, and the play asserts the screen and that Shift+Tab hands the keyboard back to Close."
       },
       {
         "name": "tile",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TerminalPane.vue has a tile branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--tile"
+        ],
+        "note": "Live shell with inTile set; the play asserts the tile class. The shape follows window width (a phone-width window is forced to the drawer), so this state depends on the runner window staying at desktop width."
       },
       {
         "name": "drawer",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TerminalPane.vue has a drawer branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--drawer"
+        ],
+        "note": "Live shell in a 390px wrapper; the drawer class is used whenever the pane is not in the tile slot."
       },
       {
         "name": "chooser",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TerminalPane.vue has a chooser branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--chooser"
+        ],
+        "note": "A chat with a workspace and a repository folder and no shell asks which to open; the play picks the repository and the new tab is selected."
       },
       {
         "name": "connecting",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TerminalPane.vue has a connecting branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--connecting"
+        ],
+        "note": "The socket opens and never sends the handshake; the pane shows Connecting to the terminal."
       },
       {
         "name": "reconnecting",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TerminalPane.vue has a reconnecting branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--reconnecting"
+        ],
+        "note": "A dropped connection is retried after a held status read, so the pane stays reconnecting; the request count proves the retry read happened. The phase shares the connecting line."
       },
       {
         "name": "takeover",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TerminalPane.vue has a takeover branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--takeover"
+        ],
+        "note": "Another connection takes the session (close 4409); the play clicks Take over and the takeover prompt goes while the shell comes back live. Known: the takeover notice stays as a stale alert after the reconnect because the store keeps it in its error ref; recorded, not fixed in this slice."
       },
       {
         "name": "ended",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TerminalPane.vue has a ended branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--ended"
+        ],
+        "note": "The shell prints and exits with code 0; the pane shows the ended line and the tab reads ended (0)."
       },
       {
         "name": "creating",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TerminalPane.vue has a creating branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--creating"
+        ],
+        "note": "The first shell is being created and the create request is held; the pane says it is starting and the new-session control is disabled."
       },
       {
         "name": "error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TerminalPane.vue has a error branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--failure"
+        ],
+        "note": "The status read fails; the pane shows the could-not-ask alert and no session list."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "unavailable",
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--unavailable"
+        ],
+        "note": "The engine reports the terminal unavailable (https_required); the alert shows and the session tabs are hidden."
+      },
+      {
+        "name": "capacity",
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--capacity"
+        ],
+        "note": "A workspace with four ended sessions: the capacity alert shows, the new-session control is disabled, and each ended session still has its End control."
+      },
+      {
+        "name": "truncated",
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--truncated"
+        ],
+        "note": "The ready frame says the engine lost output; the truncation notice shows while the shell stays live."
+      },
+      {
+        "name": "no-shell",
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--no-shell"
+        ],
+        "note": "A chat with no shell and nothing asked for one: the pane says none is open, and the request count proves nothing was created."
+      },
+      {
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--loading"
+        ],
+        "note": "The status read is held. The pane shows the same no-shell line as an empty chat, because it has no separate loading indicator."
+      },
+      {
+        "name": "closed",
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--closed"
+        ],
+        "note": "Mounted but not opened: the open class is absent and no request is made."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TerminalPane.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load: the status read is held and the pane shows the no-shell line, not a loading indicator, so the placeholder geometry differs from the loaded screen. Initial failure is the error state. Refresh shows the connecting line (reconnecting phase). Empty is no-shell. There is no filtered-empty state."
     },
     "migration": {
       "status": "unassessed",
