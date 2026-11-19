@@ -6350,9 +6350,13 @@ class ProjectChatManager:
         return project_ids, chat_ids
 
     def workspace_busy_chat_ids(self, workspace: str) -> list[str]:
-        """Chats in *workspace* with a turn or subagent running."""
+        """Chats in *workspace* with a live stream or background work outstanding."""
         _project_ids, chat_ids = self.workspace_scope(workspace)
         busy = set(self.active_chat_ids())
+        busy.update(
+            cid for cid in chat_ids
+            if self._provider_background_busy(cid, self._providers.get(cid))
+        )
         return sorted(cid for cid in busy if cid in chat_ids)
 
     def refuse_workspace_teardown(self, workspace: str) -> None:

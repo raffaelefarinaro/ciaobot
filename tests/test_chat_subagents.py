@@ -732,30 +732,6 @@ def test_a_background_stream_does_not_count_as_a_live_turn(tmp_path: Path) -> No
     assert calls == [("chat-1", "proj-1", "Title", "interim")]
 
 
-# ── OpenCode background work interrupted by a restart ────────────────────────
-#
-# OpenCode keeps its background set only in the provider object, so shutdown
-# records it and the next boot consumes the record once.
-
-
-def _opencode_chat_with_background_work(
-    pcm: ProjectChatManager, tmp_path: Path, *, outstanding: bool = True
-):
-    project = pcm.create_project("oc-restart", workspace="personal")
-    chat = pcm.create_chat(project.project_id, title="oc-restart")
-    chat.provider = "opencode"
-    chat.session_id = "ses_parent_1"
-    pcm._save()
-    provider = OpencodeProvider(tmp_path)
-    provider._background_children = {"ses_child_b", "ses_child_a"}
-    provider._background_shells = {"sh_1"}
-    provider._shell_commands = {"sh_1": "bash gates.sh"}
-    pcm._providers[chat.chat_id] = SimpleNamespace(
-        provider=provider, background_work_outstanding=outstanding
-    )
-    return chat
-
-
 async def test_finish_background_stop_calls_abort_through_contract(tmp_path: Path) -> None:
     aborted: list[str] = []
 
@@ -782,3 +758,47 @@ async def test_finish_background_stop_calls_abort_through_contract(tmp_path: Pat
     await pcm._finish_background_stop("chat-claude")
     assert aborted == ["sess-abort-1"]
 
+
+
+# --- Workspace busy check counts provider background work -------------------
+
+
+def _workspace_chat(pcm: ProjectChatManager, flag: bool):
+    project = pcm.create_project("busy-ws", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="busy-ws")
+    pcm._providers[chat.chat_id] = SimpleNamespace(
+        background_work_outstanding=flag, background_activity_age=0.0
+    )
+    return chat
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_workspace_busy_chat_ids_counts_provider_background_work(
+    tmp_path: Path, flag: bool
+) -> None:
+    pcm = _make_manager(tmp_path)
+    chat = _workspace_chat(pcm, flag)
+    assert chat.chat_id not in pcm.active_chat_ids()
+    expected = [chat.chat_id] if flag else []
+    assert pcm.workspace_busy_chat_ids("personal") == expected
+    assert pcm.workspace_busy_chat_ids("other") == []
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_workspace_rename_refused_while_background_work_outstanding(
+    tmp_path: Path, flag: bool
+) -> None:
+    from ciao.workspace_rename import WorkspaceRenameBusy, rename_workspace
+
+    pcm = _make_manager(tmp_path)
+    _workspace_chat(pcm, flag)
+    stub = SimpleNamespace()
+    if flag:
+        with pytest.raises(WorkspaceRenameBusy):
+            rename_workspace(
+                pcm._config,
+                old="personal", new="santo",
+                projects=pcm, schedules=stub, webhooks=stub, imports=stub,
+            )
+    else:
+        assert pcm.workspace_busy_chat_ids("personal") == []

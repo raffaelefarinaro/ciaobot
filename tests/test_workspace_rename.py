@@ -586,6 +586,7 @@ class _StubProvider:
 
     def __init__(self) -> None:
         self.disconnected = False
+        self.background_work_outstanding = False
 
     async def disconnect(self) -> None:
         self.disconnected = True

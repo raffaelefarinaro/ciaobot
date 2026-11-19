@@ -927,6 +927,33 @@ def test_current_project_complete_and_delete_are_deferred() -> None:
     asyncio.run(_assert_current_project_action_is_deferred("project_delete"))
 
 
+def test_deferred_action_waits_for_provider_background_work() -> None:
+    async def scenario() -> None:
+        pcm = _LifecyclePcm()
+        busy = {"value": True}
+        pcm.active_chat_ids = lambda: set()  # type: ignore[attr-defined]
+        pcm._providers = {"chat-1": object()}  # type: ignore[attr-defined]
+        pcm._provider_background_busy = (  # type: ignore[attr-defined]
+            lambda chat_id, service: busy["value"]
+        )
+        config = SimpleNamespace(workspace=lambda name: object())
+        control_plane = CiaoControlPlane(
+            config, project_chat_manager=pcm, schedule_manager=SimpleNamespace()
+        )
+        principal = McpPrincipal(
+            token_id="t", chat_id="chat-1", project_id="project-1",
+            workspace="personal", provider="claude",
+        )
+        control_plane.project_complete(principal, "project-1")
+        await asyncio.sleep(0.05)
+        assert not pcm.completed
+        busy["value"] = False
+        await asyncio.sleep(0.4)
+        assert pcm.completed == ["project-1"]
+
+    asyncio.run(scenario())
+
+
 class _ChatCreatePcm:
     def __init__(self, *, parent_mode: str = "auto") -> None:
         self.projects = {
