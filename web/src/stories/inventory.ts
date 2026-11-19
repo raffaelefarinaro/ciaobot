@@ -1065,60 +1065,54 @@ export const inventory: InventoryEntry[] = [
       "empty",
       "parse-error"
     ],
-    "variantNotes": "Read-only/editable/commentable/header/empty/parse-error variants.",
+    "variantNotes": "Read-only/editable/commentable/header/empty/parse-error variants: the row-number column and meta bar belong to the commentable preview, the toolbar and inputs to edit mode; hasHeader is content-derived.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in CsvViewer.vue implements this render; no rendered-state story exists."
-      },
-      {
-        "name": "read-only",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "CsvViewer.vue has a read-only branch; no rendered-state story exists."
-      },
-      {
-        "name": "editable",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "CsvViewer.vue has a editable branch; no rendered-state story exists."
-      },
-      {
-        "name": "commentable",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "CsvViewer.vue has a commentable branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["csv-viewer--default"],
+        "note": "Default props: a read-only non-commentable table with no rows header-like, so headers synthesize (Column 1..N), no row-number column renders and cells are spans. The meta bar still reads 'Click a cell to comment' at these props although clicks do nothing until the commentable prop is set."
       },
       {
         "name": "header",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "CsvViewer.vue has a header branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["csv-viewer--header"],
+        "note": "A header-like first row renders as th text through parseCsv's hasHeader; in edit mode those headers become labeled inputs (covered by the editable state)."
+      },
+      {
+        "name": "commentable",
+        "coverage": "covered",
+        "storyIds": ["csv-viewer--commentable"],
+        "note": "Read-only commentable preview (how FileViewerModal renders CSVs): the row-number column, the meta bar's click hint, durable cell highlights via the cellComments prop, and the is-selected mark a click leaves."
+      },
+      {
+        "name": "editable",
+        "coverage": "covered",
+        "storyIds": ["csv-viewer--editable"],
+        "note": "Edit mode (readOnly false): the toolbar with + Row / + Column and the rows·cols count, labeled header/cell inputs, and one delete control per row. hasHeader false in edit mode synthesizes headers on add; not separately covered."
       },
       {
         "name": "empty",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "CsvViewer.vue has a empty branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["csv-viewer--empty"],
+        "note": "Content whose parse yields no rows renders 'Empty CSV.' and no table. A content row that parses with quoted cells is not a distinct branch."
       },
       {
         "name": "parse-error",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": "CsvViewer.vue has a parse-error branch; no rendered-state story exists."
+        "note": "The v-if=\"parseError\" branch is defensive only: parseCsv (papaparse, header:false) never throws for the string content props supply, so parseError cannot be set from props; no story can render it without editing the owner."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["csv-viewer--narrow"],
+        "note": "A 390px pane: the meta bar and the table's own .csv-scroll scroll container still render inside the narrow wrapper. The 640px/767px media queries are viewport-driven and belong to the visual check, not a wrapper state."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in CsvViewer.vue has not yet been audited."
+      "status": "none",
+      "detail": "CsvViewer parses its content prop synchronously and performs no fetches: there is no initial, refresh, failure or stale loading state of its own. Its parseError branch is a dead defensive path (see the parse-error state)."
     },
     "migration": {
       "status": "unassessed",
@@ -1224,60 +1218,186 @@ export const inventory: InventoryEntry[] = [
       "error",
       "editing"
     ],
-    "variantNotes": "Lazy dialog owner; preview/history/diff, text/Markdown/image/PDF/PPTX/HTML/CSV/folder, loading/error/editing/comment and pin/share branches.",
+    "variantNotes": "Lazy dialog owner. Preview branches: text/Markdown/document properties/empty, CSV, image (+ its load-failure alert), PDF (+ the LibreOffice notice), HTML artifact (preview/code/code-loading/code-error) and folder. Loading/error and the streaming-end refresh; editing (textarea/CSV/save-flight/save-failure); comment draft and read popovers; pinned and pin-pending; the More actions menu; the archived-transcript continue action; narrow.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in FileViewerModal.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--default"],
+        "note": "A chat-scoped text file loaded: title/subtitle, Edit, Discuss, unpinned pin control and the pre body; open-auto-focus lands the keyboard on the modal frame and Escape closes through requestClose."
       },
       {
-        "name": "preview",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "FileViewerModal.vue has a preview branch; no rendered-state story exists."
+        "name": "markdown",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--markdown"],
+        "note": "A .md file renders the .fv-md branch; the chat-less open keeps Edit hidden (canEdit needs a chat id)."
       },
       {
-        "name": "history",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "FileViewerModal.vue has a history branch; no rendered-state story exists."
+        "name": "document-properties",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--document-properties"],
+        "note": "YAML frontmatter renders the .fv-meta properties header (kind, status, name, summary, tags) above the markdown body."
       },
       {
-        "name": "diff",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "FileViewerModal.vue has a diff branch; no rendered-state story exists."
+        "name": "empty",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--empty"],
+        "note": "A loaded file with empty content renders the .fv-pre branch with no text."
+      },
+      {
+        "name": "csv",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--csv"],
+        "note": "A CSV path renders CsvViewer read-only and commentable inside the modal, with a durable cell highlight and the cell-select mark. Its Comment trigger is not asserted: a click fires the document selectionchange handler, which clears the CSV cell anchor (useFileComments onSelectionChange). The comment compose and read flows are their own states below."
+      },
+      {
+        "name": "image",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--image"],
+        "note": "A served attachment (imageUrl) renders the .fv-img branch; a served image has no workspace path, so pin, Discuss and Edit are absent."
+      },
+      {
+        "name": "image-error",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--image-error"],
+        "note": "A workspace-path image that fails to load: the <img> native load 404s, onImageError probes the same URL (declared route) and the role=alert error branch replaces the image. The raw 404 the img makes is a plain resource load outside the fence."
+      },
+      {
+        "name": "folder",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--folder"],
+        "note": "kind folder mounts the real FolderBrowser (VueFinder) over one declared /api/workspace-dir listing; the browser's own first fetch is the only request."
+      },
+      {
+        "name": "pdf",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--pdf"],
+        "note": "kind pdf renders the workspace-binary preview iframe; the iframe's navigation is a plain resource load outside the fence, so the story asserts the iframe attributes rather than its content."
+      },
+      {
+        "name": "libreoffice-notice",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--libreoffice-notice"],
+        "note": "A .pptx with pptxNeedsLibreoffice renders the install notice; the Install in Chat click stops at the store's fix-chat flow (no General project seeded → error toast, zero requests)."
+      },
+      {
+        "name": "html",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--html"],
+        "note": "kind html in preview view mounts HtmlArtifactViewer: the toolbar and the sandbox='allow-scripts' frame the artifact contract depends on."
+      },
+      {
+        "name": "html-code",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--html-code"],
+        "note": "Switching to Code view fetches the artifact source over /api/workspace-file (declared route) and renders the code; with sourceLoaded, Edit becomes available."
+      },
+      {
+        "name": "html-code-loading",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--html-code-loading"],
+        "note": "Code view while the source fetch is in flight renders the 'Loading source…' note and keeps Edit refused."
+      },
+      {
+        "name": "html-code-error",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--html-code-error"],
+        "note": "A failed source fetch renders the source-error note; Edit stays refused without the source."
       },
       {
         "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "FileViewerModal.vue has a loading branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--loading"],
+        "note": "Initial open held at the declared /api/workspace-file route: the .fv-loading 'Loading…' branch, driven through the store's real open() flow."
       },
       {
         "name": "error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "FileViewerModal.vue has a error branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--error"],
+        "note": "An open answered HTTP 404 sets store.error and renders the .fv-error branch (fileLoadErrorMessage wording)."
+      },
+      {
+        "name": "refresh",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--refresh"],
+        "note": "The streaming-end watcher re-opens the same file: chat path resolution then a fresh read (both routes declared) repaints the body with the new content."
+      },
+      {
+        "name": "refresh-failure",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--refresh-failure"],
+        "note": "A refresh whose read fails (HTTP 500) replaces the body with the .fv-error branch."
       },
       {
         "name": "editing",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "FileViewerModal.vue has a editing branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["file-modal-preview-editor--editing"],
+        "note": "The Edit action swaps the body for .fv-edit-shell's textarea: buffer starts from content, typing marks isDirty, Cancel restores the preview without a write."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "editing-csv",
+        "coverage": "covered",
+        "storyIds": ["file-modal-preview-editor--editing-csv"],
+        "note": "Editing a CSV path renders CsvViewer in edit mode inside .fv-edit-shell (toolbar, labeled header/cell inputs, row add/delete)."
+      },
+      {
+        "name": "saving",
+        "coverage": "covered",
+        "storyIds": ["file-modal-preview-editor--saving"],
+        "note": "A save POST held by the boundary blocks both Cancel and Save ('Saving…'), the real disabled state not a styled one."
+      },
+      {
+        "name": "save-error",
+        "coverage": "covered",
+        "storyIds": ["file-modal-preview-editor--save-error"],
+        "note": "A save answered HTTP 500 renders 'Save failed (HTTP 500).' in the editor and unblocks the controls without writing."
+      },
+      {
+        "name": "pinned",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--pinned"],
+        "note": "The dock target's pinned file shows the pin control active ('Unpin from sidebar'); unpinning keeps the modal open (only a successful pin closes it)."
+      },
+      {
+        "name": "pin-pending",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--pin-pending"],
+        "note": "A chat-scoped pin write held at PATCH /api/chats/{id} leaves the pin control actually disabled."
+      },
+      {
+        "name": "actions-menu",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--actions-menu"],
+        "note": "The More menu lists Copy path / Show in folder / Download / Open in default app (loopback page); Download is enabled on a loaded file and Open in memory map is absent for non-markdown paths. The copy/share/open-elsewhere confirmation labels are transient timers of this same menu."
+      },
+      {
+        "name": "archived-transcript",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--archived-transcript"],
+        "note": "A memory-vault Logs/Chats transcript path adds 'Continue this chat'; its click runs continueArchivedChat, and a failed declare (HTTP 500) surfaces the store's error toast then restores the button."
+      },
+      {
+        "name": "comment-draft",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--comment-draft"],
+        "note": "Selecting text in the pre body floats the Comment trigger; clicking it opens the compose popover, and saving stages the comment durably for the file and re-highlights the line."
+      },
+      {
+        "name": "comment-popover",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--comment-popover"],
+        "note": "A durable line comment highlights its .pre-line; clicking it opens the read popover (location label, note, Edit/Delete), and Delete removes the highlight."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--narrow"],
+        "note": "The dialog is a fixed overlay teleported to body, so a 390px wrapper cannot constrain it: the story sets the narrow viewport (parameters.viewport) and asserts the modal fits it. The ≤640px media queries (Discuss into the menu, zero padding) are viewport-driven and belong to the visual check."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in FileViewerModal.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load is one GET /api/workspace-file (held in flight → the .fv-loading text line; failure → the .fv-error line): no skeleton geometry, just a centered text line that does not match the loaded table/prose geometry, so a loading-geometry follow-up applies. Loaded, empty, image-error and initial failure are rendered states; the streaming-end watcher performs the only refresh (refresh / refresh-failure; a superseded response is discarded by the store's fetch generation with no visual stale state)."
     },
     "migration": {
       "status": "unassessed",
@@ -2096,25 +2216,49 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/FileViewerModal.vue",
       "web/src/components/PinnedFilePanel.vue"
     ],
-    "variants": [],
-    "variantNotes": "Preview/code/source loading/error; no live iframe sources in catalogue. Detailed variants are unassessed.",
+    "variants": [
+      "default",
+      "code",
+      "code-loading",
+      "code-error",
+      "narrow"
+    ],
+    "variantNotes": "Preview frame (sandbox allow-scripts frame that navigates to /api/workspace-html by plain iframe navigation) with the Preview/Code toggle; code view renders the parent-loaded source one line per element, or the parent's Loading…/error notes. No live iframe sources in the catalogue.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HtmlArtifactViewer.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["html-artifact-viewer--default"],
+        "note": "Preview view: the toolbar (aria-pressed on both tabs) and the sandboxed frame — sandbox=\"allow-scripts\", referrerpolicy=\"no-referrer\", lazy load and the file-path title. The iframe's own navigation is not fenced."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "code",
+        "coverage": "covered",
+        "storyIds": ["html-artifact-viewer--code"],
+        "note": "Code view: the source renders one .hav-code-line per line inside the pre; toggling back to Preview unmounts the code and remounts the frame (the controlled view prop flips through the parent wrapper)."
+      },
+      {
+        "name": "code-loading",
+        "coverage": "covered",
+        "storyIds": ["html-artifact-viewer--code-loading"],
+        "note": "Code view while the parent's source fetch is in flight renders the 'Loading source…' note and neither frame nor code."
+      },
+      {
+        "name": "code-error",
+        "coverage": "covered",
+        "storyIds": ["html-artifact-viewer--code-error"],
+        "note": "A parent-owned source failure renders the .hav-note-error note in place of the code, never in place of the frame."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["html-artifact-viewer--narrow"],
+        "note": "A 390px pane: the toolbar and the sandboxed frame stay inside the narrow wrapper."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HtmlArtifactViewer.vue has not yet been audited."
+      "status": "none",
+      "detail": "HtmlArtifactViewer performs no transport itself: the preview frame navigates natively to /api/workspace-html and the source fetch belongs to the parent, which passes sourceLoading/sourceError in as props. There is no own initial/refresh/failure/stale state; the two note branches render the parent's loading and failure."
     },
     "migration": {
       "status": "unassessed",
@@ -9282,48 +9426,42 @@ export const inventory: InventoryEntry[] = [
       "diff",
       "editing"
     ],
-    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are renderer support components.",
+    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are renderer support components. History and diff branches no longer exist in the template: the scoped style still carries .fv-history-*/.fv-diff-* rules nothing renders.",
     "states": [
       {
         "name": "default",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": ".fv-body in FileViewerModal.vue implements this family; no rendered-state story exists."
+        "note": "The .fv-body preview states are proven by components-file-viewer-modal's covered states (default/markdown/document-properties/empty/csv/image/image-error/folder/pdf/libreoffice-notice/html stories render exactly this body); inline rows cannot claim story coverage."
       },
       {
         "name": "preview",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": ".fv-body in FileViewerModal.vue includes preview; no rendered-state story exists."
+        "note": "Same body as default, named for the preview-vs-editor split this family owns; covered through components-file-viewer-modal (including html-code/code-loading/code-error for the artifact panel). Inline rows cannot claim story coverage."
       },
       {
         "name": "history",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": ".fv-body in FileViewerModal.vue includes history; no rendered-state story exists."
+        "note": "No history branch exists in .fv-body's template: the history UI was removed (only its .fv-history-* CSS remains in the scoped style) and no web surface consumes file snapshots."
       },
       {
         "name": "diff",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": ".fv-body in FileViewerModal.vue includes diff; no rendered-state story exists."
+        "note": "No diff branch exists in .fv-body's template: the diff UI was removed (only its .fv-diff-* CSS remains in the scoped style)."
       },
       {
         "name": "editing",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": ".fv-body in FileViewerModal.vue includes editing; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "note": "The edit shell is exercised end to end by components-file-viewer-modal's editing, editing-csv, saving and save-error states (the file-modal-preview-editor--* stories, claimed by the modal component row); inline rows cannot claim story coverage."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in FileViewerModal.vue has not yet been audited."
+      "status": "known",
+      "detail": "The .fv-body shows the modal's 'Loading…'/error text lines for the initial load and the streaming-end refresh failure — no separate skeleton geometry (initial loading and failure are the modal row's covered loading/error stories). Loaded content replaces the whole body, so the loading line does not match the loaded table/prose geometry and a loading-geometry follow-up applies."
     },
     "migration": {
       "status": "unassessed",
