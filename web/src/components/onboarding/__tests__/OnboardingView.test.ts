@@ -40,7 +40,7 @@ describe('OnboardingView resumes', () => {
   it('can advance from a resumed access/memory step once both halves are ready', async () => {
     vi.mocked(api.get).mockImplementation((url: string) => {
       if (url === '/api/onboarding') return Promise.resolve({ schema: 1, revision: 2, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: {} }) as never
-      if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal', agent_fs_scope: 'workspace' }] }) as never
+      if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal' }] }) as never
       if (url === '/api/setup-status') return Promise.resolve({ workspace_root: '/srv/ciaobot' }) as never
       if (url === '/api/host/terminal') return Promise.resolve({ platform: 'darwin' }) as never
       if (url === '/api/settings/routines') return Promise.resolve({ provider_default_modes: { claude: 'auto' } }) as never

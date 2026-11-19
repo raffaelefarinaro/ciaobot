@@ -97,7 +97,6 @@ function registry(acmeLink = ''): WorkspacesResponse {
     })),
     active: 'acme',
     primary: 'acme',
-    default_agent_fs_scope: 'workspace',
     provider_options: [{ value: 'claude', label: 'Claude' }],
   } as WorkspacesResponse
 }
