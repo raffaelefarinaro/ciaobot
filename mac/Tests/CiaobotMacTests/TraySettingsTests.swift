@@ -662,9 +662,13 @@ final class TraySettingsTests: XCTestCase {
         XCTAssertTrue(item.isEnabled)
         XCTAssertNil(controller.menu?.deepItem(withTitle: MenuBarController.updatesUnavailableTitle))
         XCTAssertEqual(item.action, #selector(MenuBarController.checkForUpdates(_:)))
-        XCTAssertTrue(item.toolTip?.contains("restarts this Mac client only") == true,
-                      "The tip must not imply that the engine or the web app restarts.")
-        XCTAssertTrue(item.toolTip?.contains("verified") == true)
+        let tip = try XCTUnwrap(item.toolTip)
+        XCTAssertTrue(tip.contains("verified"))
+        XCTAssertTrue(tip.contains("Installing quits this Mac client"))
+        XCTAssertTrue(tip.contains("A bundled engine is stopped first, which interrupts running chats"),
+                      "A bundled engine stops during an install, so the tip must not say it keeps running.")
+        XCTAssertTrue(tip.contains("an external server keeps running"))
+        XCTAssertFalse(tip.contains("engine and the web app keep running"))
         XCTAssertEqual(updater.startCount, 0, "Rendering the menu must not start the updater.")
 
         controller.checkForUpdates(item)

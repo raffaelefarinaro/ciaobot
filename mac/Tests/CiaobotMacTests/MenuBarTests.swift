@@ -660,23 +660,8 @@ final class MenuBarTests: XCTestCase {
     /// through the app's one Sparkle feed, so the menu keeps only the status,
     /// Open and the rest of its own rows. The titles are the ones the deleted
     /// rows used, so a row that comes back under the old wording fails here.
-    func testMenuHasNoEngineUpdateRows() throws {
-        let controller = MenuBarController(
-            status: AppSessionStatus(),
-            statusItemFactory: FakeStatusItemFactory(),
-            openWindow: {},
-            quit: {}
-        )
-        controller.start()
-
-        let titles = try XCTUnwrap(controller.menu).items.map(\.title)
-        XCTAssertTrue(titles.contains(MenuBarController.openTitle), "The menu must still have Open Ciaobot.")
-        for prefix in ["Update Ciaobot", "Try Updating Ciaobot", "Installing Ciaobot", "Ciaobot was updated"] {
-            XCTAssertFalse(titles.contains { $0.hasPrefix(prefix) }, "An engine-update row titled “\(prefix)” is still in the tray.")
-        }
-    }
-
-    func testAppDelegateDoesNotTerminateWhenTheLastWindowCloses() {        let delegate = AppDelegate(
+    func testAppDelegateDoesNotTerminateWhenTheLastWindowCloses() {
+        let delegate = AppDelegate(
             session: AppSessionStatus(),
             presenter: FakeMainWindowPresenter()
         )

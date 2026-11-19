@@ -744,15 +744,13 @@ struct ConnectionView: View {
             .accessibilityLabel(text)
     }
 
-    /// What the connection view does when it appears. Internal so a test can
-    /// prove local mode runs none of the external launch machinery.
+    /// What the connection view does when it appears.
     func launchOnAppear() {
         // A fresh connection screen is disconnected. Do not clear a live
         // connection when SwiftUI merely re-shows the existing window.
         if origin == nil { session?.reportDisconnected() }
-        // Local mode connects from the supervisor's running origin, never
-        // from the saved server: the launch machinery below is external-only.
-        guard engineMode == .external else { return }
+        // Local mode connects from the supervisor's running origin, never from
+        // the saved server: `autoConnectTarget` is nil there by construction.
         guard let target = autoConnectTarget, !didAutoConnect else { return }
         didAutoConnect = true
         address = target.url.absoluteString
@@ -869,7 +867,7 @@ struct ConnectionView: View {
                 }
                 self.establishSession(candidate)
             } else {
-                self.error = "Could not verify the server’s startup response. Check the address and try again."
+                self.error = Self.startupFailureText(offersThisMac: self.offersThisMac)
                 self.session?.reportDisconnected()
             }
         }
@@ -901,6 +899,14 @@ struct ConnectionView: View {
     /// on an arm64 Mac, when the app actually carries a usable engine.
     var offersThisMac: Bool {
         engineMode == .external && hostIsArm64 && supervisor?.hasEngine == true
+    }
+
+    /// The failed-probe line. When the bundled engine is offered, the fix can
+    /// be the other path, so the line names it.
+    static func startupFailureText(offersThisMac: Bool) -> String {
+        offersThisMac
+            ? "Could not verify the server’s startup response. Check the address or use Ciaobot on This Mac, then try again."
+            : "Could not verify the server’s startup response. Check the address and try again."
     }
 
     /// **Use Ciaobot on This Mac** (external → local): saves the local choice,

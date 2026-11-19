@@ -191,18 +191,6 @@ final class LocalEngineWiringTests: XCTestCase {
 
     // MARK: ConnectionView in local mode
 
-    /// The appear closure's external-only launch machinery (a saved-origin
-    /// connect) must not run in local mode.
-    func testLocalModeAppearRunsNoExternalLaunchMachinery() throws {
-        let remote = try XCTUnwrap(Origin("https://remote.example.com"))
-        lastServer.remember(remote)
-        let localProbe = StubProbe(responds: true)
-        let local = ConnectionView(
-            probe: localProbe, lastServer: lastServer, hostStore: hostStore, engineMode: .local)
-        local.launchOnAppear()
-        XCTAssertTrue(localProbe.checked.isEmpty)
-    }
-
     func testLocalModeHasNoSavedOriginAutoConnect() throws {
         let remote = try XCTUnwrap(Origin("https://remote.example.com"))
         lastServer.remember(remote)

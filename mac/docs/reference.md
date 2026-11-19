@@ -8,7 +8,7 @@ The generated `.app` also carries the brand artwork — the cream tile with the 
 
 [Download the latest Ciaobot for Mac release](https://github.com/raffaelefarinaro/ciaobot-mac/releases/latest). Apple silicon, macOS 13 or later. Open the `.dmg`, drag **Ciaobot** into **Applications**, and launch it from there — not from the download folder or the mounted image, or it cannot update itself.
 
-On first launch you enter a server's address, or use the Ciaobot engine bundled in the app where that is offered. The app does not install a server on this Mac. The engine keeps running in the background when the app closes, so chats and schedules carry on. Releases are previews for now; existing copies update themselves.
+On first launch you enter a server's address, or use the Ciaobot engine bundled in the app where that is offered. The app does not install a server on this Mac. Closing the window leaves the app in the menu bar with its engine still running, so chats and schedules carry on. Quitting the app stops a bundled engine: **Quit Ciaobot** asks first when the engine is running and drains it before the app leaves. An external server is never stopped by the app. Releases are previews for now; existing copies update themselves.
 
 ## Build and run
 
@@ -357,9 +357,10 @@ a tampered or unnotarized download is never unpacked. The immediate-install
 delegate (`updater(_:willInstallUpdateOnQuit:immediateInstallationBlock:)`)
 returns `true` and runs Sparkle's install handler on the next main-queue turn,
 so a verified update installs and relaunches straight away instead of waiting
-for the user to quit. **Only the Mac client restarts.** The Ciaobot engine and
-the web app it serves are separate processes and keep running; this client does
-not restore its own web view's unsaved drafts.
+for the user to quit. The install is a system quit: no dialog, and a bundled
+engine is stopped first with the 20-second system grace (SIGTERM, then SIGKILL),
+so running chats are interrupted. An external server is not owned by the app and
+keeps running. This client does not restore its own web view's unsaved drafts.
 
 The first updater-enabled build has to be installed by hand once, because an
 installed 0.1.1 has no updater. Installing this client over an existing copy
@@ -627,7 +628,6 @@ When macOS actually denies notifications, the blocked row inside **Settings** sh
 - Automatic updates exist only in a release build that embeds the public feed and EdDSA key. The updater is unit-tested with a Sparkle double, so no test starts an updater or contacts the feed; a real check, download, install and relaunch on this Mac remains a manual check with a notarized release build. Feed signing (`SURequireSignedFeed`) is off for this first release, so a compromised feed could withhold or delay updates (it cannot install an archive that fails the EdDSA signature and notarization checks); turning feed signing on is the recorded follow-up, together with key rotation and delta updates. Installing the first updater-enabled build over 0.1.1 is manual because that build has no updater.
 - The disk image is produced only by a release run on a signing Mac. Its tests drive the real `scripts/make-dmg.sh` with recording `hdiutil`, `codesign` and `xcrun` doubles plus one real `hdiutil` create/mount/detach of a throwaway image, so no test notarizes, staples or Gatekeeper-assesses an image, and none performs a real drag-to-Applications install. The tests read the staged and mounted `.DS_Store` and background picture; how Finder draws the window in Light and Dark mode remains a manual release check, as do the notarization and install steps.
 - The fixed Settings URLs are unit-tested as exact app-owned strings, but whether System Settings highlights the intended pane on every supported macOS release is a manual check. The app never uses a page-provided URL for this action.
-- An update cannot be cancelled from the app once started (the engine's apply drains for up to its own 10-minute default).
 - Real-server GUI testing, and the full quit/relaunch flow that reuses a saved session, remain manual checks. No automated test proves that a cookie written to a named store survives an actual process relaunch; WebKit's on-disk flush is not observable from the test harness, so persistence across relaunch is implemented but not yet verified end to end. Automated tests use isolated fixtures only and never contact a live server.
 - The menu-bar icon’s rendered tint, the rendered attention number beside the mark, the real click path through **Open Ciaobot** after closing the window, the chat-row click path, and the Dock-reopen path are covered by unit tests for their presenter and item state, but not by GUI automation. Verifying them by hand means launching this build, closing its window, and using the menu-bar item; the automated GUI launch test deliberately does not drive the operator’s running app.
 - The app icon’s transparency and macOS proportions are checked from the PNG and `.icns` bytes. That does not prove a live Dock tile redraws after an in-place replacement: a running copy and Finder’s icon cache can keep showing the old square until the app is relaunched (or the bundle is rebuilt and the cache refreshed). This slice never replaces the operator’s running app, so that visual check remains manual.

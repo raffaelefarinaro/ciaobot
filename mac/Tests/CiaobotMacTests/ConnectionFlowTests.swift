@@ -395,16 +395,35 @@ final class ConnectionFlowTests: XCTestCase {
     /// The connection screen is the external mode's only surface, and it offers
     /// no install, repair, update or same-Mac discovery control. The view is
     /// AppKit/SwiftUI, so this reads its source the way BundledEngineTests does.
-    func testExternalModeOffersNoInstall() throws {
-        let app = URL(fileURLWithPath: #filePath)
+    /// #3130 M3 deleted the engine installer, updater and local discovery. The
+    /// compiler proves a deleted type is not referenced, but not that a removed
+    /// name or UI string is absent from the sources, so every source file is
+    /// scanned. Type names match anywhere, ignoring case. UI strings match only
+    /// where a string literal starts, so running text such as "Restart Ciaobot"
+    /// or "to check again." stays allowed.
+    func testNoEngineInstallerRemnantsInAnySource() throws {
+        let sources = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("Sources/CiaobotMac/App.swift")
-        let text = try String(contentsOf: app, encoding: .utf8)
-        for banned in ["Install Ciaobot", "Repair Ciaobot", "Find Ciaobot on This Mac", "Start Ciaobot",
-                       "NativeInstall", "NativeRepair", "LocalServerDiscovery", "EngineUpdat", "installer"] {
-            XCTAssertFalse(text.contains(banned), "The connection screen mentions \(banned)")
+            .appendingPathComponent("Sources/CiaobotMac")
+        let files = try FileManager.default.contentsOfDirectory(at: sources, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "swift" }
+        XCTAssertFalse(files.isEmpty, "The source scan found no Swift files under \(sources.path).")
+
+        let banned = [
+            "NativeInstall", "EngineUpdat", "EngineRelease", "LocalServerDiscovery",
+            "WorkspacePort", "FreePort", "WorkspaceDotenvPort", "Ciaobot installer",
+            "\"Start Ciaobot", "\"Repair Ciaobot", "\"Find Ciaobot", "\"Install Ciaobot",
+            "\"Update Ciaobot", "\"Try Updating Ciaobot", "\"Installing Ciaobot", "\"Ciaobot was updated",
+            "\"Check Again",
+        ]
+        for file in files {
+            let text = try String(contentsOf: file, encoding: .utf8)
+            for term in banned {
+                XCTAssertNil(text.range(of: term, options: .caseInsensitive),
+                             "\(file.lastPathComponent) still mentions the removed engine installer: \(term)")
+            }
         }
     }
 }
