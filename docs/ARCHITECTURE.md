@@ -32,7 +32,7 @@ Chat listings batch cross-cwd Claude session availability checks into one fresh
 directory scan per request. Individual session lookups retain their separate
 freshness contract; listing availability is never cached across requests.
 
-Settings → MCP is an inventory of Claude Code and OpenCode native configuration plus connection states from already running chats in the selected workspace. `/api/mcp/status` reports provider availability and inventory certainty, safe server metadata, and one connection row per live chat. Absent sessions remain unchecked; unreadable config/status is unknown. Settings edits provider configuration only to turn one MCP server on or off (`POST /api/mcp/servers/enabled`, Claude Code's `disabledMcpServers` or OpenCode's `disabled` flag) and never handles credentials. Settings **Sign in** navigates to the exact chat's MCP section; its managed control raises and starts the chat's `mcp_auth` action (`POST /api/chats/{chat_id}/actions/mcp-auth`, `ChatActionsRuntime.request_mcp_auth`). OAuth uses that chat's session, and starting it may start the chat's OpenCode server. Both providers retain callback paste-back and verification. A terminal sign-in (`opencode mcp auth`, `claude mcp login`) only reaches sessions started afterwards: OpenCode V2 has no reconnect route, so a running chat server keeps its old state until it restarts. A server is reported blocked only when the workspace's `disallowed_tools` names `mcp__<server>`.
+Settings → MCP is one button per installed agent. Each button types that agent's server-built MCP command (`mcp_command` on its provider row: `claude mcp` or `opencode mcp`) into the in-app terminal for the active workspace's project. The page does not read MCP inventory or turn servers on or off. Changes apply to new chats; a running chat loads them after `ciao chat reload`. A CLI that is not installed has no button.
 
 ## App repo layout
 
@@ -1095,15 +1095,13 @@ through `<style scoped src>`, because a parent's scoped rules do not reach a
 child's subtree.
 
 `SettingsView.vue` is being decomposed the same way, one settings surface at a
-time, into `components/settings/`. The MCP tab uses `composables/useMcpServers.ts`
-for inventory and usage reads; it has no per-server edit drafts, secret inputs,
-tool probes, or add form. `GET /api/mcp/status` reads native Claude Code and
-OpenCode configuration and cached status from already running chats in the
-selected workspace. It exposes safe server metadata and per-chat states, but
-never starts a provider or MCP process, edits provider files, or widens Claude's
-workspace allowlist. Explicit on/off writes change provider configuration; setup and manual CLI
-authentication use the workspace root. `SettingsView` serializes guarded
-workspace switches, with latest-intent and query-reveal tokens.
+time, into `components/settings/`. The MCP tab lists one `ProviderMcpButton`
+per agent whose provider row carries `mcp_command`. The button types that
+command into the in-app terminal (`composables/useRunInTerminal.ts`) for the
+active workspace's project, and copies it when the terminal is not ready. It
+does not edit provider files or start an MCP process. *Ask Ciao to add one*
+still opens a chat titled "Add an MCP server". `SettingsView` serializes guarded
+workspace switches for File access links.
 
 The frontend MCP surface is owned by `web/src/components/ChatMcpConnections.vue`
 (health and managed controls), `web/src/components/ChatMcpTerminalRecovery.vue`

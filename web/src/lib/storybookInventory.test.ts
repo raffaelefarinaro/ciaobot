@@ -468,7 +468,7 @@ describe('production ownership', () => {
 
 describe('filtering and isolation', () => {
   it('searches all fields with trimmed case-insensitive AND terms in stable order', () => {
-    for (const query of ['  CHAT   COMPOSER ', 'TaskWorkspaceSurface', 'settings/SettingsMcpServers', 'onboarding/OnboardingButton', 'btn-primary']) expect(filterInventory(inventory, { ...defaults, query }).length, query).toBeGreaterThan(0)
+    for (const query of ['  CHAT   COMPOSER ', 'TaskWorkspaceSurface', 'settings/SettingsSwitch', 'onboarding/OnboardingButton', 'btn-primary']) expect(filterInventory(inventory, { ...defaults, query }).length, query).toBeGreaterThan(0)
     const row = inventory.find((entry) => entry.id === 'chat-panel-composer')!
     for (const query of [row.owner.path, row.owner.anchor, row.sources[0], row.variants[0], row.loading.detail, row.migration.note]) expect(filterInventory([row], { ...defaults, query })).toEqual([row])
     const consumer = inventory.find((entry) => entry.consumers.length)!
