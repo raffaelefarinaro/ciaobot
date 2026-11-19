@@ -7377,8 +7377,8 @@ def _pip_install_hint(output: str) -> str:
     if "cannot uninstall" in lowered or "no record file" in lowered:
         return (
             "The running engine belongs to a packaged Ciaobot.app and cannot be "
-            "replaced by the development deploy action. Use the signed in-app "
-            "updater or re-run the one-line installer for production updates."
+            "replaced by the development deploy action. Ciaobot for Mac updates its "
+            "bundled engine together with the app."
         )
     return ""
 
@@ -7448,7 +7448,7 @@ def _restart_only(config, *, dev_mode: bool) -> bool:
 _BUNDLED_DEPLOY_REFUSAL = (
     "This engine runs from the installed Ciaobot.app, not a source checkout, "
     "so there is nothing to pull or rebuild. Use Restart to restart it; updates "
-    "come from the in-app updater or the one-line installer."
+    "come from the Ciaobot app (Sparkle)."
 )
 
 _INSTALLER_DEPLOY_REFUSAL = (
