@@ -88,7 +88,7 @@ def test_pip_hint_explains_a_packaged_engine_cannot_be_replaced() -> None:
     hint = _pip_install_hint(output)
 
     assert "Ciaobot.app" in hint
-    assert "one-line installer" in hint
+    assert "updates its bundled engine" in hint
 
 
 def test_pip_hint_is_empty_for_an_unrelated_failure() -> None:

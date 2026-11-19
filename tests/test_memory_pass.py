@@ -3080,10 +3080,6 @@ async def test_pump_defers_while_draining_and_keeps_queue(
     assert memory_id is not None
     assert manager.get_chat(memory_id).helper["state"] == "queued"
     assert streams.chat_ids == []
-    # ...and the idle snapshot can see it, so a second claim fails closed.
-    assert manager._memory_pass.update_idle_reasons() == [
-        f"memory pass queued in chat {memory_id}"
-    ]
 
     # Releasing the claim makes the queue eligible again. The re-pump itself is
     # the coordinator's job (slice 2); here the same pump is simply asked again.
@@ -3092,6 +3088,3 @@ async def test_pump_defers_while_draining_and_keeps_queue(
 
     assert streams.chat_ids == [memory_id]
     assert manager.get_chat(memory_id).helper["state"] == "running"
-    assert manager._memory_pass.update_idle_reasons() == [
-        f"memory pass running in chat {memory_id}"
-    ]

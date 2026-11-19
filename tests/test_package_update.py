@@ -271,22 +271,26 @@ def test_update_package_installer_mode_points_at_installer(monkeypatch) -> None:
 
     assert result["ok"] is False
     assert result["mode"] == "installer"
-    # install-engine.sh is deleted; an installer-managed engine updates through
-    # the engine's own verbs, and it has no Ciaobot.app to reinstall (#568).
-    assert result["command"] == "ciao update stage"
-    assert "Run `ciao update stage`, then `ciao update apply`" in result["error"]
+    # install-engine.sh is deleted, and the engine no longer updates itself
+    # through its own verbs: macOS updates it through the app, Linux through the
+    # documented reinstall (#3130 P6).
+    assert result["command"] == ""
+    assert "no longer updates itself" in result["error"]
+    assert "Ciaobot for Mac updates it" in result["error"]
+    assert "docs/LINUX.md" not in result["error"]
+    assert "ciao update" not in result["error"] + result["command"]
     assert "install-engine" not in result["command"] + result["error"]
 
 
 # Receipt ownership decides the answer, not the platform. A Linux
 # `systemd-user` engine placed by the shell installer is a managed install, so
-# it must be told about `ciao update stage` rather than the generic Linux
-# administrator workflow, which the platform branch would otherwise return
+# it must be told that it no longer updates itself rather than given the generic
+# Linux administrator workflow, which the platform branch would otherwise return
 # first. This is the #567 review finding on the branch order.
 #
-# The command follows the platform too: install.sh exits on Linux with "this
-# installer supports macOS only", so a Linux installer engine must not be sent
-# to it. (Round 1 review finding.)
+# No command is offered to it: install.sh exits on Linux with "this installer
+# supports macOS only", so a Linux installer engine must not be sent to it.
+# (Round 1 review finding.)
 def test_update_package_installer_checked_before_linux(monkeypatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "installer")
@@ -295,8 +299,10 @@ def test_update_package_installer_checked_before_linux(monkeypatch) -> None:
 
     assert result["ok"] is False
     assert result["mode"] == "installer"
-    assert "ciao update stage" in result["error"]
-    assert result["command"] == "ciao update stage"
+    assert "no longer updates itself" in result["error"]
+    assert "docs/LINUX.md" in result["error"]
+    assert "Ciaobot for Mac" not in result["error"]
+    assert result["command"] == ""
 
 
 def test_linux_source_export_never_recommends_the_mac_installer(monkeypatch) -> None:

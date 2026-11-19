@@ -42,7 +42,7 @@ See [INTEGRATIONS.md](INTEGRATIONS.md) for current commands. Contributors runnin
 ### Existing installs
 
 - **Upgrading from the retired macOS app:** follow the [migration guide](INTEGRATIONS.md#upgrading-from-the-macos-app) to keep your workspace, password, chats, and schedules.
-- **Updates:** use **Settings → General** in the PWA. See the [macOS update instructions](INTEGRATIONS.md#upgrading-from-the-macos-app).
+- **Updates:** on macOS, Ciaobot for Mac updates itself (Sparkle). On Linux, see [Linux hosting](docs/LINUX.md).
 - **Stop or start the engine:** run `ciao service stop` or `ciao service start`. Your workspace is kept.
 
 ## How it works

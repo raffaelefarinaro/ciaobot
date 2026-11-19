@@ -252,8 +252,9 @@ directly at the HTTPS hostname with its dashboard password.
 
 ## Updates and backups
 
-A one-line install updates by re-running the installer — the same one line —
-or with `ciao update`, which downloads and runs that installer the same way.
+A one-line install updates by re-running the installer — the same one line.
+`ciao update` no longer updates an engine; `ciao update status` only prints the
+last update record.
 The install re-downloads the release wheel, checks it against the stamped
 digest, refreshes the engine with `uv tool install --force`, and re-installs
 and restarts the service unit; the workspace, its `.env` and its configuration

@@ -191,9 +191,6 @@ from ciao.web.routes_node import (
     package_changelog_endpoint,
     package_status_endpoint,
     package_update_endpoint,
-    update_settings_endpoint,
-    update_start_endpoint,
-    update_status_endpoint,
 )
 from ciao.web.routes_push import (
     push_public_key,
@@ -639,9 +636,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # start an update from a browser, exactly as they may
         # POST /api/admin/restart. Stage and apply run chained in one background
         # job; the card polls the status route.
-        Route("/api/update/status", update_status_endpoint, methods=["GET"]),
-        Route("/api/update/start", update_start_endpoint, methods=["POST"]),
-        Route("/api/update/settings", update_settings_endpoint, methods=["PATCH"]),
         Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"]),
         Route("/api/setup/list-dirs", setup_list_dirs_endpoint, methods=["GET"]),
         Route("/api/setup/inspect-folder", setup_inspect_folder_endpoint, methods=["GET"]),
