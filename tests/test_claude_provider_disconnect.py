@@ -107,14 +107,12 @@ def test_disconnect_clears_the_provider_state(tmp_path: Path) -> None:
     client = _SdkLikeClient()
     provider = _provider_with(client, tmp_path)
     provider._connected = True
-    provider._turn_open = True
     provider._session_id = "sess-1"
 
     asyncio.run(provider.disconnect())
 
     assert provider._client is None
     assert provider._connected is False
-    assert provider._turn_open is False
     assert provider._session_id is None
     assert client.close_calls == 1
 

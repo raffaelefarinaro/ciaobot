@@ -86,7 +86,6 @@ set and nothing else.
 |---|---|---|
 | `disconnect()` | Session reset, delete, idle reap, stop escalation. | The process is leaked. On `BaseProvider` the default is a no-op. |
 | `ActiveHandle.stop()` | The Stop button. | Registered from `run_streaming`. |
-| `steer_turn(request)` | A user steer during a live turn: returns a delivery id and emits `SteerDeliveredEvent` once the model consumed it. | Falls back to the next-turn queue. On `BaseProvider` the default returns `None`. |
 | `move_to_background()` | The PWA's *Move to background* action (OpenCode's Ctrl+B). | On `BaseProvider` the default returns `"unsupported"` and the route answers 409. A provider that implements it sets `ToolUseEvent.backgroundable` on the calls it can move; the PWA shows the action only for those. |
 | `response_session_id` | Unheld permission and question replies, to reject replies for an old session. | Defaults to `""` when the provider has no session-scoped response fence. |
 | `current_session_id` | Turn delivery session rotation in `_drive_stream` and the host's live session probes; the service getter forwards it. | Defaults to `None`: the adapter tracks no session. A service with no provider instance reports `None` without constructing one. |

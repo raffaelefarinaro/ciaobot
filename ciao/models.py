@@ -377,13 +377,6 @@ class TokenUsageEvent(StreamEvent):
 
 
 @dataclass(slots=True)
-class SteerDeliveredEvent(StreamEvent):
-    """A message sent with ``steer_turn`` reached the running turn."""
-
-    delivery_id: str = ""
-
-
-@dataclass(slots=True)
 class PromptCancelledEvent(StreamEvent):
     """Stop cancelled the turn's prompt before the provider ran it.
 
