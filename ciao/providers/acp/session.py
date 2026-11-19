@@ -14,7 +14,7 @@ import hashlib
 import json
 import logging
 import os
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -358,6 +358,17 @@ class AcpSession:
         kind = canonical(body).get("sessionUpdate")
         self._note_update(events, kind=kind if isinstance(kind, str) else "")
 
+    def on_ext(
+        self,
+        method: str,
+        payload: Any,
+        hook: Callable[[UpdateNormalizer, str, Mapping[str, Any]], list[StreamEvent]],
+    ) -> None:
+        """Enqueue the events of one extension notification. Synchronous, like :meth:`on_update`."""
+        if self._replaying or not isinstance(payload, Mapping):
+            return
+        self._note_update(hook(self._normalizer, method, payload), kind="ext")
+
     def _note_update(self, events: list[StreamEvent], *, kind: str) -> None:
         if self._prompt_active:
             for event in events:
@@ -641,3 +652,21 @@ class AcpSession:
         self._close_late()
         if self._cap_object("sessionCapabilities", "close") and self.session_id:
             await self._connection.conn.close_session(session_id=self.session_id)
+
+    async def discard(self) -> None:
+        """Remove a throwaway session the agent keeps (a probe or a one-shot), best effort.
+
+        ``session/delete`` when the agent advertises it, so the session does not stay in the
+        user's own CLI history; otherwise ``session/close``. A failure is logged with its
+        exception type only, and never raised: the caller's result does not depend on it.
+        """
+        self._close_late()
+        if not self.session_id:
+            return
+        try:
+            if self._cap_object("sessionCapabilities", "delete"):
+                await self._connection.conn.delete_session(session_id=self.session_id)
+            else:
+                await self.close()
+        except Exception as exc:  # noqa: BLE001 — the adapter's error text is never logged
+            logger.warning("%s could not remove a throwaway session (%s).", self.spec.id, type(exc).__name__)

@@ -116,11 +116,11 @@ def test_models_route_reports_claude_evidence_from_the_acp_catalog(tmp_path: Pat
     import json
 
     from ciao.providers.acp.agents import ClaudeAcpProvider
-    from ciao.providers.opencode import OpencodeProvider
+    from ciao.providers.acp.agents import OpencodeAcpProvider
     from ciao.web.routes_api import list_models
 
     monkeypatch.setattr(ClaudeAcpProvider, "model_catalog", AsyncMock(return_value=[]))
-    monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[]))
+    monkeypatch.setattr(OpencodeAcpProvider, "model_catalog", AsyncMock(return_value=[]))
     config = _route_config(tmp_path)
 
     body = json.loads(asyncio.run(list_models(_models_request(config))).body)
@@ -138,13 +138,13 @@ def test_models_route_reports_observed_claude_models_and_configured_aliases(tmp_
     import json
 
     from ciao.providers.acp.agents import ClaudeAcpProvider
-    from ciao.providers.opencode import OpencodeProvider
+    from ciao.providers.acp.agents import OpencodeAcpProvider
     from ciao.web.routes_api import list_models
 
     monkeypatch.setattr(ClaudeAcpProvider, "model_catalog", AsyncMock(return_value=[
         {"model": "claude-x", "label": "Claude X", "variants": ["low", "high"]},
     ]))
-    monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[
+    monkeypatch.setattr(OpencodeAcpProvider, "model_catalog", AsyncMock(return_value=[
         {"model": "provider/model", "label": "Provider Model"},
     ]))
     config = _route_config(tmp_path)
@@ -166,10 +166,10 @@ def test_models_route_rejects_an_unknown_workspace_name_and_ignores_paths(tmp_pa
     import asyncio
     from unittest.mock import AsyncMock
 
-    from ciao.providers.opencode import OpencodeProvider
+    from ciao.providers.acp.agents import OpencodeAcpProvider
     from ciao.web.routes_api import list_models
 
-    monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[]))
+    monkeypatch.setattr(OpencodeAcpProvider, "model_catalog", AsyncMock(return_value=[]))
     config = _route_config(tmp_path)
 
     unknown = asyncio.run(list_models(_models_request(config, b"workspace=missing")))
@@ -179,19 +179,19 @@ def test_models_route_rejects_an_unknown_workspace_name_and_ignores_paths(tmp_pa
     assert rejected.status_code == 400
     # A valid call resolves through the config seam, never the raw query value.
     asyncio.run(list_models(_models_request(config, b"workspace=work")))
-    assert OpencodeProvider.model_catalog.await_args.args[0] == config.agent_root("work")
+    assert OpencodeAcpProvider.model_catalog.await_args.args[0] == config.agent_root("work")
 
 
 def test_refresh_probes_the_claude_catalog_again(tmp_path: Path, monkeypatch) -> None:
     import asyncio
 
     from ciao.providers.acp.agents import ClaudeAcpProvider
-    from ciao.providers.opencode import OpencodeProvider
+    from ciao.providers.acp.agents import OpencodeAcpProvider
     from ciao.web.routes_api import list_models
 
     claude_probe = AsyncMock(return_value=[])
     monkeypatch.setattr(ClaudeAcpProvider, "model_catalog", claude_probe)
-    monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[]))
+    monkeypatch.setattr(OpencodeAcpProvider, "model_catalog", AsyncMock(return_value=[]))
     config = _route_config(tmp_path)
 
     asyncio.run(list_models(_models_request(config, b"workspace=work&refresh=1")))

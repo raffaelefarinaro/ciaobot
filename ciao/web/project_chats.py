@@ -191,7 +191,12 @@ from ciao.os_support.files import open_fd
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao import provider_registry
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
-from ciao.providers.base import BACKGROUND_WORK_MAX_S, BaseProvider, QuestionResponseResult
+from ciao.providers.base import (
+    BACKGROUND_WORK_MAX_S,
+    BaseProvider,
+    CleanupTimedOut,
+    QuestionResponseResult,
+)
 from ciao.rate_limits import RateLimitStore, default_store_path
 from ciao.schedules import (
     ScheduleEntry,
@@ -5026,6 +5031,15 @@ class ProjectChatManager:
                 deleted = await descriptor.factory().delete_session(
                     root, sid, runtime_root=self._config.state_path.parent
                 )
+            except CleanupTimedOut:
+                # One id ran out of time: the chat's remaining ids are skipped, so the
+                # archive's total wait stays bounded. Their journals are left in place.
+                logger.warning(
+                    "Reclaiming %s sessions for chat %s timed out; the remaining ids were skipped.",
+                    chat.provider,
+                    chat.chat_id,
+                )
+                break
             except Exception:  # noqa: BLE001 — provider cleanup is fail-open
                 logger.exception(
                     "Failed to reclaim %s session %s for chat %s",
@@ -5678,9 +5692,9 @@ class ProjectChatManager:
         were in) into a ~2 s warm turn instead of a cold start.
 
         Bounded by count and by idle age so neither a long day of chat-hopping
-        nor a chat left open for days pins a process per chat. opencode is
-        never kept: its provider is a whole `opencode serve` with a port and an
-        SSE stream, which is what the idle timeout exists for.
+        nor a chat left open for days pins a process per chat. Every ACP agent
+        (opencode included, as `opencode acp`) qualifies; a provider that is not
+        an ACP agent is reclaimed by the idle timeout.
         """
         candidates = [
             (self._provider_last_used[chat_id], chat_id)
@@ -6829,88 +6843,28 @@ class ProjectChatManager:
 
     # ── Image-capability pre-flight ──────────────────────────────────────
 
-    async def _catalog_image_support(self, provider: str, model: str) -> bool | None:
-        """Whether ``model`` accepts images, per the provider's own catalog.
+    def _agent_accepts_images(self, chat: ChatInfo) -> bool:
+        """Whether the chat's live agent may receive images.
 
-        ``None`` means the provider did not say -- it is unknown, the model is
-        absent from its catalog, or its build reports no capability block.
-        Unknown is not a refusal; the caller treats it as capable.
+        The gate is the agent-level ``promptCapabilities.image`` the agent stated at its
+        handshake, read from the connection the chat already has. Only an explicit
+        False refuses; no connection yet, or no statement, is capable. A model that
+        cannot take an image is the adapter's to refuse, not this pre-flight's.
         """
-        descriptor = provider_registry.get(provider)
-        if descriptor is None:
-            return None
-        try:
-            catalog = await descriptor.factory().model_catalog(
-                self._config.workspace_root
-            )
-        except Exception:  # noqa: BLE001 — a probe must never block a turn
-            logger.info(
-                "%s catalog unavailable for %s; assuming capable",
-                provider,
-                model,
-                exc_info=True,
-            )
-            return None
-        for row in catalog:
-            if row.get("model") == model:
-                value = row.get("images")
-                return value if isinstance(value, bool) else None
-        return None
-
-    async def _model_capable(self, model: str, chat: ChatInfo) -> bool:
-        """Whether ``model`` can accept image input.
-
-        The provider's own ``model_catalog`` is the single source of truth.
-        Only opencode reports one (it is bring-your-own-provider and its
-        catalog spans text-only models); Anthropic's and OpenAI's current
-        models all accept images, and the base default is an empty catalog,
-        so every other provider answers yes without any work.
-
-        Unknown answers resolve to capable, so a cold catalog or an older
-        opencode build never blocks an image turn -- the upstream rejects the
-        attachment itself if it really cannot take one.
-        """
-        if not model:
-            return True
-        supports = await self._catalog_image_support(chat.provider, model)
-        return True if supports is None else supports
+        live = self._providers.get(chat.chat_id)
+        provider = live.provider if live is not None else None
+        return provider is None or provider.agent_accepts_images() is not False
 
     async def _capability_candidates(
         self, chat: ChatInfo, model: str
     ) -> list[dict[str, object]]:
-        """Vision-capable alternatives for the capability question.
+        """The question's candidates: the current model only, disabled.
 
-        Always leads with the current model as a disabled ``current`` entry so
-        the PWA can render the active-but-unsuitable choice. The rest are models
-        the chat's provider states accept images, drawn from the same catalog
-        that ruled the current one out, so a suggestion cannot be a guess.
-        For opencode, every entry with ``images is True`` in its catalog is
-        offered (no 3-item cap); other providers report an empty catalog, so
-        only the current entry is returned there.
+        The image statement covers the whole agent session, not each model, so no
+        alternative model is offered from a per-model table.
         """
-        entries: list[dict] = [{"id": model, "label": model, "disabled": True}]
-        descriptor = provider_registry.get(chat.provider)
-        if descriptor is None:
-            return entries
-        try:
-            catalog = await descriptor.factory().model_catalog(
-                self._config.workspace_root
-            )
-        except Exception:  # noqa: BLE001 — the question is still useful empty
-            logger.info(
-                "%s catalog unavailable for candidates", chat.provider, exc_info=True
-            )
-            return entries
-        for row in catalog:
-            candidate = str(row.get("model") or "")
-            if not candidate or candidate == model or row.get("images") is not True:
-                continue
-            entries.append({
-                "id": candidate,
-                "label": str(row.get("label") or candidate),
-                "supports_vision": True,
-            })
-        return entries
+        del chat
+        return [{"id": model, "label": model, "disabled": True}]
 
     async def _await_capability_answer(
         self, chat_id: str, request_id: str, timeout_s: float
@@ -10132,13 +10086,16 @@ class ProjectChatManager:
         Three tiers, in order:
 
         1. The provider's native session title, read through
-           ``BaseProvider.native_title_candidates`` (OpenCode's ``title`` agent).
-           OpenCode is polled through ``_TITLE_POLL_DELAYS`` before the lower
-           tiers run, and every wait re-checks the chat, so a manual rename or a
-           delete stops titling. Claude (ACP) has no native read: its title
-           arrives as a ``session_info_update`` event, applied by
-           ``apply_adapter_title`` while the turn streams, so its poll is
-           skipped and the lower tiers run without a wait.
+           ``BaseProvider.native_title_candidates``. Every ACP agent is read once,
+           with no wait. Claude (ACP) has no native read: its title arrives as a
+           ``session_info_update`` event, applied by ``apply_adapter_title`` while
+           the turn streams, so the read finds nothing and the lower tiers run.
+           opencode's own title is not forwarded over ACP (anomalyco/opencode#56894),
+           so its ``New session - <timestamp>`` placeholder is refused by
+           ``_real_title`` and nothing polls for it. Context-prefixed Ciaobot
+           prompts commonly suppress Claude's native titler, and nothing polls
+           after the fallback is written. Every wait re-checks the chat, so a
+           manual rename or a delete stops titling.
         2. A one-shot model call (``_llm_chat_title``) when the native title
            is absent, run straight after the inline native read.
         3. The deterministic ``chat_service._fallback_title`` (first 6 words of the
@@ -10154,9 +10111,16 @@ class ProjectChatManager:
 
         chat = self._chats.get(chat_id)
         provider = getattr(chat, "provider", "claude") if chat else "claude"
-        # Claude has no native read (see tier 1), so it takes no poll. Polling the full schedule
-        # here would hold the LLM title back by the schedule's two-minute tail.
-        delays: tuple[float, ...] = () if provider == "claude" else self._TITLE_POLL_DELAYS
+        delays: tuple[float, ...] = self._TITLE_POLL_DELAYS
+        descriptor = provider_registry.get(provider)
+        if provider == "claude":
+            # Claude's title arrives as a session_info_update event (see tier 1): no native read,
+            # so no poll. Polling would hold the LLM title back by the schedule's tail.
+            delays = ()
+        elif descriptor is not None and descriptor.acp_spec_path:
+            # Other ACP agents are read once, with no wait: their title, if any, is on the
+            # event stream, so a poll has nothing to catch up with.
+            delays = (0.0,)
         stopped, native = await self._poll_native_title(chat_id, delays, _is_titling_target)
         if stopped:
             return None
@@ -10266,10 +10230,10 @@ class ProjectChatManager:
         `BaseProvider.native_title_candidates` contract, in provider
         preference order; each is validated here with `_real_title`, so a
         contaminated candidate keeps losing to a clean one. Returns None when
-        the provider has not yet produced a real title — including its
-        placeholder default (e.g. opencode's ``New session - <timestamp>``) —
-        so the caller keeps polling until the generated title lands instead
-        of accepting the placeholder as final.
+        the provider has no real title, including its placeholder default
+        (e.g. opencode's ``New session - <timestamp>``), which is refused and
+        never written. The caller reads once per trigger; it does not poll
+        for a title that lands later.
         """
         provider = getattr(chat, "provider", "claude")
         # The chat's OWN agent root, not the install root. Every adapter's

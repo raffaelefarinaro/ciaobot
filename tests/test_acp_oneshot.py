@@ -200,3 +200,32 @@ async def test_oneshot_transport_error_raises_a_fixed_detail(monkeypatch, tmp_pa
     assert "secret-path" not in str(raised.value)
     assert raised.value.__cause__ is None
     assert raised.value.__suppress_context__ is True
+
+
+@pytest.mark.asyncio
+async def test_oneshot_throwaway_session_is_deleted_when_the_agent_advertises_delete(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls = _install(
+        monkeypatch, tmp_path, prompts=[{"steps": [{"update": _TEXT}]}],
+        initialize={"sessionCapabilities": {"delete": {}, "close": {}}},
+    )
+
+    assert await run_acp_oneshot(FakeOneshotProvider.spec, "say it", system_prompt="", model="", env={}) == "PONG"
+    new_ids = [c["params"]["sessionId"] for c in read_calls(calls) if c["method"] == "session/new"]
+    deleted = [c["params"]["sessionId"] for c in read_calls(calls) if c["method"] == "session/delete"]
+    assert new_ids and deleted == new_ids
+    assert not [c for c in read_calls(calls) if c["method"] == "session/close"]
+
+
+@pytest.mark.asyncio
+async def test_oneshot_delete_failure_keeps_the_reply(monkeypatch, tmp_path: Path, caplog) -> None:
+    _install(
+        monkeypatch, tmp_path, prompts=[{"steps": [{"update": _TEXT}]}],
+        initialize={"sessionCapabilities": {"delete": {}}},
+        delete_error="adapter secret boom",
+    )
+    caplog.set_level("WARNING")
+
+    assert await run_acp_oneshot(FakeOneshotProvider.spec, "say it", system_prompt="", model="", env={}) == "PONG"
+    assert "adapter secret" not in caplog.text

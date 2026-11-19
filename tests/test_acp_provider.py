@@ -764,10 +764,11 @@ def test_descriptor_acp_spec_resolves_module_attr(monkeypatch: pytest.MonkeyPatc
 
 
 def test_shipped_providers_that_run_over_acp() -> None:
-    # Claude (#3138) and Codex (#3139) run over ACP; OpenCode stays on its V2 HTTP driver.
+    # Claude (#3138), Codex (#3139) and OpenCode (#3140) all run over ACP.
     assert {item.id for item in provider_registry.descriptors() if item.acp_spec() is not None} == {
         "claude",
         "codex",
+        "opencode",
     }
 
 

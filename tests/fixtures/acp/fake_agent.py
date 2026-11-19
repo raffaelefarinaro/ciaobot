@@ -3,6 +3,8 @@
 Scenario JSON (every key optional):
 
 - ``initialize``: the ``agentCapabilities`` dict returned from ``initialize``.
+- ``agent_info``: the ``agentInfo`` dict (``name``, ``version``) returned from ``initialize``;
+  absent when the key is not given.
 - ``config_options``: SessionConfigOption dicts returned from ``session/new``
   and ``session/load``.
 - ``sessions``: session ids handed out by ``session/new`` in order (default
@@ -24,6 +26,7 @@ Scenario JSON (every key optional):
 - ``load_error`` / ``resume_error``: fail ``session/load`` or ``session/resume``
   with that message.
 - ``new_error``: fail ``session/new`` with that message.
+- ``delete_error``: fail ``session/delete`` with that message.
 - ``new_hang``: never answer ``session/new`` (the request blocks until the client goes away).
 - ``config_error``: fail ``session/set_config_option`` with that message.
 - ``stderr``: lines written to stderr at startup.
@@ -110,10 +113,12 @@ class FakeAgent:
             os._exit(1)
         if self.scenario.get("initialize_error"):
             raise acp.RequestError(-32000, str(self.scenario["initialize_error"]))
-        from acp.schema import InitializeResponse
+        from acp.schema import Implementation, InitializeResponse
+        agent_info = self.scenario.get("agent_info")
         return InitializeResponse(
             protocol_version=1,
             agent_capabilities=AgentCapabilities.model_validate(self.scenario.get("initialize", {})),
+            agent_info=Implementation.model_validate(agent_info) if agent_info is not None else None,
         )
 
     async def authenticate(self, method_id: str, **kwargs: Any) -> Any:
@@ -134,8 +139,10 @@ class FakeAgent:
 
     async def new_session(self, cwd: str, additional_directories: Any = None,
                           mcp_servers: Any = None, **kwargs: Any) -> Any:
+        session_id = self._next_session_id()
         self.log("session/new", {
             "cwd": cwd,
+            "sessionId": session_id,
             "mcpServers": [_dump(server) for server in mcp_servers or []],
             "additionalDirectories": additional_directories,
             "_meta": self._logged_meta(kwargs),
@@ -145,7 +152,7 @@ class FakeAgent:
         if self.scenario.get("new_hang"):
             await asyncio.Event().wait()
         return NewSessionResponse.model_validate({
-            "sessionId": self._next_session_id(),
+            "sessionId": session_id,
             "configOptions": self.scenario.get("config_options", []),
         })
 
@@ -192,6 +199,17 @@ class FakeAgent:
 
     async def close_session(self, session_id: str, **kwargs: Any) -> Any:
         self.log("session/close", {"sessionId": session_id})
+        return None
+
+    async def delete_session(self, session_id: str, **kwargs: Any) -> Any:
+        self.log("session/delete", {"sessionId": session_id})
+        if self.scenario.get("delete_hang"):
+            # Never answers: the caller's timeout is the only way out.
+            await asyncio.Event().wait()
+        if self.scenario.get("delete_not_found"):
+            raise acp.RequestError(-32002, "Resource not found")
+        if self.scenario.get("delete_error"):
+            raise acp.RequestError(-32000, str(self.scenario["delete_error"]))
         return None
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:

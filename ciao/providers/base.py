@@ -251,6 +251,10 @@ def rate_limit_status_text(quota: dict[str, str]) -> str:
     return ": ".join([parts[0], " ".join(parts[1:])]) if len(parts) > 1 else parts[0]
 
 
+class CleanupTimedOut(TimeoutError):
+    """A session cleanup ran out of time. The caller skips the chat's remaining session ids."""
+
+
 class BaseProvider(ABC):
     """Abstract provider interface."""
 
@@ -322,7 +326,8 @@ class BaseProvider(ABC):
 
         True is affirmative confirmation. None supplies no confirmation signal:
         an unsupported adapter or a best-effort cleanup with adapter-owned
-        diagnostics. It is not a claim that anything was deleted.
+        diagnostics. It is not a claim that anything was deleted. An adapter
+        whose cleanup ran out of time raises :class:`CleanupTimedOut`.
 
         ``runtime_root`` is the same runtime directory the live provider writes
         its own state under (``config.state_path.parent``). It is required with
@@ -336,6 +341,19 @@ class BaseProvider(ABC):
     ) -> list[dict[str, Any]]:
         """Optional dynamic model catalog; empty when none is exposed."""
         return []
+
+    def agent_accepts_images(self) -> bool | None:
+        """Whether the live agent takes image input, as it stated at its handshake.
+
+        None when no agent is connected or it states nothing. Only an explicit False
+        is a refusal; the preflight treats every other answer as capable.
+        """
+        return None
+
+    @classmethod
+    def invalidate_model_catalog(cls) -> None:
+        """Drop any cached model catalog so the next ``model_catalog`` probes again."""
+        return None
 
     @abstractmethod
     def run_streaming(

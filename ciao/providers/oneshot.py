@@ -1,7 +1,7 @@
 """One-shot model calls, dispatched to a runtime provider.
 
 ``provider`` selects the runner: a provider whose descriptor names an ACP
-``AgentSpec`` (see :mod:`ciao.providers.acp.oneshot`), otherwise ``opencode``.
+``AgentSpec`` (see :mod:`ciao.providers.acp.oneshot`).
 
 Calls are intentionally bare: custom system prompt, no filesystem
 settings/skills, no tools, no MCP discovery. Titles, insights,
@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import tempfile
-from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
@@ -41,52 +39,6 @@ class OneShotError(RuntimeError):
         self.detail = detail or "one-shot query failed"
         self.status = status
         self.transient = transient
-
-
-async def _run_opencode_oneshot(
-    prompt: str,
-    *,
-    system_prompt: str,
-    model: str,
-    env: dict[str, str] | None,
-    cwd: Path | None,
-) -> str:
-    from ciao.models import AgentRequest, ResultEvent
-    from ciao.providers.opencode import OpencodeProvider
-
-    # One-shot routines have a no-tools contract. Keep the server in a fresh
-    # empty directory so opencode cannot discover project instructions,
-    # configs, or MCP registrations from the workspace. Its deny-all session
-    # permission rules also prevent read/glob/grep/list from reaching files.
-    with tempfile.TemporaryDirectory(prefix="ciaobot-opencode-oneshot-") as isolated:
-        opencode = OpencodeProvider(
-            Path(isolated),
-            developer_instructions=system_prompt,
-            tools_enabled=False,
-        )
-        try:
-            async for event in opencode.run_streaming(
-                AgentRequest(
-                    prompt=prompt,
-                    model=model,
-                    mode="auto",
-                    provider="opencode",
-                    extra_env=env or {},
-                ),
-                lambda _handle: None,
-            ):
-                if isinstance(event, ResultEvent):
-                    if event.is_error:
-                        detail = (event.result or "").strip() or "opencode one-shot failed"
-                        # opencode reports a rejected prompt or a dead server as a
-                        # terminal ResultEvent; it does not distinguish retriable
-                        # upstream flakes, so do not double-retry here.
-                        raise OneShotError(detail, transient=False)
-                    return event.result
-            return ""
-        finally:
-            await opencode.delete_current_session()
-            await opencode.disconnect()
 
 
 async def run_oneshot(
@@ -143,20 +95,6 @@ async def run_oneshot(
                 model=model,
                 env=acp_env,
                 session_meta=session_meta,
-            )
-    elif provider == "opencode":
-        async def _attempt() -> str:
-            one_shot_env = dict(env or {})
-            # The engine's own bin dir leads PATH so a ``ciao`` the one-shot's
-            # opencode server launches is this engine's CLI, not a stale install
-            # earlier on the user's PATH (#989).
-            one_shot_env["PATH"] = prepend_engine_path(one_shot_env.get("PATH"))
-            return await _run_opencode_oneshot(
-                prompt,
-                system_prompt=system_prompt,
-                model=model,
-                env=one_shot_env,
-                cwd=cwd,
             )
     else:
         raise ValueError(f"Unknown one-shot provider '{provider}'")

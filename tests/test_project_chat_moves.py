@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import dataclasses
 import json
 import logging
 import sqlite3
@@ -799,7 +800,7 @@ async def test_delete_and_archive_reclaim_opencode_sessions(
             lifecycle.append("disconnect-done")
 
     monkeypatch.setattr(
-        "ciao.providers.opencode.OpencodeProvider.delete_session",
+        "ciao.providers.acp.agents.OpencodeAcpProvider.delete_session",
         _fake_opencode_delete,
     )
     opencode = pcm.create_chat(project.project_id, title="opencode-to-delete")
@@ -881,7 +882,7 @@ async def test_reclaim_failure_leaves_deletes_and_archives_durable(
         raise RuntimeError("cleanup refused")
 
     monkeypatch.setattr(
-        "ciao.providers.opencode.OpencodeProvider.delete_session",
+        "ciao.providers.acp.agents.OpencodeAcpProvider.delete_session",
         _failing_delete,
     )
     with caplog.at_level(logging.INFO, logger="ciao.web.project_chats"):
@@ -1141,3 +1142,107 @@ def test_synchronous_archive_indexing_is_best_effort(
         chat,
         project,
     )
+
+
+def _opencode_on_fake_agent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **scenario: Any) -> Path:
+    """Run OpenCode's real cleanup against the scripted ACP agent; returns its calls log."""
+    from ciao.providers.acp.agents import OpencodeAcpProvider
+    from tests.acp_helpers import write_scenario
+
+    spec, calls = write_scenario(tmp_path, **scenario)
+    fake = dataclasses.replace(
+        OpencodeAcpProvider.spec, binary=spec.binary, args=spec.args, version_gate=None
+    )
+    monkeypatch.setattr(OpencodeAcpProvider, "spec", fake)
+    return calls
+
+
+def _opencode_archive_chat(pcm: ProjectChatManager, project_id: str, title: str, sids: list[str]):
+    """An opencode chat with a durable turn, and a journal on disk for each of its session ids."""
+    from ciao.providers.acp.session import journal_file
+
+    chat = pcm.create_chat(project_id, title=title)
+    chat.provider = "opencode"
+    chat.previous_session_ids = sids[:-1]
+    chat.session_id = sids[-1]
+    chat.user_turn_count = 1
+    pcm._transcripts.record_turn(
+        AgentRequest(prompt="hello", model="sonnet", mode="auto", provider="opencode"),
+        ctx=ChatContext.for_web(chat.chat_id),
+        response_text="archived body",
+        effective_model="sonnet",
+        session_id=sids[-1],
+        usage={},
+        quota={},
+        input_kind="text",
+        provider="opencode",
+    )
+    journals = []
+    for sid in sids:
+        journal = journal_file(pcm._config.state_path.parent, "opencode", sid)
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text("{}\n", encoding="utf-8")
+        journals.append(journal)
+    return chat, journals
+
+
+async def test_archive_completes_when_opencode_never_answers_session_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hung session/delete cannot keep a chat from being archived."""
+    from ciao.providers.acp import agents as acp_agents
+
+    monkeypatch.setattr(acp_agents, "_DELETE_TIMEOUT_S", 3.0)
+    _opencode_on_fake_agent(
+        monkeypatch, tmp_path, initialize={"sessionCapabilities": {"delete": {}}}, delete_hang=True
+    )
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("hung-delete", workspace="work")
+    chat, journals = _opencode_archive_chat(pcm, project.project_id, "hung", ["hung-session"])
+
+    await asyncio.wait_for(pcm.archive_chat(chat.chat_id), 20)
+
+    assert chat.archived is True
+    assert not journals[0].exists()
+
+
+async def test_archive_completes_when_opencode_never_initializes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.providers.acp import agents as acp_agents
+
+    monkeypatch.setattr(acp_agents, "_DELETE_TIMEOUT_S", 3.0)
+    _opencode_on_fake_agent(monkeypatch, tmp_path, initialize_delay_ms=60_000)
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("hung-init", workspace="work")
+    chat, _journals = _opencode_archive_chat(pcm, project.project_id, "hung", ["hung-init-session"])
+
+    await asyncio.wait_for(pcm.archive_chat(chat.chat_id), 20)
+
+    assert chat.archived is True
+
+
+async def test_archive_stops_reclaiming_after_a_timeout_for_the_same_chat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After one id times out, the chat's remaining ids are skipped: the archive's total wait is bounded."""
+    from ciao.providers.acp import agents as acp_agents
+    from tests.acp_helpers import read_calls
+
+    monkeypatch.setattr(acp_agents, "_DELETE_TIMEOUT_S", 3.0)
+    calls = _opencode_on_fake_agent(
+        monkeypatch, tmp_path, initialize={"sessionCapabilities": {"delete": {}}}, delete_hang=True
+    )
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("hung-series", workspace="work")
+    chat, journals = _opencode_archive_chat(
+        pcm, project.project_id, "series", ["series-a", "series-b", "series-c"]
+    )
+
+    await asyncio.wait_for(pcm.archive_chat(chat.chat_id), 20)
+
+    assert chat.archived is True
+    # One agent spawn for the first id; the two after it were never attempted.
+    assert [c["method"] for c in read_calls(calls)].count("initialize") == 1
+    assert not journals[0].exists()
+    assert journals[1].exists() and journals[2].exists()

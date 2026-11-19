@@ -26,7 +26,7 @@ the user installs and signs into [Claude Code](https://docs.anthropic.com/en/doc
 then chooses Claude Code in Ciaobot; Ciaobot adds workspace/project context and
 handles the end-of-conversation memory pass around that session. For
 OpenAI access, OpenRouter, Ollama, or another cloud/local backend, the user
-installs [OpenCode 2.0.16+](https://opencode.ai/v2/docs/), configures and
+installs [OpenCode 2.3.2+](https://opencode.ai/v2/docs/), configures and
 authenticates the provider there, then chooses OpenCode in Ciaobot. Its connected models appear
 in the Ciaobot picker. Point users to the live
 [`INTEGRATIONS.md`](https://github.com/raffaelefarinaro/ciaobot/blob/main/INTEGRATIONS.md)
