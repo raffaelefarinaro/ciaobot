@@ -996,4 +996,4 @@ def test_repo_pins_uv_and_ci_workflows_use_the_same_version() -> None:
             m = re.search(r"version:\s*[\"']?([^\s\"']+)", window)
             assert m, f"{wf.name}:{i + 1} setup-uv has no version input"
             assert m.group(1) == pinned, f"{wf.name}:{i + 1} pins {m.group(1)}, pyproject pins {pinned}"
-    assert seen >= 3
+    assert seen >= 2  # publish.yml and release-smoke.yml; R1 removed the server-host rehearsal workflow that was the third
