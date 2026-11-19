@@ -1430,7 +1430,8 @@ def test_development_doc_warns_that_patch_releases_before_2_0_0_strand_1x() -> N
     text = (Path(__file__).parents[1] / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8")
 
     assert "Cutting a patch release before 2.0.0 strands 1.x engines" in text
-    assert "`release-smoke.yml` still expects the old macOS flow until L6" in text
+    assert "`release-smoke.yml` installs the published Linux `install.sh`" in text
+    assert "until L6" not in text
 
 
 # The 1.x manifest step signs nothing itself, but its verify runs with the
