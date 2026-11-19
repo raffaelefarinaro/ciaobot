@@ -258,14 +258,19 @@ describe('ChatPanel queued messages', () => {
     wrapper.unmount()
   })
 
-  it('a running turn shows Queued chips with no mode buttons', async () => {
-    const { wrapper } = await mountPanel((store) => {
-      store.streaming['chat-1'] = true
-      queue(store, [{ id: 'a', text: 'one' }, { id: 'b', text: 'two', waiting: true }])
+  it('a running turn shows Send next only on waiting chips', async () => {
+    const { wrapper, store } = await mountPanel((s) => {
+      s.streaming['chat-1'] = true
+      queue(s, [{ id: 'a', text: 'one' }, { id: 'b', text: 'two', waiting: true }])
     })
+    openSocket(store)
     expect(wrapper.find('.queued-mode').exists()).toBe(false)
-    expect(wrapper.find('.queued-send-now').exists()).toBe(false)
     expect(wrapper.find('.queued-send-all').exists()).toBe(false)
+    const buttons = wrapper.findAll('.queued-send-now')
+    expect(buttons.map(b => b.text())).toEqual(['Send next'])
+    expect(buttons[0].attributes('title')).toBe('Run after this reply')
+    await buttons[0].trigger('click')
+    expect(JSON.parse(send.mock.calls[0][0])).toEqual({ type: 'queue_send_now', entry_ids: ['b'] })
     const labels = wrapper.findAll('.queued-chip .queued-label').map(l => l.text())
     expect(labels).toEqual(['Queued', 'Waiting'])
     wrapper.unmount()
@@ -279,12 +284,12 @@ describe('ChatPanel queued messages', () => {
     const all = wrapper.get('.queued-send-all')
     expect(all.text()).toBe('Send all now')
     await all.trigger('click')
-    expect(JSON.parse(send.mock.calls[0][0])).toEqual({ type: 'queue_set_delivery', entry_ids: ['a', 'b'], delivery: 'steer' })
+    expect(JSON.parse(send.mock.calls[0][0])).toEqual({ type: 'queue_send_now', entry_ids: ['a', 'b'] })
     send.mockClear()
     const one = wrapper.findAll('.queued-send-now')
     expect(one.map(b => b.text())).toEqual(['Send now', 'Send now'])
     await one[1].trigger('click')
-    expect(JSON.parse(send.mock.calls[0][0])).toEqual({ type: 'queue_set_delivery', entry_ids: ['b'], delivery: 'steer' })
+    expect(JSON.parse(send.mock.calls[0][0])).toEqual({ type: 'queue_send_now', entry_ids: ['b'] })
     wrapper.unmount()
   })
 

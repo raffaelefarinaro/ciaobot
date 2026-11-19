@@ -15,16 +15,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from ciao.models import ResultEvent, SteerDeliveredEvent
+from ciao.models import ResultEvent
 from ciao.web.chat_broker import ChatStream, shared_origin
 from ciao.web.routes_api import chat_messages
 from ciao.web.transcript_service import _render_opencode_thread
 from tests.test_chat_messages_interrupted import _make_manager, _Msg, _request
-from tests.test_project_chats_queue import (
-    _SteerProvider,
-    _start_blocked_turn,
-    _wait_for,
-)
+from tests.test_project_chats_queue import _wait_for
 
 
 def _result(chat) -> ResultEvent:
@@ -147,7 +143,6 @@ def test_adopt_waiting_carries_origin() -> None:
             {"id": "w1", "text": "wake", "images": [], "origin": "background_run"},
             {"id": "w2", "text": "typed", "images": []},
         ],
-        "queue",
     )
     first = stream.drain_one()
     second = stream.drain_one()
@@ -244,62 +239,8 @@ def test_shared_origin_requires_every_entry_to_agree() -> None:
 WAKE = "[Ciaobot] 1 background run finished."
 
 
-async def _steer_entries(tmp_path: Path, entries: list[dict]):
-    """Steer ``entries`` into a blocked turn that echoes delivery; return state."""
-    delivered = SteerDeliveredEvent(type="steer_delivered", delivery_id="d1")
-    pcm, chat, _stream, release, _calls, captured, consumer = await _start_blocked_turn(
-        tmp_path, _SteerProvider(), events=[delivered]
-    )
-    before = pcm.get_chat(chat.chat_id).user_turn_count
-    for entry in entries:
-        pcm.queue_message(chat.chat_id, delivery="steer", **entry)
-    await pcm.steer_queue(chat.chat_id)
-    release.set()
-    await asyncio.wait_for(consumer, timeout=5.0)
-    steered = [e for e in captured if e.get("type") == "steered"]
-    assert len(steered) == 1
-    return pcm, chat, before, steered[0]
 
 
-async def test_a_steered_wake_keeps_its_origin(tmp_path: Path) -> None:
-    pcm, chat, before, event = await _steer_entries(
-        tmp_path, [{"text": WAKE, "entry_id": "q-w", "origin": "background_run"}]
-    )
-    meta = pcm.get_chat(chat.chat_id)
-    assert event["origin"] == "background_run"
-    assert meta.user_turn_origin == {str(before): "background_run"}
-    assert meta.user_turn_steered[str(before)] is True
-
-
-async def test_a_steered_wake_mixed_with_typed_text_has_no_origin(
-    tmp_path: Path,
-) -> None:
-    pcm, chat, _before, event = await _steer_entries(
-        tmp_path,
-        [
-            {"text": WAKE, "entry_id": "q-w", "origin": "background_run"},
-            {"text": "and check the log", "entry_id": "q-t"},
-        ],
-    )
-    assert "origin" not in event
-    assert event["text"] == f"{WAKE}\n\nand check the log"
-    assert pcm.get_chat(chat.chat_id).user_turn_origin == {}
-
-
-async def test_steered_entries_with_different_origins_have_no_origin(
-    tmp_path: Path,
-) -> None:
-    other = "[Ciaobot] Lost CLI tasks: 1 CLI task x"
-    pcm, chat, _before, event = await _steer_entries(
-        tmp_path,
-        [
-            {"text": WAKE, "entry_id": "q-w", "origin": "background_run"},
-            {"text": other, "entry_id": "q-c", "origin": "cli_task_wake"},
-        ],
-    )
-    assert "origin" not in event
-    assert event["text"] == f"{WAKE}\n\n{other}"
-    assert pcm.get_chat(chat.chat_id).user_turn_origin == {}
 
 
 def _parked_wake_chat(tmp_path: Path):
@@ -318,7 +259,7 @@ def _parked_wake_chat(tmp_path: Path):
 
 async def test_send_now_of_a_parked_wake_keeps_its_origin(tmp_path: Path) -> None:
     pcm, chat = _parked_wake_chat(tmp_path)
-    assert await pcm.set_queue_delivery(chat.chat_id, ["p1"], "steer") is True
+    assert await pcm.send_queued_now(chat.chat_id, ["p1"]) is True
     stream = pcm.get_active_stream(chat.chat_id)
     assert stream is not None
     await _wait_for(lambda: stream.done)
@@ -332,7 +273,7 @@ async def test_send_now_of_a_wake_with_a_typed_entry_has_no_origin(
     tmp_path: Path,
 ) -> None:
     pcm, chat = _parked_wake_chat(tmp_path)
-    assert await pcm.set_queue_delivery(chat.chat_id, ["p1", "p2"], "steer") is True
+    assert await pcm.send_queued_now(chat.chat_id, ["p1", "p2"]) is True
     stream = pcm.get_active_stream(chat.chat_id)
     assert stream is not None
     await _wait_for(lambda: stream.done)
@@ -342,54 +283,7 @@ async def test_send_now_of_a_wake_with_a_typed_entry_has_no_origin(
     assert chat.user_turn_origin == {}
 
 
-async def test_a_reverted_steer_keeps_its_origin_and_flushes_as_a_card_turn(
-    tmp_path: Path,
-) -> None:
-    pcm, chat, _stream, release, _calls, captured, consumer = await _start_blocked_turn(
-        tmp_path, _SteerProvider()
-    )
-    pcm.queue_message(
-        chat.chat_id, WAKE, entry_id="q-a", delivery="steer", origin="background_run"
-    )
-    await pcm.steer_queue(chat.chat_id)
-    release.set()  # the turn ends without a SteerDeliveredEvent
-    await asyncio.wait_for(consumer, timeout=5.0)
 
-    fallback = [e for e in captured if e.get("type") == "steer_fallback"]
-    assert [(e["entry_ids"], e["reason"]) for e in fallback] == [(["q-a"], "finished")]
-    echoes = [e for e in captured if e.get("type") == "user_echo"]
-    assert echoes[-1]["entry_id"] == "q-a"
-    assert echoes[-1]["origin"] == "background_run"
-    assert pcm.get_chat(chat.chat_id).user_turn_origin == {
-        str(echoes[-1]["turn_index"]): "background_run"
-    }
-
-
-async def test_a_steer_stopped_back_into_the_queue_keeps_its_origin(
-    tmp_path: Path,
-) -> None:
-    holder: dict[str, asyncio.Event] = {}
-    provider = _SteerProvider(on_stop=lambda: holder["e"].set())
-    pcm, chat, _stream, release, _calls, _captured, consumer = await _start_blocked_turn(
-        tmp_path, provider
-    )
-    holder["e"] = release
-    pcm.queue_message(
-        chat.chat_id, WAKE, entry_id="q-a", delivery="steer", origin="cli_task_wake"
-    )
-    await pcm.steer_queue(chat.chat_id)
-    await pcm.stop_chat(chat.chat_id)
-    await asyncio.wait_for(consumer, timeout=5.0)
-    assert pcm.get_chat(chat.chat_id).pending_queue[0]["origin"] == "cli_task_wake"
-
-
-def test_revert_steers_keeps_origin_on_the_entry() -> None:
-    stream = ChatStream("chat-1")
-    stream.enqueue("w", entry_id="w", delivery="steer", origin="background_run")
-    stream.mark_steering(["w"], "d1")
-    assert stream.revert_steers() == ["w"]
-    assert stream.pending[0]["origin"] == "background_run"
-    assert stream.drain_one()["origin"] == "background_run"
 
 
 # ── The retry origin ──────────────────────────────────────────────────────

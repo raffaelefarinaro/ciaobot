@@ -6102,20 +6102,20 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   /**
-   * "Send now" on waiting entries while nothing runs: starts a turn from them
-   * and removes them through `user_echo`, so nothing is changed optimistically.
-   * With a turn running the chips only queue, so no frame is sent.
+   * "Send now" on waiting entries: starts a turn from them when nothing runs,
+   * or moves them into the live queue to run after the current reply. The
+   * entries leave through `user_echo` or the next `queue_state`, so nothing
+   * is changed optimistically.
    */
   function sendQueuedNow(chatId: string, entryIds: string[]): void {
     const ws = sockets.value[chatId]
-    if (ws?.readyState !== WebSocket.OPEN || isChatStreaming(chatId)) return
+    if (ws?.readyState !== WebSocket.OPEN) return
     const wanted = new Set(entryIds)
     const chosen = (queuedMessages.value[chatId] || []).filter(q => wanted.has(q.id))
     if (!chosen.length) return
     ws.send(JSON.stringify({
-      type: 'queue_set_delivery',
+      type: 'queue_send_now',
       entry_ids: chosen.map(q => q.id),
-      delivery: 'steer',
     }))
   }
 

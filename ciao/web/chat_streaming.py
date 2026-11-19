@@ -35,7 +35,6 @@ from ciao.models import (
     PermissionRequestEvent,
     PromptCancelledEvent,
     ResultEvent,
-    SteerDeliveredEvent,
     StreamEvent,
     SystemStatusEvent,
     ThinkingEvent,
@@ -160,14 +159,6 @@ class ChatStreamingHost(Protocol):
     def _vault_root_for_chat(self, chat_id: str) -> Path | None: ...
 
     async def reload_provider(self, chat_id: str) -> bool: ...
-
-    def _fallback_steers(
-        self, chat_id: str, stream: ChatStream, reason: str
-    ) -> None: ...
-
-    def on_steer_delivered(
-        self, chat_id: str, stream: ChatStream, steer_id: str
-    ) -> None: ...
 
     def on_prompt_cancelled(
         self,
@@ -654,10 +645,8 @@ class ChatStreaming:
                 turn_answer_ready = False
                 turn_vault_reads: list[Path] = []
                 turn_succeeded = False
-                # The turn index the answer is filed under: the last steer that
-                # landed in this turn (its final answer row), else the turn itself.
+                # The turn index the answer is filed under.
                 turn_verify_index: int | None = None
-                stream.steered_turn_indexes.clear()
                 stream.running_turn_index = current_turn_index
                 turn_steps = TextStepJoiner()
                 turn_segment = FinalAnswerTracker()
@@ -693,11 +682,6 @@ class ChatStreaming:
                                 chat_id, stream, run_prompt, run_images, run_turn_index
                             )
                             prompt_cancelled = True
-                            continue
-                        if isinstance(event, SteerDeliveredEvent):
-                            self._host.on_steer_delivered(
-                                chat_id, stream, event.delivery_id
-                            )
                             continue
                         payload = event_to_json(event)
                         if payload and isinstance(
@@ -744,20 +728,7 @@ class ChatStreaming:
                                 rec["completed_at"] = completed_at
                                 if duration_ms is not None:
                                     rec["duration_ms"] = duration_ms
-                                turn_verify_index = (
-                                    stream.steered_turn_indexes[-1]
-                                    if stream.steered_turn_indexes
-                                    else run_turn_index
-                                )
-                                # Steers delivered into this turn finish with it.
-                                for steered_index in stream.steered_turn_indexes:
-                                    steered_rec = cm.user_turn_timings.setdefault(
-                                        str(steered_index), {}
-                                    )
-                                    steered_rec["completed_at"] = completed_at
-                                    if duration_ms is not None:
-                                        steered_rec["duration_ms"] = duration_ms
-                                stream.steered_turn_indexes.clear()
+                                turn_verify_index = run_turn_index
                                 sent_at_rec = rec.get("sent_at", "")
                                 self._host._save()
                             else:
@@ -1186,7 +1157,6 @@ class ChatStreaming:
                                 reason=error_msg,
                                 unattended=turn_unattended,
                             )
-                        self._host._fallback_steers(chat_id, stream, "finished")
                         parked = stream.drain_pending()
                         if parked:
                             cm_park = self._host._chats.get(chat_id)
@@ -1206,7 +1176,6 @@ class ChatStreaming:
                     # turn's text here would re-announce it (#2139 review).
                     last_answer_text = turn_answer_text
                 if question_paused:
-                    self._host._fallback_steers(chat_id, stream, "finished")
                     parked = stream.drain_pending()
                     if parked:
                         cm_park = self._host._chats.get(chat_id)
@@ -1216,9 +1185,6 @@ class ChatStreaming:
                             stream.publish_queue_state(cm_park.pending_queue)
                     break
 
-                # A steer the provider never confirmed goes back to the queue
-                # and flushes (or parks) below like any other entry.
-                self._host._fallback_steers(chat_id, stream, "finished")
                 next_pending = stream.drain_one()
                 skipped_blank = False
                 while next_pending is not None and not (

@@ -314,7 +314,6 @@ async def test_adopting_waiting_entries_preserves_send_ids(tmp_path: Path) -> No
     stream = pcm.start_stream(chat.chat_id, "initial")
     stream.adopt_waiting(
         [{"id": "q-1", "text": "waiting", "images": [], "send_id": "s-adopt"}],
-        "queue",
     )
 
     assert pcm.has_pending_send(chat.chat_id, "s-adopt") is True
@@ -1513,8 +1512,6 @@ def test_park_pending_for_retry_publishes_the_parked_queue(tmp_path: Path) -> No
                     "id": "q-1",
                     "text": "and then summarise it",
                     "images": ["shot.png"],
-                    "delivery": "queue",
-                    "steering": False,
                     "waiting": True,
                 },
             ],
@@ -1522,7 +1519,7 @@ def test_park_pending_for_retry_publishes_the_parked_queue(tmp_path: Path) -> No
     ]
     public = pcm._chats[chat.chat_id].to_dict()["pending_queue"]
     assert public == [
-        {k: v for k, v in e.items() if k not in ("delivery", "steering", "waiting")}
+        {k: v for k, v in e.items() if k != "waiting"}
         for e in states[0]["queue"]
     ]
     assert public is not pcm._chats[chat.chat_id].pending_queue
@@ -1629,51 +1626,38 @@ def _queue_states(captured: list[dict]) -> list[list[dict]]:
     return [e["queue"] for e in captured if e.get("type") == "queue_state"]
 
 
-def test_chat_stream_steer_candidates_and_take() -> None:
+async def test_mid_turn_message_queues_and_runs_after_the_result(tmp_path: Path) -> None:
+    """A message sent while a turn runs queues, then starts the next turn."""
+    provider = _SteerProvider()
+    pcm, chat, _stream, release, turn_calls, captured, consumer = (
+        await _start_blocked_turn(tmp_path, provider)
+    )
+    assert pcm.queue_message(chat.chat_id, "after", entry_id="q-after") is True
+    await asyncio.sleep(0)
+    assert turn_calls == ["initial"]
+    await _wait_for(lambda: any(event.get("type") == "queued" for event in captured))
+    queued = [event for event in captured if event.get("type") == "queued"]
+    assert queued[-1]["text"] == "after"
+    assert "delivery" not in queued[-1]
+    release.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+    assert turn_calls == ["initial", "after"]
+
+
+
+
+def test_public_queue_shape_is_id_text_images_waiting() -> None:
     stream = ChatStream("chat-1")
-    stream.enqueue("plain", entry_id="a")
-    stream.enqueue("steer me", entry_id="b", delivery="steer")
-    stream.enqueue("with image", ["shot.png"], entry_id="c", delivery="steer")
-
-    assert [e["id"] for e in stream.steer_candidates()] == ["b", "c"]
-
-    stream.mark_steering(["b", "c"], "d1")
-    assert stream.steer_candidates() == []
-    # In flight: locked against edit and remove.
-    assert stream.edit_pending("b", "changed") is False
-    assert stream.remove_pending("b") is False
-    # And refuses to go back to queue by hand.
-    assert stream.set_delivery(["b"], "queue") is False
-
-    taken = stream.take_steered("d1")
-    assert [e["id"] for e in taken] == ["b", "c"]
-    assert [e["id"] for e in stream.pending] == ["a"]
-
-
-def test_chat_stream_set_delivery_and_revert() -> None:
-    stream = ChatStream("chat-1")
-    stream.enqueue("a", entry_id="a")
-    stream.enqueue("b", entry_id="b")
-    assert stream.set_delivery(["a", "b"], "steer") is True
-    assert [e["delivery"] for e in stream.pending] == ["steer", "steer"]
-    stream.mark_steering(["a"], "d1")
-    assert stream.revert_steers() == ["a", "b"]
-    assert [(e["delivery"], e["steer_id"]) for e in stream._pending] == [
-        ("queue", ""),
-        ("queue", ""),
+    stream.waiting = lambda: [{
+        "id": "w", "text": "held", "images": ["a.png"], "delivery": "steer", "steer_id": "x",
+    }]
+    stream.enqueue("live", ["b.png"], entry_id="l")
+    queue = stream.pending_public()
+    assert queue == [
+        {"id": "w", "text": "held", "images": ["a.png"], "waiting": True},
+        {"id": "l", "text": "live", "images": ["b.png"], "waiting": False},
     ]
-    assert stream.set_delivery(["missing"], "steer") is False
-
-
-def test_pending_public_hides_steer_id_and_flags_steering() -> None:
-    stream = ChatStream("chat-1")
-    stream.enqueue("a", entry_id="a", delivery="steer")
-    stream.mark_steering(["a"], "d1")
-    stream.enqueue("b", entry_id="b")
-    assert stream.pending_public() == [
-        {"id": "a", "text": "a", "images": [], "delivery": "steer", "steering": True, "waiting": False},
-        {"id": "b", "text": "b", "images": [], "delivery": "queue", "steering": False, "waiting": False},
-    ]
+    assert all(set(entry) == {"id", "text", "images", "waiting"} for entry in queue)
 
 
 def test_queue_state_marks_waiting_entries_and_live_entries() -> None:
@@ -1695,68 +1679,33 @@ def test_a_parked_queue_state_marks_every_entry_waiting() -> None:
     assert [e["waiting"] for e in last["queue"]] == [True, True]
 
 
-async def test_steer_queue_combines_in_list_order(tmp_path: Path) -> None:
-    provider = _SteerProvider()
-    pcm, chat, stream, release, turn_calls, captured, consumer = (
-        await _start_blocked_turn(tmp_path, provider)
-    )
-    assert pcm.queue_message(chat.chat_id, "a", entry_id="q-a", delivery="steer")
-    assert pcm.queue_message(chat.chat_id, "b", entry_id="q-b")
-    # Reorder b before a, then set both to steer: one dispatch, list order.
-    assert pcm.reorder_queue(chat.chat_id, "q-b", "q-a")
-    ok = await pcm.set_queue_delivery(chat.chat_id, ["q-a", "q-b"], "steer")
-    assert ok is True
 
-    assert [r.prompt for r in provider.requests] == ["b\n\na"]
-    assert provider.requests[0].images == []
-    await _wait_for(lambda: bool(_queue_states(captured)))
-    last = _queue_states(captured)[-1]
-    assert [(e["id"], e["steering"]) for e in last] == [("q-b", True), ("q-a", True)]
-
-    release.set()
-    await asyncio.wait_for(consumer, timeout=5.0)
-
-
-async def test_steer_overflow_stays_queued_and_keeps_accepted_ids_deduped(
+async def test_send_now_overflow_stays_waiting_and_keeps_accepted_ids_deduped(
     tmp_path: Path,
 ) -> None:
-    provider = _SteerProvider()
-    pcm, chat, stream, release, _calls, captured, consumer = await _start_blocked_turn(
-        tmp_path, provider
-    )
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("send-now-overflow", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="send-now-overflow")
     ids = [f"s-{index}" for index in range(MAX_SEND_IDS_PER_TURN + 3)]
-    entry_ids = []
-    for index, send_id in enumerate(ids):
-        entry_id = f"q-{index}"
-        entry_ids.append(entry_id)
-        assert pcm.queue_message(
-            chat.chat_id,
-            f"message {index}",
-            entry_id=entry_id,
-            delivery="steer",
-            send_id=send_id,
-        )
+    entry_ids = [f"q-{index}" for index in range(len(ids))]
+    chat.pending_queue = [
+        {"id": entry_ids[index], "text": f"message {index}", "images": [], "send_id": send_id}
+        for index, send_id in enumerate(ids)
+    ]
+    turn_calls: list[str] = []
 
-    await pcm.steer_queue(chat.chat_id)
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        turn_calls.append(prompt)
+        yield _result(chat)
 
-    assert len(provider.requests) == 1
-    assert provider.requests[0].prompt == "\n\n".join(
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    assert await pcm.send_queued_now(chat.chat_id, entry_ids) is True
+    await _wait_for(lambda: bool(turn_calls))
+    assert turn_calls[0] == "\n\n".join(
         f"message {index}" for index in range(MAX_SEND_IDS_PER_TURN)
     )
-    fallback = [
-        event for event in stream.buffered_events()
-        if event.get("type") == "steer_fallback"
-    ]
-    assert fallback[-1] == {
-        "type": "steer_fallback",
-        "entry_ids": entry_ids[MAX_SEND_IDS_PER_TURN:],
-        "reason": "send_id_limit",
-    }
-    overflow = [entry for entry in stream.pending if entry["id"] in entry_ids[MAX_SEND_IDS_PER_TURN:]]
-    assert len(overflow) == 3
-    assert all(entry["delivery"] == "queue" for entry in overflow)
-
-    pcm.on_steer_delivered(chat.chat_id, stream, "d1")
+    waiting = pcm.get_chat(chat.chat_id).pending_queue
+    assert [entry["id"] for entry in waiting] == entry_ids[MAX_SEND_IDS_PER_TURN:]
     owned = chat.user_turn_send_ids[str(chat.user_turn_count - 1)]
     assert isinstance(owned, list)
     assert len(owned) == MAX_SEND_IDS_PER_TURN
@@ -1764,363 +1713,24 @@ async def test_steer_overflow_stays_queued_and_keeps_accepted_ids_deduped(
         assert pcm.find_turn_by_send_id(chat.chat_id, send_id) is not None
     for send_id in ids[MAX_SEND_IDS_PER_TURN:]:
         assert pcm.has_pending_send(chat.chat_id, send_id) is True
-
-    release.set()
-    await asyncio.wait_for(consumer, timeout=5.0)
+        assert pcm.find_turn_by_send_id(chat.chat_id, send_id) is None
 
 
-async def test_steer_queue_combines_images_in_list_order(tmp_path: Path) -> None:
-    provider = _SteerProvider()
-    pcm, chat, stream, release, _calls, captured, consumer = await _start_blocked_turn(
-        tmp_path, provider
-    )
-    one = _write_media(tmp_path, "one.png")
-    two = _write_media(tmp_path, "two.png")
-
-    def _img(path: Path) -> ImageAttachment:
-        return ImageAttachment(path=path, mime_type="image/png", original_filename=path.name)
-
-    assert pcm.queue_message(
-        chat.chat_id, "first", images=[_img(one)], entry_id="q-1", delivery="steer"
-    )
-    # Dispatch only happens in steer_queue, so both are still undispatched.
-    assert pcm.queue_message(
-        chat.chat_id, "", images=[_img(two)], entry_id="q-2", delivery="steer"
-    )
-    await pcm.steer_queue(chat.chat_id)
-
-    assert len(provider.requests) == 1
-    request = provider.requests[0]
-    assert request.prompt == "first"
-    assert [img.original_filename for img in request.images] == ["one.png", "two.png"]
-
-    release.set()
-    await asyncio.wait_for(consumer, timeout=5.0)
 
 
-async def test_steer_delivered_publishes_steered_and_bumps_turn(tmp_path: Path) -> None:
-    from ciao.models import SteerDeliveredEvent
-
-    provider = _SteerProvider()
-    delivered = SteerDeliveredEvent(type="steer_delivered", delivery_id="d1")
-    pcm, chat, stream, release, turn_calls, captured, consumer = (
-        await _start_blocked_turn(tmp_path, provider, events=[delivered])
-    )
-    before = pcm.get_chat(chat.chat_id).user_turn_count
-    pcm.queue_message(chat.chat_id, "a", entry_id="q-a", delivery="steer", send_id="s-a")
-    pcm.queue_message(chat.chat_id, "b", entry_id="q-b", delivery="steer", send_id="s-b")
-    await pcm.steer_queue(chat.chat_id)
-    release.set()
-    await asyncio.wait_for(consumer, timeout=5.0)
-
-    steered = [e for e in captured if e.get("type") == "steered"]
-    assert len(steered) == 1
-    event = steered[0]
-    assert event["entry_ids"] == ["q-a", "q-b"]
-    assert event["text"] == "a\n\nb"
-    assert event["turn_index"] == before
-    assert event["delivery_id"] == "d1"
-    assert event["sent_at"]
-    meta = pcm.get_chat(chat.chat_id)
-    assert meta.user_turn_count == before + 1
-    assert meta.user_turn_steered[str(before)] is True
-    assert pcm.find_turn_by_send_id(chat.chat_id, "s-a")["turn_index"] == before
-    assert pcm.find_turn_by_send_id(chat.chat_id, "s-b")["turn_index"] == before
-    assert meta.user_turn_timings[str(before)]["sent_at"] == event["sent_at"]
-    # The steered turn gets the turn's completion stamp, and nothing flushed as
-    # a second turn.
-    assert "completed_at" in meta.user_turn_timings[str(before)]
-    assert turn_calls == ["initial"]
-    assert _queue_states(captured)[-1] == []
-    assert not [e for e in captured if e.get("type") == "steer_fallback"]
 
 
-async def test_steer_delivered_before_dispatch_returns_still_lands(
-    tmp_path: Path,
-) -> None:
-    """The echo can beat steer_turn's return; the entries must still clear."""
-    provider = _SteerProvider()
-    pcm, chat, stream, release, _calls, captured, consumer = await _start_blocked_turn(
-        tmp_path, provider
-    )
-
-    async def echo_first(request):
-        pcm.on_steer_delivered(chat.chat_id, stream, "d9")
-        return "d9"
-
-    provider.steer_turn = echo_first  # type: ignore[method-assign]
-    pcm.queue_message(chat.chat_id, "a", entry_id="q-a", delivery="steer")
-    await pcm.steer_queue(chat.chat_id)
-
-    await _wait_for(lambda: any(e.get("type") == "steered" for e in captured))
-    assert stream.pending == []
-    release.set()
-    await asyncio.wait_for(consumer, timeout=5.0)
 
 
-async def test_steer_without_live_turn_falls_back_with_notice(tmp_path: Path) -> None:
-    provider = _SteerProvider(delivery_id=None)
-    pcm, chat, stream, release, turn_calls, captured, consumer = (
-        await _start_blocked_turn(tmp_path, provider)
-    )
-    pcm.queue_message(chat.chat_id, "later", entry_id="q-a", delivery="steer")
-    await pcm.steer_queue(chat.chat_id)
-
-    await _wait_for(lambda: any(e.get("type") == "steer_fallback" for e in captured))
-    fallback = [e for e in captured if e.get("type") == "steer_fallback"][0]
-    assert fallback == {
-        "type": "steer_fallback",
-        "entry_ids": ["q-a"],
-        "reason": "not_running",
-    }
-    assert [(e["delivery"], e["steering"]) for e in _queue_states(captured)[-1]] == [
-        ("queue", False)
-    ]
-
-    release.set()
-    await asyncio.wait_for(consumer, timeout=5.0)
-    # It flushed as the next turn.
-    assert turn_calls == ["initial", "later"]
-
-
-async def test_steer_queue_without_a_stream_falls_back_quietly(tmp_path: Path) -> None:
-    pcm = _make_manager(tmp_path)
-    # No stream, no provider: nothing to publish to and nothing to raise.
-    await pcm.steer_queue("no-such-chat")
-
-
-async def test_undelivered_steer_reverts_at_turn_end(tmp_path: Path) -> None:
-    provider = _SteerProvider()
-    pcm, chat, stream, release, turn_calls, captured, consumer = (
-        await _start_blocked_turn(tmp_path, provider)
-    )
-    pcm.queue_message(chat.chat_id, "late", entry_id="q-a", delivery="steer")
-    await pcm.steer_queue(chat.chat_id)
-    assert len(provider.requests) == 1
-
-    release.set()  # the turn ends without a SteerDeliveredEvent
-    await asyncio.wait_for(consumer, timeout=5.0)
-
-    fallback = [e for e in captured if e.get("type") == "steer_fallback"]
-    assert [(e["entry_ids"], e["reason"]) for e in fallback] == [(["q-a"], "finished")]
-    assert turn_calls == ["initial", "late"]
-    echoes = [e for e in captured if e.get("type") == "user_echo"]
-    assert echoes[-1]["entry_id"] == "q-a"
-    assert not [e for e in captured if e.get("type") == "steered"]
-
-
-async def test_stop_reverts_steers(tmp_path: Path) -> None:
-    release_holder: dict[str, asyncio.Event] = {}
-    provider = _SteerProvider(on_stop=lambda: release_holder["e"].set())
-    pcm, chat, stream, release, turn_calls, captured, consumer = (
-        await _start_blocked_turn(tmp_path, provider)
-    )
-    release_holder["e"] = release
-    pcm.queue_message(chat.chat_id, "after stop", entry_id="q-a", delivery="steer")
-    await pcm.steer_queue(chat.chat_id)
-
-    await pcm.stop_chat(chat.chat_id)
-    await asyncio.wait_for(consumer, timeout=5.0)
-
-    fallback = [e for e in captured if e.get("type") == "steer_fallback"]
-    assert [(e["entry_ids"], e["reason"]) for e in fallback] == [(["q-a"], "stopped")]
-    # Stop wins: the steer is not delivered and, with Stop holding the whole
-    # queue, nothing is sent: the entry waits as a queued chip.
-    assert turn_calls == ["initial"]
-    parked = pcm.get_chat(chat.chat_id).pending_queue
-    assert [(e["id"], e["text"]) for e in parked] == [("q-a", "after stop")]
-
-
-async def test_set_queue_delivery_rejects_bad_values(tmp_path: Path) -> None:
-    provider = _SteerProvider()
-    pcm, chat, stream, release, _calls, captured, consumer = await _start_blocked_turn(
-        tmp_path, provider
-    )
-    pcm.queue_message(chat.chat_id, "a", entry_id="q-a")
-    assert await pcm.set_queue_delivery(chat.chat_id, ["q-a"], "sometimes") is False
-    assert await pcm.set_queue_delivery(chat.chat_id, ["nope"], "steer") is False
-    assert stream.pending[0]["delivery"] == "queue"
-    assert provider.requests == []
-    # Back to queue is fine for an undispatched entry.
-    assert await pcm.set_queue_delivery(chat.chat_id, ["q-a"], "queue") is True
-    release.set()
-    await asyncio.wait_for(consumer, timeout=5.0)
 
 
 # ── Steer delivery, review round 1 (#1392 A2) ────────────────────────────
 
 
-async def test_steer_into_an_unattended_turn_stays_unattended(tmp_path: Path) -> None:
-    """A delivered steer must not turn the attended-only guards off."""
-    from types import SimpleNamespace
-
-    from ciao.control_plane import CiaoControlPlane, McpPrincipal
-    from ciao.models import SteerDeliveredEvent
-
-    provider = _SteerProvider()
-    delivered = SteerDeliveredEvent(type="steer_delivered", delivery_id="d1")
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("2026-q4-steer-unattended", workspace="work")
-    chat = pcm.create_chat(project.project_id, title="steer-unattended")
-    pcm._providers[chat.chat_id] = provider  # type: ignore[assignment]
-    release = asyncio.Event()
-    after_delivery = asyncio.Event()
-
-    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
-        await release.wait()
-        yield delivered
-        after_delivery.set()
-        await asyncio.sleep(0.2)
-        yield _result(chat)
-
-    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
-    captured: list[dict] = []
-
-    async def consume(stream) -> None:
-        async for ev in stream.subscribe():
-            captured.append(ev)
-
-    stream = pcm.start_stream(chat.chat_id, "tick", unattended=True)
-    consumer = asyncio.create_task(consume(stream))
-    await _wait_for(lambda: any(e.get("type") == "user_echo" for e in captured))
-    pcm.queue_message(chat.chat_id, "steer", entry_id="q-a", delivery="steer")
-    await pcm.steer_queue(chat.chat_id)
-    release.set()
-    await asyncio.wait_for(after_delivery.wait(), timeout=2.0)
-
-    plane = CiaoControlPlane(
-        SimpleNamespace(workspace=lambda name: object()),
-        project_chat_manager=pcm,
-        schedule_manager=SimpleNamespace(),
-    )
-    principal = McpPrincipal(
-        token_id="t", chat_id=chat.chat_id, project_id=project.project_id,
-        workspace="work", provider="claude",
-    )
-    assert pcm.get_chat(chat.chat_id).user_turn_count == 2
-    assert plane._unattended_turn(principal) is True
-    await asyncio.wait_for(consumer, timeout=5.0)
 
 
-async def test_steer_into_an_attended_turn_stays_attended(tmp_path: Path) -> None:
-    from types import SimpleNamespace
-
-    from ciao.control_plane import CiaoControlPlane, McpPrincipal
-
-    provider = _SteerProvider()
-    pcm, chat, stream, release, _calls, captured, consumer = await _start_blocked_turn(
-        tmp_path, provider
-    )
-    pcm.queue_message(chat.chat_id, "steer", entry_id="q-a", delivery="steer")
-    await pcm.steer_queue(chat.chat_id)
-    pcm.on_steer_delivered(chat.chat_id, stream, "d1")
-    plane = CiaoControlPlane(
-        SimpleNamespace(workspace=lambda name: object()),
-        project_chat_manager=pcm,
-        schedule_manager=SimpleNamespace(),
-    )
-    principal = McpPrincipal(
-        token_id="t", chat_id=chat.chat_id, project_id="p",
-        workspace="work", provider="claude",
-    )
-    assert plane._unattended_turn(principal) is False
-    release.set()
-    await asyncio.wait_for(consumer, timeout=5.0)
 
 
-async def test_steer_text_expands_file_refs_without_a_prefix(tmp_path: Path) -> None:
-    provider = _SteerProvider()
-    pcm, chat, stream, release, _calls, captured, consumer = await _start_blocked_turn(
-        tmp_path, provider
-    )
-    seen: list[tuple[str, str]] = []
-
-    def expand(text: str, chat_id: str) -> str:
-        seen.append((text, chat_id))
-        return text.replace("@ref-1", "/abs/file.md")
-
-    pcm.expand_file_refs = expand  # type: ignore[method-assign]
-    pcm.queue_message(chat.chat_id, "read @ref-1", entry_id="q-a", delivery="steer")
-    pcm.queue_message(chat.chat_id, "then stop", entry_id="q-b", delivery="steer")
-    await pcm.steer_queue(chat.chat_id)
-
-    assert seen == [("read @ref-1\n\nthen stop", chat.chat_id)]
-    assert [r.prompt for r in provider.requests] == ["read /abs/file.md\n\nthen stop"]
-    release.set()
-    await asyncio.wait_for(consumer, timeout=5.0)
-
-
-async def test_steer_turn_timeout_falls_back_and_returns(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from ciao.web import project_chats
-
-    monkeypatch.setattr(project_chats, "_STEER_DISPATCH_TIMEOUT_S", 0.05)
-    provider = _SteerProvider()
-
-    async def hang(request):
-        await asyncio.sleep(30)
-
-    provider.steer_turn = hang  # type: ignore[method-assign]
-    pcm, chat, stream, release, turn_calls, captured, consumer = (
-        await _start_blocked_turn(tmp_path, provider)
-    )
-    pcm.queue_message(chat.chat_id, "slow", entry_id="q-a", delivery="steer")
-    await asyncio.wait_for(pcm.steer_queue(chat.chat_id), timeout=2.0)
-
-    fallback = [e for e in captured if e.get("type") == "steer_fallback"]
-    await _wait_for(lambda: any(e.get("type") == "steer_fallback" for e in captured))
-    fallback = [e for e in captured if e.get("type") == "steer_fallback"]
-    assert [(e["entry_ids"], e["reason"]) for e in fallback] == [(["q-a"], "not_running")]
-    assert stream.pending[0]["delivery"] == "queue"
-    release.set()
-    await asyncio.wait_for(consumer, timeout=5.0)
-    assert turn_calls == ["initial", "slow"]
-
-
-async def test_steer_turn_exception_falls_back_and_does_not_escape(
-    tmp_path: Path,
-) -> None:
-    provider = _SteerProvider()
-
-    async def boom(request):
-        raise RuntimeError("cli went away")
-
-    provider.steer_turn = boom  # type: ignore[method-assign]
-    pcm, chat, stream, release, turn_calls, captured, consumer = (
-        await _start_blocked_turn(tmp_path, provider)
-    )
-    pcm.queue_message(chat.chat_id, "x", entry_id="q-a", delivery="steer")
-    await pcm.steer_queue(chat.chat_id)  # must not raise
-
-    await _wait_for(lambda: any(e.get("type") == "steer_fallback" for e in captured))
-    fallback = [e for e in captured if e.get("type") == "steer_fallback"][0]
-    assert fallback["reason"] == "not_running"
-    release.set()
-    await asyncio.wait_for(consumer, timeout=5.0)
-
-
-async def test_steer_turn_cancellation_is_not_swallowed(tmp_path: Path) -> None:
-    provider = _SteerProvider()
-    started = asyncio.Event()
-
-    async def hang(request):
-        started.set()
-        await asyncio.sleep(30)
-
-    provider.steer_turn = hang  # type: ignore[method-assign]
-    pcm, chat, stream, release, _calls, captured, consumer = await _start_blocked_turn(
-        tmp_path, provider
-    )
-    pcm.queue_message(chat.chat_id, "x", entry_id="q-a", delivery="steer")
-    task = asyncio.create_task(pcm.steer_queue(chat.chat_id))
-    await started.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert stream.pending[0]["delivery"] == "queue"
-    release.set()
-    await asyncio.wait_for(consumer, timeout=5.0)
 
 
 async def test_send_now_starts_a_turn_from_waiting_entries(tmp_path: Path) -> None:
@@ -2142,7 +1752,7 @@ async def test_send_now_starts_a_turn_from_waiting_entries(tmp_path: Path) -> No
     ]
     del one
 
-    assert await pcm.set_queue_delivery(chat.chat_id, ["p2", "p1"], "steer") is True
+    assert await pcm.send_queued_now(chat.chat_id, ["p2", "p1"]) is True
     stream = pcm.get_active_stream(chat.chat_id)
     assert stream is not None
     # List order, not the order the ids were named.
@@ -2179,7 +1789,7 @@ async def test_failed_send_now_keeps_entries_and_does_not_record_delivery(
 
     pcm.start_stream = fail_to_start  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="could not start"):
-        await pcm.set_queue_delivery(chat.chat_id, ["p1"], "steer")
+        await pcm.send_queued_now(chat.chat_id, ["p1"])
 
     assert chat.pending_queue[0]["send_id"] == "s-first"
     assert pcm.find_turn_by_send_id(chat.chat_id, "s-first") is None
@@ -2209,7 +1819,7 @@ async def test_send_now_owns_ids_during_stream_start_for_replayed_send(
         return original_start_stream(*args, **kwargs)
 
     pcm.start_stream = replay_while_starting  # type: ignore[method-assign]
-    assert await pcm.set_queue_delivery(chat.chat_id, ["p1"], "steer") is True
+    assert await pcm.send_queued_now(chat.chat_id, ["p1"]) is True
 
     assert duplicate_suppressed_during_start == [True]
 
@@ -2236,7 +1846,7 @@ async def test_failed_send_now_prunes_history_after_concurrent_owner(
 
     pcm.start_stream = fail_to_start  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="could not start"):
-        await pcm.set_queue_delivery(chat.chat_id, ["p1"], "steer")
+        await pcm.send_queued_now(chat.chat_id, ["p1"])
 
     assert len(chat.user_turn_send_ids) == SEND_ID_HISTORY_TURNS
     assert pcm.find_turn_by_send_id(chat.chat_id, "s-0") is None
@@ -2267,22 +1877,12 @@ async def test_failed_send_now_without_concurrent_owner_restores_exact_history(
 
     pcm.start_stream = fail_to_start  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="could not start"):
-        await pcm.set_queue_delivery(chat.chat_id, ["p1"], "steer")
+        await pcm.send_queued_now(chat.chat_id, ["p1"])
 
     assert chat.user_turn_send_ids == original_history
     assert chat.pending_queue[0]["send_id"] == "s-new"
     assert pcm.find_turn_by_send_id(chat.chat_id, "s-new") is None
 
-
-async def test_queue_delivery_on_a_waiting_entry_is_a_noop(tmp_path: Path) -> None:
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("2026-q4-waiting-queue", workspace="work")
-    chat = pcm.create_chat(project.project_id, title="waiting-queue")
-    chat.pending_queue = [{"id": "p1", "text": "first", "images": []}]
-    assert await pcm.set_queue_delivery(chat.chat_id, ["p1"], "queue") is True
-    assert chat.pending_queue == [{"id": "p1", "text": "first", "images": []}]
-    assert pcm.get_active_stream(chat.chat_id) is None
-    assert await pcm.set_queue_delivery(chat.chat_id, ["nope"], "steer") is False
 
 
 async def test_a_plain_stop_parks_the_whole_queue(tmp_path: Path) -> None:
@@ -2293,8 +1893,7 @@ async def test_a_plain_stop_parks_the_whole_queue(tmp_path: Path) -> None:
     )
     release_holder["e"] = release
     pcm.queue_message(chat.chat_id, "queued", entry_id="q-a")
-    pcm.queue_message(chat.chat_id, "steered", entry_id="q-b", delivery="steer")
-    await pcm.steer_queue(chat.chat_id)
+    pcm.queue_message(chat.chat_id, "also queued", entry_id="q-b")
 
     await pcm.stop_chat(chat.chat_id)
     await asyncio.wait_for(consumer, timeout=5.0)
@@ -2302,85 +1901,14 @@ async def test_a_plain_stop_parks_the_whole_queue(tmp_path: Path) -> None:
     assert turn_calls == ["initial"]  # nothing was sent automatically
     parked = pcm.get_chat(chat.chat_id).pending_queue
     assert [e["id"] for e in parked] == ["q-a", "q-b"]
-    assert [e["text"] for e in parked] == ["queued", "steered"]
+    assert [e["text"] for e in parked] == ["queued", "also queued"]
     last_state = _queue_states(captured)[-1]
     assert [e["id"] for e in last_state] == ["q-a", "q-b"]
-    assert [e["reason"] for e in captured if e.get("type") == "steer_fallback"] == ["stopped"]
+    assert [e.get("type") for e in captured if e.get("type") == "steer_fallback"] == []
 
 
-async def test_stop_reverts_steers_after_the_provider_stop(tmp_path: Path) -> None:
-    order: list[str] = []
-    release_holder: dict[str, asyncio.Event] = {}
-
-    def on_stop() -> None:
-        order.append("provider_stop")
-        release_holder["e"].set()
-
-    provider = _SteerProvider(on_stop=on_stop)
-    pcm, chat, stream, release, _calls, captured, consumer = await _start_blocked_turn(
-        tmp_path, provider
-    )
-    release_holder["e"] = release
-    real = pcm._fallback_steers
-
-    def spy(chat_id, stream_, reason):
-        order.append(f"fallback:{reason}")
-        real(chat_id, stream_, reason)
-
-    pcm._fallback_steers = spy  # type: ignore[method-assign]
-    pcm.queue_message(chat.chat_id, "x", entry_id="q-a", delivery="steer")
-    await pcm.steer_queue(chat.chat_id)
-    await pcm.stop_chat(chat.chat_id)
-    await asyncio.wait_for(consumer, timeout=5.0)
-
-    assert order.index("provider_stop") < order.index("fallback:stopped")
 
 
-async def test_an_echo_when_no_dispatch_is_in_flight_is_dropped(tmp_path: Path) -> None:
-    provider = _SteerProvider()
-    pcm, chat, stream, release, _calls, captured, consumer = await _start_blocked_turn(
-        tmp_path, provider
-    )
-    # No steer_turn is awaited: an unknown delivery id must not be remembered,
-    # or a later dispatch could be mistaken for delivered.
-    pcm.on_steer_delivered(chat.chat_id, stream, "stray")
-    assert stream.early_steer_deliveries == set()
-    assert stream.steer_inflight is False
-    release.set()
-    await asyncio.wait_for(consumer, timeout=5.0)
-
-
-async def test_an_empty_steer_entry_reverts_to_queue_immediately(tmp_path: Path) -> None:
-    provider = _SteerProvider()
-    pcm, chat, stream, release, _calls, captured, consumer = await _start_blocked_turn(
-        tmp_path, provider
-    )
-    stream.enqueue("", [], entry_id="q-empty", delivery="steer")
-    await pcm.steer_queue(chat.chat_id)
-
-    assert provider.requests == []
-    fallback = [e for e in captured if e.get("type") == "steer_fallback"]
-    await _wait_for(lambda: any(e.get("type") == "steer_fallback" for e in captured))
-    fallback = [e for e in captured if e.get("type") == "steer_fallback"]
-    assert [(e["entry_ids"], e["reason"]) for e in fallback] == [
-        (["q-empty"], "not_running")
-    ]
-    assert stream._pending[0]["delivery"] == "queue"
-    release.set()
-    await asyncio.wait_for(consumer, timeout=5.0)
-
-
-async def test_steer_lock_is_dropped_with_the_chat(tmp_path: Path) -> None:
-    provider = _SteerProvider()
-    pcm, chat, stream, release, _calls, captured, consumer = await _start_blocked_turn(
-        tmp_path, provider
-    )
-    await pcm.steer_queue(chat.chat_id)
-    assert chat.chat_id in pcm._steer_locks
-    release.set()
-    await asyncio.wait_for(consumer, timeout=5.0)
-    pcm._pop_provider(chat.chat_id)
-    assert chat.chat_id not in pcm._steer_locks
 
 
 # ── Waiting entries stay waiting (#1392 A2, round 2) ─────────────────────
@@ -2451,9 +1979,11 @@ async def test_parking_appends_to_the_waiting_queue(tmp_path: Path) -> None:
 # ── Review round 2 fixes (#1392 A2, round 3) ─────────────────────────────
 
 
-async def test_queue_delivery_on_waiting_entries_while_a_turn_runs(tmp_path: Path) -> None:
+async def test_send_now_during_a_turn_moves_waiting_entries_into_the_live_queue(
+    tmp_path: Path,
+) -> None:
     provider = _SteerProvider()
-    pcm, chat, stream, release, turn_calls, captured, consumer = (
+    pcm, chat, stream, release, turn_calls, _captured, consumer = (
         await _start_blocked_turn(tmp_path, provider)
     )
     waiting = pcm.get_chat(chat.chat_id)
@@ -2461,45 +1991,16 @@ async def test_queue_delivery_on_waiting_entries_while_a_turn_runs(tmp_path: Pat
         {"id": "w1", "text": "wait one", "images": []},
         {"id": "w2", "text": "wait two", "images": []},
     ]
-    # "queue" on a waiting entry is a no-op that succeeds.
-    assert await pcm.set_queue_delivery(chat.chat_id, ["w1"], "queue") is True
-    assert [e["id"] for e in waiting.pending_queue] == ["w1", "w2"]
-    assert provider.requests == []
-
-    # "steer" moves it into the live stream and dispatches it.
-    assert await pcm.set_queue_delivery(chat.chat_id, ["w1"], "steer") is True
-    assert [e["id"] for e in waiting.pending_queue] == ["w2"]
-    assert [r.prompt for r in provider.requests] == ["wait one"]
-    assert [(e["id"], e["delivery"], e["steer_id"] != "") for e in stream.pending] == [
-        ("w1", "steer", True)
-    ]
+    pcm.queue_message(chat.chat_id, "later live", entry_id="q-live")
+    assert turn_calls == ["initial"]
+    assert await pcm.send_queued_now(chat.chat_id, ["w2", "w1"]) is True
+    assert waiting.pending_queue == []
+    assert [e["id"] for e in stream.pending] == ["w1", "w2", "q-live"]
+    assert turn_calls == ["initial"]
     release.set()
     await asyncio.wait_for(consumer, timeout=5.0)
+    assert turn_calls == ["initial", "wait one", "wait two", "later live"]
 
-
-async def test_steer_on_a_waiting_entry_that_falls_back_runs_as_the_next_turn(
-    tmp_path: Path,
-) -> None:
-    provider = _SteerProvider(delivery_id=None)
-    pcm, chat, stream, release, turn_calls, captured, consumer = (
-        await _start_blocked_turn(tmp_path, provider)
-    )
-    pcm.get_chat(chat.chat_id).pending_queue = [
-        {"id": "w1", "text": "wait one", "images": ["x.png"]},
-    ]
-    stream.enqueue("live", [], entry_id="q-live")
-    assert await pcm.set_queue_delivery(chat.chat_id, ["w1", "q-live"], "steer") is True
-    # Mixed ids: both were handed over together, then fell back to queue mode.
-    assert [r.prompt for r in provider.requests] == ["wait one\n\nlive"]
-    assert pcm.get_chat(chat.chat_id).pending_queue == []
-    assert [(e["id"], e["delivery"]) for e in stream.pending] == [
-        ("w1", "queue"),
-        ("q-live", "queue"),
-    ]
-    assert stream.pending[0]["images"] == ["x.png"]
-    release.set()
-    await asyncio.wait_for(consumer, timeout=5.0)
-    assert turn_calls[1] == "wait one"
 
 
 async def test_blank_skip_queue_state_keeps_waiting_chips(tmp_path: Path) -> None:
@@ -2546,7 +2047,7 @@ async def test_send_now_with_nothing_resolvable_leaves_entries_waiting(
         {"id": "p1", "text": "   ", "images": ["gone.png"]},
         {"id": "p2", "text": "", "images": []},
     ]
-    assert await pcm.set_queue_delivery(chat.chat_id, ["p1", "p2"], "steer") is False
+    assert await pcm.send_queued_now(chat.chat_id, ["p1", "p2"]) is False
     assert pcm.get_active_stream(chat.chat_id) is None
     assert [e["id"] for e in chat.pending_queue] == ["p1", "p2"]
 
@@ -2562,29 +2063,12 @@ async def test_parked_queue_state_has_the_live_entry_shape(tmp_path: Path) -> No
                     "id": "p1",
                     "text": "t",
                     "images": ["a.png"],
-                    "delivery": "queue",
-                    "steering": False,
                     "waiting": True,
                 }
             ],
         }
     ]
 
-
-async def test_one_steer_dispatch_publishes_one_steering_queue_state(
-    tmp_path: Path,
-) -> None:
-    provider = _SteerProvider()
-    pcm, chat, stream, release, _calls, captured, consumer = await _start_blocked_turn(
-        tmp_path, provider
-    )
-    pcm.queue_message(chat.chat_id, "a", entry_id="q-a", delivery="steer")
-    await pcm.steer_queue(chat.chat_id)
-    await _wait_for(lambda: any(q and q[0]["steering"] for q in _queue_states(captured)))
-    steering = [q for q in _queue_states(captured) if q and q[0]["steering"]]
-    assert len(steering) == 1
-    release.set()
-    await asyncio.wait_for(consumer, timeout=5.0)
 
 
 # ── A prompt the provider cancelled before it ran (#1406) ────────────────
@@ -2696,7 +2180,7 @@ async def test_cancelled_combined_send_now_keeps_all_ids_parked(tmp_path: Path) 
     assert pcm.has_pending_send(chat.chat_id, "s-two") is True
 
 
-async def test_cancelled_combined_ids_survive_reload_adoption_and_steer_delivery(
+async def test_cancelled_combined_ids_survive_reload_and_adoption(
     tmp_path: Path,
 ) -> None:
     pcm = _make_manager(tmp_path)
@@ -2744,15 +2228,9 @@ async def test_cancelled_combined_ids_survive_reload_adoption_and_steer_delivery
 
     consumer = asyncio.create_task(consume())
     await _wait_for(lambda: any(e.get("type") == "user_echo" for e in captured))
-    assert await reloaded.set_queue_delivery(chat.chat_id, [parked["id"]], "steer")
+    assert await reloaded.send_queued_now(chat.chat_id, [parked["id"]])
     assert stream.pending[0]["send_ids"] == ["s-cancelled", "s-companion"]
-
-    reloaded.on_steer_delivered(chat.chat_id, stream, "d1")
-    cancelled = reloaded.find_turn_by_send_id(chat.chat_id, "s-cancelled")
-    companion = reloaded.find_turn_by_send_id(chat.chat_id, "s-companion")
-    assert cancelled is not None
-    assert companion is not None
-    assert cancelled["turn_index"] == companion["turn_index"]
+    assert reloaded.find_turn_by_send_id(chat.chat_id, "s-cancelled") is None
 
     release.set()
     await asyncio.wait_for(consumer, timeout=5.0)

@@ -271,12 +271,6 @@ class _DriveHost:
         del chat_id
         return self._agent_root
 
-    def _fallback_steers(self, chat_id: str, stream: object, reason: str) -> None:
-        del chat_id, stream, reason
-
-    def on_steer_delivered(self, chat_id: str, stream: object, steer_id: str) -> None:
-        del chat_id, stream, steer_id
-
     def on_prompt_cancelled(
         self,
         chat_id: str,
@@ -1581,7 +1575,7 @@ async def test_stop_while_waiting_withdraws_prompt_to_a_waiting_chip(
 
         entry_id = chat.pending_queue[0]["id"]
         probe.release.set()
-        assert await manager.set_queue_delivery(chat.chat_id, [entry_id], "steer")
+        assert await manager.send_queued_now(chat.chat_id, [entry_id])
         await _join_drives(manager)
         assert probe.calls == [(chat.chat_id, "send during stop")]
         assert manager.find_turn_by_send_id(chat.chat_id, "S") is not None

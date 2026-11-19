@@ -853,12 +853,7 @@ def _render_opencode_thread(
                 timing = chat.user_turn_timings.get(str(user_idx)) or {}
                 if timing.get("sent_at"):
                     entry["sent_at"] = timing["sent_at"]
-                if chat.user_turn_steered.get(str(user_idx)):
-                    # A steered index inherits the running turn's unattended
-                    # flag for the control plane's guards; the bubble is still
-                    # something the person typed.
-                    entry["steered"] = True
-                elif chat.user_turn_unattended.get(str(user_idx)):
+                if chat.user_turn_unattended.get(str(user_idx)):
                     entry["unattended"] = True
                 origin = chat.user_turn_origin.get(str(user_idx))
                 if origin:
@@ -997,7 +992,7 @@ def _stamp_user_turn(
     turn's flags on it. Images are always re-derived from this turn's refs (or
     the session message's inline blocks), never kept from the row's old index.
     """
-    for key in ("images", "sent_at", "steered", "unattended", "origin"):
+    for key in ("images", "sent_at", "unattended", "origin"):
         entry.pop(key, None)
     # Image refs are recorded per user-turn index at send time. JSON keys are
     # strings, but tolerate int lookups too in case the map has been mutated
@@ -1029,9 +1024,7 @@ def _stamp_user_turn(
         entry["sent_at"] = sent_at
     # Loop/schedule ticks are user turns in the session file too, so the flag
     # has to come from our own per-turn record.
-    if chat.user_turn_steered.get(str(turn_index)) or chat.user_turn_steered.get(turn_index):
-        entry["steered"] = True
-    elif chat.user_turn_unattended.get(str(turn_index)) or chat.user_turn_unattended.get(turn_index):
+    if chat.user_turn_unattended.get(str(turn_index)) or chat.user_turn_unattended.get(turn_index):
         entry["unattended"] = True
     origin = chat.user_turn_origin.get(str(turn_index)) or chat.user_turn_origin.get(turn_index)
     if origin:

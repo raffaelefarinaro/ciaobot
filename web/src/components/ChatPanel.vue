@@ -928,12 +928,12 @@
           <span v-if="view.isStreaming" class="queued-label">{{ q.waiting ? 'Waiting' : 'Queued' }}</span>
           <div class="queued-actions">
             <button
-              v-if="!view.isStreaming"
+              v-if="q.waiting || !view.isStreaming"
               type="button"
               class="queued-send-now"
-              title="Start a turn with this message now"
+              :title="view.isStreaming ? 'Run after this reply' : 'Start a turn with this message now'"
               @click="sendNow($event, [q.id])"
-            >Send now</button>
+            >{{ view.isStreaming ? 'Send next' : 'Send now' }}</button>
             <button
               class="queued-action"
               :disabled="i === 0"
