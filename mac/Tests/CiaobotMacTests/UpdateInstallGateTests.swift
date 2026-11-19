@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 
 @testable import CiaobotMac
@@ -69,6 +70,9 @@ private final class GateHarness {
     var state: LocalEngineState = .running(port: GateHarness.port)
     var now: TimeInterval = 0
     let drainer = ScriptedEngineDrainer()
+    /// A ledger of this harness's own, so drains counted by one test never
+    /// reach another.
+    let ledger = DrainLedger()
     private(set) var events: [String] = []
     private(set) var scheduled: [(delay: TimeInterval, work: () -> Void)] = []
     private(set) lazy var gate = UpdateInstallGate(
@@ -77,7 +81,8 @@ private final class GateHarness {
         owner: "sparkle-1.2.3",
         willInstall: { [unowned self] in self.events.append("willInstall") },
         schedule: { [unowned self] delay, work in self.scheduled.append((delay, work)) },
-        clock: { [unowned self] in self.now }
+        clock: { [unowned self] in self.now },
+        ledger: ledger
     )
 
     var installs: Int { events.filter { $0 == "install" }.count }
@@ -93,6 +98,13 @@ private final class GateHarness {
 
     func settle() async {
         await settleMainActor()
+    }
+
+    /// Drops work already held, such as a poll the gate scheduled before an
+    /// abort (it does nothing once its attempt has ended), so a test reads only
+    /// the retries it starts.
+    func dropHeldWork() {
+        scheduled.removeAll()
     }
 
     /// Runs the earliest held work, then lets its consequences settle.
@@ -345,20 +357,73 @@ final class UpdateInstallGateTests: XCTestCase {
         XCTAssertTrue(harness.scheduled.isEmpty, "A confirmed cancel is not sent again.")
     }
 
-    /// A cancel that is never confirmed is sent three times in all, then logged.
-    func testACancelNeverConfirmedIsSentThreeTimesInAll() async {
+    /// A cancel that is never confirmed backs off: five seconds, then doubling
+    /// to a two-minute step. The retries stop once ten minutes have passed since
+    /// the first cancel, so the last attempt is at 635 s and nothing follows it.
+    func testAnUnconfirmedCancelBacksOffUntilTheTenMinuteCap() async {
+        let harness = GateHarness()
+        harness.drainer.fallback = busy
+        harness.drainer.cancelResults = Array(repeating: false, count: 100)
+
+        XCTAssertTrue(harness.take())
+        await harness.settle()
+        harness.dropHeldWork()
+        harness.gate.installAborted()
+        await harness.settle()
+
+        var delays: [TimeInterval] = []
+        while let next = harness.scheduled.first, delays.count < 50 {
+            delays.append(next.delay)
+            await harness.fireNext()
+        }
+
+        XCTAssertEqual(delays, [5, 10, 20, 40, 80, 120, 120, 120, 120])
+        XCTAssertEqual(harness.drainer.cancels.count, 10, "The first cancel plus one retry per delay.")
+        XCTAssertEqual(harness.drainer.cancels.map(\.owner), Array(repeating: "sparkle-1.2.3", count: 10))
+        XCTAssertTrue(harness.scheduled.isEmpty, "Past the cap nothing else is scheduled.")
+        XCTAssertEqual(harness.now, 635)
+    }
+
+    /// A retry is dropped once the engine is no longer running on the drained
+    /// port: a starting or stopping engine has no admission to reopen.
+    func testAnUnconfirmedCancelStopsWhenTheEngineIsNoLongerRunning() async {
         let harness = GateHarness()
         harness.drainer.fallback = busy
         harness.drainer.cancelResults = [false, false, false]
 
         XCTAssertTrue(harness.take())
         await harness.settle()
+        harness.dropHeldWork()
         harness.gate.installAborted()
         await harness.settle()
-        for _ in 0..<3 { await harness.fireNext() }
+        XCTAssertEqual(harness.lastDelay, UpdateInstallGate.cancelRetryInterval)
 
-        XCTAssertEqual(harness.drainer.cancels.count, 3)
-        XCTAssertTrue(harness.scheduled.isEmpty, "After the third attempt nothing else is scheduled.")
+        harness.state = .transitioning
+        await harness.fireNext()
+
+        XCTAssertEqual(harness.drainer.cancels.count, 2)
+        XCTAssertTrue(harness.scheduled.isEmpty, "A transitioning engine is not retried.")
+    }
+
+    /// A retry queued before a newer drain on the same port is dropped: the
+    /// newer drain closed admission again, and the stale cancel must not reopen it.
+    func testAQueuedCancelRetryIsDroppedOnceANewerDrainStarts() async {
+        let harness = GateHarness()
+        harness.drainer.fallback = busy
+        harness.drainer.cancelResults = [false, false]
+
+        XCTAssertTrue(harness.take())
+        await harness.settle()
+        harness.dropHeldWork()
+        harness.gate.installAborted()
+        await harness.settle()
+        XCTAssertEqual(harness.scheduled.count, 1, "The failed cancel has a retry queued.")
+
+        harness.ledger.noteDrain(port: GateHarness.port)
+        await harness.fireNext()
+
+        XCTAssertEqual(harness.drainer.cancels.count, 1, "The stale retry sends nothing.")
+        XCTAssertTrue(harness.scheduled.isEmpty)
     }
 
     /// A second handler replaces the first and keeps the one gate: only one
@@ -471,6 +536,7 @@ final class EngineDrainClientTests: XCTestCase {
         XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:8777/api/admin/drain")
         let owner = try StubDrainProtocol.owner(of: request)
         XCTAssertEqual(owner, "sparkle-1.2.3")
+        XCTAssertEqual(request.timeoutInterval, 5, "Each request carries the five-second bound itself.")
         XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
         XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
     }
@@ -545,19 +611,38 @@ final class EngineDrainClientTests: XCTestCase {
 
     func testAScheduleCountMustBeAWholeNumberToCountAsReported() {
         XCTAssertEqual(
-            EngineDrainClient.reading(from: Data(#"{"active_chat_ids":[],"schedule_work_count":2}"#.utf8)),
+            EngineDrainClient.reading(from: drainAnswer(#""schedule_work_count":2"#)),
             DrainReading(activeChats: 0, scheduleWork: 2)
         )
         XCTAssertEqual(
-            EngineDrainClient.reading(from: Data(#"{"active_chat_ids":[]}"#.utf8)),
+            EngineDrainClient.reading(from: drainAnswer("")),
             DrainReading(activeChats: 0, scheduleWork: nil)
         )
         XCTAssertEqual(
-            EngineDrainClient.reading(from: Data(#"{"active_chat_ids":[],"schedule_work_count":true}"#.utf8)),
+            EngineDrainClient.reading(from: drainAnswer(#""schedule_work_count":true"#)),
             DrainReading(activeChats: 0, scheduleWork: nil),
             "A boolean is not a count."
         )
+        // A count Int cannot hold, or one that is not whole or not positive,
+        // is no count. Converting 1e30 with a trapping cast would crash the app.
+        for count in ["1e30", "1.5", "-1"] {
+            XCTAssertEqual(
+                EngineDrainClient.reading(from: drainAnswer(#""schedule_work_count":\#(count)"#)),
+                DrainReading(activeChats: 0, scheduleWork: nil),
+                "schedule_work_count \(count) is not a count."
+            )
+        }
         XCTAssertNil(EngineDrainClient.reading(from: Data(#"{"draining":true}"#.utf8)))
+    }
+
+    /// The answer must say the drain is on: a drain answer without `draining`
+    /// true is no reading, so it can never count as idle.
+    func testADrainAnswerMustSayItIsDraining() {
+        XCTAssertNil(EngineDrainClient.reading(from: Data(#"{"active_chat_ids":[]}"#.utf8)))
+        XCTAssertNil(EngineDrainClient.reading(from: Data(#"{"draining":false,"active_chat_ids":[]}"#.utf8)))
+        XCTAssertNil(EngineDrainClient.reading(from: Data(#"{"draining":"true","active_chat_ids":[]}"#.utf8)))
+        XCTAssertNil(EngineDrainClient.reading(from: Data(#"{"draining":1,"active_chat_ids":[]}"#.utf8)))
+        XCTAssertNotNil(EngineDrainClient.reading(from: drainAnswer("")))
     }
 
     /// The production session is session-free with five-second bounds. Each
@@ -572,6 +657,69 @@ final class EngineDrainClientTests: XCTestCase {
         XCTAssertNil(configuration.httpCookieStorage)
         XCTAssertNil(configuration.urlCredentialStorage)
         XCTAssertNil(configuration.urlCache)
+    }
+
+    /// The client the app builds by default uses that configuration.
+    func testTheDefaultClientUsesTheProductionConfiguration() {
+        let session = EngineDrainClient().session.configuration
+
+        XCTAssertEqual(session.timeoutIntervalForRequest, 5)
+        XCTAssertFalse(session.httpShouldSetCookies)
+        XCTAssertNil(session.httpCookieStorage)
+        XCTAssertNil(session.urlCredentialStorage)
+    }
+
+    /// A never-answering engine is unreachable within the five-second request
+    /// bound. The loopback listen backlog completes the TCP handshake, so the
+    /// request is sent and then waits for an answer that never comes.
+    func testANeverAnsweringEngineIsUnreachableWithinTheRequestBound() async throws {
+        let silent = try silentEnginePort()
+        defer { silent.close() }
+
+        let started = Date()
+        let result = await EngineDrainClient().drain(port: silent.port, owner: "sparkle-1.2.3")
+
+        XCTAssertEqual(result, .failure(.unreachable))
+        XCTAssertLessThan(
+            Date().timeIntervalSince(started), 8,
+            "Five seconds by the request bound, with slack for a loaded machine."
+        )
+    }
+
+    /// A drain answer for the reading tests: `draining` true and an empty
+    /// chat list, plus any extra member.
+    private func drainAnswer(_ extra: String) -> Data {
+        let tail = extra.isEmpty ? "" : ",\(extra)"
+        return Data(#"{"draining":true,"active_chat_ids":[]\#(tail)}"#.utf8)
+    }
+
+    /// A loopback listening socket on a free port that never accepts or
+    /// answers. Closing it is the caller's job.
+    private func silentEnginePort() throws -> (port: Int, close: () -> Void) {
+        let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { throw XCTSkip("No socket for a silent listener.") }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        address.sin_port = 0
+        let bound = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bound == 0, Darwin.listen(descriptor, 1) == 0 else {
+            Darwin.close(descriptor)
+            throw XCTSkip("No loopback port for a silent listener.")
+        }
+        var bound4 = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &bound4) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.getsockname(descriptor, $0, &length)
+            }
+        }
+        return (Int(UInt16(bigEndian: bound4.sin_port)), { Darwin.close(descriptor) })
     }
 }
 

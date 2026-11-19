@@ -35,6 +35,25 @@ protocol EngineDraining: AnyObject {
     func cancel(port: Int, owner: String) async -> Bool
 }
 
+/// Counts the drains sent to each port. A cancel retry compares the count it
+/// was issued under with the current one: a drain sent since then closed
+/// admission again, and the stale cancel must not reopen it. Gates share the
+/// default ledger, so a retry of an earlier gate sees a later gate's drain.
+@MainActor
+final class DrainLedger {
+    static let shared = DrainLedger()
+
+    private var drains: [Int: Int] = [:]
+
+    func noteDrain(port: Int) {
+        drains[port, default: 0] += 1
+    }
+
+    func generation(port: Int) -> Int {
+        drains[port, default: 0]
+    }
+}
+
 /// Holds a verified Sparkle install until the bundled engine is idle, then
 /// lets Sparkle install and relaunch.
 ///
@@ -54,12 +73,16 @@ final class UpdateInstallGate {
     static let drainTimeout: TimeInterval = 600
     static let retryAfter: TimeInterval = 1800
     static let unreachableLimit = 12
-    /// A cancel the engine does not confirm is sent again: three attempts in
-    /// all, five seconds apart.
-    static let cancelAttempts = 3
+    /// A cancel the engine does not confirm is sent again with backoff: five
+    /// seconds, then doubling up to two minutes, until it is confirmed, the
+    /// engine is no longer running on the drained port, a newer drain closed
+    /// admission there, or `cancelRetryCap` has passed since the first cancel.
     static let cancelRetryInterval: TimeInterval = 5
+    static let cancelRetryMaxInterval: TimeInterval = 120
+    static let cancelRetryCap: TimeInterval = 600
     /// Sparkle install-phase error codes (`SUError` in SUErrors.h, domain
     /// `SUSparkleErrorDomain`) that mean the install this gate holds is over.
+    /// 4008 (authorize later) never reaches the delegate: Sparkle filters it.
     /// Everything else, such as "no update" or appcast and download trouble
     /// from a background check, leaves a held install alone.
     static let installAbortCodes: Set<Int> = [4002, 4003, 4004, 4005, 4006, 4007, 4009, 4010, 4012]
@@ -88,6 +111,7 @@ final class UpdateInstallGate {
     private let willInstall: () -> Void
     private let schedule: Schedule
     private let clock: Clock
+    private let ledger: DrainLedger
 
     /// The handler Sparkle is waiting on. A second `takeControl` replaces it.
     private var install: (() -> Void)?
@@ -112,7 +136,8 @@ final class UpdateInstallGate {
         owner: String,
         willInstall: @escaping () -> Void,
         schedule: @escaping Schedule,
-        clock: @escaping Clock = UpdateInstallGate.monotonicClock
+        clock: @escaping Clock = UpdateInstallGate.monotonicClock,
+        ledger: DrainLedger = DrainLedger.shared
     ) {
         self.localState = localState
         self.drainer = drainer
@@ -120,6 +145,7 @@ final class UpdateInstallGate {
         self.willInstall = willInstall
         self.schedule = schedule
         self.clock = clock
+        self.ledger = ledger
     }
 
     /// Takes Sparkle's install handler. Always `true`: this client installs
@@ -171,6 +197,7 @@ final class UpdateInstallGate {
                 idleReadings = 0
             }
             drainingPort = port
+            ledger.noteDrain(port: port)
             Task { @MainActor in
                 let result = await self.drainer.drain(port: port, owner: self.owner)
                 self.absorb(result, port: port, attempt: id)
@@ -270,28 +297,52 @@ final class UpdateInstallGate {
     }
 
     private func cancelDrain(port: Int) {
-        Self.sendCancel(port: port, owner: owner, drainer: drainer, schedule: schedule)
+        let retry = CancelRetry(
+            port: port,
+            owner: owner,
+            drainer: drainer,
+            schedule: schedule,
+            localState: localState,
+            clock: clock,
+            ledger: ledger
+        )
+        Self.sendCancel(retry, generation: ledger.generation(port: port), startedAt: clock(), attempt: 1)
     }
 
-    /// Sends a drain cancel, and sends it again while the engine has not
-    /// confirmed admission is open. It captures no gate state, so an abort or a
-    /// replacement gate cannot stop it. A cancel still unconfirmed after the
-    /// last attempt is logged, not retried forever.
+    /// Everything a cancel retry needs. It captures no gate state, so an abort
+    /// or a replacement gate cannot stop a cancel already on its way.
+    private struct CancelRetry {
+        let port: Int
+        let owner: String
+        let drainer: EngineDraining
+        let schedule: Schedule
+        let localState: LocalState
+        let clock: Clock
+        let ledger: DrainLedger
+    }
+
+    /// Sends a drain cancel, and sends it again with backoff while the engine
+    /// has not confirmed admission is open. A retry is dropped when the engine
+    /// is no longer running on the port, when a newer drain has closed
+    /// admission there since this cancel was issued, or once `cancelRetryCap`
+    /// has passed. Giving up is logged, not retried forever.
     private static func sendCancel(
-        port: Int,
-        owner: String,
-        drainer: EngineDraining,
-        schedule: @escaping Schedule,
-        attempt: Int = 1
+        _ retry: CancelRetry,
+        generation: Int,
+        startedAt: TimeInterval,
+        attempt: Int
     ) {
         Task { @MainActor in
-            if await drainer.cancel(port: port, owner: owner) { return }
-            guard attempt < cancelAttempts else {
-                NSLog("Ciaobot update: the engine did not confirm closing the drain for %@ after %d attempts.", owner, attempt)
+            if await retry.drainer.cancel(port: retry.port, owner: retry.owner) { return }
+            guard retry.clock() - startedAt < cancelRetryCap,
+                  retry.localState() == .running(port: retry.port) else {
+                NSLog("Ciaobot update: the engine did not confirm closing the drain for %@; no further retry.", retry.owner)
                 return
             }
-            schedule(cancelRetryInterval) {
-                sendCancel(port: port, owner: owner, drainer: drainer, schedule: schedule, attempt: attempt + 1)
+            let delay = min(cancelRetryInterval * pow(2, Double(attempt - 1)), cancelRetryMaxInterval)
+            retry.schedule(delay) {
+                guard retry.ledger.generation(port: retry.port) == generation else { return }
+                sendCancel(retry, generation: generation, startedAt: startedAt, attempt: attempt + 1)
             }
         }
     }
@@ -336,7 +387,8 @@ final class EngineDrainClient: EngineDraining {
 
     private static let refusesRedirects = RefuseRedirects()
 
-    private let session: URLSession
+    /// Not private: a test reads the configuration the default client uses.
+    let session: URLSession
 
     init(session: URLSession? = nil) {
         self.session = session ?? URLSession(configuration: Self.makeConfiguration())
@@ -364,19 +416,31 @@ final class EngineDrainClient: EngineDraining {
         return true
     }
 
-    /// The reading in a drain answer. `active_chat_ids` is required; a
-    /// `schedule_work_count` that is missing, boolean or not a whole number
-    /// stays nil, which the gate reads as not idle.
+    /// The reading in a drain answer. The answer must say `draining` is true:
+    /// anything else is not a drain. `active_chat_ids` is required; a
+    /// `schedule_work_count` that is missing, boolean, negative, fractional or
+    /// too large for an `Int` stays nil, which the gate reads as not idle.
     static func reading(from data: Data) -> DrainReading? {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              isTrue(object["draining"]),
               let active = object["active_chat_ids"] as? [Any] else { return nil }
         var scheduleWork: Int?
-        if let number = object["schedule_work_count"] as? NSNumber,
-           CFGetTypeID(number) != CFBooleanGetTypeID() {
-            let value = number.doubleValue
-            if value >= 0, value == value.rounded(.towardZero) { scheduleWork = Int(value) }
+        if let number = object["schedule_work_count"] as? NSNumber, !isBoolean(number),
+           let whole = Int(exactly: number.doubleValue), whole >= 0 {
+            scheduleWork = whole
         }
         return DrainReading(activeChats: active.count, scheduleWork: scheduleWork)
+    }
+
+    /// JSON `true`, and only that: a number or a string is not a flag.
+    private static func isTrue(_ value: Any?) -> Bool {
+        guard let number = value as? NSNumber, isBoolean(number) else { return false }
+        return number.boolValue
+    }
+
+    /// JSON booleans bridge to `NSNumber` too, so a count must not be one.
+    private static func isBoolean(_ number: NSNumber) -> Bool {
+        CFGetTypeID(number) == CFBooleanGetTypeID()
     }
 
     /// One POST to the loopback engine. The host is `127.0.0.1` by design: the
@@ -388,6 +452,7 @@ final class EngineDrainClient: EngineDraining {
         request.httpMethod = "POST"
         request.httpShouldHandleCookies = false
         request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = Self.timeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["owner": owner])
         do {

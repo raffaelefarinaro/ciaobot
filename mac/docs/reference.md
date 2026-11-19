@@ -376,17 +376,34 @@ quit. The gate decides when the verified update installs:
   refusal (409), or twelve unreachable readings in a row (one minute) cancels the
   drain (`POST .../api/admin/drain/cancel`) and retries the whole gate after 30
   minutes. A cancel the engine does not confirm (a 2xx answer with `draining`
-  false) is sent again five seconds later, up to three attempts in all, then
-  logged. The gate never installs while the supervisor reports a running engine
-  that cannot be read.
+  false) is sent again with backoff: five seconds, doubling to a two-minute step.
+  The retries stop once the cancel is confirmed, the engine is no longer running
+  on that port, a newer drain has closed admission there, or ten minutes have
+  passed since the first cancel; giving up is logged. The gate never installs
+  while the supervisor reports a running engine that cannot be read.
+
+The drain owner is `sparkle-<version>`, limited to 64 characters of letters,
+digits, `.`, `_` and `-`; any other character in the version becomes `_`.
 
 Sparkle's own **Install and Relaunch** (automatic install off) skips the drain:
-its alert is the user's consent. Sparkle reports a driver that stopped with an
-error through the same delegate method as background checks, so only an
-install-phase error (codes 4002 to 4012 except 4008, the authorize-later notice)
-abandons the install. "No update", appcast and download errors from a background
-check leave a held install alone. An abandoned install cancels the drain the gate
-holds and ends the update quit reason.
+its alert is the user's consent, but nothing drained the chats. Its terminate is
+therefore a user quit that asks about running chats, not a silent update quit.
+Sparkle reports a driver that stopped with an error through the same delegate
+method as background checks, so only an install-phase error abandons the install:
+codes 4002 to 4007, 4009, 4010 and 4012. Sparkle filters code 4008 (the
+authorize-later notice) before it reaches the delegate, so it never abandons an
+install. "No update", appcast and download errors from a background check leave a
+held install alone. An abandoned install cancels the drain the gate holds and
+ends the update quit reason. A quit the user cancels while an install is raised
+abandons that install the same way.
+
+The production wiring is pinned by `ClientUpdaterTests`: with no engine the
+shipped gate runs Sparkle's handler with the update flag already raised and
+drains nothing; with a running engine it drains through the injected drainer
+under the update's owner and keeps the install held while the engine is busy;
+and `ClientUpdater(localState:)` forwards its engine state and drainer to the
+gate it builds. The drain client's own tests pin the five-second bound on each
+request and a never-answering engine returning unreachable.
 
 While an install is already scheduled, a different update is refused: Sparkle
 keeps it for its install on quit. Taking control for a different owner otherwise

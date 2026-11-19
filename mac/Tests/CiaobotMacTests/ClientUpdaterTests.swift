@@ -207,6 +207,107 @@ final class ClientUpdaterTests: XCTestCase {
         XCTAssertFalse(updateQuit.installing)
         delegate.relaunchWillStart()
         XCTAssertTrue(updateQuit.installing)
+        XCTAssertFalse(updateQuit.drained, "Sparkle's relaunch drained nothing, so its quit still asks about running chats.")
+    }
+
+    // MARK: - Production wiring
+
+    /// The shipped gate factory, with its drainer injected: an install with no
+    /// engine runs Sparkle's handler on the next turn, and the update flag is
+    /// already raised when the handler runs.
+    func testProductionWiringRaisesTheUpdateFlagBeforeSparkleRuns() async {
+        let updateQuit = UpdateQuitIntent()
+        let drainer = ScriptedEngineDrainer()
+        let delegate = ClientUpdateInstallDelegate(
+            makeGate: ClientUpdateInstallDelegate.productionGate(
+                localState: { .external },
+                updateQuit: updateQuit,
+                makeDrainer: { drainer }
+            ),
+            updateQuit: updateQuit
+        )
+        var flagWhenSparkleRan: Bool?
+        var drainedWhenSparkleRan: Bool?
+        let ran = expectation(description: "Sparkle's handler runs")
+        XCTAssertTrue(delegate.takeControl(owner: "sparkle-1.2.3") {
+            flagWhenSparkleRan = updateQuit.installing
+            drainedWhenSparkleRan = updateQuit.drained
+            ran.fulfill()
+        })
+
+        await fulfillment(of: [ran], timeout: 5)
+
+        XCTAssertEqual(flagWhenSparkleRan, true)
+        XCTAssertEqual(drainedWhenSparkleRan, false, "No engine ran, so nothing was drained.")
+        XCTAssertEqual(drainer.calls, [], "An external engine is never drained.")
+    }
+
+    /// With a running engine the shipped gate drains it through the injected
+    /// drainer, under the update's owner. The busy answer keeps the install held.
+    func testProductionWiringDrainsARunningEngineThroughTheInjectedDrainer() async {
+        let updateQuit = UpdateQuitIntent()
+        let drainer = ScriptedEngineDrainer()
+        let delegate = ClientUpdateInstallDelegate(
+            makeGate: ClientUpdateInstallDelegate.productionGate(
+                localState: { .running(port: 8777) },
+                updateQuit: updateQuit,
+                makeDrainer: { drainer }
+            ),
+            updateQuit: updateQuit
+        )
+
+        XCTAssertTrue(delegate.takeControl(owner: "sparkle-1.2.3") {
+            XCTFail("A busy engine must not install.")
+        })
+        await settleMainActor()
+
+        XCTAssertEqual(drainer.drains.map(\.port), [8777])
+        XCTAssertEqual(drainer.calls, ["drain sparkle-1.2.3"])
+        XCTAssertFalse(updateQuit.installing)
+        // Stops the poll loop the real clock keeps running; the abandon also
+        // cancels the held drain through the wiring under test.
+        updateQuit.abandonInstall()
+        await settleMainActor()
+        XCTAssertEqual(drainer.cancels.map(\.owner), ["sparkle-1.2.3"])
+    }
+
+    /// The shipped initializer forwards the engine state and the drainer to the
+    /// gate it builds, and keeps the delegate it wired.
+    func testTheShippedInitializerForwardsItsEngineStateAndDrainer() async throws {
+        let updateQuit = UpdateQuitIntent()
+        let drainer = ScriptedEngineDrainer()
+        let updater = ClientUpdater(
+            environment: [:],
+            updateQuit: updateQuit,
+            localState: { .running(port: 9123) },
+            makeDrainer: { drainer }
+        )
+        let delegate = try XCTUnwrap(updater.installDelegate)
+
+        XCTAssertTrue(delegate.takeControl(owner: "sparkle-4.5.6") {
+            XCTFail("A busy engine must not install.")
+        })
+        await settleMainActor()
+
+        XCTAssertEqual(drainer.drains.map(\.port), [9123])
+        XCTAssertEqual(drainer.drains.map(\.owner), ["sparkle-4.5.6"])
+        updateQuit.abandonInstall()
+        await settleMainActor()
+    }
+
+    // MARK: - Drain owner
+
+    /// The owner names the version, keeps to letters, digits, `.`, `_` and `-`,
+    /// and is clipped to 64 characters.
+    func testTheDrainOwnerIsBoundedAndLimitedToSafeCharacters() {
+        XCTAssertEqual(ClientUpdateInstallDelegate.drainOwner(forVersion: "1.10.0"), "sparkle-1.10.0")
+        XCTAssertEqual(
+            ClientUpdateInstallDelegate.drainOwner(forVersion: "1.2 beta/x+5\n"),
+            "sparkle-1.2_beta_x_5_"
+        )
+        let long = ClientUpdateInstallDelegate.drainOwner(forVersion: String(repeating: "9", count: 200))
+        XCTAssertEqual(long.count, ClientUpdateInstallDelegate.maxOwnerLength)
+        XCTAssertTrue(long.hasPrefix("sparkle-9"))
     }
 
     // MARK: - Install gate ownership
@@ -268,7 +369,7 @@ final class ClientUpdaterTests: XCTestCase {
     func testAnAbandonedInstallEndsTheUpdateQuitReason() {
         let updateQuit = UpdateQuitIntent()
         let delegate = makeInstallDelegate(drainer: ScriptedEngineDrainer(), state: .external, updateQuit: updateQuit)
-        updateQuit.beginInstall()
+        updateQuit.beginInstall(drained: true)
         XCTAssertEqual(EngineLifecycle.quitReason(nil, updateInstall: updateQuit.installing), .update)
 
         delegate.installDidAbort(sparkleError(4005))
@@ -295,7 +396,7 @@ final class ClientUpdaterTests: XCTestCase {
                     localState: { state },
                     drainer: drainer,
                     owner: owner,
-                    willInstall: { updateQuit.beginInstall() },
+                    willInstall: { updateQuit.beginInstall(drained: state != .external) },
                     schedule: { _, _ in },
                     clock: { 0 }
                 )

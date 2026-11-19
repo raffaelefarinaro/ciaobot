@@ -904,7 +904,7 @@ final class EngineLifecycleTests: XCTestCase {
         let updateQuit = UpdateQuitIntent()
         let delegate = makeDelegate(mode: .local, supervisor: supervisor, updateQuit: updateQuit, launched: true)
 
-        updateQuit.beginInstall()
+        updateQuit.beginInstall(drained: true)
         XCTAssertEqual(shouldTerminate(delegate), .terminateLater)
         XCTAssertEqual(dialogs.titles, [], "an update-driven quit never asks")
         XCTAssertEqual(blockers.origins, [])
@@ -921,12 +921,52 @@ final class EngineLifecycleTests: XCTestCase {
         let updateQuit = UpdateQuitIntent()
         let delegate = makeDelegate(mode: .local, supervisor: supervisor, updateQuit: updateQuit, launched: true)
 
-        updateQuit.beginInstall()
+        updateQuit.beginInstall(drained: true)
         XCTAssertEqual(shouldTerminate(delegate), .terminateLater)
         time.advance(25)
         XCTAssertEqual(processes.killed, [], "an update quit is not cut short at the 20 s system grace")
         time.advance(10)
         XCTAssertEqual(processes.killed, [pid], "the grace ends at 35 s")
+    }
+
+    /// Sparkle's own "Install and Relaunch" raises the update reason with no
+    /// drain, so the running engine's chats are not drained and the quit asks.
+    func testARelaunchWithoutADrainStillAsksAboutRunningChats() throws {
+        let supervisor = makeSupervisor()
+        _ = try bringUp(supervisor)
+        dialogs.result = false
+        let updateQuit = UpdateQuitIntent()
+        let delegate = makeDelegate(mode: .local, supervisor: supervisor, updateQuit: updateQuit)
+
+        updateQuit.beginInstall(drained: false)
+        XCTAssertEqual(shouldTerminate(delegate), .terminateLater)
+        blockers.answerAll()
+
+        XCTAssertEqual(dialogs.titles.count, 1, "no drain held the chats, so the quit asks")
+        XCTAssertEqual(replies, [false], "the user cancelled the quit")
+    }
+
+    /// A quit cancelled while Sparkle's install is raised abandons that install:
+    /// the update flag ends, and the gate's held drain is released through the
+    /// updater's hook, so a later quit asks again.
+    func testACancelledQuitAbandonsARaisedInstall() throws {
+        let supervisor = makeSupervisor()
+        _ = try bringUp(supervisor)
+        dialogs.result = false
+        let updateQuit = UpdateQuitIntent()
+        var released = 0
+        updateQuit.onAbandon = { released += 1 }
+        let delegate = makeDelegate(mode: .local, supervisor: supervisor, updateQuit: updateQuit)
+
+        // A user quit asks first; the gate raises its install while the chat
+        // count is read; then the user cancels the dialog.
+        XCTAssertEqual(shouldTerminate(delegate), .terminateLater)
+        updateQuit.beginInstall(drained: true)
+        blockers.answerAll()
+
+        XCTAssertEqual(replies, [false])
+        XCTAssertFalse(updateQuit.installing, "the install will not run, so the flag ends")
+        XCTAssertEqual(released, 1, "the gate's drain is released once")
     }
 
     /// The supervisor reads as the update gate expects: only a running engine
@@ -971,7 +1011,7 @@ final class EngineLifecycleTests: XCTestCase {
                     localState: { .external },
                     drainer: ScriptedEngineDrainer(),
                     owner: owner,
-                    willInstall: { updateQuit.beginInstall() },
+                    willInstall: { updateQuit.beginInstall(drained: true) },
                     schedule: { _, work in deferred = work }
                 )
             },

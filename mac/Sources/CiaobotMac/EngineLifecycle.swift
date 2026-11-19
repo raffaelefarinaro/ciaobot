@@ -239,10 +239,31 @@ final class RestartBlockersProbe: NSObject, URLSessionDataDelegate, RestartBlock
 @MainActor
 final class UpdateQuitIntent {
     private(set) var installing = false
+    /// True when the raised install drained the bundled engine first. Sparkle's
+    /// own "Install and Relaunch" raises an install with no drain, so its
+    /// terminate still asks about running chats.
+    private(set) var drained = false
+    /// Runs when a raised install is abandoned by a cancelled quit. The updater
+    /// sets it to cancel the gate's held drain.
+    var onAbandon: (@MainActor () -> Void)?
 
-    func beginInstall() { installing = true }
+    func beginInstall(drained: Bool) {
+        installing = true
+        self.drained = drained
+    }
 
-    func endInstall() { installing = false }
+    func endInstall() {
+        installing = false
+        drained = false
+    }
+
+    /// Ends a raised install that will not happen, and lets the updater release
+    /// what it holds for it.
+    func abandonInstall() {
+        let hook = onAbandon
+        endInstall()
+        hook?()
+    }
 }
 
 /// Closes the main window of a login launch once SwiftUI has created it.

@@ -565,8 +565,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         defer { insideShouldTerminate = false }
         // Sparkle's install terminates the app to swap the bundle, after the
         // update gate has drained the engine: it is an update quit, so no
-        // dialog stands in front of it.
-        let reason = EngineLifecycle.quitReason(launchEvent(), updateInstall: updateQuit.installing)
+        // dialog stands in front of it. Sparkle's own "Install and Relaunch"
+        // raises the install without a drain, so that terminate still asks.
+        let reason = EngineLifecycle.quitReason(
+            launchEvent(),
+            updateInstall: updateQuit.installing && updateQuit.drained
+        )
         switch EngineLifecycle.terminationPlan(mode: mode, engineState: supervisor?.state, quitReason: reason) {
         case .terminateNow:
             return .terminateNow
@@ -622,6 +626,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `terminationDeferred` stays set until the reply is actually sent, so a
     /// quit that arrives during the hop still joins this flow.
     private func finishDeferredTermination(terminate: Bool) {
+        if !terminate, updateQuit.installing {
+            // A cancelled quit while Sparkle's install is raised: the install
+            // will not run, so it is abandoned and the gate releases its drain.
+            updateQuit.abandonInstall()
+        }
         let send: @MainActor () -> Void = { [self] in
             terminationDeferred = false
             replyToTerminate(terminate)
