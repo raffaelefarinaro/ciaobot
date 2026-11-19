@@ -10149,6 +10149,16 @@ def _dispatch(argv_list: list[str]) -> int:
         # so they stay on engine_update, which the updater job also runs.
         receiver_verbs = {"status", "run-apply", "run-recover"}
         if sys.platform.startswith("linux") and not (rest and rest[0] in receiver_verbs):
+            from ciao.package_version import detect_install_mode  # noqa: PLC0415
+
+            # A source checkout is updated with git. The installer would replace
+            # the venv the checkout runs from.
+            if detect_install_mode() == "editable":
+                print(
+                    "This is a source checkout; update it with git, not ciao update.",
+                    file=sys.stderr,
+                )
+                return 2
             from ciao.linux_service import run_update  # noqa: PLC0415
 
             return run_update(rest)

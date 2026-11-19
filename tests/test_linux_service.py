@@ -703,6 +703,8 @@ def test_cli_update_on_linux_runs_the_installer(monkeypatch):
 
     seen = []
     monkeypatch.setattr(cli.sys, "platform", "linux")
+    # This test checkout is itself a source install; pin the installed mode.
+    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "uv_tool")
 
     def installer(argv):
         seen.append(("installer", list(argv)))
@@ -716,6 +718,26 @@ def test_cli_update_on_linux_runs_the_installer(monkeypatch):
     assert cli.main(["update", "--no-service"]) == 0
     assert cli.main(["update"]) == 0
     assert seen == [("installer", ["--no-service"]), ("installer", [])]
+
+
+def test_cli_update_refuses_a_source_checkout_on_linux(monkeypatch, capsys):
+    # Mutation guard: without the editable check, install.sh replaces the
+    # venv this checkout runs from. The refusal must come before any fetch.
+    from ciao import engine_update, linux_service
+
+    monkeypatch.setattr(cli.sys, "platform", "linux")
+    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "editable")
+    monkeypatch.setattr(
+        linux_service, "run_update", lambda argv: pytest.fail("installer must not run")
+    )
+    monkeypatch.setattr(
+        engine_update, "main", lambda argv: pytest.fail("receiver must not run")
+    )
+
+    assert cli.main(["update"]) == 2
+    assert capsys.readouterr().err.strip() == (
+        "This is a source checkout; update it with git, not ciao update."
+    )
 
 
 def test_cli_update_on_linux_keeps_the_receiver_verbs(monkeypatch):
