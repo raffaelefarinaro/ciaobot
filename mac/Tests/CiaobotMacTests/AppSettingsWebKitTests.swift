@@ -16,15 +16,21 @@ final class AppSettingsWebKitTests: XCTestCase {
         let webView: WKWebView
         let fake: AppSettingsFakeNotifications
         let settings: AppSettingsFakeSystemSettings
+        let updates: AppSettingsFakeUpdates
     }
 
-    private func makeHarness(withBridge: Bool = true, state: ChatNotificationState = .off) throws -> Harness {
+    private func makeHarness(
+        withBridge: Bool = true,
+        state: ChatNotificationState = .off,
+        updates: AppSettingsFakeUpdates? = nil
+    ) throws -> Harness {
+        let updates = updates ?? AppSettingsFakeUpdates()
         let fake = AppSettingsFakeNotifications(state)
         let settings = AppSettingsFakeSystemSettings()
         var representable = WebWindow(origin: origin)
         if withBridge {
             let bridge = AppSettingsBridge()
-            bridge.bind(notifications: fake, systemSettings: settings)
+            bridge.bind(notifications: fake, systemSettings: settings, updates: updates)
             representable.appSettings = bridge
         }
         let coordinator = representable.makeCoordinator()
@@ -35,7 +41,7 @@ final class AppSettingsWebKitTests: XCTestCase {
         window.orderFrontRegardless()
         Self.retained.append(window)
         Self.retained.append(coordinator)
-        return Harness(coordinator: coordinator, webView: webView, fake: fake, settings: settings)
+        return Harness(coordinator: coordinator, webView: webView, fake: fake, settings: settings, updates: updates)
     }
 
     /// A trusted click from the main frame of the selected origin, delivered
@@ -163,7 +169,8 @@ final class AppSettingsWebKitTests: XCTestCase {
             "{op: 1}",
             "{op: null}",
             "{}",
-            "{op: 'checkForUpdates'}",
+            "{op: 'checkForUpdates', extra: 1}",
+            "{op: 'setAutomaticUpdates', on: true, extra: 1}",
             "{op: 'nope'}",
             "'notifications'",
             "['notifications']",
@@ -174,6 +181,88 @@ final class AppSettingsWebKitTests: XCTestCase {
             assertRefused(try post(h.webView, body))
         }
         XCTAssertEqual(h.fake.actionCount, 0)
+    }
+
+    func testSnapshotCarriesUpdatesWithoutAGesture() throws {
+        let h = try makeHarness(updates: AppSettingsFakeUpdates(canCheck: true, automatic: true))
+        try load(h)
+        let outcome = try post(h.webView, "{op: 'get'}")
+        let snapshot = try XCTUnwrap(outcome["ok"] as? [String: Any], "\(outcome)")
+        let updates = try XCTUnwrap(snapshot["updates"] as? [String: Any])
+        XCTAssertEqual(updates["available"] as? Bool, true)
+        XCTAssertEqual(updates["automatic"] as? Bool, true)
+        XCTAssertEqual(updates["canCheck"] as? Bool, true)
+        XCTAssertEqual(h.updates.checkCount, 0)
+    }
+
+    func testCheckForUpdatesWithoutAGestureIsRefused() throws {
+        let h = try makeHarness()
+        try load(h)
+        assertRefused(try post(h.webView, "{op: 'checkForUpdates'}"))
+        XCTAssertEqual(h.updates.checkCount, 0)
+    }
+
+    func testCheckForUpdatesWithAGestureActsOnce() throws {
+        let h = try makeHarness()
+        try load(h)
+        click(h)
+        XCTAssertNotNil(try post(h.webView, "{op: 'checkForUpdates'}")["ok"])
+        XCTAssertEqual(h.updates.checkCount, 1)
+        assertRefused(try post(h.webView, "{op: 'checkForUpdates'}"))
+        XCTAssertEqual(h.updates.checkCount, 1)
+    }
+
+    func testCheckForUpdatesWhenUnavailableLeavesTheClickUnspent() throws {
+        let h = try makeHarness(updates: AppSettingsFakeUpdates(reason: "No feed."))
+        try load(h)
+        click(h)
+        assertRefused(try post(h.webView, "{op: 'checkForUpdates'}"))
+        XCTAssertEqual(h.updates.checkCount, 0)
+        // The refusal spent nothing, so the same click still backs an allowed action.
+        assertRefused(try post(h.webView, "{op: 'setAutomaticUpdates', on: true}"))
+        XCTAssertTrue(h.updates.automaticSets.isEmpty)
+    }
+
+    func testSetAutomaticUpdatesWithoutAGestureIsRefused() throws {
+        let h = try makeHarness()
+        try load(h)
+        assertRefused(try post(h.webView, "{op: 'setAutomaticUpdates', on: true}"))
+        XCTAssertTrue(h.updates.automaticSets.isEmpty)
+    }
+
+    func testSetAutomaticUpdatesWithAGestureActsOnce() throws {
+        let h = try makeHarness()
+        try load(h)
+        click(h)
+        let outcome = try post(h.webView, "{op: 'setAutomaticUpdates', on: true}")
+        let snapshot = try XCTUnwrap(outcome["ok"] as? [String: Any], "\(outcome)")
+        XCTAssertEqual((snapshot["updates"] as? [String: Any])?["automatic"] as? Bool, true)
+        XCTAssertEqual(h.updates.automaticSets, [true])
+        assertRefused(try post(h.webView, "{op: 'setAutomaticUpdates', on: false}"))
+        XCTAssertEqual(h.updates.automaticSets, [true])
+    }
+
+    func testSetAutomaticUpdatesRequiresAStrictBooleanAndExactKeys() throws {
+        let h = try makeHarness()
+        try load(h)
+        let bodies = [
+            "{op: 'setAutomaticUpdates', on: 1}",
+            "{op: 'setAutomaticUpdates', on: 0}",
+            "{op: 'setAutomaticUpdates', on: 'true'}",
+            "{op: 'setAutomaticUpdates', on: null}",
+            "{op: 'setAutomaticUpdates', on: [true]}",
+            "{op: 'setAutomaticUpdates'}",
+            "{op: 'setAutomaticUpdates', on: true, extra: 1}",
+            "{op: 'setAutomaticUpdates', on: true, off: false}",
+        ]
+        for body in bodies {
+            click(h)
+            assertRefused(try post(h.webView, body))
+        }
+        XCTAssertTrue(h.updates.automaticSets.isEmpty)
+        click(h)
+        XCTAssertNotNil(try post(h.webView, "{op: 'setAutomaticUpdates', on: false}")["ok"])
+        XCTAssertEqual(h.updates.automaticSets, [false])
     }
 
     func testIframeCallIsRefusedEvenWithAGesture() throws {

@@ -46,6 +46,8 @@
             <!-- Nothing to do: the status sits in the corner as a badge. -->
             <span v-else-if="upToDate" class="badge badge--success">Up to date<template v-if="packageStatus?.current_version"> · {{ packageStatus.current_version }}</template></span>
           </div>
+          <!-- Inside Ciaobot for Mac the card leads with the app's own updater. -->
+          <SettingsMacUpdates v-if="desktopClient" />
           <SkeletonLoader v-if="packageLoading && !packageStatus" label="Checking package status" :count="2" />
           <div v-else-if="packageStatus">
             <div v-if="packageStatus.error" class="hint hint--warn hint--spaced">
@@ -1266,6 +1268,7 @@ import SettingsDevices from './settings/SettingsDevices.vue'
 import SettingsServer from './settings/SettingsServer.vue'
 import SettingsAppInstall from './settings/SettingsAppInstall.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
+import SettingsMacUpdates from './settings/SettingsMacUpdates.vue'
 import SettingsKeyboardShortcuts from './settings/SettingsKeyboardShortcuts.vue'
 import SettingsRestartResume from './settings/SettingsRestartResume.vue'
 import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'

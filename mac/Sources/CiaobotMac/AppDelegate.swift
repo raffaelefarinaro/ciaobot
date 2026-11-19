@@ -491,7 +491,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 openChat: { session.openChat(chatID: $0) }
             )
             notifications.start()
-            appSettings.bind(notifications: notifications, systemSettings: systemSettings)
+            appSettings.bind(notifications: notifications, systemSettings: systemSettings, updates: updater)
             // One feed pair per saved host. The active host's entry uses the
             // session's own store; every other host uses its snapshot-verified
             // saved sign-in, and a remote host without one is never contacted.

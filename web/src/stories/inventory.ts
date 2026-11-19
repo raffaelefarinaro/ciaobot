@@ -19,7 +19,7 @@ export const inventory: InventoryEntry[] = [
     kind: 'component',
     owner: { path: 'web/src/components/settings/SettingsSwitch.vue', anchor: 'class="settings-switch"' },
     sources: [],
-    consumers: ['web/src/components/settings/SettingsNotifications.vue', 'web/src/components/settings/SettingsRestartResume.vue'],
+    consumers: ['web/src/components/settings/SettingsMacUpdates.vue', 'web/src/components/settings/SettingsNotifications.vue', 'web/src/components/settings/SettingsRestartResume.vue'],
     variants: ['checked', 'disabled', 'busy'],
     variantNotes: 'Controlled native switch; checked controls On/Off, disabled blocks activation, busy shows an ellipsis without disabling. Parents own saves.',
     states: [
@@ -9603,6 +9603,97 @@ export const inventory: InventoryEntry[] = [
     "loading": {
       "status": "known",
       "detail": "Initial: support and enabled flags start false, so the first paint before onMounted reads Not available in this browser, and Off on this device is the answer only after isPushEnabled() resolves; an enabled device shows Off until then. Failure is best-effort and silent (no failure line). There is no refresh or stale state."
+    },
+    "migration": {
+      "status": "unassessed",
+      "note": "Inventory admission does not approve a design migration."
+    }
+  },
+  {
+    "id": "components-settings-settings-mac-updates",
+    "name": "SettingsMacUpdates",
+    "family": "Settings",
+    "kind": "component",
+    "owner": {
+      "path": "web/src/components/settings/SettingsMacUpdates.vue",
+      "anchor": "<template>"
+    },
+    "sources": [],
+    "consumers": [
+      "web/src/components/SettingsView.vue"
+    ],
+    "variants": [
+      "installs-automatically",
+      "asks-before-installing",
+      "checking",
+      "unavailable"
+    ],
+    "variantNotes": "Ciaobot for Mac's own update row, shown first in the Updates card inside the app. It renders only with the app's bridge; the workshop stubs the bridge per story and renders no action.",
+    "states": [
+      {
+        "name": "installs-automatically",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-mac-updates--installs-automatically"
+        ],
+        "note": "Available and automatic: status reads Installs updates automatically, the switch is on and both controls are enabled."
+      },
+      {
+        "name": "asks-before-installing",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-mac-updates--asks-before-installing"
+        ],
+        "note": "Available and manual: status reads Asks before installing updates and the switch is off."
+      },
+      {
+        "name": "checking",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-mac-updates--checking"
+        ],
+        "note": "Available but a check or install is running: Check for Updates is disabled."
+      },
+      {
+        "name": "unavailable",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-mac-updates--unavailable"
+        ],
+        "note": "Unavailable with the native reason as text; both controls are disabled and linked to the reason."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-mac-updates--narrow"
+        ],
+        "note": "390px container: the check button keeps a 44px height inside the narrow viewport."
+      },
+      {
+        "name": "no-bridge",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-mac-updates--no-bridge"
+        ],
+        "note": "No updates block from the app: the row renders nothing and the card keeps its static text."
+      },
+      {
+        "name": "action-pending",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "Busy while a check or switch request is in flight needs a bridge reply held open; covered by the component unit tests, not the workshop."
+      },
+      {
+        "name": "action-refused",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "A refused action shows the menu-bar alert; the workshop cannot produce a trusted click, so the unit tests cover it."
+      }
+    ],
+    "loading": {
+      "status": "none",
+      "detail": "Reads the Mac app's snapshot through the bridge on mount and again on the change event or when the window becomes visible. No network request."
     },
     "migration": {
       "status": "unassessed",
