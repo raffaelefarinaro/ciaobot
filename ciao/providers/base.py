@@ -11,7 +11,7 @@ from collections.abc import AsyncGenerator, AsyncIterable, Callable, Mapping, Se
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, TypeGuard
+from typing import Any, TypeGuard
 
 from ciao.models import (
     AgentRequest,
@@ -96,10 +96,6 @@ class McpOAuthUnavailable(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
-
-
-# Outcome of a "move to background" request (#1413).
-MoveToBackgroundOutcome = Literal["moved", "nothing", "unsupported", "not_running", "failed"]
 
 
 def build_prompt(request: AgentRequest) -> str:
@@ -355,17 +351,6 @@ class BaseProvider(ABC):
         """
         ...
 
-    async def move_to_background(self) -> MoveToBackgroundOutcome:
-        """Move the running turn's foreground tools to the background (OpenCode's Ctrl+B).
-
-        ``moved``: a backgroundable call was running and the provider accepted
-        the request; ``nothing``: accepted, but nothing was running that could
-        move; ``not_running``: no live session; ``failed``: the provider
-        refused or could not be reached. Providers without the feature (Claude)
-        answer ``unsupported``.
-        """
-        return "unsupported"
-
     async def disconnect(self) -> None:
         """Discard any provider-side connection state."""
 
@@ -472,10 +457,6 @@ class BaseProvider(ABC):
     def background_child_ids(self) -> list[str]:
         """Session ids of the tracked background subagents."""
         return []
-
-    async def stop_background_task(self, task_id: str) -> bool:
-        """Stop one tracked background task; False when not tracked or unsupported."""
-        return False
 
     async def abort_session(self, session_id: str) -> None:
         """Abort a provider-side session; a no-op for adapters without one."""
