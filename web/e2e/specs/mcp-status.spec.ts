@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { boot, horizontalOverflow, isolate, openChatDetails, seedInbox, settled } from '../support/app'
+import { boot, horizontalOverflow, isolate, openChatDetails, quiesce, seedInbox, settled } from '../support/app'
 
 /** Provider rows the MCP settings page turns into one button each. A row with no `mcp_command` is not a button. */
 function providerConnections() {
@@ -84,6 +84,11 @@ for (const provider of ['claude', 'opencode'] as const) {
     if (provider === 'claude') await page.screenshot({ path: `${previews}/desktop.png`, animations: 'disabled' })
     await page.goBack()
     await expect(page).toHaveURL(new RegExp(`/chat/${chatId}$`))
+    // The URL changes before the chat paints. On a wide pane the rail then
+    // mounts in place, and the details button exists only while it is closed.
+    // Checking in that gap waits for a button the painted page never shows.
+    await expect(page.locator('textarea.chat-input')).toBeVisible()
+    await quiesce(page)
     if (!(await rail.isVisible())) await openChatDetails(page)
     await rail.locator('.chat-mcp-connections').getByRole('button', { name: 'Sign in', exact: true }).click()
     await expect.poll(() => started).toBe(1)
@@ -272,7 +277,8 @@ for (const mobile of [false, true]) {
     const nav = page.getByRole('navigation', { name: 'Settings sections' })
     await expect(nav.getByRole('link', { name: 'MCP servers' })).toHaveAttribute('aria-current', 'page')
     await expect(nav.getByRole('heading', { name: 'Alpha' })).toBeVisible()
-    if (mobile) await page.locator('.sidebar-backdrop').click()
+    // The drawer is 84vw (max 320px), so the backdrop's centre sits under it.
+    if (mobile) await page.locator('.sidebar-backdrop').click({ position: { x: 370, y: 400 } })
     const claude = agentMcp(page, 'Claude Code')
     const opencode = agentMcp(page, 'OpenCode')
     await expect(claude.locator('code')).toHaveText('claude mcp')
