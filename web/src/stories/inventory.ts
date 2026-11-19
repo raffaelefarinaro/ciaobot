@@ -2999,24 +2999,66 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/MemoryMapView.vue"
     ],
     "variants": [],
-    "variantNotes": "Loading/error/over-cap/stats. Detailed variants are unassessed.",
+    "variantNotes": "No configurable props: geometry comes from the guide content (over-cap flag, warn bars, expiry tags) and the workspace watcher.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in MemoryGuideBudget.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["memory-guide-budget--default"],
+        "note": "The loaded read fills the v-else-if=\"guideStats\" region list: two region meters under cap, the token note and enabled Open/Discuss; the play opens the guide through the viewer store and Discuss fails closed in the toast stack."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": ["memory-guide-budget--loading"],
+        "note": "The held first read keeps guideStats null and shows the loading flag (the v-else-if=\"guideLoading\" span in the title line); both actions stay disabled until it answers."
+      },
+      {
+        "name": "over-cap",
+        "coverage": "covered",
+        "storyIds": ["memory-guide-budget--over-cap"],
+        "note": "A region over its advisory cap renders the 'over cap' flag (v-if=\"guideOverCap\"), the section's guide-budget--over class and the count/bar warn classes of that region's meter."
+      },
+      {
+        "name": "high-usage",
+        "coverage": "covered",
+        "storyIds": ["memory-guide-budget--high-usage"],
+        "note": "A region at 80% or more under cap renders the guide-region-bar--high tint without the over-cap flag or a warn count."
+      },
+      {
+        "name": "expired-and-malformed",
+        "coverage": "covered",
+        "storyIds": ["memory-guide-budget--expired-and-malformed"],
+        "note": "Entries with expiry tags fill the meta line's v-if=\"r.expiredCount\" span and the v-if=\"r.malformedCount\" span with its guide-region-meta--warn class."
+      },
+      {
+        "name": "legacy-claude-guide",
+        "coverage": "covered",
+        "storyIds": ["memory-guide-budget--legacy-claude-guide"],
+        "note": "The pre-migration lookup: a 404 on the workspace-qualified AGENTS.md resolves the legacy CLAUDE.md candidate, so the label and both actions name and act on that file."
+      },
+      {
+        "name": "no-guide",
+        "coverage": "covered",
+        "storyIds": ["memory-guide-budget--no-guide"],
+        "note": "All four candidate probes 404 (qualified AGENTS.md and CLAUDE.md, then the bare names): the silent 'No guide file found for this workspace.' rail note, the label placeholder and both actions blocked."
+      },
+      {
+        "name": "error",
+        "coverage": "covered",
+        "storyIds": ["memory-guide-budget--error"],
+        "note": "A failed qualified read renders the last error through v-if=\"guideError\" and blocks both actions; the owner stops before the bare fallback names once a qualified probe errored, so they stay undeclared routes the story must never see requested."
+      },
+      {
+        "name": "refresh",
+        "coverage": "covered",
+        "storyIds": ["memory-guide-budget--refresh"],
+        "note": "The workspace watcher re-reads: a held switched-workspace read keeps the previous regions on screen with the loading flag in the slot and both actions blocked."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in MemoryGuideBudget.vue has not yet been audited."
+      "status": "known",
+      "detail": "No skeleton: initial loading and refresh reuse the loaded rail card — title, label and both buttons — with the loading flag where the over-cap flag would sit; the region list is the only absence and a refresh keeps prior content. A failed read renders the error note instead of stale numbers, and an empty workspace is the silent no-guide state. Initial loading, refresh and the error render are covered; no loading geometry mismatch to fix."
     },
     "migration": {
       "status": "unassessed",
@@ -3037,24 +3079,30 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/MemoryMapView.vue"
     ],
     "variants": [],
-    "variantNotes": "Native disclosure/static tag table (not dynamic network content). Detailed variants are unassessed.",
+    "variantNotes": "No configurable props: the only state is the per-browser disclosure choice; content is static.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in MemoryHowItWorks.vue implements this render; no rendered-state story exists."
+        "name": "collapsed",
+        "coverage": "covered",
+        "storyIds": ["memory-how-it-works--collapsed"],
+        "note": "The v-show=\"open\" body starts display:none and outside the tab order with aria-expanded false; the keyboard path Tab-Enter opens it and Tab reaches the Categories RouterLink."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "expanded",
+        "coverage": "covered",
+        "storyIds": ["memory-how-it-works--expanded"],
+        "note": "The open body's content: the six-row tag table with its sr-only caption and the off-site noopener link; the toggle collapses and re-opens it and stores each choice per browser."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["memory-how-it-works--narrow"],
+        "note": "A 390px viewport shows the compact table paddings from the owner's @media (max-width: 640px) branch, with unsplit tags and the keyboard path intact."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in MemoryHowItWorks.vue has not yet been audited."
+      "status": "none",
+      "detail": "Static explainer with no fetch and no asynchronous state; the open choice persists in the per-browser 'ciao.memory.howOpen' storage entry."
     },
     "migration": {
       "status": "unassessed",
