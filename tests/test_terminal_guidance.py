@@ -125,7 +125,7 @@ def _inventory_command_names(monkeypatch: pytest.MonkeyPatch) -> set[str]:
     # Settings -> MCP servers and Chat details render one button per agent that
     # types the agent's own MCP command (`mcp_command` in /api/settings/providers).
     from ciao import setup_status
-    from ciao.providers import opencode
+    from ciao import opencode_cli as opencode
 
     # The bare form, as the server hands it out when the user's terminal
     # resolves the binary.

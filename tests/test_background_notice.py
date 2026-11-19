@@ -549,27 +549,8 @@ def test_wake_tail_reaches_the_fence_bounded_and_escaped(monkeypatch: pytest.Mon
 # renderer import them from there. AST checks are pinned to enclosing context,
 # not line numbers.
 
-_PARSER_NAMES = ("native_shell_run", "native_subagent_run", "native_wake_run")
-
-
 def _ciao_source(*parts: str) -> str:
     return (Path(__file__).resolve().parent.parent / "ciao").joinpath(*parts).read_text()
-
-
-def _all_function_names(source: str) -> list[str]:
-    return [
-        node.name
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    ]
-
-
-def _top_level_assign_names(source: str) -> set[str]:
-    names: set[str] = set()
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Assign):
-            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
-    return names
 
 
 def _imports_by_module(source: str) -> dict[str, set[str]]:
@@ -583,35 +564,6 @@ def _imports_by_module(source: str) -> dict[str, set[str]]:
     return modules
 
 
-def test_native_parsers_are_defined_once_in_background_notice_only() -> None:
-    neutral_names = _all_function_names(_ciao_source("background_notice.py"))
-    adapter_names = _all_function_names(_ciao_source("providers", "opencode.py"))
-    for name in _PARSER_NAMES:
-        assert neutral_names.count(name) == 1, name
-        assert name not in adapter_names, name
-
-    neutral_assigns = _top_level_assign_names(_ciao_source("background_notice.py"))
-    adapter_assigns = _top_level_assign_names(_ciao_source("providers", "opencode.py"))
-    assert "NATIVE_WAKE_TAIL_LINES" in neutral_assigns
-    assert "_SHELL_TAIL_LINES" not in adapter_assigns
-    assert "_SHELL_TAIL_LINES" not in neutral_assigns
-    assert background_notice.NATIVE_WAKE_TAIL_LINES == 50
-
-
-def test_adapter_and_renderer_import_the_shared_parser_from_the_neutral_module() -> None:
-    adapter_imports = _imports_by_module(_ciao_source("providers", "opencode.py"))
-    renderer_imports = _imports_by_module(_ciao_source("web", "transcript_service.py"))
-    shared_adapter = adapter_imports["ciao.background_notice"]
-    assert "native_wake_run" in shared_adapter
-    assert "NATIVE_WAKE_TAIL_LINES" in shared_adapter
-    shared_renderer = renderer_imports["ciao.background_notice"]
-    assert "native_wake_run" in shared_renderer
-    assert "NATIVE_WAKE_TAIL_LINES" in shared_renderer
-    # The renderer reads sessions through the provider registry, not the
-    # concrete adapter.
-    assert "ciao.providers.opencode" not in renderer_imports
-
-
 def test_background_notice_imports_no_provider_sdk_or_web_module() -> None:
     banned_prefixes = ("ciao.providers", "ciao.web")
     sdk_roots = {"anthropic", "opencode", "openai", "httpx"}
@@ -620,46 +572,3 @@ def test_background_notice_imports_no_provider_sdk_or_web_module() -> None:
         assert module.split(".", 1)[0] not in sdk_roots, module
 
 
-def _format_finished_runs_tail_lines_by_scope(source: str) -> dict[str, list[str]]:
-    """tail_lines expressions of the ``format_finished_runs`` calls, by enclosing def."""
-    calls: dict[str, list[str]] = {}
-    scopes: list[str] = []
-
-    def visit(node: ast.AST) -> None:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            scopes.append(node.name)
-        for child in ast.iter_child_nodes(node):
-            if (
-                isinstance(child, ast.Call)
-                and isinstance(child.func, ast.Name)
-                and child.func.id == "format_finished_runs"
-            ):
-                values = [
-                    ast.unparse(kw.value)
-                    for kw in child.keywords
-                    if kw.arg == "tail_lines"
-                ]
-                scope = scopes[-1] if scopes else "<module>"
-                calls.setdefault(scope, []).extend(values or ["<missing>"])
-            visit(child)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            scopes.pop()
-
-    visit(ast.parse(source))
-    return calls
-
-
-def test_only_opencode_wake_and_pending_renderer_use_the_shared_limit() -> None:
-    adapter = _format_finished_runs_tail_lines_by_scope(
-        _ciao_source("providers", "opencode.py")
-    )
-    renderer = _format_finished_runs_tail_lines_by_scope(
-        _ciao_source("web", "transcript_service.py")
-    )
-    # The Claude/native transcript path keeps its own literal tail limit;
-    # not every formatter call has to use the shared constant.
-    assert adapter == {"_wake_result": ["NATIVE_WAKE_TAIL_LINES"]}
-    assert renderer == {
-        "_native_task_notice": ["50"],
-        "flush_notice": ["NATIVE_WAKE_TAIL_LINES"],
-    }

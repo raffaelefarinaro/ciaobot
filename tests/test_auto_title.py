@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 from ciao.providers.base import BaseProvider
 from ciao.providers.acp.agents import OpencodeAcpProvider
-from ciao.providers.opencode import OpencodeProvider
+from ciao.providers.acp.agents import OpencodeAcpProvider
 from ciao.web.project_chats import ProjectChatManager
 
 
@@ -457,42 +457,6 @@ async def test_base_provider_native_title_default_without_construction() -> None
     assert await MinimalProvider.native_title_candidates(Path("/ws"), "sess-1", runtime_root=Path("/runtime")) == ()
     assert entries == []
     assert MinimalProvider.capabilities == BaseProvider.capabilities
-
-
-@pytest.mark.asyncio
-async def test_opencode_native_title_candidates_extraction_matrix(monkeypatch) -> None:
-    """OpenCode forwards the exact read_thread args and extracts the old title."""
-    from pathlib import Path
-
-
-    calls: list[tuple[Path, str, Path]] = []
-
-    async def fake_read_thread(workspace_root, session_id, *, runtime_root):
-        calls.append((workspace_root, session_id, runtime_root))
-        return fake_read_thread.thread
-
-    fake_read_thread.thread = {}
-    monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
-
-    root = Path("/roots/work")
-    cases = [
-        # Real thread with a dict info and a title.
-        ({"info": {"title": "How hash tables work"}, "messages": []}, ("How hash tables work",)),
-        # Empty info dict, missing info key, non-dict thread, non-dict info.
-        ({"info": {}, "messages": []}, ("",)),
-        ({"messages": []}, ("",)),
-        ("not a thread", ("",)),
-        ({"info": "weird", "messages": []}, ("",)),
-        # Falsey title values keep the old `str(... or "")` shape.
-        ({"info": {"title": ""}}, ("",)),
-        ({"info": {"title": None}}, ("",)),
-        # A non-string truthy title is stringified exactly as before.
-        ({"info": {"title": 12345}}, ("12345",)),
-    ]
-    for thread, expected in cases:
-        fake_read_thread.thread = thread
-        assert await OpencodeProvider.native_title_candidates(root, "sess-1", runtime_root=Path("/runtime")) == expected
-    assert calls == [(root, "sess-1", Path("/runtime"))] * len(cases)
 
 
 # ── Manager dispatch through the provider registry ───────────────────────

@@ -247,12 +247,12 @@ def release_check(
     if tested is None or record.get("ciaobot") != running_version:
         return {"state": "untested"}
     if provider == "opencode":
-        from ciao.providers.opencode import server_version_error
+        from ciao.opencode_cli import cli_version_error
 
-        if server_version_error({"version": tested}) is not None:
+        if cli_version_error({"version": tested}) is not None:
             return {"state": "untested"}
     if provider == "opencode":
-        if server_version_error({"version": installed_text}) is not None:
+        if cli_version_error({"version": installed_text}) is not None:
             return {"state": "unsupported", "tested": tested}
     installed = parse_cli_version(installed_text)
     order = compare_versions(installed, tested) if installed else None
@@ -297,7 +297,7 @@ def _probe_version(binary: str) -> str:
 def current_checks() -> dict[str, dict[str, str]]:
     """``release_check`` for each installed provider; absent providers have no row."""
     from ciao import setup_status
-    from ciao.providers.opencode import resolve_opencode_binary
+    from ciao.opencode_cli import resolve_opencode_binary
 
     checks: dict[str, dict[str, str]] = {}
     try:

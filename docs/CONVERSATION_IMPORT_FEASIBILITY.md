@@ -1,6 +1,6 @@
 # Conversation-history import: source-format and proposals-only extraction feasibility (issue #980)
 
-Historical: written before #3135; names symbols that no longer exist.
+Historical, paths no longer exist: written before #3135; the OpenCode HTTP driver and `ciao/providers/opencode.py` named below were removed in the ACP cutover.
 
 ## Status
 

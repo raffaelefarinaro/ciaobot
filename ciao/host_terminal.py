@@ -203,7 +203,7 @@ def action_command(action: str) -> str:
             raise NothingToUpdate(f"{action}: nothing to update")
         return check["command"]
     from ciao import setup_status
-    from ciao.providers import opencode
+    from ciao import opencode_cli
 
     if action == "claude-install":
         # The ACP adapter Ciaobot runs chats through is always needed. The CLI installer
@@ -215,9 +215,9 @@ def action_command(action: str) -> str:
     if action == "claude-login":
         return setup_status.claude_auth_command(setup_status.claude_cli_path())
     if action == "opencode-install":
-        return opencode.opencode_install_command()
+        return opencode_cli.opencode_install_command()
     if action == "opencode-login":
-        return opencode.OPENCODE_LOGIN_COMMAND
+        return opencode_cli.OPENCODE_LOGIN_COMMAND
     if action == "codex-install":
         return CODEX_INSTALL_COMMAND
     if action == "codex-login":

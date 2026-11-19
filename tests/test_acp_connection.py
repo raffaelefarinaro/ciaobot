@@ -24,7 +24,7 @@ from ciao.providers.acp import connection as connection_module
 from ciao.providers.acp.agents import OPENCODE, OpencodeAcpProvider
 from ciao.providers.acp.connection import AcpConnection, AgentStartError, AgentVersionError, StderrRing
 from ciao.providers.acp.spec import AgentSpec
-from ciao.providers.opencode import OPENCODE_V2_REQUIRED, cached_opencode_version
+from ciao.opencode_cli import OPENCODE_V2_REQUIRED, cached_opencode_version
 from tests.acp_helpers import read_calls, write_scenario
 
 
@@ -510,7 +510,7 @@ def test_failed_version_probe_is_not_cached(tmp_path: Path) -> None:
 def test_failed_version_probe_of_a_present_binary_is_cached_briefly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import ciao.providers.opencode as opencode_module
+    import ciao.opencode_cli as opencode_module
 
     script = tmp_path / "opencode"
     count = tmp_path / "runs.txt"
@@ -531,7 +531,7 @@ def test_version_probe_runs_with_the_agent_env_policy(
 ) -> None:
     import subprocess
 
-    import ciao.providers.opencode as opencode_module
+    import ciao.opencode_cli as opencode_module
 
     dump = tmp_path / "env.txt"
     script = tmp_path / "opencode"

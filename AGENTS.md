@@ -25,8 +25,8 @@ Before changing code:
 - `ciao/cli.py` is the `ciao` CLI; `ciao/main.py` is the server entry.
 - `ciao/web/app.py` lists every route as an explicit `Route(...)`; handlers
   live in `ciao/web/routes_*.py`.
-- `ciao/providers/` holds `claude.py` (Claude Agent SDK), `opencode.py` and the
-  shared `base.py`. One-shot model calls go through `providers/oneshot.py`;
+- `ciao/providers/` holds the ACP agent layer (`acp/`, one `AgentSpec` per CLI) and the
+  shared `base.py`; `ciao/opencode_cli.py` holds the OpenCode CLI helpers. One-shot model calls go through `providers/oneshot.py`;
   there is no Messages API and no provider-enforced structured output, so
   validate model JSON locally.
 - `ciao/stock/` holds generic assets shipped in the wheel (skills, commands,

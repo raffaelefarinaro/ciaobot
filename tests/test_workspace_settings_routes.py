@@ -30,7 +30,7 @@ from ciao.os_support.private import is_private
 
 @pytest.fixture(autouse=True)
 def _stub_auth_list(monkeypatch):
-    monkeypatch.setattr("ciao.providers.opencode.bounded_output", lambda *a, **k: (0, b"[]"))
+    monkeypatch.setattr("ciao.opencode_cli.bounded_output", lambda *a, **k: (0, b"[]"))
 
 
 def test_settings_and_verify_expose_safe_opencode_inventory(tmp_path, monkeypatch):
@@ -43,11 +43,11 @@ def test_settings_and_verify_expose_safe_opencode_inventory(tmp_path, monkeypatc
     monkeypatch.setattr(routes_api, "_provider_config_payload", lambda config: {
         "connections": {"opencode": {"ready": True}, "claude": {"ready": False}}
     })
-    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda: "fake")
+    monkeypatch.setattr("ciao.opencode_cli.resolve_opencode_binary", lambda: "fake")
     rows = [{"id": "ollama", "name": "Ollama", "connections": [
         {"type": "credential", "method": "key", "token": "hidden-sentinel"}]}]
     calls = []
-    monkeypatch.setattr("ciao.providers.opencode.bounded_output",
+    monkeypatch.setattr("ciao.opencode_cli.bounded_output",
                         lambda *a, **k: (calls.append(1) or (0, json.dumps(rows).encode())))
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(routes=[
@@ -95,8 +95,8 @@ def test_verify_inventory_is_fresh_during_older_inflight_get(tmp_path, monkeypat
         return 0, json.dumps([{"id": name, "name": name, "connections": [{"type": "env"}]}]).encode()
 
     monkeypatch.setattr(routes_api, "_provider_config_payload", lambda config: {"connections": {"opencode": {}}})
-    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda: "fake")
-    monkeypatch.setattr("ciao.providers.opencode.bounded_output", collector)
+    monkeypatch.setattr("ciao.opencode_cli.resolve_opencode_binary", lambda: "fake")
+    monkeypatch.setattr("ciao.opencode_cli.bounded_output", collector)
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(routes=[
         Route("/api/settings/providers", routes_api.provider_config_settings),
@@ -143,7 +143,7 @@ def test_opencode_verify_refreshes_models_for_default_and_named_workspaces(tmp_p
     from ciao.providers.acp.provider import invalidate_acp_catalog as acp_invalidate
     from ciao.web import routes_api
     from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
-    import ciao.providers.opencode as mod
+    import ciao.opencode_cli as mod
 
     roots = [tmp_path / "default", tmp_path / "named"]
     versions = {root: "old" for root in roots}
@@ -190,138 +190,6 @@ def test_opencode_verify_refreshes_models_for_default_and_named_workspaces(tmp_p
         assert counts == {roots[0]: 2, roots[1]: 2}
     finally:
         acp_invalidate("opencode")
-
-
-@pytest.mark.parametrize("cleanup_fails", [False, True])
-@pytest.mark.parametrize("error_type,classification", [(ValueError, "unexpected"), (TimeoutError, "timeout")])
-def test_startup_exception_chain_never_leaks_in_response_or_logs(
-    tmp_path, monkeypatch, caplog, cleanup_fails, error_type, classification
-):
-    import logging
-    import socket
-    import threading
-    import time
-    from types import SimpleNamespace
-    import httpx
-    import uvicorn
-    from itsdangerous import URLSafeTimedSerializer
-    from starlette.middleware import Middleware
-    from ciao.web import routes_api
-    from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
-    import ciao.providers.opencode as mod
-
-    raw_startup = error_type("startup-secret-sentinel")
-    raw_cleanup = OSError("cleanup-secret-sentinel")
-
-    class Process:
-        returncode = None
-        stderr = None
-
-        async def wait(self):
-            self.returncode = 0
-            return 0
-
-    class Tree:
-        def terminate(self):
-            if cleanup_fails:
-                raise raw_cleanup
-
-        def kill(self):
-            if cleanup_fails:
-                raise raw_cleanup
-
-        def close(self):
-            pass
-
-    class Client:
-        def __init__(self, **kwargs):
-            pass
-
-        async def get(self, *args, **kwargs):
-            raise raw_startup
-
-        async def aclose(self):
-            pass
-
-    async def spawn(*args, **kwargs):
-        return Process(), Tree()
-
-    async def health(self):
-        raise raw_startup
-
-    class ChatRequest:
-        extra_env = {}
-        mcp_token = ""
-
-    async def chat_start(request):
-        from starlette.responses import JSONResponse
-        await mod.OpencodeProvider(tmp_path)._ensure_server_locked(ChatRequest())
-        return JSONResponse({"ok": True})
-
-    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda *args: "fake")
-    monkeypatch.setattr(mod, "_spawn_server", spawn)
-    monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
-    monkeypatch.setattr(mod.OpencodeProvider, "_await_health", health)
-    serializer = URLSafeTimedSerializer("test-secret")
-    # Only the chat start spawns an opencode server now: /api/models reads the ACP probe.
-    app = Starlette(routes=[Route("/api/test-chat-start", chat_start)],
-                    middleware=[Middleware(AuthMiddleware, serializer=serializer)])
-    app.state.config = SimpleNamespace(workspace_root=tmp_path)
-    headers = {"Cookie": f"{SESSION_COOKIE}={serializer.dumps({'user': 'owner'})}"}
-    mod.invalidate_opencode_model_cache()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
-    sock.listen()
-    port = sock.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(app, log_config=None, lifespan="off"))
-    thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]})
-    caplog.set_level(logging.ERROR, logger="uvicorn.error")
-    try:
-        thread.start()
-        deadline = time.monotonic() + 5
-        while not server.started:
-            assert thread.is_alive() and time.monotonic() < deadline
-            time.sleep(0.01)
-        expected_errors = ("cleanup failed", "quarantined") if cleanup_fails else ("startup failed", "startup failed")
-        for index, expected in enumerate(expected_errors):
-            # Uvicorn closes the connection after an unhandled ASGI exception.
-            with httpx.Client(base_url=f"http://127.0.0.1:{port}") as client:
-                response = client.get("/api/test-chat-start", headers=headers)
-            assert response.status_code == 500
-            assert b"startup-secret-sentinel" not in response.content
-            assert b"cleanup-secret-sentinel" not in response.content
-            deadline = time.monotonic() + 5
-            while True:
-                records = [r for r in caplog.records if r.name == "uvicorn.error" and r.exc_info]
-                if len(records) > index and expected in str(records[-1].exc_info[1]):
-                    break
-                assert time.monotonic() < deadline
-                time.sleep(0.01)
-            pending = [records[-1].exc_info[1]]
-            seen = set()
-            while pending:
-                exc = pending.pop()
-                if id(exc) in seen:
-                    continue
-                seen.add(id(exc))
-                assert exc is not raw_startup and exc is not raw_cleanup
-                assert "startup-secret-sentinel" not in str(exc)
-                assert "cleanup-secret-sentinel" not in str(exc)
-                pending.extend(item for item in (exc.__cause__, exc.__context__) if item is not None)
-                if isinstance(exc, BaseExceptionGroup):
-                    pending.extend(exc.exceptions)
-            if expected == "cleanup failed":
-                assert classification in str(records[-1].exc_info[1])
-        assert "startup-secret-sentinel" not in caplog.text
-        assert "cleanup-secret-sentinel" not in caplog.text
-    finally:
-        server.should_exit = True
-        thread.join(5)
-        sock.close()
-        assert not thread.is_alive()
-        mod.invalidate_opencode_model_cache()
-        with mod._SERVER_START_GUARD:
-            mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
 
 
 class _PCM:

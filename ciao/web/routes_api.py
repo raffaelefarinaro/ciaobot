@@ -1047,7 +1047,7 @@ def _provider_config_payload(config) -> dict:
 
 
 def _provider_config_payload_with_inventory(config) -> dict:
-    from ciao.providers.opencode import opencode_credential_inventory
+    from ciao.opencode_cli import opencode_credential_inventory
 
     payload = _provider_config_payload(config)
     row = payload["connections"].get("opencode")
@@ -3172,8 +3172,8 @@ async def chat_messages(request: Request) -> JSONResponse:
     """Return conversation history for a chat.
 
     Claude chats read the SDK session file via ``get_session_messages``.
-    opencode chats read the session history from a short-lived ``opencode serve``. Both fall
-    back to the durable ``.runtime`` transcript when the provider-side session
+    ACP chats, opencode included, read the session history from their session journal. Both
+    fall back to the durable ``.runtime`` transcript when the provider-side session
     is unreadable.
 
     When a chat is archived, provider-side session storage is deleted to reclaim

@@ -91,7 +91,7 @@ REGISTRY_FILENAME = "web_projects.json"
 
 #: The markers wrapping the capsule Ciaobot prepends to every prompt it seeds a
 #: provider session with (``ProjectChatManager._build_prompt_prefix`` for Claude,
-#: ``OpencodeProvider``'s text rewrite for opencode). It is the only evidence in
+#: the ACP provider's text rewrite for opencode). It is the only evidence in
 #: the session itself that Ciaobot drove it, and it is the same literal the
 #: transcript renderers strip before showing history.
 CIAO_CONTEXT_BEGIN = "[CIAO_CONTEXT_BEGIN]"

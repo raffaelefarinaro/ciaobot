@@ -133,8 +133,8 @@ _DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         cli_label="opencode",
         factory_path="ciao.providers.acp.agents:OpencodeAcpProvider",
         acp_spec_path="ciao.providers.acp.agents:OPENCODE",
-        auth_command_path="ciao.providers.opencode:auth_command",
-        system_skills_path="ciao.providers.opencode:opencode_system_skills",
+        auth_command_path="ciao.opencode_cli:auth_command",
+        system_skills_path="ciao.opencode_cli:opencode_system_skills",
         status_probe_path="ciao.setup_status:opencode_status_probe",
         default_model_settings_attr="opencode",
         # opencode calls reasoning effort a model `variant`. The catalog is

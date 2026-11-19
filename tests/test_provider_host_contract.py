@@ -8,13 +8,11 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from ciao.providers.base import ActiveHandle, BaseProvider
-from ciao.providers.opencode import OpencodeProvider
 
 
 class _Minimal(BaseProvider):
@@ -46,17 +44,5 @@ async def test_base_containers_are_fresh_per_call(tmp_path: Path) -> None:
 def test_is_connected_is_read_only(tmp_path: Path) -> None:
     with pytest.raises(AttributeError):
         setattr(_Minimal(tmp_path), "is_connected", True)
-
-
-@pytest.mark.parametrize("returncode", [None, 0])
-@pytest.mark.parametrize("has_client", [True, False])
-@pytest.mark.parametrize("has_process", [True, False])
-def test_opencode_is_connected_follows_its_server(
-    tmp_path: Path, returncode: int | None, has_client: bool, has_process: bool
-) -> None:
-    p = OpencodeProvider(tmp_path)
-    p._client = object() if has_client else None
-    p._process = SimpleNamespace(returncode=returncode) if has_process else None
-    assert p.is_connected is (has_client and has_process and returncode is None)
 
 

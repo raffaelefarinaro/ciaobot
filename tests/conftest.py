@@ -127,7 +127,7 @@ def _no_installed_opencode(monkeypatch: pytest.MonkeyPatch) -> None:
     CI has no OpenCode installed, so this is what CI already sees. A test that
     wants a binary sets ``CIAO_OPENCODE_BIN``, which is resolved first.
     """
-    monkeypatch.setattr("ciao.providers.opencode.resolve_tool", lambda name: None)
+    monkeypatch.setattr("ciao.opencode_cli.resolve_tool", lambda name: None)
 
 
 @pytest.fixture(autouse=True)

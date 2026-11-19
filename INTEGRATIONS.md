@@ -98,16 +98,15 @@ Ciaobot reads provider configuration and live chat status without editing
 `opencode.json` or launching a server from Settings. Keep existing MCP entries
 in the provider configuration. See the [OpenCode V2 MCP documentation](https://opencode.ai/v2/docs/mcp-servers/).
 
-Ciaobot sends V2 text/file prompts with queued delivery.
-V2 has no stable per-prompt system field, so compact core/runtime context rides
-in the text behind markers that transcript replay and session handovers strip.
-The provider normalizes V2's flat message records once at the HTTP boundary;
-transcript rendering and child-session reads continue to use a small internal
-part representation. Fork, interrupt, tool approvals, forms (rendered as
-AskUserQuestion cards), and background subagents are native. When a chat is
-archived, deleted, or reset, Ciaobot disconnects its server and then calls
-`DELETE /api/session/{id}` to reclaim the persisted OpenCode session; cleanup
-is fail-open if the provider is unavailable.
+Ciaobot sends prompts over ACP with queued delivery (one prompt at a time per
+session). The unified core context rides in the text of the first prompt of each
+session, after a compaction and after a handover. Fork, interrupt, tool approvals, and background
+subagents are native. Forms (AskUserQuestion cards) are not wired under ACP: the ACP provider has no
+`respond_question` override and emits no form events, so a form reply gets the base refusal
+"Native question responses are not supported by this provider" and an ACP session shows no form card. When a chat is
+archived, deleted, or reset, Ciaobot closes its ACP session and asks the agent to
+delete the persisted session (`session/delete`) when the agent advertises it;
+cleanup is fail-open if the agent is unavailable.
 
 ### Auto mode approvals
 
@@ -429,7 +428,7 @@ not a new filesystem sandbox. Existing viewer extension and size guards remain.
 - `ciao gws-auth-helper <profile>`: interactive headless OAuth re-authentication when `gws auth login` cannot open a browser.
 - `CLAUDE_DEFAULT_MODEL_PERSONAL` / `CLAUDE_DEFAULT_MODEL_WORK` / `CIAO_DISALLOWED_TOOLS_PERSONAL` / `CIAO_DISALLOWED_TOOLS_WORK`: **removed 2026-08-20 and no longer read.** They configured the two hardcoded `personal`/`work` entries of the bootstrap registry, which now derives its workspaces from the vault instead, so they could not describe a workspace named anything else. Put `disallowed_tools` on the workspace in `.runtime/workspaces.json`, which works for any name; the default model is now a per-provider operator setting (Settings → Providers), not a per-workspace one.
 - `CIAO_MEMORY_DIR`: legacy override for the old `~/.ciao/memory.md` + `user.md` directory during the one-release migration window. Default `~/.ciao`. Not used for new writes; safe to unset after migration.
-- **Image-capability pre-flight**: before dispatch, a turn that carries images checks whether the selected model can see them. Anthropic's and OpenAI's current models all accept images, so only OpenCode is consulted — it is bring-your-own-provider, and each V2 catalog entry lists supported modalities in `capabilities.input`. An unstated answer counts as capable, so a cold catalog never blocks a turn. A non-vision model pauses the turn on a `model_capability_question` (30s window): the PWA offers the models OpenCode states accept images, an "Open picker" escape hatch, and Cancel. Switch re-dispatches on the picked model; cancel/timeout close the turn with a `status` bubble; the images are never silently dropped. Text-only and unattended (loop/schedule) turns skip the question. Implemented in `ciao/providers/opencode.py::model_accepts_images` and the pre-flight in `ciao/web/project_chats.py::ProjectChatManager.stream_chat`.
+- **Image-capability pre-flight**: before dispatch, a turn that carries images checks whether the chat's agent accepts images. Gating is agent-level under ACP: `promptCapabilities.image` from the agent's `initialize` response. Only an explicit `false` refuses, so an agent that has not stated it, or has no connection yet, never blocks a turn. A non-vision model pauses the turn on a `model_capability_question` (30s window): the PWA offers the candidates `_capability_candidates` returns, an "Open picker" escape hatch, and Cancel. Switch re-dispatches on the picked model; cancel/timeout close the turn with a `status` bubble; the images are never silently dropped. Text-only and unattended (loop/schedule) turns skip the question. Implemented in `ciao/providers/acp/provider.py::agent_accepts_images`, `ProjectChatManager._agent_accepts_images`, and the pre-flight in `ciao/web/chat_streaming.py`.
 - **Web Push timing** (not configurable): a completed turn pushes 30 seconds after it ends. Rapid replies to the same chat cancel the previous timer and start a new one (coalesce into a single push). Permission requests and model questions push immediately (no delay). Unanswered permission requests re-fire every 30 seconds, up to 3 times, until the user approves/denies or the turn ends. Marking a chat read sends a separate clear control to all registered Web Push subscriptions and the macOS notification log.
 - `CIAO_PYTHON`: path to a specific Python binary for `scripts/dev.sh` (e.g. when Homebrew breaks `ensurepip`).
 - `CIAO_PATH`: baked into the launchd plist's `EnvironmentVariables` at setup time so developer-mode subprocesses (npm, node, git) are found despite launchd's minimal default PATH. Not an operator env var; it's a `com.ciao.server.plist.tmpl` placeholder rendered from the user's shell PATH.
@@ -443,7 +442,7 @@ not a new filesystem sandbox. Existing viewer extension and size guards remain.
 
 ### Injected CLI context variables
 
-The Ciaobot server injects the following environment variables into every spawned agent CLI subprocess (`claude` or `opencode serve`):
+The Ciaobot server injects the following environment variables into every spawned agent CLI subprocess (`claude`, `codex` or `opencode acp`):
 
 - `CIAO_WORKSPACE`: the filesystem workspace root path. This is operator config forwarded for compatibility; it is not the logical chat workspace.
 - `CIAO_ACTIVE_WORKSPACE`: the logical workspace name derived per turn from `chat -> project -> project.workspace`.

@@ -455,21 +455,6 @@ def _is_retryable_connection_error(text: str) -> bool:
     return any(indicator in low for indicator in connection_indicators)
 
 
-def _is_retryable_provider_startup_error(text: str) -> bool:
-    """Recognize a transient provider-launch failure before turn progress."""
-    low = (text or "").lower()
-    if "opencode serve exited" in low and (
-        "database is locked" in low or "database is busy" in low
-    ):
-        return True
-    # A server that stays alive but never answers /api/info is the same
-    # transient startup wedge (shared SQLite contention with other opencode
-    # processes); _ensure_server already retries it internally, so a chat
-    # turn that still lands here should get the same bounded auto-retry as
-    # the database-locked exit instead of failing outright.
-    return "opencode serve did not become healthy" in low
-
-
 def _is_retryable_auth_error(text: str) -> bool:
     """Recognize a transient OAuth session expiry that can recover on retry.
 
