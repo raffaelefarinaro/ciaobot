@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import stat
 import sys
 from collections.abc import AsyncIterator, Mapping
@@ -550,11 +551,15 @@ async def test_additional_directories_sent_only_when_advertised(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_crash_mid_turn_yields_error_result_with_stderr_tail(tmp_path: Path) -> None:
+async def test_crash_mid_turn_yields_fixed_error_and_logs_stderr(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    secret = "SECRET_CRASH_TOKEN_456"
+    caplog.set_level(logging.WARNING, logger="ciao.providers.acp.session")
     steps = [{"update": _text("partial")}, {"crash": True}]
     async with _started(
         tmp_path,
-        stderr=["adapter blew up"],
+        stderr=[f"adapter {secret} read /Users/alice/.config/agent.toml"],
         prompts=[{"steps": steps}],
     ) as harness:
         events = await _collect(harness)
@@ -562,8 +567,32 @@ async def test_crash_mid_turn_yields_error_result_with_stderr_tail(tmp_path: Pat
         result = events[-1]
         assert isinstance(result, ResultEvent)
         assert result.is_error is True
-        assert result.result.startswith("fake stopped unexpectedly.")
-        assert "adapter blew up" in result.result
+        # Raw adapter stderr never reaches a stream event; the event is a fixed sentence.
+        assert result.result == "fake stopped unexpectedly."
+        for event in events:
+            assert secret not in repr(event)
+            assert "/Users/alice" not in repr(event)
+        # ...and the tail stays diagnosable in the log.
+        assert secret in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_failed_config_set_logs_exception_and_reports_fixed_status(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    secret = "SECRET_CONFIG_789"
+    caplog.set_level(logging.WARNING, logger="ciao.providers.acp.session")
+    config = [_select("mode", "default", ["default", "acceptEdits"])]
+    async with _started(
+        tmp_path,
+        config_options=config,
+        config_error=f"bad value {secret} in /Users/alice/settings.json",
+    ) as harness:
+        events = await harness.session.apply(mode="auto", model="", thinking="")
+        assert events == [SystemStatusEvent(type="system", status="fake could not set mode.")]
+        assert secret not in repr(events)
+        assert "/Users/alice" not in repr(events)
+        assert secret in caplog.text
 
 
 def test_journal_skips_torn_last_line(tmp_path: Path) -> None:

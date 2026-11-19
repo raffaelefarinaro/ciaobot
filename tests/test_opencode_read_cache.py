@@ -93,8 +93,8 @@ def test_failed_spawn_is_negative_cached_for_thread(
         "ciao.providers.opencode._EphemeralServer", _DeadEphemeralServer
     )
 
-    first = asyncio.run(OpencodeProvider.read_thread(tmp_path, "ses1"))
-    second = asyncio.run(OpencodeProvider.read_thread(tmp_path, "ses1"))
+    first = asyncio.run(OpencodeProvider.read_thread(tmp_path, "ses1", runtime_root=Path("/runtime")))
+    second = asyncio.run(OpencodeProvider.read_thread(tmp_path, "ses1", runtime_root=Path("/runtime")))
 
     assert first == {}
     assert second == {}
@@ -110,7 +110,7 @@ def test_failure_cache_expires_and_recovers(
     monkeypatch.setattr(
         "ciao.providers.opencode._EphemeralServer", _DeadEphemeralServer
     )
-    asyncio.run(OpencodeProvider.read_thread(tmp_path, "ses1"))
+    asyncio.run(OpencodeProvider.read_thread(tmp_path, "ses1", runtime_root=Path("/runtime")))
     assert _THREAD_CACHE[(str(tmp_path), "ses1")][1] == _READ_FAILURE_CACHE_TTL
 
     # Age the entry past its own TTL, then let opencode work again.
@@ -125,7 +125,7 @@ def test_failure_cache_expires_and_recovers(
         "ciao.providers.opencode._EphemeralServer",
         lambda root: _HealthyEphemeralServer(payload),
     )
-    result = asyncio.run(OpencodeProvider.read_thread(tmp_path, "ses1"))
+    result = asyncio.run(OpencodeProvider.read_thread(tmp_path, "ses1", runtime_root=Path("/runtime")))
 
     assert result == {}
     assert _HealthyEphemeralServer.spawns == 1

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
 from types import SimpleNamespace
 
 from ciao.providers import claude as claude_adapter
@@ -32,6 +33,7 @@ def _config(roots: dict[str, str] | None = None, *, primary: str = "personal"):
 
     return SimpleNamespace(
         workspace_root="/tmp",
+        state_path=Path("/runtime/state.json"),
         workspace_names=lambda: tuple(roots) or (primary,),
         primary_workspace=lambda: primary,
         agent_root=lambda name: roots.get(name, "/tmp"),
@@ -59,7 +61,7 @@ async def test_native_title_opencode(monkeypatch) -> None:
 
     manager = _manager(chats={"chat-1": _chat(provider="opencode")})
 
-    async def fake_read_thread(_workspace, _sid):
+    async def fake_read_thread(_workspace, _sid, **_kwargs):
         return {"info": {"title": "How hash tables work"}, "messages": []}
 
     monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
@@ -72,7 +74,7 @@ async def test_native_title_opencode_missing(monkeypatch) -> None:
 
     manager = _manager(chats={"chat-1": _chat(provider="opencode")})
 
-    async def fake_read_thread(_workspace, _sid):
+    async def fake_read_thread(_workspace, _sid, **_kwargs):
         return {"info": {"title": ""}, "messages": []}
 
     monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
@@ -90,7 +92,7 @@ async def test_native_title_opencode_placeholder_is_not_final(monkeypatch) -> No
 
     manager = _manager(chats={"chat-1": _chat(provider="opencode")})
 
-    async def fake_read_thread(_workspace, _sid):
+    async def fake_read_thread(_workspace, _sid, **_kwargs):
         return {"info": {"title": "New session - 2026-08-18T12:20:10.198Z"}, "messages": []}
 
     monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
@@ -177,7 +179,7 @@ async def test_auto_title_if_default_sets_native_title(monkeypatch) -> None:
 
     manager = _manager(chats={"chat-1": _chat(provider="opencode")})
 
-    async def fake_read_thread(_workspace, _sid):
+    async def fake_read_thread(_workspace, _sid, **_kwargs):
         return {"info": {"title": "Native Title"}, "messages": []}
 
     monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
@@ -191,7 +193,7 @@ async def test_auto_title_if_default_skips_when_not_default(monkeypatch) -> None
 
     manager = _manager(chats={"chat-1": _chat(title="Already Named")})
 
-    async def fake_read_thread(_workspace, _sid):
+    async def fake_read_thread(_workspace, _sid, **_kwargs):
         return {"info": {"title": "Native Title"}, "messages": []}
 
     monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
@@ -205,7 +207,7 @@ async def test_auto_title_if_default_skips_without_session(monkeypatch) -> None:
 
     manager = _manager(chats={"chat-1": _chat(session_id="")})
 
-    async def fake_read_thread(_workspace, _sid):
+    async def fake_read_thread(_workspace, _sid, **_kwargs):
         return {"info": {"title": "Native Title"}, "messages": []}
 
     async def failing_oneshot(*_args, **_kwargs):
@@ -226,7 +228,7 @@ async def test_auto_title_if_default_skips_when_native_missing(monkeypatch) -> N
 
     manager = _manager(chats={"chat-1": _chat(provider="opencode")})
 
-    async def fake_read_thread(_workspace, _sid):
+    async def fake_read_thread(_workspace, _sid, **_kwargs):
         return {"info": {"title": ""}, "messages": []}
 
     async def failing_oneshot(*_args, **_kwargs):
@@ -396,7 +398,7 @@ async def test_auto_title_waits_for_late_provider_title(monkeypatch) -> None:
 
     reads = 0
 
-    async def fake_read_thread(_workspace, _sid):
+    async def fake_read_thread(_workspace, _sid, **_kwargs):
         nonlocal reads
         reads += 1
         # opencode's title agent has not run yet on the first two reads.
@@ -418,7 +420,7 @@ async def test_auto_title_polls_until_session_exists(monkeypatch) -> None:
     chat = _chat(provider="opencode", session_id="")
     manager = _manager(chats={"chat-1": chat})
 
-    async def fake_read_thread(_workspace, _sid):
+    async def fake_read_thread(_workspace, _sid, **_kwargs):
         return {"info": {"title": "Arrived Late"}, "messages": []}
 
     # The turn assigns the session while the poller is waiting.
@@ -440,7 +442,7 @@ async def test_auto_title_stops_when_user_renames_mid_poll(monkeypatch) -> None:
     chat = _chat(provider="opencode")
     manager = _manager(chats={"chat-1": chat})
 
-    async def fake_read_thread(_workspace, _sid):
+    async def fake_read_thread(_workspace, _sid, **_kwargs):
         return {"info": {"title": ""}, "messages": []}
 
     async def rename_during_wait(*_args, **_kwargs):
@@ -518,8 +520,21 @@ async def test_native_title_reads_the_chats_own_agent_root(monkeypatch) -> None:
         projects={"project-1": SimpleNamespace(project_id="project-1", workspace="work")},
     )
 
+    runtime_roots: list[Path] = []
+    real_candidates = claude_adapter.ClaudeProvider.native_title_candidates.__func__
+
+    async def spy_candidates(cls, workspace_root, session_id, *, runtime_root):
+        runtime_roots.append(runtime_root)
+        return await real_candidates(cls, workspace_root, session_id, runtime_root=runtime_root)
+
+    monkeypatch.setattr(
+        claude_adapter.ClaudeProvider, "native_title_candidates", classmethod(spy_candidates)
+    )
+
     assert await manager._native_chat_title(manager._chats["chat-1"]) == "Work Chat Title"
     assert seen == ["/roots/work"]
+    # The runtime root is the engine's state directory, never the chat's agent root.
+    assert runtime_roots == [manager._config.state_path.parent]
 
 
 @pytest.mark.asyncio
@@ -529,7 +544,7 @@ async def test_native_title_opencode_also_reads_the_chats_agent_root(monkeypatch
 
     seen: list[str] = []
 
-    async def fake_read_thread(workspace, _sid):
+    async def fake_read_thread(workspace, _sid, **_kwargs):
         seen.append(str(workspace))
         return {"info": {"title": "Opencode Work Title"}}
 
@@ -574,7 +589,7 @@ async def test_base_provider_native_title_default_without_construction() -> None
             return
             yield  # pragma: no cover - empty async generator
 
-    assert await MinimalProvider.native_title_candidates(Path("/ws"), "sess-1") == ()
+    assert await MinimalProvider.native_title_candidates(Path("/ws"), "sess-1", runtime_root=Path("/runtime")) == ()
     assert entries == []
     assert MinimalProvider.capabilities == BaseProvider.capabilities
 
@@ -603,7 +618,7 @@ async def test_claude_native_title_candidates_extraction_matrix(monkeypatch) -> 
     monkeypatch.setattr(claude_adapter, "get_session_info", reader)
 
     root = Path("/roots/work")
-    assert await ClaudeProvider.native_title_candidates(root, "sess-1") == (
+    assert await ClaudeProvider.native_title_candidates(root, "sess-1", runtime_root=Path("/runtime")) == (
         "Claude Custom",
         "Claude Summary",
     )
@@ -613,10 +628,10 @@ async def test_claude_native_title_candidates_extraction_matrix(monkeypatch) -> 
     reader.info = Info()
     reader.info.custom_title = None
     reader.info.summary = None
-    assert await ClaudeProvider.native_title_candidates(root, "sess-1") == ("", "")
+    assert await ClaudeProvider.native_title_candidates(root, "sess-1", runtime_root=Path("/runtime")) == ("", "")
 
     reader.info = None
-    assert await ClaudeProvider.native_title_candidates(root, "sess-1") == ()
+    assert await ClaudeProvider.native_title_candidates(root, "sess-1", runtime_root=Path("/runtime")) == ()
 
 
 @pytest.mark.asyncio
@@ -632,7 +647,7 @@ async def test_claude_native_title_candidates_propagates_sdk_errors(monkeypatch)
 
     monkeypatch.setattr(claude_adapter, "get_session_info", exploding_reader)
     with pytest.raises(RuntimeError, match="claude cli missing"):
-        await ClaudeProvider.native_title_candidates(Path("/ws"), "sess-1")
+        await ClaudeProvider.native_title_candidates(Path("/ws"), "sess-1", runtime_root=Path("/runtime"))
 
 
 @pytest.mark.asyncio
@@ -641,10 +656,10 @@ async def test_opencode_native_title_candidates_extraction_matrix(monkeypatch) -
     from pathlib import Path
 
 
-    calls: list[tuple[Path, str]] = []
+    calls: list[tuple[Path, str, Path]] = []
 
-    async def fake_read_thread(workspace_root, session_id):
-        calls.append((workspace_root, session_id))
+    async def fake_read_thread(workspace_root, session_id, *, runtime_root):
+        calls.append((workspace_root, session_id, runtime_root))
         return fake_read_thread.thread
 
     fake_read_thread.thread = {}
@@ -667,8 +682,8 @@ async def test_opencode_native_title_candidates_extraction_matrix(monkeypatch) -
     ]
     for thread, expected in cases:
         fake_read_thread.thread = thread
-        assert await OpencodeProvider.native_title_candidates(root, "sess-1") == expected
-    assert calls == [(root, "sess-1")] * len(cases)
+        assert await OpencodeProvider.native_title_candidates(root, "sess-1", runtime_root=Path("/runtime")) == expected
+    assert calls == [(root, "sess-1", Path("/runtime"))] * len(cases)
 
 
 # ── Manager dispatch through the provider registry ───────────────────────
@@ -701,7 +716,7 @@ async def test_registered_third_adapter_supplies_native_title(monkeypatch) -> No
             yield  # pragma: no cover
 
         @classmethod
-        async def native_title_candidates(cls, workspace_root, session_id):
+        async def native_title_candidates(cls, workspace_root, session_id, **_kwargs):
             reads.append((str(workspace_root), session_id))
             return (
                 "",
@@ -827,7 +842,7 @@ async def test_unregistered_provider_id_returns_none_without_any_read(monkeypatc
         factory_calls.append(descriptor_self.id)
         return real_factory(descriptor_self)
 
-    async def recording_read(_workspace_root, _session_id):
+    async def recording_read(_workspace_root, _session_id, **_kwargs):
         read_calls.append(1)
 
     def recording_info(_sid, directory=None):
@@ -867,7 +882,7 @@ async def test_adapter_read_failure_keeps_failure_log(monkeypatch, caplog) -> No
             yield  # pragma: no cover
 
         @classmethod
-        async def native_title_candidates(cls, workspace_root, session_id):
+        async def native_title_candidates(cls, workspace_root, session_id, **_kwargs):
             raise RuntimeError("adapter storage unreadable")
 
     class Descriptor:
@@ -935,7 +950,7 @@ async def test_native_title_cancellation_propagates(monkeypatch) -> None:
             yield  # pragma: no cover
 
         @classmethod
-        async def native_title_candidates(cls, workspace_root, session_id):
+        async def native_title_candidates(cls, workspace_root, session_id, **_kwargs):
             raise asyncio.CancelledError()
 
     class Descriptor:
@@ -970,7 +985,7 @@ async def test_rename_during_third_adapter_read_wins(monkeypatch) -> None:
             yield  # pragma: no cover
 
         @classmethod
-        async def native_title_candidates(cls, workspace_root, session_id):
+        async def native_title_candidates(cls, workspace_root, session_id, **_kwargs):
             reached.set()
             await release.wait()
             return ("Clean summary",)
@@ -1012,7 +1027,7 @@ async def test_removed_chat_during_third_adapter_read_is_not_resurrected(monkeyp
             yield  # pragma: no cover
 
         @classmethod
-        async def native_title_candidates(cls, workspace_root, session_id):
+        async def native_title_candidates(cls, workspace_root, session_id, **_kwargs):
             reached.set()
             await release.wait()
             return ("Clean summary",)
@@ -1187,7 +1202,7 @@ async def test_llm_fallback_not_called_when_native_title_lands(monkeypatch) -> N
         oneshot_calls.append(1)
         return "Should Not Be Used"
 
-    async def fake_read_thread(_workspace, _sid):
+    async def fake_read_thread(_workspace, _sid, **_kwargs):
         return {"info": {"title": "Native Title"}, "messages": []}
 
     monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)

@@ -490,25 +490,32 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ChatPanel.vue",
       "web/src/components/ProjectView.vue"
     ],
-    "variants": [],
-    "variantNotes": "Row/other button form. Detailed variants are unassessed.",
+    "variants": [
+      "link",
+      "row"
+    ],
+    "variantNotes": "Link (default) and row forms; both open the terminal store on click.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in BrowserTerminalButton.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "browser-terminal-button--default"
+        ],
+        "note": "Link form (Open in Terminal): tab focuses it, a click reads the engine status once and the button stays."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "row",
+        "coverage": "covered",
+        "storyIds": [
+          "browser-terminal-button--row"
+        ],
+        "note": "Row form (Open terminal) in the Chat details Open section; a click reads the engine status once."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in BrowserTerminalButton.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch on render. A click opens the terminal store, which reads status once; the story asserts that one declared request."
     },
     "migration": {
       "status": "unassessed",
@@ -2403,24 +2410,84 @@ export const inventory: InventoryEntry[] = [
       "web/src/App.vue"
     ],
     "variants": [],
-    "variantNotes": "Actual toast stack, error/action/link/hidden-under-modal states; no live notifications in catalogue. Detailed variants are unassessed.",
+    "variantNotes": "No configurable variants: one toast shape whose action follows the toast's fields (an info action, an external link, an error fix, a fix route or a restore-draft action).",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in InAppToast.vue implements this render; no rendered-state story exists."
+        "name": "info",
+        "coverage": "covered",
+        "storyIds": ["in-app-toast--info"],
+        "note": "Info toast with title, body and Dismiss; a toast that offers nothing else has no action button."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "action",
+        "coverage": "covered",
+        "storyIds": ["in-app-toast--action"],
+        "note": "Info toast with an in-app action button; clicking it runs the callback and dismisses the toast."
+      },
+      {
+        "name": "link",
+        "coverage": "covered",
+        "storyIds": ["in-app-toast--link"],
+        "note": "Info toast with an external link that opens in a new tab with noopener noreferrer."
+      },
+      {
+        "name": "error",
+        "coverage": "covered",
+        "storyIds": ["in-app-toast--error"],
+        "note": "Error toast is an alert with the error border and the default Fix this error action."
+      },
+      {
+        "name": "fix-in-settings",
+        "coverage": "covered",
+        "storyIds": ["in-app-toast--fix-in-settings"],
+        "note": "An error whose remediation lives in Settings: the button uses fixLabel, dismisses, and routes to fixRoute."
+      },
+      {
+        "name": "restore-draft",
+        "coverage": "covered",
+        "storyIds": ["in-app-toast--restore-draft"],
+        "note": "An error carrying restoreDraft labels its action Restore draft; the story proves the label and Dismiss."
+      },
+      {
+        "name": "restore-action",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "Clicking Restore draft calls store.restoreDraft, which creates a chat over the API; the fail-closed fixture declares no chat-write routes, so the click is exercised by the component tests instead."
+      },
+      {
+        "name": "dismiss",
+        "coverage": "covered",
+        "storyIds": ["in-app-toast--dismiss"],
+        "note": "The close control removes the toast; removing the last toast removes the stack itself."
+      },
+      {
+        "name": "swipe",
+        "coverage": "covered",
+        "storyIds": ["in-app-toast--swipe"],
+        "note": "A horizontal drag past the dismiss threshold hides the toast; the toast follows the pointer while swiping."
+      },
+      {
+        "name": "under-modal",
+        "coverage": "covered",
+        "storyIds": ["in-app-toast--under-modal"],
+        "note": "While any aria-modal dialog is in the document the stack drops below it instead of painting over it."
+      },
+      {
+        "name": "workspace-scope",
+        "coverage": "covered",
+        "storyIds": ["in-app-toast--workspace-scope"],
+        "note": "Only toasts for the active workspace and account render; another workspace's chat or profile toast stays hidden."
+      },
+      {
+        "name": "narrow",
+        "coverage": "not-applicable",
+        "storyIds": [],
+        "note": "The stack is position: fixed and already becomes full width under a 600px viewport; a wrapper cannot constrain a fixed element, so its own viewport rule is the narrow layout."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in InAppToast.vue has not yet been audited."
+      "status": "none",
+      "detail": "Renders only the toasts the project store already holds and never fetches, so it has no loading or empty treatment of its own."
     },
     "migration": {
       "status": "unassessed",
@@ -3190,24 +3257,72 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/HousekeepingStrip.vue"
     ],
     "variants": [],
-    "variantNotes": "Error/blocking tone, open menu, href vs action. Detailed variants are unassessed.",
+    "variantNotes": "No configurable variants: one row shape parametrised by tone, alert line, notice key and menu items.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in NeedsYouRow.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["needs-you-row--default"],
+        "note": "Title, line and primary control; a row with no extra items has no overflow trigger and stays a focus target rather than a tab stop."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "alert",
+        "coverage": "covered",
+        "storyIds": ["needs-you-row--alert"],
+        "note": "An alert line is announced as an alert and clamps to two lines instead of truncating at one."
+      },
+      {
+        "name": "error-tone",
+        "coverage": "covered",
+        "storyIds": ["needs-you-row--error-tone"],
+        "note": "Error tone adds the marker and the screen-reader prefix Error:, never colour alone."
+      },
+      {
+        "name": "blocking-tone",
+        "coverage": "covered",
+        "storyIds": ["needs-you-row--blocking-tone"],
+        "note": "Blocking tone uses the same marker with the Blocking: prefix and no error styling."
+      },
+      {
+        "name": "menu",
+        "coverage": "covered",
+        "storyIds": ["needs-you-row--menu"],
+        "note": "Menu items add the ... trigger with aria-haspopup; the menu itself stays closed until asked for."
+      },
+      {
+        "name": "menu-open",
+        "coverage": "covered",
+        "storyIds": ["needs-you-row--menu-open"],
+        "note": "Opening links aria-controls to the menu, labels it, lists every item and moves focus to the first enabled one; an href item opens away from the app."
+      },
+      {
+        "name": "menu-keyboard",
+        "coverage": "covered",
+        "storyIds": ["needs-you-row--menu-keyboard"],
+        "note": "Enter opens the menu; arrow, Home and End move between enabled items; Escape closes it and returns focus to the trigger."
+      },
+      {
+        "name": "menu-disabled-item",
+        "coverage": "covered",
+        "storyIds": ["needs-you-row--menu-disabled-item"],
+        "note": "A disabled item is marked aria-disabled, does nothing when clicked and leaves the menu open."
+      },
+      {
+        "name": "notice-target",
+        "coverage": "covered",
+        "storyIds": ["needs-you-row--notice-target"],
+        "note": "A notice key makes the row the inbox's reveal target; it can take focus and is not hidden from assistive tech."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["needs-you-row--narrow"],
+        "note": "Under the row's own container query the text takes the full width and the primary control stretches beneath it."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in NeedsYouRow.vue has not yet been audited."
+      "status": "none",
+      "detail": "Renders entirely from props; it issues no request and has no loading or empty treatment of its own."
     },
     "migration": {
       "status": "unassessed",
@@ -3397,51 +3512,74 @@ export const inventory: InventoryEntry[] = [
     "variants": [
       "popover",
       "sheet",
-      "count",
-      "partial"
+      "trigger"
     ],
-    "variantNotes": "Popover/sheet/trigger/count/partial.",
+    "variantNotes": "Popover or sheet, with or without its own trigger when another control opens it; the count badge and partial ring are states of that trigger.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in NotificationBell.vue implements this render; no rendered-state story exists."
-      },
-      {
-        "name": "popover",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "NotificationBell.vue has a popover branch; no rendered-state story exists."
-      },
-      {
-        "name": "sheet",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "NotificationBell.vue has a sheet branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["notification-bell--default"],
+        "note": "With nothing to report the button opens a dialog, reports aria-expanded false and shows neither a count nor a ring."
       },
       {
         "name": "count",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "NotificationBell.vue has a count branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["notification-bell--count"],
+        "note": "A count renders as a decorative badge while the accessible name carries the number and the item word."
+      },
+      {
+        "name": "count-overflow",
+        "coverage": "covered",
+        "storyIds": ["notification-bell--count-overflow"],
+        "note": "Past 99 the badge reads 99+ while the accessible name keeps the exact count."
       },
       {
         "name": "partial",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "NotificationBell.vue has a partial branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["notification-bell--partial"],
+        "note": "A stale or unavailable source adds the hollow ring and the words Some sources could not be fully checked without inventing a count."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "popover",
+        "coverage": "covered",
+        "storyIds": ["notification-bell--popover"],
+        "note": "The popover is a labelled dialog teleported to the body; opening repeats the count and focuses its heading, and Close returns to the bell."
+      },
+      {
+        "name": "escape",
+        "coverage": "covered",
+        "storyIds": ["notification-bell--escape"],
+        "note": "Escape closes the open dialog and puts focus back on the bell that opened it."
+      },
+      {
+        "name": "sheet",
+        "coverage": "covered",
+        "storyIds": ["notification-bell--sheet"],
+        "note": "The sheet variant adds a backdrop that closes the dialog on click and still returns focus to the trigger."
+      },
+      {
+        "name": "external-trigger",
+        "coverage": "covered",
+        "storyIds": ["notification-bell--external-trigger"],
+        "note": "With trigger false no bell renders; another control calls the exposed open(anchor) and the sheet focuses its heading."
+      },
+      {
+        "name": "navigate",
+        "coverage": "covered",
+        "storyIds": ["notification-bell--navigate"],
+        "note": "Choosing a row closes the dialog and lets the row's link navigate to its notice."
+      },
+      {
+        "name": "narrow",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "The dialog is teleported to the body and position: fixed at min(380px, calc(100vw - 16px)); a 390px wrapper cannot constrain it, and that viewport rule is itself the narrow layout."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in NotificationBell.vue has not yet been audited."
+      "status": "known",
+      "detail": "Sources still checking, or stale or unavailable, are named in the accessible name; only stale and unavailable add the hollow ring. The dialog's own list states are audited on NotificationInboxList."
     },
     "migration": {
       "status": "unassessed",
@@ -3462,60 +3600,81 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/NotificationBell.vue"
     ],
     "variants": [
-      "checking",
-      "ready",
-      "stale",
-      "unavailable",
-      "all-clear"
+      "popover",
+      "sheet"
     ],
-    "variantNotes": "Checking/ready/stale/unavailable/all-clear; freshness per source, unread and timestamps.",
+    "variantNotes": "Popover or sheet density; every other state is projected from the sources' health and the rows they produce.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in NotificationInboxList.vue implements this render; no rendered-state story exists."
-      },
-      {
         "name": "checking",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "NotificationInboxList.vue implements the checking branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["notification-inbox-list--checking"],
+        "note": "Before any source answers the summary says it is checking, every source is listed as checking, and nothing claims the list is clear."
       },
       {
         "name": "ready",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "NotificationInboxList.vue implements the ready branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["notification-inbox-list--ready"],
+        "note": "A healthy projection shows the summary, one section per populated group with its count, unread and attention markers, and no source list."
       },
       {
         "name": "stale",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "NotificationInboxList.vue implements the stale branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["notification-inbox-list--stale"],
+        "note": "A stale source keeps its last rows but the summary says they could not be fully checked, each row says May be out of date, and the source offers Retry."
       },
       {
         "name": "unavailable",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "NotificationInboxList.vue implements the unavailable branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["notification-inbox-list--unavailable"],
+        "note": "A source that never answered is never reported as clear: the summary says nothing is confirmed and the source row offers Retry."
       },
       {
         "name": "all-clear",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "NotificationInboxList.vue implements the all-clear branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["notification-inbox-list--all-clear"],
+        "note": "No rows and a ready overall status says You're all caught up with no source list and no empty sections."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "empty-stale",
+        "coverage": "covered",
+        "storyIds": ["notification-inbox-list--empty-stale"],
+        "note": "No rows with a source out of date says only that nothing was found at the last check, not that everything is clear."
+      },
+      {
+        "name": "retry-busy",
+        "coverage": "covered",
+        "storyIds": ["notification-inbox-list--retry-busy"],
+        "note": "While a retry is in flight every Retry is disabled, so a second read cannot start from the same list."
+      },
+      {
+        "name": "row-gone",
+        "coverage": "covered",
+        "storyIds": ["notification-inbox-list--row-gone"],
+        "note": "Opening an exact row re-reads its source first; a row that vanished leaves the list, is announced as no longer available, and does not navigate."
+      },
+      {
+        "name": "row-navigates",
+        "coverage": "covered",
+        "storyIds": ["notification-inbox-list--row-navigates"],
+        "note": "A row without its own re-read navigates directly to its notice target."
+      },
+      {
+        "name": "sheet",
+        "coverage": "covered",
+        "storyIds": ["notification-inbox-list--sheet"],
+        "note": "Sheet density raises each row to the larger touch target."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["notification-inbox-list--narrow"],
+        "note": "In a 390px column the summary and every row stay inside the width; the rows keep their title, reason, time and state stacked."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in NotificationInboxList.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load is checking (every source listed as checking, no skeleton or spinner); loaded is ready or all-clear; empty is all-clear, or empty-stale when a source is out of date; initial failure is unavailable; refresh is retry-busy, which disables every Retry; stale is stale or empty-stale. The list has no filter, so there is no filtered-empty state. Placeholder geometry is a text summary, not a skeleton, so it is not compared with the loaded layout."
     },
     "migration": {
       "status": "unassessed",
@@ -3978,24 +4137,54 @@ export const inventory: InventoryEntry[] = [
       "web/src/App.vue"
     ],
     "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variantNotes": "No configurable variants: one card with an optional message that its caller has already normalised and capped.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in RestartNotice.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["restart-notice--default"],
+        "note": "The fixed card with the default drain message, a polite status role, the spinner frame, the restart tag and the wait prompt."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "custom-message",
+        "coverage": "covered",
+        "storyIds": ["restart-notice--custom-message"],
+        "note": "A supplied message replaces the default without changing the rest of the card."
+      },
+      {
+        "name": "long-message",
+        "coverage": "covered",
+        "storyIds": ["restart-notice--long-message"],
+        "note": "An over-long message is shown as the capped display string and clamps to three lines inside the card's width."
+      },
+      {
+        "name": "moved",
+        "coverage": "covered",
+        "storyIds": ["restart-notice--moved"],
+        "note": "A remembered position is restored from local storage as explicit left/top, drops the centring transform and reads as moved."
+      },
+      {
+        "name": "keyboard-move",
+        "coverage": "covered",
+        "storyIds": ["restart-notice--keyboard-move"],
+        "note": "The card is focusable; an arrow key moves it by one step from its rendered box, keeps focus on it and stores the new position."
+      },
+      {
+        "name": "drag",
+        "coverage": "covered",
+        "storyIds": ["restart-notice--drag"],
+        "note": "A pointer drag follows the grab offset, marks the card as dragging, and stores the dropped position on release."
+      },
+      {
+        "name": "narrow",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "The card is position: fixed at min(400px, calc(100vw - 24px)); a 390px wrapper cannot constrain a fixed element, and that viewport rule is the narrow layout."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in RestartNotice.vue has not yet been audited."
+      "status": "none",
+      "detail": "It is the restart message itself: a live drain notice with an animated spinner, not a request-backed view with loading or empty states."
     },
     "migration": {
       "status": "unassessed",
@@ -4804,20 +4993,32 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in TerminalKeyRow.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-key-row--default"
+        ],
+        "note": "Enabled keys. A pointer tap reports the key with pointer true and leaves focus where it was."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "disabled",
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-key-row--disabled"
+        ],
+        "note": "Disabled until the screen is live: each key is disabled and a press is not reported."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-key-row--keyboard-focus"
+        ],
+        "note": "Focus on a key and Enter: the press is reported as a keyboard activation and focus stays on the key."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TerminalKeyRow.vue has not yet been audited."
+      "status": "none",
+      "detail": "Props only: no fetch, no store and no loading state."
     },
     "migration": {
       "status": "unassessed",
@@ -4848,78 +5049,140 @@ export const inventory: InventoryEntry[] = [
       "creating",
       "error"
     ],
-    "variantNotes": "Tile/drawer/chooser/connecting/reconnecting/takeover/ended/creating/truncated/error; no live socket fixtures here.",
+    "variantNotes": "Tile, drawer, chooser, connecting, reconnecting, takeover, ended, creating, truncated, unavailable, capacity and error. Connected stories use the real store with declared status, sessions and socket fixtures (synthetic storybook-alpha and storybook-beta names).",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in TerminalPane.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--default"
+        ],
+        "note": "Live shell in the drawer shape. The real open reads status and sessions, a declared socket replays fixed bytes, and the play asserts the screen and that Shift+Tab hands the keyboard back to Close."
       },
       {
         "name": "tile",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TerminalPane.vue has a tile branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--tile"
+        ],
+        "note": "Live shell with inTile set; the play asserts the tile class. The shape follows window width (a phone-width window is forced to the drawer), so this state depends on the runner window staying at desktop width."
       },
       {
         "name": "drawer",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TerminalPane.vue has a drawer branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--drawer"
+        ],
+        "note": "Live shell in a 390px wrapper; the drawer class is used whenever the pane is not in the tile slot."
       },
       {
         "name": "chooser",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TerminalPane.vue has a chooser branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--chooser"
+        ],
+        "note": "A chat with a workspace and a repository folder and no shell asks which to open; the play picks the repository and the new tab is selected."
       },
       {
         "name": "connecting",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TerminalPane.vue has a connecting branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--connecting"
+        ],
+        "note": "The socket opens and never sends the handshake; the pane shows Connecting to the terminal."
       },
       {
         "name": "reconnecting",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TerminalPane.vue has a reconnecting branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--reconnecting"
+        ],
+        "note": "A dropped connection is retried after a held status read, so the pane stays reconnecting; the request count proves the retry read happened. The phase shares the connecting line."
       },
       {
         "name": "takeover",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TerminalPane.vue has a takeover branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--takeover"
+        ],
+        "note": "Another connection takes the session (close 4409); the play clicks Take over and the takeover prompt goes while the shell comes back live. Known: the takeover notice stays as a stale alert after the reconnect because the store keeps it in its error ref; recorded, not fixed in this slice."
       },
       {
         "name": "ended",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TerminalPane.vue has a ended branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--ended"
+        ],
+        "note": "The shell prints and exits with code 0; the pane shows the ended line and the tab reads ended (0)."
       },
       {
         "name": "creating",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TerminalPane.vue has a creating branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--creating"
+        ],
+        "note": "The first shell is being created and the create request is held; the pane says it is starting and the new-session control is disabled."
       },
       {
         "name": "error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TerminalPane.vue has a error branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--failure"
+        ],
+        "note": "The status read fails; the pane shows the could-not-ask alert and no session list."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "unavailable",
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--unavailable"
+        ],
+        "note": "The engine reports the terminal unavailable (https_required); the alert shows and the session tabs are hidden."
+      },
+      {
+        "name": "capacity",
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--capacity"
+        ],
+        "note": "A workspace with four ended sessions: the capacity alert shows, the new-session control is disabled, and each ended session still has its End control."
+      },
+      {
+        "name": "truncated",
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--truncated"
+        ],
+        "note": "The ready frame says the engine lost output; the truncation notice shows while the shell stays live."
+      },
+      {
+        "name": "no-shell",
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--no-shell"
+        ],
+        "note": "A chat with no shell and nothing asked for one: the pane says none is open, and the request count proves nothing was created."
+      },
+      {
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--loading"
+        ],
+        "note": "The status read is held. The pane shows the same no-shell line as an empty chat, because it has no separate loading indicator."
+      },
+      {
+        "name": "closed",
+        "coverage": "covered",
+        "storyIds": [
+          "terminal-pane--closed"
+        ],
+        "note": "Mounted but not opened: the open class is absent and no request is made."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TerminalPane.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load: the status read is held and the pane shows the no-shell line, not a loading indicator, so the placeholder geometry differs from the loaded screen. Initial failure is the error state. Refresh shows the connecting line (reconnecting phase). Empty is no-shell. There is no filtered-empty state."
     },
     "migration": {
       "status": "unassessed",

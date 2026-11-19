@@ -4989,7 +4989,9 @@ class ProjectChatManager:
                 descriptor = provider_registry.get(chat.provider)
                 if descriptor is None:
                     continue
-                deleted = await descriptor.factory().delete_session(root, sid)
+                deleted = await descriptor.factory().delete_session(
+                    root, sid, runtime_root=self._config.state_path.parent
+                )
             except Exception:  # noqa: BLE001 — provider cleanup is fail-open
                 logger.exception(
                     "Failed to reclaim %s session %s for chat %s",
@@ -6777,6 +6779,7 @@ class ProjectChatManager:
             # parsing delimiters.
             injected_context_prefix=prefix,
             compact=compact,
+            unattended=unattended,
         )
 
     # ── Image-capability pre-flight ──────────────────────────────────────
@@ -10187,7 +10190,7 @@ class ProjectChatManager:
             if descriptor is None:
                 return None
             candidates = await descriptor.factory().native_title_candidates(
-                workspace, chat.session_id
+                workspace, chat.session_id, runtime_root=self._config.state_path.parent
             )
             for candidate in candidates:
                 title = chat_service._real_title(candidate)

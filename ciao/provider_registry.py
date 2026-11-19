@@ -23,6 +23,7 @@ from importlib import import_module
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from ciao.providers.acp.spec import AgentSpec
     from ciao.providers.base import BaseProvider
 
 
@@ -67,10 +68,19 @@ class ProviderDescriptor:
     # default model for this provider, when it has one. Takes precedence over
     # ``default_model``; empty means the provider has no such setting.
     default_model_config_key: str = ""
+    # module:attr of the AgentSpec when this provider runs over ACP.
+    acp_spec_path: str = ""
 
     def factory(self) -> type["BaseProvider"]:
         """Import and return the provider class."""
         module_name, _, attr = self.factory_path.partition(":")
+        return getattr(import_module(module_name), attr)  # type: ignore[no-any-return]
+
+    def acp_spec(self) -> "AgentSpec | None":
+        """Import and return the ACP ``AgentSpec``, or ``None`` when the provider is not ACP."""
+        if not self.acp_spec_path:
+            return None
+        module_name, _, attr = self.acp_spec_path.partition(":")
         return getattr(import_module(module_name), attr)  # type: ignore[no-any-return]
 
     def auth_command(self, *, device_auth: bool = False) -> list[str]:
