@@ -1401,21 +1401,33 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Closed count/hidden state. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HomeNoticeReopen.vue implements this render; no rendered-state story exists."
+        "name": "hidden",
+        "coverage": "covered",
+        "storyIds": ["home-notice-reopen--hidden"],
+        "note": "A closed count of zero renders no control. The story asserts the absent button and a quiet fixture ledger."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "closed-count-singular",
+        "coverage": "covered",
+        "storyIds": ["home-notice-reopen--singular"],
+        "note": "One closed notice renders the singular label; the play reopens it and asserts the count control disappears."
+      },
+      {
+        "name": "closed-count-plural",
+        "coverage": "covered",
+        "storyIds": ["home-notice-reopen--plural"],
+        "note": "Two closed notices render the plural label; the play reopens all and asserts both rows return."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": ["home-notice-reopen--keyboard-focus"],
+        "note": "The reopen control receives visible keyboard focus and Enter reopens the notices."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HomeNoticeReopen.vue has not yet been audited."
+      "status": "none",
+      "detail": "HomeNoticeReopen reads an in-memory closed-count synchronously; it performs no request and has no loading or refresh state."
     },
     "migration": {
       "status": "unassessed",
@@ -1441,20 +1453,38 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HomeNoticeWindow.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["home-notice-window--default"],
+        "note": "Real owner with a synthetic title, key and slot; the play closes the window and asserts focus moves to the recovery control."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "blocking",
+        "coverage": "covered",
+        "storyIds": ["home-notice-window--blocking"],
+        "note": "The blocking modifier is asserted on the real article and close/focus still works."
+      },
+      {
+        "name": "custom-close-label",
+        "coverage": "covered",
+        "storyIds": ["home-notice-window--custom-close-label"],
+        "note": "A caller-supplied close label is used for both the accessible name and tooltip, and the close path still returns focus."
+      },
+      {
+        "name": "close-keyboard-focus",
+        "coverage": "covered",
+        "storyIds": ["home-notice-window--close-keyboard-focus"],
+        "note": "The close button is keyboard focused with a visible ring and Enter closes the window and moves focus."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["home-notice-window--narrow"],
+        "note": "The owner renders inside a 390px wrapper with its closing and focus behaviour intact."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HomeNoticeWindow.vue has not yet been audited."
+      "status": "none",
+      "detail": "HomeNoticeWindow is a pure presentational shell over a slot; it fetches nothing and has no loading, busy or refresh branch."
     },
     "migration": {
       "status": "unassessed",
@@ -1478,21 +1508,45 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Detailed configurable variants have not yet been audited.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HomeOnboardingResume.vue implements this render; no rendered-state story exists."
+        "name": "hidden",
+        "coverage": "covered",
+        "storyIds": ["home-onboarding-resume--hidden"],
+        "note": "A completed receipt renders nothing; the story asserts the absent card after the receipt read."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "initial-load-failure",
+        "coverage": "covered",
+        "storyIds": ["home-onboarding-resume--initial-failure"],
+        "note": "A synthetic 503 leaves the card hidden, matching the owner's fail-silent fetch."
+      },
+      {
+        "name": "installation-pending",
+        "coverage": "covered",
+        "storyIds": ["home-onboarding-resume--installation-pending"],
+        "note": "An in-progress installation receipt renders the resume card and its inert /onboarding link."
+      },
+      {
+        "name": "workspace-pending",
+        "coverage": "covered",
+        "storyIds": ["home-onboarding-resume--workspace-pending"],
+        "note": "A pending workspace receipt names the synthetic workspace in the label and link."
+      },
+      {
+        "name": "refresh-focus",
+        "coverage": "covered",
+        "storyIds": ["home-onboarding-resume--focus-refresh"],
+        "note": "A window focus event re-reads the receipt; the play dispatches it and asserts the newly pending workspace label appears."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["home-onboarding-resume--narrow"],
+        "note": "The pending card and its link stay usable inside a 390px wrapper."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HomeOnboardingResume.vue has not yet been audited."
+      "status": "known",
+      "detail": "HomeOnboardingResume renders nothing until its first /api/onboarding read answers, and also renders nothing when that read fails: there is no skeleton, spinner or error text to distinguish those moments. Refresh keeps the previous label while the new read is in flight."
     },
     "migration": {
       "status": "unassessed",
@@ -1622,21 +1676,99 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Installation/push/phone/error, persistent browser dismissal. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HomeSetupCard.vue implements this render; no rendered-state story exists."
+        "name": "complete-hidden",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--complete-hidden"],
+        "note": "With install and push already done the card renders no notice."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "dismissed-hidden",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--dismissed-hidden"],
+        "note": "The device-local dismissal key hides the card; the story stubs only that localStorage key."
+      },
+      {
+        "name": "install-prompt",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--install-prompt"],
+        "note": "A synthetic beforeinstallprompt leads to a real Install button; the play presses it and asserts the control is withdrawn while the prompt is awaited and the installed hint appears after acceptance."
+      },
+      {
+        "name": "install-instructions",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--install-instructions"],
+        "note": "Without a browser prompt the owner shows the How to install link to Settings."
+      },
+      {
+        "name": "installed-on-device",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--installed-on-device"],
+        "note": "A related-app probe result marks the install step done."
+      },
+      {
+        "name": "push-enabled",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--push-enabled"],
+        "note": "An existing subscription marks notifications on for this device."
+      },
+      {
+        "name": "push-denied",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--push-denied"],
+        "note": "A denied permission shows the system-settings guidance and blocks the enable button."
+      },
+      {
+        "name": "needs-install-first",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--needs-install-first"],
+        "note": "On a phone browser the notification step says to install the app first."
+      },
+      {
+        "name": "push-unavailable",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--push-unavailable"],
+        "note": "Without service worker or push support the notification step is absent."
+      },
+      {
+        "name": "push-enable-busy",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--push-enable-busy"],
+        "note": "A held public-key read keeps the real Enable button disabled; the owner keeps its label rather than showing a spinner."
+      },
+      {
+        "name": "push-enable-error",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--push-enable-error"],
+        "note": "A synthetic refused subscribe response surfaces the owner's error region without claiming notifications are on."
+      },
+      {
+        "name": "phone-step",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--phone-step"],
+        "note": "A touch, non-standalone browser shows the two ordered device steps."
+      },
+      {
+        "name": "dismiss-action",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--dismiss-action"],
+        "note": "The dismiss control writes only the story-local storage stub and hides the card."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--narrow"],
+        "note": "The card and its step controls stay usable inside a 390px wrapper. The workshop runner has a fine pointer, so the production 44px minimum under `(pointer: coarse)` is not asserted here."
+      },
+      {
+        "name": "in-app-desktop-branch",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "The app hides this card (#3197); desktop-client detection cannot be exercised in the browser workshop without faking the native bridge."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HomeSetupCard.vue has not yet been audited."
+      "status": "known",
+      "detail": "HomeSetupCard starts from browser capability probes, then awaits installed-app probing, push support and subscription reads before showing the push step; a pending probe leaves that step unasserted rather than showing a spinner. The in-app branch is not reachable here."
     },
     "migration": {
       "status": "unassessed",
@@ -1716,21 +1848,69 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Visible/on-host/revealed/error; no real passwords in fixtures/metadata. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HomeWelcomeCard.vue implements this render; no rendered-state story exists."
+        "name": "hidden",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--hidden"],
+        "note": "A not-pending welcome status renders no card; the play asserts the empty canvas after the fixture read."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "on-host",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--on-host"],
+        "note": "The loopback page renders the host-only card with a synthetic password from the fixture."
+      },
+      {
+        "name": "remote",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--remote"],
+        "note": "A non-host welcome status has no host-only affordance; the synthetic fixture sets on_host false and the play asserts the different copy."
+      },
+      {
+        "name": "copied",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--copied"],
+        "note": "The copy command writes the synthetic password to the clipboard stub and the play asserts the copied label."
+      },
+      {
+        "name": "password-busy",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--password-busy"],
+        "note": "A held /api/welcome/password read keeps the Show button actually disabled; the play asserts the block and the absent error."
+      },
+      {
+        "name": "password-error",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--password-error"],
+        "note": "A refused /api/welcome/password read shows the owner's fixed host-down wording and no password."
+      },
+      {
+        "name": "folder-busy",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--folder-busy"],
+        "note": "A held /api/welcome/open-folder call keeps the button disabled; the play asserts the actual block."
+      },
+      {
+        "name": "folder-error",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--folder-error"],
+        "note": "A failing folder request shows an error and re-enables the button."
+      },
+      {
+        "name": "dismissed",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--dismissed"],
+        "note": "The dismiss action posts once and removes the card without touching other storage."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--narrow"],
+        "note": "The card's password row and controls stay inside a 390px wrapper. Production raises the buttons to 44px only under `(pointer: coarse)`, which the browser runner does not emulate."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HomeWelcomeCard.vue has not yet been audited."
+      "status": "known",
+      "detail": "HomeWelcomeCard shows no card while the initial /api/welcome read is pending and none when it fails or reports not pending. The password and open-folder calls each have their own pending/error branch: both buttons are actually disabled while held; a failed password read replaces the transport wording with fixed host-down guidance."
     },
     "migration": {
       "status": "unassessed",
@@ -1797,21 +1977,105 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Notices/unavailable, row/menu primary action kinds and update-task rows, not a generic alert clone. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HousekeepingStrip.vue implements this render; no rendered-state story exists."
+        "name": "empty",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--empty"],
+        "note": "Three successful empty reads render no 'Needs you' section and no all-clear row."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "initial-loading",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--initial-loading"],
+        "note": "One held source keeps the three-source load gate pending; the play asserts no rows are drawn during it."
+      },
+      {
+        "name": "health-error",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--health-error"],
+        "note": "A synthetic error check renders a health row with an error tone and its detail."
+      },
+      {
+        "name": "health-fix-busy",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--health-fix-busy"],
+        "note": "A held fix request keeps the Fix button disabled and relabelled 'Fixing…'."
+      },
+      {
+        "name": "action-run-busy",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--action-run-busy"],
+        "note": "A held run request keeps the lead button disabled and relabelled 'Running…'."
+      },
+      {
+        "name": "action-dismiss",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--action-dismiss"],
+        "note": "The dismiss action posts once and its fresh empty list removes the row."
+      },
+      {
+        "name": "action-terminal",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--action-terminal"],
+        "note": "A runnable terminal action leads the row; the play launches it and asserts the 'Opened in Terminal' status."
+      },
+      {
+        "name": "task-offered",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--task-offered"],
+        "note": "An applicable offered task renders its reason and a Start in chat button."
+      },
+      {
+        "name": "task-preview",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "The store fetches /api/update-tasks/{id}/preview, but HousekeepingStrip.vue's template never renders taskPreviews, so the fetched summary has no DOM to assert in isolation."
+      },
+      {
+        "name": "task-start-busy",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--task-start-busy"],
+        "note": "A held start request keeps the lead button disabled and relabelled 'Working…'."
+      },
+      {
+        "name": "task-in-progress",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--task-in-progress"],
+        "note": "An in-progress task with a live chat leads with Resume chat and says the chat is open."
+      },
+      {
+        "name": "task-waiting-review",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--task-needs-review"],
+        "note": "A waiting-review task leads with Review proposals and names the archived-chat case."
+      },
+      {
+        "name": "task-unknown-applicability",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--task-unknown-applicability"],
+        "note": "An unknown detector answer says it is checking and offers Check again, never a start."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--narrow"],
+        "note": "A row with a lead button stays usable inside a 390px wrapper."
+      },
+      {
+        "name": "global-router-navigation",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "View/chat/review handlers import the app's global router instead of the connected one, so those destinations cannot be exercised inside the fixture workshop without production edits."
+      },
+      {
+        "name": "notice-reveal",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "The ?notice= reveal path depends on the app's notification inbox and query-string orchestration, which this story host deliberately does not bootstrap."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HousekeepingStrip.vue has not yet been audited."
+      "status": "known",
+      "detail": "HousekeepingStrip draws nothing until the first reads of actions, update tasks and workspace health have each settled or the 3000ms gate fires; an empty list is silent rather than an all-clear. A failed source leaves the strip silent too. Per-row busy states disable the pressed control (Fix, Run, terminal launch, task start/dismiss) and preview loads independently."
     },
     "migration": {
       "status": "unassessed",
