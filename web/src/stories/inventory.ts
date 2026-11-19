@@ -2588,21 +2588,21 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Explicit overlay host composition over TaskWorkspaceSurface, not a second task editor. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
+        "name": "closed",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "<template> in ItemPeekHost.vue implements this render; no rendered-state story exists."
+        "note": "Closed: no peek target, so no overlay mounts. Blocked by the coverage guard: storybookInventory.test.ts assertCoverage admits covered states only on component and inline rows, and this row is composition. Left uncovered until the maintainer decides (change the row kind or let composition rows claim stories); the story was not committed because an unclaimed story fails the orphan check."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "task-open",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "Task target mounts TaskWorkspaceSurface in overlay mode over the view; its close ends the target. Blocked by the same composition-coverage guard as closed. Draft stories (TaskOpen, TaskOpenLoading, TaskOpenFailed) are not committed."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in ItemPeekHost.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial: the overlay's Loading task… sheet, drawn by TaskWorkspaceSurface in overlay mode (covered by the task-editor row's OverlayLoading). Failure: Could not load task with Retry (task-editor OverlayFailed). The host has no refresh or stale state of its own. No story here, so the host's own render is unverified in the workshop."
     },
     "migration": {
       "status": "unassessed",
@@ -4795,20 +4795,44 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in TaskNoteFeed.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-note-feed--default", "task-note-feed--narrow"],
+        "note": "Default: an agent note and a user note, newest first, each with its author and time, and a live link. Narrow draws the same feed at 390px with an unbroken token that wraps inside its bubble."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "edited",
+        "coverage": "covered",
+        "storyIds": ["task-note-feed--edited"],
+        "note": "v-if item.edited_at: the ' · edited' mark follows the time in the meta line."
+      },
+      {
+        "name": "no-recorded-time",
+        "coverage": "covered",
+        "storyIds": ["task-note-feed--no-recorded-time"],
+        "note": "formatCompletedAt has no time for the note, so the meta line reads No time recorded."
+      },
+      {
+        "name": "actions",
+        "coverage": "covered",
+        "storyIds": ["task-note-feed--with-actions"],
+        "note": "The actions scoped slot renders in each note's meta line (the board's Edit button). WithActions presses the second note's Edit and the owner's handler opens its editor."
+      },
+      {
+        "name": "editing",
+        "coverage": "covered",
+        "storyIds": ["task-note-feed--editing"],
+        "note": "v-if editingId equals the note id: the editor slot replaces that note's rendered text only. Editing shows the field with the note's text, and Done editing restores the rendered text."
+      },
+      {
+        "name": "empty",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "The owner has no empty branch: zero notes draws an empty ordered list. Any empty copy belongs to the caller."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TaskNoteFeed.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch: the notes arrive as the updates prop from the owner. The owner's own loading state is audited at the components-task-workspace-surface row."
     },
     "migration": {
       "status": "unassessed",
@@ -4832,21 +4856,75 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Delegated vs manually linked task rows; note/approve/mark-done/action-error. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in TaskOriginNote.vue implements this render; no rendered-state story exists."
+        "name": "no-origin",
+        "coverage": "covered",
+        "storyIds": ["task-origin-note--no-origin"],
+        "note": "NoOrigin: no delegation and no link (v-if taskId || linkedTasks.length is false), so the root is not rendered."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "task-not-loaded",
+        "coverage": "covered",
+        "storyIds": ["task-origin-note--task-not-loaded"],
+        "note": "TaskNotLoaded: a delegated chat whose task the signals store does not hold yet. The row names A task on the board with the Delegated task detail, and no status or controls."
+      },
+      {
+        "name": "running",
+        "coverage": "covered",
+        "storyIds": ["task-origin-note--running"],
+        "note": "Running: the warn status word for a running attempt, and Mark done… offered (canMarkDone). Approve Done is not offered."
+      },
+      {
+        "name": "review-ready",
+        "coverage": "covered",
+        "storyIds": ["task-origin-note--review-ready"],
+        "note": "ReviewReady: the task awaits review (canApprove), so the Review ready status and the Approve Done button with its aria-label are drawn, and Mark done… is not."
+      },
+      {
+        "name": "closure-form",
+        "coverage": "covered",
+        "storyIds": ["task-origin-note--closure-form"],
+        "note": "ClosureForm: noteOpen on the approve path. The optional note field takes focus, the approve consequence line is drawn, and Cancel returns focus to the Approve Done button."
+      },
+      {
+        "name": "mark-done-form",
+        "coverage": "covered",
+        "storyIds": ["task-origin-note--mark-done-form"],
+        "note": "MarkDoneForm: noteOpen on the override path. The note field takes focus, the mark-done consequence line and the Mark done and archive submit are drawn, and Cancel returns focus to Mark done…."
+      },
+      {
+        "name": "saving",
+        "coverage": "covered",
+        "storyIds": ["task-origin-note--saving"],
+        "note": "Saving: approving is set while the completion write is held. The submit reads Saving… and the note field and Cancel are disabled."
+      },
+      {
+        "name": "refused",
+        "coverage": "covered",
+        "storyIds": ["task-origin-note--refused"],
+        "note": "Refused: approveError draws .task-origin-error with role alert and the server sentence. The form stays open, the note field regains focus, and Approve Done is enabled again."
+      },
+      {
+        "name": "superseded",
+        "coverage": "covered",
+        "storyIds": ["task-origin-note--superseded"],
+        "note": "Superseded: a later attempt holds the task, so the muted A newer attempt holds this task status is drawn and no controls are."
+      },
+      {
+        "name": "done",
+        "coverage": "covered",
+        "storyIds": ["task-origin-note--done"],
+        "note": "Done: the task is done, so the done status pill is drawn and no controls are."
+      },
+      {
+        "name": "linked-task",
+        "coverage": "covered",
+        "storyIds": ["task-origin-note--linked-only"],
+        "note": "LinkedOnly: a linked task without delegation is a read-only task link with the Linked task detail, and no state or controls."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TaskOriginNote.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial: until taskSignals holds the chat's task, the row is the delegation stamp's fallback (task-not-loaded), whose title is the placeholder A task on the board and which has no status pill, so its geometry differs from the loaded row (title, status word, controls); a later loading follow-up should note it, and this slice does not fix the owner. Loaded: the states above. Empty: no-origin. The owner draws no refresh, failure or stale state of its own: the signals store keeps the last rows on a failed read and is not rendered here."
     },
     "migration": {
       "status": "unassessed",
