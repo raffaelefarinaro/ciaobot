@@ -129,34 +129,6 @@ const ACTION = {
 } as const
 
 describe('ChatPanel needs-you card', () => {
-  it.each(['open', 'working', 'waiting', 'done', 'failed'] as const)(
-    'keeps MCP %s in the store without an inline card',
-    async (state) => {
-      const { wrapper: panel, store } = await mountPanel()
-      const mcp = { ...ACTION, kind: 'mcp_auth', state, params: { server: 'linear', provider: 'claude' } } as const
-      store.chatActions = { [CHAT_ID]: [mcp] }
-      await flushPromises()
-      expect(panel.find('.chat-column [data-kind="mcp_auth"]').exists()).toBe(false)
-      expect(panel.find('.chat-column .needs-you-fold').exists()).toBe(false)
-      expect(store.chatActions[CHAT_ID]).toEqual([mcp])
-      const opener = panel.find('[title="Show chat details"]')
-      await opener.trigger('click')
-      await flushPromises()
-      expect(panel.find('.chat-mcp-connections .needs-you-card').attributes('data-action-id')).toBe(mcp.id)
-    },
-  )
-
-  it('shows only the command inline when two MCP actions are also present', async () => {
-    const { wrapper: panel, store } = await mountPanel()
-    const mcp = { ...ACTION, kind: 'mcp_auth', params: { server: 'linear', provider: 'opencode' } } as const
-    store.chatActions = { [CHAT_ID]: [mcp, { ...mcp, id: 'a2', params: { ...mcp.params, server: 'other' } }, ACTION] }
-    await flushPromises()
-    expect(panel.findAll('.chat-column .needs-you-card')).toHaveLength(1)
-    expect(panel.find('.chat-column [data-kind="mcp_auth"]').exists()).toBe(false)
-    expect(panel.get('.chat-column .needs-you-card-title').text()).toBe('Suggested command — review before running')
-    expect(store.chatActions[CHAT_ID]).toHaveLength(3)
-  })
-
   it('shows the chat\'s needs-you card above the queue and the composer', async () => {
     const { wrapper: panel, store } = await mountPanel()
     store.chatActions = { [CHAT_ID]: [ACTION as never] }

@@ -83,12 +83,11 @@
           class="btn-icon work-inspector-trigger work-inspector-trigger--header"
           :aria-expanded="inspectorOpen"
           :aria-controls="domId('chat-work-rail')"
-          :aria-label="detailsTriggerLabel"
+          aria-label="Show chat details"
           title="Show chat details"
           @click="toggleWorkDetails"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
-          <span v-if="closedMcpProblemCount" class="chat-mcp-indicator" aria-hidden="true"></span>
         </button>
         <!-- Archive is the header's one action, so it gets words, not just a
              glyph. Chat details opens from the info tab and hides from its own heading. -->
@@ -110,7 +109,6 @@
           ref="moreMenu"
           class="chat-more"
           :can-archive="!chat.archived"
-          :mcp-problems="closedMcpProblemCount"
           @details="showDetailsFromMenu"
           @archive="doArchive"
         />
@@ -134,12 +132,11 @@
       class="btn-icon work-inspector-trigger"
       :aria-expanded="false"
       :aria-controls="domId('chat-work-rail')"
-      :aria-label="detailsTriggerLabel"
+      aria-label="Show chat details"
       title="Show chat details"
       @click="toggleWorkDetails"
     >
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
-      <span v-if="closedMcpProblemCount" class="chat-mcp-indicator" aria-hidden="true"></span>
     </button>
     <div
       ref="chatColumnEl"
@@ -1111,7 +1108,7 @@
             @focus="handleInputFocus"
             @click="refreshComposerPickers"
           ></textarea>
-          <p v-if="isMcpToken" :id="domId('mcp-shortcut-hint')" class="hint">{{ mcpUnavailableReason || 'Open MCP connections — no message is sent' }}</p>
+          <p v-if="isMcpToken" :id="domId('mcp-shortcut-hint')" class="hint">{{ mcpUnavailableReason || 'Open MCP settings — no message is sent' }}</p>
           <div
             class="input-actions composer-bar"
             ref="composerBarEl"
@@ -1315,16 +1312,12 @@
           </button>
         </div>
       </section>
-      <ChatMcpConnections
-        v-if="!chat.archived && chatMcpProvider"
-        ref="mcpConnections"
-        :chat-id="chat.chat_id"
-        :provider="chatMcpProvider"
-        :controller="chatMcp"
-        :prioritize-heading="mcpHeadingPriority"
-        @settings="openMcpSettings"
-      />
-      <p v-if="mcpSettingsError" role="alert">{{ mcpSettingsError }}</p>
+      <section v-if="!chat.archived" class="cd-section cd-block chat-rail-mcp" :aria-labelledby="domId('chat-rail-mcp')">
+        <div class="cd-head"><h3 :id="domId('chat-rail-mcp')" class="cd-heading chat-mcp-heading" tabindex="-1">MCP</h3></div>
+        <ProviderMcpButton v-if="mcpConnection" :connection="mcpConnection" :chat-id="chat.chat_id" />
+        <p v-if="mcpUnavailableReason" class="hint">{{ mcpUnavailableReason }}</p>
+        <p v-if="mcpLoadError" role="alert">{{ mcpLoadError }}</p>
+      </section>
       <!-- The linked repository; the header's `code` badge opens here. -->
       <div v-if="project?.repo" ref="railRepoEl" class="chat-rail-repo cd-block" tabindex="-1">
         <ChatRepoSection
@@ -1408,7 +1401,6 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
-import { isNavigationFailure, NavigationFailureType, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { errorMessage } from '../lib/errorMessage'
 import { isApplePlatform } from '../lib/platform'
@@ -1425,7 +1417,7 @@ import { recordSentPrompt } from '../lib/chatDrafts'
 import { splitAttachmentBlock, type AttachedFile } from '../lib/chatAttachments'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useArchiveChat } from '../composables/useArchiveChat'
-import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatInfo, ChatMessage, TurnVerification } from '../lib/types'
+import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatInfo, ChatMessage, ProviderConfigSettings, ProviderConnection, TurnVerification } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
@@ -1436,9 +1428,8 @@ import ChatHeaderMoreMenu from './ChatHeaderMoreMenu.vue'
 import { markChatRailArrival, takeChatRailArrival, useChatRail } from '../composables/useChatRail'
 import { chatDetailsClosed, rememberChatDetails } from '../lib/chatDetailsPref'
 import { useChatView } from '../composables/useChatView'
-import { useChatMcpConnections } from '../composables/useChatMcpConnections'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
-import ChatMcpConnections from './ChatMcpConnections.vue'
+import ProviderMcpButton from './ProviderMcpButton.vue'
 import NeedsYouStack from './NeedsYouStack.vue'
 import { actionCopy } from '../lib/chatActions'
 import ModelSelector from './ModelSelector.vue'
@@ -1702,38 +1693,29 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const titleInputEl = ref<HTMLInputElement | null>(null)
 const chat = computed(() => view.chat!)
-const router = useRouter()
-const chatMcpProvider = computed<'claude' | 'opencode' | null>(() => {
-  const provider = chat.value?.provider
-  return provider === 'claude' || provider === 'opencode' ? provider as 'claude' | 'opencode' : null
-})
-const mcpUnavailableReason = computed(() => {
-  if (!chatMcpProvider.value) return "MCP details are unavailable for this chat's provider."
-  if (!store.projects.find(p => p.project_id === chat.value?.project_id)?.workspace?.trim()) return "This chat's workspace is not available yet. Try again after it loads."
-  return ''
-})
-const mcpActionLabel = computed(() => mcpUnavailableReason.value ? 'Why MCP details are unavailable' : 'Open MCP connections')
-const chatMcp = useChatMcpConnections({
-  workspace: () => store.projects.find(p => p.project_id === chat.value?.project_id)?.workspace ?? '',
-  provider: () => chat.value?.provider ?? '',
-  chatId: () => chat.value?.chat_id ?? '',
-  actions: () => store.chatActions[chat.value?.chat_id ?? ''] ?? [],
-  archived: () => !!chat.value?.archived,
-})
-const mcpSettingsError = ref('')
-async function openMcpSettings() {
-  const workspace = store.projects.find(p => p.project_id === chat.value?.project_id)?.workspace
-  const provider = chatMcpProvider.value
-  if (!workspace || !provider || !router) {
-    mcpSettingsError.value = 'This chat’s workspace or CLI could not be resolved.'
-    return
-  }
-  mcpSettingsError.value = ''
+// Chat details shows one button that opens the chat's agent CLI MCP settings.
+// The command is the provider row's `mcp_command`, read once from the engine
+// the first time Chat details opens; the browser never builds it.
+const mcpConnection = ref<ProviderConnection | null>(null)
+const mcpLoadError = ref('')
+let mcpLoading = false
+const mcpUnavailableReason = computed(() => mcpConnection.value && !mcpConnection.value.mcp_command
+  ? "No MCP command is available for this chat's agent."
+  : '')
+const mcpActionLabel = computed(() => mcpUnavailableReason.value ? 'Why MCP settings are unavailable' : 'Open MCP settings')
+async function loadMcpConnection() {
+  if (mcpConnection.value || mcpLoading) return
+  mcpLoading = true
+  mcpLoadError.value = ''
   try {
-    const failure = await router.push({ path: '/settings/mcp', query: { workspace, provider } })
-    if (failure && !isNavigationFailure(failure, NavigationFailureType.duplicated)) throw failure
-  } catch {
-    mcpSettingsError.value = 'Could not open this chat’s MCP settings.'
+    const res = await api.get<ProviderConfigSettings>('/api/settings/providers')
+    const row = res.connections?.[chat.value?.provider ?? '']
+    if (row) mcpConnection.value = row
+    else mcpLoadError.value = "Could not find this chat's agent."
+  } catch (e) {
+    mcpLoadError.value = `Could not look up the MCP command: ${(e as Error)?.message || e}`
+  } finally {
+    mcpLoading = false
   }
 }
 
@@ -1762,7 +1744,7 @@ function selectAdjacentChat(direction: -1 | 1): boolean {
 const needsYouActions = computed(() => {
   const current = chat.value
   if (!current || current.archived) return []
-  return (store.chatActions[current.chat_id] ?? []).filter(a => a.kind !== 'mcp_auth' && actionCopy(a) !== null)
+  return (store.chatActions[current.chat_id] ?? []).filter(a => actionCopy(a) !== null)
 })
 
 // A needs-you card that holds the focus and goes away hands it to the
@@ -2207,10 +2189,7 @@ const isWidePane = ref(false)
 const railOpen = ref(!props.filePinned && !chatDetailsClosed())
 const railShown = computed(() => isWidePane.value && railOpen.value)
 const drawerShown = computed(() => !isWidePane.value && inspectorOpen.value)
-const closedMcpProblemCount = computed(() => railShown.value || drawerShown.value ? 0 : chatMcp.problemCount.value)
-const detailsTriggerLabel = computed(() => closedMcpProblemCount.value
-  ? `Show chat details, ${closedMcpProblemCount.value} MCP connections need attention`
-  : 'Show chat details')
+watch([railShown, drawerShown], ([rail, drawer]) => { if (rail || drawer) void loadMcpConnection() }, { immediate: true })
 let panelObserver: ResizeObserver | null = null
 onMounted(() => {
   if (typeof ResizeObserver === 'undefined' || !panelEl.value) return
@@ -2240,13 +2219,6 @@ const railHideButton = ref<HTMLButtonElement | null>(null)
  */
 type DetailsTarget = 'close' | 'context' | 'repo' | 'mcp'
 const detailsTarget = ref<DetailsTarget>('close')
-const mcpHeadingPriority = ref(false)
-const mcpConnections = ref<InstanceType<typeof ChatMcpConnections> | null>(null)
-let mcpHeadingEpoch = 0
-function clearMcpHeadingPriority() {
-  mcpHeadingEpoch++
-  mcpHeadingPriority.value = false
-}
 const detailsFocusEl = computed<HTMLElement | null>(() => {
   if (detailsTarget.value === 'context') return railContextEl.value ?? railHideButton.value
   if (detailsTarget.value === 'repo') return railRepoEl.value ?? railHideButton.value
@@ -2258,8 +2230,6 @@ const detailsFocusEl = computed<HTMLElement | null>(() => {
 const contextRevealKey = ref(0)
 function showDetails(target: DetailsTarget = 'close') {
   detailsTarget.value = target
-  mcpHeadingEpoch++
-  mcpHeadingPriority.value = target === 'mcp'
   // The rail may not be mounted yet (narrow drawer, or a wide rail that
   // starts closed), and its watch is lazy: bump the key once it exists.
   const reveal = () => { if (target === 'context') contextRevealKey.value += 1 }
@@ -2285,72 +2255,25 @@ function showDetails(target: DetailsTarget = 'close') {
   })
 }
 function closeDetails() {
-  pendingMcpReveal.value = false
-  clearMcpHeadingPriority()
   if (isWidePane.value) { railOpen.value = false; rememberChatDetails(false) }
   else inspectorOpen.value = false
   // Opened from ⋯: the drawerShown watch below returns focus there instead.
   if (!detailsFromMenu) void nextTick(() => inspectorTrigger.value?.focus())
 }
 function toggleWorkDetails() {
-  const marked = closedMcpProblemCount.value > 0
-  showDetails(marked ? 'mcp' : 'close')
-  if (marked && !isWidePane.value) {
-    const epoch = mcpHeadingEpoch
-    void nextTick(async () => {
-      await nextTick()
-      if (epoch !== mcpHeadingEpoch || !drawerShown.value) return
-      clearMcpHeadingPriority()
-      await nextTick()
-      mcpConnections.value?.revealDrawerAction(true)
-    })
-  }
+  showDetails('close')
 }
 function openProjectKnowledge() {
   showDetails('context')
 }
 useModalFocus(railEl, drawerShown, {
   initialFocus: detailsFocusEl,
-  onEscape: () => { pendingMcpReveal.value = false; clearMcpHeadingPriority(); inspectorOpen.value = false },
+  onEscape: () => { inspectorOpen.value = false },
 })
-const pendingMcpReveal = ref(false)
-function matchesMcpRoute(route: { params: Record<string, unknown>; query: Record<string, unknown> }) {
-  return route.params.chatId === props.chatId && route.query.details === 'mcp'
-}
-function signature(route: { params: Record<string, unknown>; query: Record<string, unknown> }) {
-  return `${String(route.params.chatId ?? '')}|${String(route.query.details ?? '')}`
-}
-if (router) {
-  pendingMcpReveal.value = matchesMcpRoute(router.currentRoute.value)
-  const removeAfterEach = router.afterEach((to, from, failure) => {
-    if (failure && !isNavigationFailure(failure, NavigationFailureType.duplicated)) return
-    if (!matchesMcpRoute(to)) { pendingMcpReveal.value = false; clearMcpHeadingPriority(); return }
-    if (signature(to) !== signature(from) || to.fullPath === from.fullPath) pendingMcpReveal.value = true
-  })
-  onBeforeUnmount(removeAfterEach)
-}
-watch([pendingMcpReveal, () => view.chat, chatMcpProvider], async ([pending, loaded, provider]) => {
-  if (!pending || !loaded || loaded.chat_id !== props.chatId || !provider || loaded.archived) return
-  showDetails('mcp')
-  const epoch = mcpHeadingEpoch
-  await nextTick()
-  if (!pendingMcpReveal.value) return
-  const heading = railEl.value?.querySelector<HTMLElement>('.chat-mcp-heading')
-  if (!heading) return
-  heading.focus({ preventScroll: true })
-  if (document.activeElement !== heading) return
-  const rail = railEl.value!
-  const header = rail.querySelector<HTMLElement>('.chat-rail-head')
-  rail.scrollTo({ top: Math.max(0, rail.scrollTop + heading.getBoundingClientRect().top - rail.getBoundingClientRect().top - (header?.getBoundingClientRect().height ?? 0) - 8), behavior: 'auto' })
-  pendingMcpReveal.value = false
-  await nextTick()
-  if (epoch === mcpHeadingEpoch) clearMcpHeadingPriority()
-}, { immediate: true })
 // Chat details opened from the ⋯ menu return focus to ⋯ however they close (the
 // close button or Escape). Registered after useModalFocus, so this runs after
 // its restore of the opener, which is the menu item that has already gone.
 watch(drawerShown, (open) => {
-  if (!open) clearMcpHeadingPriority()
   if (open || !detailsFromMenu) return
   detailsFromMenu = false
   void nextTick(() => moreMenu.value?.focusTrigger())
@@ -5588,17 +5511,7 @@ onMounted(() => {
   background: transparent;
   color: var(--fg2);
 }
-.work-inspector-trigger .chat-mcp-indicator {
-  position: absolute;
-  right: 5px;
-  bottom: 5px;
-  width: 8px;
-  height: 8px;
-  box-sizing: border-box;
-  border: 1.5px solid var(--accent);
-  transform: rotate(45deg);
-  pointer-events: none;
-}
+.chat-mcp-heading:focus { outline: 2px solid var(--accent); outline-offset: 3px; }
 .work-inspector-trigger--header:hover {
   color: var(--fg);
   border-color: transparent;

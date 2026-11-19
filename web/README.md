@@ -244,10 +244,6 @@ web/
                            /memory, /stats, /settings, /settings/:tab
     components/           one Vue SFC per feature pane (including HomeIntake, HomeReviewSummary, UsageView (the /stats Usage page; data from lib/usageStats.ts),
                            CommandPaletteModal, FileViewerModal, NotificationBell (the inbox bell and its popover or phone sheet), NotificationInboxList (the inbox body), HomeNoticeWindow, HousekeepingStrip (Home's single "Needs you" list above the composer: workspace-health errors, operator notices and update tasks, one title, one line and one primary button per row) with NeedsYouRow (the row and its ⋯ menu), and WebhookTriggers)
-    components/ChatMcpConnections.vue  chat-scoped connection health and managed recovery
-    components/ChatMcpTerminalRecovery.vue  copy-only manual terminal previews
-    composables/useChatMcpConnections.ts  scoped status observer and row derivation
-    composables/useMcpAuthStart.ts  shared start lease and popup owner
     components/TaskBoardView.vue  the `/tasks` route entry point: a thin wrapper that
                            renders `TaskWorkspaceSurface.vue` and forwards its
                            `open-sidebar` request and the open task's pull-to-close, and
@@ -719,7 +715,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   second `defineStore` would have put a proxy and a second `$state` in between.
   `stores/chatAnnotations.test.ts` drives it with a bare `ref` for the active
   chat — no Pinia, no mount.
-  **Needs-you actions are engine-owned and transient** (`ChatInfo.actions`, `chat_actions_changed`, the snapshot's `chat_actions`, kept in `stores/projects.ts`'s `chatActions` under the same read-start watermark and clock as the chat reads; `startChatAction`/`dismissChatAction`/`continueChatAction`/`submitChatActionCallback`; a 409 adopts the engine's list). ChatPanel renders non-MCP actions in the bounded keyed `NeedsYouStack.vue`; MCP actions remain in the store for Chat details and alone do not create Needs you attention. Actual failed turns, questions, permission and task blockers and generic cards retain their attention semantics. When a card appears or changes state the stack scrolls itself (never the page, never the focus) to that card's `data-needs-you-primary` element, else its `.needs-you-btn--primary`; `CallbackPasteField` and the device code carry the marker. `NeedsYouCard.vue` owns Not now and Continue, a per-kind body in `components/needs-you/` owns the primary control, and `CallbackPasteField.vue` is the shared paste-back field for a sign-in that ends on an unreachable loopback page, and `lib/chatActions.ts` owns the copy (`actionCopy` returns null for a kind with no UI yet, and such actions are not shown).
+  **Needs-you actions are engine-owned and transient** (`ChatInfo.actions`, `chat_actions_changed`, the snapshot's `chat_actions`, kept in `stores/projects.ts`'s `chatActions` under the same read-start watermark and clock as the chat reads; `startChatAction`/`dismissChatAction`/`continueChatAction`/`submitChatActionCallback`; a 409 adopts the engine's list). ChatPanel renders every action in the bounded keyed `NeedsYouStack.vue`, and any held action counts as attention along with failed turns, questions, permission and task blockers. When a card appears or changes state the stack scrolls itself (never the page, never the focus) to that card's `data-needs-you-primary` element, else its `.needs-you-btn--primary`; `CallbackPasteField` and the device code carry the marker. `NeedsYouCard.vue` owns Not now and Continue, a per-kind body in `components/needs-you/` owns the primary control, and `CallbackPasteField.vue` is the shared paste-back field for a sign-in that ends on an unreachable loopback page, and `lib/chatActions.ts` owns the copy (`actionCopy` returns null for a kind with no UI yet, and such actions are not shown).
 
   Pure logic the store hands over whole lives in `lib/`, Vue-free and directly
   testable: `lib/chatHistory.ts` (history normalising, server-row mapping, turn
@@ -841,28 +837,19 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   not ready. *Ask Ciao to add one* still starts a chat titled "Add an MCP server".
   Changes apply to new chats; a running chat loads them after `ciao chat reload`.
   The page does not read `/api/mcp/status` or turn servers on or off. The Providers tab instead shows generic sign-in commands for the user to copy or type manually, and opens the selected workspace's browser terminal without sending input. Verify rereads provider and model information; OpenCode configuration is not credential verification and completed model reads do not prove catalog availability.
-  Chat details observes the actual chat provider and owning workspace even when
-  closed. Duplicate raw names and current actions have deterministic precedence;
-  absent or unreadable observations remain unknown. Settings workspace switches
-  serialize under the existing guard with latest-intent and query-reveal tokens;
-  the shared start lease prevents duplicate OAuth starts across surfaces and a
-  disposed popup owner preserves a safe link; `needs-you/McpAuthBody.vue` is a
-  shared caller of that lease. The standalone trimmed,
-  case-insensitive `/mcp` navigates locally only with a supported provider and
-  resolved workspace; otherwise it explains the problem without consuming the
-  draft or staged state. Arguments are ordinary messages. Successful navigation
-  clears only text, preserving all four staged arrays, history, queue, offline
-  state and uploads. While streaming Stop remains primary with a separate Open
-  action; IME, picker, touch and pane guards still apply.
+  Chat details has an MCP section that holds the same `ProviderMcpButton.vue`
+  for the chat's own agent. ChatPanel reads `/api/settings/providers` once, the
+  first time the details rail or drawer opens, and keeps the row for that pane;
+  a failed read shows a one-line alert. There is no health observer, no
+  connection marker on the details trigger or the ⋯ menu, and no sign-in card:
+  signing in happens in the agent's own MCP command. The standalone trimmed,
+  case-insensitive `/mcp` opens Chat details on the MCP heading and sends
+  nothing; when the agent's row has no `mcp_command` it shows why instead.
+  Arguments are ordinary messages. Opening clears only text, preserving all
+  four staged arrays, history, queue, offline state and uploads. While
+  streaming Stop remains primary with a separate Open action; IME, picker,
+  touch and pane guards still apply.
 
-  MCP Terminal recovery previews the owning workspace/provider command and copies
-  only: no terminal API, input, session or target change. The user separately
-  opens Chat details → Open → Terminal, chooses Workspace if offered, and
-  reviews, pastes and runs it. Its `lib/codeCopy.ts` helper checks that preview
-  context is still current before falling back to legacy copy after an async
-  clipboard rejection, so a stale preview cannot copy an old command. This does
-  not change the existing reviewed command-card and Settings Run in terminal
-  behavior.
   Shared settings styling lives in `components/settings/settingsPanels.css`,
   loaded by both sides with `<style scoped src>` — a parent's scoped rules
   never reach a child, and the alternative is silently unstyled markup. New

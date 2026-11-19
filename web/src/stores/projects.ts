@@ -1722,8 +1722,7 @@ export const useProjectStore = defineStore('projects', () => {
     if (chatIsMemoryPass(chatId)) return false
     if (chatNeedsInput(chatId)) return true
     if (chatFailed(chatId)) return true
-    // MCP recovery belongs to Chat details, not chat attention.
-    if (chatActions.value[chatId]?.some(a => a.kind !== 'mcp_auth')) return true
+    if (chatActions.value[chatId]?.length) return true
     const chat = chats.value.find(c => c.chat_id === chatId)
     if (!chat) return false
     // Only the loaded workspace's tasks are held, and slugs collide across
@@ -2220,16 +2219,6 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
-  /** Settings' MCP Sign in: put the chat's sign-in card for `server` on the chat, or get the one there. */
-  async function requestMcpAuth(chatId: string, server: string): Promise<ChatAction | null> {
-    const readStartedAt = chatReadStart()
-    const res = await api.post<{ action?: unknown }>(`/api/chats/${encodeURIComponent(chatId)}/actions/mcp-auth`, { server })
-    const raised = res?.action
-    if (!isChatAction(raised)) return null
-    upsertChatAction(chatId, raised, readStartedAt)
-    return raised
-  }
-
   async function dismissChatAction(chatId: string, actionId: string): Promise<'dismissed' | 'conflict'> {
     const readStartedAt = chatReadStart()
     try {
@@ -2238,21 +2227,6 @@ export const useProjectStore = defineStore('projects', () => {
         chatActionsChatClock[chatId] = nextChatReadClock()
       }
       return 'dismissed'
-    } catch (e) {
-      if (!adoptChatActionConflict(chatId, e, readStartedAt)) throw e
-      return 'conflict'
-    }
-  }
-
-  /** Turn the card's MCP server off for this workspace and provider. A refusal (400) keeps the card and rethrows. */
-  async function turnOffChatActionServer(chatId: string, actionId: string): Promise<'turned_off' | 'conflict'> {
-    const readStartedAt = chatReadStart()
-    try {
-      const res = await api.post<{ actions?: unknown }>(chatActionPath(chatId, actionId, 'turn-off'), {})
-      if (applyChatActionsRead(chatId, normalizeChatActions(res?.actions), readStartedAt)) {
-        chatActionsChatClock[chatId] = nextChatReadClock()
-      }
-      return 'turned_off'
     } catch (e) {
       if (!adoptChatActionConflict(chatId, e, readStartedAt)) throw e
       return 'conflict'
@@ -7062,7 +7036,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor, applyChatPinState, applyChatPinsSnapshot, dropChatPinState, pruneChatPins, isChatPinPending,
     chatReadStart,
-    startChatAction, requestMcpAuth, dismissChatAction, turnOffChatActionServer, continueChatAction, submitChatActionCallback,
+    startChatAction, dismissChatAction, continueChatAction, submitChatActionCallback,
     removeQueued, removeQueuedById, requestQueuedEdit, ackQueuedEdit, pendingQueueTakes, queueTakeFailures, reorderQueued, clearQueued,
     loadMessages,
     loadOlderMessages, expandMessagePart,

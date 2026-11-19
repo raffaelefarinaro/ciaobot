@@ -118,37 +118,6 @@ export interface ArchivedWorkspacesResponse {
   archived: ArchivedWorkspace[]
 }
 
-export interface McpConnection {
-  state: 'connected' | 'failed' | 'disabled' | 'needs_auth' | 'unknown'
-  chat_id: string
-  error?: string
-}
-
-export interface McpNativeServer {
-  name: string
-  scope: string
-  source: string
-  kind?: string
-  enabled?: boolean // false = turned off; missing = on
-  applies_to?: string | null // where Turn off / Turn on writes; null = cannot be switched here
-  allowed: boolean | null
-  connections: McpConnection[]
-}
-
-export interface McpProviderInventory {
-  provider: 'claude' | 'opencode'
-  available: boolean
-  inventory_state: 'loaded' | 'unknown'
-  servers: McpNativeServer[]
-}
-
-export interface McpStatus {
-  workspace: string
-  agent_root: string
-  providers: McpProviderInventory[]
-  shell: { kind: 'posix'; cd_prefix: string }
-}
-
 /** Status of the agent CLI surface (Settings → Agent CLI), from /api/agent/status. */
 export interface AgentCliStatus {
   ready: boolean
@@ -344,7 +313,7 @@ export interface ChatPinState {
 }
 
 /** A needs-you kind the engine can raise on a chat. */
-export type ChatActionKind = 'mcp_auth' | 'command' | 'gws_auth' | 'permission_mode' | 'device_code' | 'system_setting' | 'restart' | 'limit'
+export type ChatActionKind = 'command' | 'gws_auth' | 'permission_mode' | 'device_code' | 'system_setting' | 'restart' | 'limit'
 
 /** Where a needs-you action is in its life. */
 export type ChatActionState = 'open' | 'working' | 'waiting' | 'done' | 'failed'
