@@ -147,12 +147,8 @@ class PermissionBroker:
     ) -> QuestionResponseResult:
         item = self._pending.get(request_id)
         if item is None:
-            return QuestionResponseResult(
-                ok=False,
-                error="This approval has already been answered.",
-                retryable=False,
-                already_resolved=True,
-            )
+            # Settled already (another tab, or cancelled): acknowledged so the caller clears its card.
+            return QuestionResponseResult(ok=True, already_resolved=True)
         if session_id and item.session_id != session_id:
             return QuestionResponseResult(
                 ok=False,

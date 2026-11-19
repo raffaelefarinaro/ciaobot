@@ -584,6 +584,26 @@ def claude_install_command() -> str:
     return "curl -fsSL https://claude.ai/install.sh | bash"
 
 
+# The ACP adapter Ciaobot runs for Claude chats, hard-pinned: bumped deliberately.
+CLAUDE_ADAPTER_PACKAGE = "@agentclientprotocol/claude-agent-acp@0.108.1"
+
+
+def claude_adapter_install_command() -> str:
+    """npm line that installs the pinned ACP adapter (needs Node 22 or newer)."""
+    return f"npm install -g {CLAUDE_ADAPTER_PACKAGE}"
+
+
+def claude_adapter_path() -> str:
+    """Absolute path to ``claude-agent-acp`` on the terminal PATH, or "" when not installed."""
+    from ciao.tool_path import resolve_tool
+
+    try:
+        resolved = resolve_tool("claude-agent-acp")
+    except Exception:
+        resolved = None
+    return resolved or ""
+
+
 def claude_path_command(directory: str = "") -> str:
     """Shell line that puts ``directory`` on the login PATH.
 
@@ -745,6 +765,24 @@ def _claude_status(
         else None
     )
     claude_skills = discover_claude_system_skills()
+    if binary and not claude_adapter_path():
+        # Claude chats run through the adapter, so a CLI without it cannot run a turn.
+        return _provider(
+            name="claude",
+            ok=False,
+            auth="not_installed",
+            command=claude_adapter_install_command(),
+            detail=(
+                "Claude Code is installed, but the ACP adapter (claude-agent-acp) is not. "
+                "Use Install in Settings → Providers."
+            ),
+            version=version,
+            skills=claude_skills,
+            cli_path=binary,
+            release_check=check,
+            path_command=claude_path_hint(binary),
+            terminal_action="claude-install",
+        )
     if not binary:
         # No CLI means no chats, whatever credentials exist: report the install
         # step rather than an auth command the user cannot run yet.

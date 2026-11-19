@@ -61,6 +61,7 @@ from ciao.models import AgentRequest, ResultEvent, StreamEvent, TokenUsageEvent
 from ciao.provider_registry import ProviderDescriptor
 from ciao.provider_service import ProviderService
 from ciao.providers.base import ActiveHandle, BaseProvider, ProviderCapabilities
+from ciao.providers.acp.agents import ClaudeAcpProvider
 from ciao.providers.claude import ClaudeProvider
 from ciao.providers.opencode import OpencodeProvider
 
@@ -75,7 +76,7 @@ def _config(tmp_path: Path) -> CiaoConfig:
 
 
 # The actual constructor boundaries the registry can resolve today.
-_PROVIDER_CLASSES: tuple[type[BaseProvider], ...] = (ClaudeProvider, OpencodeProvider)
+_PROVIDER_CLASSES: tuple[type[BaseProvider], ...] = (ClaudeProvider, ClaudeAcpProvider, OpencodeProvider)
 
 
 @dataclass
@@ -455,8 +456,8 @@ async def test_seam_counters_fire_on_a_real_provider_construction(
     assert counts.ensure == ["claude"]
     assert counts.registry_lookups == ["claude"]
     assert counts.factory_resolutions == ["claude"]
-    assert counts.constructions == ["ClaudeProvider"]
-    assert isinstance(provider, ClaudeProvider)
+    assert counts.constructions == ["ClaudeAcpProvider"]
+    assert isinstance(provider, ClaudeAcpProvider)
     assert service.provider is provider
 
 

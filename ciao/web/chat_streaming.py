@@ -1559,28 +1559,6 @@ class ChatStreaming:
             streamed_steps.feed(event)
             if (
                 isinstance(event, ResultEvent)
-                and chat.provider == "claude"
-                and stream is not None
-                and stream.user_stopped
-                and event.is_error
-                and (not event.result or _is_sdk_internal_diagnostic(event.result))
-            ):
-                # A user Stop makes the SDK end on an error frame that is not
-                # an answer: either empty (#952) or a non-empty SDK/CLI
-                # diagnostic (``[ede_diagnostic] ...``, ``ResultError``, exit
-                # code). Normalize it at this boundary, before journaling or
-                # publication, into a non-error partial carrying the text that
-                # was already streamed. Substantive errors and normal
-                # completions are untouched, and a genuine non-stop failure
-                # stays an error.
-                event = replace(
-                    event,
-                    result=streamed_steps.text,
-                    is_error=False,
-                    stopped=True,
-                )
-            elif (
-                isinstance(event, ResultEvent)
                 and stream is not None
                 and stream.user_stopped
                 and not event.is_error
@@ -1592,16 +1570,6 @@ class ChatStreaming:
                 # opencode joins its parts with separators. Persisting that
                 # tail would drop every earlier block on reload (#1223).
                 event = replace(event, result=streamed_steps.text, stopped=True)
-            elif (
-                isinstance(event, ResultEvent)
-                and chat.provider == "claude"
-                and event.is_error
-                and _is_sdk_internal_diagnostic(event.result)
-            ):
-                # A non-stop failure whose only text is an SDK internal must
-                # not become the durable/rendered reply. Keep it an error, but
-                # replace the internal with actionable prose.
-                event = replace(event, result=_SDK_INTERNAL_ERROR_MESSAGE)
             if (
                 isinstance(event, ResultEvent)
                 and event.stopped

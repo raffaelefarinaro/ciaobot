@@ -308,22 +308,22 @@ async def test_oneshot_claude_env_carries_the_engine_first_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import ciao.providers.oneshot as oneshot
+    from ciao import setup_status
+    from ciao.providers.acp import oneshot as acp_oneshot
 
     captured: dict = {}
 
-    async def fake_query(*, prompt: str, options):
-        captured["options"] = options
-        if False:  # pragma: no cover - make this an async generator
-            yield None
+    async def fake_run(spec, prompt, **kwargs):
+        captured["env"] = kwargs["env"]
+        return "ok"
 
-    monkeypatch.setattr(oneshot, "query", fake_query)
+    monkeypatch.setattr(acp_oneshot, "run_acp_oneshot", fake_run)
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "")
     monkeypatch.setenv("PATH", os.pathsep.join(["/stale", "/user/bin"]))
 
     await oneshot.run_oneshot("hi", system_prompt="s", model="haiku")
 
-    assert (
-        captured["options"].env["PATH"].split(os.pathsep)[0] == engine_bin_dir()
-    )
+    assert captured["env"]["PATH"].split(os.pathsep)[0] == engine_bin_dir()
 
 
 @pytest.mark.asyncio

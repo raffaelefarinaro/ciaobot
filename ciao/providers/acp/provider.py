@@ -16,7 +16,7 @@ import math
 import time
 from collections.abc import AsyncGenerator, Callable, Mapping
 from contextlib import aclosing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -34,7 +34,7 @@ from ciao.models import (
 )
 from ciao.providers.acp.connection import AcpConnection, AgentStartError
 from ciao.providers.acp.permissions import PermissionBroker
-from ciao.providers.acp.session import AcpSession, SessionJournal, journal_file
+from ciao.providers.acp.session import AcpSession, ModeNotApplied, SessionJournal, journal_file
 from ciao.providers.acp.spec import AgentSpec
 from ciao.redact import redact_text
 from ciao.providers.base import (
@@ -43,6 +43,7 @@ from ciao.providers.base import (
     ProviderCapabilities,
     QuestionResponseResult,
     build_prompt,
+    native_slash_prompt,
     prepend_stable_context,
 )
 
@@ -155,6 +156,19 @@ def _runtime_dir(config: object | None) -> Path:
     return Path(state_path).parent
 
 
+_CAPSULE_URI = "ciaobot://context"
+
+
+def _capsule_block(capsule: str, *, embedded: bool) -> dict[str, Any]:
+    """The context capsule as an embedded resource when the agent takes them, else plain text."""
+    if embedded:
+        return {
+            "type": "resource",
+            "resource": {"uri": _CAPSULE_URI, "mimeType": "text/plain", "text": capsule},
+        }
+    return {"type": "text", "text": capsule}
+
+
 class AcpProvider(BaseProvider):
     spec: ClassVar[AgentSpec]  # set by each subclass
     capabilities = ProviderCapabilities(
@@ -190,6 +204,16 @@ class AcpProvider(BaseProvider):
         """``_meta`` for a one-shot call of this agent."""
         return {}
 
+    @classmethod
+    def spawn_env(cls) -> dict[str, str]:
+        """Env added to the agent process at spawn, under the request's own env."""
+        return {}
+
+    @classmethod
+    def process_env(cls, request: AgentRequest) -> dict[str, str]:
+        """The env the agent process is spawned with for this request's connection."""
+        return {**cls.spawn_env(), **request.extra_env}
+
     # -- turn ------------------------------------------------------------------
 
     async def run_streaming(
@@ -220,9 +244,22 @@ class AcpProvider(BaseProvider):
             session, replaced = await self._session_for(connection, request)
             if replaced:
                 prepend_stable_context(request)
-            for event in await session.apply(
-                mode=request.mode, model=request.model, thinking=request.thinking_level
-            ):
+            try:
+                applied = await session.apply(
+                    mode=request.mode, model=request.model, thinking=request.thinking_level
+                )
+            except ModeNotApplied:
+                # The chat asked for a mode the agent would not hold, so nothing runs. The session
+                # id still goes out: the retry resumes this session rather than opening another.
+                logger.warning("%s did not start the turn: the requested mode was not applied.", self.spec.id)
+                yield ResultEvent(
+                    type="result",
+                    is_error=True,
+                    result=f"{self.spec.id} could not set the requested mode; the turn did not run.",
+                    session_id=session.session_id,
+                )
+                return
+            for event in applied:
                 yield self._seen(event)
             blocks = self._blocks(connection, request)
             register_handle(AcpHandle(session))
@@ -253,7 +290,7 @@ class AcpProvider(BaseProvider):
         self._connection = await AcpConnection.open(
             self.spec,
             cwd=self.workspace_root,
-            env=request.extra_env,
+            env=type(self).process_env(request),
             client=self._client,
         )
         self._client.connection = self._connection
@@ -268,8 +305,11 @@ class AcpProvider(BaseProvider):
         if session is not None and resume and session.session_id == resume:
             # A changed ``_meta`` takes effect by reloading the same session, but
             # never under an open late turn: that waits for the next turn.
-            if session.meta_key == json.dumps(meta, sort_keys=True) or session.late_turn_open:
+            if session.meta_key == json.dumps(meta, sort_keys=True):
                 return session, False
+            if session.late_turn_open:
+                return session, False
+            logger.info("Reloading %s session %s: options changed", self.spec.id, resume)
         await self._close_session()
         broker = PermissionBroker(lambda _event: None)
         self._client.broker = broker
@@ -297,9 +337,17 @@ class AcpProvider(BaseProvider):
         return opened, replaced
 
     def _blocks(self, connection: AcpConnection, request: AgentRequest) -> list[dict[str, Any]]:
-        text = COMPACT_COMMAND if request.compact else build_prompt(request)
-        blocks: list[dict[str, Any]] = [{"type": "text", "text": text}]
         prompt_caps = connection.agent_capabilities.get("promptCapabilities")
+        slash = native_slash_prompt(request) if self.spec.slash_capsule_as_block and not request.compact else None
+        if slash is not None:
+            command, capsule = slash
+            blocks: list[dict[str, Any]] = [
+                {"type": "text", "text": build_prompt(replace(request, prompt=command))},
+                _capsule_block(capsule, embedded=isinstance(prompt_caps, dict) and prompt_caps.get("embeddedContext") is True),
+            ]
+        else:
+            text = COMPACT_COMMAND if request.compact else build_prompt(request)
+            blocks = [{"type": "text", "text": text}]
         accepts_images = isinstance(prompt_caps, dict) and prompt_caps.get("image") is True
         if request.images and accepts_images and not request.compact:
             for image in request.images:
@@ -368,12 +416,7 @@ class AcpProvider(BaseProvider):
     ) -> QuestionResponseResult:
         broker = self._broker
         if broker is None:
-            return QuestionResponseResult(
-                ok=False,
-                error="This approval has already been answered.",
-                retryable=False,
-                already_resolved=True,
-            )
+            return QuestionResponseResult(ok=True, already_resolved=True)
         return broker.respond(request_id, approved, session_id=session_id)
 
     async def _close_session(self) -> None:
@@ -461,7 +504,7 @@ class AcpProvider(BaseProvider):
     @classmethod
     async def _probe_catalog(cls, workspace_root: Path) -> list[dict[str, Any]]:
         connection = await AcpConnection.open(
-            cls.spec, cwd=workspace_root, env={}, client=AgentClient()  # type: ignore[abstract]
+            cls.spec, cwd=workspace_root, env=cls.spawn_env(), client=AgentClient()  # type: ignore[abstract]
         )
         try:
             # No prompt is sent, so the session's journal file is never written; the

@@ -77,6 +77,7 @@ from ciao.config import (
     RESTART_EXIT_CODE,
     WorkspaceConfig,
 )
+from ciao.model_tiers import MAX_MODEL_ID_CHARS
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
     WORKSPACE_NAME_RE,
@@ -2601,6 +2602,14 @@ async def chat_detail(request: Request) -> Response:
     # read as "no change" there.
     if "pin" in body:
         return await _chat_pin_patch(request, pcm, chat_id, body)
+    # A model id is user-controlled and can reach a status line, so it is bounded as a
+    # delegation's is. None leaves the chat's model alone.
+    model = body.get("model")
+    if isinstance(model, str) and len(model) > MAX_MODEL_ID_CHARS:
+        return JSONResponse(
+            {"error": f"model must be text of at most {MAX_MODEL_ID_CHARS} characters"},
+            status_code=400,
+        )
     try:
         chat = pcm.update_chat(
             chat_id,
@@ -2708,6 +2717,11 @@ async def chat_handover(request: Request) -> JSONResponse:
     body = await request.json()
     provider = str(body.get("provider", "")).strip()
     model = str(body.get("model", "")).strip()
+    if len(model) > MAX_MODEL_ID_CHARS:
+        return JSONResponse(
+            {"error": f"model must be text of at most {MAX_MODEL_ID_CHARS} characters"},
+            status_code=400,
+        )
     raw_messages = body.get("messages", [])
     messages = raw_messages if isinstance(raw_messages, list) else []
     try:
@@ -6192,7 +6206,6 @@ async def _acp_catalog(
 
 async def list_models(request: Request) -> JSONResponse:
     config = request.app.state.config
-    from ciao.providers.catalog_evidence import claude_catalog_evidence, invalidate_claude_catalog
 
     workspace_name = request.query_params.get("workspace")
     if workspace_name:
@@ -6210,9 +6223,6 @@ async def list_models(request: Request) -> JSONResponse:
     opencode_catalog = await provider_registry.require("opencode").factory().model_catalog(
         workspace_root, force=refresh
     )
-    if refresh:
-        invalidate_claude_catalog(workspace_root)
-    claude_evidence = claude_catalog_evidence(workspace_root)
     opencode_evidence_models = [
         {"id": str(item.get("model")), "label": str(item.get("label") or item.get("model"))}
         for item in opencode_catalog if item.get("model")
@@ -6237,10 +6247,6 @@ async def list_models(request: Request) -> JSONResponse:
         for item in opencode_catalog
         if item.get("model")
     }
-    # Claude Code serves one upstream, so its models are a single list rather
-    # than the work/personal split the routing-backend era needed.
-    claude_models = list(CLAUDE_MODELS)
-    claude_default = config.default_model_for_provider("claude") or config.claude_default_model
     # Every descriptor that runs over ACP reports its own catalog. A probe that raises
     # leaves that provider with an empty catalog; the exception is logged by type only.
     acp_descriptors = [item for item in provider_registry.descriptors() if item.acp_spec_path]
@@ -6277,6 +6283,13 @@ async def list_models(request: Request) -> JSONResponse:
             if row.get("model"):
                 acp_levels.setdefault(str(row["model"]), list(row.get("variants") or []))
 
+    # The Claude catalog is the ACP one above. The top-level "models" and "default" are the
+    # tier list and the default the PWA reads when that catalog is empty.
+    claude_default = (
+        acp_defaults.get("claude")
+        or config.default_model_for_provider("claude")
+        or config.claude_default_model
+    )
     return JSONResponse({
         "models": list(CLAUDE_MODELS),
         "default": claude_default,
@@ -6284,12 +6297,10 @@ async def list_models(request: Request) -> JSONResponse:
         # can never replace that provider's entry.
         "provider_models": {
             **acp_models,
-            "claude": claude_models,
             "opencode": opencode_models,
         },
         "provider_defaults": {
             **acp_defaults,
-            "claude": claude_default,
             "opencode": opencode_default,
         },
         "backends": {
@@ -6312,12 +6323,6 @@ async def list_models(request: Request) -> JSONResponse:
         "thinking_levels": {k: list(v) for k, v in THINKING_LEVELS.items()},
         "provider_catalog_evidence": {
             **acp_evidence,
-            "claude": {
-                "status": claude_evidence.status,
-                "source": claude_evidence.source,
-                "models": [{"id": model.id, "label": model.label} for model in claude_evidence.models],
-                "reason": claude_evidence.reason,
-            },
             "opencode": opencode_evidence,
         },
     })

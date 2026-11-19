@@ -36,6 +36,8 @@ class FakeOneshotProvider(AcpProvider):
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **scenario: Any) -> Path:
+    # A one-shot runs in plan mode, which is fail-closed: the agent must offer plan.
+    scenario.setdefault("config_options", _OPTIONS)
     spec, calls = write_scenario(
         tmp_path,
         spec_modes={"plan": (ModeChoice(config_id="mode", values=("plan",)),)},
@@ -92,6 +94,25 @@ async def test_oneshot_runs_in_empty_temp_dir(monkeypatch, tmp_path: Path) -> No
     assert cwd.name == "work"
     assert cwd.parent.name.startswith("ciaobot-acp-oneshot-")
     assert not cwd.parent.exists()  # the whole temporary tree is gone afterwards
+
+
+@pytest.mark.asyncio
+async def test_oneshot_agent_inherits_provider_credentials_and_not_ciao_internals(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # A one-shot spawns through the same connection as a chat, so it gets the same env policy.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "value-anthropic")
+    monkeypatch.setenv("CIAO_ENGINE_SECRET", "engine-internal")
+    calls = _install(
+        monkeypatch, tmp_path, prompts=[{"steps": [{"update": _TEXT}]}],
+        record_env=["ANTHROPIC_API_KEY", "CIAO_ENGINE_SECRET"],
+    )
+
+    await run_oneshot("hi", system_prompt="", model="", provider="fake", env={}, max_retries=0)
+
+    env = next(c for c in read_calls(calls) if c["method"] == "initialize")["params"]["env"]
+    assert env["ANTHROPIC_API_KEY"] == "value-anthropic"
+    assert env["CIAO_ENGINE_SECRET"] is None
 
 
 @pytest.mark.asyncio

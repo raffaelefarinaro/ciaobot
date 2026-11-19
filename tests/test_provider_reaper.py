@@ -20,7 +20,7 @@ from ciao.config import CiaoConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import (
-    _CLAUDE_WARM_IDLE_TIMEOUT_SECONDS,
+    _ACP_WARM_IDLE_TIMEOUT_SECONDS,
     _CLAUDE_WARM_PROVIDER_LIMIT,
     ProjectChatManager,
 )
@@ -518,7 +518,7 @@ async def test_claude_provider_past_the_warm_window_is_reaped(tmp_path: Path) ->
     manager = _make_manager(tmp_path)
     chat_id = _chat(manager)
     provider = _attach_claude(
-        manager, chat_id, idle_for=_CLAUDE_WARM_IDLE_TIMEOUT_SECONDS + 1
+        manager, chat_id, idle_for=_ACP_WARM_IDLE_TIMEOUT_SECONDS + 1
     )
 
     assert await manager.reap_idle_providers() == [chat_id]

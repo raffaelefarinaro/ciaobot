@@ -1073,14 +1073,29 @@ async def test_an_unknown_delegation_provider_is_refused_before_anything_starts(
     assert pcm.start_stream_calls == []
 
 
-async def test_an_unknown_delegation_model_is_refused_before_anything_starts(
-    world,
-) -> None:
+async def test_an_unknown_but_well_formed_delegation_model_is_passed_through(world) -> None:
+    """claude runs over ACP with a dynamic catalog: Ciaobot does not know the model
+    list, so an id it has never heard of goes to the adapter unchanged."""
     client, cookies, _config, pcm = world
-    task = _create(client, cookies, title="Bad model", body="Steps and links.")
+    task = _create(client, cookies, title="Pass a future model", body="Steps and links.")
 
     response = _delegate(client, cookies, task, pcm, provider="claude", model="gpt-5")
 
+    assert response.status_code == 200, response.text
+    assert pcm.create_chat_runtimes == [("claude", "gpt-5")]
+    assert len(pcm.start_stream_calls) == 1
+
+
+async def test_an_overlong_delegation_model_is_refused_on_the_default_provider(
+    world,
+) -> None:
+    """The shape check Ciaobot still owns: a model id over the limit is refused on
+    the default provider too, before any chat or attempt exists."""
+    client, cookies, _config, pcm = world
+    task = _create(client, cookies, title="Overlong model on the default", body="Steps.")
+
+    response = _delegate(client, cookies, task, pcm, model="m" * 201)
+
     assert response.status_code == 400, response.text
     error = response.json()["error"]
     assert error["code"] == "invalid_task_field"
@@ -1093,24 +1108,16 @@ async def test_an_unknown_delegation_model_is_refused_before_anything_starts(
     assert history == []
 
 
-async def test_an_unknown_delegation_model_is_refused_on_the_default_provider(
+async def test_an_unknown_but_well_formed_delegation_model_is_passed_through_on_the_default(
     world,
 ) -> None:
     client, cookies, _config, pcm = world
-    task = _create(client, cookies, title="Bad model on the default", body="Steps.")
+    task = _create(client, cookies, title="Pass a future model on the default", body="Steps.")
 
     response = _delegate(client, cookies, task, pcm, model="gpt-5")
 
-    assert response.status_code == 400, response.text
-    error = response.json()["error"]
-    assert error["code"] == "invalid_task_field"
-    assert error["retryable"] is False
-    assert pcm.create_chat_calls == []
-    assert pcm.start_stream_calls == []
-    history = client.get(
-        f"/api/tasks/{task['id']}/attempts?workspace=personal", cookies=cookies
-    ).json()["attempts"]
-    assert history == []
+    assert response.status_code == 200, response.text
+    assert pcm.create_chat_runtimes == [(None, "gpt-5")]
 
 
 def test_a_vague_delegation_is_refused_with_the_sentence_to_describe_it(world) -> None:

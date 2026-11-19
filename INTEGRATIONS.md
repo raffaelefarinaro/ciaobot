@@ -277,6 +277,10 @@ workspace and choose the password.
 
 ## Environment Variables
 
+### Anthropic credentials for Claude chats
+
+The CLIs and ACP adapters inherit the engine's process environment, so provider credentials set there (for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`) are handled by the CLI itself; only Ciaobot's own `CIAO_*` internals and the PWA token are withheld. The in-app terminal filters its environment on purpose differently: it strips secrets (`*_TOKEN`, `*_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, and similar), while agent processes inherit the engine environment minus `CIAO_*` and `PWA_AUTH_TOKEN`.
+
 Copy `.env.example` to `.env` and fill in the engine-level settings first:
 
 **Required for a configured workspace:** `PWA_AUTH_TOKEN` — the dashboard password. Password protection is always on and cannot be turned off.

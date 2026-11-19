@@ -40,6 +40,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ciao.control_plane import ControlPlaneError
+from ciao.model_tiers import MAX_MODEL_ID_CHARS
 from ciao.provider_service import supported_providers
 from ciao.task_decisions import MAX_REASON
 from ciao.web.project_chats import UnknownModelError, validate_configured_model
@@ -93,8 +94,6 @@ _WRITE_KEYS = ("workspace", "expected_revision", "body")
 #: prompt is built server-side from the record; ``instructions`` is the user's
 #: note for this hand-over, quoted after the description in its own fence, so it
 #: can shape how the task is done but cannot replace the task.
-#: Longest model id a delegation accepts; real ids are far shorter.
-MAX_DELEGATE_MODEL = 200
 
 _DELEGATE_KEYS = (
     "workspace",
@@ -443,10 +442,10 @@ async def task_delegate(request: Request) -> JSONResponse:
         not isinstance(provider, str) or provider not in supported_providers()
     ):
         return _refusal("invalid_task_field", "Unknown provider for this delegation.", 400)
-    if model is not None and (not isinstance(model, str) or len(model) > MAX_DELEGATE_MODEL):
+    if model is not None and (not isinstance(model, str) or len(model) > MAX_MODEL_ID_CHARS):
         return _refusal(
             "invalid_task_field",
-            f"The delegation model must be text of at most {MAX_DELEGATE_MODEL} characters.",
+            f"The delegation model must be text of at most {MAX_MODEL_ID_CHARS} characters.",
             400,
         )
     if model is not None:

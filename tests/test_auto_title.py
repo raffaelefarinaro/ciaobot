@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from pathlib import Path
 from types import SimpleNamespace
@@ -1085,34 +1087,124 @@ async def test_llm_fallback_titles_chat_when_native_never_lands(monkeypatch) -> 
 
 @pytest.mark.asyncio
 async def test_claude_title_does_not_wait_for_native_poll(monkeypatch) -> None:
+    """The fallback title is never held behind the native polls: none is slept on before it returns."""
     from ciao.web import project_chats as pc
 
     manager = _manager(chats={"chat-1": _chat(provider="claude")})
     manager._TITLE_POLL_DELAYS = (0.0, 60.0)
     native_reads = 0
+    slept: list[float] = []
 
     def missing_session_info(_sid, directory=None):
         nonlocal native_reads
         native_reads += 1
         return None
 
-    async def unexpected_sleep(_delay):
-        pytest.fail("Claude titling must not wait through the native poll")
+    async def recording_sleep(delay):
+        slept.append(delay)
 
     async def fake_oneshot(*_args, **_kwargs):
         return "System One Decision Models"
 
     monkeypatch.setattr(claude_adapter, "get_session_info", missing_session_info)
-    monkeypatch.setattr(pc.asyncio, "sleep", unexpected_sleep)
+    monkeypatch.setattr(pc.asyncio, "sleep", recording_sleep)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
-    assert (
-        await manager.auto_title_if_default(
-            "chat-1", "I want to find out where System One models help"
-        )
-        == "System One Decision Models"
+    title = await manager.auto_title_if_default(
+        "chat-1", "I want to find out where System One models help"
     )
+    assert title == "System One Decision Models"
     assert native_reads == 1
+    assert slept == []
+
+
+@pytest.mark.asyncio
+async def test_claude_fallback_title_is_not_held_behind_native_polls(monkeypatch) -> None:
+    """With no native title and no model title, the fallback comes back at once, and no poll is waited on."""
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(provider="claude")})
+    manager._TITLE_POLL_DELAYS = (0.0, 60.0, 60.0)
+    slept: list[float] = []
+
+    async def recording_sleep(delay):
+        slept.append(delay)
+
+    async def failing_oneshot(*_args, **_kwargs):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(claude_adapter, "get_session_info", lambda _sid, directory=None: None)
+    monkeypatch.setattr(pc.asyncio, "sleep", recording_sleep)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
+
+    assert await manager.auto_title_if_default("chat-1", "Check Zendesk ticket 152025") == (
+        "Check Zendesk ticket 152025"
+    )
+    assert manager._chats["chat-1"].title == "Check Zendesk ticket 152025"
+    assert slept == []
+
+
+@pytest.mark.asyncio
+async def test_claude_native_title_is_read_once_and_nothing_polls_after_the_fallback(monkeypatch) -> None:
+    """The fallback stands; no background poll reads the provider again after it is written."""
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(provider="claude")})
+    manager._TITLE_POLL_DELAYS = (0.0, 0.001, 0.001)
+    published: list[dict] = []
+    manager._events = SimpleNamespace(publish=published.append)
+    reads = 0
+    slept: list[float] = []
+    real_sleep = asyncio.sleep
+
+    class FakeInfo:
+        custom_title = "Claude Late Title"
+        summary = ""
+
+    def late_session_info(_sid, directory=None):
+        nonlocal reads
+        reads += 1
+        return FakeInfo() if reads >= 2 else None
+
+    async def recording_sleep(delay):
+        slept.append(delay)
+
+    async def failing_oneshot(*_args, **_kwargs):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(claude_adapter, "get_session_info", late_session_info)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
+    monkeypatch.setattr(pc.asyncio, "sleep", recording_sleep)
+
+    assert await manager.auto_title_if_default("chat-1", "hello") == "hello"
+    for _ in range(20):
+        await real_sleep(0)
+
+    assert reads == 1
+    assert slept == []
+    assert manager._chats["chat-1"].title == "hello"
+    assert published == []
+
+
+@pytest.mark.asyncio
+async def test_claude_rename_during_the_titler_wins_over_the_fallback(monkeypatch) -> None:
+    """A rename made while the one-shot titler runs keeps the user's title; no fallback is written."""
+    chat = _chat(provider="claude")
+    manager = _manager(chats={"chat-1": chat})
+    manager._TITLE_POLL_DELAYS = (0.0, 0.001)
+
+    def no_native_title(_sid, directory=None):
+        return None
+
+    async def rename_then_fail(*_args, **_kwargs):
+        chat.title = "User Picked This"
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(claude_adapter, "get_session_info", no_native_title)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", rename_then_fail)
+
+    assert await manager.auto_title_if_default("chat-1", "hello") is None
+    assert chat.title == "User Picked This"
 
 
 @pytest.mark.asyncio

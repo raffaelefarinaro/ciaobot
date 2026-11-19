@@ -28,6 +28,7 @@ from acp.schema import (
 )
 from pydantic import TypeAdapter
 
+from ciao.model_tiers import resolve_tier
 from ciao.models import (
     BridgeMode,
     ContextCompactedEvent,
@@ -45,6 +46,8 @@ logger = logging.getLogger(__name__)
 
 _LATE_QUIET = frozenset({"usage_update", "config_option_update", "current_mode_update"})
 _LATE_WAKE = "The agent continued after background work finished."
+# A chat's model string is user-controlled, so a status line echoes at most this many characters.
+_STATUS_MODEL_CHARS = 80
 
 _CONTENT_BLOCK: TypeAdapter[Any] = TypeAdapter(
     TextContentBlock
@@ -141,6 +144,17 @@ def _config_options(response: Any) -> list[dict[str, Any]]:
     return options
 
 
+class ModeNotApplied(Exception):
+    """A mode other than bypass could not be set, so the turn must not run.
+
+    The message is fixed and carries no adapter text: the caller reports a fixed sentence.
+    """
+
+    def __init__(self, mode: str) -> None:
+        super().__init__(mode)
+        self.mode = mode
+
+
 def _update_body(update: Mapping[str, Any]) -> dict[str, Any]:
     inner = update.get("update")
     if (
@@ -186,6 +200,8 @@ class AcpSession:
         self._late_open = False
         self._late_substantive = False
         self._quiet_task: asyncio.Task[None] | None = None
+        # The not-offered model status is reported once per session.
+        self._model_reported = False
         self._outer_emit = broker.emit
         broker.emit = self._emit
 
@@ -415,35 +431,60 @@ class AcpSession:
                 self._journal_event(event)
 
     async def apply(self, *, mode: BridgeMode, model: str, thinking: str) -> list[StreamEvent]:
+        """Hold the agent at the chat's mode, model and thinking level before a turn.
+
+        A mode other than ``bypass`` is fail-closed: when the agent offers no value for it,
+        or the switch fails, ``ModeNotApplied`` is raised and the turn must not run. Bypass
+        is the one mode whose failure is only reported, since it is the looser setting.
+        """
+        strict = mode != "bypass"
         events: list[StreamEvent] = []
         for choice in mode_choices(self.spec, mode):
             picked = pick_value(choice, self._offered(choice.config_id))
             if picked is None:
-                current = self._normalizer.current_values.get(choice.config_id, "")
+                if strict:
+                    raise ModeNotApplied(mode)
                 events.append(SystemStatusEvent(
                     type="system",
-                    status=f"{self.spec.id} does not offer a mode for '{mode}'; keeping {current}.",
+                    status=f"{self.spec.id} does not offer a mode for '{mode}'.",
                 ))
                 continue
-            events.extend(await self._set_option(choice.config_id, picked))
+            events.extend(await self._set_option(choice.config_id, picked, strict=strict))
         if model:
+            # The model is set exactly when the agent offers it. A bare tier name (opus) is the
+            # one alias mapped: to the offered model that has that word. Anything else is not
+            # guessed at and not sent, so the agent keeps its default; one status line per
+            # session says so.
             offered = self._offered(self.spec.model_config_id)
-            if model in offered:
-                events.extend(await self._set_option(self.spec.model_config_id, model))
+            target = model if model in offered else resolve_tier(model, offered)
+            if target is not None:
+                events.extend(await self._set_option(self.spec.model_config_id, target))
+            elif offered and not self._model_reported:
+                self._model_reported = True
+                events.append(SystemStatusEvent(
+                    type="system",
+                    status=f"{self.spec.id} does not offer the model '{model[:_STATUS_MODEL_CHARS]}'.",
+                ))
         if thinking and self.spec.thought_config_id:
             offered = self._offered(self.spec.thought_config_id)
             if not offered or thinking in offered:
                 events.extend(await self._set_option(self.spec.thought_config_id, thinking))
         return events
 
-    async def _set_option(self, config_id: str, value: str) -> list[StreamEvent]:
+    async def _set_option(self, config_id: str, value: str, *, strict: bool = False) -> list[StreamEvent]:
         if self._normalizer.current_values.get(config_id) == value:
             return []
+        failed = False
         try:
             await self._connection.conn.set_config_option(config_id, self.session_id, value)
         except RequestError as exc:
-            # The adapter's error text can carry paths and settings; it stays in the log.
-            logger.warning("%s could not set %s: %s", self.spec.id, config_id, redact_text(str(exc)))
+            # The adapter's error text can carry paths and settings, so only its type is logged.
+            logger.warning("%s could not set %s (%s).", self.spec.id, config_id, type(exc).__name__)
+            failed = True
+        # Raised outside the handler: no adapter exception is chained to the turn's error.
+        if failed:
+            if strict:
+                raise ModeNotApplied(config_id)
             return [SystemStatusEvent(
                 type="system",
                 status=f"{self.spec.id} could not set {config_id}.",

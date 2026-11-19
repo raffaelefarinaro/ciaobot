@@ -108,15 +108,10 @@ async def test_unattended_rejects_without_emitting_card() -> None:
     assert not broker.has("call-1")
 
 
-def test_respond_unknown_id_is_already_resolved() -> None:
+def test_respond_unknown_id_is_acknowledged_as_already_resolved() -> None:
     broker = PermissionBroker(lambda _event: None)
     result = broker.respond("missing", True)
-    assert result == QuestionResponseResult(
-        ok=False,
-        error="This approval has already been answered.",
-        retryable=False,
-        already_resolved=True,
-    )
+    assert result == QuestionResponseResult(ok=True, already_resolved=True)
 
 
 @pytest.mark.asyncio

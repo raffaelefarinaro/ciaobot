@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import math
 import os
+import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, AsyncIterable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -96,6 +97,26 @@ def build_prompt(request: AgentRequest) -> str:
             summary = f"{summary} - caption: {image.caption}"
         lines.append(summary)
     return "\n".join(lines).strip()
+
+
+_NATIVE_SLASH = re.compile(r"^/[\w:-]+(?:\s|$)")
+
+
+def native_slash_prompt(request: AgentRequest) -> tuple[str, str] | None:
+    """Split a native slash command from the context capsule Ciaobot put in front of it.
+
+    Returns ``(command_text, capsule)`` when the prompt starts with the recorded
+    ``injected_context_prefix`` and what follows it is a slash command; None
+    otherwise. Trust comes from the recorded prefix only: capsule-shaped text the
+    user typed is never split off, so it stays user text.
+    """
+    capsule = request.injected_context_prefix
+    if not capsule or not request.prompt.startswith(capsule):
+        return None
+    command = request.prompt[len(capsule):]
+    if not _NATIVE_SLASH.match(command):
+        return None
+    return command, capsule
 
 
 def prepend_stable_context(request: AgentRequest) -> None:

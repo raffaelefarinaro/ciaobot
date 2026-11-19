@@ -27,7 +27,6 @@ import asyncio
 import json
 import math
 import os
-import re
 import time
 import uuid
 import warnings
@@ -91,6 +90,7 @@ from ciao.providers.base import (
     QuestionResponseResult,
     build_claude_message_stream,
     build_prompt,
+    native_slash_prompt,
     rate_limit_quota_payload,
 )
 from ciao.rate_limits import RateLimitStore, default_store_path, is_rate_limit_telemetry
@@ -342,19 +342,6 @@ def get_bundled_claude_path() -> str | None:
     except Exception:
         pass
     return None
-
-
-def auth_command(*, device_auth: bool = False) -> list[str]:
-    """Interactive login command, for ``ciao auth claude`` and the PWA.
-
-    ``device_auth`` has no Claude equivalent and is ignored.
-    """
-    from ciao.tool_path import resolve_tool
-
-    binary = get_bundled_claude_path() or resolve_tool("claude")
-    if not binary:
-        raise FileNotFoundError("Claude CLI not found")
-    return [binary, "auth", "login"]
 
 
 # Patterns from the bundled Claude Code CLI's stderr that are harmless noise
@@ -1101,15 +1088,11 @@ class ClaudeProvider(BaseSDKProvider):
             return build_claude_message_stream(
                 replace(request, prompt=COMPACT_COMMAND, images=[]), uuid=prompt_uuid
             )
-        command = request.prompt
-        capsule = request.injected_context_prefix
-        if capsule and request.prompt.startswith(capsule):
-            # Trust comes from request construction, never from capsule-shaped
-            # text in the prompt: only the exact recorded prefix is removed, so
-            # a user-authored second block stays user text and is never routed
-            # into hook context.
-            command = request.prompt[len(capsule):]
-        if command != request.prompt and re.match(r"^/[\w:-]+(?:\s|$)", command):
+        # Trust comes from request construction, never from capsule-shaped text
+        # in the prompt: only the exact recorded prefix is split off.
+        slash = native_slash_prompt(request)
+        if slash is not None:
+            command, capsule = slash
             request = replace(request, prompt=command)
             self._slash_contexts[prompt_uuid] = (build_prompt(request), capsule)
         return build_claude_message_stream(request, uuid=prompt_uuid)

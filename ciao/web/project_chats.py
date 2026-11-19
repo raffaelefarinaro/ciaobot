@@ -497,15 +497,23 @@ _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # takes (ciao/providers/opencode.py::_ensure_server,
 # ciao/providers/claude.py::_ensure_connected).
 _PROVIDER_IDLE_TIMEOUT_SECONDS = 900.0
-# Claude is the exception to the timeout above. Its provider is one CLI
-# process whose next turn resumes the same session, but rebuilding it pays a
+# ACP agents (Claude today) are the exception to the timeout above. Each is one
+# agent process whose next turn resumes the same session, but rebuilding it pays a
 # cold start that measured 13-53 s on a loaded 10-core Mac — which is what the
 # SDK's initialize deadline times out on. The most recently used few are
 # therefore kept warm past the idle timeout. Both bounds matter: the count
 # stops a day of touching chats from pinning one CLI per chat, and the idle
 # age stops a chat left open for days from doing the same.
 _CLAUDE_WARM_PROVIDER_LIMIT = 4
-_CLAUDE_WARM_IDLE_TIMEOUT_SECONDS = 3600.0
+_ACP_WARM_IDLE_TIMEOUT_SECONDS = 3600.0
+
+
+def _runs_over_acp(provider: str) -> bool:
+    """Whether a provider id runs as an ACP agent process, which the warm pool keeps."""
+    descriptor = provider_registry.get(provider)
+    return descriptor is not None and bool(descriptor.acp_spec_path)
+
+
 RESTART_BLOCKER_REASONS = (
     "streaming",
     "background_work",
@@ -626,7 +634,6 @@ def _has_running_loop() -> bool:
 # local backend simply times out and the deterministic fallback applies, the
 # same trade the schedule attention classifier makes with a longer window.
 _TITLE_LLM_TIMEOUT_S = 45.0
-
 _TITLE_SYSTEM_PROMPT = """\
 You name chat sessions for a sidebar. Reply with ONLY the title: a short \
 specific noun phrase (3-8 words) naming the session's subject. No quotes, no \
@@ -5652,11 +5659,11 @@ class ProjectChatManager:
         candidates = [
             (self._provider_last_used[chat_id], chat_id)
             for chat_id, kind in self._provider_kind.items()
-            if kind == "claude"
+            if _runs_over_acp(kind)
             and chat_id in self._providers
             and chat_id in self._provider_last_used
             and now - self._provider_last_used[chat_id]
-            < _CLAUDE_WARM_IDLE_TIMEOUT_SECONDS
+            < _ACP_WARM_IDLE_TIMEOUT_SECONDS
         ]
         candidates.sort(reverse=True)
         return {chat_id for _, chat_id in candidates[:_CLAUDE_WARM_PROVIDER_LIMIT]}
@@ -5677,7 +5684,7 @@ class ProjectChatManager:
 
         The most recently used Claude providers are exempt while they are
         within ``_CLAUDE_WARM_PROVIDER_LIMIT`` and
-        ``_CLAUDE_WARM_IDLE_TIMEOUT_SECONDS``; rebuilding one costs a cold
+        ``_ACP_WARM_IDLE_TIMEOUT_SECONDS``; rebuilding one costs a cold
         start (``_warm_claude_ids``). ``force`` ignores that exemption too.
         """
         if not self._providers:
@@ -10026,14 +10033,11 @@ class ProjectChatManager:
                     chat_id,
                     exc_info=True,
                 )
-            # Claude escalation: a wedged CLI means generation may never
-            # have stopped, and the interrupted turn can leave a stale
-            # terminal message in the SDK transport buffer that would
-            # truncate the next turn's receive_response(). Dropping the
-            # client solves both; the next turn reconnects and resumes the
-            # session (ProviderService._provider is rebuilt on demand).
-            chat_meta = self._chats.get(chat_id)
-            if chat_meta is not None and chat_meta.provider == "claude":
+            # Escalation: a wedged agent may never have stopped generating.
+            # Dropping its connection ends the process; the next turn
+            # reconnects and resumes the session (ProviderService._provider is
+            # rebuilt on demand).
+            if self._chats.get(chat_id) is not None:
                 try:
                     await asyncio.wait_for(provider.disconnect(), timeout=5.0)
                 except Exception:  # noqa: BLE001 — teardown is best-effort
@@ -10070,52 +10074,35 @@ class ProjectChatManager:
         Three tiers, in order:
 
         1. The provider's native session title (opencode's ``title`` agent or
-           Claude Code's ``aiTitle``). Poll OpenCode via ``_TITLE_POLL_DELAYS``;
-           check Claude once, since context-prefixed Ciaobot prompts commonly
-           suppress its native titler. Every wait re-checks the chat, so a
-           manual rename or a delete stops titling.
+           Claude Code's ``aiTitle``). OpenCode is polled through
+           ``_TITLE_POLL_DELAYS`` before the lower tiers run. Claude (ACP) is
+           read once, with no wait. Context-prefixed Ciaobot prompts commonly
+           suppress Claude's native titler, and nothing polls after the fallback
+           is written. Every wait re-checks the chat, so a manual rename or a
+           delete stops titling.
         2. A one-shot model call (``_llm_chat_title``) when the native title
-           is absent. For Claude this runs immediately, not after the full
-           OpenCode poll window.
+           is absent, run straight after the inline native read.
         3. The deterministic ``chat_service._fallback_title`` (first 6 words of the
-           prompt) so the sidebar never stays stuck on "New Chat". An end-of-turn
-           pass can still upgrade it when a title becomes available.
+           prompt) so the sidebar never stays stuck on "New Chat".
         """
         fallback = chat_service._fallback_title(user_text)
 
         def _is_titling_target(title: str) -> bool:
             # "New Chat" is always a target; the deterministic fallback is also
-            # considered a target so a late poll can upgrade it to the native
-            # title once the provider finally publishes one.
+            # a target so the end-of-turn pass in `_drive()` can replace it with
+            # a title that reads the assistant's reply.
             return title == "New Chat" or (fallback is not None and title == fallback)
 
         chat = self._chats.get(chat_id)
         provider = getattr(chat, "provider", "claude") if chat else "claude"
-        delays = (0.0,) if provider == "claude" else self._TITLE_POLL_DELAYS
-        for delay in delays:
-            if delay:
-                await asyncio.sleep(delay)
-            chat = self._chats.get(chat_id)
-            # Bail on rename/delete, but not on a missing session: the turn
-            # may still be creating it, and a later poll will find it.
-            # The fallback title is still considered title-able so the late
-            # poll (fired after the turn) can upgrade it to the native title.
-            if chat is None or not _is_titling_target(chat.title):
-                return None
-            if not chat.session_id:
-                continue
-
-            title = await self._native_chat_title(chat)
-            if not title:
-                continue
-
-            # Re-check: user may have renamed while we were reading.
-            chat = self._chats.get(chat_id)
-            if chat is None or not _is_titling_target(chat.title):
-                return None
-            chat.title = title
-            self._save()
-            return title
+        delays: tuple[float, ...] = self._TITLE_POLL_DELAYS
+        if provider == "claude":
+            delays = (0.0,)
+        stopped, native = await self._poll_native_title(chat_id, delays, _is_titling_target)
+        if stopped:
+            return None
+        if native:
+            return native
         # Native title was absent. A model-generated label beats the raw
         # prompt snippet; the end-of-turn pass can retry a failed early call.
         chat = self._chats.get(chat_id)
@@ -10136,6 +10123,41 @@ class ProjectChatManager:
         chat.title = fallback
         self._save()
         return fallback
+
+    async def _poll_native_title(
+        self, chat_id: str, delays: Sequence[float], is_target: Callable[[str], bool]
+    ) -> tuple[bool, str | None]:
+        """Wait through ``delays`` for the provider's native title and write it when it lands.
+
+        Returns ``(stopped, title)``: ``stopped`` when the chat was renamed, deleted or left
+        the titling targets, so no further titling applies; ``title`` when a native title
+        was written.
+        """
+        for delay in delays:
+            if delay:
+                await asyncio.sleep(delay)
+            chat = self._chats.get(chat_id)
+            # Bail on rename/delete, but not on a missing session: the turn
+            # may still be creating it, and a later poll will find it.
+            # The fallback title is still considered title-able so the late
+            # poll (fired after the turn) can upgrade it to the native title.
+            if chat is None or not is_target(chat.title):
+                return True, None
+            if not chat.session_id:
+                continue
+
+            title = await self._native_chat_title(chat)
+            if not title:
+                continue
+
+            # Re-check: user may have renamed while we were reading.
+            chat = self._chats.get(chat_id)
+            if chat is None or not is_target(chat.title):
+                return True, None
+            chat.title = title
+            self._save()
+            return False, title
+        return False, None
 
     async def _llm_chat_title(
         self, chat: ChatInfo, user_text: str, assistant_text: str

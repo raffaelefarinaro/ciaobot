@@ -139,103 +139,6 @@ async def test_base_provider_response_defaults_are_explicitly_unsupported(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("approved", [True, False])
-@pytest.mark.parametrize("session_id", ["", "foreign-session"])
-async def test_claude_response_contract_preserves_gate_match_semantics(
-    tmp_path: Path, approved: bool, session_id: str
-) -> None:
-    from claude_agent_sdk.types import (
-        PermissionResultAllow, PermissionResultDeny, ToolPermissionContext,
-    )
-
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("General", workspace="personal")
-    chat = pcm.create_chat(project.project_id, title="t")
-    provider = pcm._get_provider(chat.chat_id).provider
-    provider._session_id = "ses_claude"
-    gate = provider.permission_gate
-    context = ToolPermissionContext(
-        signal=None, suggestions=[], tool_use_id="tool-1", agent_id=None
-    )
-    emitted = asyncio.Event()
-    gate.set_emit(lambda _event: emitted.set())
-    pending = asyncio.create_task(gate.handle("Bash", {"command": "ls"}, context))
-    await emitted.wait()
-
-    result = await provider.respond_permission(
-        "tool-1", approved, "because", session_id=session_id
-    )
-    assert result == QuestionResponseResult(True)
-    sdk_result = await pending
-    if approved:
-        assert isinstance(sdk_result, PermissionResultAllow)
-    else:
-        assert isinstance(sdk_result, PermissionResultDeny)
-        assert sdk_result.message == "because"
-        assert sdk_result.interrupt is False
-    assert provider.response_session_id == ""
-
-
-@pytest.mark.asyncio
-async def test_claude_response_contract_no_match_is_already_resolved(
-    tmp_path: Path,
-) -> None:
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("General", workspace="personal")
-    chat = pcm.create_chat(project.project_id, title="t")
-    provider = pcm._get_provider(chat.chat_id).provider
-
-    missing = await provider.respond_permission("never-held", True)
-    assert missing == QuestionResponseResult(True, already_resolved=True)
-    assert provider.permission_gate.answer("never-held", approved=True) is False
-
-    from claude_agent_sdk.types import ToolPermissionContext
-
-    context = ToolPermissionContext(
-        signal=None, suggestions=[], tool_use_id="duplicate", agent_id=None
-    )
-    emitted = asyncio.Event()
-    provider.permission_gate.set_emit(lambda _event: emitted.set())
-    pending = asyncio.create_task(
-        provider.permission_gate.handle("Bash", {"command": "ls"}, context)
-    )
-    await emitted.wait()
-    first = await provider.respond_permission("duplicate", True)
-    second = await provider.respond_permission("duplicate", False)
-    assert first == QuestionResponseResult(True)
-    assert second == QuestionResponseResult(True, already_resolved=True)
-    await pending
-
-
-@pytest.mark.asyncio
-async def test_claude_response_after_gate_teardown_is_already_resolved(
-    tmp_path: Path,
-) -> None:
-    from claude_agent_sdk.types import PermissionResultDeny, ToolPermissionContext
-
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("General", workspace="personal")
-    chat = pcm.create_chat(project.project_id, title="t")
-    provider = pcm._get_provider(chat.chat_id).provider
-    emitted = asyncio.Event()
-    provider.permission_gate.set_emit(lambda _event: emitted.set())
-    context = ToolPermissionContext(
-        signal=None, suggestions=[], tool_use_id="torn-down", agent_id=None
-    )
-    pending = asyncio.create_task(
-        provider.permission_gate.handle("Bash", {"command": "ls"}, context)
-    )
-    await emitted.wait()
-
-    provider.permission_gate.cancel_all()
-    assert isinstance(await pending, PermissionResultDeny)
-    assert await provider.respond_permission("torn-down", True) == QuestionResponseResult(
-        True, already_resolved=True
-    )
-    assert provider.permission_gate.pending_count == 0
-
-
-@pytest.mark.asyncio
 async def test_unknown_provider_captures_tool_id_before_acknowledgement(
     tmp_path: Path,
 ) -> None:
@@ -804,37 +707,6 @@ def test_a_native_question_blocks_a_new_ordinary_turn(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_respond_permission_forwards_to_provider_gate(tmp_path: Path) -> None:
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("General", workspace="personal")
-    chat = pcm.create_chat(project.project_id, title="t")
-
-    # Force a provider to exist so we can simulate a pending permission.
-    provider_service = pcm._get_provider(chat.chat_id)
-    gate = provider_service.provider.permission_gate
-
-    from claude_agent_sdk.types import (
-        PermissionResultAllow,
-        ToolPermissionContext,
-    )
-
-    ctx = ToolPermissionContext(
-        signal=None, suggestions=[], tool_use_id="tool-1", agent_id=None
-    )
-    pending = asyncio.create_task(gate.handle("Bash", {"command": "ls"}, ctx))
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-
-    ok = await pcm.respond_permission(
-        chat.chat_id, request_id="tool-1", approved=True, reason=""
-    )
-    assert ok.ok is True
-
-    result = await pending
-    assert isinstance(result, PermissionResultAllow)
-
-
-@pytest.mark.asyncio
 async def test_respond_permission_keeps_matching_pending_without_ack(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("General", workspace="personal")
@@ -1030,38 +902,40 @@ async def test_respond_permission_returns_false_when_no_provider(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_respond_permission_unknown_request_id_returns_false(tmp_path: Path) -> None:
+async def test_respond_permission_unknown_request_id_is_acknowledged_on_the_acp_path(
+    tmp_path: Path,
+) -> None:
+    """A stale id on the ACP provider (Claude) is already settled: acknowledged, so the card clears."""
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("General", workspace="personal")
-    chat = pcm.create_chat(project.project_id, title="t")
-    pcm._get_provider(chat.chat_id)  # instantiate gate
+    chat = pcm.create_chat(project.project_id, title="t", provider="claude")
+    provider_service = pcm._get_provider(chat.chat_id)
+    assert provider_service.provider.response_session_id == ""  # no live session behind the reply
 
     ok = await pcm.respond_permission(
         chat.chat_id, request_id="never-asked", approved=True, reason=""
     )
+
     # A stale id is already settled; acknowledge it so clients clear the card.
     assert ok.ok is True
 
 
 @pytest.mark.asyncio
-async def test_respond_permission_strips_buffered_event_from_active_stream(
+async def test_respond_permission_strips_buffered_event_from_active_stream_on_the_acp_path(
     tmp_path: Path,
 ) -> None:
-    """An answered permission must not replay on the next subscribe.
+    """An answered permission must not replay on the next subscribe, on the ACP path too.
 
-    Repro: the user opens a chat, the SDK asks for Bash approval, the
-    user taps Approve, then later reopens the chat. Without buffer
-    cleanup the broker replays the original ``permission_request`` and
-    the PWA renders a phantom Approve/Deny card for a request that's
-    already been answered.
+    Repro: the user opens a chat, the agent asks for Bash approval, the user taps Approve,
+    then reopens the chat. Without buffer cleanup the broker replays the original
+    ``permission_request`` and the PWA renders a phantom card for a settled request.
     """
     from ciao.web.chat_broker import ChatStream
 
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("General", workspace="personal")
-    chat = pcm.create_chat(project.project_id, title="t")
+    chat = pcm.create_chat(project.project_id, title="t", provider="claude")
 
-    # Simulate an in-flight stream that already published a permission_request.
     stream = ChatStream("hi")
     pcm._broker.register(chat.chat_id, stream)
     stream.publish({
@@ -1072,10 +946,9 @@ async def test_respond_permission_strips_buffered_event_from_active_stream(
         "request_id": "tool-99",
     })
 
-    # Ensure a provider exists so respond_permission's gate hop is exercised.
     pcm._get_provider(chat.chat_id)
 
-    # Stale reply (gate has nothing pending) — should still strip the buffer.
+    # Stale reply (the ACP provider holds nothing pending) must still strip the buffer.
     await pcm.respond_permission(
         chat.chat_id, request_id="tool-99", approved=True, reason=""
     )
@@ -1220,33 +1093,6 @@ async def test_child_session_permission_reply_uses_child_session(tmp_path: Path)
     ]
 
 
-@pytest.mark.asyncio
-async def test_parallel_claude_permissions_both_reach_the_gate(tmp_path: Path) -> None:
-    from claude_agent_sdk.types import PermissionResultAllow, ToolPermissionContext
-
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("General", workspace="personal")
-    chat = pcm.create_chat(project.project_id, title="t")
-    gate = pcm._get_provider(chat.chat_id).provider.permission_gate
-    pcm._broker.register(chat.chat_id, ChatStream("hi"))
-    gate.set_emit(lambda ev: pcm._notify_permission(chat.chat_id, ev))
-
-    def ctx(tool_use_id: str) -> ToolPermissionContext:
-        return ToolPermissionContext(
-            signal=None, suggestions=[], tool_use_id=tool_use_id, agent_id=None
-        )
-
-    first = asyncio.create_task(gate.handle("Grep", {}, ctx("tu-a")))
-    second = asyncio.create_task(gate.handle("Bash", {}, ctx("tu-b")))
-    await asyncio.sleep(0)
-
-    assert (await pcm.respond_permission(chat.chat_id, request_id="tu-a", approved=True)).ok
-    assert isinstance(await asyncio.wait_for(first, 1), PermissionResultAllow)
-    assert json.loads(chat.pending_permission)["request_id"] == "tu-b"
-    assert (await pcm.respond_permission(chat.chat_id, request_id="tu-b", approved=True)).ok
-    assert isinstance(await asyncio.wait_for(second, 1), PermissionResultAllow)
-
-
 class _YieldingPostClient(_PostClient):
     def __init__(self, status_code: int = 204) -> None:
         super().__init__()
@@ -1328,41 +1174,6 @@ async def test_opencode_409_deny_does_not_retract_the_card(tmp_path: Path) -> No
 
     assert result.ok and result.already_resolved
     assert _denied(stream) == []
-
-
-@pytest.mark.asyncio
-async def test_losing_claude_deny_does_not_retract_an_approved_call(tmp_path: Path) -> None:
-    from claude_agent_sdk.types import PermissionResultAllow, ToolPermissionContext
-
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("General", workspace="personal")
-    chat = pcm.create_chat(project.project_id, title="t")
-    gate = pcm._get_provider(chat.chat_id).provider.permission_gate
-    stream = ChatStream("hi")
-    pcm._broker.register(chat.chat_id, stream)
-    gate.set_emit(lambda ev: pcm._notify_permission(chat.chat_id, ev))
-    stream.publish({
-        "type": "tool_use", "tool_name": "Write", "tool_use_id": "tu-a",
-        "file_touch": {"file_path": "notes.md", "action": "created"},
-    })
-
-    ctx = ToolPermissionContext(
-        signal=None, suggestions=[], tool_use_id="tu-a", agent_id=None
-    )
-    task = asyncio.create_task(gate.handle("Write", {}, ctx))
-    await asyncio.sleep(0)
-
-    approve, deny = await asyncio.gather(
-        pcm.respond_permission(chat.chat_id, request_id="tu-a", approved=True),
-        pcm.respond_permission(chat.chat_id, request_id="tu-a", approved=False),
-    )
-
-    assert approve.ok and not approve.already_resolved
-    assert deny.ok and deny.already_resolved
-    assert isinstance(await asyncio.wait_for(task, 1), PermissionResultAllow)
-    assert _denied(stream) == []
-    tool_event = next(e for e in stream.buffered_events() if e.get("type") == "tool_use")
-    assert "file_touch" in tool_event
 
 
 _CHILD_THEN_NEWER = [

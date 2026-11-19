@@ -17,7 +17,7 @@ from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig
 from ciao.setup_marker import read_setup_vault_mode
-from ciao.setup_status import claude_auth_status, setup_status
+from ciao.setup_status import claude_auth_status, claude_status_probe, setup_status
 from ciao.web.auth import AuthMiddleware
 from ciao.web.routes_api import (
     provider_connection_action,
@@ -48,6 +48,10 @@ def claude_cli_present(monkeypatch):
     """
     monkeypatch.setattr(
         "ciao.setup_status.claude_cli_path", lambda: "/usr/local/bin/claude"
+    )
+    # Claude chats run through the ACP adapter, so the adapter counts as installed too.
+    monkeypatch.setattr(
+        "ciao.setup_status.claude_adapter_path", lambda: "/usr/local/bin/claude-agent-acp"
     )
     monkeypatch.setattr("ciao.setup_status._cli_version", lambda binary: "2.0.0 (Claude Code)")
     monkeypatch.setattr(
@@ -2521,6 +2525,20 @@ def test_missing_claude_row_has_no_mcp_command(tmp_path, monkeypatch) -> None:
 
     assert claude["auth"] == "not_installed"
     assert "mcp_command" not in claude
+
+
+def test_claude_cli_without_the_acp_adapter_is_not_ready(monkeypatch) -> None:
+    monkeypatch.setattr("ciao.setup_status.claude_adapter_path", lambda: "")
+
+    row = claude_status_probe({}, config_path=Path("/nonexistent"))
+
+    assert row["ok"] is False
+    assert row["detail"] == (
+        "Claude Code is installed, but the ACP adapter (claude-agent-acp) is not. "
+        "Use Install in Settings → Providers."
+    )
+    assert row["command"] == "npm install -g @agentclientprotocol/claude-agent-acp@0.108.1"
+    assert row["terminal_action"] == "claude-install"
 
 
 _FAKE_CODEX = """#!/bin/sh
