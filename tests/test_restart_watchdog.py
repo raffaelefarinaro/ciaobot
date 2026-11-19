@@ -38,28 +38,6 @@ def test_supervised_watchdog_exits_with_the_restart_code_and_never_execs() -> No
     assert exits == [75]
 
 
-def test_legacy_installer_bootstrap_watchdog_still_reexecs(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The legacy installer bootstrap takes the same unsupervised re-exec path
-    as any other unsupervised run."""
-    execs: list[tuple[str, list[str]]] = []
-    exits: list[int] = []
-    monkeypatch.setattr(sys, "argv", ["ciao", "run", "--installer-bootstrap"])
-
-    _restart_watchdog(
-        75,
-        supervised=False,
-        sleep=lambda s: None,
-        execv=lambda exe, argv: execs.append((exe, argv)),
-        exit_now=exits.append,
-    )
-
-    assert exits == []
-    assert len(execs) == 1
-    assert execs[0][1][:3] == [sys.executable, "-m", "ciao.cli"]
-
-
 def test_unsupervised_watchdog_re_execs_as_before() -> None:
     """A plain `ciao run` under launchd has no supervisor to relaunch it, so
     the watchdog re-execs a fresh interpreter under the same pid."""

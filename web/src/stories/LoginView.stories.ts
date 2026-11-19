@@ -216,7 +216,7 @@ export const Narrow: Story = {
 }
 
 export const BootstrapSetup: Story = {
-  // The non-native first-run wizard: run note, tour, workspace field with its
+  // The first-run wizard: run note, tour, workspace field with its
   // probe, the ok provider card, and a blocked Finish until the form is done.
   parameters: {
     fixture: {
@@ -239,31 +239,6 @@ export const BootstrapSetup: Story = {
     expect(badge?.textContent?.trim()).toBe('[ok] Ready')
     expect((canvasElement.querySelector('input[type="radio"][value="claude"]') as HTMLInputElement).checked).toBe(true)
     // The form is incomplete: the submit is actually blocked.
-    expect(finishButton(canvasElement).disabled).toBe(true)
-  },
-}
-
-export const BootstrapNative: Story = {
-  // native_bootstrap: no shell bar, run note or tour, and the probe answers
-  // about the installer's suggested folder.
-  parameters: {
-    fixture: {
-      routes: [
-        statusRoute(() => json(bootstrapStatus({ native_bootstrap: true, suggested_workspace: '~/Ciaobot' }))),
-        inspectRoute('~/Ciaobot', () => inspectAnswer()),
-      ],
-    },
-  },
-  render: () => renderLoginState({ label: 'native first-run setup' }),
-  play: async ({ canvasElement }) => {
-    await wizardReady(canvasElement)
-    const shell = canvasElement.querySelector('.login-shell')
-    expect(shell?.className).toContain('native-bootstrap')
-    expect(shellTitle(canvasElement)).toBeNull()
-    expect(canvasElement.querySelector('.setup-tour')).toBeNull()
-    expect(canvasElement.querySelector('.setup-run-note')).toBeNull()
-    expect(setupWorkspace(canvasElement).value).toBe('~/Ciaobot')
-    expect(canvasElement.querySelector('#setup-workspace-name')).toBeTruthy()
     expect(finishButton(canvasElement).disabled).toBe(true)
   },
 }
@@ -520,30 +495,6 @@ export const Restarting: Story = {
     expect(canvasElement.textContent).toContain('When it comes back, log in with the password you just set.')
     expect(canvasElement.querySelector('.spinner-container .caret')).toBeTruthy()
     expect(canvasElement.querySelector('.setup-wizard')).toBeNull()
-  },
-}
-
-export const RestartingNative: Story = {
-  // The native restarting copy, also through the finish write.
-  parameters: {
-    fixture: {
-      routes: [
-        statusRoute(() => json(bootstrapStatus({ native_bootstrap: true, suggested_workspace: '~/Ciaobot' }))),
-        inspectRoute('~/Ciaobot', () => inspectAnswer()),
-        route('POST', LOGIN_SETUP_DONE_PATH, () => json({ ok: true })),
-      ],
-    },
-  },
-  render: () => renderLoginState({ label: 'restarting after native setup' }),
-  play: async ({ canvasElement, userEvent }) => {
-    await wizardReady(canvasElement)
-    await fillPasswordFields(canvasElement, userEvent)
-    await userEvent.click(finishButton(canvasElement))
-    await waitFor(() => expect(canvasElement.querySelector('.restarting-body')).toBeTruthy())
-    expect(canvasElement.textContent).toContain('Setup saved. Ciaobot is starting on this Mac.')
-    expect(canvasElement.textContent).toContain('When it comes back, log in with the password you just set.')
-    expect(shellTitle(canvasElement)).toBeNull()
-    expect(canvasElement.querySelector('.line--banner')).toBeNull()
   },
 }
 

@@ -1195,14 +1195,11 @@ export interface SetupCheck {
 
 /** `/api/setup-status`, from ciao/setup_status.py::setup_status. */
 export interface SetupStatus {
-  native_bootstrap: boolean
   configured: boolean
   bootstrap: boolean
   mode: string
   workspace_root: string
   vault_root: string
-  /** The installer's folder suggestion on a fresh install; null otherwise. */
-  suggested_workspace: string | null
   checks: SetupCheck[]
   providers: Record<string, SetupProviderStatus>
   provider_ready: boolean

@@ -537,32 +537,12 @@ def _restart_watchdog(
 async def _async_main(
     *,
     supervised: bool = False,
-    installer_bootstrap: bool = False,
-    installer_run_id: str | None = None,
-    installer_suggest_workspace: str | None = None,
     app_engine: bool = False,
     app_engine_port: int | None = None,
 ) -> int:
-    if installer_bootstrap:
-        # Before anything is created: refuse to bootstrap over an install, then
-        # isolate this process from any inherited destination.
-        from ciao.install_discovery import InstallerEntryRefused, require_fresh_installer_entry
-
-        try:
-            require_fresh_installer_entry(environ=os.environ, cwd=Path.cwd())
-        except InstallerEntryRefused as exc:
-            print(f"Ciaobot installer bootstrap refused: {exc}", file=sys.stderr)
-            return 64
-        _enter_installer_bootstrap_environment(config_root=Path.home() / ".ciao" / "installer-bootstrap")
     _ensure_tool_dirs_on_path()
     os.environ.setdefault("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
-    # Ordinary startup keeps its exact call shape; only the installer mode asks
-    # for the scratch branch.
-    config = (
-        CiaoConfig.from_env(installer_bootstrap=True, installer_suggest_workspace=installer_suggest_workspace)
-        if installer_bootstrap
-        else CiaoConfig.from_env()
-    )
+    config = CiaoConfig.from_env()
     if app_engine_port is not None:
         # The app's `--port`: this process only, ahead of the instance lock
         # and the ready record so both carry the port actually served.
@@ -589,15 +569,6 @@ async def _async_main(
         config.import_legacy_gws_profile_env()
         if config._workspace_registry_changed:
             config.persist_workspace_registry()
-        if installer_bootstrap:
-            return await _run_server_locked(
-                config,
-                supervised=supervised,
-                startup_id=lock.startup_id,
-                engine_pid=os.getpid(),
-                installer_bootstrap=True,
-                installer_run_id=installer_run_id,
-            )
         if app_engine:
             # App mode: publish the readiness record for the app's probe and
             # hand the engine's lifetime to the parent watcher, which SIGTERMs
@@ -629,23 +600,6 @@ async def _async_main(
         )
 
 
-def _enter_installer_bootstrap_environment(*, config_root: Path) -> None:
-    """Isolate an installer bootstrap child from anything inherited.
-
-    The environment is sanitised in place, not just the mapping handed to the
-    config: several downstream readers hit ``os.environ`` directly. The working
-    directory moves to a neutral launcher folder so cwd discovery cannot see the
-    runtime root, and the no-browser preference survives.
-    """
-    keep = {"CIAO_NO_BROWSER"}
-    for key in [key for key in os.environ if key.startswith(("CIAO_", "PWA_")) and key not in keep]:
-        os.environ.pop(key, None)
-    os.environ.pop("GWS_PROFILE", None)
-    launcher = config_root / "launcher"
-    launcher.mkdir(parents=True, exist_ok=True)
-    os.chdir(launcher)
-
-
 def _start_workspace_move_verify(
     app: Any, config: CiaoConfig, tracker: StartupTracker, request_restart: Any
 ) -> None:
@@ -674,9 +628,8 @@ def _start_workspace_move_verify(
 def _pin_app_engine_bootstrap_host(config: CiaoConfig, *, app_engine: bool) -> None:
     """Keep the pre-setup wizard of the app's engine on loopback.
 
-    The installer bootstrap already binds 127.0.0.1; the app engine's
-    bootstrap (no configured workspace yet) must not be a setup wizard
-    reachable on the LAN. Once a workspace is configured the host the
+    The app engine's bootstrap (no configured workspace yet) must not be a
+    setup wizard reachable on the LAN. Once a workspace is configured the host the
     settings overlay chose applies as before. This process only, never saved.
     """
     if app_engine and config.bootstrap_mode:
@@ -724,8 +677,6 @@ async def _run_server_locked(
     supervised: bool = False,
     startup_id: str | None = None,
     engine_pid: int | None = None,
-    installer_bootstrap: bool = False,
-    installer_run_id: str | None = None,
     app_engine: bool = False,
 ) -> int:
     """Server implementation; caller owns the workspace instance lock."""
@@ -739,16 +690,7 @@ async def _run_server_locked(
 
     app_settings = AppSettingsStore(config.state_path.parent / "app_settings.json")
     app_settings.import_legacy_env(getattr(config, "legacy_env_settings", {}))
-    bootstrap_port = config.pwa_port
     app_settings.apply_to_config(config)
-    if installer_bootstrap:
-        # Stored settings must not move an installer bootstrap off loopback or
-        # into dev mode; this applies to this process only and is never saved.
-        # The port is the bootstrap's own PWA_PORT (see from_env), not a stored setting.
-        config.pwa_host = "127.0.0.1"
-        config.pwa_port = bootstrap_port
-        config.dev_mode = False
-        config.app_repo = None
     _pin_app_engine_bootstrap_host(config, app_engine=app_engine)
 
     setup_error_logging(config.workspace_root)
@@ -1177,8 +1119,6 @@ async def _run_server_locked(
         config,
         app_settings=app_settings,
         mcp_service=mcp_service,
-        installer_bootstrap=installer_bootstrap,
-        installer_run_id=installer_run_id,
     )
     app.state.startup_tracker = tracker
     # The startup gate's own verdict, so routes and tests read the same answer
@@ -1781,9 +1721,6 @@ async def _run_server_locked(
 def main(
     *,
     supervised: bool = False,
-    installer_bootstrap: bool = False,
-    installer_run_id: str | None = None,
-    installer_suggest_workspace: str | None = None,
     app_engine: bool = False,
     app_engine_port: int | None = None,
 ) -> None:
@@ -1794,19 +1731,9 @@ def main(
     from ciao.instance_lock import WorkspaceAlreadyRunningError
 
     try:
-        if app_engine:
-            code = asyncio.run(
-                _async_main(
-                    supervised=supervised, app_engine=True, app_engine_port=app_engine_port
-                )
-            )
-        else:
-            code = asyncio.run(_async_main(
-                supervised=supervised,
-                installer_bootstrap=installer_bootstrap,
-                installer_run_id=installer_run_id,
-                installer_suggest_workspace=installer_suggest_workspace,
-            ))
+        code = asyncio.run(
+            _async_main(supervised=supervised, app_engine=app_engine, app_engine_port=app_engine_port)
+        )
     except WorkspaceAlreadyRunningError as exc:
         print(f"Ciaobot did not start: {exc}", file=sys.stderr)
         code = 2

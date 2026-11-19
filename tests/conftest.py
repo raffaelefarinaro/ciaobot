@@ -190,8 +190,8 @@ def _restore_ciao_env(monkeypatch: pytest.MonkeyPatch) -> None:
     ``monkeypatch`` cannot undo a key it never saw set. A later test's implicit
     workspace resolution then skipped install discovery, because a workspace was
     already named, and read an unregistered root: ``memory-proposals`` listed
-    nothing, but only in the serial full run, where ``test_installer_handoff``
-    precedes ``test_memory_proposal_cli``.
+    nothing, but only in the serial full run, where an earlier driven setup
+    left the variables behind.
 
     Depends on ``monkeypatch`` so it is torn down before it: both then restore
     to the same pre-test state.

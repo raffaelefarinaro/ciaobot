@@ -2994,7 +2994,7 @@ export const inventory: InventoryEntry[] = [
       "web/src/router.ts"
     ],
     "variants": [],
-    "variantNotes": "Login/bootstrap/native-bootstrap/restarting/provider diagnostics; connected composition. Detailed variants are unassessed.",
+    "variantNotes": "Login/bootstrap/restarting/provider diagnostics; connected composition. Detailed variants are unassessed.",
     "states": [
       {
         "name": "login",
@@ -3050,15 +3050,7 @@ export const inventory: InventoryEntry[] = [
         "storyIds": [
           "login-view--bootstrap-setup"
         ],
-        "note": "The v-else-if isBootstrap wizard on a non-native install: first-run shell bar, run note, tour, the workspace field with its mount note, the claude '[ok] Ready' card, and Finish Setup blocked while the form is incomplete; GET /api/setup/inspect-folder answers for ~/ciaobot."
-      },
-      {
-        "name": "bootstrap-native",
-        "coverage": "covered",
-        "storyIds": [
-          "login-view--bootstrap-native"
-        ],
-        "note": "native_bootstrap: no shell bar, run note or tour, the native-bootstrap form styles, and the suggested ~/Ciaobot workspace is what the probe answers about."
+        "note": "The v-else-if isBootstrap wizard on the install: first-run shell bar, run note, tour, the workspace field with its mount note, the claude '[ok] Ready' card, and Finish Setup blocked while the form is incomplete; GET /api/setup/inspect-folder answers for ~/ciaobot."
       },
       {
         "name": "bootstrap-detected-workspaces",
@@ -3122,15 +3114,7 @@ export const inventory: InventoryEntry[] = [
         "storyIds": [
           "login-view--restarting"
         ],
-        "note": "The RESTARTING branch (isRestarting), reached the way production reaches it: the non-native wizard completes, POST /api/setup/finish answers, and the wizard form is replaced by the restarting copy with the 'ciaobot@local · restarting' shell bar while the probe poll keeps running."
-      },
-      {
-        "name": "restarting-native",
-        "coverage": "covered",
-        "storyIds": [
-          "login-view--restarting-native"
-        ],
-        "note": "The nativeBootstrap restarting copy ('Setup saved. Ciaobot is starting on this Mac.') with no shell bar and no banner, also reached through the finish write."
+        "note": "The RESTARTING branch (isRestarting), reached the way production reaches it: the wizard completes, POST /api/setup/finish answers, and the wizard form is replaced by the restarting copy with the 'ciaobot@local · restarting' shell bar while the probe poll keeps running."
       },
       {
         "name": "finish-error",
