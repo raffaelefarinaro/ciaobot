@@ -119,6 +119,7 @@ private final class FakeSettingsOpener: SystemSettingsOpening {
 private final class FakeClientUpdater: ClientUpdateControlling {
     var canCheckForUpdates: Bool
     var unavailableReason: String?
+    var automaticallyInstallsUpdates = false
     private(set) var startCount = 0
     private(set) var checkCount = 0
 
@@ -127,6 +128,7 @@ private final class FakeClientUpdater: ClientUpdateControlling {
         self.unavailableReason = unavailableReason
     }
 
+    func setAutomaticallyInstallsUpdates(_ on: Bool) { automaticallyInstallsUpdates = on }
     func start() { startCount += 1 }
     func checkForUpdates() { checkCount += 1 }
 }
@@ -741,7 +743,10 @@ final class TraySettingsTests: XCTestCase {
         )
         let settings = try XCTUnwrap(menu.item(withTitle: MenuBarController.settingsTitle))
         let submenu = try XCTUnwrap(settings.submenu)
-        XCTAssertEqual(submenu.items.map(\.title), [MenuBarController.checkForUpdatesTitle])
+        XCTAssertEqual(submenu.items.map(\.title), [
+            MenuBarController.checkForUpdatesTitle,
+            MenuBarController.automaticInstallTitle,
+        ])
     }
 
     // MARK: - Notification guidance

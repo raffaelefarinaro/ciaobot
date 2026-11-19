@@ -89,9 +89,15 @@ private final class FakeMenuBarController: MenuBarControlling {
 private final class FakeClientUpdater: ClientUpdateControlling {
     var canCheckForUpdates = true
     var unavailableReason: String?
+    var automaticallyInstallsUpdates = false
+    private(set) var automaticSets: [Bool] = []
     private(set) var startCount = 0
     private(set) var checkCount = 0
 
+    func setAutomaticallyInstallsUpdates(_ on: Bool) {
+        automaticSets.append(on)
+        automaticallyInstallsUpdates = on
+    }
     func start() { startCount += 1 }
     func checkForUpdates() { checkCount += 1 }
 }
@@ -678,6 +684,65 @@ final class MenuBarTests: XCTestCase {
 
         XCTAssertTrue(delegate.applicationShouldHandleReopen(NSApplication.shared, hasVisibleWindows: false))
         XCTAssertEqual(presenter.presentCount, 1)
+    }
+
+    // MARK: - Install Updates Automatically row
+
+    /// The checkmark reads Sparkle's setting when the menu is built, sits right
+    /// after Check for Updates, and a click forwards exactly one setter call.
+    func testInstallUpdatesAutomaticallyRowReflectsAndToggles() throws {
+        let updater = FakeClientUpdater()
+        updater.automaticallyInstallsUpdates = true
+        let controller = MenuBarController(
+            status: AppSessionStatus(),
+            statusItemFactory: FakeStatusItemFactory(),
+            openWindow: {},
+            quit: {},
+            updates: updater
+        )
+        controller.start()
+
+        let submenu = try XCTUnwrap(controller.menu?.item(withTitle: MenuBarController.settingsTitle)?.submenu)
+        XCTAssertEqual(submenu.items.map(\.title), [
+            MenuBarController.checkForUpdatesTitle,
+            MenuBarController.automaticInstallTitle,
+        ])
+        let row = try XCTUnwrap(controller.menu?.deepItem(withTitle: MenuBarController.automaticInstallTitle))
+        XCTAssertEqual(row.state, .on)
+        XCTAssertTrue(row.isEnabled)
+        XCTAssertEqual(row.toolTip, MenuBarController.automaticInstallToolTip)
+        XCTAssertEqual(updater.automaticSets, [], "Showing the row must not change the setting.")
+
+        controller.toggleAutomaticInstall(row)
+        XCTAssertEqual(updater.automaticSets, [false], "One click forwards exactly one setter call.")
+
+        let after = try XCTUnwrap(controller.menu?.deepItem(withTitle: MenuBarController.automaticInstallTitle))
+        XCTAssertEqual(after.state, .off, "The rebuilt menu shows the new setting.")
+    }
+
+    /// An unavailable updater keeps the row visible but disabled, and the tooltip
+    /// leads with the reason. A click that AppKit still delivers changes nothing.
+    func testInstallUpdatesAutomaticallyRowIsDisabledWithTheReason() throws {
+        let reason = "This build has no update feed configured."
+        let updater = FakeClientUpdater()
+        updater.unavailableReason = reason
+        let controller = MenuBarController(
+            status: AppSessionStatus(),
+            statusItemFactory: FakeStatusItemFactory(),
+            openWindow: {},
+            quit: {},
+            updates: updater
+        )
+        controller.start()
+
+        let row = try XCTUnwrap(controller.menu?.deepItem(withTitle: MenuBarController.automaticInstallTitle))
+        XCTAssertFalse(row.isEnabled)
+        XCTAssertNil(row.action)
+        XCTAssertTrue(row.toolTip?.hasPrefix(reason) == true)
+        XCTAssertTrue(row.toolTip?.hasSuffix(MenuBarController.automaticInstallToolTip) == true)
+
+        controller.toggleAutomaticInstall(row)
+        XCTAssertEqual(updater.automaticSets, [], "A disabled row must not reach the updater.")
     }
 
     // MARK: - Notification opt-in row

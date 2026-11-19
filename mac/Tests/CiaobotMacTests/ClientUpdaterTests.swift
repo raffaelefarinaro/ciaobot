@@ -10,6 +10,7 @@ import Sparkle
 private final class FakeUpdaterEngine: ClientUpdaterEngine {
     var canCheckForUpdates = true
     var automaticallyChecksForUpdates = false
+    var automaticallyDownloadsUpdates = false
     private(set) var startCount = 0
     private(set) var checkCount = 0
     private(set) var backgroundCheckCount = 0
@@ -89,6 +90,44 @@ final class ClientUpdaterTests: XCTestCase {
 
         XCTAssertEqual(engine.startCount, 1)
         XCTAssertEqual(engine.backgroundCheckCount, 0, "A user who turned automatic checks off must not be checked on launch.")
+    }
+
+    // MARK: - Automatic install setting
+
+    /// The setting reads and writes the engine only once the updater has started.
+    /// Before that there is no engine, so a write is not kept for later.
+    func testAutomaticInstallSettingIsForwardedOnlyOnceStarted() {
+        let engine = FakeUpdaterEngine()
+        let updater = makeUpdater(engine: engine)
+
+        XCTAssertFalse(updater.automaticallyInstallsUpdates, "An unstarted updater reads false.")
+        updater.setAutomaticallyInstallsUpdates(true)
+        XCTAssertFalse(engine.automaticallyDownloadsUpdates, "An unstarted updater must not forward the setter.")
+
+        updater.start()
+        XCTAssertFalse(updater.automaticallyInstallsUpdates, "The engine's own default is read after start.")
+
+        updater.setAutomaticallyInstallsUpdates(true)
+        XCTAssertTrue(engine.automaticallyDownloadsUpdates)
+        XCTAssertTrue(updater.automaticallyInstallsUpdates)
+
+        updater.setAutomaticallyInstallsUpdates(false)
+        XCTAssertFalse(engine.automaticallyDownloadsUpdates)
+    }
+
+    /// An inert build never creates an engine, so the setting reads false and
+    /// the setter is a no-op.
+    func testAutomaticInstallSettingIsIgnoredWhenUnavailable() {
+        let engine = FakeUpdaterEngine()
+        var factoryCount = 0
+        let updater = makeUpdater(engine: engine, bundleIdentifier: "com.example.other") { factoryCount += 1 }
+
+        updater.start()
+        updater.setAutomaticallyInstallsUpdates(true)
+
+        XCTAssertEqual(factoryCount, 0, "An unavailable updater must not build an engine.")
+        XCTAssertFalse(updater.automaticallyInstallsUpdates)
+        XCTAssertFalse(engine.automaticallyDownloadsUpdates)
     }
 
     // MARK: - Inert builds

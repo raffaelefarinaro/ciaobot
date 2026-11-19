@@ -410,6 +410,18 @@ keeps it for its install on quit. Taking control for a different owner otherwise
 aborts the older gate first, so the older drain is cancelled before the new owner
 drains.
 
+**Install Updates Automatically** (the Settings row in the tray) is Sparkle's
+`automaticallyDownloadsUpdates`. It is on by default, from `SUAutomaticallyUpdate`,
+and Sparkle stores the user's choice in the app's defaults. With it on, a verified
+update is downloaded in the background and installs through the same gate; with
+it off, Sparkle asks first and the user chooses Install and Relaunch. The setting
+reads off and ignores writes until the updater has started, and it is never
+written in an unavailable build.
+
+A Sparkle idle reading can overlap a Settings restart that already holds the
+engine's drain claim. That overlap is accepted: both paths drain the engine and
+stop it, so neither can leave chats running.
+
 Once the install runs it is an update quit: no dialog, and a bundled engine is
 stopped with the 35-second quit grace (SIGTERM, then SIGKILL). The drain has
 already closed admission, so the stop is quick, and admission stays closed until
@@ -638,6 +650,8 @@ Whenever the app opens a System Settings pane (Login Items for approval or a ref
 **Settings → Change Connected Host…** is enabled only after a verified connection. It presents the client window and only then posts the same request as **Change Server…** (Command-Shift-L); if the window cannot be presented, the presenter shows an explicit failure and this action does not post a request that would be silently dropped. The connection screen returns and the previous connection is dismantled locally. It never contacts, stops, restarts, or reconfigures the separately installed server. The connection screen returns **Keep me signed in** to its default instead of carrying the previous host's choice, so signing in to a different host starts from a fresh default.
 
 **Settings → Check for Updates…** appears only in a release build that carries an updater configuration, and is enabled only while Sparkle reports it is idle; clicking it asks Sparkle to check and show its own progress. Its tooltip states that an automatic update restarts this Mac client only. In every other build the row keeps its truthful disabled shape: **Updates unavailable**, with the exact reason in its tooltip (no feed, no signing key, a debug or test process, or a foreign bundle identifier), and no action. Opening the menu never starts the updater or a check.
+
+**Settings → Install Updates Automatically** is a checkmark row directly below Check for Updates. It is bound to Sparkle's automatic download-and-install setting (see [Automatic updates](#automatic-updates)): a click flips it, and the menu is rebuilt to show the new state. In an updater-enabled build the row is disabled whenever the updater is unavailable, and its tooltip leads with the same reason as the Updates unavailable row. A build with no updater object shows no such row.
 
 When macOS actually denies notifications, the blocked row inside **Settings** shows that in its title and opens the fixed app-owned URL `x-apple.systempreferences:com.apple.Notifications-Settings.extension`. The same fixed link is offered by the allowed-but-delivery-off row, and by no other state. It is never supplied by a server or a page, and it is not offered for a technical registration error, a missing sign-in, or a missing connection: those visible states name the missing step and offer either the signed/bundled app or the Ciaobot window instead. When notifications are unavailable because the process is not a bundled app, no Settings action is offered, because System Settings cannot turn that process into a notification-capable app.
 

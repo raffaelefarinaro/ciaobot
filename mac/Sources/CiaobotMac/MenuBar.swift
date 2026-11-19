@@ -191,6 +191,8 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     /// Says what an install does. The bundled engine is drained first, so the
     /// install waits for idle chats; then the app and its engine restart together.
     static let checkForUpdatesToolTip = "Download and install a verified Ciaobot update. Ciaobot waits until no chat is working, then restarts the app and its engine together."
+    static let automaticInstallTitle = "Install Updates Automatically"
+    static let automaticInstallToolTip = "Downloads verified updates in the background and installs them when no chat is working."
     /// A visible label if the bundled template is missing. It is not a status
     /// claim and the item still carries the same limited menu.
     static let fallbackTitle = "C"
@@ -873,7 +875,7 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         if changeHost != nil {
             otherItems.append(changeHostItem())
         }
-        otherItems.append(updatesItem())
+        otherItems.append(contentsOf: updatesItems())
 
         for notification in notificationItems {
             submenu.addItem(notification)
@@ -1233,20 +1235,22 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     }
 
     /// Two truthful shapes: a real check when this build has a started updater,
-    /// or the disabled row that names why it cannot. The row never starts the
-    /// updater and never claims a check it cannot perform.
-    private func updatesItem() -> NSMenuItem {
+    /// or the disabled row that names why it cannot. The automatic-install row
+    /// follows the check row in both shapes; it is disabled whenever the updater
+    /// is unavailable. The row never starts the updater and never claims a check
+    /// it cannot perform.
+    private func updatesItems() -> [NSMenuItem] {
         guard let updates else {
             let item = NSMenuItem(title: Self.updatesUnavailableTitle, action: nil, keyEquivalent: "")
             item.isEnabled = false
             item.toolTip = "This build has no updater. Ciaobot for Mac does not download or install updates; use a new app build when one is available."
-            return item
+            return [item]
         }
         if let reason = updates.unavailableReason {
             let item = NSMenuItem(title: Self.updatesUnavailableTitle, action: nil, keyEquivalent: "")
             item.isEnabled = false
             item.toolTip = "\(reason) Ciaobot for Mac does not download or install updates in this build; use a new app build when one is available."
-            return item
+            return [item, automaticInstallItem(updates, unavailableReason: reason)]
         }
         let item = NSMenuItem(
             title: Self.checkForUpdatesTitle,
@@ -1257,6 +1261,27 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         // Sparkle reports when a check or a download is already running.
         item.isEnabled = updates.canCheckForUpdates
         item.toolTip = Self.checkForUpdatesToolTip
+        return [item, automaticInstallItem(updates, unavailableReason: nil)]
+    }
+
+    /// A checkmark row for Sparkle's automatic download-and-install setting. An
+    /// unavailable updater shows the row disabled, with the reason ahead of the
+    /// usual tooltip, so the row says why it cannot be changed.
+    private func automaticInstallItem(
+        _ updates: ClientUpdateControlling,
+        unavailableReason: String?
+    ) -> NSMenuItem {
+        let item = NSMenuItem(title: Self.automaticInstallTitle, action: nil, keyEquivalent: "")
+        item.state = updates.automaticallyInstallsUpdates ? .on : .off
+        if let unavailableReason {
+            item.isEnabled = false
+            item.toolTip = "\(unavailableReason) \(Self.automaticInstallToolTip)"
+        } else {
+            item.action = #selector(toggleAutomaticInstall(_:))
+            item.target = self
+            item.isEnabled = true
+            item.toolTip = Self.automaticInstallToolTip
+        }
         return item
     }
 
@@ -1489,6 +1514,14 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
         updates.checkForUpdates()
         // The click may have started a session; the next open reads the real
         // availability again.
+        rebuildMenu()
+    }
+
+    /// Flips Sparkle's automatic download-and-install setting. A disabled row
+    /// forwards nothing even if AppKit sends the action anyway.
+    @objc func toggleAutomaticInstall(_ sender: Any?) {
+        guard let updates, updates.unavailableReason == nil else { return }
+        updates.setAutomaticallyInstallsUpdates(!updates.automaticallyInstallsUpdates)
         rebuildMenu()
     }
 
