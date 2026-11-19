@@ -2151,25 +2151,47 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/SchedulePanel.vue",
       "web/src/components/TaskWorkspaceSurface.vue"
     ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variants": [
+      "rail",
+      "close-title",
+      "phone-narrow"
+    ],
+    "variantNotes": "`rail: true` takes the header's width for the rail, `closeTitle` overrides the tooltip while `aria-label` keeps `closeLabel`, and under a 767px viewport the close button hides so the title keeps the room.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ItemTitleRow.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["item-title-row--default"],
+        "note": "The close button in its shared .btn-icon box plus the slotted plain title; the close tooltip falls back to closeLabel (title attribute, aria-hidden glyph) and a click emits close."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "close-title",
+        "coverage": "covered",
+        "storyIds": ["item-title-row--close-title"],
+        "note": "closeTitle overrides the root's tooltip while aria-label keeps the accessible name (SchedulePanel: name Close automation, tooltip Close)."
+      },
+      {
+        "name": "rail",
+        "coverage": "covered",
+        "storyIds": ["item-title-row--rail"],
+        "note": "rail: true adds item-title-row--rail so the row takes the header's room; ChatPanel, ProjectView and SchedulePanel pass :rail when the title rail is on."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": ["item-title-row--keyboard-focus"],
+        "note": "Tab reaches the close button, :focus-visible draws the 2px accent outline, and Enter emits close."
+      },
+      {
+        "name": "phone-narrow",
+        "coverage": "covered",
+        "storyIds": ["item-title-row--phone-narrow"],
+        "note": "The @media (max-width: 767px) rule hides .close-btn so the title keeps the room on a phone; the story pins the workshop's narrow 390px viewport (the media query follows the viewport, not the story wrapper)."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in ItemTitleRow.vue has not yet been audited."
+      "status": "none",
+      "detail": "The title row has no loading states: close and slot content render as given. While the engine names a chat the pending shimmer is the host's own branch outside this row (ChatPanel renders it when no rail is shown) and each host draws its own first-load skeleton; the row has no failure, empty or stale state."
     },
     "migration": {
       "status": "unassessed",
@@ -2190,25 +2212,68 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/HomeRecentChats.vue",
       "web/src/components/SchedulePanel.vue"
     ],
-    "variants": [],
-    "variantNotes": "Link/button and optional sub/end slots. Detailed variants are unassessed.",
+    "variants": [
+      "link",
+      "heading-slot",
+      "sub-slot",
+      "detail-slot",
+      "end-slot",
+      "disabled"
+    ],
+    "variantNotes": "A `to` route renders the link branch; without it the row is a button the host wires up. The heading slot replaces the plain title (host spans carry list-row-title), sub is the muted sub-line, detail holds any clamped lines under it and end the right column (list-row-when for the muted mono); all of the host's classes, handlers and attributes land on the root.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ListRow.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["list-row--default"],
+        "note": "The v-else button branch with the plain text title over the shared hairline row; the host's handlers land on the root (HomeRecentChats passes @click, title and disabled), so the story proves a click reaches it."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "link-row",
+        "coverage": "covered",
+        "storyIds": ["list-row--link-row"],
+        "note": "The v-if `to` branch in a fresh memory router: an anchor with the row's href whose click opens the route and lands router-link-exact-active (SchedulePanel's overview renders its link rows this way)."
+      },
+      {
+        "name": "heading-slot",
+        "coverage": "covered",
+        "storyIds": ["list-row--heading-slot"],
+        "note": "The heading slot replaces the plain title; a host title span must carry list-row-title to share the title style (:slotted rule, SchedulePanel's ov-title)."
+      },
+      {
+        "name": "sub-slot",
+        "coverage": "covered",
+        "storyIds": ["list-row--sub-slot"],
+        "note": "The v-if $slots.sub branch: one muted sub-line under the title."
+      },
+      {
+        "name": "detail-slot",
+        "coverage": "covered",
+        "storyIds": ["list-row--detail-slot"],
+        "note": "The detail slot under the sub-line (a pending question, a reply snippet); the slot renders raw, with no wrapper of the row's own, so hosts clamp it themselves."
+      },
+      {
+        "name": "end-slot",
+        "coverage": "covered",
+        "storyIds": ["list-row--end-slot"],
+        "note": "The v-if $slots.end branch: the right-hand end column, whose time or state span carries list-row-when for the muted mono (:slotted rule)."
+      },
+      {
+        "name": "disabled",
+        "coverage": "covered",
+        "storyIds": ["list-row--disabled"],
+        "note": "The host's :disabled lands on the root button (HomeRecentChats for chats that are not in this browser) and keeps it actually disabled, while a host title stays the root's tooltip beside the visible text label."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": ["list-row--keyboard-focus"],
+        "note": "Tab reaches the row and :focus-visible draws the global 2px accent outline; roaming the list with arrows is the host's roamFocus (lib/listRoaming.ts), not the row's, and is not claimed here."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in ListRow.vue has not yet been audited."
+      "status": "none",
+      "detail": "ListRow has no loading states of its own: it renders loaded rows only. List loading belongs to the hosts — Home's lanes draw the shared SkeletonLoader while their first load is in flight (a generic row pair, not ListRow's title-over-sub-line geometry, and a candidate for the loading follow-up), while the Automations overview keeps its loaded rows; the row itself has no failure, empty or stale state."
     },
     "migration": {
       "status": "unassessed",
@@ -3600,9 +3665,9 @@ export const inventory: InventoryEntry[] = [
       },
       {
         "name": "link",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SidebarRow.vue's v-if `to` branch renders a RouterLink with active-class and the same title, shimmer and meta marks; no story exists. The Rows and titles slice owns link rows and their host controls."
+        "coverage": "covered",
+        "storyIds": ["foundation-sidebar-row--link", "foundation-sidebar-row--link-active"],
+        "note": "The v-if `to` branch renders a RouterLink with active-class and the same title, shimmer and meta marks. The link stories assert href and the meta mark, and the row's active classes on the linked route (every production consumer passes `to`; the sidebar's task and settings rows add `active` and aria-current on top)."
       },
       {
         "name": "placeholder",
@@ -3611,10 +3676,16 @@ export const inventory: InventoryEntry[] = [
         "note": "The loading branch: a plain sidebar-row--placeholder box, aria-hidden, not focusable, with one shimmer bar at the given width and no title or meta. SidebarListSkeleton draws lists of these on a first load; the narrow story keeps it inside a 390px block."
       },
       {
+        "name": "host-control",
+        "coverage": "covered",
+        "storyIds": ["foundation-sidebar-row--host-control"],
+        "note": "The v-else branch the host wires up: a plain element carrying the host's role, tabindex, aria-pressed and click handler on the root. No current production consumer uses this branch (ProjectSidebar and SidebarListSkeleton all pass `to` or `placeholder`), so the story claims the branch's own contract, not a host screen."
+      },
+      {
         "name": "keyboard-focus",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ":focus-visible draws the row's 2px accent outline; no rendered focus story exists. The Rows and titles slice owns the keyboard path."
+        "coverage": "covered",
+        "storyIds": ["foundation-sidebar-row--keyboard-focus"],
+        "note": ":focus-visible draws the row's 2px accent outline. The keyboard story tabs to a link row (naturally in the tab order), asserts focus-visible plus the outline and that Enter opens the row's route; the plain branch is focusable only when the host adds tabindex, which the host-control story shows."
       }
     ],
     "loading": {
@@ -4313,25 +4384,59 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/SchedulePanel.vue",
       "web/src/components/TaskWorkspaceSurface.vue"
     ],
-    "variants": [],
-    "variantNotes": "Pending-title/neighbor/arrival states, not a fabricated tab component. Detailed variants are unassessed.",
+    "variants": [
+      "pending-title",
+      "segment-marks",
+      "busy"
+    ],
+    "variantNotes": "A titlePending item shows the naming shimmer under its accessible name; each item's mark (needs, working, unread) draws its track segment in miniature; busy refuses the swipe, wheel and arrow-key steps.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in TitleRail.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["title-rail--default"],
+        "note": "The settled rail: role=group named `<group label>, 2 of 3`, the current item with aria-current=page and tabindex 0 over neighbours at -1, title over project, and one highlighted segment on the hidden track. Swipe, wheel and pull gestures are not claimed by stories."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "pending-title",
+        "coverage": "covered",
+        "storyIds": ["title-rail--pending-title"],
+        "note": "The titlePending branch: the naming shimmer stands in for the title on the pending item (label Naming conversation, <project> passes from the host), while neighbours keep their title text."
+      },
+      {
+        "name": "segment-marks",
+        "coverage": "covered",
+        "storyIds": ["title-rail--segment-marks"],
+        "note": "The track's per-item marks in miniature: needs the alert triangle, working the chase (asserted through its animation), unread the dot."
+      },
+      {
+        "name": "busy",
+        "coverage": "covered",
+        "storyIds": ["title-rail--busy"],
+        "note": "With busy the arrow-key step (and the swipe and wheel) is refused: the asserted window passes with no select landing and aria-current stays put."
+      },
+      {
+        "name": "keyboard-step",
+        "coverage": "covered",
+        "storyIds": ["title-rail--keyboard-step"],
+        "note": "ArrowRight on the focused current item slides to the next item and selects it; the story's host handler moves the current id, so aria-current follows to the neighbour."
+      },
+      {
+        "name": "rename-gesture",
+        "coverage": "covered",
+        "storyIds": ["title-rail--rename-gesture"],
+        "note": "A double click on the current item emits rename (the hosts open the rename field); the story's host handler counts the rename."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": ["title-rail--keyboard-focus"],
+        "note": "Tab reaches the current item only (its neighbours are tabindex -1) and :focus-visible draws the rail's 2px outline on it."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TitleRail.vue has not yet been audited."
+      "status": "none",
+      "detail": "The rail has no loading states: a pending title is the naming-conversation shimmer, not a load, and hosts render the rail only once items exist — each host's own first-load placeholder (the chat's ChatPaneSkeleton and friends) covers that load. No failure, empty or stale geometry exists."
     },
     "migration": {
       "status": "unassessed",
