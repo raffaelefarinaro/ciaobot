@@ -20,7 +20,6 @@ def test_resolve_tier_matches_a_whole_word_only() -> None:
     from ciao.model_tiers import resolve_tier
 
     assert resolve_tier("opus", ["claude-opusx-1"]) is None
-    assert resolve_tier("sonnet", ["sonnet[1m]"]) == "sonnet[1m]"
 
 
 def test_resolve_tier_takes_the_first_offered_match() -> None:
@@ -51,7 +50,12 @@ def test_resolve_tier_prefers_the_plain_id_over_a_bracket_variant() -> None:
     assert resolve_tier("sonnet", ["sonnet[1m]", "claude-sonnet-4-6"]) == "claude-sonnet-4-6"
 
 
-def test_resolve_tier_falls_back_to_a_variant_when_only_variants_are_offered() -> None:
+def test_resolve_tier_never_picks_a_variant_for_a_bare_tier() -> None:
     from ciao.model_tiers import resolve_tier
 
-    assert resolve_tier("sonnet", ["sonnet[1m]"]) == "sonnet[1m]"
+    # Only long-context / older variants offered: no match, so the caller reports
+    # "not offered" and the adapter default stands.
+    assert resolve_tier("sonnet", ["sonnet[1m]"]) is None
+    assert resolve_tier("opus", ["claude-opus-4-8[1m]", "claude-opus-4-7[1m]"]) is None
+    # A plain id beside a variant still wins; the variant is never the fallback.
+    assert resolve_tier("opus", ["claude-opus-4-8[1m]", "claude-opus-4-7"]) == "claude-opus-4-7"

@@ -77,6 +77,7 @@ from ciao.config import (
     RESTART_EXIT_CODE,
     WorkspaceConfig,
 )
+from ciao.model_tiers import MAX_MODEL_ID_CHARS
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
     WORKSPACE_NAME_RE,
@@ -2601,6 +2602,14 @@ async def chat_detail(request: Request) -> Response:
     # read as "no change" there.
     if "pin" in body:
         return await _chat_pin_patch(request, pcm, chat_id, body)
+    # A model id is user-controlled and can reach a status line, so it is bounded as a
+    # delegation's is. None leaves the chat's model alone.
+    model = body.get("model")
+    if isinstance(model, str) and len(model) > MAX_MODEL_ID_CHARS:
+        return JSONResponse(
+            {"error": f"model must be text of at most {MAX_MODEL_ID_CHARS} characters"},
+            status_code=400,
+        )
     try:
         chat = pcm.update_chat(
             chat_id,
@@ -2708,6 +2717,11 @@ async def chat_handover(request: Request) -> JSONResponse:
     body = await request.json()
     provider = str(body.get("provider", "")).strip()
     model = str(body.get("model", "")).strip()
+    if len(model) > MAX_MODEL_ID_CHARS:
+        return JSONResponse(
+            {"error": f"model must be text of at most {MAX_MODEL_ID_CHARS} characters"},
+            status_code=400,
+        )
     raw_messages = body.get("messages", [])
     messages = raw_messages if isinstance(raw_messages, list) else []
     try:

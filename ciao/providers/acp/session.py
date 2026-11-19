@@ -46,6 +46,8 @@ logger = logging.getLogger(__name__)
 
 _LATE_QUIET = frozenset({"usage_update", "config_option_update", "current_mode_update"})
 _LATE_WAKE = "The agent continued after background work finished."
+# A chat's model string is user-controlled, so a status line echoes at most this many characters.
+_STATUS_MODEL_CHARS = 80
 
 _CONTENT_BLOCK: TypeAdapter[Any] = TypeAdapter(
     TextContentBlock
@@ -461,7 +463,7 @@ class AcpSession:
                 self._model_reported = True
                 events.append(SystemStatusEvent(
                     type="system",
-                    status=f"{self.spec.id} does not offer the model '{model}'.",
+                    status=f"{self.spec.id} does not offer the model '{model[:_STATUS_MODEL_CHARS]}'.",
                 ))
         if thinking and self.spec.thought_config_id:
             offered = self._offered(self.spec.thought_config_id)

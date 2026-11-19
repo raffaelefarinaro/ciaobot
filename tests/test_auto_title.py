@@ -1205,3 +1205,156 @@ async def test_claude_rename_during_the_titler_wins_over_the_fallback(monkeypatc
 
     assert await manager.auto_title_if_default("chat-1", "hello") is None
     assert chat.title == "User Picked This"
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_prompt_carries_assistant_reply(monkeypatch) -> None:
+    """The post-reply invocation includes the assistant's framing so the
+    title can name the topic rather than echo the question."""
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(provider="claude")})
+
+    prompts: list[str] = []
+
+    async def fake_oneshot(prompt, **_kwargs):
+        prompts.append(prompt)
+        return "Automation Page Job Log"
+
+    def missing_session_info(_sid, directory=None):
+        return None
+
+    monkeypatch.setattr(claude_adapter, "get_session_info", missing_session_info)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    title = await manager.auto_title_if_default(
+        "chat-1", "why no recent sessions?", "The Automation page lists every job run."
+    )
+    assert title == "Automation Page Job Log"
+    assert "<assistant>The Automation page lists every job run.</assistant>" in prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_failure_still_applies_deterministic_fallback(
+    monkeypatch,
+) -> None:
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(provider="claude")})
+
+    async def failing_oneshot(*_args, **_kwargs):
+        raise RuntimeError("usage limit reached")
+
+    def missing_session_info(_sid, directory=None):
+        return None
+
+    monkeypatch.setattr(claude_adapter, "get_session_info", missing_session_info)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
+
+    assert await manager.auto_title_if_default("chat-1", "hello") == "hello"
+    assert manager._chats["chat-1"].title == "hello"
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_rejects_contaminated_title(monkeypatch) -> None:
+    """A degrading model that echoes the injected capsule (or returns nothing
+    usable) must not contaminate the sidebar; the deterministic fallback wins."""
+    from ciao.web import project_chats as pc
+
+    leaked = (
+        '[CIAO_CONTEXT_BEGIN] [Chat ID: "chat-1"] <ciao-context> workspace=work '
+        "vault=work/memory-vault </ciao-context>"
+    )
+
+    async def leaking_oneshot(*_args, **_kwargs):
+        return leaked
+
+    def missing_session_info(_sid, directory=None):
+        return None
+
+    monkeypatch.setattr(claude_adapter, "get_session_info", missing_session_info)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", leaking_oneshot)
+
+    manager = _manager(chats={"chat-1": _chat(provider="claude")})
+    assert await manager.auto_title_if_default("chat-1", "hello") == "hello"
+    assert manager._chats["chat-1"].title == "hello"
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_not_called_when_native_title_lands(monkeypatch) -> None:
+    """Tier 1 stays free: when the provider publishes a title the one-shot
+    call must never run."""
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(provider="opencode")})
+
+    oneshot_calls: list[int] = []
+
+    async def unexpected_oneshot(*_args, **_kwargs):
+        oneshot_calls.append(1)
+        return "Should Not Be Used"
+
+    async def fake_read_thread(_workspace, _sid, **_kwargs):
+        return {"info": {"title": "Native Title"}, "messages": []}
+
+    monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", unexpected_oneshot)
+
+    assert await manager.auto_title_if_default("chat-1", "hello") == "Native Title"
+    assert oneshot_calls == []
+
+
+@pytest.mark.asyncio
+async def test_llm_fallback_respects_manual_rename_during_call(monkeypatch) -> None:
+    """A rename that lands while the model is running must win."""
+    from ciao.web import project_chats as pc
+
+    chat = _chat(provider="claude")
+    manager = _manager(chats={"chat-1": chat})
+
+    async def slow_oneshot(*_args, **_kwargs):
+        chat.title = "User Picked This"
+        return "Model's Title"
+
+    def missing_session_info(_sid, directory=None):
+        return None
+
+    monkeypatch.setattr(claude_adapter, "get_session_info", missing_session_info)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", slow_oneshot)
+
+    assert await manager.auto_title_if_default("chat-1", "hello") is None
+    assert chat.title == "User Picked This"
+
+
+def test_clean_llm_title_strips_noise() -> None:
+    from ciao.web.chat_service import _clean_llm_title
+
+    assert _clean_llm_title("  Zendesk Ticket Thread  ") == "Zendesk Ticket Thread"
+    assert _clean_llm_title('"Quoted Title"\n') == "Quoted Title"
+    assert _clean_llm_title("`Backticked`") == "Backticked"
+    assert _clean_llm_title("Trailing period.") == "Trailing period"
+    # First non-empty line wins over an explanation paragraph.
+    assert _clean_llm_title("Real Title\n\nHere is why I picked it...") == "Real Title"
+    long = "A" * 80
+    assert _clean_llm_title(long) == "A" * 57 + "..."
+    assert _clean_llm_title("") is None
+    assert _clean_llm_title(None) is None
+    assert _clean_llm_title("[CIAO_CONTEXT_BEGIN] leaked") is None
+    assert _clean_llm_title("New session - 2026-08-31") is None
+
+
+def test_fallback_title_strips_leading_url() -> None:
+    """The reported failure: 'Check Zendesk ticket https://scandit.zendesk…'."""
+    from ciao.web.chat_service import _fallback_title
+
+    assert (
+        _fallback_title(
+            "Check Zendesk ticket https://scandit.zendesk.com/agent/tickets/152025 "
+            "and check the other one too"
+        )
+        == "Check Zendesk ticket"
+    )
+    # A bare-URL prompt still yields something (the URL itself, capped).
+    bare = _fallback_title("https://example.com/very/long/path/segments")
+    assert bare is not None and bare.startswith("https://")
+    assert _fallback_title("plain words only here") == "plain words only here"

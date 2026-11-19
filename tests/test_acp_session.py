@@ -611,6 +611,28 @@ async def test_unoffered_full_id_is_not_guessed_to_a_tier_variant(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_unoffered_model_status_echoes_at_most_80_characters(tmp_path: Path) -> None:
+    """The chat's model string is user-controlled, so the PWA-visible status line is capped."""
+    config = [_select("mode", "default", ["default", "bypassPermissions"]), _model_select(_LEGACY_MODELS)]
+    long_model = "z" * 300
+    async with _started(tmp_path, config_options=config) as harness:
+        events = await harness.session.apply(mode="normal", model=long_model, thinking="")
+        assert _model_set_calls(harness.calls) == []
+        assert [e.status for e in events] == [f"fake does not offer the model '{'z' * 80}'."]
+
+
+@pytest.mark.asyncio
+async def test_bare_tier_with_only_a_variant_offered_is_not_set(tmp_path: Path) -> None:
+    """A bare tier is never mapped to a long-context variant: the default stands and one line says so."""
+    config = [_select("mode", "default", ["default", "bypassPermissions"]),
+              _model_select([{"value": "sonnet[1m]", "name": "Sonnet 1M"}])]
+    async with _started(tmp_path, config_options=config) as harness:
+        events = await harness.session.apply(mode="normal", model="sonnet", thinking="")
+        assert _model_set_calls(harness.calls) == []
+        assert [e.status for e in events] == ["fake does not offer the model 'sonnet'."]
+
+
+@pytest.mark.asyncio
 async def test_unoffered_model_is_reported_once_per_session(tmp_path: Path) -> None:
     config = [_select("mode", "default", ["default", "bypassPermissions"]), _model_select(_LEGACY_MODELS)]
     async with _started(tmp_path, config_options=config) as harness:

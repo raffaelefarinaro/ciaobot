@@ -183,6 +183,32 @@ def test_handover_chat_canonicalizes_and_passes_through_the_model(tmp_path: Path
     assert pcm.get_chat(chat.chat_id).model == "no-such-model"
 
 
+def test_handover_route_refuses_a_model_id_over_the_bound(tmp_path: Path) -> None:
+    """The handover route bounds the model id like a delegation does: 201 is refused, 200 is taken."""
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ciao.web.routes_api import chat_handover
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("handover", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
+    app = Starlette(routes=[Route("/chats/{chat_id}/handover", chat_handover, methods=["POST"])])
+    app.state.project_chat_manager = pcm
+    client = TestClient(app, raise_server_exceptions=False)
+    url = f"/chats/{chat.chat_id}/handover"
+
+    refused = client.post(url, json={"provider": "claude", "model": "m" * 201})
+    assert refused.status_code == 400
+    assert "200 characters" in refused.json()["error"]
+    assert pcm.get_chat(chat.chat_id).model == "opus"
+
+    accepted = client.post(url, json={"provider": "claude", "model": "m" * 200})
+    assert accepted.status_code == 200
+    assert pcm.get_chat(chat.chat_id).model == "m" * 200
+
+
 def test_normalize_truncates_oversized_newest_message() -> None:
     small_rows = [{"role": "user", "content": f"older {i}"} for i in range(13)]
     big = "A" * 7500 + "B" * 7500

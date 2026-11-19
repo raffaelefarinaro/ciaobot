@@ -13,6 +13,9 @@ from collections.abc import Sequence
 
 MODEL_TIERS = ("haiku", "sonnet", "opus", "fable")
 
+# The longest model id an entry point accepts (delegation, chat handover, chat PATCH).
+MAX_MODEL_ID_CHARS = 200
+
 _WORD_BREAK = re.compile(r"[-/_.\[\]\s]+")
 
 
@@ -34,11 +37,12 @@ def resolve_tier(alias: str, offered: Sequence[str]) -> str | None:
 
     1. an offered id equal to the tier name (``opus``);
     2. the first id without a bracketed variant (``claude-opus-4-8`` over
-       ``claude-opus-4-8[1m]``);
-    3. the first match in offered order (a variant, when only variants are offered).
+       ``claude-opus-4-8[1m]``).
 
-    A value that is not a tier resolves to None: a concrete id is matched exactly by
-    the caller, and is never mapped to a tier.
+    When only bracketed variants (``sonnet[1m]``) are offered there is no match and
+    the result is None: a long-context or older variant is never picked for a bare
+    tier. A value that is not a tier also resolves to None: a concrete id is matched
+    exactly by the caller, and is never mapped to a tier.
     """
     tier = canonical_tier(alias)
     if tier not in MODEL_TIERS:
@@ -50,4 +54,4 @@ def resolve_tier(alias: str, offered: Sequence[str]) -> str | None:
     for model in matches:
         if "[" not in model:
             return model
-    return matches[0] if matches else None
+    return None

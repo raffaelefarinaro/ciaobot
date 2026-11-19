@@ -10089,8 +10089,8 @@ class ProjectChatManager:
 
         def _is_titling_target(title: str) -> bool:
             # "New Chat" is always a target; the deterministic fallback is also
-            # considered a target so a late poll can upgrade it to the native
-            # title once the provider finally publishes one.
+            # a target so the end-of-turn pass in `_drive()` can replace it with
+            # a title that reads the assistant's reply.
             return title == "New Chat" or (fallback is not None and title == fallback)
 
         chat = self._chats.get(chat_id)
