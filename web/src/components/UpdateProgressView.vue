@@ -1,11 +1,21 @@
 <template>
-  <div class="update-progress-overlay">
+  <div
+    ref="overlayEl"
+    class="update-progress-overlay"
+    role="alertdialog"
+    aria-modal="true"
+    :aria-label="dialogLabel"
+    tabindex="-1"
+    @keydown="onOverlayKeydown"
+  >
     <!-- The package update's full-window progress view. A `/api/package/update`
          run leaves no persisted record for the screen to read, so these staged
          rows are the screen's own timed animation while the install is in
          flight, exactly as the boot screen advances its rows; a failed run
          returns to the Updates card, and a settled one hands the window to the
-         app-level restart notice. -->
+         app-level restart notice. The run cannot be cancelled, so the overlay
+         is a modal alertdialog: focus enters it, the rest of the app is inert,
+         and Escape is claimed without closing anything. -->
     <div class="update-progress-content">
       <div class="update-progress-head">
         <Wordmark size="lg" />
@@ -45,6 +55,9 @@
         <span class="update-progress-prompt-text">updating</span>
         <span class="caret"></span>
       </div>
+
+      <!-- The stage in words, for screen readers: the rows above are visual. -->
+      <span class="update-progress-sr" aria-live="polite">{{ currentStage }}</span>
     </div>
   </div>
 </template>
@@ -53,7 +66,7 @@
 import Wordmark from './Wordmark.vue'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
-defineProps<{
+const props = defineProps<{
   /** The version the run is moving to; `…` while the card has no answer. */
   version?: string
 }>()
@@ -67,7 +80,7 @@ const STAGES = [
   'checking the current Ciaobot version',
   'preparing the local engine',
   'checking the signed release',
-  'downloading the next hello',
+  'downloading the signed release',
   'installing the updated runtime',
   'getting ready to restart',
 ] as const
@@ -92,6 +105,47 @@ const progressPercent = computed(() =>
 )
 
 const progressLabel = computed(() => `Updating ${progressPercent.value} percent`)
+const dialogLabel = computed(() =>
+  props.version ? `Updating Ciaobot to ${props.version}` : 'Updating Ciaobot',
+)
+const currentStage = computed(() => STAGES[Math.min(activeIndex.value, STAGES.length - 1)])
+
+// ── Modal wiring ──────────────────────────────────────────────────────────
+// The run cannot be cancelled, so the overlay is a modal alertdialog. Focus
+// moves into it, every sibling of its ancestors is made inert so Tab cannot
+// reach the card behind it, and the element that had focus is handed back on
+// the way out. The overlay has no focusable control of its own, so nothing
+// inside it can take the focus back out.
+const overlayEl = ref<HTMLElement | null>(null)
+let returnFocusTo: HTMLElement | null = null
+let inerted: Element[] = []
+
+function makeBackgroundInert(from: HTMLElement) {
+  let node: HTMLElement = from
+  while (node.parentElement) {
+    for (const sibling of Array.from(node.parentElement.children)) {
+      if (sibling !== node && !sibling.hasAttribute('inert')) {
+        sibling.setAttribute('inert', '')
+        inerted.push(sibling)
+      }
+    }
+    node = node.parentElement
+  }
+}
+
+function releaseBackground() {
+  for (const el of inerted) el.removeAttribute('inert')
+  inerted = []
+}
+
+function onOverlayKeydown(event: KeyboardEvent) {
+  // Escape would close a dialog; this one closes nothing, so it is claimed here
+  // and does not reach the app's own Escape handlers behind the overlay.
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+  }
+}
 
 function pad(n: number): string {
   return n.toString().padStart(2, '0')
@@ -131,10 +185,24 @@ function advance() {
   stageTimer = window.setTimeout(advance, 900)
 }
 
-onMounted(() => advance())
+onMounted(() => {
+  const overlay = overlayEl.value
+  if (overlay) {
+    const active = document.activeElement
+    returnFocusTo = active instanceof HTMLElement && active !== document.body ? active : null
+    makeBackgroundInert(overlay)
+    overlay.focus({ preventScroll: true })
+  }
+  advance()
+})
 
 onUnmounted(() => {
   if (stageTimer) window.clearTimeout(stageTimer)
+  releaseBackground()
+  if (returnFocusTo?.isConnected && !returnFocusTo.hasAttribute('disabled')) {
+    returnFocusTo.focus({ preventScroll: true })
+  }
+  returnFocusTo = null
 })
 </script>
 
@@ -152,6 +220,18 @@ onUnmounted(() => {
   background-image:
     linear-gradient(180deg, rgba(255, 77, 109, 0.04) 0%, transparent 60%),
     repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.012) 0 1px, transparent 1px 3px);
+}
+
+.update-progress-overlay:focus {
+  outline: none;
+}
+.update-progress-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }
 
 .update-progress-content {

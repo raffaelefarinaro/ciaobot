@@ -179,9 +179,9 @@ it('says up to date for an installer install with nothing newer', async () => {
   }
 })
 
-it('collapses Updates to its title and an up-to-date badge when nothing is in progress', async () => {
+it('collapses Updates to its title and an up-to-date badge for an editable install with nothing newer', async () => {
   const { wrapper } = await mountCard(
-    { mode: 'installer', current_version: '2.0.0', update_available: false, latest_version: '2.0.0' },
+    { mode: 'editable', current_version: '2.0.0', update_available: false, latest_version: '2.0.0' },
   )
   try {
     // The first card on General is Updates. Its title stays; the status sits in
@@ -196,15 +196,82 @@ it('collapses Updates to its title and an up-to-date badge when nothing is in pr
   }
 })
 
-it('collapses a bundled app that is up to date, without the reinstall copy', async () => {
+it.each([
+  ['bundled_app', 'Ciaobot for Mac updates this engine together with the app.'],
+  ['installer', 'Install Ciaobot for Mac to keep it up to date.'],
+])('keeps the %s hint when the engine is up to date, next to the badge', async (mode, copy) => {
   const { wrapper } = await mountCard(
-    { mode: 'bundled_app', current_version: '2.0.0', update_available: false, latest_version: '2.0.0' },
+    { mode, current_version: '2.0.0', update_available: false, latest_version: '2.0.0' },
   )
   try {
+    // Up to date is not a reason to drop the explanation of where updates come
+    // from: the hint always shows for these two modes.
     const card = wrapper.get('.card')
     expect(card.get('.settings-card-header .badge--success').text()).toBe('Up to date · 2.0.0')
-    expect(card.findAll('p.hint')).toHaveLength(0)
-    expect(card.find('code').exists()).toBe(false)
+    expect(card.findAll('p.hint')).toHaveLength(1)
+    expect(card.get('p.hint').text()).toContain(copy)
+    expect(buttonLabels(wrapper)).not.toContain('Update to 2.0.0')
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+const OVERLAY_ANSWER = { mode: 'editable', current_version: '0.19.0', update_available: true, latest_version: '0.20.0' }
+
+it('makes the progress overlay a modal dialog: focus inside, background inert, Escape claimed', async () => {
+  const { wrapper, post } = await mountCard(OVERLAY_ANSWER, { attach: true })
+  try {
+    await button(wrapper, 'Update to 0.20.0')!.trigger('click')
+    await flushPromises()
+    post.mockImplementation(() => new Promise(() => {}))
+    await button(wrapper, 'Update & Restart')!.trigger('click')
+    await flushPromises()
+
+    const overlay = wrapper.get('.update-progress-overlay')
+    expect(overlay.attributes('role')).toBe('alertdialog')
+    expect(overlay.attributes('aria-modal')).toBe('true')
+    expect(overlay.attributes('aria-label')).toBe('Updating Ciaobot to 0.20.0')
+    // Focus is inside the dialog, not on the body or the card behind it.
+    expect(document.activeElement).toBe(overlay.element)
+    // The card behind the overlay cannot be reached: its siblings are inert.
+    expect(wrapper.get('.pane-body').attributes('inert')).toBeDefined()
+    expect(overlay.attributes('inert')).toBeUndefined()
+    // The stage text is announced politely, and the stage names are the ones
+    // the installer uses.
+    expect(overlay.get('[aria-live="polite"]').text()).toBe('preparing the local engine')
+    expect(overlay.text()).toContain('downloading the signed release')
+    expect(overlay.text()).not.toContain('next hello')
+    // Escape is claimed by the dialog: it closes nothing and stops the event.
+    const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    overlay.element.dispatchEvent(escape)
+    expect(escape.defaultPrevented).toBe(true)
+    expect(wrapper.find('.update-progress-overlay').exists()).toBe(true)
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('returns focus to the card Update button and lifts the inert background after a failed run', async () => {
+  const { wrapper, post } = await mountCard(OVERLAY_ANSWER, { attach: true })
+  try {
+    const trigger = button(wrapper, 'Update to 0.20.0')!
+    // A keyboard or pointer user has the button focused before it is pressed.
+    ;(trigger.element as HTMLButtonElement).focus()
+    await trigger.trigger('click')
+    await flushPromises()
+    // Opening the panel leaves the button that opened it focusable and focused.
+    expect(document.activeElement).toBe(trigger.element)
+
+    post.mockResolvedValue({ ok: false, error: 'disk full' } as never)
+    const restart = button(wrapper, 'Update & Restart')!
+    ;(restart.element as HTMLButtonElement).focus()
+    await restart.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.update-progress-overlay').exists()).toBe(false)
+    expect(wrapper.get('.pane-body').attributes('inert')).toBeUndefined()
+    expect(wrapper.text()).toContain('Update failed: disk full')
+    expect(document.activeElement).toBe(trigger.element)
   } finally {
     wrapper.unmount()
   }

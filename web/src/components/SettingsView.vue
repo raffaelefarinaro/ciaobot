@@ -32,16 +32,19 @@
               </p>
             </div>
             <div v-if="packageStatus && !['bundled_app', 'installer'].includes(packageStatus.mode ?? '') && packageStatus.update_available" class="settings-card-header-actions">
+              <!-- Disabled only while a run is in flight: opening the panel must not
+                   disable the button that opened it, or focus falls to the body. -->
               <button
+                ref="updateTriggerEl"
                 class="btn-primary btn-small"
                 @click="openUpdatePanel"
-                :disabled="packageUpdating || showUpdatePanel"
+                :disabled="packageUpdating"
               >
                 {{ `Update to ${packageStatus.latest_version}` }}
               </button>
             </div>
             <!-- Nothing to do: the status sits in the corner as a badge. -->
-            <span v-else-if="updatesCompact" class="badge badge--success">Up to date<template v-if="packageStatus?.current_version"> · {{ packageStatus.current_version }}</template></span>
+            <span v-else-if="upToDate" class="badge badge--success">Up to date<template v-if="packageStatus?.current_version"> · {{ packageStatus.current_version }}</template></span>
           </div>
           <SkeletonLoader v-if="packageLoading && !packageStatus" label="Checking package status" :count="2" />
           <div v-else-if="packageStatus">
@@ -3164,7 +3167,10 @@ async function fetchPackageStatus() {
   }
 }
 
+const updateTriggerEl = ref<HTMLButtonElement | null>(null)
+
 async function openUpdatePanel() {
+  if (showUpdatePanel.value || packageUpdating.value) return
   showUpdatePanel.value = true
   changelogLoading.value = true
   changelog.value = { commits: [], compare_url: '', error: '' }
@@ -3178,8 +3184,10 @@ async function openUpdatePanel() {
 }
 
 async function doPackageUpdate() {
+  if (packageUpdating.value) return
   packageUpdating.value = true
   packageResult.value = 'Updating Ciaobot and restarting...'
+  let failed = false
   try {
     const res = await api.post<PackageUpdateResult>('/api/package/update')
     if (res.ok) {
@@ -3187,28 +3195,43 @@ async function doPackageUpdate() {
       packageResult.value = ''
       await restartAndReload('Update complete. Restarting Ciaobot with the latest version…')
     } else {
+      failed = true
       packageResult.value = `Update failed: ${res.error || 'unknown error'}`
       await fetchPackageStatus()
     }
   } catch (e) {
+    failed = true
     packageResult.value = `Update failed: ${errorMessage(e, 'unknown error')}`
     await fetchPackageStatus()
   } finally {
     packageUpdating.value = false
   }
+  // The progress overlay has just unmounted and handed focus back where it
+  // could. A failed run lands on the card's own button, so keyboard users are
+  // where they were before the run started.
+  if (failed) {
+    await nextTick()
+    updateTriggerEl.value?.focus()
+  }
 }
 
-// The compact Updates state: the installed version is known to be the newest
-// and nothing is in flight, so the section is only its title with an
-// "Up to date" status. A version check that never answered, or that answered
+// The up-to-date state: the installed version is known to be the newest and
+// nothing is in flight. A version check that never answered, or that answered
 // with a rate limit, has said nothing about the installed version, so it is
-// never compact: "Up to date" over "Update check failed" would be the card
+// never up to date: "Up to date" over "Update check failed" would be the card
 // asserting what it does not know.
-const updatesCompact = computed(() => {
+const upToDate = computed(() => {
   const status = packageStatus.value
   if (!status || status.error || status.update_available) return false
-  if (packageUpdating.value) return false
-  return true
+  return !packageUpdating.value
+})
+
+// The compact Updates state is an up-to-date install whose copy is not needed.
+// An engine that updates through the Mac app or the old installer always
+// explains where its updates come from, so it is never collapsed.
+const updatesCompact = computed(() => {
+  if (!upToDate.value) return false
+  return !['bundled_app', 'installer'].includes(packageStatus.value?.mode ?? '')
 })
 
 </script>
