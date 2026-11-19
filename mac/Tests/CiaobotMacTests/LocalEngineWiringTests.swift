@@ -73,10 +73,6 @@ private final class DeferredProbe: ProbeChecking {
     func answer(_ index: Int, ok: Bool) { completions[index](ok) }
 }
 
-private final class SpyTransport {
-    var calls = 0
-}
-
 @MainActor
 final class LocalEngineWiringTests: XCTestCase {
     private var suiteName = ""
@@ -116,7 +112,7 @@ final class LocalEngineWiringTests: XCTestCase {
         AppDelegate(
             session: AppSessionStatus(),
             presenter: StubMainWindowPresenter(),
-            makeMenuBar: { _, _, _, _, _ in StubMenuBarController() },
+            makeMenuBar: { _, _, _, _ in StubMenuBarController() },
             mode: mode,
             supervisor: EngineSupervisor(
                 engine: BundledEngine(root: home.appendingPathComponent("engine")),
@@ -187,56 +183,13 @@ final class LocalEngineWiringTests: XCTestCase {
         let delegate = AppDelegate(
             session: AppSessionStatus(),
             presenter: StubMainWindowPresenter(),
-            makeMenuBar: { _, _, _, _, _ in StubMenuBarController() }
+            makeMenuBar: { _, _, _, _ in StubMenuBarController() }
         )
         XCTAssertEqual(delegate.mode, .external)
         XCTAssertNil(delegate.supervisor, "The test initializer runs no engine unless one is injected.")
     }
 
     // MARK: ConnectionView in local mode
-
-    private func makeDiscovery(_ spy: SpyTransport) -> LocalServerDiscovery {
-        LocalServerDiscovery(
-            candidate: Origin("http://127.0.0.1:8443"),
-            detectInstallation: { nil },
-            transport: { _, completion in spy.calls += 1; completion(nil) }
-        )
-    }
-
-    /// Debug builds default discovery off, so force it on: only the real guard
-    /// in `startAutomaticDiscovery` can keep local mode from probing.
-    func testLocalModeDoesNotStartSameMacDiscovery() {
-        let localSpy = SpyTransport()
-        let local = ConnectionView(
-            discovery: makeDiscovery(localSpy), autoDiscovery: true,
-            lastServer: lastServer, hostStore: hostStore, engineMode: .local)
-        local.startAutomaticDiscovery()
-        XCTAssertEqual(localSpy.calls, 0, "Local mode probes via the supervisor, never via same-Mac discovery.")
-
-        let externalSpy = SpyTransport()
-        let external = ConnectionView(
-            discovery: makeDiscovery(externalSpy), autoDiscovery: true,
-            lastServer: lastServer, hostStore: hostStore, engineMode: .external)
-        external.startAutomaticDiscovery()
-        XCTAssertEqual(externalSpy.calls, 1, "The external screen keeps its shipped discovery policy.")
-    }
-
-    /// The appear closure's external-only launch machinery (an install that
-    /// finished while the window was closed) must not run in local mode.
-    func testLocalModeAppearRunsNoExternalLaunchMachinery() throws {
-        let service = try XCTUnwrap(Origin("http://127.0.0.1:8443"))
-        let localProbe = StubProbe(responds: true)
-        let local = ConnectionView(
-            probe: localProbe, lastServer: lastServer, hostStore: hostStore, engineMode: .local)
-        local.launchOnAppear(installState: .succeeded(service))
-        XCTAssertTrue(localProbe.checked.isEmpty)
-
-        let externalProbe = StubProbe(responds: true)
-        let external = ConnectionView(
-            probe: externalProbe, lastServer: lastServer, hostStore: hostStore, engineMode: .external)
-        external.launchOnAppear(installState: .succeeded(service))
-        XCTAssertEqual(externalProbe.checked.map(\.canonicalKey), [service.canonicalKey])
-    }
 
     func testLocalModeHasNoSavedOriginAutoConnect() throws {
         let remote = try XCTUnwrap(Origin("https://remote.example.com"))
@@ -620,7 +573,7 @@ final class LocalEngineWiringTests: XCTestCase {
         let delegate = AppDelegate(
             session: AppSessionStatus(),
             presenter: StubMainWindowPresenter(),
-            makeMenuBar: { _, _, _, _, _ in StubMenuBarController() },
+            makeMenuBar: { _, _, _, _ in StubMenuBarController() },
             mode: .local,
             supervisor: fixture.supervisor,
             takeover: fixture.takeover

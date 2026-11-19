@@ -19,7 +19,7 @@ Traps:
 - Under full-suite load `SparklePackagingTests` can fail with `fork: Resource temporarily unavailable` (local process limit). Re-run that suite alone with `--filter SparklePackagingTests`; green there means a flake, a real failure fails again.
 - Never set `timeoutIntervalForResource` on a WebSocket session. URLSession leaves the TCP connection open when it times out a WebSocket task itself (cancel and invalidation do not release it), so a capped, reconnecting stream leaks connections until new ones fail with `ENOMEM`. Detect dead peers with `sendPing`.
 - Tests never open a real menu or leave a status item in the menu bar; follow the fakes in `MenuBarTests` / `MenubarChatsTests`.
-- In a test shell script, probing a descriptor with `{ true >&$n; }` makes `/bin/sh` itself hold fds 10 and 11 (its saved copies), so a leak check must allow those two. Plant the descriptor you expect to stay closed at a known number (`fcntl(fd, F_DUPFD, 40)`), as `NativeInstallerTests.testOnlyTheEventDescriptorIsInherited` does.
+- In a test shell script, probing a descriptor with `{ true >&$n; }` makes `/bin/sh` itself hold fds 10 and 11 (its saved copies), so a leak check must allow those two. Plant the descriptor you expect to stay closed at a known number (`fcntl(fd, F_DUPFD, 40)`).
 
 ## Git
 

@@ -49,7 +49,8 @@ V1_10_FIELDS = (
 )
 
 # The phases the 0.5.x app's EngineUpdateRecord treats as terminal
-# (`mac/Sources/CiaobotMac/EngineUpdater.swift`, `terminalPhases`). The client
+# (`terminalPhases` in `mac/Sources/CiaobotMac/EngineUpdater.swift` before #3130
+# M3 deleted it; see git history). The client
 # also accepts any phase it is polling, so the union with PHASES is the
 # vocabulary its parser must never see a value outside of.
 _TERMINAL_PHASES = frozenset({"applied", "rolled_back", "rollback_failed", "failed"})

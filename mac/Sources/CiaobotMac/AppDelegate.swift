@@ -89,13 +89,9 @@ final class MainWindowPresenter: MainWindowPresenting {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let session: AppSessionStatus
-    // Owned here so quitting can cancel a running install.
-    let installer = NativeInstaller()
     /// The in-window Settings bridge. Created here so the connected main window
     /// can be handed it before the menu-bar controller exists.
     let appSettings = AppSettingsBridge()
-    // One engine updater shared by the connection screen and the menu bar.
-    let engineUpdater: EngineUpdater
     /// The stored engine-mode choice (`CiaobotEngineMode`).
     let engineMode: EngineModeStoring
     /// The engine mode this app runs in: `local` owns the bundled engine
@@ -146,12 +142,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// stop-and-exit flow is pending, further quit events wait for its reply.
     private var terminationDeferred = false
 
-    typealias MenuBarFactory = @MainActor (AppSessionStatus, ClientUpdateControlling?, EngineUpdateMenuProviding?,
+    typealias MenuBarFactory = @MainActor (AppSessionStatus, ClientUpdateControlling?,
                                            @escaping () -> Void, @escaping () -> Void) -> MenuBarControlling
 
     private let presenter: MainWindowPresenting
     private let updater: ClientUpdateControlling?
-    private let engineUpdates: EngineUpdateMenuProviding?
     private let makeMenuBar: MenuBarFactory?
     private let loginItem: LoginItemControlling?
     private let dockIcon: DockIconControlling?
@@ -179,7 +174,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             reportFailure: MainWindowPresenter.presentFailureAlert
         )
         let session = AppSessionStatus(workspaceIcon: workspaceIcon)
-        let engineUpdater = EngineUpdater()
         let updateQuit = UpdateQuitIntent()
         // One launch defaults domain for the stored engine mode, last server
         // and saved hosts. A DEBUG test launch with an isolated suite keeps
@@ -207,8 +201,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // a debug build, a test process, or a build without the release
             // updater keys; `start()` decides and records why.
             updater: ClientUpdater(updateQuit: updateQuit),
-            engineUpdater: engineUpdater,
-            engineUpdates: EngineUpdateMonitor(status: session, updater: engineUpdater),
             // The signing probe is the real one here. The row explains an
             // ad-hoc or unsigned build instead of offering a registration macOS
             // would refuse.
@@ -239,8 +231,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updater: ClientUpdateControlling? = nil,
         // Without an injected updater the test initializer creates an inert one
         // and no monitor, so no test launch probes the engine.
-        engineUpdater: EngineUpdater? = nil,
-        engineUpdates: EngineUpdateMenuProviding? = nil,
         makeMenuBar: MenuBarFactory? = nil,
         loginItem: LoginItemControlling? = nil,
         dockIcon: DockIconControlling? = nil,
@@ -275,8 +265,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.session = session
         self.presenter = presenter
         self.updater = updater
-        self.engineUpdater = engineUpdater ?? EngineUpdater()
-        self.engineUpdates = engineUpdates
         self.makeMenuBar = makeMenuBar
         self.loginItem = loginItem
         self.dockIcon = dockIcon
@@ -479,7 +467,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let session = self.session
-        let engineUpdates = self.engineUpdates
         let open: () -> Void = { [weak self] in
             _ = self?.presenter.present()
         }
@@ -489,7 +476,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let quit = { NSApp.terminate(nil) }
         let controller: MenuBarControlling
         if let makeMenuBar {
-            controller = makeMenuBar(session, updater, engineUpdates, open, quit)
+            controller = makeMenuBar(session, updater, open, quit)
         } else {
             // The menu bar keeps this controller alive for the app's lifetime
             // and stops it with the item. The socket itself only exists after
@@ -525,7 +512,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 systemSettings: systemSettings,
                 changeHost: ConnectionMenuActions.changeConnectedHost(present: present),
                 updates: updater,
-                engineUpdates: engineUpdates,
                 engineSupervisor: supervisor,
                 localEngineMode: mode == .local
             )
@@ -535,7 +521,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        installer.cancel()
         #if DEBUG
         testWindowReporter?.stop()
         testWindowReporter = nil
