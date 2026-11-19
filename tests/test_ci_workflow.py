@@ -685,7 +685,6 @@ def test_release_smoke_keeps_expressions_out_of_run_blocks_and_secrets_out() -> 
     # Security-sensitive workflow: no expression is interpolated into a shell
     # script (values come in through env:), no repository secret is read, and
     # every action is pinned to a version, not a branch.
-    text = _smoke_text()
     smoke = _release_smoke()
     for name, job in smoke["jobs"].items():
         for step in job["steps"]:
@@ -694,7 +693,7 @@ def test_release_smoke_keeps_expressions_out_of_run_blocks_and_secrets_out() -> 
             )
             if "uses" in step:
                 assert "@v" in step["uses"] and not step["uses"].endswith("@main")
-    assert "secrets." not in text
+    assert not re.search(r"\bsecrets\b", json.dumps(smoke))
     assert smoke["permissions"] == {"contents": "read"}
 
 
@@ -1803,6 +1802,17 @@ def _rehearsal_steps() -> list[tuple[str, dict]]:
     ]
 
 
+def _rehearsal_run_text() -> str:
+    return "\n".join(step.get("run", "") for _, step in _rehearsal_steps())
+
+
+def _triggers(workflow: dict) -> dict:
+    return workflow.get("on", workflow.get(True))  # YAML 1.1 reads a bare `on` key as True
+
+
+_REF_GUARD = "Refuse refs other than develop and main"
+
+
 def test_release_rehearsal_never_uploads_to_a_release() -> None:
     # The rehearsal's outputs are workflow artifacts. A release is never created,
     # edited, or uploaded to, and no job asks for write access to the repository.
@@ -1813,29 +1823,66 @@ def test_release_rehearsal_never_uploads_to_a_release() -> None:
         assert "permissions" not in job, f"job {name} overrides the read-only token"
     for banned in ("gh release", "gh api", "contents: write", "action-gh-release"):
         assert banned not in text, f"release-rehearsal.yml uses {banned!r}"
+    # The run blocks never write back. Comments may name these commands (the
+    # dispatch line does), so only the text of run: blocks is checked.
+    runs = _rehearsal_run_text()
+    for banned in ("git push", "git tag", "gh workflow", "-X POST"):
+        assert banned not in runs, f"a run block uses {banned!r}"
+
+
+def test_release_rehearsal_is_dispatch_only_without_inputs() -> None:
+    # Only a hand dispatch starts the run: no push, pull_request or schedule
+    # trigger, and no dispatch inputs that could widen what gets rehearsed.
+    # Mutation: adding a trigger or an input fails here.
+    triggers = _triggers(_rehearsal())
+    assert set(triggers) == {"workflow_dispatch"}
+    assert not (triggers["workflow_dispatch"] or {}).get("inputs")
 
 
 def test_release_rehearsal_binds_signing_secret_to_one_step() -> None:
-    # Only the manifest signing step may read the secret, and it reads both of
-    # the two values the signer takes. Mutation: moving either into another step
-    # (or a job-level env) puts the secret in a step that does not sign.
+    # Only the manifest signing step may read the secret, and it reads both of the
+    # two values the signer takes. \bsecrets\b matches every form a reference can
+    # take (secrets.X, toJSON(secrets), secrets: inherit), so a reference in a job
+    # or workflow env, or in another step, fails here.
+    rehearsal = _rehearsal()
     holders = [
-        (job, step) for job, step in _rehearsal_steps() if "secrets." in json.dumps(step)
+        (job, step)
+        for job, step in _rehearsal_steps()
+        if re.search(r"\bsecrets\b", json.dumps(step))
     ]
-    assert [(job, step.get("name")) for job, step in holders] == [("engine", "Sign engine manifest")]
-    env = holders[0][1]["env"]
-    assert env == {
+    assert [(job, step.get("name")) for job, step in holders] == [
+        ("engine", "Sign engine manifest")
+    ]
+    assert holders[0][1]["env"] == {
         "TAURI_SIGNING_PRIVATE_KEY": "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}",
         "TAURI_SIGNING_PRIVATE_KEY_PASSWORD": "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}",
     }
-    assert _rehearsal_text().count("secrets.") == 2
-    assert "env" not in _rehearsal()["jobs"]["engine"]
-    assert "env" not in _rehearsal()
+    outside_jobs = {key: value for key, value in rehearsal.items() if key != "jobs"}
+    assert not re.search(r"\bsecrets\b", json.dumps(outside_jobs))
+    for job in rehearsal["jobs"].values():
+        job_level = {key: value for key, value in job.items() if key != "steps"}
+        assert not re.search(r"\bsecrets\b", json.dumps(job_level))
+    assert len(re.findall(r"\bsecrets\b", json.dumps(rehearsal))) == 2
 
 
-def test_release_rehearsal_produces_wheel_installer_and_dmg() -> None:
-    # The engine job makes the wheel, the stamped installer, the manifest and
-    # its signature, and uploads them as one artifact. The Mac job packages the
+def test_release_rehearsal_signing_job_names_the_release_signing_environment() -> None:
+    # The job that signs names the Environment that is meant to hold the signing
+    # secrets, and the file says what the maintainer must do to make it hold them.
+    # Mutation: dropping the environment key, or naming another one, fails here.
+    rehearsal = _rehearsal()
+    signing_jobs = {
+        job for job, step in _rehearsal_steps() if step.get("name") == "Sign engine manifest"
+    }
+    assert signing_jobs == {"engine"}
+    assert rehearsal["jobs"]["engine"]["environment"] == "release-signing"
+    text = _rehearsal_text()
+    assert "move both secrets into this Environment" in text
+    assert "deployment branches to develop and main" in text
+
+
+def test_release_rehearsal_produces_wheel_installer_and_adhoc_app_archive() -> None:
+    # The engine job makes the wheel, the stamped installer, the manifest and its
+    # signature, and uploads them as one artifact. The mac-adhoc job packages the
     # ad-hoc app and uploads its archive. Mutation: dropping the stamped installer,
     # the signed manifest, or the archive from its upload breaks the set.
     rehearsal = _rehearsal()
@@ -1850,41 +1897,49 @@ def test_release_rehearsal_produces_wheel_installer_and_dmg() -> None:
     assert "--asset \"$ws/ciaobot-$VERSION-py3-none-any.whl\"" in engine_runs
     assert "uv build --wheel --out-dir dist" in engine_runs
 
+    # The artifact name carries the run attempt, so a re-run never mixes its files
+    # with an earlier attempt's, and the download asks for the same name.
+    artifact = "rehearsal-${{ github.sha }}-${{ github.run_attempt }}"
     upload = _smoke_step(engine, "Upload the rehearsal artifact set")
     assert upload["uses"].startswith("actions/upload-artifact@v")
-    assert upload["with"]["name"] == "rehearsal-${{ github.sha }}"
+    assert upload["with"]["name"] == artifact
     assert upload["with"]["path"] == "rehearsal/"
     assert upload["with"]["if-no-files-found"] == "error"
 
     assert rehearsal["jobs"]["linux"]["needs"] == "engine"
     download = _smoke_step(rehearsal["jobs"]["linux"], "Download the rehearsal artifact set")
     assert download["uses"].startswith("actions/download-artifact@v")
-    assert download["with"]["name"] == "rehearsal-${{ github.sha }}"
+    assert download["with"]["name"] == artifact
 
-    dmg = rehearsal["jobs"]["dmg"]
-    assert dmg["runs-on"] == "macos-15"
-    dmg_runs = "\n".join(step.get("run", "") for step in dmg["steps"])
-    assert "scripts/package-app.sh --output" in dmg_runs
+    assert "dmg" not in rehearsal["jobs"]
+    mac = rehearsal["jobs"]["mac-adhoc"]
+    assert mac["runs-on"] == "macos-15"
+    mac_runs = "\n".join(step.get("run", "") for step in mac["steps"])
+    assert "scripts/package-app.sh --output" in mac_runs
     # make-dmg.sh refuses ad-hoc builds, so it is deliberately not run here.
-    assert "make-dmg.sh" not in dmg_runs
-    archive = _smoke_step(dmg, "Upload the ad-hoc app archive")
+    assert "make-dmg.sh" not in mac_runs
+    archive = _smoke_step(mac, "Upload the ad-hoc app archive")
     assert archive["uses"].startswith("actions/upload-artifact@v")
+    assert archive["with"]["name"] == "rehearsal-adhoc-${{ github.sha }}-${{ github.run_attempt }}"
     for pattern in ("rehearsal-package/Ciaobot-*-adhoc.zip", "rehearsal-package/MANIFEST.txt", "rehearsal-package/SHA256SUMS"):
         assert pattern in archive["with"]["path"]
+    # The archive name comes from the app bundle's version, which build-app.sh
+    # still hardcodes. The workflow says so instead of asserting the name.
+    assert "CFBundleShortVersionString" in _rehearsal_text()
     assert "mac-app-signing-rehearsal.yml" in _rehearsal_text()
 
 
 def test_release_rehearsal_refuses_refs_other_than_develop_and_main() -> None:
-    # The guard is the first step of the engine and Mac jobs and runs for real.
-    # Mutation: widening the case pattern, or dropping the branch check, lets a
-    # feature ref through and fails here.
+    # The guard is the first step of the engine and mac-adhoc jobs and runs for
+    # real. Mutation: widening the case pattern, dropping the branch check, or
+    # moving the guard below another step fails here.
     if sys.platform == "win32":
         pytest.skip("runs the workflow's bash")
-    guards = [
-        step
-        for _, step in _rehearsal_steps()
-        if step.get("name") == "Refuse refs other than develop and main"
-    ]
+    rehearsal = _rehearsal()
+    for job_name in ("engine", "mac-adhoc"):
+        first = rehearsal["jobs"][job_name]["steps"][0]
+        assert first.get("name") == _REF_GUARD, f"job {job_name} does not refuse refs first"
+    guards = [step for _, step in _rehearsal_steps() if step.get("name") == _REF_GUARD]
     assert len(guards) == 2
     for guard in guards:
         assert guard["env"] == {
@@ -1896,7 +1951,13 @@ def test_release_rehearsal_refuses_refs_other_than_develop_and_main() -> None:
             ("main", "branch", 0),
             ("raffaelefarinaro/feature", "branch", 1),
             ("release/v2.0.0", "branch", 1),
+            ("develop-evil", "branch", 1),
+            ("main2", "branch", 1),
+            ("refs/heads/develop", "branch", 1),
+            ("Develop", "branch", 1),
+            ("release", "branch", 1),
             ("develop", "tag", 1),
+            ("main", "tag", 1),
             ("", "branch", 1),
         ):
             result = _run_bash_step(
@@ -1963,14 +2024,69 @@ def test_release_rehearsal_waits_are_bounded() -> None:
                 f"job {job_name} step {step.get('name')!r} has an unbounded loop"
             )
     text = _rehearsal_text()
-    assert "seq 1 90" in text
+    # Every wait loop has the same iteration cap. Mutation: one loop at 91 fails here.
+    assert set(re.findall(r"seq 1 (\d+)", text)) == {"90"}
+    assert text.count("seq 1 90") == 4
     assert text.count("curl -fsS --max-time 5") >= 4
 
 
-def test_release_rehearsal_legacy_gate_reads_the_staged_files_as_a_file_url() -> None:
-    # The 1.x gate reads the rehearsal's files through --release-root (a file://
-    # URL), never from a published release.
-    gate = _smoke_step(_rehearsal()["jobs"]["engine"], "Run the 1.x update gate against the rehearsal files")
+def test_release_rehearsal_legacy_literal_matches_publish_and_smoke() -> None:
+    # One literal decides the 1.x gate in all three release workflows. Mutation:
+    # changing it in one file alone fails here.
+    literal = _rehearsal()["env"]["LEGACY_MANIFEST_VERSION"]
+    assert literal == "2.0.0"
+    assert literal == _publish_workflow()["env"]["LEGACY_MANIFEST_VERSION"]
+    assert literal == _release_smoke()["env"]["LEGACY_MANIFEST_VERSION"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="runs the workflow's bash")
+@pytest.mark.parametrize(
+    ("version", "legacy"),
+    [("1.10.0", "false"), ("2.0.0", "true"), ("2.0.1", "false")],
+)
+def test_release_rehearsal_decision_step_outputs(
+    tmp_path: Path, version: str, legacy: str
+) -> None:
+    # Runs the real decision step. A swapped true/false echo, a dropped notice, or
+    # a loose comparison fails here.
+    rehearsal = _rehearsal()
+    step = _smoke_step(rehearsal["jobs"]["engine"], "Decide whether the 1.x update gate runs")
+    output = tmp_path / "github-output"
+    output.touch()
+
+    result = _run_bash_step(
+        step["run"],
+        {
+            "VERSION": version,
+            "GITHUB_OUTPUT": str(output),
+            "LEGACY_MANIFEST_VERSION": rehearsal["env"]["LEGACY_MANIFEST_VERSION"],
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8") == f"legacy={legacy}\n"
+    if legacy == "false":
+        assert f"::notice::1.x update gate skipped for {version}" in result.stdout
+    else:
+        assert "::notice::" not in result.stdout
+
+
+def test_release_rehearsal_legacy_gate_runs_only_for_2_0_0_and_reads_staged_files() -> None:
+    # The 1.x gate runs only when the decision step says so, and reads the
+    # rehearsal's files through --release-root (a file:// URL), never from a
+    # published release. Signing and verification run for every version.
+    # Mutation: dropping the if, or swapping the outputs, fails here.
+    engine = _rehearsal()["jobs"]["engine"]
+    names = [step.get("name") for step in engine["steps"]]
+    decision = _smoke_step(engine, "Decide whether the 1.x update gate runs")
+    gate = _smoke_step(engine, "Run the 1.x update gate against the rehearsal files")
+    assert decision["id"] == "legacy"
+    assert names.index("Read the release version from pyproject.toml") < names.index(
+        "Decide whether the 1.x update gate runs"
+    ) < names.index("Run the 1.x update gate against the rehearsal files")
+    assert gate["if"] == "steps.legacy.outputs.legacy == 'true'"
+    for name in ("Sign engine manifest", "Verify the signed manifest and its wheel"):
+        assert "if" not in _smoke_step(engine, name), name
     assert "python3 scripts/legacy-update-gate.py" in gate["run"]
     assert "--release-root \"$RUNNER_TEMP/legacy\"" in gate["run"]
     assert "--release-base" not in gate["run"]
@@ -1982,3 +2098,10 @@ def test_release_rehearsal_is_documented_for_dispatch() -> None:
         encoding="utf-8"
     )
     assert "gh workflow run release-rehearsal.yml --ref develop" in development
+    # GitHub offers workflow_dispatch only for files on the default branch, so the
+    # doc names that branch and the acceptance-run ordering.
+    assert "default branch, which is `main`" in development
+    assert "release-signing" in development
+    assert "rehearsal-<sha>-<run_attempt>" in development
+    upkeep = (Path(__file__).parents[1] / "docs" / "UPKEEP.md").read_text(encoding="utf-8")
+    assert "release-signing" in upkeep

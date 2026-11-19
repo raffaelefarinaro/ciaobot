@@ -12,6 +12,11 @@ name: release rehearsal
 on:
   workflow_dispatch:
 
+env:
+  # Same literal as publish.yml and release-smoke.yml: the one release that ships
+  # the wheel-only manifest 1.x engines read (#3131 Q3).
+  LEGACY_MANIFEST_VERSION: "2.0.0"
+
 # Read-only for the whole run. Nothing here needs to write to the repository.
 permissions:
   contents: read
@@ -20,6 +25,11 @@ jobs:
   engine:
     runs-on: macos-latest
     timeout-minutes: 60
+    # The signing step reads TAURI_SIGNING_PRIVATE_KEY and its password. The
+    # maintainer must move both secrets into this Environment and restrict its
+    # deployment branches to develop and main. Until that is done, the in-file ref
+    # guard is only a convenience.
+    environment: release-signing
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -64,6 +74,20 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Decide whether the 1.x update gate runs
+        id: legacy
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Only the 2.0.0 release ships the wheel-only manifest that 1.x engines
+          # read, so the 1.x gate runs for that version and no other.
+          if [ "$VERSION" = "$LEGACY_MANIFEST_VERSION" ]; then
+            echo "legacy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "legacy=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::1.x update gate skipped for $VERSION: only $LEGACY_MANIFEST_VERSION ships the 1.x manifest"
+          fi
       - name: Build PWA assets
         working-directory: web
         run: |
@@ -127,6 +151,7 @@ jobs:
             "$ws/ciaobot-engine-manifest.json" "$ws/ciaobot-engine-manifest.json.sig" \
             --asset "$ws/ciaobot-$VERSION-py3-none-any.whl")
       - name: Run the 1.x update gate against the rehearsal files
+        if: steps.legacy.outputs.legacy == 'true'
         timeout-minutes: 15
         env:
           GH_TOKEN: ${{ github.token }}
@@ -146,7 +171,7 @@ jobs:
       - name: Upload the rehearsal artifact set
         uses: actions/upload-artifact@v7
         with:
-          name: rehearsal-${{ github.sha }}
+          name: rehearsal-${{ github.sha }}-${{ github.run_attempt }}
           path: rehearsal/
           if-no-files-found: error
           retention-days: 14
@@ -161,7 +186,7 @@ jobs:
       - name: Download the rehearsal artifact set
         uses: actions/download-artifact@v7
         with:
-          name: rehearsal-${{ github.sha }}
+          name: rehearsal-${{ github.sha }}-${{ github.run_attempt }}
           path: rehearsal
       - name: Install from the rehearsal files
         timeout-minutes: 15
@@ -277,7 +302,7 @@ jobs:
             tail -80 "$debug_log" | redact || true
           fi
 
-  dmg:
+  mac-adhoc:
     # The ad-hoc Mac app (#3128 F). It is not signed with a Developer ID and is
     # not notarized, so it cannot go through make-dmg.sh, which refuses both. The
     # signed and notarized DMG comes from #3128 G's mac-app-signing-rehearsal.yml
@@ -318,10 +343,13 @@ jobs:
           # Fresh output directory in the workspace: package-app.sh refuses an
           # output that already holds an artifact.
           scripts/package-app.sh --output "$GITHUB_WORKSPACE/rehearsal-package"
+      # The archive is named Ciaobot-<CFBundleShortVersionString>-adhoc.zip. build-app.sh
+      # writes that key as a fixed 0.5.0 today, not the engine version, so the name is
+      # not checked against $VERSION here. The app version sync (#3131 L8) changes that.
       - name: Upload the ad-hoc app archive
         uses: actions/upload-artifact@v7
         with:
-          name: rehearsal-adhoc-${{ github.sha }}
+          name: rehearsal-adhoc-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             rehearsal-package/Ciaobot-*-adhoc.zip
             rehearsal-package/MANIFEST.txt
