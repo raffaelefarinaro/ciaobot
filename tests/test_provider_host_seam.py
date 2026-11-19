@@ -65,3 +65,40 @@ def test_base_provider_defines_every_host_seam(name: str) -> None:
 )
 def test_base_provider_has_no_mcp_management_seam(name: str) -> None:
     assert not hasattr(BaseProvider, name)
+
+
+# A host branches on a provider id only where the difference is the agent's own
+# on-disk or command-surface layout. Each entry is (file under ciao/web, stripped line)
+# with its count, so an edit that moves a line does not break the guard, while a new
+# branch does. Entries that encode a Claude-only behaviour are open work: they should
+# move to a ProviderDescriptor field and leave this list.
+_PROVIDER_ID_BRANCH = re.compile(
+    r"(?:==|!=)\s*[\"'](?:claude|opencode)[\"']|\bin\s*\{[^}]*[\"'](?:claude|opencode)[\"']"
+)
+_ALLOWED_PROVIDER_ID_BRANCHES: dict[tuple[str, str], int] = {
+    # Command directories differ per agent (.opencode/commands vs .claude/commands).
+    ("commands.py", 'if target == "opencode":'): 1,
+    ("commands.py", 'if target == "claude":'): 1,
+    # Connection-action cache invalidation: each agent keeps its own discovery cache.
+    ("routes_api.py", 'if provider == "claude":'): 1,
+    ("routes_api.py", 'if provider == "opencode":'): 1,
+    # Open: Claude-only behaviour still branched on the id (see the comment above).
+    ("project_chats.py", 'if provider == "claude":'): 1,
+    ("project_chats.py", 'if chat.provider == "claude" and self._claude_session_exists('): 1,
+    ("project_chats.py", 'if chat.provider != "claude":'): 2,
+    ("project_chats.py", 'if provider != "claude" and is_tier(resolved):'): 1,
+    ("project_chats.py", 'if chat.provider == "claude" and self._claude_ai_connectors_trimmed(workspace):'): 1,
+    ("project_chats.py", 'if provider != "claude":'): 1,
+    ("transcript_service.py", 'if provider != "claude":'): 1,
+}
+
+
+def test_web_sources_branch_on_no_acp_provider_id_outside_allowlist() -> None:
+    from collections import Counter
+
+    found: Counter[tuple[str, str]] = Counter()
+    for path in sorted(_WEB_ROOT.rglob("*.py")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if _PROVIDER_ID_BRANCH.search(line):
+                found[(path.name, line.strip())] += 1
+    assert found == Counter(_ALLOWED_PROVIDER_ID_BRANCHES)

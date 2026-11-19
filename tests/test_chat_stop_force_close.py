@@ -2,7 +2,7 @@
 
 A provider-level stop (Claude interrupt / opencode abort) is the clean path,
 but it only ends the turn when the provider cooperates. When it doesn't — a
-hung CLI, a dead SSE subscription — the drive loop used to sit blocked in the
+hung CLI, a dead provider stream — the drive loop used to sit blocked in the
 event iterator forever with the UI stuck on "streaming". These tests pin the
 bounded grace + force-close contract: the turn always closes promptly, every
 client gets a terminal result event, and queued follow-ups still flush.

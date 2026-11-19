@@ -1,7 +1,7 @@
 """Tests for the idle provider sweep.
 
 `ProjectChatManager._providers` is keyed by chat id and used to be emptied only
-by a lifecycle event. opencode runs one `opencode serve` process per chat, so
+by a lifecycle event. opencode runs one `opencode acp` process per chat, so
 without a reaper those processes accumulate for the life of the server. These
 tests pin the safety conditions: a chat with work in flight, a parked question,
 or a recent turn is never reclaimed.
@@ -282,7 +282,7 @@ async def test_a_parked_message_queue_does_not_pin_the_provider(
 
 
 class _FailingProvider(_StubProvider):
-    """A provider whose teardown raises — an opencode server that won't die."""
+    """A provider whose teardown raises — an opencode agent process that won't die."""
 
     def __init__(self, *, fail_times: int = 10_000) -> None:
         super().__init__()
