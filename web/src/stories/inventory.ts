@@ -7297,36 +7297,100 @@ export const inventory: InventoryEntry[] = [
       "routine",
       "error"
     ],
-    "variantNotes": "Observed branches in OnboardingCareStage.vue; remaining variants have not been audited.",
+    "variantNotes": "A routine installed (enabled or paused) or none, the read error, the availability answers with their proposed slot, and the write errors through the exposed save/refresh. busy only feeds the emitted StageState; the stage renders no Save control and no disabled visual state while a write is pending.",
     "states": [
       {
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--loading"
+        ],
+        "note": "Loading: the held GET /api/schedules read — the stage shows the No care routine is installed sentence while loading. The placeholder borrows the loaded empty copy instead of drawing a row shape; recorded for the loading follow-up, not fixed here."
+      },
+      {
+        "name": "no-routine",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--no-routine"
+        ],
+        "note": "Empty: a loaded list with no system-memory-curation routine shows the role=status No care routine is installed… sentence and no availability group; canContinue stays true because an unedited Continue writes nothing."
+      },
+      {
+        "name": "load-failure",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--load-failure"
+        ],
+        "note": "Failure: a failed schedule read shows the role=alert with the engine's message; with error set the no-routine sentence hides. The error rides the emitted state while canContinue stays bound to a pending save only (the owner never dead-ends Continue)."
+      },
+      {
+        "name": "refresh-failure",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--refresh-failure"
+        ],
+        "note": "Refresh: the exposed refresh re-reads /api/schedules after a loaded routine; a refused re-read shows the role=alert beside the still-installed routine and the emitted state carries the error. The shell never calls refresh today; the story drives the exposed method directly."
+      },
+      {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingCareStage.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--default"
+        ],
+        "note": "A routine installed and enabled: Workspace care is on., the segmented availability group (always on / daytime / varies), the proposed local time and the browser timezone, and the untouched hint The packaged default stays…."
       },
       {
-        "name": "routine",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingCareStage.vue has a routine branch; no rendered-state story exists."
+        "name": "paused",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--paused"
+        ],
+        "note": "routine.enabled false: the head reads Workspace care is paused. and the proposal fields stay editable."
       },
       {
-        "name": "error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingCareStage.vue has a error branch; no rendered-state story exists."
+        "name": "availability-edit",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--availability-edit"
+        ],
+        "note": "Choosing an availability answer proposes its local slot (suggestedTime) until the time is edited: the play clicks varies, asserting the checked segment, the proposed 09:00 and the Saved when you continue hint."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "timezone-edit",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--timezone-edit"
+        ],
+        "note": "Typing a timezone marks the proposal edited for the shell's Continue; the local time field edit rides the same saved-when-you-continue branch."
+      },
+      {
+        "name": "save-applied",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--save-applied"
+        ],
+        "note": "The shell's Continue calls the exposed save: the play proposes a slot, then invokes save through the host control; the PATCH /api/schedules/system-memory-curation@<workspace> write answers and the hint returns to the packaged default."
+      },
+      {
+        "name": "save-refused",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--save-refused"
+        ],
+        "note": "A refused PATCH through the exposed save: the role=alert shows the engine's message, the proposal stays edited for a retry and canContinue stays true (OnboardingCareStage.vue save())."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--narrow"
+        ],
+        "note": "Narrow: the routine stage in a maximum 390px container; the time and timezone fields stack into one column."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingCareStage.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load: one GET /api/schedules on mount (loading, held) — while it is held the stage renders the No care routine sentence, the placeholder borrowing the loaded empty copy rather than a row shape (noted for the loading follow-up; not fixed in this slice). Loaded, empty and failure follow it (default, no-routine, load-failure). Refresh: the exposed refresh re-runs the same read; a refused re-read keeps the routine and shows the alert (refresh-failure). The shell does not call refresh today. Writes: the exposed save PATCHes the routine row (save-applied, save-refused); while a write is pending only the emitted state changes. Stale: none observed."
     },
     "migration": {
       "status": "unassessed",
@@ -7661,42 +7725,90 @@ export const inventory: InventoryEntry[] = [
       "host",
       "provisioned"
     ],
-    "variantNotes": "Observed branches in OnboardingLocationStage.vue; remaining variants have not been audited.",
+    "variantNotes": "Provisioned set-rows (Ciaobot folder and Workspace, each with a Change control) against the fresh folder/name fields; the onHost help note; folder inspection (existing notes, engine refusal, request failure) and the name validation. busy only feeds the emitted StageState; the provisioned Change controls are links that stories assert but never click.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingLocationStage.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-location-stage--default"
+        ],
+        "note": "Fresh install (context.provisioned false): the Main Ciaobot folder input#onboarding-folder and Workspace name input#onboarding-name, both empty, no set-rows and no errors; mounting reads nothing (the play asserts an empty request ledger)."
       },
       {
-        "name": "folder",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingLocationStage.vue has a folder branch; no rendered-state story exists."
+        "name": "folder-inspected",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-location-stage--folder-inspected"
+        ],
+        "note": "After the folder input's change event, /api/setup/inspect-folder answers ok: inspected=true and the Existing notes found help renders for mode \"existing\" (or \"notes\"). Play types a synthetic path and blurs."
       },
       {
-        "name": "host",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingLocationStage.vue has a host branch; no rendered-state story exists."
+        "name": "folder-error",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-location-stage--folder-error"
+        ],
+        "note": "The inspection refuses ({ok:false,error}) or fails: the folder error paragraph (role=alert) renders, the emitted state carries the error and canContinue stays false (OnboardingLocationStage.vue inspect())."
+      },
+      {
+        "name": "name-invalid",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-location-stage--name-invalid"
+        ],
+        "note": "An invalid workspace name committed on blur (NAME_PATTERN): the name error renders in the field's role=alert with aria-invalid on the input and canContinue false (nameError)."
       },
       {
         "name": "provisioned",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingLocationStage.vue has a provisioned branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-location-stage--provisioned"
+        ],
+        "note": "context.provisioned: the Ciaobot folder set-row (a.change to /settings/advanced#workspace-move, asserted not clicked) and the Workspace set-row with the Change link button; /api/setup-status supplies workspace_root on mount and marks the path inspected."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "provisioned-loading",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-location-stage--provisioned-loading"
+        ],
+        "note": "The held /api/setup-status read: the set-value reads Loading… with no skeleton; the row already has its loaded geometry (see loading)."
+      },
+      {
+        "name": "provisioned-load-error",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-location-stage--provisioned-load-error"
+        ],
+        "note": "A failed /api/setup-status read: the role=alert Could not load the current Ciaobot folder. renders beside the still-Loading set-value (provisionedPath stays empty)."
+      },
+      {
+        "name": "provisioned-edit-name",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-location-stage--provisioned-edit-name"
+        ],
+        "note": "The Workspace row's Change button opens the name field pre-filled with the stored name while the folder set-row stays (OnboardingLocationStage.vue editingName)."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-location-stage--narrow"
+        ],
+        "note": "Narrow: the fresh stage in a maximum 390px container, one column of fields."
+      },
+      {
+        "name": "host-note",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "The v-if=\"!onHost\" help paragraph renders only when the page hostname is not a loopback name (isHostOrigin, lib/hostOrigin.ts); the workshop and its browser runner always serve on localhost, so this branch cannot render in isolation and has no story."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingLocationStage.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load: only the provisioned variant reads on mount (/api/setup-status; provisioned-loading held — the set-row keeps the loaded geometry and the value reads Loading…, no skeleton anywhere). Failure keeps the alert beside the Loading… value (provisioned-load-error). The fresh stage reads nothing on mount; folder inspection is user-triggered on change and guarded against late answers by an inspector id, so refresh and stale states do not apply."
     },
     "migration": {
       "status": "unassessed",
@@ -7720,36 +7832,76 @@ export const inventory: InventoryEntry[] = [
       "pending",
       "error"
     ],
-    "variantNotes": "Observed branches in OnboardingMemoryStage.vue; remaining variants have not been audited.",
+    "variantNotes": "The handover group's three answers (off/dismiss/all), the eligibility-driven suggestion, the acting_available notice and the read/write errors. busy only feeds the emitted StageState; while a write is pending further taps are ignored and the native radios re-sync to the model.",
     "states": [
       {
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-memory-stage--loading"
+        ],
+        "note": "Loading: both mount reads (handover and onboarding receipt) held — the group renders the stored Ask me first with no suggestion line and no alert; the placeholder matches the loaded geometry (no skeleton)."
+      },
+      {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingMemoryStage.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-memory-stage--default"
+        ],
+        "note": "handover loaded (off) with no eligible journey: Ask me first checked, no Suggested hint, no service notice and no error."
       },
       {
-        "name": "pending",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingMemoryStage.vue has a pending branch; no rendered-state story exists."
+        "name": "suggested",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-memory-stage--suggested"
+        ],
+        "note": "An in-progress installation with a stored off may be offered the draft: File what's clear, ask about the rest is proposed and the Suggested. Saved when you continue. hint shows until the choice is tapped."
       },
       {
-        "name": "error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingMemoryStage.vue has a error branch; no rendered-state story exists."
+        "name": "service-unavailable",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-memory-stage--service-unavailable"
+        ],
+        "note": "acting_available false with a non-off draft: the role=status The trusted service is unavailable… paragraph renders alongside the proposal; the choice still writes on selection."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "load-failure",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-memory-stage--load-failure"
+        ],
+        "note": "A failed handover read: the role=alert shows the engine's message, the group stays on the stored answer, no suggestion shows and canContinue stays false until a successful load."
+      },
+      {
+        "name": "choice-saved",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-memory-stage--choice-saved"
+        ],
+        "note": "Choosing an answer writes it at once (select → saveMemoryHandover → PATCH memory_handover): the play skips duplicates, asserting the checked radio and the four recorded requests (handover, receipt, write, registry re-read)."
+      },
+      {
+        "name": "save-refused",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-memory-stage--save-refused"
+        ],
+        "note": "A refused write rolls the group back to the stored answer and shows the role=alert error (OnboardingMemoryStage.vue commit); tapping the option again is the retry."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-memory-stage--narrow"
+        ],
+        "note": "Narrow: the suggested render in a maximum 390px container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingMemoryStage.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load: two reads on mount, /api/proposals/handover?workspace=… and /api/onboarding (loading, held) — while held the group shows the stored Ask me first with no suggestion, matching the loaded geometry with no skeleton. Failure renders the role=alert and canContinue false (load-failure). Writes: every choice writes at once and the registry re-reads (choice-saved); a refused write rolls the draft back (save-refused). Refresh: none beyond the mount read. Stale: none observed."
     },
     "migration": {
       "status": "unassessed",
