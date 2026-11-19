@@ -3978,7 +3978,6 @@ export const inventory: InventoryEntry[] = [
     },
     "sources": [],
     "consumers": [
-      "web/src/components/settings/SettingsMcpServers.vue"
     ],
     "variants": [
       "selected",
@@ -6459,71 +6458,23 @@ export const inventory: InventoryEntry[] = [
     }
   },
   {
-    "id": "components-settings-settings-mcp-servers",
-    "name": "SettingsMcpServers",
-    "family": "Settings",
-    "kind": "component",
-    "owner": {
-      "path": "web/src/components/settings/SettingsMcpServers.vue",
-      "anchor": "<template>"
-    },
-    "sources": [],
-    "consumers": [
-      "web/src/components/SettingsView.vue"
+    id: 'components-provider-mcp-button',
+    name: 'ProviderMcpButton',
+    family: 'Settings',
+    kind: 'component',
+    owner: { path: 'web/src/components/ProviderMcpButton.vue', anchor: '<template>' },
+    sources: ['web/src/composables/useRunInTerminal.ts'],
+    consumers: ['web/src/components/SettingsView.vue'],
+    variants: [],
+    variantNotes: 'Open, copy and terminal outcomes have not yet been audited.',
+    states: [
+      { name: 'default', coverage: 'uncovered', storyIds: [], note: 'The button, command and reload note render when mcp_command is set; no story exists.' },
+      { name: 'typed', coverage: 'uncovered', storyIds: [], note: 'A typed terminal run has no story.' },
+      { name: 'copied', coverage: 'uncovered', storyIds: [], note: 'A copied terminal fallback has no story.' },
+      { name: 'failed', coverage: 'uncovered', storyIds: [], note: 'A failed terminal run has no story.' },
     ],
-    "variants": [
-      "provider",
-      "unknown-inventory",
-      "empty",
-      "server"
-    ],
-    "variantNotes": "Observed branches in SettingsMcpServers.vue; remaining variants have not been audited.",
-    "states": [
-      {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsMcpServers.vue implements this render; no rendered-state story exists."
-      },
-      {
-        "name": "provider",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMcpServers.vue implements the provider branch; no rendered-state story exists."
-      },
-      {
-        "name": "unknown-inventory",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMcpServers.vue implements the unknown-inventory branch; no rendered-state story exists."
-      },
-      {
-        "name": "empty",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMcpServers.vue implements the empty branch; no rendered-state story exists."
-      },
-      {
-        "name": "server",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMcpServers.vue implements the server branch; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
-    ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsMcpServers.vue has not yet been audited."
-    },
-    "migration": {
-      "status": "unassessed",
-      "note": "Inventory admission does not approve a design migration."
-    }
+    loading: { status: 'none', detail: 'No fetch. The command arrives on the provider row.' },
+    migration: { status: 'unassessed', note: 'Inventory admission does not approve a design migration.' },
   },
   {
     "id": "components-settings-settings-memory-backup",
@@ -7463,7 +7414,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsDevices.vue",
       "web/src/components/settings/SettingsEngineLogin.vue",
       "web/src/components/settings/SettingsKeyboardShortcuts.vue",
-      "web/src/components/settings/SettingsMcpServers.vue",
       "web/src/components/settings/SettingsMemoryBackup.vue",
       "web/src/components/settings/SettingsMemoryHandover.vue",
       "web/src/components/settings/SettingsNotifications.vue",
@@ -7719,7 +7669,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsDevices.vue",
       "web/src/components/settings/SettingsEngineLogin.vue",
       "web/src/components/settings/SettingsKeyboardShortcuts.vue",
-      "web/src/components/settings/SettingsMcpServers.vue",
       "web/src/components/settings/SettingsMemoryBackup.vue",
       "web/src/components/settings/SettingsMemoryHandover.vue",
       "web/src/components/settings/SettingsNotifications.vue",
@@ -7862,7 +7811,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsDevices.vue",
       "web/src/components/settings/SettingsEngineLogin.vue",
       "web/src/components/settings/SettingsKeyboardShortcuts.vue",
-      "web/src/components/settings/SettingsMcpServers.vue",
       "web/src/components/settings/SettingsMemoryBackup.vue",
       "web/src/components/settings/SettingsMemoryHandover.vue",
       "web/src/components/settings/SettingsNotifications.vue",
@@ -7957,7 +7905,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/SettingsView.vue",
       "web/src/components/TaskWorkspaceSurface.vue",
       "web/src/components/WebhookTriggers.vue",
-      "web/src/components/settings/SettingsMcpServers.vue",
       "web/src/components/settings/WorkspaceGoogleAccount.vue"
     ],
     "consumers": [],
@@ -8068,7 +8015,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsDevices.vue",
       "web/src/components/settings/SettingsEngineLogin.vue",
       "web/src/components/settings/SettingsKeyboardShortcuts.vue",
-      "web/src/components/settings/SettingsMcpServers.vue",
       "web/src/components/settings/SettingsMemoryBackup.vue",
       "web/src/components/settings/SettingsMemoryHandover.vue",
       "web/src/components/settings/SettingsNotifications.vue",
@@ -8222,7 +8168,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsDevices.vue",
       "web/src/components/settings/SettingsEngineLogin.vue",
       "web/src/components/settings/SettingsKeyboardShortcuts.vue",
-      "web/src/components/settings/SettingsMcpServers.vue",
       "web/src/components/settings/SettingsMemoryBackup.vue",
       "web/src/components/settings/SettingsMemoryHandover.vue",
       "web/src/components/settings/SettingsNotifications.vue",
@@ -8375,7 +8320,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsDevices.vue",
       "web/src/components/settings/SettingsEngineLogin.vue",
       "web/src/components/settings/SettingsKeyboardShortcuts.vue",
-      "web/src/components/settings/SettingsMcpServers.vue",
       "web/src/components/settings/SettingsMemoryBackup.vue",
       "web/src/components/settings/SettingsMemoryHandover.vue",
       "web/src/components/settings/SettingsNotifications.vue",

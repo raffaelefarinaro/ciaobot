@@ -1152,35 +1152,6 @@ async def test_claude_slash_context_is_cleared_on_disconnect(
     assert await claude_provider._slash_context_hook({"prompt": "/retro"}, None, {}) == {}
 
 
-@pytest.mark.parametrize("fail_send", [False, True])
-@pytest.mark.asyncio
-async def test_claude_slash_steer_uses_native_payload_and_cleans_failed_send(
-    claude_provider: ClaudeProvider, fail_send: bool,
-) -> None:
-    sent = []
-
-    class FakeClient:
-        async def query(self, payload):
-            sent.extend([message async for message in payload])
-            if fail_send:
-                raise RuntimeError("send failed")
-
-    claude_provider._client = FakeClient()
-    claude_provider._connected = True
-    claude_provider._turn_open = True
-    request = AgentRequest(
-        prompt="[CIAO_CONTEXT_BEGIN]\nsteer\n[CIAO_CONTEXT_END]\n\n/retro",
-        model="opus", mode="normal",
-        injected_context_prefix="[CIAO_CONTEXT_BEGIN]\nsteer\n[CIAO_CONTEXT_END]\n\n",
-    )
-    if fail_send:
-        with pytest.raises(RuntimeError, match="send failed"):
-            await claude_provider.steer_turn(request)
-    else:
-        assert await claude_provider.steer_turn(request)
-    assert sent[0]["message"]["content"] == "/retro"
-    output = await claude_provider._slash_context_hook({"prompt": "/retro"}, None, {})
-    assert bool(output) is not fail_send
 
 
 @pytest.mark.asyncio
@@ -2436,7 +2407,7 @@ async def _collect(gen) -> list:
     return [item async for item in gen]
 
 
-def _steer_result(text: str):
+def _result_msg(text: str):
     from claude_agent_sdk import ResultMessage
 
     return ResultMessage(
@@ -2445,12 +2416,12 @@ def _steer_result(text: str):
         duration_api_ms=1,
         is_error=False,
         num_turns=1,
-        session_id="sess-steer",
+        session_id="sess-echo",
         result=text,
     )
 
 
-def _steer_text(text: str):
+def _text_msg(text: str):
     # Text reaches the host as partial stream events; a tool-use message is the
     # simplest ordered marker the converter turns into an event.
     from claude_agent_sdk import AssistantMessage, ToolUseBlock
@@ -2458,12 +2429,12 @@ def _steer_text(text: str):
     return AssistantMessage(
         content=[ToolUseBlock(id=f"t-{text}", name=text, input={})],
         model="haiku",
-        session_id="sess-steer",
+        session_id="sess-echo",
     )
 
 
-class _SteerFakeClient:
-    """Fake SDK client that records the steer's streamed user message."""
+class _EchoFakeClient:
+    """Fake SDK client that records the turn's streamed user message."""
 
     def __init__(self, rounds) -> None:
         self.rounds = list(rounds)
@@ -2510,19 +2481,15 @@ class _SteerFakeClient:
         return {}
 
     @property
-    def steer_uuid(self) -> str:
-        return self.queries[-1]["uuid"]
-
-    @property
     def prompt_uuid(self) -> str:
         return self.queries[0]["uuid"]
 
 
-def _wire_steer_provider(provider: ClaudeProvider, monkeypatch, fake) -> None:
+def _wire_echo_provider(provider: ClaudeProvider, monkeypatch, fake) -> None:
     async def fake_ensure(_request):
         provider._connected = True
         provider._client = fake
-        provider._session_id = "sess-steer"
+        provider._session_id = "sess-echo"
         return fake
 
     monkeypatch.setattr(provider, "_ensure_connected", fake_ensure)
@@ -2535,18 +2502,18 @@ async def test_claude_first_turn_connects_without_prompt_then_queries(
     """No prompt at connect keeps the SDK from closing stdin at idle (#1402)."""
     connects: list[tuple] = []
 
-    class FirstTurnClient(_SteerFakeClient):
+    class FirstTurnClient(_EchoFakeClient):
         async def connect(self, *args):
             connects.append(args)
 
     async def round_one(_client):
-        yield _steer_result("ok")
+        yield _result_msg("ok")
 
     fake = FirstTurnClient([round_one])
 
     async def fake_ensure(_request):
         claude_provider._client = fake
-        claude_provider._session_id = "sess-steer"
+        claude_provider._session_id = "sess-echo"
         return fake
 
     monkeypatch.setattr(claude_provider, "_ensure_connected", fake_ensure)
@@ -2564,130 +2531,12 @@ async def test_claude_first_turn_connects_without_prompt_then_queries(
     assert claude_provider._connected is True
 
 
-@pytest.mark.asyncio
-async def test_claude_steer_turn_refuses_without_open_turn(
-    claude_provider: ClaudeProvider,
-) -> None:
-    fake = _SteerFakeClient([])
-    claude_provider._client = fake
-    claude_provider._connected = True
-
-    request = AgentRequest(prompt="more", model="haiku", mode="normal")
-    assert await claude_provider.steer_turn(request) is None
-    assert fake.queries == []
 
 
-@pytest.mark.asyncio
-async def test_claude_steer_echo_mid_turn_emits_delivered_and_one_result(
-    claude_provider: ClaudeProvider, monkeypatch,
-) -> None:
-    from claude_agent_sdk import UserMessage
-
-    from ciao.models import ResultEvent, SteerDeliveredEvent, ToolUseEvent
-
-    steer_request = AgentRequest(prompt="x", model="haiku", mode="normal")
-    delivery: dict[str, str | None] = {}
-
-    async def round_one(client):
-        yield _steer_text("working")
-        delivery["id"] = await claude_provider.steer_turn(steer_request)
-        yield UserMessage(content=[], uuid="not-ours")  # ignored: unknown uuid
-        yield UserMessage(
-            content=[{"type": "text", "text": "x"}], uuid=client.steer_uuid
-        )
-        yield _steer_text("done PINEAPPLE")
-        yield _steer_result("done PINEAPPLE")
-
-    fake = _SteerFakeClient([round_one])
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
-
-    events = [
-        e
-        async for e in claude_provider.run_streaming(
-            AgentRequest(prompt="go", model="haiku", mode="normal"), lambda _h: None
-        )
-    ]
-
-    delivered = [e for e in events if isinstance(e, SteerDeliveredEvent)]
-    assert [e.delivery_id for e in delivered] == [delivery["id"]]
-    assert delivered[0].type == "steer_delivered"
-    assert len([e for e in events if isinstance(e, ResultEvent)]) == 1
-    markers = [i for i, e in enumerate(events) if isinstance(e, ToolUseEvent)]
-    assert [events[i].tool_name for i in markers] == ["working", "done PINEAPPLE"]
-    assert markers[0] < events.index(delivered[0]) < markers[1]
-    assert fake.calls == 1
-    assert claude_provider._turn_open is False
-    assert claude_provider._steers_pending == set()
 
 
-@pytest.mark.asyncio
-async def test_claude_steer_echo_after_result_keeps_turn_open(
-    claude_provider: ClaudeProvider, monkeypatch,
-) -> None:
-    from claude_agent_sdk import UserMessage
-
-    from ciao.models import ResultEvent, SteerDeliveredEvent, ToolUseEvent
-
-    steer_request = AgentRequest(prompt="x", model="haiku", mode="normal")
-
-    async def round_one(_client):
-        yield _steer_text("first")
-        await claude_provider.steer_turn(steer_request)
-        yield _steer_result("a")
-
-    async def round_two(client):
-        yield UserMessage(content="x", uuid=client.steer_uuid)
-        yield _steer_text("second")
-        yield _steer_result("b")
-
-    fake = _SteerFakeClient([round_one, round_two])
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
-
-    events = [
-        e
-        async for e in claude_provider.run_streaming(
-            AgentRequest(prompt="go", model="haiku", mode="normal"), lambda _h: None
-        )
-    ]
-
-    results = [e for e in events if isinstance(e, ResultEvent)]
-    assert len(results) == 1
-    assert results[0].result == "b"
-    assert len([e for e in events if isinstance(e, SteerDeliveredEvent)]) == 1
-    assert [e.tool_name for e in events if isinstance(e, ToolUseEvent)] == ["first", "second"]
-    assert fake.calls == 2
 
 
-@pytest.mark.asyncio
-async def test_claude_steer_grace_timeout_ends_turn(
-    claude_provider: ClaudeProvider, monkeypatch,
-) -> None:
-    from ciao.models import ResultEvent, SteerDeliveredEvent
-
-    monkeypatch.setattr("ciao.providers.claude._STEER_ECHO_GRACE_S", 0.05)
-    steer_request = AgentRequest(prompt="x", model="haiku", mode="normal")
-
-    async def round_one(_client):
-        yield _steer_text("first")
-        await claude_provider.steer_turn(steer_request)
-        yield _steer_result("a")
-
-    fake = _SteerFakeClient([round_one])  # the second receive_response never yields
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
-
-    events = [
-        e
-        async for e in claude_provider.run_streaming(
-            AgentRequest(prompt="go", model="haiku", mode="normal"), lambda _h: None
-        )
-    ]
-
-    results = [e for e in events if isinstance(e, ResultEvent)]
-    assert len(results) == 1
-    assert results[0].result == "a"
-    assert not [e for e in events if isinstance(e, SteerDeliveredEvent)]
-    assert claude_provider._steers_pending == set()
-    assert claude_provider._turn_open is False
 
 
 class _StopFakeClient:
@@ -2708,73 +2557,23 @@ class _StopFakeClient:
         self.plain_interrupts += 1
 
 
-@pytest.mark.asyncio
-async def test_claude_stop_cancels_queued_steers(
-    claude_provider: ClaudeProvider, caplog,
-) -> None:
-    from ciao.providers.claude import SDKHandle
-
-    claude_provider._steers_pending.add("s1")
-    client = _StopFakeClient(still_queued=["s1"])
-    with caplog.at_level(logging.WARNING):
-        await SDKHandle(
-            client=client, pending_steers=claude_provider._steers_pending
-        ).stop()
-
-    assert client.control_requests == [{"subtype": "interrupt", "cancel_queued": True}]
-    assert client.plain_interrupts == 0
-    assert claude_provider._steers_pending == set()
-    assert "s1" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_claude_stop_without_steers_uses_plain_interrupt(
+async def test_claude_stop_after_the_echo_uses_plain_interrupt(
     claude_provider: ClaudeProvider,
 ) -> None:
     from ciao.providers.claude import SDKHandle
 
     client = _StopFakeClient()
-    await SDKHandle(client=client, pending_steers=claude_provider._steers_pending).stop()
+    echoed = asyncio.Event()
+    echoed.set()
+    await SDKHandle(client=client, prompt_echoed=echoed).stop()
 
     assert client.plain_interrupts == 1
     assert client.control_requests == []
 
 
-@pytest.mark.asyncio
-async def test_claude_steer_with_images_builds_image_blocks(
-    claude_provider: ClaudeProvider, monkeypatch, tmp_path: Path,
-) -> None:
-    image = tmp_path / "dot.png"
-    image.write_bytes(b"\x89PNG\r\n\x1a\nfake")
-    steer_request = AgentRequest(
-        prompt="what colour is this?",
-        model="haiku",
-        mode="normal",
-        images=[
-            ImageAttachment(path=image, mime_type="image/png", original_filename="dot.png")
-        ],
-    )
-
-    async def round_one(client):
-        delivery_id = await claude_provider.steer_turn(steer_request)
-        assert delivery_id == client.steer_uuid
-        sent = client.queries[-1]
-        assert sent["type"] == "user"
-        content = sent["message"]["content"]
-        assert content[0]["type"] == "text"
-        assert "what colour is this?" in content[0]["text"]
-        assert [block["type"] for block in content[1:]] == ["image"]
-        assert content[1]["source"]["media_type"] == "image/png"
-        claude_provider._steers_pending.clear()
-        yield _steer_result("ok")
-
-    fake = _SteerFakeClient([round_one])
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
-    async for _event in claude_provider.run_streaming(
-        AgentRequest(prompt="go", model="haiku", mode="normal"), lambda _h: None
-    ):
-        pass
-    assert len(fake.queries) == 2  # the prompt, then the steer
 
 
 @pytest.mark.asyncio
@@ -2798,7 +2597,7 @@ async def test_claude_options_enable_user_message_replay(
     assert "replay-user-messages" in captured["options"].extra_args
 
 
-async def _run_steer_turn(provider: ClaudeProvider, handles: list | None = None):
+async def _run_turn(provider: ClaudeProvider, handles: list | None = None):
     return [
         e
         async for e in provider.run_streaming(
@@ -2808,80 +2607,10 @@ async def _run_steer_turn(provider: ClaudeProvider, handles: list | None = None)
     ]
 
 
-@pytest.mark.asyncio
-async def test_claude_steer_ended_stream_does_not_spin(
-    claude_provider: ClaudeProvider, monkeypatch,
-) -> None:
-    from ciao.models import ResultEvent
-
-    async def round_one(_client):
-        await claude_provider.steer_turn(AgentRequest(prompt="x", model="haiku", mode="normal"))
-        yield _steer_result("a")
-
-    async def empty(_client):
-        return
-        yield  # pragma: no cover
-
-    fake = _SteerFakeClient([round_one] + [empty] * 200)
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
-
-    events = await asyncio.wait_for(_run_steer_turn(claude_provider), 5)
-
-    assert len([e for e in events if isinstance(e, ResultEvent)]) == 1
-    assert fake.calls <= 3
-    assert claude_provider._steers_pending == set()
 
 
-@pytest.mark.asyncio
-async def test_claude_turn_closes_steer_gate_before_post_result_awaits(
-    claude_provider: ClaudeProvider, monkeypatch,
-) -> None:
-    seen: list[bool] = []
-
-    async def spy(*_args, **_kwargs):
-        seen.append(claude_provider._turn_open)
-
-    async def round_one(_client):
-        yield _steer_result("a")
-
-    fake = _SteerFakeClient([round_one])
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
-    monkeypatch.setattr(claude_provider, "_augment_with_context_pct", spy)
-
-    await _run_steer_turn(claude_provider)
-
-    assert seen == [False]
 
 
-@pytest.mark.asyncio
-async def test_claude_stop_during_grace_wait_ends_turn_and_closes_gate(
-    claude_provider: ClaudeProvider, monkeypatch,
-) -> None:
-    from ciao.models import ResultEvent
-
-    monkeypatch.setattr("ciao.providers.claude._STEER_ECHO_GRACE_S", 30.0)
-    in_grace = asyncio.Event()
-
-    async def round_one(_client):
-        await claude_provider.steer_turn(AgentRequest(prompt="x", model="haiku", mode="normal"))
-        yield _steer_result("a")
-        in_grace.set()
-
-    fake = _SteerFakeClient([round_one])  # the follow-up round never yields
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
-    handles: list = []
-    turn = asyncio.create_task(_run_steer_turn(claude_provider, handles))
-    await asyncio.wait_for(in_grace.wait(), 2)
-    await asyncio.sleep(0.05)
-
-    await handles[0].stop()
-    events = await asyncio.wait_for(turn, 2)
-
-    assert len([e for e in events if isinstance(e, ResultEvent)]) == 1
-    assert await claude_provider.steer_turn(
-        AgentRequest(prompt="late", model="haiku", mode="normal")
-    ) is None
-    assert fake.control_requests == [{"subtype": "interrupt", "cancel_queued": True}]
 
 
 @pytest.mark.asyncio
@@ -2896,155 +2625,47 @@ async def test_claude_stop_cancel_failure_warns_and_falls_back_to_interrupt(
         raise RuntimeError("transport gone")
 
     client._query._send_control_request = boom
-    claude_provider._steers_pending.add("s1")
+    echoed = asyncio.Event()
     with caplog.at_level(logging.WARNING):
-        await SDKHandle(
-            client=client, pending_steers=claude_provider._steers_pending
-        ).stop()
+        await SDKHandle(client=client, prompt_echoed=echoed).stop()
 
     assert client.plain_interrupts == 1
     assert "cancel" in caplog.text.lower()
 
 
+
+
+
+
+
+
+
+
+
+
+
+
 @pytest.mark.asyncio
-async def test_claude_unrelated_timeout_in_round_is_not_swallowed(
+async def test_claude_turn_ends_on_its_own_result_without_waiting(
     claude_provider: ClaudeProvider, monkeypatch,
 ) -> None:
-    async def round_one(_client):
-        await claude_provider.steer_turn(AgentRequest(prompt="x", model="haiku", mode="normal"))
-        yield _steer_result("a")
-
-    async def round_two(_client):
-        raise asyncio.TimeoutError("unrelated")
-        yield  # pragma: no cover
-
-    fake = _SteerFakeClient([round_one, round_two])
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
-
-    with pytest.raises(asyncio.TimeoutError):
-        await _run_steer_turn(claude_provider)
-
-
-@pytest.mark.asyncio
-async def test_claude_steer_turn_discards_pending_when_send_raises(
-    claude_provider: ClaudeProvider,
-) -> None:
-    class Client:
-        async def query(self, payload):
-            raise RuntimeError("send blew up")
-
-    claude_provider._client = Client()
-    claude_provider._connected = True
-    claude_provider._turn_open = True
-
-    with pytest.raises(RuntimeError):
-        await claude_provider.steer_turn(AgentRequest(prompt="x", model="haiku", mode="normal"))
-    assert claude_provider._steers_pending == set()
-
-
-@pytest.mark.asyncio
-async def test_claude_steer_grace_timeout_cancels_the_queued_steer(
-    claude_provider: ClaudeProvider, monkeypatch,
-) -> None:
-    monkeypatch.setattr("ciao.providers.claude._STEER_ECHO_GRACE_S", 0.05)
-    ids: list[str | None] = []
-
-    async def round_one(_client):
-        ids.append(await claude_provider.steer_turn(
-            AgentRequest(prompt="x", model="haiku", mode="normal")
-        ))
-        yield _steer_result("a")
-
-    fake = _SteerFakeClient([round_one])
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
-
-    await _run_steer_turn(claude_provider)
-
-    assert fake.control_requests == [
-        {"subtype": "cancel_async_message", "message_uuid": ids[0]}
-    ]
-    assert claude_provider._steers_pending == set()
-
-
-@pytest.mark.asyncio
-async def test_claude_grace_timeout_closes_steer_gate_before_cancelling(
-    claude_provider: ClaudeProvider, monkeypatch,
-) -> None:
-    monkeypatch.setattr("ciao.providers.claude._STEER_ECHO_GRACE_S", 0.05)
-    late: list[str | None] = []
-
-    async def round_one(_client):
-        await claude_provider.steer_turn(AgentRequest(prompt="x", model="haiku", mode="normal"))
-        yield _steer_result("a")
-
-    fake = _SteerFakeClient([round_one])
-
-    async def cancel(request, timeout=60.0):
-        late.append(await claude_provider.steer_turn(
-            AgentRequest(prompt="late", model="haiku", mode="normal")
-        ))
-        return {"cancelled": True}
-
-    fake._query._send_control_request = cancel
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
-
-    await _run_steer_turn(claude_provider)
-
-    assert late == [None]
-    assert claude_provider._steers_pending == set()
-
-
-@pytest.mark.asyncio
-async def test_claude_grace_timeout_cancel_is_bounded(
-    claude_provider: ClaudeProvider, monkeypatch, caplog,
-) -> None:
+    """After the echo and one result, the turn does not open another round."""
     from ciao.models import ResultEvent
 
-    monkeypatch.setattr("ciao.providers.claude._STEER_ECHO_GRACE_S", 0.05)
-    monkeypatch.setattr("ciao.providers.claude._STEER_CANCEL_TIMEOUT_S", 0.05)
+    async def ours(_client):
+        yield _result_msg("ok")
 
-    async def round_one(_client):
-        await claude_provider.steer_turn(AgentRequest(prompt="x", model="haiku", mode="normal"))
-        yield _steer_result("a")
+    async def later(_client):
+        if False:
+            yield None
 
-    fake = _SteerFakeClient([round_one])
+    fake = _EchoFakeClient([ours, later])
+    _wire_echo_provider(claude_provider, monkeypatch, fake)
 
-    async def hang(request, timeout=60.0):
-        await asyncio.sleep(3600)
+    events = await asyncio.wait_for(_run_turn(claude_provider), 5)
 
-    fake._query._send_control_request = hang
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
-
-    with caplog.at_level(logging.WARNING):
-        events = await asyncio.wait_for(_run_steer_turn(claude_provider), 3)
-
-    assert len([e for e in events if isinstance(e, ResultEvent)]) == 1
-    assert "cancel" in caplog.text.lower()
-    assert claude_provider._steers_pending == set()
-
-
-@pytest.mark.asyncio
-async def test_claude_grace_timeout_warns_when_cancel_not_confirmed(
-    claude_provider: ClaudeProvider, monkeypatch, caplog,
-) -> None:
-    monkeypatch.setattr("ciao.providers.claude._STEER_ECHO_GRACE_S", 0.05)
-
-    async def round_one(_client):
-        await claude_provider.steer_turn(AgentRequest(prompt="x", model="haiku", mode="normal"))
-        yield _steer_result("a")
-
-    fake = _SteerFakeClient([round_one])
-
-    async def not_cancelled(request, timeout=60.0):
-        return {"cancelled": False}
-
-    fake._query._send_control_request = not_cancelled
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
-
-    with caplog.at_level(logging.WARNING):
-        await _run_steer_turn(claude_provider)
-
-    assert "not cancelled" in caplog.text.lower()
+    assert [e.result for e in events if isinstance(e, ResultEvent)] == ["ok"]
+    assert fake.calls == 1
 
 
 # --- #1406: attribute a turn's output by its own prompt's replay echo ---
@@ -3059,7 +2680,7 @@ def _follow_up_result(text: str, *, is_error: bool = False, origin: dict | None 
         duration_api_ms=1,
         is_error=is_error,
         num_turns=1,
-        session_id="sess-steer",
+        session_id="sess-echo",
         result=text,
         origin=origin if origin is not None else {"kind": "task-notification"},
     )
@@ -3078,19 +2699,19 @@ async def test_claude_turn_skips_a_follow_up_that_ran_before_its_prompt(
     from ciao.models import ResultEvent
 
     async def follow_up(_client):
-        yield _steer_text("follow-up")
+        yield _text_msg("follow-up")
         yield _follow_up_result("background done")
 
     async def ours(client):
         yield _prompt_echo(client.prompt_uuid)
-        yield _steer_text("mine")
-        yield _steer_result("ANSWER")
+        yield _text_msg("mine")
+        yield _result_msg("ANSWER")
 
-    fake = _SteerFakeClient([follow_up, ours])
+    fake = _EchoFakeClient([follow_up, ours])
     fake.echo_prompt = False
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    _wire_echo_provider(claude_provider, monkeypatch, fake)
 
-    events = await asyncio.wait_for(_run_steer_turn(claude_provider), 5)
+    events = await asyncio.wait_for(_run_turn(claude_provider), 5)
 
     results = [e for e in events if isinstance(e, ResultEvent)]
     assert [r.result for r in results] == ["ANSWER"]
@@ -3107,16 +2728,16 @@ async def test_claude_turn_ends_on_the_result_after_its_echo_whatever_its_origin
     from ciao.models import ResultEvent
 
     async def merged(client):
-        yield _steer_text("follow-up")
+        yield _text_msg("follow-up")
         yield _prompt_echo(client.prompt_uuid)
-        yield _steer_text("mine")
+        yield _text_msg("mine")
         yield _follow_up_result("ANSWER")
 
-    fake = _SteerFakeClient([merged])
+    fake = _EchoFakeClient([merged])
     fake.echo_prompt = False
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    _wire_echo_provider(claude_provider, monkeypatch, fake)
 
-    events = await asyncio.wait_for(_run_steer_turn(claude_provider), 5)
+    events = await asyncio.wait_for(_run_turn(claude_provider), 5)
 
     results = [e for e in events if isinstance(e, ResultEvent)]
     assert [r.result for r in results] == ["ANSWER"]
@@ -3126,32 +2747,32 @@ async def test_claude_turn_ends_on_the_result_after_its_echo_whatever_its_origin
 
 
 @pytest.mark.parametrize(
-    "stale_is_error", [False, True], ids=["orphan_steer_ran", "stopped_follow_up"]
+    "stale_is_error", [False, True], ids=["orphan_prompt_ran", "stopped_follow_up"]
 )
 @pytest.mark.asyncio
 async def test_claude_turn_skips_a_stale_result_left_in_the_cli(
     claude_provider: ClaudeProvider, monkeypatch, stale_is_error: bool,
 ) -> None:
-    """A steer whose cancel failed, or a turn a Stop left queued, runs unread
+    """A prompt left queued, or a turn a Stop left queued, runs unread
     while the CLI stays alive (#1402); its result must not end the next turn."""
     from claude_agent_sdk import UserMessage
 
     from ciao.models import ResultEvent
 
     async def stale(_client):
-        yield UserMessage(content="old steer", uuid="orphan-steer")
-        yield _steer_text("stale")
+        yield UserMessage(content="old prompt", uuid="orphan-prompt")
+        yield _text_msg("stale")
         yield _follow_up_result("STALE", is_error=stale_is_error, origin={"kind": "human"})
 
     async def ours(client):
         yield _prompt_echo(client.prompt_uuid)
-        yield _steer_result("THIRD")
+        yield _result_msg("THIRD")
 
-    fake = _SteerFakeClient([stale, ours])
+    fake = _EchoFakeClient([stale, ours])
     fake.echo_prompt = False
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    _wire_echo_provider(claude_provider, monkeypatch, fake)
 
-    events = await asyncio.wait_for(_run_steer_turn(claude_provider), 5)
+    events = await asyncio.wait_for(_run_turn(claude_provider), 5)
 
     assert [e.result for e in events if isinstance(e, ResultEvent)] == ["THIRD"]
     assert _marker_names(events) == []
@@ -3167,16 +2788,16 @@ async def test_claude_stop_before_the_echo_cancels_the_queued_prompt(
     in_follow_up = asyncio.Event()
 
     async def follow_up(_client):
-        yield _steer_text("follow-up")
+        yield _text_msg("follow-up")
         in_follow_up.set()
         await stopped.wait()
         yield _follow_up_result("", is_error=True)
 
-    fake = _SteerFakeClient([follow_up])
+    fake = _EchoFakeClient([follow_up])
     fake.echo_prompt = False
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    _wire_echo_provider(claude_provider, monkeypatch, fake)
     handles: list = []
-    turn = asyncio.create_task(_run_steer_turn(claude_provider, handles))
+    turn = asyncio.create_task(_run_turn(claude_provider, handles))
     await asyncio.wait_for(in_follow_up.wait(), 2)
 
     await handles[0].stop()
@@ -3199,11 +2820,11 @@ async def test_claude_stop_wakes_a_turn_waiting_for_its_echo(
     async def follow_up(_client):
         yield _follow_up_result("background done")
 
-    fake = _SteerFakeClient([follow_up])  # the prompt never runs
+    fake = _EchoFakeClient([follow_up])  # the prompt never runs
     fake.echo_prompt = False
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    _wire_echo_provider(claude_provider, monkeypatch, fake)
     handles: list = []
-    turn = asyncio.create_task(_run_steer_turn(claude_provider, handles))
+    turn = asyncio.create_task(_run_turn(claude_provider, handles))
     while fake.calls < 2:
         await asyncio.sleep(0.01)
 
@@ -3223,16 +2844,16 @@ async def test_claude_stop_after_the_echo_keeps_the_plain_interrupt(
 
     async def ours(client):
         yield _prompt_echo(client.prompt_uuid)
-        yield _steer_text("mine")
+        yield _text_msg("mine")
         echoed.set()
         await stopped.wait()
         yield _follow_up_result("", is_error=True, origin={"kind": "human"})
 
-    fake = _SteerFakeClient([ours])
+    fake = _EchoFakeClient([ours])
     fake.echo_prompt = False
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    _wire_echo_provider(claude_provider, monkeypatch, fake)
     handles: list = []
-    turn = asyncio.create_task(_run_steer_turn(claude_provider, handles))
+    turn = asyncio.create_task(_run_turn(claude_provider, handles))
     await asyncio.wait_for(echoed.wait(), 2)
 
     await handles[0].stop()
@@ -3259,13 +2880,13 @@ async def test_claude_compaction_status_before_the_echo_is_shown(
             data={"compact_metadata": {"pre_tokens": 50000, "post_tokens": 4000}},
         )
         yield _prompt_echo(client.prompt_uuid)
-        yield _steer_result("")
+        yield _result_msg("")
 
-    fake = _SteerFakeClient([compact])
+    fake = _EchoFakeClient([compact])
     fake.echo_prompt = False
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    _wire_echo_provider(claude_provider, monkeypatch, fake)
 
-    events = await asyncio.wait_for(_run_steer_turn(claude_provider), 5)
+    events = await asyncio.wait_for(_run_turn(claude_provider), 5)
 
     assert [e.status for e in events if isinstance(e, SystemStatusEvent)] == [
         "compacting",
@@ -3290,13 +2911,13 @@ async def test_claude_pre_echo_init_still_records_bundled_skills(
     async def ours(client):
         yield SystemMessage(subtype="init", data={"skills": ["a"]})
         yield _prompt_echo(client.prompt_uuid)
-        yield _steer_result("ok")
+        yield _result_msg("ok")
 
-    fake = _SteerFakeClient([ours])
+    fake = _EchoFakeClient([ours])
     fake.echo_prompt = False
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    _wire_echo_provider(claude_provider, monkeypatch, fake)
 
-    await asyncio.wait_for(_run_steer_turn(claude_provider), 5)
+    await asyncio.wait_for(_run_turn(claude_provider), 5)
 
     assert seen == [{"skills": ["a"]}]
 
@@ -3313,7 +2934,7 @@ async def test_claude_follow_up_text_does_not_flag_our_result_as_a_drop(
     async def merged(client):
         yield SDKStreamEvent(
             uuid="e1",
-            session_id="sess-steer",
+            session_id="sess-echo",
             event={
                 "type": "content_block_delta",
                 "delta": {
@@ -3324,13 +2945,13 @@ async def test_claude_follow_up_text_does_not_flag_our_result_as_a_drop(
             parent_tool_use_id=None,
         )
         yield _prompt_echo(client.prompt_uuid)
-        yield _steer_result("ok")
+        yield _result_msg("ok")
 
-    fake = _SteerFakeClient([merged])
+    fake = _EchoFakeClient([merged])
     fake.echo_prompt = False
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    _wire_echo_provider(claude_provider, monkeypatch, fake)
 
-    events = await asyncio.wait_for(_run_steer_turn(claude_provider), 5)
+    events = await asyncio.wait_for(_run_turn(claude_provider), 5)
 
     results = [e for e in events if isinstance(e, ResultEvent)]
     assert [(r.result, r.is_error) for r in results] == [("ok", False)]
@@ -3347,16 +2968,16 @@ async def test_claude_stop_before_the_echo_reports_the_cancelled_prompt(
     in_follow_up = asyncio.Event()
 
     async def follow_up(_client):
-        yield _steer_text("follow-up")
+        yield _text_msg("follow-up")
         in_follow_up.set()
         await stopped.wait()
         yield _follow_up_result("", is_error=True)
 
-    fake = _SteerFakeClient([follow_up])
+    fake = _EchoFakeClient([follow_up])
     fake.echo_prompt = False
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    _wire_echo_provider(claude_provider, monkeypatch, fake)
     handles: list = []
-    turn = asyncio.create_task(_run_steer_turn(claude_provider, handles))
+    turn = asyncio.create_task(_run_turn(claude_provider, handles))
     await asyncio.wait_for(in_follow_up.wait(), 2)
 
     await handles[0].stop()
@@ -3381,11 +3002,11 @@ async def test_claude_stop_after_the_echo_reports_no_cancelled_prompt(
         await stopped.wait()
         yield _follow_up_result("", is_error=True, origin={"kind": "human"})
 
-    fake = _SteerFakeClient([ours])
+    fake = _EchoFakeClient([ours])
     fake.echo_prompt = False
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    _wire_echo_provider(claude_provider, monkeypatch, fake)
     handles: list = []
-    turn = asyncio.create_task(_run_steer_turn(claude_provider, handles))
+    turn = asyncio.create_task(_run_turn(claude_provider, handles))
     await asyncio.wait_for(echoed.wait(), 2)
 
     await handles[0].stop()
@@ -3411,11 +3032,11 @@ async def test_claude_cli_death_after_the_echo_on_stop_keeps_the_interrupted_err
         echoed.set()
         await stopped.wait()  # the stream then closes with no result
 
-    fake = _SteerFakeClient([ours])
+    fake = _EchoFakeClient([ours])
     fake.echo_prompt = False
-    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    _wire_echo_provider(claude_provider, monkeypatch, fake)
     handles: list = []
-    turn = asyncio.create_task(_run_steer_turn(claude_provider, handles))
+    turn = asyncio.create_task(_run_turn(claude_provider, handles))
     await asyncio.wait_for(echoed.wait(), 2)
 
     await handles[0].stop()
