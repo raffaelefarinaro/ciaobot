@@ -927,16 +927,64 @@ def test_opencode_child_id_at_the_length_cap_is_kept(tmp_path: Path) -> None:
     assert opened[0].tool_use_id == f"child:{child}"
 
 
-def test_opencode_child_set_is_capped_per_root_session(tmp_path: Path) -> None:
+_CHILD_LIMIT_LOG = "OpenCode child sessions over 256 live at once are not shown"
+
+
+def test_opencode_child_cap_counts_live_children_and_logs_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     provider = OpencodeAcpProvider(tmp_path)
     normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    caplog.set_level(logging.DEBUG, logger="ciao.providers.acp.agents")
     for index in range(256):
         assert provider.ext_update(normalizer, _CHILD, _child_status(f"ses_{index}", "running"))
-    # The 257th child has no node, and no event for it is emitted.
+    # The 257th live child has no node, and no event for it is emitted.
     assert provider.ext_update(normalizer, _CHILD, _child_status("ses_overflow", "running")) == []
     assert provider.ext_update(normalizer, _CHILD, _child_update("ses_overflow", _TEXT)) == []
+    assert provider.ext_update(normalizer, _CHILD, _child_status("ses_overflow2", "running")) == []
+    # One DEBUG line for the whole overflow, and it names no child id.
+    lines = [r.getMessage() for r in caplog.records if r.name == "ciao.providers.acp.agents"]
+    assert lines == [_CHILD_LIMIT_LOG]
     # Children already open keep working.
     assert provider.ext_update(normalizer, _CHILD, _child_status("ses_0", "completed"))[0].type == "tool_result"
+
+
+def test_opencode_finished_children_free_their_slot(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    # 300 children one after another, each finished before the next starts: all of them nest.
+    for index in range(300):
+        child = f"ses_seq_{index}"
+        opened = provider.ext_update(normalizer, _CHILD, _child_status(child, "running"))
+        assert [event.tool_use_id for event in opened] == [f"child:{child}"]
+        nested = provider.ext_update(normalizer, _CHILD, _child_update(child, _TEXT))
+        assert [event.parent_tool_use_id for event in nested] == [f"child:{child}"]
+        ended = provider.ext_update(normalizer, _CHILD, _child_status(child, "completed"))
+        assert [(event.type, event.tool_use_id) for event in ended] == [("tool_result", f"child:{child}")]
+
+
+@pytest.mark.asyncio
+async def test_opencode_children_left_running_do_not_fill_the_next_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+
+    async def turn_with_children_left_running(_self: Any, _request: Any, _register: Any) -> Any:
+        for index in range(256):
+            assert provider.ext_update(normalizer, _CHILD, _child_status(f"ses_run_{index}", "running"))
+        if False:  # pragma: no cover - makes this an async generator with no events
+            yield
+
+    async def turn_with_one_more_child(_self: Any, _request: Any, _register: Any) -> Any:
+        yield provider.ext_update(normalizer, _CHILD, _child_status("ses_next", "running"))[0]
+
+    monkeypatch.setattr(AcpProvider, "run_streaming", turn_with_children_left_running)
+    assert [event async for event in provider.run_streaming(None, lambda _h: None)] == []
+    # The turn ended with 256 children still running: the next turn's child still gets a node.
+    monkeypatch.setattr(AcpProvider, "run_streaming", turn_with_one_more_child)
+    events = [event async for event in provider.run_streaming(None, lambda _h: None)]
+    assert [(event.type, event.tool_use_id) for event in events] == [("tool_use", "child:ses_next")]
 
 
 def test_plain_update_child_meta_names_the_same_node_as_the_ext_path(tmp_path: Path) -> None:

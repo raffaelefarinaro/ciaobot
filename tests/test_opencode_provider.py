@@ -282,7 +282,7 @@ async def test_ephemeral_none_cleanup_failure_keeps_safe_classification(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome,message", [
-    ("version", "OpenCode 2.3.2 or later is required"),
+    ("version", "OpenCode 2.3.2 or newer is required"),
     ("operations", "OpenCode API is missing required operations"),
     ("unauthorized", "OpenCode server authentication failed"),
 ])

@@ -172,7 +172,7 @@ class _FlushedResponses:
 _ENGINE_INTERNAL_ENV_KEYS = frozenset({"PWA_AUTH_TOKEN"})
 
 
-def _agent_base_env(unset: tuple[str, ...]) -> dict[str, str]:
+def agent_base_env(unset: tuple[str, ...]) -> dict[str, str]:
     """The engine's environment as an agent process inherits it.
 
     Every variable is passed through, provider credentials included: each CLI decides what it
@@ -233,7 +233,7 @@ class AcpConnection:
         if not os.path.isabs(binary):
             # A '.' or empty PATH entry resolves relative to the cwd we are about to set.
             raise AgentStartError(f"{spec.binary} resolved to a relative path ({binary}); refusing to start it.")
-        merged = {**_agent_base_env(spec.unset_env), **spec.env, **env}
+        merged = {**agent_base_env(spec.unset_env), **spec.env, **env}
         merged["PATH"] = prepend_engine_path(merged.get("PATH"))
         # No start_new_session: the agent stays in the engine's process group so the
         # supervisor's group kill reaches it when the engine dies.

@@ -15,7 +15,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import AsyncGenerator, Callable, Mapping
+from contextlib import aclosing
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
@@ -27,6 +28,7 @@ from ciao.models import AgentRequest, AssistantTextDelta, StreamEvent, ThinkingE
 from ciao.providers.acp.normalize import UpdateNormalizer, child_tool_id, loggable_kind
 from ciao.providers.acp.provider import AcpProvider
 from ciao.providers.acp.spec import AgentSpec, ModeChoice, VersionGate
+from ciao.providers.base import ActiveHandle
 from ciao.providers.opencode import (
     OPENCODE_V2_REQUIRED,
     cached_opencode_version,
@@ -220,8 +222,10 @@ _OPENCODE_CHILD_END = {"completed": False, "failed": True, "interrupted": True}
 # chat's own state: usage_update the context and cost gauges, config_option_update the tracked
 # model, current_mode_update the mode, compaction_update the parent's compaction status.
 _CHILD_UPDATE_KINDS = frozenset({"agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update"})
-# A child's title is shown on its node; the child set bounds memory per root session.
+# A child's title is shown on its node.
 _CHILD_TITLE_CHARS = 200
+# Live children (opened, no terminal status yet) per turn. A child leaves the set when its
+# terminal status arrives and when the turn ends, so the cap bounds only children running at once.
 _CHILD_LIMIT = 256
 
 
@@ -261,7 +265,31 @@ class OpencodeAcpProvider(AcpProvider):
         super().__init__(workspace_root, config=config)
         self._children: set[str] = set()
         self._children_root: object = None
+        self._children_limit_logged = False
         self._dropped_kinds: set[str] = set()
+
+    async def run_streaming(
+        self,
+        request: AgentRequest,
+        register_handle: Callable[[ActiveHandle | None], None],
+    ) -> AsyncGenerator[StreamEvent, None]:
+        try:
+            async with aclosing(super().run_streaming(request, register_handle)) as events:
+                async for event in events:
+                    yield event
+        finally:
+            # A child still running when the turn ends is not counted against the next turn.
+            self._forget_children()
+
+    def _forget_children(self) -> None:
+        self._children.clear()
+        self._children_limit_logged = False
+
+    def _log_children_limit(self) -> None:
+        # Once per turn; the line names no child id and no adapter text.
+        if not self._children_limit_logged:
+            self._children_limit_logged = True
+            logger.debug("OpenCode child sessions over %d live at once are not shown", _CHILD_LIMIT)
 
     def ext_update(
         self, normalizer: UpdateNormalizer, method: str, payload: Mapping[str, Any]
@@ -277,13 +305,15 @@ class OpencodeAcpProvider(AcpProvider):
         # Validated by child_tool_id, so the id is a plain string here.
         child_id = tool_id.removeprefix("child:")
         if root != self._children_root:
-            self._children_root, self._children = root, set()
+            self._children_root = root
+            self._forget_children()
         parent_session = payload.get("parentSessionId")
         parent = None if parent_session == root else child_tool_id(parent_session)
         events: list[StreamEvent] = []
         if child_id not in self._children:
             # The first event for a child opens its node, whether a status or an update came first.
             if len(self._children) >= _CHILD_LIMIT:
+                self._log_children_limit()
                 return []
             self._children.add(child_id)
             events.append(ToolUseEvent(
@@ -308,6 +338,8 @@ class OpencodeAcpProvider(AcpProvider):
         elif kind == "status":
             status = payload.get("status")
             if isinstance(status, str) and status in _OPENCODE_CHILD_END:
+                # The child is over: its slot is free for the next one.
+                self._children.discard(child_id)
                 events.append(ToolUseEvent(
                     type="tool_result",
                     tool_use_id=tool_id,

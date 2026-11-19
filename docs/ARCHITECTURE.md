@@ -981,6 +981,8 @@ Known gaps:
 
 - Stdio JSON-RPC lines are not capped. `_STDIO_LIMIT` only sizes the stream buffer: the SDK's reader catches `LimitOverrunError` and keeps appending, so a longer line is assembled in memory. The SDK offers no hook to refuse it, and no custom transport is built for this.
 - Deleting a chat does not delete its opencode session, which stays in opencode's own history (accepted until slice D2). The probe and one-shot sessions are removed with `session/delete` when the agent advertises it.
+- The OpenCode transcript renderer `_render_opencode_thread` in `ciao/web/transcript_service.py`, and its branch, are kept for the legacy HTTP driver and are to delete in D2/E.
+- The title poll `_TITLE_POLL_DELAYS` and `_poll_native_title` in `ciao/web/project_chats.py` are kept only for the legacy OpenCode path and are to delete in D2/E.
 
 ACP agents (`ciao/providers/acp/`, #3137) keep their chat history in a session journal. Journal history reads the whole file on each read, as OpenCode's history does; the journal has no size bound yet. Accepted gaps, to follow up: the background-wake notice card is not rebuilt from the journal on reload, and file-card errors are not mirrored into the journal. The model catalog probe is bounded at 25 s and a timed-out probe returns an empty catalog without caching it. Codex's thinking levels (`minimal`, `low`, `medium`, `high`, `xhigh`) in `ciao/provider_registry.py` are an UNVERIFIED static default taken from the codex-acp 2.7.0 source: codex-acp reads the efforts from its runtime model catalog, so confirm the names against a live probe at the real-Mac/live checkpoint before relying on them.
 
