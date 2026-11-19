@@ -627,7 +627,6 @@ const GET_ROUTES = {
   '/api/projects': (req) => sessionOf(req).projects || PROJECTS,
   '/api/chats': (req) => chatsForSession(sessionOf(req)),
   '/api/schedules': (req) => liveSchedules(sessionOf(req)),
-  '/api/subagents/running': () => ({ chats: {} }),
   '/api/housekeeping': (req) => ({ actions: sessionOf(req).actions ?? [] }),
   '/api/tasks': (req, url) => {
     const state = sessionOf(req)

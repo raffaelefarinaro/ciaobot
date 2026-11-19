@@ -52,7 +52,6 @@ function seed(withNeedsYou: boolean) {
   store.activeWorkspace = 'personal'
   store.bootstrapped = true
   store.projectStreaming = {}
-  store.backgroundAgents = {}
   return store
 }
 

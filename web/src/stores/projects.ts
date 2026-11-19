@@ -30,8 +30,6 @@ import type {
   ChatPinState,
   ChatPostprocess,
   ChatMessage,
-  RunningSubagent,
-  RunningSubagentsResponse,
   SubagentTranscript,
   WsEvent,
   EventsWsMessage,
@@ -45,7 +43,7 @@ import type {
   WorkspaceProviderOption,
   WorkspacesResponse,
 } from '../lib/types'
-import { bareAgentId, isShellRow, sameAgent, shellTaskId } from '../lib/subagentIds'
+import { bareAgentId, sameAgent } from '../lib/subagentIds'
 import { chatActionErrorReason, isChatAction, normalizeChatActions } from '../lib/chatActions'
 import { checkingHealth, failedHealth, readyHealth, type SourceHealth } from '../lib/sourceHealth'
 
@@ -302,10 +300,6 @@ export const useProjectStore = defineStore('projects', () => {
   // Subagent transcripts keyed by chat_id. Loaded lazily on chat switch and
   // after each streaming turn (subagents can be spawned mid-turn).
   const subagents = ref<Record<string, SubagentTranscript[]>>({})
-  // Live subagents per chat, from /api/subagents/running. Metadata only (no
-  // transcripts), refreshed on a poll while anything is working, so the
-  // sidebar can list what every chat has in flight — not just the open one.
-  const runningSubagents = ref<Record<string, RunningSubagent[]>>({})
   const sockets = ref<Record<string, WebSocket>>({})
   const streaming = ref<Record<string, boolean>>({})
   const streamingText = ref<Record<string, string>>({})
@@ -423,12 +417,6 @@ export const useProjectStore = defineStore('projects', () => {
   // finished, no user row drove it). The turn before it already settled, so
   // it keeps rendering instead of yielding to the live trace.
   const wakeStreaming = ref<Record<string, boolean>>({})
-  // Per-chat count of background subagents still running *after* the parent
-  // turn's result landed. Driven by `chat_subagents_ready` over /ws/events
-  // (the server's subagent watcher). Powers a persistent "N background agents
-  // running" indicator so the user can see work is ongoing during the quiet
-  // gap between the turn ending and the agents reporting back.
-  const backgroundAgents = ref<Record<string, number>>({})
   // Full-screen restart overlay while the server drains active chats and
   // relaunches. Driven by /ws/events `server_restarting` (and the same
   // signal on the per-chat socket when a send is rejected mid-drain).
@@ -484,8 +472,8 @@ export const useProjectStore = defineStore('projects', () => {
   // in `archiveChat`, or from a `chat_archived` event — that no `/api/chats`
   // payload has confirmed yet. Every list refresh replaces `chats.value`
   // wholesale, so a GET issued before the archive landed on the server (the 15s
-  // poll, or the refresh the `chat_result_ready` / `chat_subagents_ready`
-  // handlers fire) resolves with `archived: false` and puts the row back in the
+  // poll, or the refresh the `chat_result_ready`
+  // handler fires) resolves with `archived: false` and puts the row back in the
   // sidebar until the next refresh — the archive flicker. `applyPendingArchived`
   // re-applies the local truth to every payload; entries clear as soon as the
   // server agrees (or the chat is gone), and on rollback when the POST fails.
@@ -1136,7 +1124,6 @@ export const useProjectStore = defineStore('projects', () => {
   function streamingTextFor(chatId: string): string { return streamingText.value[chatId] || '' }
   function streamingThinkingFor(chatId: string): string { return streamingThinking.value[chatId] || '' }
   function queuedFor(chatId: string): QueuedMessage[] { return queuedMessages.value[chatId] || [] }
-  function backgroundAgentsFor(chatId: string): number { return backgroundAgents.value[chatId] || 0 }
   function timelineFor(chatId: string): StreamEntry[] { return streamingTimeline.value[chatId] || [] }
   function deniedToolUseIdsFor(chatId: string): string[] { return deniedToolUseIds.value[chatId] || [] }
   function streamStartedAtFor(chatId: string): number { return streamStartedAt.value[chatId] || 0 }
@@ -1179,8 +1166,6 @@ export const useProjectStore = defineStore('projects', () => {
 
   const currentQueued = computed(() => queuedFor(activeChatId.value || ''))
 
-  const activeBackgroundAgents = computed(() => backgroundAgentsFor(activeChatId.value || ''))
-
   // Paused while the read-only subagent view is open for this chat: that
   // view already polls its single transcript on a 4s timer, so the store's
   // full-chat poll (every subagent, every transcript, re-parsed) would run
@@ -1190,44 +1175,24 @@ export const useProjectStore = defineStore('projects', () => {
     subagentViewActiveChatId.value = chatId
   }
 
-  // Live view while subagents run: refresh the active chat's subagent
-  // transcripts on a short interval so the panel updates as the agents
-  // work. The CLI appends to the transcript files continuously, so polling
-  // the REST endpoint is enough for a near-live feed. Runs while the active
-  // chat has running background agents OR is streaming a turn (agents
-  // dispatched mid-turn nest live inside the Working trace).
+  // Live view while a turn streams: refresh the active chat's subagent
+  // transcripts on a short interval so the panel updates as the agents work.
+  // The CLI appends to the transcript files continuously, so polling the REST
+  // endpoint is enough for a near-live feed.
   let subagentPollTimer: ReturnType<typeof setInterval> | null = null
-  // Rows the cheap running list names for the active chat. A separate owner
-  // from the engine count above: the count only exists while a watcher lives,
-  // so a chat whose count is 0 can still have a running child the list found.
-  // Never written back into `backgroundAgents`.
-  const activeRunningSubagentCount = computed(() =>
-    (runningSubagents.value[activeChatId.value || ''] || []).length,
-  )
-  // True while the running-list poll is alive. Independent running rows keep
-  // the full-list poll going only while that poll can still learn they ended,
-  // so a row the server never retires cannot hold a 4s transcript poll forever.
-  const runningPollLive = ref(false)
   watch(
     () => [
       activeChatId.value,
-      activeBackgroundAgents.value,
       isStreaming.value,
       subagentViewActiveChatId.value,
-      activeRunningSubagentCount.value > 0 && runningPollLive.value,
     ] as const,
-    ([chatId, count, streamingNow, viewChatId, runningKnown], previous) => {
+    ([chatId, streamingNow, viewChatId]) => {
       if (subagentPollTimer !== null) {
         clearInterval(subagentPollTimer)
         subagentPollTimer = null
       }
-      if (!chatId || (count <= 0 && !streamingNow && !runningKnown)) return
+      if (!chatId || !streamingNow) return
       if (viewChatId !== null && viewChatId === chatId) return
-      // Discovery: running rows appeared for this chat with nothing else
-      // polling it. Paint the full list now instead of after the first tick.
-      if (runningKnown && count <= 0 && !streamingNow && !(previous && previous[0] === chatId && previous[4])) {
-        void loadSubagents(chatId)
-      }
       subagentPollTimer = setInterval(() => {
         void loadSubagents(chatId)
       }, 4000)
@@ -1276,104 +1241,10 @@ export const useProjectStore = defineStore('projects', () => {
       clearInterval(subagentPollTimer)
       subagentPollTimer = null
     }
-    stopRunningSubagentPoll()
     for (const undo of teardowns.splice(0)) {
       try { undo() } catch { /* a disposed store must not throw */ }
     }
   })
-
-  // Anything working anywhere: a streaming turn or background agents. Gates
-  // the running-subagent poll so an idle app makes no requests at all.
-  const anyChatWorking = computed(() =>
-    Object.values(streaming.value).some(Boolean)
-    || Object.values(projectStreaming.value).some(Boolean)
-    || Object.values(backgroundAgents.value).some(n => n > 0),
-  )
-
-  // The UI-facing "is anything happening?" — deliberately NOT `anyChatWorking`,
-  // which is the poll gate above. A native background shell is the assistant
-  // working and must light the nav item, but it is not a subagent.
-  const anyChatBusy = computed(() =>
-    anyChatWorking.value
-    || Object.values(runningSubagents.value).some(rows => rows.some(isShellRow)),
-  )
-
-  // The server keeps a row "running" until the agent's transcript goes idle,
-  // which lags the parent turn by up to FINISHED_AGENT_IDLE_SECONDS (60s). So
-  // one refresh on the falling edge was not enough: whatever it still listed
-  // stayed in the sidebar with a live spinner until the next turn. Drain
-  // instead — keep polling until the rows are gone — but only for a bounded
-  // window, because a row the server can never retire (an interrupted agent
-  // whose transcript has no final record) would otherwise poll forever. The
-  // bound counts interval ticks rather than reading the wall clock: under
-  // vitest's fake timers the two can disagree, and a deadline taken from the
-  // real clock silently never expires (CI run 33378792898).
-  const RUNNING_SUBAGENT_DRAIN_MS = 90_000
-  const RUNNING_SUBAGENT_POLL_MS = 4000
-  const RUNNING_SUBAGENT_DRAIN_TICKS = Math.ceil(RUNNING_SUBAGENT_DRAIN_MS / RUNNING_SUBAGENT_POLL_MS)
-
-  let runningSubagentTimer: ReturnType<typeof setInterval> | null = null
-  let runningSubagentRefreshGeneration = 0
-  function stopRunningSubagentPoll(): void {
-    if (runningSubagentTimer !== null) {
-      clearInterval(runningSubagentTimer)
-      runningSubagentTimer = null
-    }
-    runningPollLive.value = false
-  }
-  // Poll until the rows clear or the drain budget is spent (shell rows never
-  // spend it). Used for the
-  // falling edge of work and for rows discovered while nothing is working.
-  function startRunningSubagentDrain(): void {
-    let drainTicksLeft = RUNNING_SUBAGENT_DRAIN_TICKS
-    runningPollLive.value = true
-    runningSubagentTimer = setInterval(() => {
-      if (Object.keys(runningSubagents.value).length === 0) {
-        stopRunningSubagentPoll()
-        return
-      }
-      // A listed shell or Monitor is retired by the server from provider
-      // state (24 h cap), so it keeps the poll alive without spending the
-      // budget; agent rows stay bounded.
-      const holdsShell = Object.values(runningSubagents.value).some(rows => rows.some(isShellRow))
-      if (!holdsShell) {
-        if (drainTicksLeft <= 0) {
-          stopRunningSubagentPoll()
-          return
-        }
-        drainTicksLeft -= 1
-      }
-      void refreshRunningSubagents()
-    }, RUNNING_SUBAGENT_POLL_MS)
-  }
-  watch(anyChatWorking, (working) => {
-    stopRunningSubagentPoll()
-    // Refresh on both edges: rising paints the rows without waiting a tick,
-    // falling starts the drain that clears the last of them.
-    void refreshRunningSubagents()
-    if (working) {
-      runningPollLive.value = true
-      runningSubagentTimer = setInterval(() => {
-        void refreshRunningSubagents()
-      }, RUNNING_SUBAGENT_POLL_MS)
-      return
-    }
-    startRunningSubagentDrain()
-  })
-  // Rows fetched while nothing is working (page load, reconnect, a child the
-  // engine count never announced) would otherwise be listed once and never
-  // refreshed, so a finished child kept its spinner. Discovery restarts the
-  // bounded drain; a failed request is not completion, only a successful
-  // list without the row is, and `refreshRunningSubagents` keeps the rows
-  // across a failure.
-  watch(
-    () => Object.values(runningSubagents.value).some(rows => rows.length > 0),
-    (any) => {
-      if (any && !anyChatWorking.value && runningSubagentTimer === null) {
-        startRunningSubagentDrain()
-      }
-    },
-  )
 
   function projectChats(projectId: string): ChatInfo[] {
     // Hide remote chats (session lives on another device, not openable here).
@@ -1428,100 +1299,13 @@ export const useProjectStore = defineStore('projects', () => {
     return Boolean(projectStreaming.value[chatId] || streaming.value[chatId])
   }
 
-  // Background subagents outlive the turn that spawned them; this powers the
-  // sidebar/header indicators during the quiet gap where no turn is
-  // streaming but agents are still working.
-  function chatHasBackgroundAgents(chatId: string): boolean {
-    return (backgroundAgents.value[chatId] || 0) > 0
-  }
-
-  // Per-task stop state, keyed chat id then bare task id. It lives here, not in
-  // the rows: the composer popover unmounts on close and the Chat details rail
-  // is a second view of the same rows, and both must show a stop still pending.
-  const stoppingTasks = ref<Record<string, Record<string, true>>>({})
-  const stopTaskErrors = ref<Record<string, Record<string, string>>>({})
-  const stopTaskTimers = new Map<string, ReturnType<typeof setTimeout>>()
-  // A task the provider never reports ended must not leave Stop locked for good.
-  const STOP_LOCK_MS = 15_000
-
-  function dropTaskEntry(map: Record<string, Record<string, unknown>>, chatId: string, taskId: string) {
-    const rows = map[chatId]
-    if (!rows || !(taskId in rows)) return
-    delete rows[taskId]
-    if (!Object.keys(rows).length) delete map[chatId]
-  }
-
-  function releaseStoppingTask(chatId: string, taskId: string) {
-    const key = `${chatId}\u0000${taskId}`
-    cancelTimer(stopTaskTimers.get(key))
-    stopTaskTimers.delete(key)
-    dropTaskEntry(stoppingTasks.value, chatId, taskId)
-  }
-
-  // Stops one native shell or Monitor from the Processes list. It stays
-  // "stopping" until the row leaves the running list: the engine answers
-  // before the provider has reported the task ended. A failure is recorded
-  // for the row, not thrown.
-  async function stopBackgroundTask(chatId: string, taskId: string): Promise<void> {
-    if (stoppingTasks.value[chatId]?.[taskId]) return
-    dropTaskEntry(stopTaskErrors.value, chatId, taskId)
-    stoppingTasks.value[chatId] = { ...stoppingTasks.value[chatId], [taskId]: true }
-    stopTaskTimers.set(
-      `${chatId}\u0000${taskId}`,
-      scheduleTimer(() => releaseStoppingTask(chatId, taskId), STOP_LOCK_MS),
-    )
-    try {
-      await api.post(
-        `/api/chats/${encodeURIComponent(chatId)}/background-tasks/${encodeURIComponent(taskId)}/stop`,
-        {},
-      )
-    } catch {
-      releaseStoppingTask(chatId, taskId)
-      stopTaskErrors.value[chatId] = {
-        ...stopTaskErrors.value[chatId],
-        [taskId]: 'Could not stop this process. Try again.',
-      }
-    }
-  }
-
-  // A row that left the poll has ended: its stopping state and error go too.
-  watch(runningSubagents, (all) => {
-    for (const map of [stoppingTasks.value, stopTaskErrors.value]) {
-      for (const chatId of Object.keys(map)) {
-        const live = new Set((all[chatId] || []).filter(isShellRow).map(r => shellTaskId(r.agent_id)))
-        for (const taskId of Object.keys(map[chatId])) {
-          if (live.has(taskId)) continue
-          if (map === stoppingTasks.value) releaseStoppingTask(chatId, taskId)
-          else dropTaskEntry(map, chatId, taskId)
-        }
-      }
-    }
-  }, { deep: false })
-
-  // Subagents this chat has working right now, from /api/subagents/running.
-  // Sidebar rows and the per-row "working" signal read this; it is deliberately
-  // separate from `subagents` (full transcripts, active chat only) because the
-  // sidebar covers every chat and must stay cheap to keep fresh.
-  function runningSubagentsFor(chatId: string): RunningSubagent[] {
-    return runningSubagents.value[chatId] || []
-  }
-
-  function chatHasRunningSubagents(chatId: string): boolean {
-    return runningSubagentsFor(chatId).length > 0
-  }
-
   /**
    * Is this chat doing anything right now?
    *
-   * One definition for every "working" surface. Each consumer used to OR the
-   * sources by hand, so adding one meant finding them all, and the surfaces
-   * disagreed for a chat whose only activity was a running subagent. Add new
-   * activity sources here, not at the call sites.
+   * One definition for every "working" surface: a turn is streaming.
    */
   function chatIsWorking(chatId: string): boolean {
     return isChatStreaming(chatId)
-      || chatHasBackgroundAgents(chatId)
-      || chatHasRunningSubagents(chatId)
   }
 
   // ── Memory pass record ───────────────────────────────────────────────
@@ -2202,7 +1986,6 @@ export const useProjectStore = defineStore('projects', () => {
       // restores or dismisses it, so a reload before either happens just
       // re-offers it rather than losing it.
       if (!bootstrapped.value) void offerOrphanDrafts(new Set(chats.value.map(ch => ch.chat_id)))
-      void refreshRunningSubagents()
       reloadTaskSignals()
       if (initialDetail) {
         const detail = await initialDetail
@@ -4459,21 +4242,6 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
-  // Live subagents across every working chat, for the sidebar rows. Replaced
-  // wholesale rather than merged: the server omits chats with nothing running,
-  // and that omission is exactly how a finished subagent's row disappears.
-  async function refreshRunningSubagents(): Promise<void> {
-    const generation = ++runningSubagentRefreshGeneration
-    try {
-      const r = await api.get<RunningSubagentsResponse>('/api/subagents/running')
-      if (generation !== runningSubagentRefreshGeneration) return
-      runningSubagents.value = (r && typeof r === 'object' && r.chats) ? r.chats : {}
-    } catch {
-      // Transient (offline, host proxy down): keep the last known rows rather
-      // than blanking the sidebar on one failed poll.
-    }
-  }
-
   // ── Chat switching ──────────────────────────────────────────────────
 
   /**
@@ -5260,10 +5028,6 @@ export const useProjectStore = defineStore('projects', () => {
           projectStreaming.value[entry.chat_id] = true
           if (entry.background) wakeStreaming.value[entry.chat_id] = true
         }
-        // Authoritative background-agent counts: replace local state so a
-        // count left stale by a missed event (WS gap, server restart) heals
-        // on reconnect.
-        backgroundAgents.value = { ...(msg.background_agents || {}) }
         // Authoritative per-chat pin state for every persisted chat (including
         // closed/archived), so a client that missed a pin/unpin while its socket
         // was down heals to server truth instead of writing stale browser state.
@@ -5308,10 +5072,6 @@ export const useProjectStore = defineStore('projects', () => {
         projectStreaming.value[msg.chat_id] = true
         if (msg.background) wakeStreaming.value[msg.chat_id] = true
         else delete wakeStreaming.value[msg.chat_id]
-        // Note: backgroundAgents is NOT cleared here — agents from a prior
-        // turn keep running across new turns. The server's JSONL watcher
-        // re-announces the count at every turn end (including 0), and the
-        // events snapshot heals stale counts on reconnect.
         if (
           isViewedChat(msg.chat_id) &&
           shouldReconnectActiveChatOnStreamingStarted(sockets.value[msg.chat_id])
@@ -5416,44 +5176,6 @@ export const useProjectStore = defineStore('projects', () => {
         if (isViewedChat(msg.chat_id)) {
           void reconcileAfterResult(msg.chat_id)
         }
-        break
-      }
-      case 'chat_subagents_ready': {
-        // The sidebar's subagent rows come from a poll; this is the same
-        // signal a tick later, so use it to redraw immediately.
-        void refreshRunningSubagents()
-        const prevAgents = backgroundAgents.value[msg.chat_id] || 0
-        if (msg.remaining > 0) {
-          backgroundAgents.value[msg.chat_id] = msg.remaining
-        } else {
-          delete backgroundAgents.value[msg.chat_id]
-        }
-        // A non-decreasing positive count is the initial "N running"
-        // announcement (or a subagent spawning children). It does not warrant
-        // a full history reconcile (no new agent output yet), but we do want
-        // the transcript panel to populate promptly so a freshly dispatched
-        // agent is visible without waiting up to 4s for the poll watcher's
-        // first tick. Pull subagents once (focused only) then return.
-        if (msg.remaining >= prevAgents && msg.remaining > 0) {
-          const focusedNow = isViewedChat(msg.chat_id) &&
-            (typeof document === 'undefined' || document.visibilityState === 'visible')
-          if (focusedNow) void loadSubagents(msg.chat_id)
-          break
-        }
-        const isFocused = isViewedChat(msg.chat_id) &&
-          (typeof document === 'undefined' || document.visibilityState === 'visible')
-        if (isFocused) {
-          // Subagent transcripts land after the parent turn's result. Refresh
-          // history and the subagent panel so the user sees the update without
-          // having to switch chats or wait for the next sync interval.
-          void reconcileAfterResult(msg.chat_id)
-          void loadSubagents(msg.chat_id)
-        }
-        // Keep sidebar ordering and last-activity timestamps in sync.
-        const listReadStart = chatReadStart()
-        api.get<ChatInfo[]>('/api/chats?active_only=1')
-          .then(c => reconcileActiveChats(c, listReadStart))
-          .catch(() => { /* ignore */ })
         break
       }
       case 'chat_read': {
@@ -7459,17 +7181,17 @@ export const useProjectStore = defineStore('projects', () => {
     // State
     projects, chats, workspaces, workspaceRegistryStatus, workspaceRegistryError, workspaceProviderOptions, claudeTrimOptions, activeWorkspace, activeChatId, besideChatId, bootstrapped, chatsHealth, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
-    projectStreaming, wakeStreaming, isWakeStreaming, backgroundAgents, runningSubagents, stoppingTasks, stopTaskErrors, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
+    projectStreaming, wakeStreaming, isWakeStreaming, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     chatActions, pendingChatModeWrites,
     serverRestarting, serverRestartMessage,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isViewedChat, viewedChatIds, chatById, messagesFor, isMessageHistoryLoading, subagentsFor, isChatWakeStreaming,
-    streamingTextFor, streamingThinkingFor, queuedFor, backgroundAgentsFor, timelineFor,
+    streamingTextFor, streamingThinkingFor, queuedFor, timelineFor,
     deniedToolUseIdsFor, streamStartedAtFor, pendingImagesFor, pendingFilesFor, pendingCommentsFor, pendingChatCommentsFor,
-    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentDeniedToolUseIds, currentLiveUsage, currentStreamStartedAt, projectChats,
+    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, currentActivity, currentTimeline, currentDeniedToolUseIds, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, chatFailed, chatNeedsYou, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
-    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, stopBackgroundTask, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
+    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatIsWorking, workspaceIsStreaming, projectFor,
     chatPostprocess,
     memoryPassNeedsAttention, memoryInsightRows,
     archivingChats, isArchiving,
@@ -7496,7 +7218,7 @@ export const useProjectStore = defineStore('projects', () => {
     chatReadStart,
     startChatAction, requestMcpAuth, dismissChatAction, turnOffChatActionServer, continueChatAction, submitChatActionCallback,
     removeQueued, removeQueuedById, requestQueuedEdit, ackQueuedEdit, pendingQueueTakes, queueTakeFailures, reorderQueued, clearQueued,
-    loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setSubagentViewActive,
+    loadMessages, loadSubagents, loadSubagent, setSubagentViewActive,
     loadOlderMessages, expandMessagePart,
     connectWs, disconnectWs, connectEventsWs, reconnectNow,
     engineSeenAliveWithin,

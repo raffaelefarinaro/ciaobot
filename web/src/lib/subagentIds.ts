@@ -26,20 +26,6 @@ export function subagentPath(chatId: string, agentId: string): string {
   return `/chat/${chatId}/subagent/${bareAgentId(agentId)}`
 }
 
-/**
- * True for a background shell or Monitor the engine lists beside the agents
- * (`subagent_type: "shell"` or `"monitor"`). It is a process, not an agent: it
- * has no transcript and must not be counted or linked as one.
- */
-export function isShellRow(sub: { subagent_type?: string }): boolean {
-  return sub.subagent_type === 'shell' || sub.subagent_type === 'monitor'
-}
-
-/** The id the stop route takes: a process row's `agent_id` without its `task:` / `shell:` prefix. */
-export function shellTaskId(agentId: string): string {
-  return agentId.replace(/^(?:task|shell):/, '')
-}
-
 /** Short display form of an agent id (most are UUIDs). */
 export function shortAgentId(agentId: string): string {
   const id = bareAgentId(agentId)

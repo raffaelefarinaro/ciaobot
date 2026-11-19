@@ -478,28 +478,6 @@ export interface SubagentTranscript {
   started_at?: number | null
 }
 
-// One live subagent from `/api/subagents/running`. Same dispatch metadata as
-// SubagentTranscript, minus the transcript: the sidebar only needs to name the
-// agent and say it is working, and polling full transcripts for every working
-// chat would be far more than that costs.
-export interface RunningSubagent {
-  agent_id: string
-  description?: string
-  subagent_type?: string
-  is_async?: boolean
-  status?: 'running' | 'completed' | 'failed' | ''
-  turn_index?: number | null
-  /** Process rows (`shell` / `monitor`): ISO start time, empty when unknown. */
-  started_at?: string
-  /** Process rows: the engine can stop it from the Processes list. */
-  stoppable?: boolean
-}
-
-/** `GET /api/subagents/running`. Chats with nothing running are omitted. */
-export interface RunningSubagentsResponse {
-  chats?: Record<string, RunningSubagent[]>
-}
-
 // ── WebSocket events ────────────────────────────────────────────────────
 
 export type WsEvent =
@@ -632,7 +610,7 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string; background?: boolean }[]; background_agents?: Record<string, number>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; chat_actions?: Record<string, ChatAction[]>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; keyboard_revision?: string; appearance?: AppearancePayload | null }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string; background?: boolean }[]; restarting?: boolean; chat_pins: Record<string, ChatPinState>; chat_actions?: Record<string, ChatAction[]>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; keyboard_revision?: string; appearance?: AppearancePayload | null }
   | { type: 'keyboard_settings_changed'; keyboard_shortcuts: Record<string, string>; keyboard_send_mode: 'modifier' | 'enter'; revision: string }
   | ({ type: 'appearance_settings_changed' } & AppearancePayload)
   | { type: 'chat_pin_changed'; chat_id: string; path: string; dismissed_paths: string[]; revision: number }
@@ -642,7 +620,6 @@ export type EventsWsMessage =
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string; failure_id?: string; repo_location?: Partial<RepoLocation> }
   | { type: 'chat_repo_location'; chat_id: string; project_id: string; repo_location: Partial<RepoLocation> }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
-  | { type: 'chat_subagents_ready'; chat_id: string; project_id: string; remaining: number }
   | { type: 'chat_read'; chat_id: string; last_read_at: string }
   | { type: 'chat_unread'; chat_id: string; last_read_at: string }
   | { type: 'chat_title'; chat_id: string; title: string; status?: 'pending' | 'ready' }

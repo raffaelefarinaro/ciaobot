@@ -45,15 +45,6 @@ is available, these controls are disabled and it can still run on schedule.
 Recovery rejects model and thinking changes until the server can atomically
 guard them against a newer failure, and rejects provider handovers.
 
-A running background subagent stays visible while its chat is idle. The engine's
-`chat_subagents_ready` count and the `/api/subagents/running` list are separate
-sources and the store never writes one into the other. When the list names a
-running child of the active chat while the count is 0, the store refetches that
-chat's full subagent list once and keeps both polls going, within the existing
-90-second drain, until a successful list no longer names it. A failed request
-keeps the rows, and a dedicated single-agent view still suppresses the full-list
-poll.
-
 Production hashed JavaScript and CSS under `/assets` use negotiated gzip above
 500 bytes. Other static files, API responses, and chat streams keep their
 existing response path. Conditional and ranged asset requests retain their

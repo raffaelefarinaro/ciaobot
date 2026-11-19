@@ -9,7 +9,6 @@
          and the action icons. -->
     <PaneHeader
       phone-overflow
-      :active-bg-agents="view.activeBackgroundAgents"
       @open-sidebar="$emit('open-sidebar')"
     >
       <template #title>
@@ -964,8 +963,7 @@
     <!-- Dock strip: one counted line for everything not expanded above, so the
          dock never grows past one card plus this. Rendered whenever there is
          anything to collapse OR anything already expanded, so the disclosure
-         works in both directions. Background agents and runs are not here: they
-         are the composer bar's activity cluster. -->
+         works in both directions. -->
     <div v-if="dockStripVisible" class="dock-strip-wrap">
       <!-- aria-live sits on an inner span: an explicit role="status" on the
            button would override its implicit button role and drop
@@ -1217,18 +1215,7 @@
               <input type="file" multiple hidden @change="handleFileSelect" />
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </label>
-            <!-- Background work the turn left running: agents and shells, right
-                 against Send. Fills the bar's free space, so it is also the spacer. -->
-            <ComposerActivity
-              :chat-id="chat.chat_id"
-              :agent-count="composerAgentCount"
-              :agents="runningRows"
-              :now="nowTs"
-              :stop-task="stopShell"
-              :stopping="store.stoppingTasks[chat.chat_id]"
-              :stop-errors="store.stopTaskErrors[chat.chat_id]"
-              @open-details="openRunDetails"
-            />
+            <span class="composer-spacer" aria-hidden="true"></span>
             <span v-if="inputText.trim() && !isMcpToken" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
             <button
               v-if="view.isStreaming && isMcpToken"
@@ -1367,43 +1354,6 @@
           @compact="compactContext"
         />
       </div>
-      <section
-        v-if="runningRows.length"
-        ref="railRunningEl"
-        class="cd-section cd-block chat-rail-running"
-        :aria-labelledby="domId('chat-rail-running')"
-        tabindex="-1"
-      >
-        <div class="cd-head">
-          <h3 :id="domId('chat-rail-running')" class="cd-heading">Running</h3>
-          <span class="cd-count">{{ runningRows.length }}</span>
-        </div>
-        <!-- One list, agents first: an agent has a transcript to open, a shell only a Stop. -->
-        <div class="cd-rows">
-          <router-link
-            v-for="sub in runningSubagents"
-            :key="sub.agent_id"
-            :to="subagentPath(chat.chat_id, sub.agent_id)"
-            class="cd-row cd-row--link chat-rail-agent"
-          >
-            <span class="cd-icon"><ActivityGlyph kind="working" /></span>
-            <span class="cd-main">
-              <span class="cd-primary">{{ subagentLabel(sub) }}</span>
-              <span class="cd-detail">Agent<template v-if="sub.subagent_type"> · {{ sub.subagent_type }}</template></span>
-            </span>
-            <span class="cd-trail" aria-hidden="true"><AppIcon name="arrow" /></span>
-          </router-link>
-          <ShellRows
-            v-if="runningShells.length"
-            variant="rail"
-            :rows="runningShells"
-            :now="nowTs"
-            :stop-task="stopShell"
-            :stopping="store.stoppingTasks[chat.chat_id]"
-            :errors="store.stopTaskErrors[chat.chat_id]"
-          />
-        </div>
-      </section>
       <section v-if="railTools.length" class="cd-section cd-block chat-rail-tools" :aria-labelledby="domId('chat-rail-tools')">
         <div class="cd-head">
           <h3 :id="domId('chat-rail-tools')" class="cd-heading">Skills and MCP</h3>
@@ -1524,8 +1474,6 @@ import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
 import { errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
-import ShellRows from './ShellRows.vue'
-import ComposerActivity from './ComposerActivity.vue'
 import ComposerUploadProgress from './ComposerUploadProgress.vue'
 import ActivityGlyph from './ActivityGlyph.vue'
 import {
@@ -1576,7 +1524,6 @@ import { useChatComposer } from '../composables/useChatComposer'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 import SlashCommandPicker from './SlashCommandPicker.vue'
-import { isShellRow, subagentLabel, subagentPath } from '../lib/subagentIds'
 import { handleAppLinkClick } from '../lib/appLinks'
 
 /** The footer facts for one turn: when it landed, how long it took, which
@@ -1710,9 +1657,8 @@ const {
 } = composer
 const isContinuing = ref(false)
 
-// Ticks once a second while streaming, a background run is going or a native
-// shell is listed (see the watch below `runningRows`), so the live
-// elapsed-time labels advance.
+// Ticks once a second while a turn is streaming, so the live elapsed-time
+// labels advance.
 const nowTs = ref(Date.now())
 let clockTimer: ReturnType<typeof setInterval> | null = null
 
@@ -2238,16 +2184,8 @@ function compactContext() {
   void store.compactChat(chat.value.chat_id)
 }
 
-// The poll's rows include background shells (`subagent_type: "shell"`); the
-// composer lists those as processes, everything else counts as an agent.
-const runningRows = computed(() => (chat.value ? store.runningSubagentsFor(chat.value.chat_id) : []))
-const runningSubagents = computed(() => runningRows.value.filter(sub => !isShellRow(sub)))
-function stopShell(taskId: string) {
-  if (chat.value) void store.stopBackgroundTask(chat.value.chat_id, taskId)
-}
-const runningShells = computed(() => runningRows.value.filter(isShellRow))
 watch(
-  () => view.isStreaming || runningShells.value.length > 0,
+  () => view.isStreaming,
   (ticking) => {
     if (ticking && !clockTimer) {
       nowTs.value = Date.now()
@@ -2259,9 +2197,6 @@ watch(
   },
   { immediate: true },
 )
-// Same rule as the sidebar row (ChatSignals): the watcher's pushed count and
-// the running-subagent poll tick on different clocks, so take the larger.
-const composerAgentCount = computed(() => Math.max(view.activeBackgroundAgents, runningSubagents.value.length))
 
 
 // On a pane wide enough for the rail beside a full reading column, Chat
@@ -2308,7 +2243,6 @@ onMounted(() => {
 onBeforeUnmount(() => { panelObserver?.disconnect() })
 
 const railHideButton = ref<HTMLButtonElement | null>(null)
-const railRunningEl = ref<HTMLElement | null>(null)
 
 /**
  * Show Chat details: in place on a wide pane, as the drawer otherwise. Focus
@@ -2316,7 +2250,7 @@ const railRunningEl = ref<HTMLElement | null>(null)
  * drops on a trigger that just unmounted. The drawer's focus trap places it,
  * so the named section has to be its initial focus rather than a later move.
  */
-type DetailsTarget = 'close' | 'running' | 'context' | 'repo' | 'mcp'
+type DetailsTarget = 'close' | 'context' | 'repo' | 'mcp'
 const detailsTarget = ref<DetailsTarget>('close')
 const mcpHeadingPriority = ref(false)
 const mcpConnections = ref<InstanceType<typeof ChatMcpConnections> | null>(null)
@@ -2326,7 +2260,6 @@ function clearMcpHeadingPriority() {
   mcpHeadingPriority.value = false
 }
 const detailsFocusEl = computed<HTMLElement | null>(() => {
-  if (detailsTarget.value === 'running') return railRunningEl.value ?? railHideButton.value
   if (detailsTarget.value === 'context') return railContextEl.value ?? railHideButton.value
   if (detailsTarget.value === 'repo') return railRepoEl.value ?? railHideButton.value
   if (detailsTarget.value === 'mcp') return railEl.value?.querySelector<HTMLElement>('.chat-mcp-heading') ?? railHideButton.value
@@ -2384,11 +2317,6 @@ function toggleWorkDetails() {
       mcpConnections.value?.revealDrawerAction(true)
     })
   }
-}
-// The composer bar's activity cluster opens Chat details at Running; a finished
-// run's notice can outlive the section it points at.
-function openRunDetails() {
-  showDetails('running')
 }
 function openProjectKnowledge() {
   showDetails('context')
@@ -6600,33 +6528,6 @@ details[open] > .activity-summary::before {
   border-top: 1px solid var(--border);
 }
 
-/* "N agents" header pill: background subagents still running after the
-   parent turn ended (view.activeBackgroundAgents, fed by /ws/events). */
-.bg-agents-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 9px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: 11px;
-  color: var(--fg2);
-  white-space: nowrap;
-}
-
-.bg-agents-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent2);
-  animation: bg-agents-pulse 1.6s ease-in-out infinite;
-}
-
-@keyframes bg-agents-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
-}
-
 /* Message content (markdown) */
 .message-content {
   min-width: 0;
@@ -7186,26 +7087,6 @@ details[open] > .activity-summary::before {
   background: none;
 }
 
-/* Focus lands here from the composer bar's activity cluster; the outline says where. */
-.chat-rail-running:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 4px;
-  border-radius: var(--radius-xs);
-}
-
-.bg-agents-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  flex-shrink: 0;
-  animation: bg-agents-pulse 1.4s ease-in-out infinite;
-}
-
-@keyframes bg-agents-pulse {
-  0%, 100% { opacity: 0.35; }
-  50% { opacity: 1; }
-}
 
 
 /* Slash-command picker styles are shared with SlashCommandPicker.vue through
@@ -7250,6 +7131,11 @@ details[open] > .activity-summary::before {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.composer-spacer {
+  flex: 1;
+  min-width: 0;
 }
 
 
