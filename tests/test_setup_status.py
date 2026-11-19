@@ -1587,7 +1587,8 @@ async def test_opencode_verify_invalidates_models_before_probe(monkeypatch, tmp_
     import ciao.providers.opencode as mod
 
     calls = []
-    monkeypatch.setattr(mod, "invalidate_opencode_model_cache", lambda: calls.append("invalidate"))
+    from ciao.providers.acp.agents import OpencodeAcpProvider
+    monkeypatch.setattr(OpencodeAcpProvider, "invalidate_model_catalog", classmethod(lambda cls: calls.append("invalidate")))
     monkeypatch.setattr(mod, "opencode_credential_inventory",
                         lambda: (calls.append("inventory") or {"status": "complete", "providers": []}))
     monkeypatch.setattr(routes_api, "_provider_config_payload",
