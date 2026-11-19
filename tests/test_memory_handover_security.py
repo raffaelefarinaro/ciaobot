@@ -128,7 +128,7 @@ def test_corrupt_state_blocks_real_handover_commands_without_receipt_or_guide_ch
             if path.is_file()
         }
         monkeypatch.setattr(
-            "ciao.install_discovery.discover_workspace", lambda _base: root
+            "ciao.workspace_discovery.discover_workspace", lambda _base: root
         )
         monkeypatch.setenv("CIAO_WORKSPACE", str(root))
         args = [

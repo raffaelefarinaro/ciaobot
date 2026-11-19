@@ -323,12 +323,12 @@ def test_installed_workspace_env_still_discovers_on_macos(
     platform would, or the refactor would have silently moved discovery behind
     a platform check the suite never satisfied.
     """
-    from ciao import install_discovery
+    from ciao import workspace_discovery
 
     install = tmp_path / "install"
     install.mkdir()
     (install / ".env").write_text("FOO=from-file\n", encoding="utf-8")
-    monkeypatch.setattr(install_discovery, "_platform", lambda: "darwin")
+    monkeypatch.setattr(workspace_discovery, "_platform", lambda: "darwin")
     monkeypatch.setattr(
         "ciao.macos_service.discover_runtime",
         lambda **_: SimpleNamespace(
@@ -368,7 +368,7 @@ def test_app_mode_prefers_the_pointer_over_the_old_plist(
     engine's job, and a bundled engine adopting it would collide with the old
     engine's port and instance lock. Discovery answers with that workspace
     here — a real, different install — on purpose: an ``AssertionError`` from
-    this seam would be swallowed by ``install_discovery``, so only a fixture
+    this seam would be swallowed by ``workspace_discovery``, so only a fixture
     whose workspace the assertions can tell apart from the pointer's proves
     which source the code actually used.
     """
@@ -405,7 +405,7 @@ def test_app_mode_bootstraps_when_nothing_but_the_plist_names_a_workspace(
 
     The discovery layer still answers when asked — the plist fixture below
     names a real workspace — but app mode must not even ask: falling through to
-    `install_discovery` would adopt the old engine's workspace before the
+    `workspace_discovery` would adopt the old engine's workspace before the
     takeover has stopped it.
     """
     _app_mode(monkeypatch)
