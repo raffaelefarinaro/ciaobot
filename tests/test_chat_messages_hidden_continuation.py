@@ -453,3 +453,74 @@ async def test_hidden_continuation_without_preceding_answer_adds_no_row(
     ]
     assert not any(r.get("phase") for r in rows)
     assert LEGACY_CODE_MODE_CONTINUE_PROMPT not in json.dumps(rows)
+
+
+def _journal_chat() -> SimpleNamespace:
+    return SimpleNamespace(
+        user_turn_images={},
+        user_turn_timings={},
+        user_turn_unattended={},
+        user_turn_origin={},
+    )
+
+
+def _render_journal(records: list[dict]) -> list[dict]:
+    return transcript_service._render_acp_journal(
+        records, _journal_chat(), start_user_idx=0, workspace_root=None, agent_root=None
+    )
+
+
+@pytest.mark.parametrize("prompt", [RELOAD_CONTINUE_PROMPT, LEGACY_CODE_MODE_CONTINUE_PROMPT])
+@pytest.mark.parametrize("wrapped", [False, True], ids=["bare", "with-capsule"])
+def test_acp_journal_skips_a_hidden_continuation(prompt: str, wrapped: bool) -> None:
+    hidden_text = (CAPSULE + prompt) if wrapped else prompt
+    rows = _render_journal([
+        {"type": "user", "text": "one"},
+        {"type": "text_delta", "text": ANSWER_ONE},
+        {"type": "result"},
+        {"type": "user", "text": hidden_text},
+        {"type": "text_delta", "text": "Resumed."},
+    ])
+
+    assert [r["role"] for r in rows] == ["user", "assistant", "assistant"]
+    assert rows[0] == {
+        "role": "user", "content": "one", "turn_index": 0,
+    }
+    # The answer before the hidden prompt is final, so it does not fold into Activity.
+    assert rows[1] == {"role": "assistant", "content": ANSWER_ONE, "phase": "final_answer"}
+    assert rows[2] == {"role": "assistant", "content": "Resumed."}
+    assert all(prompt not in str(r.get("content") or "") for r in rows)
+
+
+def test_acp_journal_hidden_continuation_does_not_shift_the_next_turn_index() -> None:
+    rows = _render_journal([
+        {"type": "user", "text": RELOAD_CONTINUE_PROMPT},
+        {"type": "user", "text": "a normal prompt"},
+    ])
+
+    assert rows == [{"role": "user", "content": "a normal prompt", "turn_index": 0}]
+
+
+def test_acp_journal_renders_a_normal_prompt_that_mentions_the_continuation() -> None:
+    text = "please say " + RELOAD_CONTINUE_PROMPT
+    rows = _render_journal([{"type": "user", "text": text}])
+
+    assert rows == [{"role": "user", "content": text, "turn_index": 0}]
+
+
+def test_acp_journal_without_a_hidden_marker_renders_unchanged() -> None:
+    # An old journal row carries no turn_origin or other marker field; with no
+    # hidden prompt in it, nothing is skipped and the rows are exactly as before.
+    rows = _render_journal([
+        {"type": "user", "text": "first", "turn_origin": ""},
+        {"type": "text_delta", "text": "first answer"},
+        {"type": "user", "text": "second"},
+        {"type": "text_delta", "text": "second answer"},
+    ])
+
+    assert rows == [
+        {"role": "user", "content": "first", "turn_index": 0},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second", "turn_index": 1},
+        {"role": "assistant", "content": "second answer"},
+    ]

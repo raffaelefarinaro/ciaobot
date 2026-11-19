@@ -587,6 +587,12 @@ def _render_acp_journal(
             content = _strip_injected_context(str(record.get("text") or "")).strip()
             if not content:
                 continue
+            # A hidden continuation is a turn the host sent itself (after `ciao chat
+            # reload`): skipped before user_idx advances, and it marks the answer
+            # before it as final, as the other renderers do.
+            if cli_envelopes.is_hidden_continuation(content):
+                _mark_preceding_answer(result)
+                continue
             entry: dict = {"role": "user", "content": content, "turn_index": user_idx}
             _stamp_turn_metadata(entry, chat, user_idx)
             result.append(entry)
