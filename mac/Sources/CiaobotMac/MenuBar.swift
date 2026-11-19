@@ -188,10 +188,9 @@ final class MenuBarController: NSObject, MenuBarControlling, NSMenuDelegate {
     static let changeHostTitle = "Change Connected Host…"
     static let updatesUnavailableTitle = "Updates unavailable"
     static let checkForUpdatesTitle = "Check for Updates…"
-    /// Says what an install does. The install quits this Mac client; a bundled
-    /// engine is stopped first, which interrupts running chats. An external
-    /// server is not owned by the app and keeps running.
-    static let checkForUpdatesToolTip = "Download and install a verified Ciaobot update. Installing quits this Mac client. A bundled engine is stopped first, which interrupts running chats; an external server keeps running."
+    /// Says what an install does. The bundled engine is drained first, so the
+    /// install waits for idle chats; then the app and its engine restart together.
+    static let checkForUpdatesToolTip = "Download and install a verified Ciaobot update. Ciaobot waits until no chat is working, then restarts the app and its engine together."
     /// A visible label if the bundled template is missing. It is not a status
     /// claim and the item still carries the same limited menu.
     static let fallbackTitle = "C"

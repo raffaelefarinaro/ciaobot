@@ -125,7 +125,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let blockers: RestartBlockersFetching
     /// Responds to a deferred `applicationShouldTerminate`. Tests record it.
     private let replyToTerminate: @MainActor (Bool) -> Void
-    /// Raised by Sparkle's immediate install: that terminate is a system quit.
+    /// Raised by Sparkle's immediate install: that terminate is an update quit
+    /// (`QuitReason.update`), with no dialog and the full quit grace.
     private let updateQuit: UpdateQuitIntent
     /// Schedules the login-launch window close retries. Tests drive it.
     private let loginCloseSchedule: LoginLaunchWindowCloser.Schedule?
@@ -200,7 +201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // The updater lives for the app's lifetime. Creating it is inert in
             // a debug build, a test process, or a build without the release
             // updater keys; `start()` decides and records why.
-            updater: ClientUpdater(updateQuit: updateQuit),
+            updater: ClientUpdater(updateQuit: updateQuit, localState: { engineParts.supervisor.updateLocalState }),
             // The signing probe is the real one here. The row explains an
             // ad-hoc or unsigned build instead of offering a registration macOS
             // would refuse.
@@ -562,9 +563,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // every reply requested while it is on the stack waits one turn.
         insideShouldTerminate = true
         defer { insideShouldTerminate = false }
-        // Sparkle's immediate install terminates the app to swap the bundle:
-        // it is a system quit, so no dialog stands in front of it.
-        let reason = EngineLifecycle.quitReason(launchEvent(), updateInstall: updateQuit.installing)
+        // Sparkle's install terminates the app to swap the bundle, after the
+        // update gate has drained the engine: it is an update quit, so no
+        // dialog stands in front of it. Sparkle's own "Install and Relaunch"
+        // raises the install without a drain, so that terminate still asks.
+        let reason = EngineLifecycle.quitReason(
+            launchEvent(),
+            updateInstall: updateQuit.installing && updateQuit.drained
+        )
         switch EngineLifecycle.terminationPlan(mode: mode, engineState: supervisor?.state, quitReason: reason) {
         case .terminateNow:
             return .terminateNow
@@ -620,6 +626,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `terminationDeferred` stays set until the reply is actually sent, so a
     /// quit that arrives during the hop still joins this flow.
     private func finishDeferredTermination(terminate: Bool) {
+        if !terminate, updateQuit.installing {
+            // A cancelled quit while Sparkle's install is raised: the install
+            // will not run, so it is abandoned and the gate releases its drain.
+            updateQuit.abandonInstall()
+        }
         let send: @MainActor () -> Void = { [self] in
             terminationDeferred = false
             replyToTerminate(terminate)
