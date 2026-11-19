@@ -58,7 +58,11 @@ export const Checking: Story = {
   render: withBridge({ available: true, automatic: true, canCheck: false, reason: '' }),
   play: async ({ canvas }) => {
     expect(await canvas.findByText('Checking for updates')).toBeTruthy()
-    expect(canvas.getByRole('button', { name: 'Check for Updates…' })).toBeDisabled()
+    const button = canvas.getByRole('button', { name: 'Check for Updates…' })
+    expect(button).toBeDisabled()
+    // A disabled button must read as disabled, not as an enabled one.
+    expect(getComputedStyle(button).opacity).not.toBe('1')
+    expect(getComputedStyle(button).cursor).toBe('not-allowed')
   },
 }
 
@@ -68,7 +72,10 @@ export const Unavailable: Story = {
     expect(await canvas.findByText('Updates are unavailable')).toBeTruthy()
     expect(canvas.getByText('Updates are unavailable in a debug build.')).toBeTruthy()
     expect(canvas.getByRole('switch', { name: 'Install Updates Automatically' })).toBeDisabled()
-    expect(canvas.getByRole('button', { name: 'Check for Updates…' })).toBeDisabled()
+    const button = canvas.getByRole('button', { name: 'Check for Updates…' })
+    expect(button).toBeDisabled()
+    expect(getComputedStyle(button).opacity).not.toBe('1')
+    expect(getComputedStyle(button).cursor).toBe('not-allowed')
   },
 }
 
