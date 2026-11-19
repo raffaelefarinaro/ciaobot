@@ -1521,21 +1521,33 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Closed count/hidden state. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HomeNoticeReopen.vue implements this render; no rendered-state story exists."
+        "name": "hidden",
+        "coverage": "covered",
+        "storyIds": ["home-notice-reopen--hidden"],
+        "note": "A closed count of zero renders no control. The story asserts the absent button and a quiet fixture ledger."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "closed-count-singular",
+        "coverage": "covered",
+        "storyIds": ["home-notice-reopen--singular"],
+        "note": "One closed notice renders the singular label; the play reopens it and asserts the count control disappears."
+      },
+      {
+        "name": "closed-count-plural",
+        "coverage": "covered",
+        "storyIds": ["home-notice-reopen--plural"],
+        "note": "Two closed notices render the plural label; the play reopens all and asserts both rows return."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": ["home-notice-reopen--keyboard-focus"],
+        "note": "The reopen control receives visible keyboard focus and Enter reopens the notices."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HomeNoticeReopen.vue has not yet been audited."
+      "status": "none",
+      "detail": "HomeNoticeReopen reads an in-memory closed-count synchronously; it performs no request and has no loading or refresh state."
     },
     "migration": {
       "status": "unassessed",
@@ -1561,20 +1573,38 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HomeNoticeWindow.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["home-notice-window--default"],
+        "note": "Real owner with a synthetic title, key and slot; the play closes the window and asserts focus moves to the recovery control."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "blocking",
+        "coverage": "covered",
+        "storyIds": ["home-notice-window--blocking"],
+        "note": "The blocking modifier is asserted on the real article and close/focus still works."
+      },
+      {
+        "name": "custom-close-label",
+        "coverage": "covered",
+        "storyIds": ["home-notice-window--custom-close-label"],
+        "note": "A caller-supplied close label is used for both the accessible name and tooltip, and the close path still returns focus."
+      },
+      {
+        "name": "close-keyboard-focus",
+        "coverage": "covered",
+        "storyIds": ["home-notice-window--close-keyboard-focus"],
+        "note": "The close button is keyboard focused with a visible ring and Enter closes the window and moves focus."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["home-notice-window--narrow"],
+        "note": "The owner renders inside a 390px wrapper with its closing and focus behaviour intact."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HomeNoticeWindow.vue has not yet been audited."
+      "status": "none",
+      "detail": "HomeNoticeWindow is a pure presentational shell over a slot; it fetches nothing and has no loading, busy or refresh branch."
     },
     "migration": {
       "status": "unassessed",
@@ -1598,21 +1628,45 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Detailed configurable variants have not yet been audited.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HomeOnboardingResume.vue implements this render; no rendered-state story exists."
+        "name": "hidden",
+        "coverage": "covered",
+        "storyIds": ["home-onboarding-resume--hidden"],
+        "note": "A completed receipt renders nothing; the story asserts the absent card after the receipt read."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "initial-load-failure",
+        "coverage": "covered",
+        "storyIds": ["home-onboarding-resume--initial-failure"],
+        "note": "A synthetic 503 leaves the card hidden, matching the owner's fail-silent fetch."
+      },
+      {
+        "name": "installation-pending",
+        "coverage": "covered",
+        "storyIds": ["home-onboarding-resume--installation-pending"],
+        "note": "An in-progress installation receipt renders the resume card and its inert /onboarding link."
+      },
+      {
+        "name": "workspace-pending",
+        "coverage": "covered",
+        "storyIds": ["home-onboarding-resume--workspace-pending"],
+        "note": "A pending workspace receipt names the synthetic workspace in the label and link."
+      },
+      {
+        "name": "refresh-focus",
+        "coverage": "covered",
+        "storyIds": ["home-onboarding-resume--focus-refresh"],
+        "note": "A window focus event re-reads the receipt; the play dispatches it and asserts the newly pending workspace label appears."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["home-onboarding-resume--narrow"],
+        "note": "The pending card and its link stay usable inside a 390px wrapper."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HomeOnboardingResume.vue has not yet been audited."
+      "status": "known",
+      "detail": "HomeOnboardingResume renders nothing until its first /api/onboarding read answers, and also renders nothing when that read fails: there is no skeleton, spinner or error text to distinguish those moments. Refresh keeps the previous label while the new read is in flight."
     },
     "migration": {
       "status": "unassessed",
@@ -1742,21 +1796,99 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Installation/push/phone/error, persistent browser dismissal. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HomeSetupCard.vue implements this render; no rendered-state story exists."
+        "name": "complete-hidden",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--complete-hidden"],
+        "note": "With install and push already done the card renders no notice."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "dismissed-hidden",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--dismissed-hidden"],
+        "note": "The device-local dismissal key hides the card; the story stubs only that localStorage key."
+      },
+      {
+        "name": "install-prompt",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--install-prompt"],
+        "note": "A synthetic beforeinstallprompt leads to a real Install button; the play presses it and asserts the control is withdrawn while the prompt is awaited and the installed hint appears after acceptance."
+      },
+      {
+        "name": "install-instructions",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--install-instructions"],
+        "note": "Without a browser prompt the owner shows the How to install link to Settings."
+      },
+      {
+        "name": "installed-on-device",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--installed-on-device"],
+        "note": "A related-app probe result marks the install step done."
+      },
+      {
+        "name": "push-enabled",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--push-enabled"],
+        "note": "An existing subscription marks notifications on for this device."
+      },
+      {
+        "name": "push-denied",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--push-denied"],
+        "note": "A denied permission shows the system-settings guidance and blocks the enable button."
+      },
+      {
+        "name": "needs-install-first",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--needs-install-first"],
+        "note": "On a phone browser the notification step says to install the app first."
+      },
+      {
+        "name": "push-unavailable",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--push-unavailable"],
+        "note": "Without service worker or push support the notification step is absent."
+      },
+      {
+        "name": "push-enable-busy",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--push-enable-busy"],
+        "note": "A held public-key read keeps the real Enable button disabled; the owner keeps its label rather than showing a spinner."
+      },
+      {
+        "name": "push-enable-error",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--push-enable-error"],
+        "note": "A synthetic refused subscribe response surfaces the owner's error region without claiming notifications are on."
+      },
+      {
+        "name": "phone-step",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--phone-step"],
+        "note": "A touch, non-standalone browser shows the two ordered device steps."
+      },
+      {
+        "name": "dismiss-action",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--dismiss-action"],
+        "note": "The dismiss control writes only the story-local storage stub and hides the card."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["home-setup-card--narrow"],
+        "note": "The card and its step controls stay usable inside a 390px wrapper. The workshop runner has a fine pointer, so the production 44px minimum under `(pointer: coarse)` is not asserted here."
+      },
+      {
+        "name": "in-app-desktop-branch",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "The app hides this card (#3197); desktop-client detection cannot be exercised in the browser workshop without faking the native bridge."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HomeSetupCard.vue has not yet been audited."
+      "status": "known",
+      "detail": "HomeSetupCard starts from browser capability probes, then awaits installed-app probing, push support and subscription reads before showing the push step; a pending probe leaves that step unasserted rather than showing a spinner. The in-app branch is not reachable here."
     },
     "migration": {
       "status": "unassessed",
@@ -1836,21 +1968,69 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Visible/on-host/revealed/error; no real passwords in fixtures/metadata. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HomeWelcomeCard.vue implements this render; no rendered-state story exists."
+        "name": "hidden",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--hidden"],
+        "note": "A not-pending welcome status renders no card; the play asserts the empty canvas after the fixture read."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "on-host",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--on-host"],
+        "note": "The loopback page renders the host-only card with a synthetic password from the fixture."
+      },
+      {
+        "name": "remote",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--remote"],
+        "note": "A non-host welcome status has no host-only affordance; the synthetic fixture sets on_host false and the play asserts the different copy."
+      },
+      {
+        "name": "copied",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--copied"],
+        "note": "The copy command writes the synthetic password to the clipboard stub and the play asserts the copied label."
+      },
+      {
+        "name": "password-busy",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--password-busy"],
+        "note": "A held /api/welcome/password read keeps the Show button actually disabled; the play asserts the block and the absent error."
+      },
+      {
+        "name": "password-error",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--password-error"],
+        "note": "A refused /api/welcome/password read shows the owner's fixed host-down wording and no password."
+      },
+      {
+        "name": "folder-busy",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--folder-busy"],
+        "note": "A held /api/welcome/open-folder call keeps the button disabled; the play asserts the actual block."
+      },
+      {
+        "name": "folder-error",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--folder-error"],
+        "note": "A failing folder request shows an error and re-enables the button."
+      },
+      {
+        "name": "dismissed",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--dismissed"],
+        "note": "The dismiss action posts once and removes the card without touching other storage."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["home-welcome-card--narrow"],
+        "note": "The card's password row and controls stay inside a 390px wrapper. Production raises the buttons to 44px only under `(pointer: coarse)`, which the browser runner does not emulate."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HomeWelcomeCard.vue has not yet been audited."
+      "status": "known",
+      "detail": "HomeWelcomeCard shows no card while the initial /api/welcome read is pending and none when it fails or reports not pending. The password and open-folder calls each have their own pending/error branch: both buttons are actually disabled while held; a failed password read replaces the transport wording with fixed host-down guidance."
     },
     "migration": {
       "status": "unassessed",
@@ -1917,21 +2097,105 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Notices/unavailable, row/menu primary action kinds and update-task rows, not a generic alert clone. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HousekeepingStrip.vue implements this render; no rendered-state story exists."
+        "name": "empty",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--empty"],
+        "note": "Three successful empty reads render no 'Needs you' section and no all-clear row."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "initial-loading",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--initial-loading"],
+        "note": "One held source keeps the three-source load gate pending; the play asserts no rows are drawn during it."
+      },
+      {
+        "name": "health-error",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--health-error"],
+        "note": "A synthetic error check renders a health row with an error tone and its detail."
+      },
+      {
+        "name": "health-fix-busy",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--health-fix-busy"],
+        "note": "A held fix request keeps the Fix button disabled and relabelled 'Fixing…'."
+      },
+      {
+        "name": "action-run-busy",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--action-run-busy"],
+        "note": "A held run request keeps the lead button disabled and relabelled 'Running…'."
+      },
+      {
+        "name": "action-dismiss",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--action-dismiss"],
+        "note": "The dismiss action posts once and its fresh empty list removes the row."
+      },
+      {
+        "name": "action-terminal",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--action-terminal"],
+        "note": "A runnable terminal action leads the row; the play launches it and asserts the 'Opened in Terminal' status."
+      },
+      {
+        "name": "task-offered",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--task-offered"],
+        "note": "An applicable offered task renders its reason and a Start in chat button."
+      },
+      {
+        "name": "task-preview",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "The store fetches /api/update-tasks/{id}/preview, but HousekeepingStrip.vue's template never renders taskPreviews, so the fetched summary has no DOM to assert in isolation."
+      },
+      {
+        "name": "task-start-busy",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--task-start-busy"],
+        "note": "A held start request keeps the lead button disabled and relabelled 'Working…'."
+      },
+      {
+        "name": "task-in-progress",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--task-in-progress"],
+        "note": "An in-progress task with a live chat leads with Resume chat and says the chat is open."
+      },
+      {
+        "name": "task-waiting-review",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--task-needs-review"],
+        "note": "A waiting-review task leads with Review proposals and names the archived-chat case."
+      },
+      {
+        "name": "task-unknown-applicability",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--task-unknown-applicability"],
+        "note": "An unknown detector answer says it is checking and offers Check again, never a start."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["housekeeping-strip--narrow"],
+        "note": "A row with a lead button stays usable inside a 390px wrapper."
+      },
+      {
+        "name": "global-router-navigation",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "View/chat/review handlers import the app's global router instead of the connected one, so those destinations cannot be exercised inside the fixture workshop without production edits."
+      },
+      {
+        "name": "notice-reveal",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "The ?notice= reveal path depends on the app's notification inbox and query-string orchestration, which this story host deliberately does not bootstrap."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HousekeepingStrip.vue has not yet been audited."
+      "status": "known",
+      "detail": "HousekeepingStrip draws nothing until the first reads of actions, update tasks and workspace health have each settled or the 3000ms gate fires; an empty list is silent rather than an all-clear. A failed source leaves the strip silent too. Per-row busy states disable the pressed control (Fix, Run, terminal launch, task start/dismiss) and preview loads independently."
     },
     "migration": {
       "status": "unassessed",
@@ -2295,25 +2559,47 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/SchedulePanel.vue",
       "web/src/components/TaskWorkspaceSurface.vue"
     ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variants": [
+      "rail",
+      "close-title",
+      "phone-narrow"
+    ],
+    "variantNotes": "`rail: true` takes the header's width for the rail, `closeTitle` overrides the tooltip while `aria-label` keeps `closeLabel`, and under a 767px viewport the close button hides so the title keeps the room.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ItemTitleRow.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["item-title-row--default"],
+        "note": "The close button in its shared .btn-icon box plus the slotted plain title; the close tooltip falls back to closeLabel (title attribute, aria-hidden glyph) and a click emits close."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "close-title",
+        "coverage": "covered",
+        "storyIds": ["item-title-row--close-title"],
+        "note": "closeTitle overrides the root's tooltip while aria-label keeps the accessible name (SchedulePanel: name Close automation, tooltip Close)."
+      },
+      {
+        "name": "rail",
+        "coverage": "covered",
+        "storyIds": ["item-title-row--rail"],
+        "note": "rail: true adds item-title-row--rail so the row takes the header's room; ChatPanel, ProjectView and SchedulePanel pass :rail when the title rail is on."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": ["item-title-row--keyboard-focus"],
+        "note": "Tab reaches the close button, :focus-visible draws the 2px accent outline, and Enter emits close."
+      },
+      {
+        "name": "phone-narrow",
+        "coverage": "covered",
+        "storyIds": ["item-title-row--phone-narrow"],
+        "note": "The @media (max-width: 767px) rule hides .close-btn so the title keeps the room on a phone; the story pins the workshop's narrow 390px viewport (the media query follows the viewport, not the story wrapper)."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in ItemTitleRow.vue has not yet been audited."
+      "status": "none",
+      "detail": "The title row has no loading states: close and slot content render as given. While the engine names a chat the pending shimmer is the host's own branch outside this row (ChatPanel renders it when no rail is shown) and each host draws its own first-load skeleton; the row has no failure, empty or stale state."
     },
     "migration": {
       "status": "unassessed",
@@ -2334,25 +2620,68 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/HomeRecentChats.vue",
       "web/src/components/SchedulePanel.vue"
     ],
-    "variants": [],
-    "variantNotes": "Link/button and optional sub/end slots. Detailed variants are unassessed.",
+    "variants": [
+      "link",
+      "heading-slot",
+      "sub-slot",
+      "detail-slot",
+      "end-slot",
+      "disabled"
+    ],
+    "variantNotes": "A `to` route renders the link branch; without it the row is a button the host wires up. The heading slot replaces the plain title (host spans carry list-row-title), sub is the muted sub-line, detail holds any clamped lines under it and end the right column (list-row-when for the muted mono); all of the host's classes, handlers and attributes land on the root.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ListRow.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["list-row--default"],
+        "note": "The v-else button branch with the plain text title over the shared hairline row; the host's handlers land on the root (HomeRecentChats passes @click, title and disabled), so the story proves a click reaches it."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "link-row",
+        "coverage": "covered",
+        "storyIds": ["list-row--link-row"],
+        "note": "The v-if `to` branch in a fresh memory router: an anchor with the row's href whose click opens the route and lands router-link-exact-active (SchedulePanel's overview renders its link rows this way)."
+      },
+      {
+        "name": "heading-slot",
+        "coverage": "covered",
+        "storyIds": ["list-row--heading-slot"],
+        "note": "The heading slot replaces the plain title; a host title span must carry list-row-title to share the title style (:slotted rule, SchedulePanel's ov-title)."
+      },
+      {
+        "name": "sub-slot",
+        "coverage": "covered",
+        "storyIds": ["list-row--sub-slot"],
+        "note": "The v-if $slots.sub branch: one muted sub-line under the title."
+      },
+      {
+        "name": "detail-slot",
+        "coverage": "covered",
+        "storyIds": ["list-row--detail-slot"],
+        "note": "The detail slot under the sub-line (a pending question, a reply snippet); the slot renders raw, with no wrapper of the row's own, so hosts clamp it themselves."
+      },
+      {
+        "name": "end-slot",
+        "coverage": "covered",
+        "storyIds": ["list-row--end-slot"],
+        "note": "The v-if $slots.end branch: the right-hand end column, whose time or state span carries list-row-when for the muted mono (:slotted rule)."
+      },
+      {
+        "name": "disabled",
+        "coverage": "covered",
+        "storyIds": ["list-row--disabled"],
+        "note": "The host's :disabled lands on the root button (HomeRecentChats for chats that are not in this browser) and keeps it actually disabled, while a host title stays the root's tooltip beside the visible text label."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": ["list-row--keyboard-focus"],
+        "note": "Tab reaches the row and :focus-visible draws the global 2px accent outline; roaming the list with arrows is the host's roamFocus (lib/listRoaming.ts), not the row's, and is not claimed here."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in ListRow.vue has not yet been audited."
+      "status": "none",
+      "detail": "ListRow has no loading states of its own: it renders loaded rows only. List loading belongs to the hosts — Home's lanes draw the shared SkeletonLoader while their first load is in flight (a generic row pair, not ListRow's title-over-sub-line geometry, and a candidate for the loading follow-up), while the Automations overview keeps its loaded rows; the row itself has no failure, empty or stale state."
     },
     "migration": {
       "status": "unassessed",
@@ -3744,9 +4073,9 @@ export const inventory: InventoryEntry[] = [
       },
       {
         "name": "link",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SidebarRow.vue's v-if `to` branch renders a RouterLink with active-class and the same title, shimmer and meta marks; no story exists. The Rows and titles slice owns link rows and their host controls."
+        "coverage": "covered",
+        "storyIds": ["foundation-sidebar-row--link", "foundation-sidebar-row--link-active"],
+        "note": "The v-if `to` branch renders a RouterLink with active-class and the same title, shimmer and meta marks. The link stories assert href and the meta mark, and the row's active classes on the linked route (every production consumer passes `to`; the sidebar's task and settings rows add `active` and aria-current on top)."
       },
       {
         "name": "placeholder",
@@ -3755,10 +4084,16 @@ export const inventory: InventoryEntry[] = [
         "note": "The loading branch: a plain sidebar-row--placeholder box, aria-hidden, not focusable, with one shimmer bar at the given width and no title or meta. SidebarListSkeleton draws lists of these on a first load; the narrow story keeps it inside a 390px block."
       },
       {
+        "name": "host-control",
+        "coverage": "covered",
+        "storyIds": ["foundation-sidebar-row--host-control"],
+        "note": "The v-else branch the host wires up: a plain element carrying the host's role, tabindex, aria-pressed and click handler on the root. No current production consumer uses this branch (ProjectSidebar and SidebarListSkeleton all pass `to` or `placeholder`), so the story claims the branch's own contract, not a host screen."
+      },
+      {
         "name": "keyboard-focus",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ":focus-visible draws the row's 2px accent outline; no rendered focus story exists. The Rows and titles slice owns the keyboard path."
+        "coverage": "covered",
+        "storyIds": ["foundation-sidebar-row--keyboard-focus"],
+        "note": ":focus-visible draws the row's 2px accent outline. The keyboard story tabs to a link row (naturally in the tab order), asserts focus-visible plus the outline and that Enter opens the row's route; the plain branch is focusable only when the host adds tabindex, which the host-control story shows."
       }
     ],
     "loading": {
@@ -4457,25 +4792,59 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/SchedulePanel.vue",
       "web/src/components/TaskWorkspaceSurface.vue"
     ],
-    "variants": [],
-    "variantNotes": "Pending-title/neighbor/arrival states, not a fabricated tab component. Detailed variants are unassessed.",
+    "variants": [
+      "pending-title",
+      "segment-marks",
+      "busy"
+    ],
+    "variantNotes": "A titlePending item shows the naming shimmer under its accessible name; each item's mark (needs, working, unread) draws its track segment in miniature; busy refuses the swipe, wheel and arrow-key steps.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in TitleRail.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["title-rail--default"],
+        "note": "The settled rail: role=group named `<group label>, 2 of 3`, the current item with aria-current=page and tabindex 0 over neighbours at -1, title over project, and one highlighted segment on the hidden track. Swipe, wheel and pull gestures are not claimed by stories."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "pending-title",
+        "coverage": "covered",
+        "storyIds": ["title-rail--pending-title"],
+        "note": "The titlePending branch: the naming shimmer stands in for the title on the pending item (label Naming conversation, <project> passes from the host), while neighbours keep their title text."
+      },
+      {
+        "name": "segment-marks",
+        "coverage": "covered",
+        "storyIds": ["title-rail--segment-marks"],
+        "note": "The track's per-item marks in miniature: needs the alert triangle, working the chase (asserted through its animation), unread the dot."
+      },
+      {
+        "name": "busy",
+        "coverage": "covered",
+        "storyIds": ["title-rail--busy"],
+        "note": "With busy the arrow-key step (and the swipe and wheel) is refused: the asserted window passes with no select landing and aria-current stays put."
+      },
+      {
+        "name": "keyboard-step",
+        "coverage": "covered",
+        "storyIds": ["title-rail--keyboard-step"],
+        "note": "ArrowRight on the focused current item slides to the next item and selects it; the story's host handler moves the current id, so aria-current follows to the neighbour."
+      },
+      {
+        "name": "rename-gesture",
+        "coverage": "covered",
+        "storyIds": ["title-rail--rename-gesture"],
+        "note": "A double click on the current item emits rename (the hosts open the rename field); the story's host handler counts the rename."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": ["title-rail--keyboard-focus"],
+        "note": "Tab reaches the current item only (its neighbours are tabindex -1) and :focus-visible draws the rail's 2px outline on it."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TitleRail.vue has not yet been audited."
+      "status": "none",
+      "detail": "The rail has no loading states: a pending title is the naming-conversation shimmer, not a load, and hosts render the rail only once items exist — each host's own first-load placeholder (the chat's ChatPaneSkeleton and friends) covers that load. No failure, empty or stale geometry exists."
     },
     "migration": {
       "status": "unassessed",
