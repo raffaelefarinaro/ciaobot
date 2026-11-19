@@ -8651,42 +8651,102 @@ export const inventory: InventoryEntry[] = [
       "overlay",
       "editing"
     ],
-    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are indirect composition hosts, not direct inline consumers.",
+    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are indirect composition hosts, not direct inline consumers. The sheets are fixed-position modals, so their narrow geometry is the workshop's narrow viewport preset rather than a wrapper; the page editor is covered inside a 390px block.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-sheet in TaskWorkspaceSurface.vue implements this family; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-editor--default"],
+        "note": "The create sheet: the modal .task-sheet the board's New task opens, with focus on the title, the disabled File task until a title is typed, Filing… while its POST is in flight and the refusal line under the form when it is refused. Covered by task-editor--default, --create-refused and --create-busy."
       },
       {
         "name": "page",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-sheet in TaskWorkspaceSurface.vue includes page; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-editor--page"],
+        "note": "The detail editor as a board page (task-sheet task-detail-pane): region role, the title's arrival focus, rendered description, the side column and the fields' autosave line, inside a 390px wrapper. Covered by task-editor--page."
       },
       {
         "name": "overlay",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-sheet in TaskWorkspaceSurface.vue includes overlay; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-editor--overlay"],
+        "note": "The same editor as an overlay modal sheet (task-sheet task-detail-sheet): role=dialog, aria-modal, no board chrome, and the host's awaited-close seam. Covered by task-editor--overlay."
+      },
+      {
+        "name": "title-required",
+        "coverage": "covered",
+        "storyIds": ["task-editor--title-required"],
+        "note": "An overlay close over a title it cannot write is refused: 'Add a title before closing.' and the draft stays, with nothing presented. Covered by task-editor--title-required."
+      },
+      {
+        "name": "write-refused",
+        "coverage": "covered",
+        "storyIds": ["task-editor--write-refused"],
+        "note": "A refused save before a close keeps the editor open with the server's sentence, the draft and a re-read of the rows. Covered by task-editor--write-refused."
       },
       {
         "name": "editing",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-sheet in TaskWorkspaceSurface.vue includes editing; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-editor--editing"],
+        "note": "The description edit: a click on the rendered body is the textarea, focus follows, typing pauses write and the save line moves from Saving… to Saved. Covered by task-editor--editing."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "description-loading",
+        "coverage": "covered",
+        "storyIds": ["task-editor--description-loading"],
+        "note": "The editor's per-open description read in flight: the field is absent, 'Loading description…' is role=status. Covered by task-editor--description-loading."
+      },
+      {
+        "name": "description-failed",
+        "coverage": "covered",
+        "storyIds": ["task-editor--description-failed"],
+        "note": "A refused description read leaves the field absent and offers Retry, which re-reads without closing. Covered by task-editor--description-failed."
+      },
+      {
+        "name": "body-conflict",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "note": "The description conflict needs a GET-by-id answer that changes the prose under a dirty draft mid-write — a race inside one gesture window, not a state one story render can hold deterministically. Not claimed."
+      },
+      {
+        "name": "overlay-loading",
+        "coverage": "covered",
+        "storyIds": ["task-editor--overlay-loading"],
+        "note": "The overlay task resolution in flight: the compact task-overlay-state sheet, 'Loading task…'. Covered by task-editor--overlay-loading."
+      },
+      {
+        "name": "overlay-failed",
+        "coverage": "covered",
+        "storyIds": ["task-editor--overlay-failed"],
+        "note": "The overlay read failed: its own state, the server's sentence and a Retry, never an editor over stale rows. Covered by task-editor--overlay-failed."
+      },
+      {
+        "name": "overlay-missing",
+        "coverage": "covered",
+        "storyIds": ["task-editor--overlay-missing"],
+        "note": "The host's task is not on the board: Task not found, no editor. Covered by task-editor--overlay-missing."
+      },
+      {
+        "name": "create-refused",
+        "coverage": "covered",
+        "storyIds": ["task-editor--create-refused"],
+        "note": "A refused filing keeps the New task form, what was typed and the server's sentence under the buttons. Covered by task-editor--create-refused."
+      },
+      {
+        "name": "create-busy",
+        "coverage": "covered",
+        "storyIds": ["task-editor--create-busy"],
+        "note": "Filing… is the block itself: the submit and Cancel are disabled while the POST is in flight. Covered by task-editor--create-busy."
+      },
+      {
+        "name": "record-missing",
+        "coverage": "covered",
+        "storyIds": ["task-editor--record-missing"],
+        "note": "The record vanished under an open editor with a draft: the draft is kept and named with Copy draft and Discard draft. Covered by task-editor--record-missing."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TaskWorkspaceSurface.vue has not yet been audited."
+      "status": "known",
+      "detail": "The editor's description read is an initial load per open (held GET shows Loading description… with no field); the overlay's task resolution is the same shape (Loading task…). A refresh after a refused write re-reads the list with the editor open (record-missing keeps its draft); failure is description-failed and overlay-failed; the sheet itself has no stale shape. The sheets draw no skeleton: the board's first-load placeholder geometry is owned by the components-task-workspace-surface row."
     },
     "migration": {
       "status": "unassessed",
@@ -8712,72 +8772,66 @@ export const inventory: InventoryEntry[] = [
       "edit",
       "review-ready"
     ],
-    "variantNotes": "The .task-resolution-sheet dialog owns completion and resolution editing. The .task-completion selector instead marks earlier-completion history items, not this sheet. Support sources are indirect composition hosts, not direct inline consumers.",
+    "variantNotes": "The .task-resolution-sheet dialog owns completion and resolution editing. The .task-completion selector instead marks earlier-completion history items, not this sheet. Support sources are indirect composition hosts, not direct inline consumers. The sheet is a fixed-position modal, so its narrow geometry is the workshop's narrow viewport preset rather than a wrapper.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TaskWorkspaceSurface.vue gates .task-resolution-sheet with resolutionOpen && resolutionTask; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-completion--default"],
+        "note": "TaskWorkspaceSurface.vue gates .task-resolution-sheet with resolutionOpen && resolutionTask; the sheet enters with focus on the note field. Covered by task-completion--default."
       },
       {
         "name": "complete",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "resolutionMode === 'complete' presents Complete with resolution and the Mark done action unless the task is review-ready; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-completion--complete"],
+        "note": "resolutionMode === 'complete' presents Complete with resolution and the Mark done action unless the task is review-ready; a blank draft completes with resolution ''. Covered by task-completion--complete."
       },
       {
         "name": "edit",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "resolutionMode.value === 'edit' presents Edit resolution and Save resolution. editResolution reads the stored text before opening; a failed read opens nothing. No rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-completion--edit"],
+        "note": "resolutionMode.value === 'edit' presents Edit resolution and Save resolution. editResolution reads the stored text before opening; a failed read opens nothing. Covered by task-completion--edit."
       },
       {
         "name": "review-ready",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "In complete mode, isReviewReady(resolutionTask) selects Approve done and renders DecisionReason bound to resolutionReason; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-completion--review-ready"],
+        "note": "In complete mode, isReviewReady(resolutionTask) selects Approve done and renders DecisionReason bound to resolutionReason. Covered by task-completion--review-ready."
       },
       {
         "name": "pending",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "resolutionBusy makes the textarea, DecisionReason, submit, refresh, close and Cancel controls disabled and changes the submit label to Saving…; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-completion--pending"],
+        "note": "resolutionBusy makes the textarea, DecisionReason, submit, refresh, close and Cancel controls disabled and changes the submit label to Saving…. Covered by task-completion--pending."
       },
       {
         "name": "action-error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "resolutionError renders a role=\"alert\" message with refreshResolutionTask. The refresh re-reads the board and task revision without changing the draft; refusal keeps the sheet and draft. No rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-completion--action-error"],
+        "note": "resolutionError renders a role=\"alert\" message with refreshResolutionTask. The refresh re-reads the board and task revision without changing the draft; refusal keeps the sheet and draft. Covered by task-completion--action-error."
       },
       {
         "name": "draft",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "The optional resolutionDraft textarea is initialized by openResolution. Completion sends an empty note for a blank or whitespace-only draft; edit mode preserves the exact typed text. No rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-completion--draft"],
+        "note": "The optional resolutionDraft textarea is initialized by openResolution. Completion sends an empty note for a blank or whitespace-only draft; edit mode preserves the exact typed text. Covered by task-completion--draft."
       },
       {
         "name": "submit",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "The form calls submitResolution, flushing editor changes and, for completion, releasing a held attempt before reading the current revision. Edit uses board.update; complete uses board.complete with the optional review reason. Success resets the sheet; refusal preserves the draft. No rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-completion--submit"],
+        "note": "The form calls submitResolution, flushing editor changes and, for completion, releasing a held attempt before reading the current revision. Edit uses board.update; complete uses board.complete with the optional review reason. Covered by task-completion--submit (an approved result), --complete (a blank note) and --draft (a typed note)."
       },
       {
         "name": "cancel",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "Cancel, close and backdrop invoke closeResolution without writing; Escape also closes through useModalFocus. Closing is refused while resolutionBusy; otherwise resetResolution clears the sheet and draft. No rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "coverage": "covered",
+        "storyIds": ["task-completion--cancel"],
+        "note": "Cancel, close and backdrop invoke closeResolution without writing; Escape also closes through useModalFocus. Closing is refused while resolutionBusy; otherwise resetResolution clears the sheet and draft. Covered by task-completion--cancel."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TaskWorkspaceSurface.vue has not yet been audited."
+      "status": "known",
+      "detail": "Opening the sheet is local; the only read is edit mode's GET /api/tasks/{id} before it opens, and a failed read opens nothing (the board's own save line is the surface row's). The sheet has no initial-loading or empty render to show: the busy shape is the disabled controls with Saving…, the failure shape is the action-error row with Refresh task, and refresh is refreshResolutionTask. No stale state."
     },
     "migration": {
       "status": "unassessed",
@@ -8802,36 +8856,96 @@ export const inventory: InventoryEntry[] = [
       "delegation",
       "handover"
     ],
-    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are indirect composition hosts, not direct inline consumers.",
+    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are indirect composition hosts, not direct inline consumers. The .task-delegate anchor matches the editor's Agent block and the .task-delegate-sheet preview it opens. Both are fixed-position surfaces, so their narrow geometry is the workshop's narrow viewport preset rather than a wrapper.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-delegate in TaskWorkspaceSurface.vue implements this family; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-delegation--default"],
+        "note": "No attempt_state: the Agent block says in one line what delegating does (a new chat in the task's project, approval cards asked in that chat) and its control is Delegate to agent. Covered by task-delegation--default."
       },
       {
         "name": "delegation",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-delegate in TaskWorkspaceSurface.vue includes delegation; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-delegation--delegation"],
+        "note": "A live attempt (running, needs_you): the badge is the record's own state; Stop and Detach are the run gestures; the lazy history reads and lists the attempts. Covered by task-delegation--delegation, --attempts-loading and --attempts-error."
       },
       {
         "name": "handover",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-delegate in TaskWorkspaceSurface.vue includes handover; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-delegation--handover"],
+        "note": "The delegate preview over the closed editor (.task-delegate-sheet): the facts the chat will run with (project, the model row, attendance read as attended), the read description, the per-attempt instructions field and the Delegate confirm. Covered by task-delegation--handover."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "review-ready",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--review-ready"],
+        "note": "A result waits for review: the review lead, the Approve Done and Reject… controls, and Open chat as the section's own control. Covered by task-delegation--review-ready."
+      },
+      {
+        "name": "preview-resume",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--preview-resume"],
+        "note": "A settled attempt still linked to a live chat: the preview opens in resume mode, naming both ways out (Resume, and Start a new attempt beside Cancel). Covered by task-delegation--preview-resume."
+      },
+      {
+        "name": "preview-retry",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--preview-retry"],
+        "note": "A settled attempt whose chat is archived: the preview opens in retry mode, with Start a new attempt as the confirm. Covered by task-delegation--preview-retry."
+      },
+      {
+        "name": "preview-body-loading",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--preview-body-loading"],
+        "note": "The sheet's own description read in flight: Loading description…, and no preview to confirm against. Covered by task-delegation--preview-body-loading."
+      },
+      {
+        "name": "preview-body-error",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--preview-body-error"],
+        "note": "A refused description read: the sheet explains what the chat still receives and offers Retry, which re-reads without closing. Covered by task-delegation--preview-body-error."
+      },
+      {
+        "name": "handover-busy",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--handover-busy"],
+        "note": "A hand-over in flight: the confirm reads Working… and the instructions field and model chip stop taking input. Covered by task-delegation--handover-busy."
+      },
+      {
+        "name": "attempts-loading",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--attempts-loading"],
+        "note": "The lazy history read in flight: Loading attempts… and no list. Covered by task-delegation--attempts-loading."
+      },
+      {
+        "name": "attempts-error",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--attempts-error"],
+        "note": "A refused history read: the server's sentence with a Retry that re-reads without closing the editor. Covered by task-delegation--attempts-error."
+      },
+      {
+        "name": "linked-chats",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--linked-chats"],
+        "note": "The task names chats that worked on it: the Linked chats section with unlink as an ordinary write the row adopts. Covered by task-delegation--linked-chats."
+      },
+      {
+        "name": "reconcile",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--reconcile"],
+        "note": "A row that disagrees with itself (a settled attempt still holding the task): the block says what disagrees and which controls resolve it, never a rewrite. Covered by task-delegation--reconcile."
+      },
+      {
+        "name": "open-chat-preview",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "note": "The preview's open_chat mode can only render through a programmatic openDelegate call: delegateFromDetail diverts a live attempt to its chat before any preview opens, and both card and editor Open chat gestures navigate there directly."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TaskWorkspaceSurface.vue has not yet been audited."
+      "status": "known",
+      "detail": "Two reads, both theirs: the Agent block's lazy history (initial, with its own failure shape and Retry) and the delegate preview's description read (the sheet's initial load, Loading description…, refusal keeps the sheet with a Retry). The block itself draws no skeleton; the badge and gestures render from the row."
     },
     "migration": {
       "status": "unassessed",
@@ -8856,36 +8970,42 @@ export const inventory: InventoryEntry[] = [
       "move",
       "ordering"
     ],
-    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are indirect composition hosts, not direct inline consumers.",
+    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are indirect composition hosts, not direct inline consumers. The sheet is a fixed-position modal, so its narrow geometry is the workshop's narrow viewport preset rather than a wrapper.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-move-sheet in TaskWorkspaceSurface.vue implements this family; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-ordering--default"],
+        "note": "The .task-move-sheet the card menu's Move… opens for one task: its column preselected, the landing rows its lane offers, a Move confirm and Escape's write-free close. Covered by task-ordering--default."
       },
       {
         "name": "move",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-move-sheet in TaskWorkspaceSurface.vue includes move; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-ordering--move"],
+        "note": "A cross-lane placement: another column lists another set of landing rows, and one write carries the status and the placement (PATCH with placement anchors); the card lands in its lane. Covered by task-ordering--move."
       },
       {
-        "name": "ordering",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-move-sheet in TaskWorkspaceSurface.vue includes ordering; no rendered-state story exists."
+        "name": "done-append",
+        "coverage": "covered",
+        "storyIds": ["task-ordering--done-append"],
+        "note": "When the Done lane is not drawn (no done rows, the collapsed tab's lane absent), the completion appends when confirmed: the sheet's note says so, the position list is the single appends row, and confirming opens the completion sheet writing nothing. Covered by task-ordering--done-append."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "name": "done-position",
+        "coverage": "covered",
+        "storyIds": ["task-ordering--done-position"],
+        "note": "When the Done lane is drawn, Done keeps the chosen position: Top and after each row, and the note says the position is saved with the confirmation. Covered by task-ordering--done-position (drawn with the workshop's per-browser Done-tab preference held on for the story)."
+      },
+      {
+        "name": "order-error",
+        "coverage": "covered",
+        "storyIds": ["task-ordering--order-error"],
+        "note": "The order file could not be read (the 'ordering' variant renamed to name its branch): the drawn menu's Move up, Move down and Move… are disabled and carry the reason as their title, beside the order notice the board draws. Covered by task-ordering--order-error."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TaskWorkspaceSurface.vue has not yet been audited."
+      "status": "none",
+      "detail": "The move sheet opens from rows already on screen and reads nothing: every position option is computed from the held order, so it has no initial, refresh, failure or stale shape."
     },
     "migration": {
       "status": "unassessed",
