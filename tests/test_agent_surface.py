@@ -1741,37 +1741,6 @@ def test_no_argv_allow_or_ask_patterns_remain() -> None:
     assert not hasattr(em, "agent_cli_permission_rules")
 
 
-@pytest.mark.asyncio
-async def test_claude_cli_surface_does_not_pre_approve_ciao_commands(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """No `ciao …` argv prefix is pre-approved (an allow prefix is a shell-suffix
-    bypass risk); auto mode keeps a card on every shell command."""
-    from ciao.models import AgentRequest
-    from ciao.providers.claude import ClaudeProvider
-
-    captured: dict = {}
-
-    class FakeClient:
-        def __init__(self, options):
-            captured["options"] = options
-
-    provider = ClaudeProvider(
-        tmp_path,
-        config=SimpleNamespace(memory_char_limit=2200, user_char_limit=1375, vault_root=tmp_path / "v"),
-    )
-    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
-    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
-
-    await provider._ensure_connected(
-        AgentRequest(prompt="t", model="sonnet", mode="auto", provider="claude")
-    )
-    allowed = captured["options"].allowed_tools or []
-    assert not [entry for entry in allowed if entry.startswith("Bash(ciao ")]
-    assert not [entry for entry in allowed if entry.startswith("mcp__ciaobot__")]
-    assert not captured["options"].mcp_servers  # no MCP server is attached
-
-
 def test_opencode_cli_auto_mode_keeps_shell_ask_for_ciao_commands() -> None:
     """Auto mode emits one generic V2 `shell: ask` rule."""
     from ciao.providers.opencode import mode_settings

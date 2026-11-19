@@ -6,7 +6,6 @@ import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
-from ciao.providers import claude as claude_adapter
 from ciao.providers.base import BaseProvider
 from ciao.providers.opencode import OpencodeProvider
 from ciao.web.project_chats import ProjectChatManager
@@ -108,7 +107,6 @@ async def test_native_title_claude_missing(monkeypatch) -> None:
     from ciao.web import project_chats as pc
 
     manager = _manager(chats={"chat-1": _chat(provider="claude")})
-    monkeypatch.setattr(claude_adapter, "get_session_info", lambda _sid, directory=None: None)
     assert await manager._native_chat_title(manager._chats["chat-1"]) is None
 
 
@@ -486,62 +484,6 @@ async def test_base_provider_native_title_default_without_construction() -> None
 
 
 @pytest.mark.asyncio
-async def test_claude_native_title_candidates_extraction_matrix(monkeypatch) -> None:
-    """Claude returns (custom_title, summary) stripped, in that order, or ()."""
-    from pathlib import Path
-
-    from ciao.providers import claude as claude_adapter
-    from ciao.providers.claude import ClaudeProvider
-
-    calls: list[tuple[str, str]] = []
-
-    class Info:
-        custom_title: str | None
-        summary: str | None
-
-    def reader(sid, directory=None):
-        calls.append((sid, str(directory)))
-        return reader.info
-
-    reader.info = Info()
-    reader.info.custom_title = "  Claude Custom  "
-    reader.info.summary = "  Claude Summary  "
-    monkeypatch.setattr(claude_adapter, "get_session_info", reader)
-
-    root = Path("/roots/work")
-    assert await ClaudeProvider.native_title_candidates(root, "sess-1", runtime_root=Path("/runtime")) == (
-        "Claude Custom",
-        "Claude Summary",
-    )
-    # Exactly one read, with the exact session id and the stringified root.
-    assert calls == [("sess-1", str(root))]
-
-    reader.info = Info()
-    reader.info.custom_title = None
-    reader.info.summary = None
-    assert await ClaudeProvider.native_title_candidates(root, "sess-1", runtime_root=Path("/runtime")) == ("", "")
-
-    reader.info = None
-    assert await ClaudeProvider.native_title_candidates(root, "sess-1", runtime_root=Path("/runtime")) == ()
-
-
-@pytest.mark.asyncio
-async def test_claude_native_title_candidates_propagates_sdk_errors(monkeypatch) -> None:
-    """SDK reader failures propagate to the manager's failure boundary."""
-    from pathlib import Path
-
-    from ciao.providers import claude as claude_adapter
-    from ciao.providers.claude import ClaudeProvider
-
-    def exploding_reader(_sid, directory=None):
-        raise RuntimeError("claude cli missing")
-
-    monkeypatch.setattr(claude_adapter, "get_session_info", exploding_reader)
-    with pytest.raises(RuntimeError, match="claude cli missing"):
-        await ClaudeProvider.native_title_candidates(Path("/ws"), "sess-1", runtime_root=Path("/runtime"))
-
-
-@pytest.mark.asyncio
 async def test_opencode_native_title_candidates_extraction_matrix(monkeypatch) -> None:
     """OpenCode forwards the exact read_thread args and extracts the old title."""
     from pathlib import Path
@@ -743,7 +685,6 @@ async def test_unregistered_provider_id_returns_none_without_any_read(monkeypatc
     monkeypatch.setattr(provider_registry, "require", spying_require)
     monkeypatch.setattr(provider_registry.ProviderDescriptor, "factory", spying_factory)
     monkeypatch.setattr(OpencodeProvider, "read_thread", recording_read)
-    monkeypatch.setattr(claude_adapter, "get_session_info", recording_info)
     manager = _manager(chats={"chat-1": _chat(provider="elsewhere")})
     assert await manager._native_chat_title(manager._chats["chat-1"]) is None
     # One registry lookup, no descriptor, therefore no `require` fallback and
@@ -964,7 +905,6 @@ async def test_llm_fallback_titles_chat_when_native_never_lands(monkeypatch) -> 
     def missing_session_info(_sid, directory=None):
         return None
 
-    monkeypatch.setattr(claude_adapter, "get_session_info", missing_session_info)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
     title = await manager.auto_title_if_default("chat-1", "Check Zendesk ticket 152025")
@@ -996,7 +936,6 @@ async def test_claude_title_does_not_wait_for_native_poll(monkeypatch) -> None:
     async def fake_oneshot(*_args, **_kwargs):
         return "System One Decision Models"
 
-    monkeypatch.setattr(claude_adapter, "get_session_info", missing_session_info)
     monkeypatch.setattr(pc.asyncio, "sleep", recording_sleep)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
@@ -1024,7 +963,6 @@ async def test_claude_fallback_title_is_not_held_behind_native_polls(monkeypatch
     async def failing_oneshot(*_args, **_kwargs):
         raise RuntimeError("model unavailable")
 
-    monkeypatch.setattr(claude_adapter, "get_session_info", lambda _sid, directory=None: None)
     monkeypatch.setattr(pc.asyncio, "sleep", recording_sleep)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
 
@@ -1063,7 +1001,6 @@ async def test_claude_chat_reads_no_native_title_so_nothing_polls(monkeypatch) -
     async def failing_oneshot(*_args, **_kwargs):
         raise RuntimeError("model unavailable")
 
-    monkeypatch.setattr(claude_adapter, "get_session_info", late_session_info)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
     monkeypatch.setattr(pc.asyncio, "sleep", recording_sleep)
 
@@ -1092,7 +1029,6 @@ async def test_claude_rename_during_the_titler_wins_over_the_fallback(monkeypatc
         chat.title_origin = "user"  # what update_chat records for a rename
         raise RuntimeError("model unavailable")
 
-    monkeypatch.setattr(claude_adapter, "get_session_info", no_native_title)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", rename_then_fail)
 
     assert await manager.auto_title_if_default("chat-1", "hello") is None
@@ -1116,7 +1052,6 @@ async def test_llm_fallback_prompt_carries_assistant_reply(monkeypatch) -> None:
     def missing_session_info(_sid, directory=None):
         return None
 
-    monkeypatch.setattr(claude_adapter, "get_session_info", missing_session_info)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
     title = await manager.auto_title_if_default(
@@ -1140,7 +1075,6 @@ async def test_llm_fallback_failure_still_applies_deterministic_fallback(
     def missing_session_info(_sid, directory=None):
         return None
 
-    monkeypatch.setattr(claude_adapter, "get_session_info", missing_session_info)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
 
     assert await manager.auto_title_if_default("chat-1", "hello") == "hello"
@@ -1164,7 +1098,6 @@ async def test_llm_fallback_rejects_contaminated_title(monkeypatch) -> None:
     def missing_session_info(_sid, directory=None):
         return None
 
-    monkeypatch.setattr(claude_adapter, "get_session_info", missing_session_info)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", leaking_oneshot)
 
     manager = _manager(chats={"chat-1": _chat(provider="claude")})
@@ -1212,7 +1145,6 @@ async def test_llm_fallback_respects_manual_rename_during_call(monkeypatch) -> N
     def missing_session_info(_sid, directory=None):
         return None
 
-    monkeypatch.setattr(claude_adapter, "get_session_info", missing_session_info)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", slow_oneshot)
 
     assert await manager.auto_title_if_default("chat-1", "hello") is None

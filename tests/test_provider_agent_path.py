@@ -202,36 +202,6 @@ def test_engine_ciao_resolves_first_despite_a_decoy_on_the_inherited_path(
 
 
 @pytest.mark.asyncio
-async def test_claude_sdk_env_carries_the_engine_first_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Claude passes ``request.extra_env`` straight to the SDK subprocess."""
-    from ciao.providers.claude import ClaudeProvider
-
-    captured: dict = {}
-
-    class FakeClient:
-        def __init__(self, options):
-            captured["options"] = options
-
-    monkeypatch.setenv("PATH", os.pathsep.join(["/stale", "/user/bin"]))
-    monkeypatch.setattr(
-        "ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude"
-    )
-    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
-
-    manager = _make_manager(tmp_path)
-    project = manager.create_project("path", workspace="personal")
-    chat = manager.create_chat(project.project_id, provider="claude")
-    request = manager.build_agent_request(chat, prompt="hi")
-
-    provider = ClaudeProvider(tmp_path)
-    await provider._ensure_connected(request)
-
-    assert captured["options"].env["PATH"].split(os.pathsep)[0] == engine_bin_dir()
-
-
-@pytest.mark.asyncio
 async def test_opencode_server_env_carries_the_engine_first_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

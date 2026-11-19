@@ -843,16 +843,14 @@ async def _run_server_locked(
 
     async def check_claude_code():
         try:
-            # Prefer the SDK's bundled Claude CLI when present; otherwise fall
-            # back to an external ``claude`` resolved against the login-shell
-            # PATH, since launchd omits ~/.local/bin and other tool dirs.
-            from ciao.providers.claude import get_bundled_claude_path
+            # Resolve ``claude`` against the login-shell PATH, since launchd
+            # omits ~/.local/bin and other tool dirs.
             from ciao.tool_path import resolve_tool
-            cli = get_bundled_claude_path() or resolve_tool("claude")
+            cli = resolve_tool("claude")
             if not cli:
                 tracker.fail(
                     "connect_claude_code",
-                    "claude CLI not found (no bundled binary and not on PATH)",
+                    "claude CLI not found on PATH",
                 )
                 return
             proc = await asyncio.create_subprocess_exec(
@@ -1416,8 +1414,8 @@ async def _run_server_locked(
                 provider_service = pcm._providers.get(chat_id)
                 if provider_service is None or provider_service.provider is None:
                     break
-                gate = getattr(provider_service.provider, "permission_gate", None)
-                if gate is None or not gate.has_pending(request_id):
+                provider = provider_service.provider
+                if provider is None or not provider.has_permission_request(request_id):
                     break
                 if app.state.focused_chats.get(chat_id, 0) > 0:
                     break

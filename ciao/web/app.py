@@ -46,7 +46,7 @@ from ciao.web.agent_assets import (
     workspace_health_endpoint,
     workspace_health_fix_endpoint,
 )
-from ciao.web.commands import list_commands_endpoint, rate_limits_endpoint
+from ciao.web.commands import list_commands_endpoint
 from ciao.web.routes_auth import (
     auth_check,
     auth_host_sign_in,
@@ -622,7 +622,6 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         Route("/api/agent-assets/commands/{name}", update_command_endpoint, methods=["PATCH"]),
         Route("/api/agent-assets/commands/{name}", delete_command_endpoint, methods=["DELETE"]),
         # Claude subscription rate-limit buckets (5h / weekly / overage)
-        Route("/api/rate-limits", rate_limits_endpoint, methods=["GET"]),
         # Models & Status
         Route("/api/models", list_models, methods=["GET"]),
         Route("/api/settings/routines", settings_routines, methods=["GET", "PATCH"]),

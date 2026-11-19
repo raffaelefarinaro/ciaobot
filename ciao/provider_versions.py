@@ -220,7 +220,6 @@ def release_check(
     provider: str,
     installed_text: str,
     *,
-    bundled: bool = False,
     binary: str = "",
     record: Mapping[str, Any] | None = None,
     running_version: str | None = None,
@@ -232,7 +231,7 @@ def release_check(
     the previous record. A develop checkout or dev install reports the last
     release's version until the next cut, so it compares against that release's
     record; that is safe because ``below_tested`` only ever points up to a
-    version a release was tested with, and bundled Claude never gets a command.
+    version a release was tested with.
     """
     if record is None:
         try:
@@ -252,8 +251,6 @@ def release_check(
 
         if server_version_error({"version": tested}) is not None:
             return {"state": "untested"}
-    if bundled:
-        return {"state": "bundled", "tested": tested}
     if provider == "opencode":
         if server_version_error({"version": installed_text}) is not None:
             return {"state": "unsupported", "tested": tested}
@@ -300,7 +297,6 @@ def _probe_version(binary: str) -> str:
 def current_checks() -> dict[str, dict[str, str]]:
     """``release_check`` for each installed provider; absent providers have no row."""
     from ciao import setup_status
-    from ciao.providers.claude import get_bundled_claude_path
     from ciao.providers.opencode import resolve_opencode_binary
 
     checks: dict[str, dict[str, str]] = {}
@@ -314,13 +310,8 @@ def current_checks() -> dict[str, dict[str, str]]:
         )
     claude_path = setup_status.claude_cli_path()
     if claude_path:
-        bundled_path = get_bundled_claude_path()
-        bundled = bool(bundled_path) and claude_path == str(bundled_path)
         checks["claude"] = release_check(
-            "claude",
-            "" if bundled else _probe_version(claude_path),
-            bundled=bundled,
-            binary=claude_path,
+            "claude", _probe_version(claude_path), binary=claude_path
         )
     return checks
 

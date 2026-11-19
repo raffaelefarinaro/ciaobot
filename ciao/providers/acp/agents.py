@@ -3,7 +3,7 @@
 Every agent Ciaobot runs over ACP has one ``AgentSpec`` here and one ``AcpProvider`` subclass that
 sets it. The ``claude`` provider runs ``claude-agent-acp``. Ciaobot's disable options (the trim
 layer, the workspace's extra denies and the claude.ai connectors switch) reach the adapter as
-``_meta.claudeCode.options``, which the adapter spreads into the SDK options. Everything else
+``_meta.claudeCode.options``, which the adapter applies to the CLI. Everything else
 the CLI owns, so nothing else is sent.
 
 Login stays in the CLI: ``codex_auth_command`` only builds the command the Settings terminal

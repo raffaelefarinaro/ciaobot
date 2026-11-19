@@ -12,9 +12,9 @@ writer, and a person presses it.
 **The boundary is the shape of this code, not the prompt.**
 
 * the turn runs through :func:`ciao.providers.oneshot.run_oneshot`, which builds
-  ``ClaudeAgentOptions`` with ``tools=[]``, ``setting_sources=[]``,
-  ``skills=[]`` and ``strict_mcp_config=True`` (and, on opencode, a
-  ``tools_enabled=False`` provider in a fresh empty tempdir). The model cannot
+  the Claude one-shot options ``tools=[]``, ``settingSources=[]``,
+  ``skills=[]`` and ``strictMcpConfig=True`` (sent as ``_meta.claudeCode.options``;
+  on opencode, a ``tools_enabled=False`` provider in a fresh empty tempdir). The model cannot
   edit a note, promote a region, call ``ciao``, reach MCP or run a command,
   because the capability is absent rather than denied;
 * the only write in this module is ``append_proposals``, called by backend code

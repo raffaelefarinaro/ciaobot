@@ -192,7 +192,6 @@ from ciao.os_support.locks import lock_exclusive, unlock
 from ciao import provider_registry
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
 from ciao.providers.base import BACKGROUND_WORK_MAX_S, BaseProvider, QuestionResponseResult
-from ciao.rate_limits import RateLimitStore, default_store_path
 from ciao.schedules import (
     ScheduleEntry,
     ScheduleStore,
@@ -314,8 +313,7 @@ _RESUME_CONTINUE_PROMPT = "continue"
 _MAX_CONNECTION_DROP_RETRIES = 6
 # Cap on quota retries: every usage-limit retry is hourly (_RETRY_INTERVAL_SECONDS),
 # so a week of attempts covers a weekly limit, and a limit that never clears
-# still stops. When Claude's saved rate-limit snapshot names the rejected
-# five-hour bucket's reset, the retry is pointed there instead (_quota_reset_at).
+# still stops.
 _MAX_QUOTA_RETRIES = 7 * 24
 # A retry that comes due while the chat is running a turn waits this long and
 # checks again, not a whole retry interval.
@@ -471,11 +469,6 @@ def _retry_cap(kind: str) -> int | None:
         return _MAX_CONNECTION_DROP_RETRIES
     return None
 
-
-# Claude rate-limit buckets whose rejection explains each quota retry kind.
-_QUOTA_RESET_BUCKETS = {
-    "quota": ("five_hour",),
-}
 
 _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # ── Idle provider reaping ────────────────────────────────────────────────
@@ -7718,7 +7711,6 @@ class ProjectChatManager:
             prompt,
             image_refs=image_refs,
             reason=reason,
-            next_at=self._quota_reset_at(chat, kind),
             interval_seconds=interval,
             unattended=unattended,
             _owner=stream,
@@ -7728,41 +7720,6 @@ class ProjectChatManager:
         stream.publish({"type": "chat_retry", "status": "pending"})
         self._park_pending_for_retry(chat_id, stream)
         return True
-
-    def _quota_reset_at(self, chat: ChatInfo | None, kind: str) -> str | None:
-        """Return when the rejected Claude bucket behind a quota retry resets, plus a minute.
-
-        ``kind`` picks the buckets: the five-hour session window for "quota";
-        any other kind has none. The next attempt is pointed at the reset
-        instead of the hourly interval when the saved rate-limit snapshot names one. The file is user state,
-        so every field is type-checked and nothing here raises.
-        """
-        bucket_names = _QUOTA_RESET_BUCKETS.get(kind)
-        if bucket_names is None or chat is None or chat.provider != "claude":
-            return None
-        try:
-            payload = RateLimitStore(
-                path=default_store_path(self._runtime_root)
-            ).load()
-        except (OSError, ValueError):
-            return None
-        buckets = payload.get("buckets") if isinstance(payload, dict) else None
-        if not isinstance(buckets, dict):
-            return None
-        now = time.time()
-        resets = []
-        for name in bucket_names:
-            bucket = buckets.get(name)
-            if not isinstance(bucket, dict) or bucket.get("status") != "rejected":
-                continue
-            resets_at = bucket.get("resets_at")
-            if isinstance(resets_at, int) and not isinstance(resets_at, bool) and resets_at > now:
-                resets.append(resets_at)
-        if not resets:
-            return None
-        return datetime.fromtimestamp(min(resets) + 60, UTC).replace(
-            microsecond=0
-        ).isoformat().replace("+00:00", "Z")
 
     def recovery_status(self, chat_id: str) -> dict[str, Any] | None:
         """Read the authoritative registry after an uncertain scheduling result."""

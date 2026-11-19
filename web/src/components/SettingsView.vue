@@ -778,7 +778,6 @@
                   </div>
                 </div>
                 <p v-else-if="conn.release_check?.state === 'current'" class="set-row-sub">Tested with {{ conn.release_check.tested }}</p>
-                <p v-else-if="conn.release_check?.state === 'bundled'" class="set-row-sub">Bundled with Ciaobot; updates with Ciaobot</p>
                 <div v-if="getProviderSection(String(connKey))" class="provider-inline-defaults">
                   <div class="set-subrow">
                     <span :id="`default-model-label-${connKey}`" class="ws-label set-subrow-label">Default model</span>

@@ -213,7 +213,7 @@ McpPrincipal = AgentPrincipal
 # mode can be compared against its ceiling instead of being overwritten by it.
 # ``plan`` is read-only, ``normal`` asks before acting, ``auto`` acts with safer
 # defaults, ``bypass`` skips approvals. Mirrors ``BridgeMode`` in ciao.models
-# and the SDK mapping in ciao.providers.claude.
+# and the adapter's mode map in ciao.providers.acp.agents.
 _MODE_RANK = MODE_RANK
 
 RELOAD_OWN_NOTE = (

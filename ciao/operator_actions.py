@@ -345,8 +345,6 @@ def _run_provider_recheck(context: DetectionContext, provider: str) -> tuple[dic
         return {"state": state}, (
             f"{label} {check.get('installed', '')} is still older than {check.get('tested', '')}."
         )
-    if state == "bundled":
-        return {"state": state}, f"{label} is bundled with Ciaobot."
     if state == "unsupported":
         return {"state": state}, f"{label} is not compatible with this Ciaobot version."
     return {"state": state}, f"Could not verify {label}'s version."

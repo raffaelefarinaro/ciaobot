@@ -87,4 +87,4 @@ The user-facing product is **Ciaobot**. The CLI is installed as both `ciaobot` a
 
 ## Built on
 
-Ciaobot builds a persistent personal workspace on excellent open tools: Claude Code, the Claude Agent SDK, OpenCode, Starlette, Vue, and more. See [docs/CREDITS.md](docs/CREDITS.md) for the full list.
+Ciaobot builds a persistent personal workspace on excellent open tools: Claude Code (through claude-agent-acp), OpenCode, Starlette, Vue, and more. See [docs/CREDITS.md](docs/CREDITS.md) for the full list.

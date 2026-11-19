@@ -1553,12 +1553,9 @@ def test_auth_rejects_a_non_runtime_provider(capsys) -> None:
         cli.main(["auth", "ollama", "--print-only"])
 
 
-def test_auth_claude_uses_bundled_cli(monkeypatch) -> None:
+def test_auth_claude_uses_the_resolved_cli(monkeypatch) -> None:
     calls: list[list[str]] = []
-    monkeypatch.setattr(
-        "ciao.providers.claude.get_bundled_claude_path",
-        lambda: "/opt/ciao/claude",
-    )
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "/opt/ciao/claude")
     monkeypatch.setattr(
         cli.subprocess,
         "run",

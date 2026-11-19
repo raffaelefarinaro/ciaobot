@@ -44,7 +44,7 @@ adapter implementing only `run_streaming` satisfies that contract. A
 missing override for any other row below still degrades to that row's
 base default, an unsupported-feature answer or a silent skip — check each
 row's last column before assuming one fits. No code under `ciao/web`
-names `OpencodeProvider`, `ClaudeProvider` or a provider's private connection
+names `OpencodeProvider`, `ClaudeAcpProvider` or a provider's private connection
 flag (`tests/test_provider_host_seam.py` fails if one appears). What is
 still branched on the provider id, not the class, is in the skip list
 below.
@@ -270,7 +270,10 @@ calls it (opencode caches a private-server read for 300 s).
 Claude Code hides harness surfaces the PWA already owns (plan mode, its
 own scheduler, notifications). The trim catalog is `TRIM_OPTIONS` in
 `ciao/claude_trim.py`: tool denies, bundled-skill overrides and `disable*`
-settings, each with its default. A
+settings, each with its default. The options travel to the Claude
+adapter as `_meta.claudeCode.options` (`disallowedTools`, `settings` as an
+object, and `env` for the claude.ai connectors switch); `claude_session_options`
+in `ciao/providers/acp/agents.py` builds them. A
 new CLI that ships the same tools needs the equivalent, in its own
 permission language. See `docs/AGENT_CLI.md`.
 

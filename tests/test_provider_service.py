@@ -30,9 +30,7 @@ lookups (``provider_registry.require``); factory resolution
 (distinct seams — the constructors of the built-in provider classes are
 patched before any accessor runs, so a direct construction is counted
 without any factory resolution); handle ``stop()``; handle registration
-(``_register_handle``), which ``run_streaming`` receives; SDK client
-construction (``ClaudeSDKClient``, the object ``_ensure_connected``
-builds); server invocation (``httpx.AsyncClient``, the server connection
+(``_register_handle``), which ``run_streaming`` receives; server invocation (``httpx.AsyncClient``, the server connection
 both OpenCode server paths converge on); and subprocess invocations
 (``asyncio.create_subprocess_exec``, the exec boundary ``_spawn_server``
 reaches). Liveness of every counting harness is proven by the
@@ -44,7 +42,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import sys
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,7 +50,6 @@ from typing import Any, cast
 
 import httpx
 import pytest
-from claude_agent_sdk import ClaudeSDKClient
 
 from ciao import provider_registry
 from ciao.config import CiaoConfig
@@ -62,7 +58,6 @@ from ciao.provider_registry import ProviderDescriptor
 from ciao.provider_service import ProviderService
 from ciao.providers.base import ActiveHandle, BaseProvider, ProviderCapabilities
 from ciao.providers.acp.agents import ClaudeAcpProvider
-from ciao.providers.claude import ClaudeProvider
 from ciao.providers.opencode import OpencodeProvider
 
 
@@ -76,7 +71,7 @@ def _config(tmp_path: Path) -> CiaoConfig:
 
 
 # The actual constructor boundaries the registry can resolve today.
-_PROVIDER_CLASSES: tuple[type[BaseProvider], ...] = (ClaudeProvider, ClaudeAcpProvider, OpencodeProvider)
+_PROVIDER_CLASSES: tuple[type[BaseProvider], ...] = (ClaudeAcpProvider, OpencodeProvider)
 
 
 @dataclass
@@ -90,7 +85,6 @@ class _SeamCounts:
     registry_lookups: list[str] = field(default_factory=list)
     factory_resolutions: list[str] = field(default_factory=list)
     constructions: list[str] = field(default_factory=list)
-    sdk_constructions: list[str] = field(default_factory=list)
     server_invocations: list[str] = field(default_factory=list)
     subprocess_invocations: list[str] = field(default_factory=list)
 
@@ -178,18 +172,6 @@ def _count_provider_seams(
 
     for cls in _PROVIDER_CLASSES:
         _patch_constructor(monkeypatch, cls, counts)
-
-    # SDK client construction: the object ClaudeProvider._ensure_connected
-    # builds (claude.py builds it with ``options=`` as a keyword).
-    real_sdk_init = ClaudeSDKClient.__init__
-
-    def counting_sdk_init(
-        instance: ClaudeSDKClient, *args: Any, **kwargs: Any
-    ) -> None:
-        counts.sdk_constructions.append(type(instance).__name__)
-        real_sdk_init(instance, *args, **kwargs)
-
-    monkeypatch.setattr(ClaudeSDKClient, "__init__", counting_sdk_init)
 
     # Server invocation: the httpx.AsyncClient server connection both OpenCode
     # server paths converge on (per-chat ``_ensure_server_locked`` and the
@@ -296,7 +278,6 @@ async def test_minimal_adapter_defaults_do_no_extra_work(
     assert counts.registry_lookups == []
     assert counts.factory_resolutions == []
     assert counts.constructions == []
-    assert counts.sdk_constructions == []
     assert counts.server_invocations == []
     assert counts.subprocess_invocations == []
     assert adapter.stream_calls == 0
@@ -332,7 +313,6 @@ async def test_minimal_adapter_session_observation_defaults_to_none(
     assert counts.registry_lookups == []
     assert counts.factory_resolutions == []
     assert counts.constructions == []
-    assert counts.sdk_constructions == []
     assert counts.server_invocations == []
     assert counts.subprocess_invocations == []
 
@@ -393,7 +373,6 @@ def test_assigning_the_inherited_session_property_raises(
     assert counts.registry_lookups == []
     assert counts.factory_resolutions == []
     assert counts.constructions == []
-    assert counts.sdk_constructions == []
     assert counts.server_invocations == []
     assert counts.subprocess_invocations == []
 
@@ -468,12 +447,12 @@ def test_constructor_counter_fires_on_direct_construction(
     service = ProviderService(_config(tmp_path))
     counts = _count_provider_seams(monkeypatch, service)
 
-    provider = ClaudeProvider(tmp_path)  # direct construct, no registry or factory
+    provider = ClaudeAcpProvider(tmp_path)  # direct construct, no registry or factory
 
-    assert counts.constructions == ["ClaudeProvider"]
+    assert counts.constructions == ["ClaudeAcpProvider"]
     assert counts.factory_resolutions == []  # resolution stayed at zero
     assert counts.registry_lookups == []
-    assert isinstance(provider, ClaudeProvider)
+    assert isinstance(provider, ClaudeAcpProvider)
 
 
 async def test_seam_counters_fire_on_a_stream(
@@ -495,34 +474,6 @@ async def test_seam_counters_fire_on_a_stream(
     assert counts.registrations == [None]  # the adapter registered None itself
     assert service.active_handle() is None
     assert counts.disconnects == []  # no memory changed, so no reconnect
-
-
-async def test_sdk_server_subprocess_counters_fire_on_real_seams(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The SDK, server and subprocess counters observe their real boundaries.
-
-    Each firing is side-effect-free: the SDK client constructor stores options
-    and starts no transport (that happens at ``connect()``), the httpx client
-    opens no socket until a request (and is closed again here), and the
-    subprocess is a trivial Python command (``sys.executable -c pass``).
-    """
-    service = ProviderService(_config(tmp_path))
-    counts = _count_provider_seams(monkeypatch, service)
-
-    sdk_client = ClaudeSDKClient()
-    server_client = httpx.AsyncClient()
-    process = await asyncio.create_subprocess_exec(
-        sys.executable, "-c", "pass", stdout=asyncio.subprocess.DEVNULL
-    )
-    await process.wait()
-    await server_client.aclose()
-
-    assert counts.sdk_constructions == ["ClaudeSDKClient"]
-    assert counts.server_invocations == ["AsyncClient"]
-    assert counts.subprocess_invocations == [sys.executable]
-    assert isinstance(sdk_client, ClaudeSDKClient)
-    assert isinstance(server_client, httpx.AsyncClient)
 
 
 class _ToggleProvider(BaseProvider):
@@ -680,7 +631,6 @@ async def test_service_forwards_the_adapters_session_values_dynamically(
     assert counts.registry_lookups == []
     assert counts.factory_resolutions == []
     assert counts.constructions == []
-    assert counts.sdk_constructions == []
     assert counts.server_invocations == []
     assert counts.subprocess_invocations == []
     assert service.provider is adapter  # unchanged instance and handle
@@ -923,7 +873,6 @@ async def test_service_propagates_a_session_getter_failure_exactly(
     assert counts.registry_lookups == []
     assert counts.factory_resolutions == []
     assert counts.constructions == []
-    assert counts.sdk_constructions == []
     assert counts.server_invocations == []
     assert counts.subprocess_invocations == []
     assert service.provider is adapter  # unchanged final state
@@ -966,7 +915,6 @@ async def test_service_propagates_an_attribute_error_from_a_session_getter(
     assert counts.registry_lookups == []
     assert counts.factory_resolutions == []
     assert counts.constructions == []
-    assert counts.sdk_constructions == []
     assert counts.server_invocations == []
     assert counts.subprocess_invocations == []
     assert service.provider is adapter  # unchanged final state
@@ -1064,20 +1012,6 @@ async def test_service_propagates_cancellation_and_awaits_the_unwind(
         (None, True, (False, False)),  # flag up but no client
     ],
 )
-async def test_service_reports_claude_state_from_client_and_flag(
-    tmp_path: Path, client: object, connected: bool, expected: tuple[bool, bool]
-) -> None:
-    """Claude drives both service flags from its client state; no SDK is called."""
-    provider = ClaudeProvider(tmp_path)
-    provider._client = cast(ClaudeSDKClient, client)
-    provider._connected = connected
-    service = ProviderService(_config(tmp_path))
-    service._provider = provider
-
-    assert service.can_drain is expected[0]
-    assert service.cli_connected is expected[1]
-
-
 def _attach_live(
     provider: OpencodeProvider, session: str, *, dead: bool = False
 ) -> None:
@@ -1140,7 +1074,7 @@ async def test_builtin_session_ids_are_observed_exactly(
     forbidden accessor work; the getters and their unknown representations
     are used exactly as the built-ins define them.
     """
-    provider = ClaudeProvider(tmp_path)
+    provider = ClaudeAcpProvider(tmp_path)
     opencode = OpencodeProvider(tmp_path)
     service = ProviderService(_config(tmp_path))
     counts = _count_provider_seams(monkeypatch, service)
@@ -1148,12 +1082,12 @@ async def test_builtin_session_ids_are_observed_exactly(
     service._active_handle = handle
 
     service._provider = provider
-    assert service.current_session_id is None  # Claude's initial unknown
-    provider._session_id = "sid-1"
+    assert service.current_session_id is None  # no live ACP session yet
+    provider._session = SimpleNamespace(session_id="sid-1")
     assert service.current_session_id == "sid-1"
-    provider._session_id = "sid-2"
+    provider._session = SimpleNamespace(session_id="sid-2")
     assert service.current_session_id == "sid-2"
-    provider._session_id = None  # Claude's existing unknown representation
+    provider._session = None  # the session closed
     assert service.current_session_id is None
 
     service._provider = opencode
@@ -1173,7 +1107,6 @@ async def test_builtin_session_ids_are_observed_exactly(
     assert counts.registry_lookups == []
     assert counts.factory_resolutions == []
     assert counts.constructions == []
-    assert counts.sdk_constructions == []
     assert counts.server_invocations == []
     assert counts.subprocess_invocations == []
     assert handle.stops == 0
@@ -1273,7 +1206,6 @@ async def test_service_without_instance_reports_no_session(
     assert counts.registry_lookups == []
     assert counts.factory_resolutions == []
     assert counts.constructions == []
-    assert counts.sdk_constructions == []
     assert counts.server_invocations == []
     assert counts.subprocess_invocations == []
     assert handle.stops == 0
@@ -1355,7 +1287,6 @@ async def test_default_model_catalog_does_no_provider_work(
     assert counts.registry_lookups == []
     assert counts.factory_resolutions == []
     assert counts.constructions == []
-    assert counts.sdk_constructions == []
     assert counts.server_invocations == []
     assert counts.subprocess_invocations == []
     assert handle.stops == 0
@@ -1439,7 +1370,6 @@ async def test_third_adapter_model_catalog_dispatches_through_base_type(
     assert counts.registry_lookups == []
     assert counts.factory_resolutions == []
     assert counts.constructions == []
-    assert counts.sdk_constructions == []
     assert counts.server_invocations == []
     assert counts.subprocess_invocations == []
 
@@ -1497,68 +1427,6 @@ async def test_model_catalog_override_failures_are_not_wrapped(
     assert counts.registry_lookups == []
     assert counts.factory_resolutions == []
     assert counts.constructions == []
-    assert counts.sdk_constructions == []
-    assert counts.server_invocations == []
-    assert counts.subprocess_invocations == []
-
-
-async def test_claude_inherits_empty_model_catalog_default(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Claude answers the catalog contract through the inherited no-work default.
-
-    Both force values return fresh empty lists at temporary roots. Empty is
-    not evidence that Claude has no models. The operation is inherited, not a
-    Claude override; Claude's declared capabilities are unchanged.
-    """
-    service = ProviderService(_config(tmp_path))
-    counts = _count_provider_seams(monkeypatch, service)
-    root_one = tmp_path / "catalog-claude-one"
-    root_two = tmp_path / "catalog-claude-two"
-    root_one.mkdir()
-    root_two.mkdir()
-    adapter_class: type[BaseProvider] = ClaudeProvider
-
-    first: list[dict[str, Any]] = await adapter_class.model_catalog(root_one)
-    forced: list[dict[str, Any]] = await adapter_class.model_catalog(
-        root_two, force=True
-    )
-
-    assert first == []
-    assert forced == []
-    assert first is not forced  # fresh lists, not a shared or cached result
-    first.append({"model": "sentinel"})
-    assert forced == []
-
-    # Capabilities are unchanged by the shared contract addition.
-    assert ClaudeProvider.capabilities == ProviderCapabilities(
-        resume=True,
-        fork=True,
-        images=True,
-        stop=True,
-        permissions=True,
-        structured_questions=True,
-        thinking_levels=True,
-        usage=True,
-        quota=True,
-        background_subagents=True,
-        session_history=True,
-        schedule_unattended=True,
-    )
-    # The default is inherited, not a Claude override: the descriptor found on
-    # the class through the MRO is BaseProvider's own.
-    base_descriptor: Any = inspect.getattr_static(BaseProvider, "model_catalog")
-    assert inspect.getattr_static(ClaudeProvider, "model_catalog") is base_descriptor
-
-    # No constructor, SDK, HTTP or subprocess work on the inherited path.
-    assert counts.ensure == []
-    assert counts.streams == []
-    assert counts.disconnects == []
-    assert counts.registrations == []
-    assert counts.registry_lookups == []
-    assert counts.factory_resolutions == []
-    assert counts.constructions == []
-    assert counts.sdk_constructions == []
     assert counts.server_invocations == []
     assert counts.subprocess_invocations == []
 

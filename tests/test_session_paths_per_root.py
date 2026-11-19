@@ -23,10 +23,8 @@ import pytest
 
 from ciao import claude_sessions
 from ciao.models import AgentRequest, ChatContext
-from ciao.providers import claude as claude_adapter
 from ciao.providers import opencode as opencode_adapter
 from ciao.providers.base import BaseProvider, ProviderCapabilities
-from ciao.providers.claude import ClaudeProvider
 from ciao.providers.opencode import OpencodeProvider
 from ciao.transcripts import _claude_projects_dir
 from ciao.web.project_chats import ProjectChatManager, ChatInfo
@@ -298,8 +296,6 @@ _FORBIDDEN_START_KEYS = (
     "service_started",
     "service_provider_built",
     "builtin_reader",
-    "sdk_reader",
-    "sdk_delete",
     "server_spawned",
 )
 
@@ -352,20 +348,6 @@ def _install_forbidden_start_counters(
 
     monkeypatch.setattr(OpencodeProvider, "read_thread", counting_read_thread)
 
-    def counting_sdk_info(*args: Any, **kwargs: Any) -> Any:
-        counts["sdk_reader"] += 1
-        raise AssertionError("cleanup must not read Claude SDK session state")
-
-    monkeypatch.setattr(claude_adapter, "get_session_info", counting_sdk_info)
-
-    def counting_sdk_delete(*args: Any, **kwargs: Any) -> Any:
-        counts["sdk_delete"] += 1
-        raise AssertionError(
-            "cleanup must not reach the SDK delete outside the adapter seam"
-        )
-
-    monkeypatch.setattr(claude_adapter, "sdk_delete_session", counting_sdk_delete)
-
     def counting_ephemeral_init(self, *args: Any, **kwargs: Any) -> None:
         counts["server_spawned"] += 1
         raise AssertionError("cleanup must not spawn an opencode server")
@@ -402,125 +384,6 @@ def test_base_delete_session_default_supplies_no_signal(tmp_path: Path) -> None:
     assert counts == {"constructor": 0, "stream": 0}
     # No capability flag was added for the operation.
     assert _MinimalAdapter.capabilities == ProviderCapabilities()
-
-
-def test_claude_delete_session_owns_the_sdk_seam(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Claude's adapter classmethod drives the SDK delete once, at the root.
-
-    The exact session id and ``directory=str(root)`` reach the SDK; a missing
-    session or SDK-rejected id is quiet (the failing spy's own call count
-    proves the adapter got there); an I/O failure logs the established
-    message once; cancellation is never swallowed.
-    """
-    sdk_calls: list[tuple[str, str]] = []
-
-    def recording_sdk_delete(session_id: str, directory: str) -> None:
-        sdk_calls.append((session_id, directory))
-
-    monkeypatch.setattr(claude_adapter, "sdk_delete_session", recording_sdk_delete)
-    root = tmp_path / "agent-root"
-
-    assert asyncio.run(ClaudeProvider.delete_session(root, "sid-1", runtime_root=Path("/runtime"))) is None
-    assert sdk_calls == [("sid-1", str(root))]
-
-    # An empty id returns without SDK access.
-    sdk_calls.clear()
-    assert asyncio.run(ClaudeProvider.delete_session(root, "", runtime_root=Path("/runtime"))) is None
-    assert sdk_calls == []
-
-    # SDK-rejected ids and missing sessions are suppressed quietly: the
-    # adapter still called the SDK exactly once, with no log record left.
-    for sdk_error in (FileNotFoundError("missing session"), ValueError("not a uuid")):
-        suppressed: list[tuple[str, str]] = []
-
-        def failing_sdk_delete(
-            session_id: str,
-            directory: str,
-            _error: Exception = sdk_error,
-            _reached: list = suppressed,
-        ) -> None:
-            _reached.append((session_id, directory))
-            raise _error
-
-        monkeypatch.setattr(claude_adapter, "sdk_delete_session", failing_sdk_delete)
-        with caplog.at_level(logging.INFO, logger="ciao.providers.claude"):
-            assert asyncio.run(ClaudeProvider.delete_session(root, "sid-2", runtime_root=Path("/runtime"))) is None
-        assert suppressed == [("sid-2", str(root))]
-        assert caplog.records == []
-
-
-def test_claude_delete_session_logs_io_failures_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """An SDK I/O error keeps the established log text and still returns None."""
-    def broken_sdk_delete(session_id: str, directory: str) -> None:
-        raise OSError("disk on fire")
-
-    monkeypatch.setattr(claude_adapter, "sdk_delete_session", broken_sdk_delete)
-    root = tmp_path / "agent-root"
-    with caplog.at_level(logging.INFO, logger="ciao.providers.claude"):
-        assert asyncio.run(ClaudeProvider.delete_session(root, "sid-io", runtime_root=Path("/runtime"))) is None
-    failures = [
-        record
-        for record in caplog.records
-        if "delete_session failed for sid-io" in record.getMessage()
-    ]
-    assert len(failures) == 1
-    assert failures[0].exc_info is not None
-
-
-def test_claude_reclaim_never_draws_the_host_cleanup_warning(
-    tmp_path: Path, fake_home: Path, monkeypatch: pytest.MonkeyPatch, caplog
-) -> None:
-    """No SDK outcome turns Claude's reclaim into a confirmation warning.
-
-    Claude's return value always carries no confirmation signal, so the
-    host's ``deleted is False`` warning must stay silent across success,
-    suppressed SDK rejections and logged I/O failures alike.
-    """
-    pcm = _rerooted_manager(tmp_path, "work")
-    chat = _archived_chat(pcm, "work", "sid-claude")
-
-    # Absent session (False), a removed one (True) and an I/O failure. The seam
-    # reports absence as False and
-    # never raises FileNotFoundError/ValueError, so those are not modelled.
-    for outcome in (False, True, OSError("io")):
-        calls: list[str] = []
-
-        def outcome_delete(
-            session_id: str,
-            directory: str | None,
-            _outcome: bool | Exception = outcome,
-            _calls: list = calls,
-        ) -> bool:
-            _calls.append(session_id)
-            if isinstance(_outcome, Exception):
-                raise _outcome
-            return _outcome
-
-        monkeypatch.setattr(claude_sessions, "delete_session_file", outcome_delete)
-        caplog.clear()
-        with caplog.at_level(logging.WARNING):
-            asyncio.run(pcm._reclaim_provider_sessions_async(chat, ["sid-claude"]))
-        # The seam saw the exact id once and the host never warned. The adapter
-        # may keep its own established I/O error log for the OSError arm; that
-        # is not a confirmation signal, so only the host logger is checked.
-        assert calls == ["sid-claude"]
-        assert [record for record in caplog.records if record.name == _RECLAIM_LOGGER] == []
-
-
-def test_claude_delete_session_propagates_cancellation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A cancelled SDK delete is not converted into a quiet None."""
-    def cancelling_sdk_delete(session_id: str, directory: str) -> None:
-        raise asyncio.CancelledError()
-
-    monkeypatch.setattr(claude_adapter, "sdk_delete_session", cancelling_sdk_delete)
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(ClaudeProvider.delete_session(tmp_path, "sid-x", runtime_root=Path("/runtime")))
 
 
 class _RecordingServer:

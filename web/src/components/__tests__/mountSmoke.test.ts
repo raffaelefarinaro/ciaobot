@@ -1003,20 +1003,6 @@ describe('component mount smoke', () => {
     }
   })
 
-  it('SettingsView says bundled Claude updates with Ciaobot and offers no claude update', async () => {
-    const { wrapper, restore } = await mountModelsWith({
-      claude: { state: 'bundled', tested: '2.1.301' },
-    })
-    try {
-      const row = providerRow(wrapper, /claude/i)
-      expect(row.text()).toContain('Bundled with Ciaobot')
-      expect(row.text()).not.toContain('claude update')
-    } finally {
-      wrapper.unmount()
-      restore()
-    }
-  })
-
   it('SettingsView provides manual sign-in without claiming OpenCode verification', async () => {
     const router = makeRouter()
     await router.push('/settings/providers')

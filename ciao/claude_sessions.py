@@ -217,7 +217,9 @@ def _try_read_session_file(project_dir: Path, file_name: str) -> str | None:
                 MAX_TRANSCRIPT_BYTES,
             )
             return None
-        return path.read_text(encoding="utf-8")
+        # Invalid UTF-8 is replaced, not raised: the SDK's Node reader decodes the same
+        # way, and one bad byte must not drop the whole transcript.
+        return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
 

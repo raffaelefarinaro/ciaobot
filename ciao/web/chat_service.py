@@ -448,9 +448,7 @@ def _is_retryable_connection_error(text: str) -> bool:
         "connection timeout",
         "connection timed out",
         # Upstream API dropped the streaming connection mid-response. The CLI
-        # surfaces this as a banner; the Claude provider re-flags it as an
-        # error. Kept in sync with ``_CONNECTION_DROP_MARKERS`` in
-        # ``ciao/providers/claude.py``.
+        # surfaces this as a banner in the agent's own text.
         "connection closed mid-response",
         "response above may be incomplete",
     )

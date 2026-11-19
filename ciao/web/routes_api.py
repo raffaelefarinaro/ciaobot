@@ -91,7 +91,7 @@ from ciao.workspaces import (
 # Kept as an alias: several call sites predate the shared module.
 _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.task_decisions import clean_reason
-from ciao.core_prompt import system_prompt_payload
+from ciao.core_prompt import unified_core
 from ciao.tool_path import resolve_command
 from ciao.provider_service import capabilities_for, supported_providers
 from ciao.subprocess_step import run_step
@@ -1071,15 +1071,6 @@ async def provider_connection_action(request: Request) -> JSONResponse:
     provider = request.path_params["provider"]
     action = request.path_params["action"]
     config = request.app.state.config
-    drop_account_evidence = None
-    if provider == "claude" and action in {"verify", "logout"}:
-        from ciao.providers.catalog_evidence import invalidate_claude_account_evidence
-
-        # Before the awaited sign-out work, so an in-flight connection cannot
-        # repopulate the previous account's models afterwards, and again on the
-        # way out to drop anything recorded while it ran.
-        invalidate_claude_account_evidence()
-        drop_account_evidence = invalidate_claude_account_evidence
     if not provider_registry.is_provider(provider):
         return JSONResponse({"error": "unsupported provider"}, status_code=404)
     if action == "connect":
@@ -1123,51 +1114,41 @@ async def provider_connection_action(request: Request) -> JSONResponse:
             )
         return JSONResponse({"ok": True, "launched": launched, "command": command}, status_code=202)
     if action == "verify":
-        try:
-            if provider == "claude":
-                from ciao.setup_status import clear_claude_discovery_cache
+        if provider == "claude":
+            from ciao.setup_status import clear_claude_discovery_cache
 
-                await asyncio.to_thread(clear_claude_discovery_cache)
-            if provider == "opencode":
-                from ciao.providers.opencode import invalidate_opencode_model_cache
+            await asyncio.to_thread(clear_claude_discovery_cache)
+        if provider == "opencode":
+            from ciao.providers.opencode import invalidate_opencode_model_cache
 
-                invalidate_opencode_model_cache()
-                payload = await asyncio.to_thread(_provider_config_payload_with_inventory, config)
-                return JSONResponse(payload["connections"].get(provider, {}), headers={"Cache-Control": "no-store"})
-            payload = await asyncio.to_thread(_provider_config_payload, config)
-            return JSONResponse(payload["connections"].get(provider, {}))
-        finally:
-            # Cancellation or an error can leave a threaded sign-in probe
-            # running; drop evidence on every exit, not only on success.
-            if drop_account_evidence is not None:
-                drop_account_evidence()
+            invalidate_opencode_model_cache()
+            payload = await asyncio.to_thread(_provider_config_payload_with_inventory, config)
+            return JSONResponse(payload["connections"].get(provider, {}), headers={"Cache-Control": "no-store"})
+        payload = await asyncio.to_thread(_provider_config_payload, config)
+        return JSONResponse(payload["connections"].get(provider, {}))
     if action == "logout":
         try:
-            try:
-                # auth_command is `[binary, "auth", "login"]`, so dropping the last
-                # element yields `[binary, "auth", "logout"]`. `[:1] + ["logout"]`
-                # would run the obsolete top-level `claude logout`, which prints a
-                # "did you mean" hint and exits 0 without signing out.
-                logout_command = _auth_command_for_provider(provider)[:-1] + ["logout"]
-                run = await asyncio.to_thread(
-                    subprocess.run,
-                    logout_command,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    check=False,
-                )
-            except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
-                return JSONResponse({"error": str(exc)}, status_code=400)
-            if run.returncode != 0:
-                return JSONResponse(
-                    {"error": (run.stderr or run.stdout or "logout failed").strip()},
-                    status_code=400,
-                )
-            return JSONResponse({"ok": True})
-        finally:
-            if drop_account_evidence is not None:
-                drop_account_evidence()
+            # auth_command is `[binary, "auth", "login"]`, so dropping the last
+            # element yields `[binary, "auth", "logout"]`. `[:1] + ["logout"]`
+            # would run the obsolete top-level `claude logout`, which prints a
+            # "did you mean" hint and exits 0 without signing out.
+            logout_command = _auth_command_for_provider(provider)[:-1] + ["logout"]
+            run = await asyncio.to_thread(
+                subprocess.run,
+                logout_command,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if run.returncode != 0:
+            return JSONResponse(
+                {"error": (run.stderr or run.stdout or "logout failed").strip()},
+                status_code=400,
+            )
+        return JSONResponse({"ok": True})
     return JSONResponse({"error": "unsupported action"}, status_code=404)
 
 
@@ -3913,9 +3894,8 @@ async def workspace_dir(request: Request) -> Response:
 
 
 async def system_prompt(request: Request) -> Response:
-    """The text Ciaobot appends to every provider's system prompt (read-only)."""
-    payload = system_prompt_payload("") or {}
-    text = str(payload.get("append") or "")
+    """The Ciaobot core every provider receives in its context capsule (read-only)."""
+    text = unified_core()
     return JSONResponse({"text": text, "chars": len(text)})
 
 
