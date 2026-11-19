@@ -96,16 +96,13 @@ Ciaobot reads provider configuration and live chat status without editing
 `opencode.json` or launching a server from Settings. Keep existing MCP entries
 in the provider configuration. See the [OpenCode V2 MCP documentation](https://opencode.ai/v2/docs/mcp-servers/).
 
-Ciaobot sends V2 text/file prompts with queued delivery.
-V2 has no stable per-prompt system field, so compact core/runtime context rides
-in the text behind markers that transcript replay and session handovers strip.
-The provider normalizes V2's flat message records once at the HTTP boundary;
-transcript rendering and child-session reads continue to use a small internal
-part representation. Fork, interrupt, tool approvals, forms (rendered as
+Ciaobot sends prompts over ACP with queued delivery (one prompt at a time per
+session). The unified core context rides in the text of the first prompt of each
+session, after a compaction and after a handover. Fork, interrupt, tool approvals, forms (rendered as
 AskUserQuestion cards), and background subagents are native. When a chat is
-archived, deleted, or reset, Ciaobot disconnects its server and then calls
-`DELETE /api/session/{id}` to reclaim the persisted OpenCode session; cleanup
-is fail-open if the provider is unavailable.
+archived, deleted, or reset, Ciaobot closes its ACP session and asks the agent to
+delete the persisted session (`session/delete`) when the agent advertises it;
+cleanup is fail-open if the agent is unavailable.
 
 ### Auto mode approvals
 
@@ -441,7 +438,7 @@ not a new filesystem sandbox. Existing viewer extension and size guards remain.
 
 ### Injected CLI context variables
 
-The Ciaobot server injects the following environment variables into every spawned agent CLI subprocess (`claude` or `opencode serve`):
+The Ciaobot server injects the following environment variables into every spawned agent CLI subprocess (`claude`, `codex` or `opencode acp`):
 
 - `CIAO_WORKSPACE`: the filesystem workspace root path. This is operator config forwarded for compatibility; it is not the logical chat workspace.
 - `CIAO_ACTIVE_WORKSPACE`: the logical workspace name derived per turn from `chat -> project -> project.workspace`.

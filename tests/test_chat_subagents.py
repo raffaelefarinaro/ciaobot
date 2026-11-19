@@ -8,7 +8,6 @@ import pytest
 
 from ciao.config import CiaoConfig
 from ciao.providers.acp.agents import ClaudeAcpProvider
-from ciao.providers.opencode import OpencodeProvider
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager

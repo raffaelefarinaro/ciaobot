@@ -1047,7 +1047,7 @@ def _provider_config_payload(config) -> dict:
 
 
 def _provider_config_payload_with_inventory(config) -> dict:
-    from ciao.providers.opencode import opencode_credential_inventory
+    from ciao.opencode_cli import opencode_credential_inventory
 
     payload = _provider_config_payload(config)
     row = payload["connections"].get("opencode")

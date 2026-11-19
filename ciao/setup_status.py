@@ -432,7 +432,7 @@ def opencode_status_probe(
     env: Mapping[str, str],
     **_unused: Any,
 ) -> dict[str, Any]:
-    from ciao.providers.opencode import opencode_login_status
+    from ciao.opencode_cli import opencode_login_status
 
     return opencode_login_status()
 

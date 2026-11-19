@@ -35,7 +35,7 @@ _LOOPBACK_PEER = ("127.0.0.1", 50000)
 
 @pytest.fixture(autouse=True)
 def _stub_auth_list(monkeypatch):
-    monkeypatch.setattr("ciao.providers.opencode.bounded_output", lambda *a, **k: (0, b"[]"))
+    monkeypatch.setattr("ciao.opencode_cli.bounded_output", lambda *a, **k: (0, b"[]"))
 
 
 @pytest.fixture(autouse=True)
@@ -1545,7 +1545,7 @@ async def test_provider_verify_action_busts_claude_discovery_cache(
 
     monkeypatch.setattr("ciao.setup_status.clear_claude_discovery_cache", fake_clear)
     monkeypatch.setattr(routes_api, "_provider_config_payload", fake_payload)
-    monkeypatch.setattr("ciao.providers.opencode.opencode_credential_inventory",
+    monkeypatch.setattr("ciao.opencode_cli.opencode_credential_inventory",
                         lambda: {"status": "complete", "providers": []})
 
     config = _config(tmp_path)
@@ -1565,7 +1565,7 @@ async def test_provider_verify_action_busts_claude_discovery_cache(
 
 async def test_opencode_verify_invalidates_models_before_probe(monkeypatch, tmp_path):
     from ciao.web import routes_api
-    import ciao.providers.opencode as mod
+    import ciao.opencode_cli as mod
 
     calls = []
     from ciao.providers.acp.agents import OpencodeAcpProvider
@@ -2079,7 +2079,7 @@ def _tested_record(running: str) -> dict:
 def test_opencode_unsupported_row_keeps_v2_migration_text(monkeypatch) -> None:
     import ciao
     from ciao import provider_versions
-    from ciao.providers import opencode
+    from ciao import opencode_cli as opencode
 
     monkeypatch.setattr(opencode, "resolve_opencode_binary", lambda *a, **k: "/bin/opencode")
     monkeypatch.setattr(
@@ -2099,7 +2099,7 @@ def test_opencode_unsupported_row_keeps_v2_migration_text(monkeypatch) -> None:
 def test_opencode_ok_row_carries_a_below_tested_release_check(monkeypatch) -> None:
     import ciao
     from ciao import provider_versions
-    from ciao.providers import opencode
+    from ciao import opencode_cli as opencode
 
     monkeypatch.setattr(opencode, "resolve_opencode_binary", lambda *a, **k: "/bin/opencode")
     monkeypatch.setattr(

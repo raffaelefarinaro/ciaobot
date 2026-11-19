@@ -479,20 +479,16 @@ _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # `self._providers` is keyed by chat id and, before this, was only ever
 # emptied by a lifecycle event (session reset, handover, archive, delete).
 # Claude keeps one CLI process per chat alive between turns (#1402), so this
-# timeout also bounds how long an idle Claude CLI lives. opencode runs
-# **one `opencode serve` process per chat** — see the module
-# docstring in ciao/providers/opencode.py for why the chat's per-chat
-# capability token, sandbox and server password force that. Without a reaper, a
-# day of touching chats leaves a server process, a port, an SSE stream and a
-# stderr reader alive for every one of them until the app restarts.
+# timeout also bounds how long an idle Claude CLI lives. The reaper also bounds
+# the ACP agent processes (opencode, Codex, Claude): without it, a day of
+# touching chats leaves one agent process per chat alive until the app restarts.
 #
 # A provider is only reclaimed when the chat has been quiet for the timeout
 # AND has no work in flight (`active_chat_ids`, a between-turns drain with
 # outstanding background work, a retry loop or a pending background wake). Reclaiming is cheap to undo: the chat's
 # `session_id` is persisted, so the next turn reconnects and resumes rather
 # than starting a new conversation — the same path a token rotation already
-# takes (ciao/providers/opencode.py::_ensure_server,
-# ciao/providers/acp/provider.py::run_streaming).
+# takes (ciao/providers/acp/provider.py::run_streaming).
 _PROVIDER_IDLE_TIMEOUT_SECONDS = 900.0
 # ACP agents (Claude today) are the exception to the timeout above. Each is one
 # agent process whose next turn resumes the same session, but rebuilding it pays a

@@ -1794,16 +1794,9 @@ exposes `memory_status`/`memory_update` without creating a second memory store.
 
 Edit canonical sources, not the generated `.claude/` or `.agents/` dirs. Do not run `npx skills update` ad-hoc (it re-expands the lockfile and repopulates bloat); regenerate the `gws-*` skills through `ciao/release.py` rather than calling `gws generate-skills` by hand.
 
-OpenCode chats run over `opencode acp` (`ciao/providers/acp/agents.py`), whose start
-gate refuses any version below 2.3.2. The legacy HTTP driver tests still pin the V2
-server contract: `/api/info` must report 2.3.2+ before `/openapi.json` is checked, V2 message/session pagination must
-follow cursors, SSE frames are read from each event's `data` object, and child
-lifecycle comes from `/api/session/active` rather than the previous execution's
-`Session.Info.outcome`. Changes to the OpenCode chat path under `ciao/providers/acp/` replay
-`tests/fixtures/acp/` and run one tiny real turn against the installed `opencode acp`. When changing `ciao/providers/opencode.py`, replay the
-sanitized V2 fixtures and run a tiny real turn against the installed OpenCode
-2.x binary; route renames alone are insufficient because V2 also changed
-permissions, forms, prompts, and projected message shapes. Keep V2 internal
+OpenCode runs as `opencode acp` (`ciao/providers/acp/agents.py`), and its start gate refuses
+any version below 2.3.2. Provider changes replay the ACP fixtures under `tests/fixtures/acp/`
+and run one tiny real turn (`pytest tests/live --live-acp=opencode`). Keep V2 internal
 credential resources covered in both absolute and workspace-relative spellings
 when a custom runtime root is configured. Keep form constraints and explicit
 empty-versus-cancel semantics in the provider/PWA contract. Native form and

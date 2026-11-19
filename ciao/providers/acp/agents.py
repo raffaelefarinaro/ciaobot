@@ -32,7 +32,7 @@ from ciao.providers.acp.normalize import UpdateNormalizer, child_tool_id, loggab
 from ciao.providers.acp.provider import AcpProvider, AgentClient
 from ciao.providers.acp.spec import AgentSpec, ModeChoice, VersionGate
 from ciao.providers.base import ActiveHandle, CleanupTimedOut
-from ciao.providers.opencode import (
+from ciao.opencode_cli import (
     OPENCODE_V2_REQUIRED,
     cached_opencode_version,
     opencode_start_supported,
@@ -210,7 +210,7 @@ OPENCODE = AgentSpec(
     },
     model_config_id="model",
     thought_config_id="effort",
-    # The floor is the one in ciao.providers.opencode (shared with the Settings status row).
+    # The floor is the one in ciao.opencode_cli (shared with the Settings status row).
     version_gate=VersionGate(
         supported=opencode_start_supported,
         refusal=OPENCODE_V2_REQUIRED,

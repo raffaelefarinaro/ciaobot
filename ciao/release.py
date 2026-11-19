@@ -909,7 +909,7 @@ def _probe_opencode() -> ProviderProbe:
     published: bool | None = None
     try:
         from ciao.dependency_updates import get_latest_npm_version
-        from ciao.providers.opencode import resolve_opencode_binary
+        from ciao.opencode_cli import resolve_opencode_binary
 
         binary = resolve_opencode_binary()
         if binary is None:
@@ -1006,7 +1006,7 @@ def _probe_claude() -> ProviderProbe:
 
 def _opencode_untested_reason(probe: ProviderProbe) -> tuple[str, str] | None:
     """``(reason, why)`` when OpenCode cannot be recorded as tested."""
-    from ciao.providers.opencode import server_version_error
+    from ciao.opencode_cli import cli_version_error
 
     version = probe.installed
     if version is None:
@@ -1015,7 +1015,7 @@ def _opencode_untested_reason(probe: ProviderProbe) -> tuple[str, str] | None:
         return "not_installed", "is not installed"
     if "-" in version or not STABLE_VERSION_RE.fullmatch(version):
         return "unpublished", f"{version} is not a stable version"
-    if server_version_error({"version": version}) is not None:
+    if cli_version_error({"version": version}) is not None:
         return "unreadable", f"{version} is outside the supported 2.3.2+ / 2.x contract"
     if probe.published is False:
         return "unpublished", f"{version} is not published on npm"

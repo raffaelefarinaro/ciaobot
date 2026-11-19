@@ -44,7 +44,7 @@ adapter implementing only `run_streaming` satisfies that contract. A
 missing override for any other row below still degrades to that row's
 base default, an unsupported-feature answer or a silent skip — check each
 row's last column before assuming one fits. No code under `ciao/web`
-names `OpencodeProvider`, `ClaudeAcpProvider` or a provider's private connection
+names `OpencodeAcpProvider`, `ClaudeAcpProvider` or a provider's private connection
 flag (`tests/test_provider_host_seam.py` fails if one appears). What is
 still branched on the provider id, not the class, is in the skip list
 below.
@@ -142,8 +142,8 @@ or cross-provider id normalization. Override exceptions and cancellation
 propagate unwrapped to the caller, which keeps its own policy (image
 preflight treats any exception as unknown and therefore capable). Only the
 inherited default is guaranteed no-start: an explicit override can launch a
-short-lived server — OpenCode's catalog call owns an ephemeral
-`opencode serve` process — so status polling, startup, drain eligibility,
+short-lived server — OpenCode's catalog probe runs a short-lived
+`opencode acp` process — so status polling, startup, drain eligibility,
 Stop and live-session getters must not call it. Because the base default is
 empty, an adapter that does not override it is never questioned about image
 input.
@@ -289,11 +289,9 @@ permission language. See `docs/AGENT_CLI.md`.
 - **Dynamic model catalog.** `model_catalog(workspace_root, *, force=False)`
   (classmethod, optional) is the shared operation for the models a provider
   can currently reach; the base default answers `[]`. OpenCode overrides it:
-  its `_fetch_model_catalog` reads the V2 `/api/model` snapshot only — already
-  filtered to enabled models, so it deliberately does not join a separately
-  timed `/api/provider` snapshot — and addresses models as
-  `providerID/modelID`, with its own cache, keyword-only `force` refresh and a
-  short-lived `opencode serve` process while it reads. The `/api/models`
+  it reads the ACP `model_catalog` probe (`AcpProvider.model_catalog`, cached
+  per agent by `invalidate_acp_catalog`), and the models it reports are the
+  ones `opencode acp` advertises through its model config option. The `/api/models`
   response assembly calls it through `provider_registry.require("opencode")`,
   A fixed catalog can live on the descriptor's `default_model` instead. Image
   support is not read from the catalog: an ACP adapter states it at its handshake
@@ -320,7 +318,7 @@ adding something else.
 ## Tests
 
 Replay captured native events into `StreamEvent`s with no network. That
-is `tests/test_opencode_provider.py` and the Claude provider tests.
+is `tests/test_acp_agents.py`, `tests/fixtures/acp/` and the Claude provider tests.
 Include a fixture that carries no credentials.
 
 Then one real turn against the installed CLI, the same bar `AGENTS.md`

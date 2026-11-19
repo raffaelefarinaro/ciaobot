@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from ciao.models import AgentRequest, ImageAttachment
 from ciao.providers.base import build_prompt
@@ -152,23 +151,3 @@ def test_strip_injected_context_removes_image_manifest(tmp_path: Path) -> None:
     assert _strip_injected_context(with_prefix) == "First line.\nSecond line."
 
 
-@pytest.mark.parametrize("mode", ["normal", "plan"])
-def test_opencode_manual_and_plan_modes_add_no_allow_rules(mode: str) -> None:
-    """The same carve-out on the other provider."""
-    from ciao.providers.opencode import mode_settings
-
-    _agent, rules = mode_settings(mode)
-    resources = " ".join(str(rule.get("resource") or "") for rule in rules)
-    assert "ciao schedule create" not in resources
-    assert "ciao memory update" not in resources
-
-
-def test_opencode_auto_mode_keeps_every_ciao_command_gated() -> None:
-    """Auto mode pre-approves no `ciao …` argv prefix (a shell-suffix bypass
-    risk); every shell command, including `ciao …`, keeps a card."""
-    from ciao.providers.opencode import mode_settings
-
-    _agent, rules = mode_settings("auto")
-    shell = [r for r in rules if r.get("action") == "shell"]
-    assert not any(str(r.get("resource") or "").startswith("ciao ") for r in shell)
-    assert shell[0] == {"action": "shell", "resource": "*", "effect": "ask"}

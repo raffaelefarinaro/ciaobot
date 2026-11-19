@@ -18,15 +18,12 @@ import threading
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
 
 from ciao import claude_sessions
 from ciao.models import AgentRequest, ChatContext
-from ciao.providers import opencode as opencode_adapter
 from ciao.providers.base import BaseProvider, ProviderCapabilities
 from ciao.providers.acp.agents import OpencodeAcpProvider
-from ciao.providers.opencode import OpencodeProvider
 from ciao.transcripts import _claude_projects_dir
 from ciao.web.project_chats import ProjectChatManager, ChatInfo
 
@@ -349,13 +346,6 @@ def _install_forbidden_start_counters(
 
     monkeypatch.setattr(OpencodeAcpProvider, "read_thread", counting_read_thread)
 
-    def counting_ephemeral_init(self, *args: Any, **kwargs: Any) -> None:
-        counts["server_spawned"] += 1
-        raise AssertionError("cleanup must not spawn an opencode server")
-
-    monkeypatch.setattr(
-        opencode_adapter._EphemeralServer, "__init__", counting_ephemeral_init
-    )
 
 
 def test_base_delete_session_default_supplies_no_signal(tmp_path: Path) -> None:
@@ -405,104 +395,6 @@ class _RecordingServer:
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         self.state["exit_error"] = exc
-
-
-def _install_transport(
-    monkeypatch: pytest.MonkeyPatch,
-    client: Any,
-) -> dict[str, Any]:
-    _RecordingServer.contexts = []
-    _RecordingServer.client = client
-    monkeypatch.setattr(opencode_adapter, "_EphemeralServer", _RecordingServer)
-    return {"contexts": _RecordingServer.contexts}
-
-
-def test_opencode_delete_session_transport_contract(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The transport body is preserved: entry, DELETE path, status mapping.
-
-    ``_EphemeralServer`` is entered with the chat's own root before any id
-    check and exits even on refusal; status < 400 confirms, >= 400 does not,
-    HTTP errors and an absent client are quiet failures, and no DELETE runs
-    for an empty id.
-    """
-    root = Path("/agent-root")
-    for status, expected in ((200, True), (204, True), (400, False), (404, False), (500, False)):
-        calls: list[str] = []
-
-        class _Client:
-            async def delete(self, path: str) -> Any:
-                calls.append(path)
-                return httpx.Response(status)
-
-        transport = _install_transport(monkeypatch, _Client())
-        assert asyncio.run(OpencodeProvider.delete_session(root, "ses-x", runtime_root=Path("/runtime"))) is expected
-        assert calls == ["/api/session/ses-x"]
-        # The server was entered once and exited cleanly on every status,
-        # confirmed or refused.
-        assert len(transport["contexts"]) == 1
-        assert transport["contexts"][0]["entered"] is True
-        assert transport["contexts"][0]["exit_error"] is None
-    assert _RecordingServer.last_root == str(root)
-
-
-def test_opencode_delete_session_transport_failures(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """HTTP errors, an absent client and an empty id are quiet False values."""
-    class _HttpFailClient:
-        async def delete(self, path: str) -> Any:
-            raise httpx.ConnectError("server vanished")
-
-    transport = _install_transport(monkeypatch, _HttpFailClient())
-    assert asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x", runtime_root=Path("/runtime"))) is False
-    assert len(transport["contexts"]) == 1
-    # The transport method swallowed the HTTP error inside its own body, so
-    # the context manager exited cleanly despite the failed DELETE.
-    assert transport["contexts"][0]["exit_error"] is None
-
-    transport = _install_transport(monkeypatch, None)
-    assert asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x", runtime_root=Path("/runtime"))) is False
-    # The absent client yields no context observation beyond its own entry.
-    assert len(transport["contexts"]) == 1
-    assert transport["contexts"][0]["client"] is None
-    assert transport["contexts"][0]["exit_error"] is None
-
-    class _AbsentDeleteClient:
-        async def delete(self, path: str) -> Any:  # pragma: no cover - must not run
-            raise AssertionError("empty id must not DELETE")
-
-    transport = _install_transport(monkeypatch, _AbsentDeleteClient())
-    assert asyncio.run(OpencodeProvider.delete_session(Path("/r"), "", runtime_root=Path("/runtime"))) is False
-    # Entry happens before the empty-id check exactly as today, and the
-    # suppressed-body shortcut still exits the context cleanly.
-    assert len(transport["contexts"]) == 1
-    assert transport["contexts"][0]["exit_error"] is None
-
-
-def test_opencode_delete_session_propagates_non_http_failures(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Non-HTTP and cancellation failures are not swallowed as False."""
-    class _RuntimeFailClient:
-        async def delete(self, path: str) -> Any:
-            raise RuntimeError("unexpected transport shape")
-
-    transport = _install_transport(monkeypatch, _RuntimeFailClient())
-    with pytest.raises(RuntimeError) as runtime_exc:
-        asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x", runtime_root=Path("/runtime")))
-    # The exception the context manager saw on exit is the one that escaped.
-    assert transport["contexts"][0]["exit_error"] is runtime_exc.value
-
-    class _CancellingClient:
-        async def delete(self, path: str) -> Any:
-            raise asyncio.CancelledError()
-
-    transport = _install_transport(monkeypatch, _CancellingClient())
-    with pytest.raises(asyncio.CancelledError) as cancel_exc:
-        asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x", runtime_root=Path("/runtime")))
-    assert transport["contexts"][0]["exit_error"] is cancel_exc.value
 
 
 def _acme_chat(pcm: ProjectChatManager, session_id: str, lineage: list[str]) -> ChatInfo:

@@ -21,7 +21,7 @@ from ciao.providers.acp import provider as provider_module
 from ciao.providers.acp.provider import AcpProvider
 from ciao.providers.acp.session import AcpSession
 from ciao.providers.acp.spec import AgentSpec
-from ciao.providers.opencode import OpencodeProvider
+from ciao.providers.acp.agents import OpencodeAcpProvider
 from ciao.web.routes_api import list_models
 from tests.acp_helpers import read_calls, write_scenario
 
@@ -194,7 +194,7 @@ def _models_request(config: CiaoConfig):
 
 def test_list_models_includes_acp_provider_catalog(monkeypatch, tmp_path: Path) -> None:
     _install(monkeypatch, tmp_path, config_options=_OPTIONS)
-    monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[]))
+    monkeypatch.setattr(OpencodeAcpProvider, "model_catalog", AsyncMock(return_value=[]))
     config = _route_config(tmp_path)
 
     body = json.loads(asyncio.run(list_models(_models_request(config))).body)
@@ -219,7 +219,7 @@ def test_list_models_takes_the_opencode_catalog_from_the_acp_probe_only(
 
     http_catalog = AsyncMock(side_effect=AssertionError("the HTTP opencode catalog must not run"))
     acp_catalog = AsyncMock(return_value=[{"model": "oc/a", "label": "OC A", "variants": []}])
-    monkeypatch.setattr(OpencodeProvider, "model_catalog", http_catalog)
+    monkeypatch.setattr(OpencodeAcpProvider, "model_catalog", http_catalog)
     monkeypatch.setattr(OpencodeAcpProvider, "model_catalog", acp_catalog)
     config = _route_config(tmp_path)
 
@@ -235,7 +235,7 @@ def test_list_models_keeps_an_acp_provider_empty_when_its_probe_fails(
     monkeypatch, tmp_path: Path
 ) -> None:
     _install(monkeypatch, tmp_path, config_options=_OPTIONS, new_error="boom")
-    monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[]))
+    monkeypatch.setattr(OpencodeAcpProvider, "model_catalog", AsyncMock(return_value=[]))
     config = _route_config(tmp_path)
 
     body = json.loads(asyncio.run(list_models(_models_request(config))).body)
