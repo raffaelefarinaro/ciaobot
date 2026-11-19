@@ -27,7 +27,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from ciao.jsonio import loads_untrusted
 from ciao.web.auth import authorize_websocket
-from ciao.web.chat_broker import QUEUE_DELIVERIES, STREAM_KEEPALIVE_SECONDS, ChatStream
+from ciao.web.chat_broker import STREAM_KEEPALIVE_SECONDS, ChatStream
 from ciao.web.connection_tracker import ConnectionTracker
 from ciao.models import ImageAttachment
 from ciao.web.project_chats import ChatInfo, RestartDrainingError
@@ -94,7 +94,7 @@ async def _forward_stream(websocket: WebSocket, stream: ChatStream) -> bool:
 # events makes the poll gap lossless.
 _ATTACH_POLL_SECONDS = 0.5
 
-# Bounds on a `queue_set_delivery` frame: a queue is a handful of chips, and
+# Bounds on a `queue_send_now` frame: a queue is a handful of chips, and
 # entry ids are client-chosen short strings.
 _MAX_QUEUE_FRAME_IDS = 100
 _MAX_QUEUE_ENTRY_ID_LEN = 128
@@ -390,12 +390,11 @@ async def ws_chat(websocket: WebSocket) -> None:
                 )
                 continue
 
-            if msg_type == "queue_set_delivery":
+            if msg_type == "queue_send_now":
                 # Same trust rules as the other queue frames: the socket is
                 # bound to this chat, so ids only ever match its own queue.
-                # Shape and size are checked here; the manager checks values.
+                # Shape and size are checked here.
                 raw_ids = msg.get("entry_ids")
-                delivery_value = msg.get("delivery")
                 if (
                     isinstance(raw_ids, list)
                     and 0 < len(raw_ids) <= _MAX_QUEUE_FRAME_IDS
@@ -403,10 +402,9 @@ async def ws_chat(websocket: WebSocket) -> None:
                         isinstance(x, str) and 0 < len(x) <= _MAX_QUEUE_ENTRY_ID_LEN
                         for x in raw_ids
                     )
-                    and delivery_value in QUEUE_DELIVERIES
                 ):
                     try:
-                        await pcm.set_queue_delivery(chat_id, raw_ids, delivery_value)
+                        await pcm.send_queued_now(chat_id, raw_ids)
                     except RestartDrainingError as exc:
                         # "Send now" can start a turn; same answer as a message.
                         try:
@@ -417,7 +415,7 @@ async def ws_chat(websocket: WebSocket) -> None:
                         except (WebSocketDisconnect, RuntimeError):
                             break
                     except Exception as exc:
-                        logger.exception("queue_set_delivery failed for %s", chat_id)
+                        logger.exception("queue_send_now failed for %s", chat_id)
                         try:
                             await websocket.send_json({"type": "error", "message": str(exc)})
                         except (WebSocketDisconnect, RuntimeError):
@@ -511,10 +509,8 @@ async def ws_chat(websocket: WebSocket) -> None:
                     continue
 
                 # Concurrent-send handling. A message sent while a stream is in
-                # flight is buffered. It flushes as the next turn, or, when the
-                # client marks it `delivery: "steer"`, is handed to the running
-                # turn now (an older PWA sends no delivery and gets the queue).
-                delivery = "steer" if msg.get("delivery") == "steer" else "queue"
+                # flight is buffered and flushes as the next turn. A `delivery`
+                # key is ignored.
                 # A client may tag a deliberate retry of its own turn, so the
                 # PWA draws a notice instead of a user bubble. The tag is
                 # presentation metadata: only the exact "retry" value is
@@ -527,13 +523,10 @@ async def ws_chat(websocket: WebSocket) -> None:
                     handled = pcm.queue_message(
                         chat_id, text, images=images or None,
                         entry_id=str(msg.get("entry_id")) if msg.get("entry_id") else None,
-                        delivery=delivery,
                         send_id=send_id,
                         **origin_kwargs,
                     )
                     if handled:
-                        if delivery == "steer":
-                            await pcm.steer_queue(chat_id)
                         continue
                     # Else: the stream raced-finish between check and queue;
                     # fall through to start a new stream below.
@@ -666,10 +659,6 @@ async def ws_events(websocket: WebSocket) -> None:
                 websocket.app.state.app_settings.settings.keyboard_send_mode or "modifier"
                 if getattr(websocket.app.state, "app_settings", None) is not None else "modifier"
             ),
-            "mid_turn_delivery": (
-                websocket.app.state.app_settings.settings.mid_turn_delivery or "queue"
-                if getattr(websocket.app.state, "app_settings", None) is not None else "queue"
-            ),
             "appearance": (
                 websocket.app.state.app_settings.appearance_payload()
                 if getattr(websocket.app.state, "app_settings", None) is not None else None
@@ -679,7 +668,6 @@ async def ws_events(websocket: WebSocket) -> None:
                     json.dumps([
                         websocket.app.state.app_settings.settings.keyboard_shortcuts or {},
                         websocket.app.state.app_settings.settings.keyboard_send_mode or "modifier",
-                        websocket.app.state.app_settings.settings.mid_turn_delivery or "queue",
                     ], sort_keys=True, separators=(",", ":")).encode("utf-8")
                 ).hexdigest()
                 if getattr(websocket.app.state, "app_settings", None) is not None else ""

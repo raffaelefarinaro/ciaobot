@@ -10775,7 +10775,7 @@ describe('queue entries and settings events', () => {
     expect(Object.keys(store.queuedMessages[chatId][0]).sort()).toEqual(['id', 'images', 'text'])
   })
 
-  it('sendQueuedNow sends one frame only when idle', async () => {
+  it('sendQueuedNow sends queue_send_now while a turn runs and while idle', async () => {
     const { store, socket } = await setup()
     emit(socket, { type: 'queue_state', queue: [
       { id: 'a', text: 'one', waiting: true },
@@ -10784,11 +10784,14 @@ describe('queue entries and settings events', () => {
     ] })
     socket.send.mockClear()
     store.sendQueuedNow(chatId, ['b', 'a'])
-    expect(frames(socket, 'queue_set_delivery')).toHaveLength(0)
+    expect(frames(socket, 'queue_send_now')).toEqual([
+      { type: 'queue_send_now', entry_ids: ['a', 'b'] },
+    ])
+    socket.send.mockClear()
     store.streaming[chatId] = false
     store.sendQueuedNow(chatId, ['c', 'a'])
-    expect(frames(socket, 'queue_set_delivery')).toEqual([
-      { type: 'queue_set_delivery', entry_ids: ['a', 'c'], delivery: 'steer' },
+    expect(frames(socket, 'queue_send_now')).toEqual([
+      { type: 'queue_send_now', entry_ids: ['a', 'c'] },
     ])
     // Nothing is changed optimistically: the echo removes the entries.
     expect(store.queuedMessages[chatId].map(q => q.id)).toEqual(['a', 'b', 'c'])
