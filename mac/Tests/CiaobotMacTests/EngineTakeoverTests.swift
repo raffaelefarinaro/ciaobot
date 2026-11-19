@@ -1344,7 +1344,7 @@ final class EngineTakeoverTests: XCTestCase {
 
     /// A descriptor the app holds without close-on-exec is not handed to the command.
     /// The spawn sets POSIX_SPAWN_CLOEXEC_DEFAULT on every macOS the app supports,
-    /// the same as NativeInstaller, so this holds unconditionally.
+    /// the same as every other child the app spawns, so this holds unconditionally.
     func testAnInheritableDescriptorOfTheAppIsNotHandedToTheCommand() async throws {
         let leaked = open("/dev/null", O_RDONLY)
         XCTAssertGreaterThan(leaked, 2)

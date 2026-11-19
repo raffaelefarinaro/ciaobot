@@ -390,66 +390,21 @@ final class ConnectionFlowTests: XCTestCase {
         subscription.cancel()
     }
 
-    // MARK: Port recovery
+    // MARK: External connection screen
 
-    func testOnlyAPortFailureOffersPortRecovery() {
-        XCTAssertTrue(NativeInstallPortRecovery.isRecoverable(.installer(.activationRefused)))
-        XCTAssertTrue(NativeInstallPortRecovery.isRecoverable(.installer(.serviceNotReady)))
-
-        let downloadFailures: [NativeInstallFailure] = [
-            .offline, .timedOut, .httpStatus(500),
-            .oversized(bytes: 2_000_000, limit: 1_048_576),
-            .insecureConnection, .other,
-        ].map { NativeInstallFailure.downloadFailed($0) }
-        let others: [NativeInstallFailure] =
-            NativeInstallFailureCode.allCases
-                .filter { $0 != .activationRefused && $0 != .serviceNotReady }
-                .map { .installer($0) }
-            + downloadFailures
-            + [.checksumMismatch, .launchFailed, .cancelledBeforeLaunch, .releaseUnverified, .repairUnavailable]
-            + [.protocolViolation(.missingTerminalEvent)]
-        for failure in others {
-            XCTAssertFalse(NativeInstallPortRecovery.isRecoverable(failure), "\(failure) must not offer port recovery")
-        }
-    }
-
-    func testPortTextMustBeAPlainPort() {
-        XCTAssertEqual(NativeInstallPortRecovery.port(" 8555 "), 8555)
-        XCTAssertEqual(NativeInstallPortRecovery.port("1"), 1)
-        XCTAssertEqual(NativeInstallPortRecovery.port("65535"), 65535)
-
-        for text in ["", "0", "65536", "abc", "84 43", "-1"] {
-            XCTAssertNil(NativeInstallPortRecovery.port(text), text)
-        }
-    }
-
-    func testAFailedInstallIsClearedOnlyWhenDiscoveryFindsARunningEngine() {
-        let origin = Origin("http://127.0.0.1:8443")!
-        let running = LocalServerDiscovery.Status.running(version: "1.9.0", ready: true, onThisMac: true)
-        let failures: [NativeInstallFailure] = [
-            .installer(.activationRefused), .installer(.serviceNotReady),
-            .downloadFailed(.other), .cancelledBeforeLaunch,
-        ]
-        for failure in failures {
-            XCTAssertTrue(NativeInstallFailureReset.shouldReset(install: .failed(failure), discovery: running),
-                          "\(failure) must clear once the engine is running")
-        }
-
-        let notRunning: [LocalServerDiscovery.Status] = [
-            .idle, .checking, .installedNotRunning(version: nil), .starting,
-            .startFailed(version: nil), .notDetected,
-        ]
-        for status in notRunning {
-            XCTAssertFalse(NativeInstallFailureReset.shouldReset(install: .failed(.installer(.activationRefused)), discovery: status),
-                           "\(status) must not clear a failed install")
-        }
-
-        let notFailed: [NativeInstallState] = [
-            .idle, .succeeded(origin), .downloading, .verifying, .running(nil), .cancelling,
-        ]
-        for state in notFailed {
-            XCTAssertFalse(NativeInstallFailureReset.shouldReset(install: state, discovery: running),
-                           "\(state) is not a failed install")
+    /// The connection screen is the external mode's only surface, and it offers
+    /// no install, repair, update or same-Mac discovery control. The view is
+    /// AppKit/SwiftUI, so this reads its source the way BundledEngineTests does.
+    func testExternalModeOffersNoInstall() throws {
+        let app = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/CiaobotMac/App.swift")
+        let text = try String(contentsOf: app, encoding: .utf8)
+        for banned in ["Install Ciaobot", "Repair Ciaobot", "Find Ciaobot on This Mac", "Start Ciaobot",
+                       "NativeInstall", "NativeRepair", "LocalServerDiscovery", "EngineUpdat", "installer"] {
+            XCTAssertFalse(text.contains(banned), "The connection screen mentions \(banned)")
         }
     }
 }

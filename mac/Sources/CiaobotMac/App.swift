@@ -20,8 +20,6 @@ struct CiaobotMacApp: App {
                 session: appDelegate.session,
                 lastServer: appDelegate.lastServer,
                 hostStore: appDelegate.hostStore,
-                installer: appDelegate.installer,
-                engineUpdater: appDelegate.engineUpdater,
                 appSettings: appDelegate.appSettings,
                 supervisor: appDelegate.supervisor,
                 takeover: appDelegate.takeover,
@@ -440,10 +438,6 @@ struct ConnectionView: View {
     @State private var forgetMessage: String?
     @State private var didAutoConnect = false
     @State private var viewTracker = SessionViewTracker()
-    @State private var wizardLoadError: String?
-    @State private var portText = ""
-    @State private var portError: String?
-    @State private var pendingPortRestart = false
     /// The engine mode this connection session runs in. Initialized from the
     /// launch's resolved mode; **Connect to Another Server…** switches it to
     /// external mid-session, behind the confirmation (S6).
@@ -457,9 +451,6 @@ struct ConnectionView: View {
     /// connected; the status screen replaces the dead web view.
     @State private var engineDown = false
     @Environment(\.colorScheme) private var colorScheme
-    @StateObject private var discovery: LocalServerDiscovery
-    @StateObject private var installer: NativeInstaller
-    @StateObject private var engineUpdater: EngineUpdater
     private let probe: ProbeChecking
     private let signIn: SessionSignIn
     private let session: AppSessionStatus?
@@ -480,7 +471,6 @@ struct ConnectionView: View {
     /// Internal so a test can prove local mode has no saved-origin auto
     /// connect without rendering the view.
     let autoConnectTarget: Origin?
-    private let autoDiscovery: Bool
     private let lastServer: LastServerStoring
     private let hostStore: HostListStoring
     /// Presents the mode-switch confirmation (S6). The real one is the AppKit
@@ -496,28 +486,8 @@ struct ConnectionView: View {
     private let isTestLaunch: Bool
     private var checking: Bool { tasks.task == .checking }
     private var forgetting: Bool { tasks.task == .forgetting }
-    /// Connection controls are disabled while a connection task, an install, or an engine update runs.
-    private var busy: Bool { tasks.isBusy || installer.state.isActive || engineUpdater.state.isActive }
-    private var installFailure: NativeInstallFailure? {
-        if case .failed(let failure) = installer.state { return failure }
-        return nil
-    }
-    private var engineUpdateProgress: String { EngineUpdateCopy.progress(for: engineUpdater.state) ?? "" }
-    private var engineUpdateFailed: Bool {
-        if case .failed = engineUpdater.state { return true }
-        return false
-    }
-    private var repairOffered: Bool {
-        NativeRepairOffer.isOffered(discovery: discovery.status, installState: installer.state,
-                                    updateFailed: engineUpdateFailed,
-                                    hasInstallation: discovery.installation != nil)
-    }
-
-    /// Whether this connection session may start the same-Mac discovery by
-    /// itself. Local mode never probes: the app's own engine is the only
-    /// local server there, and its origin comes from the supervisor.
-    /// `startAutomaticDiscovery` is guarded by this same value.
-    var automaticallyStartsDiscovery: Bool { engineMode == .external && autoDiscovery }
+    /// Connection controls are disabled while a connection task runs.
+    private var busy: Bool { tasks.isBusy }
 
     /// The value the address field starts with. Exposed so a test can prove a
     /// saved origin is prefilled without rendering the view.
@@ -526,13 +496,9 @@ struct ConnectionView: View {
     init(
         probe: ProbeChecking = Probe(),
         signIn: SessionSignIn? = nil,
-        discovery: LocalServerDiscovery? = nil,
-        autoDiscovery: Bool = LocalServerDiscoveryPolicy.automaticInThisBuild,
         session: AppSessionStatus? = nil,
         lastServer: LastServerStoring = UserDefaultsLastServerStore(),
         hostStore: HostListStoring = UserDefaultsHostListStore(lastServer: UserDefaultsLastServerStore()),
-        installer: NativeInstaller? = nil,
-        engineUpdater: EngineUpdater? = nil,
         appSettings: AppSettingsBridge? = nil,
         supervisor: EngineSupervisor? = nil,
         takeover: EngineTakeover? = nil,
@@ -546,7 +512,6 @@ struct ConnectionView: View {
         self.hostIsArm64 = hostIsArm64
         self.probe = probe
         self.signIn = signIn ?? .live
-        self.autoDiscovery = autoDiscovery
         self.session = session
         self.appSettings = appSettings
         self.lastServer = lastServer
@@ -556,9 +521,6 @@ struct ConnectionView: View {
                 title: dialog.title, body: dialog.body, confirm: dialog.confirm, cancel: dialog.cancel
             )
         }
-        _discovery = StateObject(wrappedValue: discovery ?? LocalServerDiscovery())
-        _installer = StateObject(wrappedValue: installer ?? NativeInstaller())
-        _engineUpdater = StateObject(wrappedValue: engineUpdater ?? EngineUpdater())
         #if DEBUG
         let testOrigin = TestLaunch.origin()
         let testLaunchRequested = TestLaunch.autoConnectRequested()
@@ -676,8 +638,6 @@ struct ConnectionView: View {
                         appSettings: appSettings
                     )
                 }
-            } else if let wizard = installer.state.wizardOrigin {
-                wizardView(wizard)
             } else {
                 VStack(alignment: .leading, spacing: 16) {
                     if let takeoverNotice {
@@ -700,127 +660,15 @@ struct ConnectionView: View {
                         // stays, and the screen keeps working.
                         Text("Ciaobot").font(.title.bold())
                     }
-                    Text("Enter your server’s address, or connect to the Ciaobot found on this Mac.")
+                    Text("Enter your server’s address.")
                         .foregroundStyle(.secondary)
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        if discovery.isChecking {
-                            ProgressView().controlSize(.small)
-                                .accessibilityHidden(true)
-                        }
-                        Text(discovery.statusText)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .accessibilityLabel(LocalServerDiscoveryCopy.accessibilityLabel)
-                            .accessibilityValue(discovery.statusText)
-                        Spacer(minLength: 8)
-                        if discovery.canStart {
-                            Button("Start Ciaobot") { discovery.start() }
-                                .disabled(busy)
-                                .accessibilityHint("Starts the Ciaobot service installed on this Mac.")
-                        }
-                        if repairOffered {
-                            Button(NativeInstallFlowCopy.repairButton) {
-                                wizardLoadError = nil
-                                installer.start(mode: .repair)
-                            }
-                            // A previous installer child may still be exiting.
-                            .disabled(busy || !installer.canStart)
-                            .accessibilityHint(NativeInstallFlowCopy.repairHint)
-                        }
-                        if let local = discovery.connectableOrigin {
-                            Button("Connect") {
-                                address = local.url.absoluteString
-                                connect(to: local)
-                            }
-                            .disabled(busy)
-                            .accessibilityHint("Connects to the Ciaobot found on this Mac.")
-                        }
-                        if offersThisMac {
+                    if offersThisMac {
+                        HStack(spacing: 8) {
+                            Spacer(minLength: 8)
                             Button(Self.useThisMacTitle) { useThisMac() }
                                 .disabled(busy)
                                 .accessibilityHint("Runs the Ciaobot engine bundled with this app on this Mac.")
                         }
-                        Button(discovery.status == .idle ? "Find Ciaobot on This Mac" : "Check Again") {
-                            engineUpdater.reset()
-                            discovery.refresh()
-                        }
-                        .disabled(discovery.isChecking || busy)
-                        .accessibilityHint(LocalServerDiscoveryCopy.hint)
-                    }
-                    if engineUpdater.state.isActive {
-                        HStack(spacing: 8) {
-                            ProgressView().controlSize(.small).accessibilityHidden(true)
-                            Text(engineUpdateProgress).font(.caption)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .accessibilityLabel(EngineUpdateCopy.accessibilityLabel)
-                                .accessibilityValue(engineUpdateProgress)
-                        }
-                    } else if let target = discovery.updateTarget {
-                        HStack(spacing: 8) {
-                            Spacer(minLength: 8)
-                            Button(engineUpdateFailed ? EngineUpdateCopy.retryButton : EngineUpdateCopy.updateButton) {
-                                engineUpdater.start(target)
-                            }
-                            .disabled(busy)
-                            .accessibilityHint(EngineUpdateCopy.hint)
-                        }
-                    }
-                    if let outcome = EngineUpdateCopy.outcome(for: engineUpdater.state) {
-                        Text(outcome).font(.caption)
-                            .foregroundStyle(engineUpdateFailed ? Color.red : Color.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    if installer.state.isActive {
-                        HStack(spacing: 8) {
-                            ProgressView().controlSize(.small).accessibilityHidden(true)
-                            Text(NativeInstallCopy.progress(for: installer.state, mode: installer.mode) ?? "").font(.caption)
-                                .accessibilityLabel("Installation status")
-                            Spacer(minLength: 8)
-                            Button(installer.mode == .repair ? NativeInstallFlowCopy.cancelRepairButton : NativeInstallFlowCopy.cancelButton) { installer.cancel() }
-                                .disabled(installer.state == .cancelling)
-                                .accessibilityHint(installer.mode == .repair
-                                    ? NativeInstallFlowCopy.cancelRepairHint
-                                    : "Stops the installer. A Ciaobot service that already started keeps running.")
-                        }
-                    } else if NativeInstallOffer.isOffered(discovery: discovery.status, install: installer.state, mode: installer.mode) {
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(NativeInstallFlowCopy.offer).font(.caption).foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                            Spacer(minLength: 8)
-                            // After a repair that found nothing installed, this is the first install attempt, not a retry.
-                            Button(installFailure == nil || installer.mode == .repair ? NativeInstallFlowCopy.installButton : NativeInstallFlowCopy.retryButton) {
-                                wizardLoadError = nil
-                                installer.start()
-                            }
-                            // A previous installer child may still be exiting.
-                            .disabled(busy || !installer.canStart)
-                            .accessibilityHint("Downloads the pinned Ciaobot installer, verifies it, and installs Ciaobot on this Mac.")
-                        }
-                    }
-                    if let installFailure {
-                        Text(NativeInstallCopy.message(for: installFailure, mode: installer.mode))
-                            .foregroundStyle(.red)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    if let installFailure, NativeInstallPortRecovery.isRecoverable(installFailure) {
-                        HStack(spacing: 8) {
-                            TextField("Port", text: $portText)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 80)
-                                .disabled(busy || discovery.isChecking)
-                            Button(NativeInstallFlowCopy.portButton) { applyPort() }
-                                .disabled(NativeInstallPortRecovery.port(portText) == nil || busy || discovery.isChecking)
-                                .accessibilityHint(NativeInstallFlowCopy.portHint)
-                        }
-                        if let portError {
-                            Text(portError).font(.caption)
-                                .foregroundStyle(.red)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    if let wizardLoadError {
-                        Text(wizardLoadError).font(.caption).foregroundStyle(.secondary)
                     }
                     TextField("Server address", text: $address).textFieldStyle(.roundedBorder)
                         .onSubmit(connect).disabled(busy)
@@ -847,7 +695,6 @@ struct ConnectionView: View {
                     Text("The connection check confirms the server’s response format, not its identity. Sign in only if you trust the address.")
                         .font(.caption).foregroundStyle(.secondary)
                 }.padding(32).frame(maxWidth: 520)
-                    .onAppear { startAutomaticDiscovery() }
             }
         }
         // The running-origin watcher stays mounted for the whole local-mode
@@ -867,7 +714,6 @@ struct ConnectionView: View {
             }
             guard origin != nil else { return }
             address = origin?.url.absoluteString ?? address
-            discovery.invalidate()
             origin = nil
             storage = .ephemeral
             dataStore = nil
@@ -879,7 +725,6 @@ struct ConnectionView: View {
             error = nil
             forgetMessage = nil
             session?.reportDisconnected()
-            startAutomaticDiscovery()
         }
         // Editing the address to another server is a different connection
         // too. Clear the click so the new address starts from the default
@@ -887,9 +732,6 @@ struct ConnectionView: View {
         .onChange(of: addressOrigin?.canonicalKey) { _ in
             keepSignedInChoice = nil
         }
-        .onChange(of: installer.state) { handleInstallState($0) }
-        .onChange(of: engineUpdater.state) { handleEngineUpdateState($0) }
-        .onChange(of: discovery.status) { handleDiscoveryStatus($0) }
         .onReceive(settledEvents) { applySettled($0) }
     }
 
@@ -904,55 +746,17 @@ struct ConnectionView: View {
 
     /// What the connection view does when it appears. Internal so a test can
     /// prove local mode runs none of the external launch machinery.
-    func launchOnAppear(installState: NativeInstallState? = nil) {
+    func launchOnAppear() {
         // A fresh connection screen is disconnected. Do not clear a live
         // connection when SwiftUI merely re-shows the existing window.
         if origin == nil { session?.reportDisconnected() }
         // Local mode connects from the supervisor's running origin, never
         // from the saved server: the launch machinery below is external-only.
         guard engineMode == .external else { return }
-        // An install may have finished while the window was closed.
-        if origin == nil, autoConnectTarget == nil { handleInstallState(installState ?? installer.state) }
         guard let target = autoConnectTarget, !didAutoConnect else { return }
         didAutoConnect = true
         address = target.url.absoluteString
         connect(to: target)
-    }
-
-    @ViewBuilder
-    private func wizardView(_ wizard: Origin) -> some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Text(NativeInstallCopy.progress(for: installer.state) ?? "")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .accessibilityLabel("Installation status")
-                Spacer(minLength: 8)
-                Button(NativeInstallFlowCopy.cancelButton) { installer.cancel() }
-                    .accessibilityHint("Stops the installer. A Ciaobot service that already started keeps running.")
-            }
-            .padding(.horizontal, 12).padding(.vertical, 6)
-            // Setup only: an ephemeral store of its own, never remembered,
-            // never reported as a connection, torn down when setup ends.
-            WebWindow(
-                origin: wizard,
-                storage: .ephemeral,
-                onFailure: { message in
-                    self.wizardLoadError = message
-                    self.installer.cancel()
-                }
-            )
-            .id(wizard.canonicalKey)
-        }
-    }
-
-    /// Automatic same-Mac discovery starts only on the connection screen,
-    /// only in production, and never in local mode (the app's own engine is
-    /// the only local server there, and its origin comes from the supervisor).
-    /// Debug builds and test launches leave it to an explicit click so the
-    /// test suite never contacts the real candidate.
-    func startAutomaticDiscovery() {
-        guard automaticallyStartsDiscovery, origin == nil else { return }
-        discovery.refresh()
     }
 
     /// The supervisor to show the engine status screen for: local mode with
@@ -1038,68 +842,6 @@ struct ConnectionView: View {
         }
     }
 
-    /// Only `service_ready` is success. The service origin goes through the
-    /// normal probe, so it is remembered and reported only if it answers.
-    func handleInstallState(_ state: NativeInstallState) {
-        if case .succeeded(let service) = state, origin == nil {
-            address = service.url.absoluteString
-            connect(to: service, afterInstall: true)
-            return
-        }
-        // A port failure has a recovery that is not another identical retry:
-        // offer a port field, prefilled with a port that is free right now.
-        if case .failed(let failure) = state, NativeInstallPortRecovery.isRecoverable(failure) {
-            portError = nil
-            portText = FreePort.pick().map(String.init) ?? ""
-        }
-    }
-
-    /// Writes the confirmed port to the workspace `.env`, clears the failed
-    /// run, then re-detects and starts the existing service.
-    private func applyPort() {
-        guard let port = NativeInstallPortRecovery.port(portText) else { return }
-        guard let workspace = LocalInstallation.detect()?.workspace else {
-            portError = NativeInstallFlowCopy.portWorkspaceMissing
-            return
-        }
-        do {
-            try WorkspaceDotenvPort.setPort(port, in: workspace.appendingPathComponent(".env"))
-        } catch {
-            portError = NativeInstallFlowCopy.portSaveFailed
-            return
-        }
-        portError = nil
-        installer.reset()
-        pendingPortRestart = true
-        discovery.refresh()
-    }
-
-    /// A port change restarts the service once discovery has re-read the new
-    /// port. Separately, a failed install/repair message is stale as soon as
-    /// discovery finds the engine running.
-    func handleDiscoveryStatus(_ status: LocalServerDiscovery.Status) {
-        if pendingPortRestart {
-            switch status {
-            case .installedNotRunning:
-                pendingPortRestart = false
-                discovery.start()
-            case .running:
-                pendingPortRestart = false
-            case .idle, .checking, .starting, .startFailed, .notDetected:
-                break
-            }
-        }
-        if NativeInstallFailureReset.shouldReset(install: installer.state, discovery: status) {
-            installer.reset()
-        }
-    }
-
-    /// After a successful update the version line is re-read from the restarted engine.
-    func handleEngineUpdateState(_ state: EngineUpdateState) {
-        guard state.requiresRediscovery, origin == nil else { return }
-        discovery.refresh()
-    }
-
     /// Internal so the connection outcome — and therefore the remembered
     /// origin — can be tested without rendering the view.
     func connect() {
@@ -1111,10 +853,9 @@ struct ConnectionView: View {
         connect(to: candidate)
     }
 
-    private func connect(to candidate: Origin, afterInstall: Bool = false) {
+    private func connect(to candidate: Origin) {
         guard tasks.beginCheck() else { return }
         error = nil
-        wizardLoadError = nil
         storageNotice = nil
         probe.check(candidate) { ok in
             self.tasks.endCheck()
@@ -1128,11 +869,7 @@ struct ConnectionView: View {
                 }
                 self.establishSession(candidate)
             } else {
-                self.error = afterInstall
-                    ? (self.installer.mode == .repair
-                        ? NativeInstallFlowCopy.connectFailedAfterRepair(candidate)
-                        : NativeInstallFlowCopy.connectFailedAfterInstall(candidate))
-                    : "Could not verify the server’s startup response. Check the address and try again."
+                self.error = "Could not verify the server’s startup response. Check the address and try again."
                 self.session?.reportDisconnected()
             }
         }
@@ -1140,10 +877,6 @@ struct ConnectionView: View {
 
     /// The probe answered: build the one session for `candidate`.
     private func establishSession(_ candidate: Origin) {
-        // The connection screen is about to disappear. A discovery
-        // response that is still in flight must not update the screen
-        // that replaces it.
-        discovery.invalidate()
         // Resolve the store only after the probe succeeds, so a typo
         // cannot create a persistent mapping or empty store. If the
         // user opted in but cannot get a persistent store, say so
@@ -1176,7 +909,6 @@ struct ConnectionView: View {
     /// before the start once it exists.) Internal for tests.
     func useThisMac() {
         guard offersThisMac, let supervisor else { return }
-        discovery.invalidate()
         dropSession()
         modeStore?.mode = .local
         modeStore?.rolledBackTakeovers = 0

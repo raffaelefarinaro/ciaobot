@@ -550,7 +550,7 @@ final class TraySettingsTests: XCTestCase {
         let delegate = AppDelegate(
             session: AppSessionStatus(),
             presenter: MainWindowPresenter(windows: { [] }, activate: {}),
-            makeMenuBar: { _, _, _, _, _ in menuBar },
+            makeMenuBar: { _, _, _, _ in menuBar },
             loginItem: loginItem,
             dockIcon: dockIcon
         )

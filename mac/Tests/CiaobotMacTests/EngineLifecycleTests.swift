@@ -359,7 +359,7 @@ final class EngineLifecycleTests: XCTestCase {
         let delegate = AppDelegate(
             session: AppSessionStatus(),
             presenter: LifecycleMainWindowPresenter(),
-            makeMenuBar: { _, _, _, _, _ in self.menuBar },
+            makeMenuBar: { _, _, _, _ in self.menuBar },
             engineMode: TransientEngineModeStore(),
             mode: mode,
             supervisor: supervisor,

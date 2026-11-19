@@ -247,8 +247,7 @@ final class FoundationTakeoverRunner: TakeoverRunning {
         posix_spawnattr_setsigdefault(&attributes, &defaults)
         posix_spawnattr_setsigmask(&attributes, &unmasked)
         // Every descriptor the app holds closes in the child except the ones the
-        // file actions give it, as NativeInstaller spawns its children. The
-        // close-on-exec pipe ends below are a second guard.
+        // file actions give it. The close-on-exec pipe ends below are a second guard.
         let flags = POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT
         posix_spawnattr_setflags(&attributes, Int16(flags))
         posix_spawnattr_setpgroup(&attributes, 0)
