@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, cast
@@ -7713,30 +7713,6 @@ def _macos_service_command(args: argparse.Namespace) -> int:
         result = macos_service.stop_service(force=bool(args.force))
     elif action == "login":
         result = macos_service.set_login_enabled(args.login_action == "enable")
-    elif action == "update-engine":
-        result = macos_service.update_engine(force=bool(args.force))
-    elif action == "migrate":
-        result = macos_service.migrate_legacy_companion(running_app=args.app_bundle)
-    elif action == "migration-classify":
-        # The bridge Ciaobot.app needs to decide whether to hand this Mac's
-        # engine over to the terminal installer (#604). The classifier is a
-        # module of its own, not a desktop-service action, and it already runs
-        # from the verified wheel by the retired installer; importing it here
-        # rather than shelling out to `python -I -m ciao.engine_migration` is
-        # the smaller change, and it keeps the app off a second interpreter.
-        # It reads and never writes, so a Mac the app cannot interpret comes
-        # back as `desktop_invalid` and the app asks instead of guessing.
-        from ciao.engine_migration import classify
-
-        classification = classify()
-        result = macos_service.ServiceResult(
-            True,
-            "migration-classify",
-            f"this Mac classifies as {classification.kind}",
-            asdict(classification),
-        )
-    elif action == "rollback":
-        result = macos_service.rollback_legacy_companion()
     else:  # pragma: no cover - argparse constrains the action.
         parser_error = macos_service.ServiceResult(
             False,
@@ -7847,55 +7823,6 @@ def _service_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _desktop_command(args: argparse.Namespace) -> int:
-    from ciao import desktop_install
-
-    as_json = bool(getattr(args, "as_json", False))
-    explicit_dir = getattr(args, "app_dir", None)
-    if explicit_dir:
-        app_dir = Path(explicit_dir).expanduser()
-    else:
-        app_dir = _default_app_dir()
-        system_app_dir = Path("/Applications")
-        if not (app_dir / desktop_install.APP_BUNDLE_NAME).exists() and (
-            system_app_dir / desktop_install.APP_BUNDLE_NAME
-        ).exists():
-            # Older installs used /Applications. Keep uninstall able to find
-            # those bundles while new installs consistently use ~/Applications.
-            app_dir = system_app_dir
-
-    def report(payload: dict[str, object], lines: list[str]) -> int:
-        if as_json:
-            print(json.dumps(payload, indent=2))
-        else:
-            for line in lines:
-                print(line)
-        return 0
-
-    try:
-        result = desktop_install.uninstall_desktop_app(app_dir=app_dir)
-        lines = [
-            f"Removed {result['path']}"
-            if result["removed"]
-            else f"Nothing to remove at {result['path']}"
-        ]
-        # Named explicitly: when the bundle was already dragged to the Trash
-        # the headline reads "Nothing to remove", yet this run may still have
-        # booted out and deleted launchd plists. Staying silent about that
-        # tells the user nothing happened when something did.
-        for agent in result.get("removed_agents") or []:
-            lines.append(f"Removed {agent}")
-        if result.get("removed_shim"):
-            lines.append(f"Removed {result['removed_shim']}")
-        return report(result, lines)
-    except desktop_install.InstallError as exc:
-        if as_json:
-            print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
-        else:
-            print(str(exc), file=sys.stderr)
-        return 1
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ciao", description="Ciaobot local assistant CLI.")
     subparsers = parser.add_subparsers(dest="command")
@@ -7932,30 +7859,14 @@ def build_parser() -> argparse.ArgumentParser:
     ) -> None:
         service_parser = subparsers.add_parser(name, help=help_text)
         service_sub = service_parser.add_subparsers(dest="service_action", required=True)
-        for action in (
-            "status",
-            "start",
-            "restart",
-            "stop",
-            "update-engine",
-            "migrate",
-            "migration-classify",
-            "rollback",
-        ):
+        for action in ("status", "start", "restart", "stop"):
             action_parser = service_sub.add_parser(action)
             action_parser.add_argument("--json", action="store_true", dest="as_json")
-            if action in {"restart", "stop", "update-engine"}:
+            if action in {"restart", "stop"}:
                 action_parser.add_argument(
                     "--force",
                     action="store_true",
                     help="Proceed even when chats are active (after UI confirmation).",
-                )
-            if action == "migrate":
-                action_parser.add_argument(
-                    "--app-bundle",
-                    type=Path,
-                    required=True,
-                    help="Installed Ciaobot.app bundle requesting migration.",
                 )
             if action == "start":
                 action_parser.add_argument(
@@ -8016,29 +7927,6 @@ def build_parser() -> argparse.ArgumentParser:
         "Deprecated alias of `ciao service` (used by Ciaobot.app).",
         deprecated=True,
     )
-
-    # Separate from `service`, which controls the launchd engine. This group
-    # only removes an old app bundle, for the compatibility window: the app
-    # itself is retired, and installation and updates are owned by the release
-    # installers.
-    desktop_parser = subparsers.add_parser(
-        "desktop",
-        help="Remove an installed Ciaobot.app desktop bundle.",
-    )
-    desktop_sub = desktop_parser.add_subparsers(dest="desktop_action", required=True)
-    desktop_uninstall_parser = desktop_sub.add_parser(
-        "uninstall",
-        help="Remove the installed Ciaobot.app bundle.",
-    )
-    desktop_uninstall_parser.add_argument(
-        "--app-dir",
-        type=Path,
-        default=None,
-        help="Directory holding Ciaobot.app (defaults to ~/Applications, "
-        "falling back to /Applications when the bundle is only there).",
-    )
-    desktop_uninstall_parser.add_argument("--json", action="store_true", dest="as_json")
-    desktop_uninstall_parser.set_defaults(func=_desktop_command)
 
     takeover_parser = subparsers.add_parser(
         "mac-takeover",

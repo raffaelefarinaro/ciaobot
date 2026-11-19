@@ -167,7 +167,7 @@ It is the Linux installer; on macOS it refuses and names the app. Install paths:
 
 `update_package()` (`ciao/package_version.py`) answers the Settings update hint for installer-mode engines with `ciao update stage` followed by `ciao update apply`. The transaction's update host is `update_host.MacUpdateHost` (launchd); `current_update_host()` raises `UnsupportedPlatformError` on other platforms.
 
-Machines still running the retired macOS app are moved with `ciao desktop uninstall`, which removes the legacy `Ciaobot.app` bundle and its LaunchAgents. The app's own updater, the native verifier and the signed `.app` feed are not published.
+Machines still running the retired macOS app are cleaned up by hand (see INTEGRATIONS.md, Upgrading from the macOS app): the `Ciaobot.app` bundle and its LaunchAgents are removed manually. The app's own updater, the native verifier and the signed `.app` feed are not published.
 
 The engine release carries the wheel and its signed manifest (`ciaobot-engine-manifest.json` and `.sig`). `python -m ciao.release_manifest verify` checks the manifest against the embedded minisign key; see Publish under Branching and releases. The server host archive is not built or attached.
 
@@ -355,9 +355,8 @@ The macOS app is retired and its source tree is gone (`#656`): the release is th
 engine, and the one-line installer installs that. Nothing under `desktop/` is
 built, so there is no Rust or native-shell step to run here.
 
-`ciao desktop uninstall` stays for the compatibility window: run it to remove a
-`Ciaobot.app` an older install left behind, along with the launch agents and
-`ciao` shim pointing into it.
+A `Ciaobot.app` an older install left behind is removed by hand, as INTEGRATIONS.md
+describes; no command does it.
 
 After PWA changes, rebuild and either restart the service or use the **Deploy** button in PWA Settings. **Never restart the ciao service from inside a PWA chat** (you'd sever your own session); ask the operator to deploy.
 

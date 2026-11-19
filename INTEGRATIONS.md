@@ -15,10 +15,12 @@ by the engine. The `--migrate` hand-over that moved an app-managed engine to the
 terminal installer is no longer shipped, so an app user does not re-run an
 installer to switch. Your workspace folder, its notes and chats are kept.
 
-To remove the old bundle by hand, run `ciao desktop uninstall`. It takes the
-bundle (`~/Applications`, or `/Applications` for older installs; `--app-dir`
-points elsewhere) with its LaunchAgents and any `~/.local/bin/ciao` shim that
-pointed inside it. Updates after that go through **Settings → General** in the
+To remove the old bundle, quit Ciaobot.app and drag it to the Trash (it lives in
+`~/Applications`, or `/Applications` for older installs). If
+`~/Library/LaunchAgents/com.ciao.menubar.plist` is still there, unload it with
+`launchctl bootout gui/$(id -u)/com.ciao.menubar` and delete the file. If
+`~/.local/bin/ciao` points inside the bundle, re-run the installer to replace
+it. Updates after that go through **Settings → General** in the
 PWA, which stages and applies the engine package update in the background, or
 `ciao update stage` then `ciao update apply` from a terminal. There is no
 in-app app updater.
@@ -431,7 +433,7 @@ not a new filesystem sandbox. Existing viewer extension and size guards remain.
 - **Web Push timing** (not configurable): a completed turn pushes 30 seconds after it ends. Rapid replies to the same chat cancel the previous timer and start a new one (coalesce into a single push). Permission requests and model questions push immediately (no delay). Unanswered permission requests re-fire every 30 seconds, up to 3 times, until the user approves/denies or the turn ends. Marking a chat read sends a separate clear control to all registered Web Push subscriptions and the macOS notification log.
 - `CIAO_PYTHON`: path to a specific Python binary for `scripts/dev.sh` (e.g. when Homebrew breaks `ensurepip`).
 - `CIAO_PATH`: baked into the launchd plist's `EnvironmentVariables` at setup time so developer-mode subprocesses (npm, node, git) are found despite launchd's minimal default PATH. Not an operator env var; it's a `com.ciao.server.plist.tmpl` placeholder rendered from the user's shell PATH.
-- Installer and release-build variables: `CIAO_APP_DIR` overrides the per-user app directory, `CIAO_ARCHIVE_NAME` and `CIAO_VERIFIER_NAME` override release asset names, and `CIAO_RELEASE_BASE_URL` selects a private release mirror for an explicit `--version` (the embedded archive signature is still mandatory). `CIAO_PYTHON_ARM64_URL`, `CIAO_PYTHON_ARM64_SHA256`, `CIAO_PYTHON_X86_64_URL`, and `CIAO_PYTHON_X86_64_SHA256` are retired: the release workflow used to require them when assembling the embedded runtimes, and nothing reads them now. `CIAO_EXECUTABLE` is a LaunchAgent template token, not an operator environment variable.
+- Installer and release-build variables: `CIAO_ARCHIVE_NAME` and `CIAO_VERIFIER_NAME` override release asset names, and `CIAO_RELEASE_BASE_URL` selects a private release mirror for an explicit `--version` (the embedded archive signature is still mandatory). `CIAO_PYTHON_ARM64_URL`, `CIAO_PYTHON_ARM64_SHA256`, `CIAO_PYTHON_X86_64_URL`, and `CIAO_PYTHON_X86_64_SHA256` are retired: the release workflow used to require them when assembling the embedded runtimes, and nothing reads them now. `CIAO_EXECUTABLE` is a LaunchAgent template token, not an operator environment variable.
 - `CIAO_ALLOW_LAUNCH_AGENT_REPOINT`: set to `1`/`true`/`yes` (case-insensitive) to allow `setup_workspace`/`_write_launchd_plist` and `ciao setup` to repoint the live `~/Library/LaunchAgents/com.ciao.server.plist` to a different workspace without `confirm_repoint=True`/`--yes`. For automation that intentionally moves the install; leave unset for the safe default (refuse). `CIAO_LAUNCH_AGENTS_DIR` (test-only) already isolates the suite by redirecting the plist location.
 - `CIAO_EVAL_MAX_CALLS`: hard call ceiling for one `ciao eval run` (the bounded model-backed behavioral probe). Default `40`. The runner stops claiming new probes at the ceiling and records the remainder as `budget_exhausted` rather than continuing to spend. The deterministic `ciao eval contracts` half never calls a model and ignores it.
 - `CIAO_EVAL_MAX_COST_USD`: hard estimated-cost ceiling (USD) for one `ciao eval run`. Default `2.0`. `run_oneshot` returns text rather than a cost, so cost is enforced as a declared per-call upper bound (`calls × CIAO_EVAL_COST_PER_CALL_USD`); the report records the estimate used.

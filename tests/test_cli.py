@@ -1660,24 +1660,6 @@ def test_create_chat_command_uses_active_workspace_without_name_clamp(
 
 
 
-def test_desktop_uninstall_reports_when_nothing_is_installed(
-    tmp_path: Path, capsys
-) -> None:
-    assert cli.main(["desktop", "uninstall", "--app-dir", str(tmp_path)]) == 0
-    assert "Nothing to remove" in capsys.readouterr().out
-
-
-def test_desktop_uninstall_json_reports_a_refusal(tmp_path: Path, capsys) -> None:
-    pwa = tmp_path / "Ciaobot.app" / "Contents" / "MacOS"
-    pwa.mkdir(parents=True)
-    (pwa / "app_mode_loader").write_text("chrome pwa", encoding="utf-8")
-
-    assert cli.main(["desktop", "uninstall", "--app-dir", str(tmp_path), "--json"]) == 1
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is False
-    assert "not the Ciaobot desktop app" in payload["error"]
-
-
 def test_setup_does_not_download_or_install_the_desktop_app(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
