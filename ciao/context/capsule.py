@@ -126,8 +126,12 @@ def build_context_capsule(
     linked_repo_block: str = "",
     linked_repo_line: str = "",
     permission_mode: str = "",
+    core: str = "",
 ) -> str:
     """Render the compact context visible to every provider.
+
+    ``core`` is the Ciaobot core (``core_prompt.unified_core``),
+    sent with the stable facts so it rides the same once-per-session and after-compaction schedule.
 
     ``workspace_vault_root`` is the active workspace's vault, relative to the
     provider's cwd, so a path the model writes is usable verbatim.
@@ -151,6 +155,8 @@ def build_context_capsule(
     """
 
     stable: list[str] = []
+    if core:
+        stable.append(core)
     if workspace:
         stable.append(f"workspace={_field(workspace, limit=120)}")
     if workspace_vault_root:
@@ -202,14 +208,18 @@ def context_digest(
     project_context: str,
     canonical_doc: str,
     linked_repo: str = "",
+    core: str = "",
 ) -> str:
     """Return a stable digest for deciding whether routing facts changed.
 
     ``linked_repo`` is hashed in only when non-empty, so an unlinked chat keeps
-    the digest it had before linking existed.
+    the digest it had before linking existed. ``core`` follows the same rule, and
+    is hashed as its own digest: editing the core re-sends it on the next turn.
     """
     parts = [workspace, gws_profile, project_name, project_context, canonical_doc]
     if linked_repo:
         parts.append(linked_repo)
+    if core:
+        parts.append(hashlib.sha256(core.encode("utf-8")).hexdigest())
     raw = "\0".join(parts)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
