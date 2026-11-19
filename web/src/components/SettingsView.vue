@@ -52,8 +52,8 @@
                   while Ciaobot keeps running, then restarts it once.
                 </template>
                 <template v-else-if="packageStatus?.mode === 'installer'">
-                  Installed with the Ciaobot engine installer. To update, run it again:
-                  <code>curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install-engine.sh | sh</code>
+                  Installed with the Ciaobot engine installer. Update from Settings, or run
+                  <code>ciao update stage && ciao update apply</code>.
                 </template>
                 <template v-else>
                   Check the installed package version and upgrade this local app.

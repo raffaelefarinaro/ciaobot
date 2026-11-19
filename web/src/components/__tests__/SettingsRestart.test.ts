@@ -78,6 +78,9 @@ it('installer mode shows re-run guidance and no update button', async () => {
   try {
     await flushPromises()
     expect(wrapper.text()).toContain('Installed with the Ciaobot engine installer')
+    // The hint names the engine's own verbs; the deleted install-engine.sh URL must not come back.
+    expect(wrapper.text()).toContain('ciao update stage && ciao update apply')
+    expect(wrapper.html()).not.toContain('install-engine')
     const labels = wrapper.findAll('button').map(b => b.text())
     expect(labels).not.toContain('Update to 0.19.0')
     expect(labels).not.toContain('Update & Restart')

@@ -1,6 +1,6 @@
 """Classify a Mac for the Ciaobot.app → terminal-engine migration (#562 Phase 3, #576).
 
-Run from the *verified* wheel by scripts/install-engine.sh before anything is
+Run from the *verified* wheel by the retired installer before anything is
 installed. Reads state raw and never writes: the removed NodeStateManager
 would have created a host state when node_state.json is absent.
 
@@ -153,7 +153,7 @@ def check_client_url(value: str) -> str:
 
     The same rules `_client_host_url` applies to a state file's `host_url`,
     because an explicit override is the one host URL this migration never read
-    from disk and still hands straight to the user: `scripts/install-engine.sh`
+    from disk and still hands straight to the user: the retired installer
     prints it, `open`s it and writes it into the migration receipt. A prefix
     check accepts `https://`, which opens nothing, so the URL is parsed here
     exactly as the classifier parses it instead of being spelled out a second
