@@ -155,7 +155,7 @@ def _definition_digest(definition: Path) -> str:
     """The sha256 of exactly the regular file at ``definition``.
 
     The read is :func:`ciao.os_support.definition.read_definition`, shared with
-    the native handoff so the two digests cannot drift: it is binary where the
+    the installer handoff read so the two digests cannot drift: it is binary where the
     platform has ``O_BINARY``, rejects a size that the read did not cover, and
     refuses a missing, special, replaced or changed file.
     """

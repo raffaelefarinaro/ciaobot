@@ -893,11 +893,10 @@ def _rehearsal_workflow() -> str:
 
 
 def test_docs_drop_the_pinned_install_sh_digest() -> None:
-    # #2483: the client verifies install.sh against the signed manifest, so the
-    # docs no longer tell it to pin one release's digest, and the stale
-    # "after 1.7.0" wording is gone from both files.
-    from ciao.release_manifest import RELEASE_PUBLIC_KEY
-
+    # #2483: the docs no longer tell a client to pin one release's digest, and
+    # the stale "after 1.7.0" wording is gone from both files. The native
+    # installer's manifest-authentication prose went with the deleted installer,
+    # so the docs only name the manifest verifier that still exists.
     root = Path(__file__).parents[1]
     development = (root / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8")
     architecture = (root / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
@@ -906,6 +905,4 @@ def test_docs_drop_the_pinned_install_sh_digest() -> None:
     assert "next engine release after 1.7.0" not in architecture
     assert "must pin the sha256" not in development
     assert "pin the `install.sh` digest" not in development
-    assert RELEASE_PUBLIC_KEY in development
-    assert "version >= 1.8.1" in development
-    assert "Authenticating `install.sh`" in development
+    assert "python -m ciao.release_manifest verify" in development

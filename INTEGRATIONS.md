@@ -10,27 +10,17 @@ Claude's disable options reach the claude-agent-acp adapter as `_meta.claudeCode
 
 ### Upgrading from the macOS app
 
-v1.0.0 retires the macOS `Ciaobot.app`; the PWA is now served by the engine.
-There is no data migration and no vault change. If you still run the app, run
-the installer with `--migrate`: it hands the engine the app currently manages
-over to the terminal installer, keeps your workspace, password, chats,
-schedules and push subscriptions, and removes the old `Ciaobot.app` bundle.
+v1.0.0 retires the macOS `Ciaobot.app` as a separate updater; the PWA is served
+by the engine. The `--migrate` hand-over that moved an app-managed engine to the
+terminal installer is no longer shipped, so an app user does not re-run an
+installer to switch. Your workspace folder, its notes and chats are kept.
 
-```bash
-curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh -s -- --migrate
-```
-
-If the installer cannot tell whether your Mac is the host or a client, it says
-so and asks for `--as-host` or `--as-client <url>`.
-
-Should the automatic removal not be able to run — a `/Applications` install the
-account cannot write, for instance — the installer says so and leaves the bundle
-alone, and `ciao desktop uninstall` removes it by hand. That command takes the
+To remove the old bundle by hand, run `ciao desktop uninstall`. It takes the
 bundle (`~/Applications`, or `/Applications` for older installs; `--app-dir`
 points elsewhere) with its LaunchAgents and any `~/.local/bin/ciao` shim that
-pointed inside it. Your workspace folder and its notes are kept. Updates after
-that are the same one-liner again, or **Settings → General** in the PWA, which
-stages and applies the engine package update in the background; there is no
+pointed inside it. Updates after that go through **Settings → General** in the
+PWA, which stages and applies the engine package update in the background, or
+`ciao update stage` then `ciao update apply` from a terminal. There is no
 in-app app updater.
 
 ## CLI Tools

@@ -1,8 +1,8 @@
-"""One strict, bounded read of a service definition or native state file.
+"""One strict, bounded read of a service definition or installer state file.
 
-Both the native installer handoff and the service manager's fresh-activation
+Both the installer handoff and the service manager's fresh-activation
 path must hash *exactly* the bytes a launchd job will read.
-The native handoff also reads its own result and the workspace ``.env`` that
+The installer handoff also reads its own result and the workspace ``.env`` that
 proves a completed setup; each of those used to be a ``Path.read_text`` (or a
 near-identical copy of this read), which is how one of them ended up unbounded
 and able to block on a FIFO. Keeping the one implementation here means the

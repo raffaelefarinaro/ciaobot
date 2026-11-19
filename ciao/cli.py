@@ -7721,7 +7721,7 @@ def _macos_service_command(args: argparse.Namespace) -> int:
         # The bridge Ciaobot.app needs to decide whether to hand this Mac's
         # engine over to the terminal installer (#604). The classifier is a
         # module of its own, not a desktop-service action, and it already runs
-        # from the verified wheel inside install-engine.sh; importing it here
+        # from the verified wheel by the retired installer; importing it here
         # rather than shelling out to `python -I -m ciao.engine_migration` is
         # the smaller change, and it keeps the app off a second interpreter.
         # It reads and never writes, so a Mac the app cannot interpret comes
