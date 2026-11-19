@@ -6885,15 +6885,13 @@ async def settings_keyboard(request: Request) -> JSONResponse:
     def payload() -> dict[str, Any]:
         keyboard_shortcuts = app_settings.settings.keyboard_shortcuts or {}
         keyboard_send_mode = app_settings.settings.keyboard_send_mode or "modifier"
-        mid_turn_delivery = app_settings.settings.mid_turn_delivery or "queue"
         revision_source = json.dumps(
-            [keyboard_shortcuts, keyboard_send_mode, mid_turn_delivery],
+            [keyboard_shortcuts, keyboard_send_mode],
             sort_keys=True, separators=(",", ":"),
         ).encode("utf-8")
         return {
             "keyboard_shortcuts": keyboard_shortcuts,
             "keyboard_send_mode": keyboard_send_mode,
-            "mid_turn_delivery": mid_turn_delivery,
             "revision": hashlib.sha256(revision_source).hexdigest(),
         }
     if request.method == "PATCH":
@@ -6905,7 +6903,7 @@ async def settings_keyboard(request: Request) -> JSONResponse:
             return JSONResponse({"error": "expected an object"}, status_code=400)
         expected_revision = body.pop("revision", None)
         unknown = sorted(set(body) - {
-            "keyboard_shortcuts", "keyboard_send_mode", "mid_turn_delivery",
+            "keyboard_shortcuts", "keyboard_send_mode",
         })
         if unknown:
             return JSONResponse(

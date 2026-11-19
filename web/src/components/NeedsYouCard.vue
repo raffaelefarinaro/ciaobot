@@ -13,7 +13,7 @@ import ActivityGlyph from './ActivityGlyph.vue'
 import AppIcon from './AppIcon.vue'
 import { NEEDS_YOU_BODIES, NEEDS_YOU_ICONS } from './needs-you/registry'
 import { actionCopy } from '../lib/chatActions'
-import { shouldRestoreFocus } from '../lib/moveToBackground'
+import { shouldRestoreFocus } from '../lib/focusRestore'
 import { useProjectStore } from '../stores/projects'
 import type { ChatAction, ChatActionKind } from '../lib/types'
 

@@ -1891,7 +1891,7 @@ async def test_a_banner_only_follow_up_still_releases_the_park(
 async def test_a_drain_that_never_gets_a_reply_still_releases_the_park(
     tmp_path: Path,
 ) -> None:
-    """The CLI can drop after the steer and never produce a ResultEvent."""
+    """The CLI can drop and never produce a ResultEvent."""
     pcm = _make_manager(tmp_path)
     calls = _announce_spy(pcm)
     pcm._providers["chat-1"] = _FakeProvider([])
@@ -2239,9 +2239,6 @@ async def test_a_live_user_turn_keeps_the_watchers_finally_quiet(
         can_drain = True
         background_work_outstanding = False
 
-        async def steer(self, request) -> bool:  # pragma: no cover
-            raise AssertionError("must not steer into a live user turn")
-
     pcm._providers[chat.chat_id] = FakeProvider()  # type: ignore[assignment]
     # A user send: no between-turns drain left, a live foreground stream.
     pcm._broker.register(chat.chat_id, ChatStream(prompt_text="what now?"))
@@ -2300,9 +2297,6 @@ async def test_a_watcher_with_no_turn_to_supersede_it_still_releases(
     class FakeProvider:
         can_drain = True
         background_work_outstanding = False
-
-        async def steer(self, request) -> bool:  # pragma: no cover
-            raise AssertionError("no drain to capture the reply")
 
     pcm._providers[chat.chat_id] = FakeProvider()  # type: ignore[assignment]
     calls = _announce_spy(pcm)
