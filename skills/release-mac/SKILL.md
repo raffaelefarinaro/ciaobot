@@ -5,7 +5,7 @@ description: Release the Ciaobot for Mac app (the Swift package in mac/) — bui
 
 # Releasing Ciaobot for Mac
 
-> **Version releases are still held.** The app's source and its update feed now both live in this repository. The `updates` appcast is published here (see [Feed](#feed)). Version releases are not yet: `publish.yml` runs on every published release in this repository, and the app reads the latest release as the engine manifest, so a Mac version release cut here would reach the engine path. The release pipeline that moves Mac publishing here safely is part of #3131 (the Ciaobot 2.0 release pipeline). Until it lands, do not publish a Mac version release from this repository. Without `--repo`, `scripts/publish-release.sh` targets `raffaelefarinaro/ciaobot`. An urgent 1.x client fix is cut in `raffaelefarinaro/ciaobot-mac` with that repository's copy of this skill, then brought here with `git subtree pull --prefix=mac https://github.com/raffaelefarinaro/ciaobot-mac.git main`.
+> **Publishing is operator-only.** The app's source, its update feed (the `updates` appcast, see [Feed](#feed)) and the release pipeline all live in this repository. `release-on-main` creates the version release `v<version>` when a release PR merges into `main`, and `publish.yml` builds the engine for it. The DMG is attached and both appcast feeds are published by hand, in the order given in section 6. Four things stay with the operator and never run in CI or in an agent session: the Developer ID Application identity, the App Store Connect notary key, the Sparkle EdDSA private key (all in the operator's keychain or outside the repository), and the merge into `main`. Without `--repo`, `scripts/publish-release.sh` targets `raffaelefarinaro/ciaobot`. An urgent 1.x client fix is cut in `raffaelefarinaro/ciaobot-mac` with that repository's copy of this skill, then brought here with `git subtree pull --prefix=mac https://github.com/raffaelefarinaro/ciaobot-mac.git main`.
 
 This repository is public. Treat every committed file as publishable: no
 private keys, app-specific passwords, keychain profile names, Apple Account
@@ -54,10 +54,13 @@ wait on that dialog rather than fail.
 
 ## 1. Decide the version
 
-`scripts/build-app.sh` is the single definition of `CFBundleShortVersionString`
-and `CFBundleVersion`. Bump both in the same commit as the change that warrants
-the release. Sparkle compares `CFBundleVersion` as an integer, so it must
-increase monotonically; never reuse a build number.
+The version is the `version` in the repository's `pyproject.toml`. Bump it in the
+commit that warrants the release. `scripts/build-app.sh` derives
+`CFBundleShortVersionString` from it and `CFBundleVersion` as major × 10000 +
+minor × 100 + patch, so 2.0.0 is build 20000, above the build 14 that 0.5.0
+shipped. Minor and patch must stay below 100; any other shape fails the build
+before the Swift build starts. Sparkle compares `CFBundleVersion` as an integer,
+so it must increase monotonically; never reuse a build number.
 
 Semantic versioning applies to the client: a fix is a patch, a feature is a
 minor, a change users must act on is a major.
@@ -94,7 +97,7 @@ Apple-facing credentials stay in the login keychain (the identity) and in the
 environment variables above. `make-dmg.sh` and `make-appcast.sh` refuse an
 engine that `engine_sign.py check --distribution` rejects. The Developer ID
 signing and notarization of the engine-bearing app were rehearsed on a scratch
-build (#3128 G); the publishing freeze above still applies.
+build (#3128 G); the operator-only steps in section 6 still apply.
 
 The API key path defaults to `~/.appstoreconnect/private_keys/AuthKey_<KEY_ID>.p8`;
 override it with `NOTARY_KEY`. A `notarytool` keychain profile works instead via
@@ -189,24 +192,41 @@ reads; it never publishes.
 ## 6. Publish, one asset, feed last
 
 Order matters: an appcast must never point at an archive that is not yet
-downloadable.
+downloadable, and no client may be offered a 2.x build before its DMG exists.
 
-1. Create the version release with the single DMG, marked **pre-release** while
-   the build is still a preview. The DMG is what people download, install from,
-   and what Sparkle downloads as the update enclosure. There is no ZIP and no
-   `.sha256` asset: put the printed digest in the release notes.
+1. **Merge the release PR into `main`** (admin only). `release-on-main` tags
+   `v<version>` at that commit and creates its GitHub release with the CHANGELOG
+   section as the notes. That release is the latest release from this moment,
+   so the download page points at it until step 3 is done.
+2. **Wait for `publish.yml` to go green** on that release. It builds the engine
+   and the wheel, and it skips the `updates` feed release.
+3. **Attach the DMG** to `v<version>`:
    `scripts/publish-release.sh --tag v<version> --asset Ciaobot-<version>.dmg
-   --notes notes.md --prerelease` attaches exactly one file and refuses a second
-   asset. `gh release create --target` needs a full commit SHA; a short SHA is
-   rejected as invalid.
-2. Then publish `appcast.xml` as an asset on the dedicated `updates` release.
-   The asset name must be exactly `appcast.xml` because the feed URL embeds it;
-   `gh release upload` uses the local filename, so copy the generated file to
-   that name first. Keep the release pre-release too, so it never becomes
-   "latest" and never replaces the download page. `gh release edit
-   --prerelease=true` is the flag that actually sets it.
-3. Confirm the feed URL from `release/update-config.env` downloads the appcast
-   you just generated, and diff it against the local file.
+   --notes notes.md`. The DMG is what people download, install from, and what
+   Sparkle downloads as the update enclosure. The script attaches exactly one
+   file and refuses a second asset, a ZIP or a `.sha256`. When `v<version>`
+   already exists, as it does after step 1, the script uploads the DMG onto it
+   and creates nothing; its `--notes`, `--title`, `--draft` and `--prerelease`
+   are not applied to an existing release. Put the printed digest in the
+   release notes by hand with `gh release edit v<version> --notes-file
+   notes.md`. The script creates the release, pre-release if asked, only when
+   `v<version>` is absent.
+4. **Publish `appcast.xml`** as an asset on the dedicated `updates` release in
+   this repository, generated in section 5. The asset name must be exactly
+   `appcast.xml` because the feed URL embeds it; `gh release upload` uses the
+   local filename, so copy the generated file to that name first. Keep the
+   `updates` release a pre-release so it never becomes "latest" and never
+   replaces the download page. `gh release edit --prerelease=true` is the flag
+   that actually sets it. The 2.x app reads this feed (`UPDATE_FEED_URL`).
+5. **Append the same signed item** to the legacy `ciaobot-mac` feed, so 0.5.x
+   clients are offered the 2.x app: download `updates/appcast.xml` from
+   `raffaelefarinaro/ciaobot-mac`, add the one `<item>` that step 4's appcast
+   holds for this version, and upload the combined file as `appcast.xml` on that
+   repository's `updates` release. Keep every existing item. See
+   [Bridging 0.5.x](#bridging-05x).
+6. Confirm each feed downloads the appcast you just published, and diff it
+   against the local file: `UPDATE_FEED_URL` from `release/update-config.env`,
+   then `https://github.com/raffaelefarinaro/ciaobot-mac/releases/download/updates/appcast.xml`.
 
 Releases 0.1.6 and older keep their ZIP (and checksum) assets until the feed
 points at a DMG release. Remove those old assets only **after** the new appcast
@@ -246,7 +266,7 @@ confirm the client refuses it and keeps running.
 
 ### Bridging 0.5.x
 
-Installed 0.5.x clients still poll `https://github.com/raffaelefarinaro/ciaobot-mac/releases/download/updates/appcast.xml`. Upload the 2.0.0 `appcast.xml`, unchanged, as `appcast.xml` on the `updates` release of `raffaelefarinaro/ciaobot-mac`, once, and never again. Its `CFBundleVersion` must be greater than 14 (the build 0.5.0 shipped), or Sparkle will not offer it. Upload it only after the 2.0.0 DMG it points at is downloadable.
+Installed 0.5.x clients still poll `https://github.com/raffaelefarinaro/ciaobot-mac/releases/download/updates/appcast.xml`. Append the 2.0.0 item to that file once, as section 6 step 5 describes, and never again. The other items in the file stay. Its `CFBundleVersion` is 20000, above the 14 that 0.5.0 shipped, or Sparkle will not offer it. Append it only after the 2.0.0 DMG it points at is downloadable.
 
 ## Recovery
 

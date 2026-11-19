@@ -42,7 +42,7 @@ Before changing code:
 - `mac/` is the Swift Mac app (SwiftPM package `CiaobotMac`, Sparkle updates),
   imported from `ciaobot-mac` with its history. It does not bundle or import
   the engine yet and is never part of the wheel; `mac/docs/reference.md` is
-  its reference and `/release-mac` its (frozen) release skill.
+  its reference and `/release-mac` its (operator-only) release skill.
 
 ## Commands
 ```bash
