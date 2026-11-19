@@ -28,7 +28,13 @@ from acp.schema import (
 )
 from pydantic import TypeAdapter
 
-from ciao.models import BridgeMode, ResultEvent, StreamEvent, SystemStatusEvent
+from ciao.models import (
+    BridgeMode,
+    ContextCompactedEvent,
+    ResultEvent,
+    StreamEvent,
+    SystemStatusEvent,
+)
 from ciao.providers.acp.connection import AcpConnection
 from ciao.providers.acp.normalize import TurnText, UpdateNormalizer, canonical, result_event
 from ciao.providers.acp.permissions import PermissionBroker, mode_choices, pick_value
@@ -330,6 +336,9 @@ class AcpSession:
             return
         body = _update_body(update)
         events = self._normalizer.feed(body)
+        if self._normalizer.compacted:
+            self._normalizer.compacted = False
+            events.append(ContextCompactedEvent(type="context_compacted"))
         kind = canonical(body).get("sessionUpdate")
         self._note_update(events, kind=kind if isinstance(kind, str) else "")
 

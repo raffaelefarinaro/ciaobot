@@ -1362,7 +1362,7 @@ def test_cli_help_topics_retain_operational_guards(capsys: pytest.CaptureFixture
     assert "shared entry" in examples
     assert "linked references" in examples
     assert "ciao help <topic>" in examples
-    assert "one background run for the whole session" in examples
+    assert "runs inside a subagent as one auto-reload run for the whole session" in examples
     assert "SKILL.md` has the command syntax" not in examples
     assert "prints both" not in examples
 

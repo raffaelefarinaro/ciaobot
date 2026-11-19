@@ -76,6 +76,20 @@ def test_stock_skills_use_no_stale_command_or_ui_names() -> None:
         assert "proposals panel" not in text.lower(), path
 
 
+def test_stock_skills_do_not_advise_background_shells() -> None:
+    """The core forbids background shells; no stock skill may recommend one."""
+    retired_advice = (
+        "native background shell",
+        "provider's own background shell",
+        "provider's own `run_in_background`",
+        "Bash `run_in_background`, `Monitor`",
+    )
+    for path in _stock_skill_files():
+        text = path.read_text(encoding="utf-8")
+        for advice in retired_advice:
+            assert advice not in text, f"{path.relative_to(STOCK)} still says {advice!r}"
+
+
 def _capabilities_reference(name: str) -> str:
     return (STOCK_SKILLS / "ciao-capabilities" / "references" / name).read_text(encoding="utf-8")
 

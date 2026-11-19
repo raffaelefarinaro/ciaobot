@@ -15,7 +15,7 @@
 ## When to use it, and when not to
 
 - **Use it** when the user wants to watch or drive a shell themselves: read a log, run a one-off command, watch a build finish. Point them at **Chat details → Open → Terminal**, or the project page's **Terminal** section and **Open in Terminal** button, and tell them it asks for nothing: the signed-in session is enough.
-- **Do not offer it** as a way to give the agent a shell it does not have, since the agent has its own tools under the CLI's permission mode; to read a file, where the file viewer and the pinned panel are the surfaces; or to run something long in the background, where the provider's background shell is the surface and it reports back to the chat.
+- **Do not offer it** as a way to give the agent a shell it does not have, since the agent has its own tools under the CLI's permission mode; to read a file, where the file viewer and the pinned panel are the surfaces; or to run something long, which a subagent does and reports back to the chat.
 - **Do not confuse it with the native terminal window.** `/api/host/terminal` opens a real terminal *window* on the engine's desktop, and only a browser on the engine's own machine may ask for it. The browser terminal is a panel in the app and works from any device. Two different features with two different sets of rules.
 - When a user asks "can you open a terminal for me?", the honest answer is that the agent cannot open the panel's shell: the user opens it from the chat or project they are in. The agent can say which folder it will open in and what the rules are, and it can ask for a command with `ciao chat needs-action command` for the user to review and run.
 

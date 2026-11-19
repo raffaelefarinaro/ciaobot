@@ -181,10 +181,10 @@ def test_the_board_hint_is_a_constant_and_not_a_routing_fact() -> None:
     """It must not make every capsule look like its routing changed.
 
     `context_digest` decides whether the stable block is re-sent to a provider
-    session. It reads exactly the five routing facts plus the linked-repo
-    fingerprint (#1436) and nothing else, so the hint — which never varies —
-    cannot reach it: a board hint that fed the digest would re-send the whole
-    stable block on every turn of every session forever.
+    session. It reads exactly the five routing facts, the linked-repo
+    fingerprint (#1436) and the core (A4; hashed only when set, ACP chats only),
+    so the hint — which never varies — cannot reach it: a board hint that fed the
+    digest would re-send the whole stable block on every turn of every session forever.
     """
     assert tuple(inspect.signature(context_digest).parameters) == (
         "workspace",
@@ -193,6 +193,7 @@ def test_the_board_hint_is_a_constant_and_not_a_routing_fact() -> None:
         "project_context",
         "canonical_doc",
         "linked_repo",
+        "core",
     )
     # And the hint is byte-identical in both capsules: it is a constant wearing a
     # workspace's name, not a fact about one.
@@ -320,6 +321,29 @@ def _linked_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: i
     )
     chat = manager.create_chat(project.project_id)
     return manager, chat, repo
+
+
+def test_core_rides_stable_block_only() -> None:
+    core = "<ciaobot_core>CORE-TEXT</ciaobot_core>"
+    stable = build_context_capsule(workspace="personal", core=core)
+    assert stable.index(core) < stable.index("workspace=personal")
+    dynamic = build_context_capsule(workspace="personal", core=core, include_stable=False)
+    assert "CORE-TEXT" not in dynamic
+    assert "today=" in dynamic
+
+
+def test_core_change_changes_stable_digest() -> None:
+    values = {
+        "workspace": "personal",
+        "gws_profile": "",
+        "project_name": "General",
+        "project_context": "",
+        "canonical_doc": "",
+    }
+    # An empty core is hashed out, so non-ACP chats keep their digest.
+    assert context_digest(**values, core="") == context_digest(**values)
+    assert context_digest(**values, core="core a") != context_digest(**values)
+    assert context_digest(**values, core="core a") != context_digest(**values, core="core b")
 
 
 def test_a_linked_project_prefix_injects_agents_md_and_resends_on_edit(
