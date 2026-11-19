@@ -135,9 +135,12 @@ def test_verify_inventory_is_fresh_during_older_inflight_get(tmp_path, monkeypat
 
 
 def test_opencode_verify_refreshes_models_for_default_and_named_workspaces(tmp_path, monkeypatch):
+    """Verify drops the ACP catalog cache, so the next /api/models probes each workspace again."""
     from types import SimpleNamespace
     from itsdangerous import URLSafeTimedSerializer
     from starlette.middleware import Middleware
+    from ciao.providers.acp.agents import OpencodeAcpProvider
+    from ciao.providers.acp.provider import invalidate_acp_catalog as acp_invalidate
     from ciao.web import routes_api
     from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
     import ciao.providers.opencode as mod
@@ -146,27 +149,14 @@ def test_opencode_verify_refreshes_models_for_default_and_named_workspaces(tmp_p
     versions = {root: "old" for root in roots}
     counts = {root: 0 for root in roots}
 
-    class Server:
-        def __init__(self, root):
-            self.root = root
-            assert root in roots
+    async def fake_probe(cls, workspace_root):
+        # The real model_catalog cache sits in front of this probe.
+        assert workspace_root in roots
+        counts[workspace_root] += 1
+        return [{"model": f"opencode/{workspace_root.name}-{versions[workspace_root]}",
+                 "label": "m", "variants": []}]
 
-        async def __aenter__(self):
-            counts[self.root] += 1
-            return self
-
-        async def __aexit__(self, *args):
-            pass
-
-        async def get(self, path):
-            assert path == "/api/model"
-            model = f"{self.root.name}-{versions[self.root]}"
-            return SimpleNamespace(
-                status_code=200, raise_for_status=lambda: None,
-                json=lambda: {"data": [{"providerID": "opencode", "modelID": model,
-                                         "name": model, "enabled": True, "variants": []}]},
-            )
-
+    monkeypatch.setattr(OpencodeAcpProvider, "_probe_catalog", classmethod(fake_probe))
     config = SimpleNamespace(
         workspace_root=roots[0], state_path=tmp_path / "state.json",
         workspace=lambda name: object() if name == "named" else None,
@@ -174,7 +164,6 @@ def test_opencode_verify_refreshes_models_for_default_and_named_workspaces(tmp_p
         default_model_for_provider=lambda provider: "",
         claude_default_model="",
     )
-    monkeypatch.setattr(mod, "_EphemeralServer", Server)
     monkeypatch.setattr(routes_api, "_provider_config_payload", lambda config: {"connections": {"opencode": {}}})
     monkeypatch.setattr(mod, "opencode_credential_inventory", lambda: {"status": "complete", "providers": []})
     serializer = URLSafeTimedSerializer("test-secret")
@@ -186,7 +175,6 @@ def test_opencode_verify_refreshes_models_for_default_and_named_workspaces(tmp_p
     headers = {"Cookie": f"{SESSION_COOKIE}={serializer.dumps({'user': 'owner'})}",
                "Origin": "http://localhost:8443"}
     urls = ["/api/models", "/api/models?workspace=named"]
-    mod.invalidate_opencode_model_cache()
     try:
         with TestClient(app, base_url="http://localhost:8443", client=("127.0.0.1", 50000)) as client:
             for url, root in zip(urls, roots):
@@ -199,17 +187,15 @@ def test_opencode_verify_refreshes_models_for_default_and_named_workspaces(tmp_p
                 body = client.get(url, headers=headers).json()
                 expected = [f"opencode/{root.name}-new"]
                 assert body["provider_models"]["opencode"] == expected
-                assert body["opencode_models"] == expected
         assert counts == {roots[0]: 2, roots[1]: 2}
     finally:
-        mod.invalidate_opencode_model_cache()
+        acp_invalidate("opencode")
 
 
 @pytest.mark.parametrize("cleanup_fails", [False, True])
 @pytest.mark.parametrize("error_type,classification", [(ValueError, "unexpected"), (TimeoutError, "timeout")])
-@pytest.mark.parametrize("mode", ["catalog", "chat"])
 def test_startup_exception_chain_never_leaks_in_response_or_logs(
-    tmp_path, monkeypatch, caplog, cleanup_fails, error_type, classification, mode
+    tmp_path, monkeypatch, caplog, cleanup_fails, error_type, classification
 ):
     import logging
     import socket
@@ -277,8 +263,8 @@ def test_startup_exception_chain_never_leaks_in_response_or_logs(
     monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
     monkeypatch.setattr(mod.OpencodeProvider, "_await_health", health)
     serializer = URLSafeTimedSerializer("test-secret")
-    app = Starlette(routes=[Route("/api/models", routes_api.list_models),
-                            Route("/api/test-chat-start", chat_start)],
+    # Only the chat start spawns an opencode server now: /api/models reads the ACP probe.
+    app = Starlette(routes=[Route("/api/test-chat-start", chat_start)],
                     middleware=[Middleware(AuthMiddleware, serializer=serializer)])
     app.state.config = SimpleNamespace(workspace_root=tmp_path)
     headers = {"Cookie": f"{SESSION_COOKIE}={serializer.dumps({'user': 'owner'})}"}
@@ -300,7 +286,7 @@ def test_startup_exception_chain_never_leaks_in_response_or_logs(
         for index, expected in enumerate(expected_errors):
             # Uvicorn closes the connection after an unhandled ASGI exception.
             with httpx.Client(base_url=f"http://127.0.0.1:{port}") as client:
-                response = client.get("/api/models" if mode == "catalog" else "/api/test-chat-start", headers=headers)
+                response = client.get("/api/test-chat-start", headers=headers)
             assert response.status_code == 500
             assert b"startup-secret-sentinel" not in response.content
             assert b"cleanup-secret-sentinel" not in response.content

@@ -1546,7 +1546,8 @@ async def test_opencode_verify_invalidates_models_before_probe(monkeypatch, tmp_
     import ciao.providers.opencode as mod
 
     calls = []
-    monkeypatch.setattr(mod, "invalidate_opencode_model_cache", lambda: calls.append("invalidate"))
+    from ciao.providers.acp.agents import OpencodeAcpProvider
+    monkeypatch.setattr(OpencodeAcpProvider, "invalidate_model_catalog", classmethod(lambda cls: calls.append("invalidate")))
     monkeypatch.setattr(mod, "opencode_credential_inventory",
                         lambda: (calls.append("inventory") or {"status": "complete", "providers": []}))
     monkeypatch.setattr(routes_api, "_provider_config_payload",
@@ -2067,7 +2068,7 @@ def _tested_record(running: str) -> dict:
         "ciaobot": running,
         "recorded": "2026-10-20",
         "providers": {
-            "opencode": {"status": "tested", "version": "2.1.0", "package": "@opencode/cli"},
+            "opencode": {"status": "tested", "version": "2.4.0", "package": "@opencode/cli"},
             "claude": {"status": "tested", "version": "2.1.301", "source": "claude-agent-sdk 0.2.168"},
         },
     }
@@ -2105,7 +2106,7 @@ def test_opencode_unsupported_row_keeps_v2_migration_text(monkeypatch) -> None:
     assert row["auth"] == "unsupported_version"
     assert row["detail"] == opencode.OPENCODE_V2_REQUIRED
     assert row["terminal_action"] == "opencode-install"
-    assert row["release_check"] == {"state": "unsupported", "tested": "2.1.0"}
+    assert row["release_check"] == {"state": "unsupported", "tested": "2.4.0"}
 
 
 def test_opencode_ok_row_carries_a_below_tested_release_check(monkeypatch) -> None:
@@ -2115,7 +2116,7 @@ def test_opencode_ok_row_carries_a_below_tested_release_check(monkeypatch) -> No
 
     monkeypatch.setattr(opencode, "resolve_opencode_binary", lambda *a, **k: "/bin/opencode")
     monkeypatch.setattr(
-        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout="opencode v2.0.32\n", returncode=0)
+        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout="opencode v2.3.2\n", returncode=0)
     )
     monkeypatch.setattr(opencode, "_credential_count", lambda *a, **k: 1)
     monkeypatch.setattr(provider_versions, "load_record", lambda: _tested_record(ciao.__version__))
@@ -2124,7 +2125,7 @@ def test_opencode_ok_row_carries_a_below_tested_release_check(monkeypatch) -> No
 
     assert row["release_check"]["state"] == "below_tested"
     assert row["release_check"]["terminal_action"] == "opencode-update"
-    assert row["release_check"]["command"].endswith("upgrade 2.1.0")
+    assert row["release_check"]["command"].endswith("upgrade 2.4.0")
 
 
 def test_clearing_the_discovery_cache_rereads_a_system_cli_version(monkeypatch) -> None:

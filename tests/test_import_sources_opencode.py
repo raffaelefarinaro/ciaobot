@@ -59,7 +59,7 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures" / "import"
 
 #: What a supported install answers. Only the parts the adapter parses matter:
 #: `server_version_error` reads the version out of it.
-SUPPORTED_VERSION = "opencode v2.0.22"
+SUPPORTED_VERSION = "opencode v2.3.2"
 
 #: What a V1 install answers — below the enforced `(2, 0, 16)` floor.
 UNSUPPORTED_VERSION = "opencode v1.9.4"
@@ -474,7 +474,7 @@ def test_an_unsupported_opencode_is_refused_and_never_guessed(
         read_opencode_session("ses_synthetic00000000000000000000000")
 
     assert refused.value.reason == REASON_UNSUPPORTED
-    assert "2.0.16" in str(refused.value)
+    assert "2.3.2" in str(refused.value)
 
 
 # ── The boundary: no CLI, no server, no session ────────────────────────────

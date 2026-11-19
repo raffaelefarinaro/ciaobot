@@ -1128,9 +1128,7 @@ async def provider_connection_action(request: Request) -> JSONResponse:
 
                 await asyncio.to_thread(clear_claude_discovery_cache)
             if provider == "opencode":
-                from ciao.providers.opencode import invalidate_opencode_model_cache
-
-                invalidate_opencode_model_cache()
+                provider_registry.require(provider).factory().invalidate_model_catalog()
                 payload = await asyncio.to_thread(_provider_config_payload_with_inventory, config)
                 return JSONResponse(payload["connections"].get(provider, {}), headers={"Cache-Control": "no-store"})
             payload = await asyncio.to_thread(_provider_config_payload, config)
@@ -6214,40 +6212,13 @@ async def list_models(request: Request) -> JSONResponse:
         workspace_root = config.agent_root(workspace_name)
     else:
         workspace_root = Path(config.workspace_root)
-    # `?refresh=1` bypasses the opencode catalog cache. The catalog is served on
+    # `?refresh=1` bypasses the ACP catalog cache. The catalog is served on
     # demand so a provider connected in another window shows up immediately.
     refresh = str(request.query_params.get("refresh", "")).strip().lower() in {
         "1", "true", "yes", "on",
     }
-    opencode_catalog = await provider_registry.require("opencode").factory().model_catalog(
-        workspace_root, force=refresh
-    )
-    opencode_evidence_models = [
-        {"id": str(item.get("model")), "label": str(item.get("label") or item.get("model"))}
-        for item in opencode_catalog if item.get("model")
-    ]
-    opencode_evidence = {
-        "status": "observed" if opencode_evidence_models else "unknown",
-        "source": "opencode_catalog" if opencode_evidence_models else None,
-        "models": opencode_evidence_models,
-        "reason": None if opencode_evidence_models else "no_models_reported",
-    }
-    opencode_models = [
-        str(item.get("model") or "") for item in opencode_catalog if item.get("model")
-    ]
-    opencode_operator_default = config.default_model_for_provider("opencode")
-    if opencode_operator_default in opencode_models:
-        opencode_default = opencode_operator_default
-    else:
-        opencode_default = opencode_models[0] if opencode_models else ""
-    # Per-model reasoning-effort variants for opencode.
-    opencode_reasoning_levels = {
-        str(item.get("model")): list(item.get("variants") or [])
-        for item in opencode_catalog
-        if item.get("model")
-    }
-    # Every descriptor that runs over ACP reports its own catalog. A probe that raises
-    # leaves that provider with an empty catalog; the exception is logged by type only.
+    # Every descriptor that runs over ACP reports its own catalog, opencode included. A probe
+    # that raises leaves that provider with an empty catalog; the exception is logged by type only.
     acp_descriptors = [item for item in provider_registry.descriptors() if item.acp_spec_path]
     acp_results = await asyncio.gather(
         *(_acp_catalog(item, workspace_root, refresh) for item in acp_descriptors),
@@ -6276,8 +6247,7 @@ async def list_models(request: Request) -> JSONResponse:
             ],
             "reason": None if models else "no_models_reported",
         }
-        # Reasoning levels are keyed by bare model id, as the PWA reads them. A model
-        # id that opencode also reports keeps opencode's levels (see below).
+        # Reasoning levels are keyed by bare model id, as the PWA reads them.
         for row in rows:
             if row.get("model"):
                 acp_levels.setdefault(str(row["model"]), list(row.get("variants") or []))
@@ -6289,19 +6259,12 @@ async def list_models(request: Request) -> JSONResponse:
         or config.default_model_for_provider("claude")
         or config.claude_default_model
     )
+    opencode_models = acp_models.get("opencode", [])
     return JSONResponse({
         "models": list(CLAUDE_MODELS),
         "default": claude_default,
-        # ACP entries come first so an ACP descriptor id that matches a legacy provider
-        # can never replace that provider's entry.
-        "provider_models": {
-            **acp_models,
-            "opencode": opencode_models,
-        },
-        "provider_defaults": {
-            **acp_defaults,
-            "opencode": opencode_default,
-        },
+        "provider_models": acp_models,
+        "provider_defaults": acp_defaults,
         "backends": {
             "anthropic": True,
             "opencode": bool(opencode_models),
@@ -6318,12 +6281,9 @@ async def list_models(request: Request) -> JSONResponse:
             }
             for item in provider_registry.descriptors()
         ],
-        "model_reasoning_levels": {**acp_levels, **opencode_reasoning_levels},
+        "model_reasoning_levels": acp_levels,
         "thinking_levels": {k: list(v) for k, v in THINKING_LEVELS.items()},
-        "provider_catalog_evidence": {
-            **acp_evidence,
-            "opencode": opencode_evidence,
-        },
+        "provider_catalog_evidence": acp_evidence,
     })
 
 

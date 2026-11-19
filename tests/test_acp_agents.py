@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 import sys
 from pathlib import Path
@@ -21,7 +22,14 @@ from acp.exceptions import RequestError
 from ciao import provider_registry, setup_status
 from ciao.claude_trim import claude_settings_layer, trim_tool_denies
 from ciao.config import CiaoConfig, WorkspaceConfig
-from ciao.models import AgentRequest, BridgeMode, ResultEvent, SystemStatusEvent
+from ciao.models import (
+    AgentRequest,
+    AssistantTextDelta,
+    BridgeMode,
+    ResultEvent,
+    SystemStatusEvent,
+    ToolUseEvent,
+)
 from ciao.provider_registry import ProviderDescriptor
 from ciao.provider_service import ProviderService
 from ciao.providers import oneshot
@@ -31,15 +39,18 @@ from ciao.providers.acp.agents import (
     CLAUDE,
     CLAUDE_ONESHOT_OPTIONS,
     CODEX,
+    OPENCODE,
     ClaudeAcpProvider,
     CodexAcpProvider,
+    OpencodeAcpProvider,
     claude_session_options,
 )
 from ciao.providers.acp.connection import AcpConnection
-from ciao.providers.acp.permissions import mode_choices, pick_value
-from ciao.providers.acp.provider import AcpProvider
-from ciao.providers.acp.spec import AgentSpec
-from ciao.providers.base import native_slash_prompt
+from ciao.providers.acp.normalize import UpdateNormalizer
+from ciao.providers.acp.permissions import PermissionBroker, mode_choices, pick_value
+from ciao.providers.acp.provider import AcpProvider, AgentClient
+from ciao.providers.acp.spec import AgentSpec, ModeChoice
+from ciao.providers.base import QuestionResponseResult, native_slash_prompt
 from tests.acp_helpers import read_calls, write_scenario
 
 # The scripted agent that stands in for claude-agent-acp; installed per test.
@@ -709,6 +720,265 @@ async def test_delete_session_counts_a_cli_file_alone(tmp_path: Path, cli_sessio
     assert not cli_session.exists()
 
 
+class _FakeOpencodeConnection:
+    """Stands in for ``opencode acp``: records the cleanup calls and advertises ``delete``."""
+
+    def __init__(self, calls: list[str], *, delete_advertised: bool = True, delete_error=None) -> None:
+        self.calls = calls
+        self.agent_capabilities = {"sessionCapabilities": {"delete": {}}} if delete_advertised else {}
+        self._delete_error = delete_error
+        self.conn = self
+
+    async def delete_session(self, *, session_id: str) -> None:
+        self.calls.append(f"session/delete:{session_id}")
+        if self._delete_error is not None:
+            raise self._delete_error
+
+    async def close(self) -> None:
+        self.calls.append("close")
+
+
+def _fake_opencode_open(monkeypatch: pytest.MonkeyPatch, calls: list[str], connection=None, error=None):
+    async def open_fake(spec, *, cwd, env, client):
+        calls.append(f"open:{spec.id}:{cwd.name}")
+        if error is not None:
+            raise error
+        return connection
+
+    monkeypatch.setattr(agents.AcpConnection, "open", open_fake)
+
+
+@pytest.mark.asyncio
+async def test_opencode_delete_session_asks_the_agent_to_delete_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """opencode keeps the session in its own store: the agent deletes it, not only the journal."""
+    from ciao.providers.acp.session import journal_file
+
+    runtime = tmp_path / "runtime"
+    journal = journal_file(runtime, OPENCODE.id, SESSION)
+    journal.parent.mkdir(parents=True)
+    journal.write_text("{}\n", encoding="utf-8")
+    calls: list[str] = []
+    _fake_opencode_open(monkeypatch, calls, _FakeOpencodeConnection(calls))
+
+    result = await OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=runtime)
+
+    assert result is True
+    assert not journal.exists()
+    assert calls == ["open:opencode:ws", f"session/delete:{SESSION}", "close"]
+
+
+def _write_opencode_journal(runtime: Path) -> Path:
+    from ciao.providers.acp.session import journal_file
+
+    journal = journal_file(runtime, OPENCODE.id, SESSION)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text("{}\n", encoding="utf-8")
+    return journal
+
+
+@pytest.mark.asyncio
+async def test_opencode_delete_session_without_the_capability_only_drops_the_journal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = tmp_path / "rt"
+    journal = _write_opencode_journal(runtime)
+    calls: list[str] = []
+    _fake_opencode_open(monkeypatch, calls, _FakeOpencodeConnection(calls, delete_advertised=False))
+
+    assert await OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=runtime) is True
+    assert not journal.exists()
+    assert calls == ["open:opencode:ws", "close"]
+
+
+@pytest.mark.asyncio
+async def test_opencode_delete_session_refusal_is_quiet_and_still_closes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    runtime = tmp_path / "rt"
+    _write_opencode_journal(runtime)
+    calls: list[str] = []
+    connection = _FakeOpencodeConnection(calls, delete_error=RuntimeError(f"denied {SESSION}"))
+    _fake_opencode_open(monkeypatch, calls, connection)
+
+    with caplog.at_level("WARNING", logger="ciao.providers.acp.agents"):
+        result = await OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=runtime)
+
+    assert result is True  # the journal was removed
+    assert calls[-1] == "close"
+    assert "could not delete a session (RuntimeError)" in caplog.text
+    assert SESSION not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_opencode_delete_session_start_failure_keeps_the_journal_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from ciao.providers.acp.connection import AgentStartError
+    from ciao.providers.acp.session import journal_file
+
+    runtime = tmp_path / "runtime"
+    journal = journal_file(runtime, OPENCODE.id, SESSION)
+    journal.parent.mkdir(parents=True)
+    journal.write_text("{}\n", encoding="utf-8")
+    calls: list[str] = []
+    _fake_opencode_open(monkeypatch, calls, error=AgentStartError("opencode was not found on PATH."))
+
+    with caplog.at_level("WARNING", logger="ciao.providers.acp.agents"):
+        result = await OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=runtime)
+
+    assert result is True  # the journal was removed
+    assert not journal.exists()
+    assert calls == ["open:opencode:ws"]
+    assert "could not start to delete a session" in caplog.text
+
+
+def _opencode_on_fake(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **scenario: object) -> Path:
+    """Point OpenCode's cleanup at the scripted ACP agent; returns the calls-log path."""
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    spec, calls = write_scenario(tmp_path, **scenario)
+    # No version gate: the scripted agent reports no version, and the gate would probe the binary.
+    fake = dataclasses.replace(OPENCODE, binary=spec.binary, args=spec.args, version_gate=None)
+    monkeypatch.setattr(OpencodeAcpProvider, "spec", fake)
+    return calls
+
+
+_DELETE_CAPABLE = {"sessionCapabilities": {"delete": {}}}
+
+
+@pytest.mark.asyncio
+async def test_opencode_delete_session_gives_up_on_a_hung_session_delete(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An agent that never answers session/delete cannot hold the caller: it times out and closes."""
+    from ciao.providers.base import CleanupTimedOut
+
+    monkeypatch.setattr(agents, "_DELETE_TIMEOUT_S", 3.0)
+    runtime = tmp_path / "rt"
+    journal = _write_opencode_journal(runtime)
+    calls = _opencode_on_fake(monkeypatch, tmp_path, initialize=_DELETE_CAPABLE, delete_hang=True)
+    closed: list[bool] = []
+    real_close = agents.AcpConnection.close
+
+    async def recording_close(self) -> None:
+        closed.append(True)
+        await real_close(self)
+
+    monkeypatch.setattr(agents.AcpConnection, "close", recording_close)
+
+    with caplog.at_level("WARNING", logger="ciao.providers.acp.agents"):
+        with pytest.raises(CleanupTimedOut):
+            await asyncio.wait_for(
+                OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=runtime), 20
+            )
+
+    methods = [c["method"] for c in read_calls(calls)]
+    assert "session/delete" in methods
+    assert closed == [True]  # the agent is closed even though its delete was cancelled
+    assert not journal.exists()
+    assert "TimeoutError" in caplog.text
+    assert SESSION not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_opencode_delete_session_gives_up_when_the_agent_never_initializes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from ciao.providers.base import CleanupTimedOut
+
+    monkeypatch.setattr(agents, "_DELETE_TIMEOUT_S", 3.0)
+    runtime = tmp_path / "rt"
+    journal = _write_opencode_journal(runtime)
+    _opencode_on_fake(monkeypatch, tmp_path, initialize_delay_ms=60_000)
+
+    with caplog.at_level("WARNING", logger="ciao.providers.acp.agents"):
+        with pytest.raises(CleanupTimedOut):
+            await asyncio.wait_for(
+                OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=runtime), 20
+            )
+
+    assert not journal.exists()
+    assert "TimeoutError" in caplog.text
+    assert SESSION not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_opencode_absent_session_spawns_nothing_and_warns_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No journal means the chat never reached a prompt, or is already gone: no agent process."""
+
+    async def must_not_spawn(spec, *, cwd, env, client):
+        raise AssertionError("an absent session must not spawn the agent")
+
+    monkeypatch.setattr(agents.AcpConnection, "open", must_not_spawn)
+    with caplog.at_level("DEBUG", logger="ciao.providers.acp.agents"):
+        result = await OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=tmp_path / "rt")
+
+    assert result is None
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+@pytest.mark.asyncio
+async def test_opencode_not_found_session_delete_is_debug_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    runtime = tmp_path / "rt"
+    journal = _write_opencode_journal(runtime)
+    calls = _opencode_on_fake(monkeypatch, tmp_path, initialize=_DELETE_CAPABLE, delete_not_found=True)
+
+    with caplog.at_level("DEBUG", logger="ciao.providers.acp.agents"):
+        result = await OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=runtime)
+
+    assert result is True
+    assert not journal.exists()
+    assert "session/delete" in [c["method"] for c in read_calls(calls)]
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert any(r.levelno == logging.DEBUG and "no such session" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_opencode_other_session_delete_refusal_warns_with_the_type_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    runtime = tmp_path / "rt"
+    _write_opencode_journal(runtime)
+    _opencode_on_fake(monkeypatch, tmp_path, initialize=_DELETE_CAPABLE, delete_error="secret-adapter-text")
+
+    with caplog.at_level("DEBUG", logger="ciao.providers.acp.agents"):
+        result = await OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=runtime)
+
+    assert result is True
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == ["opencode could not delete a session (RequestError)."]
+    assert "secret-adapter-text" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_opencode_below_floor_delete_is_quiet_and_logs_the_gate_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A version-refused install: the gate logs its own warning, the delete adds none."""
+    runtime = tmp_path / "rt"
+    journal = _write_opencode_journal(runtime)
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    spec, calls = write_scenario(tmp_path, agent_info={"name": "opencode", "version": "2.0.16"})
+    monkeypatch.setattr(OpencodeAcpProvider, "spec", dataclasses.replace(OPENCODE, binary=spec.binary, args=spec.args))
+
+    with caplog.at_level("WARNING"):
+        result = await asyncio.wait_for(
+            OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=runtime), 20
+        )
+
+    assert result is True  # the journal went; the refused agent is simply not asked
+    assert not journal.exists()
+    assert "initialize" in [c["method"] for c in read_calls(calls)]
+    assert "session/delete" not in [c["method"] for c in read_calls(calls)]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings == ["opencode agent refused: its version is below the supported floor."]
+
+
 @pytest.mark.asyncio
 async def test_delete_session_warns_without_the_path_when_the_cli_file_cannot_go(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -754,6 +1024,282 @@ def test_codex_auth_command_raises_when_codex_is_missing(monkeypatch: pytest.Mon
     monkeypatch.setattr(agents, "codex_binary", lambda: None)
     with pytest.raises(FileNotFoundError):
         agents.codex_auth_command()
+
+
+# -- opencode over `opencode acp` (#3140, D1) ------------------------------------------
+
+_CHILD = "opencode/session/child_update"
+
+
+def test_opencode_spec_spawns_opencode_acp() -> None:
+    assert (OPENCODE.binary, OPENCODE.args) == ("opencode", ("acp",))
+    assert dict(OPENCODE.client_meta) == {"opencode/child-session-updates": True}
+    descriptor = provider_registry.get("opencode")
+    assert descriptor is not None
+    assert descriptor.acp_spec() is OPENCODE
+    assert descriptor.factory() is OpencodeAcpProvider
+
+
+def test_opencode_mode_table() -> None:
+    assert set(OPENCODE.modes) == {"normal", "plan", "auto", "bypass"}
+    assert mode_choices(OPENCODE, "plan") == (ModeChoice("mode", ("plan",)),)
+    for mode in ("normal", "auto", "bypass"):
+        assert mode_choices(OPENCODE, mode) == (ModeChoice("mode", ("build",)),)
+    assert (OPENCODE.model_config_id, OPENCODE.thought_config_id) == ("model", "effort")
+
+
+def _child_status(child: str, status: Any, *, parent: str = "ses_root", title: str = "Explore") -> dict[str, Any]:
+    return {
+        "rootSessionId": "ses_root", "childSessionId": child, "parentSessionId": parent,
+        "depth": 1, "title": title, "type": "status", "status": status,
+    }
+
+
+def _child_update(child: str, body: dict[str, Any], *, parent: str = "ses_root") -> dict[str, Any]:
+    return {
+        "rootSessionId": "ses_root", "childSessionId": child, "parentSessionId": parent,
+        "depth": 1, "type": "update", "update": body,
+    }
+
+
+_CHILD_FIXTURE = Path(__file__).parent / "fixtures" / "acp" / "opencode_child_updates.jsonl"
+
+
+def _fixture_payloads() -> list[dict[str, Any]]:
+    return [json.loads(line) for line in _CHILD_FIXTURE.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_opencode_child_update_nests_under_child_tool(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    events: list[Any] = []
+    for payload in _fixture_payloads():
+        events.extend(provider.ext_update(normalizer, _CHILD, payload))
+
+    # The fixture's four parent-state updates (usage, model, mode, compaction) are dropped.
+    assert [
+        (event.type, getattr(event, "tool_use_id", None), event.parent_tool_use_id) for event in events
+    ] == [
+        ("tool_use", "child:ses_child", None),
+        ("text", None, "child:ses_child"),
+        ("tool_use", "ses_child:call_1", "child:ses_child"),
+        ("tool_result", "ses_child:call_1", "child:ses_child"),
+        ("tool_result", "child:ses_child", None),
+    ]
+    node = events[0]
+    assert (node.tool_name, node.tool_input) == ("Subagent", "Explore")
+    assert events[1].text == "NESTED"
+    assert events[2].tool_name == "bash"
+    assert events[-1].is_error is False
+    assert normalizer.usage == {}
+    assert normalizer.current_values == {}
+    assert normalizer.compacted is False
+
+
+def test_opencode_grandchild_nests_under_its_child(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    provider.ext_update(normalizer, _CHILD, _child_status("ses_child", "running"))
+    # A grandchild names its parent child, so it nests under that child's node.
+    grand = provider.ext_update(normalizer, _CHILD, {
+        **_child_status("ses_grand", "running", parent="ses_child"), "depth": 2,
+    })
+    assert grand[0].tool_use_id == "child:ses_grand"
+    assert grand[0].parent_tool_use_id == "child:ses_child"
+
+
+def test_opencode_child_failure_is_an_error_result(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    provider.ext_update(normalizer, _CHILD, _child_status("ses_child", "running"))
+    failed = provider.ext_update(normalizer, _CHILD, _child_status("ses_child", "failed"))
+    assert [(event.type, event.is_error) for event in failed] == [("tool_result", True)]
+
+
+_DROPPED_CHILD_UPDATES = [
+    pytest.param({"sessionUpdate": "usage_update", "used": 900, "size": 1000,
+                  "cost": {"amount": "9.99", "currency": "USD"}}, id="usage_update"),
+    pytest.param({"sessionUpdate": "config_option_update", "configOptions": [
+        {"id": "model", "currentValue": "child-model", "options": []}]}, id="config_option_update"),
+    pytest.param({"sessionUpdate": "current_mode_update", "currentModeId": "plan"}, id="current_mode_update"),
+    pytest.param({"sessionUpdate": "compaction_update", "compactionId": "c1", "status": "completed"},
+                 id="compaction_update"),
+    pytest.param({"sessionUpdate": "plan", "entries": []}, id="plan"),
+]
+
+
+@pytest.mark.parametrize("body", _DROPPED_CHILD_UPDATES)
+def test_opencode_child_drops_parent_state_updates(
+    tmp_path: Path, body: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    normalizer.current_values.update({"model": "chat-model", "mode": "build"})
+    provider.ext_update(normalizer, _CHILD, _child_status("ses_child", "running"))
+    caplog.set_level(logging.DEBUG, logger="ciao.providers.acp.agents")
+    for _ in range(2):
+        assert provider.ext_update(normalizer, _CHILD, _child_update("ses_child", body)) == []
+    # The chat's own gauges, model, mode and compaction are untouched by the child.
+    assert normalizer.usage == {}
+    assert normalizer.current_values == {"model": "chat-model", "mode": "build"}
+    assert normalizer.compacted is False
+    # One DEBUG line per kind, however many times it arrives.
+    kind = body["sessionUpdate"]
+    assert [r.getMessage() for r in caplog.records].count(f"dropped child session update kind {kind}") == 1
+
+
+def test_opencode_child_guards_drop_foreign_unknown_and_malformed(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    # A child of another session never reaches this chat.
+    foreign = {**_child_status("ses_child", "running"), "rootSessionId": "ses_other"}
+    assert provider.ext_update(normalizer, _CHILD, foreign) == []
+    # Any other extension notification is ignored.
+    assert provider.ext_update(normalizer, "opencode/other", _child_status("ses_child", "running")) == []
+    # A non-string status is not a terminal status: the child opens and nothing ends it.
+    events = provider.ext_update(normalizer, _CHILD, _child_status("ses_child", ["completed"]))
+    assert [event.type for event in events] == ["tool_use"]
+
+
+def test_opencode_child_title_is_capped_and_stripped_of_control_characters(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    opened = provider.ext_update(normalizer, _CHILD, _child_status("ses_child", "running", title="Ex\x1b[2Jplore\x00" + "x" * 500))
+    title = opened[0].tool_input
+    assert len(title) == 200
+    assert not any(ch in title for ch in "\x00\x1b")
+    assert title.startswith("Ex[2Jplore")
+
+
+@pytest.mark.parametrize("child", ["ses\x00child", "x" * 129, ""])
+def test_opencode_child_with_unusable_id_is_dropped(tmp_path: Path, child: str) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    assert provider.ext_update(normalizer, _CHILD, _child_status(child, "running")) == []
+
+
+def test_opencode_child_id_at_the_length_cap_is_kept(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    child = "c" * 128
+    opened = provider.ext_update(normalizer, _CHILD, _child_status(child, "running"))
+    assert opened[0].tool_use_id == f"child:{child}"
+
+
+_CHILD_LIMIT_LOG = "OpenCode child sessions over 256 live at once are not shown"
+
+
+def test_opencode_child_cap_counts_live_children_and_logs_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    caplog.set_level(logging.DEBUG, logger="ciao.providers.acp.agents")
+    for index in range(256):
+        assert provider.ext_update(normalizer, _CHILD, _child_status(f"ses_{index}", "running"))
+    # The 257th live child has no node, and no event for it is emitted.
+    assert provider.ext_update(normalizer, _CHILD, _child_status("ses_overflow", "running")) == []
+    assert provider.ext_update(normalizer, _CHILD, _child_update("ses_overflow", _TEXT)) == []
+    assert provider.ext_update(normalizer, _CHILD, _child_status("ses_overflow2", "running")) == []
+    # One DEBUG line for the whole overflow, and it names no child id.
+    lines = [r.getMessage() for r in caplog.records if r.name == "ciao.providers.acp.agents"]
+    assert lines == [_CHILD_LIMIT_LOG]
+    # Children already open keep working.
+    assert provider.ext_update(normalizer, _CHILD, _child_status("ses_0", "completed"))[0].type == "tool_result"
+
+
+def test_opencode_finished_children_free_their_slot(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    # 300 children one after another, each finished before the next starts: all of them nest.
+    for index in range(300):
+        child = f"ses_seq_{index}"
+        opened = provider.ext_update(normalizer, _CHILD, _child_status(child, "running"))
+        assert [event.tool_use_id for event in opened] == [f"child:{child}"]
+        nested = provider.ext_update(normalizer, _CHILD, _child_update(child, _TEXT))
+        assert [event.parent_tool_use_id for event in nested] == [f"child:{child}"]
+        ended = provider.ext_update(normalizer, _CHILD, _child_status(child, "completed"))
+        assert [(event.type, event.tool_use_id) for event in ended] == [("tool_result", f"child:{child}")]
+
+
+@pytest.mark.asyncio
+async def test_opencode_children_left_running_do_not_fill_the_next_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+
+    async def turn_with_children_left_running(_self: Any, _request: Any, _register: Any) -> Any:
+        for index in range(256):
+            assert provider.ext_update(normalizer, _CHILD, _child_status(f"ses_run_{index}", "running"))
+        if False:  # pragma: no cover - makes this an async generator with no events
+            yield
+
+    async def turn_with_one_more_child(_self: Any, _request: Any, _register: Any) -> Any:
+        yield provider.ext_update(normalizer, _CHILD, _child_status("ses_next", "running"))[0]
+
+    monkeypatch.setattr(AcpProvider, "run_streaming", turn_with_children_left_running)
+    assert [event async for event in provider.run_streaming(None, lambda _h: None)] == []
+    # The turn ended with 256 children still running: the next turn's child still gets a node.
+    monkeypatch.setattr(AcpProvider, "run_streaming", turn_with_one_more_child)
+    events = [event async for event in provider.run_streaming(None, lambda _h: None)]
+    assert [(event.type, event.tool_use_id) for event in events] == [("tool_use", "child:ses_next")]
+
+
+def test_plain_update_child_meta_names_the_same_node_as_the_ext_path(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    provider.ext_update(normalizer, _CHILD, _child_status("ses_child", "running"))
+    plain = normalizer.feed({
+        **_TEXT,
+        "_meta": {"opencode/child-session": {"id": "ses_child", "parentID": "ses_root", "depth": 1}},
+    })
+    assert [event.parent_tool_use_id for event in plain] == ["child:ses_child"]
+    # Unusable ids are not used as a parent at all.
+    bad = normalizer.feed({**_TEXT, "_meta": {"opencode/child-session": {"id": "ses\x00child"}}})
+    assert [event.parent_tool_use_id for event in bad] == [None]
+
+
+@pytest.mark.asyncio
+async def test_opencode_permission_option_ids_once_always_reject() -> None:
+    options = [
+        {"optionId": "once", "kind": "allow_once", "name": "Once"},
+        {"optionId": "always", "kind": "allow_always", "name": "Always"},
+        {"optionId": "reject", "kind": "reject_once", "name": "Reject"},
+    ]
+    for approved, expected in ((True, "once"), (False, "reject")):
+        broker = PermissionBroker(lambda _event: None)
+        task = asyncio.create_task(broker.request(
+            "ses_root", {"toolCallId": "call-1", "title": "bash"}, options,
+        ))
+        for _ in range(20):
+            if broker.has("call-1"):
+                break
+            await asyncio.sleep(0)
+        assert broker.respond("call-1", approved, session_id="ses_root") == QuestionResponseResult(ok=True)
+        assert await task == {"outcome": "selected", "optionId": expected}
+
+
+class _RecordingSession:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Any]] = []
+
+    def on_ext(self, method: str, payload: Any, hook: Any) -> None:
+        self.calls.append((method, payload))
+
+
+@pytest.mark.asyncio
+async def test_ext_notification_reaches_the_live_session() -> None:
+    client = AgentClient(ext_hook=lambda _n, _m, _p: [])
+    session = _RecordingSession()
+    client.session = session  # type: ignore[assignment]
+    await client.ext_notification(_CHILD, {"rootSessionId": "ses_root"})
+    assert session.calls == [(_CHILD, {"rootSessionId": "ses_root"})]
+    # No hook, no delivery: a client without an extension hook drops the notification.
+    unhooked = AgentClient()
+    unhooked.session = session  # type: ignore[assignment]
+    await unhooked.ext_notification(_CHILD, {"rootSessionId": "ses_root"})
+    assert len(session.calls) == 1
 
 
 def test_claude_acp_provider_has_no_sdk_import_or_native_title_read() -> None:
