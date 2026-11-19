@@ -457,6 +457,87 @@ def opencode_status_probe(
     return opencode_login_status()
 
 
+def codex_status_probe(
+    env: Mapping[str, str],
+    *,
+    timeout: float = 10.0,
+    **_unused: Any,
+) -> dict[str, Any]:
+    """Codex install and login state for Settings.
+
+    Installed means both ``codex`` and ``codex-acp`` resolve. Signed in means ``codex login status``
+    exits 0. Only the exit code is read: the command's output is never stored, returned or logged,
+    so a token it might print cannot reach the PWA.
+    """
+    from ciao.host_terminal import CODEX_INSTALL_COMMAND
+    from ciao.provider_versions import parse_cli_version
+    from ciao.providers.acp.agents import codex_acp_binary, codex_binary
+
+    codex = codex_binary()
+    adapter = codex_acp_binary()
+    if codex is None or adapter is None:
+        return _provider(
+            name="codex",
+            ok=False,
+            auth="not_installed",
+            command=CODEX_INSTALL_COMMAND,
+            detail="Codex and its ACP adapter are not both installed on this machine.",
+            version="not installed",
+            terminal_action="codex-install",
+        )
+    version = "unknown"
+    try:
+        found = subprocess.run(
+            [codex, "--version"],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+        version = parse_cli_version(found.stdout) or "unknown"
+    except (OSError, subprocess.SubprocessError):
+        version = "unknown"
+    try:
+        status = subprocess.run(
+            [codex, "login", "status"],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return _provider(
+            name="codex",
+            ok=False,
+            auth="unknown",
+            command="codex login",
+            detail="codex login status did not answer.",
+            version=version,
+            terminal_action="codex-login",
+        )
+    if status.returncode == 0:
+        return _provider(
+            name="codex",
+            ok=True,
+            auth="signed_in",
+            command="codex login",
+            detail="Signed in to Codex.",
+            version=version,
+        )
+    return _provider(
+        name="codex",
+        ok=False,
+        auth="logged_out",
+        command="codex login",
+        detail="Codex is installed but not signed in. Run the sign-in command in a terminal.",
+        version=version,
+        terminal_action="codex-login",
+    )
+
+
 # Where the wizard sends someone who has no Claude Code at all. Kept as a
 # constant so the PWA and the CLI point at the same page.
 CLAUDE_INSTALL_DOCS_URL = (

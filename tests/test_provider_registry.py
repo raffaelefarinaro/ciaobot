@@ -81,3 +81,13 @@ def test_default_model_settings_attr_exists_on_the_real_config(descriptor):
 
     names = {field.name for field in fields(CiaoConfig)}
     assert descriptor.default_model_settings_attr in names
+
+
+def test_codex_descriptor_resolves_spec_and_factory() -> None:
+    descriptor = provider_registry.require("codex")
+    spec = descriptor.acp_spec()
+    assert spec is not None and spec.id == "codex"
+    assert descriptor.factory().spec is spec
+    assert descriptor.label == "OpenAI (via Codex)"
+    assert descriptor.short_label == "Codex"
+    assert descriptor.thinking_levels == ("minimal", "low", "medium", "high", "xhigh")
