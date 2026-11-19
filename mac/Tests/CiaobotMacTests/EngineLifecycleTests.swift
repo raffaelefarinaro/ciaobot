@@ -913,6 +913,42 @@ final class EngineLifecycleTests: XCTestCase {
         XCTAssertEqual(replies, [true])
     }
 
+    /// An update quit gives the engine the full 35 s grace, not the 20 s system
+    /// grace: nothing is killed at 25 s, and the SIGKILL comes at 35 s.
+    func testAnUpdateInstallQuitGivesTheEngineTheFullGrace() throws {
+        let supervisor = makeSupervisor()
+        let pid = try bringUp(supervisor)
+        let updateQuit = UpdateQuitIntent()
+        let delegate = makeDelegate(mode: .local, supervisor: supervisor, updateQuit: updateQuit, launched: true)
+
+        updateQuit.beginInstall()
+        XCTAssertEqual(shouldTerminate(delegate), .terminateLater)
+        time.advance(25)
+        XCTAssertEqual(processes.killed, [], "an update quit is not cut short at the 20 s system grace")
+        time.advance(10)
+        XCTAssertEqual(processes.killed, [pid], "the grace ends at 35 s")
+    }
+
+    /// The supervisor reads as the update gate expects: only a running engine
+    /// has a port, a starting or stopping one is transitioning, and anything
+    /// this app does not own is external.
+    func testTheUpdateGateReadsTheSupervisorAsExternalRunningOrTransitioning() throws {
+        let supervisor = makeSupervisor()
+        XCTAssertEqual(supervisor.updateLocalState, .external)
+
+        supervisor.start()
+        XCTAssertEqual(supervisor.updateLocalState, .transitioning, "a starting engine is not idle")
+
+        let pid = processes.nextPID
+        try writeReady(pid: pid)
+        identity.answer = EngineIdentity(pid: pid, startupID: "abc123")
+        time.advance(0.5)
+        XCTAssertEqual(supervisor.updateLocalState, .running(port: 8777))
+
+        supervisor.stop(grace: 35) {}
+        XCTAssertEqual(supervisor.updateLocalState, .transitioning, "a stopping engine is not idle")
+    }
+
     /// Without the update flag the same running engine asks (control for the test above).
     func testWithoutTheUpdateFlagTheSameQuitAsks() throws {
         let supervisor = makeSupervisor()
@@ -932,7 +968,7 @@ final class EngineLifecycleTests: XCTestCase {
         let delegate = ClientUpdateInstallDelegate(
             makeGate: { owner in
                 UpdateInstallGate(
-                    localPort: { nil },
+                    localState: { .external },
                     drainer: ScriptedEngineDrainer(),
                     owner: owner,
                     willInstall: { updateQuit.beginInstall() },

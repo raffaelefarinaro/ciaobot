@@ -168,7 +168,7 @@ final class ClientUpdaterTests: XCTestCase {
     /// must be inert on its own, without a test double, so even a launch path
     /// that created it would never start Sparkle.
     func testTheShippedUpdaterIsInertInsideATestProcess() {
-        let updater = ClientUpdater()
+        let updater = ClientUpdater(localState: { .external })
 
         updater.start()
 
@@ -188,7 +188,7 @@ final class ClientUpdaterTests: XCTestCase {
     // MARK: - Immediate install
 
     func testInstallDelegateImplementsTheSparkleImmediateInstallContract() {
-        let delegate = ClientUpdateInstallDelegate()
+        let delegate = makeInstallDelegate(drainer: ScriptedEngineDrainer())
         XCTAssertTrue(
             delegate.responds(to: ClientUpdateInstallDelegate.immediateInstallSelector),
             "The Swift signature must map to Sparkle 2.10.1's updater:willInstallUpdateOnQuit:immediateInstallationBlock:, or Sparkle will silently wait for quit."
@@ -202,11 +202,106 @@ final class ClientUpdaterTests: XCTestCase {
     /// relaunch raises the update reason and needs no drain.
     func testSparkleRelaunchRaisesTheUpdateReason() {
         let updateQuit = UpdateQuitIntent()
-        let delegate = ClientUpdateInstallDelegate(updateQuit: updateQuit)
+        let delegate = makeInstallDelegate(drainer: ScriptedEngineDrainer(), updateQuit: updateQuit)
 
         XCTAssertFalse(updateQuit.installing)
         delegate.relaunchWillStart()
         XCTAssertTrue(updateQuit.installing)
+    }
+
+    // MARK: - Install gate ownership
+
+    /// Owner A holds a drain. Taking control for owner B first aborts A's gate,
+    /// so A's cancel is sent under A's owner before B's first drain.
+    func testAnOwnerChangeCancelsTheHeldDrainBeforeTheNewOwnerDrains() async {
+        let drainer = ScriptedEngineDrainer()
+        drainer.fallback = .success(DrainReading(activeChats: 1, scheduleWork: 0))
+        let delegate = makeInstallDelegate(drainer: drainer)
+
+        XCTAssertTrue(delegate.takeControl(owner: "sparkle-1.0.0") {})
+        await settleMainActor()
+        XCTAssertTrue(delegate.takeControl(owner: "sparkle-2.0.0") {})
+        await settleMainActor()
+
+        XCTAssertEqual(
+            drainer.calls,
+            ["drain sparkle-1.0.0", "cancel sparkle-1.0.0", "drain sparkle-2.0.0"],
+            "The old owner's cancel is issued before the new owner's drain."
+        )
+    }
+
+    /// While an install is already scheduled, another owner is refused and the
+    /// first install is left to run: Sparkle keeps the second update.
+    func testAnotherOwnerIsRefusedWhileAnInstallIsScheduled() {
+        let drainer = ScriptedEngineDrainer()
+        let delegate = makeInstallDelegate(drainer: drainer, state: .external)
+
+        XCTAssertTrue(delegate.takeControl(owner: "sparkle-1.0.0") {})
+        XCTAssertFalse(delegate.takeControl(owner: "sparkle-2.0.0") {}, "A scheduled install is not replaced by another owner.")
+        XCTAssertEqual(drainer.calls, [])
+    }
+
+    // MARK: - Abort handling
+
+    /// Only an install-phase Sparkle error releases the held drain. A background
+    /// check's "no update", a download error, or an authorize-later notice does not.
+    func testOnlyAnInstallPhaseErrorReleasesTheHeldDrain() async {
+        let drainer = ScriptedEngineDrainer()
+        drainer.fallback = .success(DrainReading(activeChats: 1, scheduleWork: 0))
+        let delegate = makeInstallDelegate(drainer: drainer)
+        XCTAssertTrue(delegate.takeControl(owner: "sparkle-1.2.3") {})
+        await settleMainActor()
+
+        delegate.installDidAbort(sparkleError(1001))   // SUNoUpdateError from a background check
+        delegate.installDidAbort(sparkleError(2001))   // SUDownloadError
+        delegate.installDidAbort(sparkleError(4008))   // SUInstallationAuthorizeLaterError
+        await settleMainActor()
+        XCTAssertEqual(drainer.cancels.count, 0, "Non-install errors leave the held drain alone.")
+
+        delegate.installDidAbort(sparkleError(4005))   // SUInstallationError
+        await settleMainActor()
+        XCTAssertEqual(drainer.cancels.map(\.owner), ["sparkle-1.2.3"])
+    }
+
+    /// An abandoned install ends the update quit reason, so a later quit asks
+    /// as a user quit again.
+    func testAnAbandonedInstallEndsTheUpdateQuitReason() {
+        let updateQuit = UpdateQuitIntent()
+        let delegate = makeInstallDelegate(drainer: ScriptedEngineDrainer(), state: .external, updateQuit: updateQuit)
+        updateQuit.beginInstall()
+        XCTAssertEqual(EngineLifecycle.quitReason(nil, updateInstall: updateQuit.installing), .update)
+
+        delegate.installDidAbort(sparkleError(4005))
+
+        XCTAssertEqual(EngineLifecycle.quitReason(nil, updateInstall: updateQuit.installing), .user)
+    }
+
+    private func sparkleError(_ code: Int) -> NSError {
+        NSError(domain: SUSparkleErrorDomain, code: code)
+    }
+
+    /// The delegate under test, with its gates reading a fixed engine state and
+    /// draining through `drainer`. Scheduled work is dropped, so a test drives
+    /// only the calls it makes.
+    private func makeInstallDelegate(
+        drainer: EngineDraining,
+        state: LocalEngineState = .running(port: 8777),
+        updateQuit: UpdateQuitIntent? = nil
+    ) -> ClientUpdateInstallDelegate {
+        let updateQuit = updateQuit ?? UpdateQuitIntent()
+        return ClientUpdateInstallDelegate(
+            makeGate: { owner in
+                UpdateInstallGate(
+                    localState: { state },
+                    drainer: drainer,
+                    owner: owner,
+                    willInstall: { updateQuit.beginInstall() },
+                    schedule: { _, _ in },
+                    clock: { 0 }
+                )
+            },
+            updateQuit: updateQuit
+        )
     }
 
     // MARK: - Configuration

@@ -231,14 +231,18 @@ final class RestartBlockersProbe: NSObject, URLSessionDataDelegate, RestartBlock
 
 /// Set while Sparkle's immediate install is terminating the app to replace
 /// the bundle. The install handler raises it just before it runs, so the
-/// terminate that follows reads as a system quit: no dialog stands in front of
-/// an update the user already chose, and the engine still drains with the
-/// system grace. One instance is shared by the updater and the app delegate.
+/// terminate that follows reads as an update quit (`QuitReason.update`): no
+/// dialog stands in front of an update the user already chose, and the engine
+/// still drains with the full quit grace. It is cleared when Sparkle abandons
+/// the install, so a later quit is a user quit again. One instance is shared by
+/// the updater and the app delegate.
 @MainActor
 final class UpdateQuitIntent {
     private(set) var installing = false
 
     func beginInstall() { installing = true }
+
+    func endInstall() { installing = false }
 }
 
 /// Closes the main window of a login launch once SwiftUI has created it.

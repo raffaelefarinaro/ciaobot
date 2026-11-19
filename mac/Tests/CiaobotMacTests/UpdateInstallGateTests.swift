@@ -8,34 +8,76 @@ import XCTest
 final class ScriptedEngineDrainer: EngineDraining {
     var script: [Result<DrainReading, DrainRefusal>] = []
     var fallback: Result<DrainReading, DrainRefusal> = .success(DrainReading(activeChats: 1, scheduleWork: 0))
+    /// Cancel answers in order; once empty, every cancel is confirmed.
+    var cancelResults: [Bool] = []
+    /// Runs inside each drain call before it answers. A test spends clock time here.
+    var onDrain: (() -> Void)?
     private(set) var drains: [(port: Int, owner: String)] = []
     private(set) var cancels: [(port: Int, owner: String)] = []
+    /// Every call in order, as `drain <owner>` or `cancel <owner>`.
+    private(set) var calls: [String] = []
 
     func drain(port: Int, owner: String) async -> Result<DrainReading, DrainRefusal> {
         drains.append((port, owner))
+        calls.append("drain \(owner)")
+        onDrain?()
         return script.isEmpty ? fallback : script.removeFirst()
     }
 
-    func cancel(port: Int, owner: String) async {
+    func cancel(port: Int, owner: String) async -> Bool {
         cancels.append((port, owner))
+        calls.append("cancel \(owner)")
+        return cancelResults.isEmpty ? true : cancelResults.removeFirst()
     }
 }
 
+/// A drainer whose drain answers only when the test says so, so a reply can
+/// arrive after its attempt has ended.
+@MainActor
+private final class HeldEngineDrainer: EngineDraining {
+    private(set) var cancels: [(port: Int, owner: String)] = []
+    private var pending: [CheckedContinuation<Result<DrainReading, DrainRefusal>, Never>] = []
+
+    var inFlight: Int { pending.count }
+
+    func drain(port: Int, owner: String) async -> Result<DrainReading, DrainRefusal> {
+        await withCheckedContinuation { pending.append($0) }
+    }
+
+    func answerOldest(_ result: Result<DrainReading, DrainRefusal>) {
+        pending.removeFirst().resume(returning: result)
+    }
+
+    func cancel(port: Int, owner: String) async -> Bool {
+        cancels.append((port, owner))
+        return true
+    }
+}
+
+/// Lets queued main-actor work, such as a drain reply, run to completion.
+@MainActor
+func settleMainActor() async {
+    for _ in 0..<20 { await Task.yield() }
+}
+
 /// A gate wired to fakes. Scheduled work is held, not run, so each test decides
-/// when the next poll, retry or install happens.
+/// when the next poll, retry or install happens. Firing work advances the fake
+/// clock by its delay, as time would pass.
 @MainActor
 private final class GateHarness {
     static let port = 8777
-    var port: Int? = GateHarness.port
+    var state: LocalEngineState = .running(port: GateHarness.port)
+    var now: TimeInterval = 0
     let drainer = ScriptedEngineDrainer()
     private(set) var events: [String] = []
     private(set) var scheduled: [(delay: TimeInterval, work: () -> Void)] = []
     private(set) lazy var gate = UpdateInstallGate(
-        localPort: { [unowned self] in self.port },
+        localState: { [unowned self] in self.state },
         drainer: drainer,
         owner: "sparkle-1.2.3",
         willInstall: { [unowned self] in self.events.append("willInstall") },
-        schedule: { [unowned self] delay, work in self.scheduled.append((delay, work)) }
+        schedule: { [unowned self] delay, work in self.scheduled.append((delay, work)) },
+        clock: { [unowned self] in self.now }
     )
 
     var installs: Int { events.filter { $0 == "install" }.count }
@@ -49,15 +91,15 @@ private final class GateHarness {
         events.append(event)
     }
 
-    /// Lets queued main-actor work, such as a drain reply, run to completion.
     func settle() async {
-        for _ in 0..<20 { await Task.yield() }
+        await settleMainActor()
     }
 
     /// Runs the earliest held work, then lets its consequences settle.
     func fireNext() async {
         guard !scheduled.isEmpty else { return }
         let next = scheduled.removeFirst()
+        now += next.delay
         next.work()
         await settle()
     }
@@ -72,7 +114,7 @@ final class UpdateInstallGateTests: XCTestCase {
     /// and nothing is drained.
     func testWithoutALocalEngineTheInstallRunsOnTheNextTurnWithoutDraining() async {
         let harness = GateHarness()
-        harness.port = nil
+        harness.state = .external
 
         XCTAssertTrue(harness.take(), "Returning true stops Sparkle waiting for a quit.")
         await harness.settle()
@@ -120,8 +162,9 @@ final class UpdateInstallGateTests: XCTestCase {
         XCTAssertEqual(harness.installs, 0, "Six readings with no schedule count still never install.")
     }
 
-    /// A drain that never settles is cancelled with the same owner after 600 s
-    /// (120 five-second readings), and the whole gate retries after 1800 s.
+    /// A drain that never settles is cancelled with the same owner once the
+    /// clock reaches 600 s, and the whole gate retries after 1800 s. Readings
+    /// are five seconds apart, so the reading at 600 s is the 121st.
     func testADrainThatNeverSettlesCancelsWithTheSameOwnerAndRetries() async {
         let harness = GateHarness()
         harness.drainer.fallback = busy
@@ -134,7 +177,7 @@ final class UpdateInstallGateTests: XCTestCase {
             guardCount += 1
         }
 
-        XCTAssertEqual(harness.drainer.drains.count, 120)
+        XCTAssertEqual(harness.drainer.drains.count, 121)
         XCTAssertEqual(harness.drainer.cancels.count, 1)
         XCTAssertEqual(harness.drainer.cancels.first?.owner, "sparkle-1.2.3", "The cancel names the drain's owner.")
         XCTAssertEqual(harness.drainer.cancels.first?.port, GateHarness.port)
@@ -142,8 +185,29 @@ final class UpdateInstallGateTests: XCTestCase {
         XCTAssertEqual(harness.installs, 0)
 
         await harness.fireNext()
-        XCTAssertEqual(harness.drainer.drains.count, 121, "The retry starts a new drain.")
+        XCTAssertEqual(harness.drainer.drains.count, 122, "The retry starts a new drain.")
         XCTAssertEqual(harness.installs, 0)
+    }
+
+    /// The drain timeout is counted on the clock, not in poll intervals. Each
+    /// drain here takes 25 s on top of the 5 s poll, so 600 s is reached after
+    /// 21 readings rather than 121.
+    func testTheDrainTimeoutIsCountedOnTheClock() async {
+        let harness = GateHarness()
+        harness.drainer.fallback = busy
+        harness.drainer.onDrain = { [unowned harness] in harness.now += 25 }
+
+        XCTAssertTrue(harness.take())
+        await harness.settle()
+        var guardCount = 0
+        while harness.lastDelay != UpdateInstallGate.retryAfter, guardCount < 500 {
+            await harness.fireNext()
+            guardCount += 1
+        }
+
+        XCTAssertEqual(harness.drainer.drains.count, 21)
+        XCTAssertEqual(harness.drainer.cancels.count, 1)
+        XCTAssertEqual(harness.lastDelay, 1800)
     }
 
     func testABusyRefusalCancelsAndRetriesWithoutInstalling() async {
@@ -175,6 +239,27 @@ final class UpdateInstallGateTests: XCTestCase {
         XCTAssertEqual(harness.installs, 0)
     }
 
+    /// An unreachable reading breaks the idle streak: idle, idle, unreachable,
+    /// idle, idle is not an install. One more idle reading is.
+    func testAnUnreachableReadingResetsTheIdleStreak() async {
+        let harness = GateHarness()
+        harness.drainer.script = [idle, idle, .failure(.unreachable), idle, idle]
+        harness.drainer.fallback = idle
+
+        XCTAssertTrue(harness.take())
+        await harness.settle()
+        for _ in 0..<4 { await harness.fireNext() }
+
+        XCTAssertEqual(harness.drainer.drains.count, 5)
+        XCTAssertEqual(harness.installs, 0, "Two idle readings after the failure are not three.")
+        XCTAssertEqual(harness.lastDelay, UpdateInstallGate.pollInterval, "The gate keeps polling.")
+
+        await harness.fireNext()
+        XCTAssertEqual(harness.lastDelay, 0, "The third idle reading after the failure schedules the install.")
+        await harness.fireNext()
+        XCTAssertEqual(harness.events, ["willInstall", "install"])
+    }
+
     /// Sparkle giving up cancels a drain the gate holds and stops the gate: a
     /// poll scheduled before the abort reads nothing.
     func testInstallAbortedCancelsAHeldDrainAndStopsTheGate() async {
@@ -193,17 +278,169 @@ final class UpdateInstallGateTests: XCTestCase {
         XCTAssertEqual(harness.events, [])
     }
 
+    /// A drain reply that lands after an abort may have reopened admission
+    /// under the abort's cancel, so it cancels again. It never installs.
+    func testAStaleDrainReplyAfterAnAbortCancelsAgain() async {
+        let drainer = HeldEngineDrainer()
+        let gate = UpdateInstallGate(
+            localState: { .running(port: 8777) },
+            drainer: drainer,
+            owner: "sparkle-1.2.3",
+            willInstall: {},
+            schedule: { _, _ in },
+            clock: { 0 }
+        )
+
+        XCTAssertTrue(gate.takeControl {})
+        await settleMainActor()
+        XCTAssertEqual(drainer.inFlight, 1, "The first drain is still in flight.")
+
+        gate.installAborted()
+        await settleMainActor()
+        XCTAssertEqual(drainer.cancels.count, 1)
+
+        drainer.answerOldest(.success(DrainReading(activeChats: 0, scheduleWork: 0)))
+        await settleMainActor()
+        XCTAssertEqual(drainer.cancels.map(\.owner), ["sparkle-1.2.3", "sparkle-1.2.3"], "The stale reply cancels again.")
+        XCTAssertEqual(drainer.inFlight, 0, "The stale reply schedules no further poll.")
+    }
+
+    /// An abort during the 30-minute retry wait stops the timer: the retry
+    /// closure finds the attempt ended and never reads the engine again.
+    func testAnAbortDuringTheRetryWaitStopsTheTimer() async {
+        let harness = GateHarness()
+        harness.drainer.fallback = .failure(.busyRestart)
+
+        XCTAssertTrue(harness.take())
+        await harness.settle()
+        XCTAssertEqual(harness.lastDelay, 1800)
+
+        harness.gate.installAborted()
+        await harness.settle()
+        XCTAssertEqual(harness.drainer.cancels.count, 1, "The retry already cancelled the drain; the abort holds none.")
+
+        await harness.fireNext()
+        XCTAssertEqual(harness.drainer.drains.count, 1, "The retry wait ended with the abort.")
+        XCTAssertEqual(harness.events, [])
+    }
+
+    /// A cancel the engine does not confirm is sent again five seconds later,
+    /// keyed by the same owner, and stops once it is confirmed.
+    func testACancelThatFailsOnceIsRetried() async {
+        let harness = GateHarness()
+        harness.drainer.fallback = busy
+        harness.drainer.cancelResults = [false]
+
+        XCTAssertTrue(harness.take())
+        await harness.settle()
+        harness.gate.installAborted()
+        await harness.settle()
+        XCTAssertEqual(harness.drainer.cancels.count, 1)
+        XCTAssertEqual(harness.lastDelay, UpdateInstallGate.cancelRetryInterval, "The failed cancel is scheduled again in five seconds.")
+
+        await harness.fireNext()
+        await harness.fireNext()
+        XCTAssertEqual(harness.drainer.cancels.count, 2)
+        XCTAssertEqual(harness.drainer.cancels.map(\.owner), ["sparkle-1.2.3", "sparkle-1.2.3"])
+        XCTAssertTrue(harness.scheduled.isEmpty, "A confirmed cancel is not sent again.")
+    }
+
+    /// A cancel that is never confirmed is sent three times in all, then logged.
+    func testACancelNeverConfirmedIsSentThreeTimesInAll() async {
+        let harness = GateHarness()
+        harness.drainer.fallback = busy
+        harness.drainer.cancelResults = [false, false, false]
+
+        XCTAssertTrue(harness.take())
+        await harness.settle()
+        harness.gate.installAborted()
+        await harness.settle()
+        for _ in 0..<3 { await harness.fireNext() }
+
+        XCTAssertEqual(harness.drainer.cancels.count, 3)
+        XCTAssertTrue(harness.scheduled.isEmpty, "After the third attempt nothing else is scheduled.")
+    }
+
     /// A second handler replaces the first and keeps the one gate: only one
     /// install is scheduled, and it runs the second handler.
     func testASecondTakeControlReplacesTheHandlerAndKeepsTheGate() async {
         let harness = GateHarness()
-        harness.port = nil
+        harness.state = .external
         XCTAssertTrue(harness.gate.takeControl { harness.record("first") })
         XCTAssertTrue(harness.gate.takeControl { harness.record("second") })
         XCTAssertEqual(harness.scheduled.count, 1)
 
         await harness.fireNext()
         XCTAssertEqual(harness.events, ["willInstall", "second"])
+    }
+
+    /// A starting or stopping engine is never idle and never drained. The gate
+    /// waits, and installs only after three idle readings once it is running.
+    func testATransitioningEngineIsNeverIdle() async {
+        let harness = GateHarness()
+        harness.state = .transitioning
+        harness.drainer.fallback = idle
+
+        XCTAssertTrue(harness.take())
+        await harness.settle()
+        for _ in 0..<5 { await harness.fireNext() }
+        XCTAssertEqual(harness.drainer.drains.count, 0, "A starting or stopping engine is not read.")
+        XCTAssertEqual(harness.installs, 0)
+
+        harness.state = .running(port: GateHarness.port)
+        for _ in 0..<3 { await harness.fireNext() }
+        XCTAssertEqual(harness.drainer.drains.count, 3)
+        XCTAssertEqual(harness.lastDelay, 0, "Three idle readings after it runs schedule the install.")
+        XCTAssertEqual(harness.installs, 0)
+
+        await harness.fireNext()
+        XCTAssertEqual(harness.events, ["willInstall", "install"])
+    }
+
+    /// The idle streak is per port. An engine that moves to another port starts
+    /// its count again, so two idle readings on each port never install.
+    func testAPortChangeRestartsTheIdleStreak() async {
+        let harness = GateHarness()
+        harness.state = .running(port: 8001)
+        harness.drainer.fallback = idle
+
+        XCTAssertTrue(harness.take())
+        await harness.settle()
+        await harness.fireNext()
+        XCTAssertEqual(harness.drainer.drains.count, 2)
+
+        harness.state = .running(port: 8002)
+        await harness.fireNext()
+        await harness.fireNext()
+        XCTAssertEqual(harness.drainer.drains.count, 4)
+        XCTAssertEqual(harness.installs, 0, "Two idle readings on the new port are not three in a row.")
+
+        await harness.fireNext()
+        XCTAssertEqual(harness.lastDelay, 0, "Three idle readings on the new port install.")
+    }
+
+    /// The install turn reads the engine again. A change since the deciding
+    /// reading starts the gate over instead of installing.
+    func testTheInstallTurnRestartsTheGateWhenTheEngineChanged() async {
+        let harness = GateHarness()
+        harness.drainer.fallback = idle
+
+        XCTAssertTrue(harness.take())
+        await harness.settle()
+        await harness.fireNext()
+        await harness.fireNext()
+        XCTAssertEqual(harness.lastDelay, 0, "Three idle readings schedule the install.")
+
+        harness.state = .transitioning
+        await harness.fireNext()
+        XCTAssertEqual(harness.installs, 0, "The engine changed before the install turn, so nothing installs.")
+        XCTAssertEqual(harness.lastDelay, UpdateInstallGate.pollInterval, "The gate polls again from a fresh streak.")
+
+        harness.state = .running(port: GateHarness.port)
+        for _ in 0..<3 { await harness.fireNext() }
+        XCTAssertEqual(harness.lastDelay, 0)
+        await harness.fireNext()
+        XCTAssertEqual(harness.events, ["willInstall", "install"])
     }
 }
 
@@ -230,6 +467,7 @@ final class EngineDrainClientTests: XCTestCase {
         XCTAssertEqual(result, .success(DrainReading(activeChats: 1, scheduleWork: 0)))
         let request = try XCTUnwrap(StubDrainProtocol.requests.first)
         XCTAssertEqual(request.httpMethod, "POST")
+        // The host is loopback by design: the drain routes exist only there.
         XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:8777/api/admin/drain")
         let owner = try StubDrainProtocol.owner(of: request)
         XCTAssertEqual(owner, "sparkle-1.2.3")
@@ -240,12 +478,28 @@ final class EngineDrainClientTests: XCTestCase {
     func testCancelPostsTheSameOwnerToTheCancelRoute() async throws {
         StubDrainProtocol.answer = (200, Data(#"{"draining":false}"#.utf8))
 
-        await makeClient().cancel(port: 8777, owner: "sparkle-1.2.3")
+        let confirmed = await makeClient().cancel(port: 8777, owner: "sparkle-1.2.3")
 
+        XCTAssertTrue(confirmed)
         let request = try XCTUnwrap(StubDrainProtocol.requests.first)
         XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:8777/api/admin/drain/cancel")
         let owner = try StubDrainProtocol.owner(of: request)
         XCTAssertEqual(owner, "sparkle-1.2.3")
+    }
+
+    /// A cancel is confirmed only by a 2xx answer that says the drain is closed.
+    func testACancelIsConfirmedOnlyByAnOpenAdmissionAnswer() async {
+        StubDrainProtocol.answer = (200, Data(#"{"draining":true}"#.utf8))
+        let stillDraining = await makeClient().cancel(port: 8777, owner: "sparkle-1.2.3")
+        XCTAssertFalse(stillDraining, "A cancel that leaves the drain on is not confirmed.")
+
+        StubDrainProtocol.answer = (409, Data(#"{"error":"drain owned by another operation"}"#.utf8))
+        let refused = await makeClient().cancel(port: 8777, owner: "sparkle-1.2.3")
+        XCTAssertFalse(refused)
+
+        StubDrainProtocol.fails = true
+        let unreachable = await makeClient().cancel(port: 8777, owner: "sparkle-1.2.3")
+        XCTAssertFalse(unreachable)
     }
 
     func testAConflictIsABusyRestartAndOtherFailuresAreUnreachable() async {
@@ -266,6 +520,29 @@ final class EngineDrainClientTests: XCTestCase {
         XCTAssertEqual(refused, .failure(.unreachable))
     }
 
+    /// A redirect is never followed: the answer must come from the engine that
+    /// was asked, so the 3xx is no reading.
+    func testARedirectIsRefusedNotFollowed() async {
+        StubDrainProtocol.answer = (302, Data())
+        StubDrainProtocol.location = "http://127.0.0.1:9999/elsewhere"
+
+        let result = await makeClient().drain(port: 8777, owner: "sparkle-1.2.3")
+
+        XCTAssertEqual(result, .failure(.unreachable))
+        XCTAssertEqual(StubDrainProtocol.requests.count, 1, "The redirect target is never requested.")
+    }
+
+    /// An answer over the shared 64 KiB cap is no reading, even when it is valid
+    /// JSON with the right fields.
+    func testAnAnswerOverTheResponseCapIsUnreachable() async {
+        let padding = String(repeating: "x", count: RestartBlockersProbe.maximumResponseBytes)
+        StubDrainProtocol.answer = (200, Data(#"{"draining":true,"active_chat_ids":[],"pad":"\#(padding)"}"#.utf8))
+
+        let result = await makeClient().drain(port: 8777, owner: "sparkle-1.2.3")
+
+        XCTAssertEqual(result, .failure(.unreachable))
+    }
+
     func testAScheduleCountMustBeAWholeNumberToCountAsReported() {
         XCTAssertEqual(
             EngineDrainClient.reading(from: Data(#"{"active_chat_ids":[],"schedule_work_count":2}"#.utf8)),
@@ -282,17 +559,33 @@ final class EngineDrainClientTests: XCTestCase {
         )
         XCTAssertNil(EngineDrainClient.reading(from: Data(#"{"draining":true}"#.utf8)))
     }
+
+    /// The production session is session-free with five-second bounds. Each
+    /// value is pinned so a longer timeout or a restored cookie jar fails here.
+    func testTheProductionConfigurationIsSessionFreeWithFiveSecondBounds() {
+        let configuration = EngineDrainClient.makeConfiguration()
+
+        XCTAssertEqual(configuration.timeoutIntervalForRequest, 5)
+        XCTAssertEqual(configuration.timeoutIntervalForResource, 5)
+        XCTAssertFalse(configuration.httpShouldSetCookies)
+        XCTAssertEqual(configuration.httpCookieAcceptPolicy, .never)
+        XCTAssertNil(configuration.httpCookieStorage)
+        XCTAssertNil(configuration.urlCredentialStorage)
+        XCTAssertNil(configuration.urlCache)
+    }
 }
 
 /// Answers every request with one canned status and body, and records the request.
 private final class StubDrainProtocol: URLProtocol {
     static var answer: (Int, Data) = (200, Data())
     static var fails = false
+    static var location: String?
     static var requests: [URLRequest] = []
 
     static func reset() {
         answer = (200, Data())
         fails = false
+        location = nil
         requests = []
     }
 
@@ -324,12 +617,18 @@ private final class StubDrainProtocol: URLProtocol {
             return
         }
         let (status, data) = Self.answer
-        let response = HTTPURLResponse(
-            url: request.url ?? URL(fileURLWithPath: "/"),
-            statusCode: status,
-            httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": "application/json"]
-        )!
+        let url = request.url ?? URL(fileURLWithPath: "/")
+        var headers = ["Content-Type": "application/json"]
+        if let location = Self.location { headers["Location"] = location }
+        let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!
+        if (300...399).contains(status), let location = Self.location, let target = URL(string: location) {
+            // A redirect is reported the way a protocol reports one, so the
+            // session's own redirect handling runs and asks the task's delegate.
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, wasRedirectedTo: URLRequest(url: target), redirectResponse: response)
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
         client?.urlProtocolDidFinishLoading(self)

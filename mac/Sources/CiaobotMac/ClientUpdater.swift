@@ -36,23 +36,32 @@ final class ClientUpdateInstallDelegate: NSObject, SPUUpdaterDelegate {
 
     typealias GateFactory = @MainActor (_ owner: String) -> UpdateInstallGate
 
+    /// The one gate factory the shipped updater uses. Every gate reads the
+    /// bundled engine through `localState`, drains it over loopback, and raises
+    /// `updateQuit` just before Sparkle's handler runs.
+    static func productionGate(
+        localState: @escaping UpdateInstallGate.LocalState,
+        updateQuit: UpdateQuitIntent
+    ) -> GateFactory {
+        { owner in
+            UpdateInstallGate(
+                localState: localState,
+                drainer: EngineDrainClient(),
+                owner: owner,
+                willInstall: { updateQuit.beginInstall() },
+                schedule: UpdateInstallGate.mainQueueSchedule
+            )
+        }
+    }
+
     private let makeGate: GateFactory
     private let updateQuit: UpdateQuitIntent
     /// The gate for the update Sparkle is installing now.
     private var gate: UpdateInstallGate?
 
-    init(makeGate: GateFactory? = nil, updateQuit: UpdateQuitIntent? = nil) {
-        let quit = updateQuit ?? UpdateQuitIntent()
-        self.updateQuit = quit
-        self.makeGate = makeGate ?? { owner in
-            UpdateInstallGate(
-                localPort: { nil },
-                drainer: EngineDrainClient(),
-                owner: owner,
-                willInstall: { quit.beginInstall() },
-                schedule: UpdateInstallGate.mainQueueSchedule
-            )
-        }
+    init(makeGate: @escaping GateFactory, updateQuit: UpdateQuitIntent) {
+        self.makeGate = makeGate
+        self.updateQuit = updateQuit
         super.init()
     }
 
@@ -79,15 +88,36 @@ final class ClientUpdateInstallDelegate: NSObject, SPUUpdaterDelegate {
         updateQuit.beginInstall()
     }
 
-    /// Sparkle gave up on the install: release the drain this client holds.
+    /// Sparkle reports a driver that stopped with an error. Only an install-phase
+    /// error ends the install this client holds.
     @objc func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+        installDidAbort(error)
+    }
+
+    /// Sparkle's background checks report "no update" and appcast or download
+    /// trouble through the same method. Those must not release a drain that a
+    /// pending install is still holding, so they are ignored.
+    func installDidAbort(_ error: Error) {
+        let nsError = error as NSError
+        guard nsError.domain == SUSparkleErrorDomain,
+              UpdateInstallGate.installAbortCodes.contains(nsError.code) else { return }
         gate?.installAborted()
+        updateQuit.endInstall()
     }
 
     /// The gate for `owner` takes the handler. A second call for the same
-    /// owner replaces the stored handler and keeps the gate.
+    /// owner replaces the stored handler and keeps the gate. A call for another
+    /// owner first aborts the old gate, which cancels its drain under the old
+    /// owner, so that cancel is sent before the new owner's first drain. While
+    /// an install is already scheduled, another owner is refused: Sparkle keeps
+    /// that update for its install on quit.
     func takeControl(owner: String, of immediateInstallHandler: @escaping () -> Void) -> Bool {
-        if gate?.owner != owner {
+        if let current = gate, current.owner != owner {
+            if current.isInstalling { return false }
+            current.installAborted()
+            gate = nil
+        }
+        if gate == nil {
             gate = makeGate(owner)
         }
         return gate?.takeControl(immediateInstallHandler) ?? false
@@ -104,12 +134,11 @@ final class SparkleUpdaterEngine: ClientUpdaterEngine {
     private let installDelegate: ClientUpdateInstallDelegate
     private let controller: SPUStandardUpdaterController
 
-    init(installDelegate: ClientUpdateInstallDelegate? = nil) {
-        let delegate = installDelegate ?? ClientUpdateInstallDelegate()
-        self.installDelegate = delegate
+    init(installDelegate: ClientUpdateInstallDelegate) {
+        self.installDelegate = installDelegate
         self.controller = SPUStandardUpdaterController(
             startingUpdater: false,
-            updaterDelegate: delegate,
+            updaterDelegate: installDelegate,
             userDriverDelegate: nil
         )
     }
@@ -190,9 +219,10 @@ final class ClientUpdater: ClientUpdateControlling {
         bundle: Bundle = .main,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         updateQuit: UpdateQuitIntent? = nil,
-        localPort: @escaping () -> Int? = { nil }
+        localState: @escaping UpdateInstallGate.LocalState
     ) {
         let quit = updateQuit ?? UpdateQuitIntent()
+        let gates = ClientUpdateInstallDelegate.productionGate(localState: localState, updateQuit: quit)
         self.init(
             configuration: Configuration(
                 bundle: bundle,
@@ -201,23 +231,15 @@ final class ClientUpdater: ClientUpdateControlling {
             ),
             makeEngine: {
                 SparkleUpdaterEngine(installDelegate: ClientUpdateInstallDelegate(
-                    makeGate: { owner in
-                        UpdateInstallGate(
-                            localPort: localPort,
-                            drainer: EngineDrainClient(),
-                            owner: owner,
-                            willInstall: { quit.beginInstall() },
-                            schedule: UpdateInstallGate.mainQueueSchedule
-                        )
-                    },
+                    makeGate: gates,
                     updateQuit: quit
                 ))
             }
         )
     }
 
-    init(configuration: Configuration, makeEngine: EngineFactory? = nil) {
-        self.makeEngine = makeEngine ?? { SparkleUpdaterEngine() }
+    init(configuration: Configuration, makeEngine: @escaping EngineFactory) {
+        self.makeEngine = makeEngine
         self.unavailableReason = Self.unavailableReason(for: configuration)
     }
 

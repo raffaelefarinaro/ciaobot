@@ -125,7 +125,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let blockers: RestartBlockersFetching
     /// Responds to a deferred `applicationShouldTerminate`. Tests record it.
     private let replyToTerminate: @MainActor (Bool) -> Void
-    /// Raised by Sparkle's immediate install: that terminate is a system quit.
+    /// Raised by Sparkle's immediate install: that terminate is an update quit
+    /// (`QuitReason.update`), with no dialog and the full quit grace.
     private let updateQuit: UpdateQuitIntent
     /// Schedules the login-launch window close retries. Tests drive it.
     private let loginCloseSchedule: LoginLaunchWindowCloser.Schedule?
@@ -200,7 +201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // The updater lives for the app's lifetime. Creating it is inert in
             // a debug build, a test process, or a build without the release
             // updater keys; `start()` decides and records why.
-            updater: ClientUpdater(updateQuit: updateQuit, localPort: { engineParts.supervisor.runningPort }),
+            updater: ClientUpdater(updateQuit: updateQuit, localState: { engineParts.supervisor.updateLocalState }),
             // The signing probe is the real one here. The row explains an
             // ad-hoc or unsigned build instead of offering a registration macOS
             // would refuse.
