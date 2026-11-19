@@ -6626,25 +6626,48 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/onboarding/OnboardingRuntimeStage.vue",
       "web/src/components/onboarding/OnboardingShell.vue"
     ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variants": [
+      "primary",
+      "secondary",
+      "link",
+      "disabled"
+    ],
+    "variantNotes": "One variant prop over one native button: secondary (the default) is the outlined rest, primary the filled continue action, link the accent text action; disabled is a fall-through attribute the owners pass while a save is in flight.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingButton.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["onboarding-button--default"],
+        "note": "The secondary default render: one native `type=\"button\"` at the 44px touch height carrying `data-variant=\"secondary\"`."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "primary",
+        "coverage": "covered",
+        "storyIds": ["onboarding-button--primary"],
+        "note": "`variant=\"primary\"` sets `data-variant=\"primary\"`; the Shell's Continue is the production use."
+      },
+      {
+        "name": "link",
+        "coverage": "covered",
+        "storyIds": ["onboarding-button--link"],
+        "note": "`variant=\"link\"` drops the border and reads as accent text; Leave setup, Change and Change name are the production uses."
+      },
+      {
+        "name": "disabled",
+        "coverage": "covered",
+        "storyIds": ["onboarding-button--disabled"],
+        "note": "Attributes fall through to the native button, so the owners' busy flags disable it (Shell busy, RuntimeStage loadingStatus and saving); the story asserts the control is actually blocked."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": ["onboarding-button--keyboard-focus"],
+        "note": "`:focus-visible` draws the 2px accent outline; the story tabs to the button, asserts focus-visible and that Enter fires the click."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingButton.vue has not yet been audited."
+      "status": "none",
+      "detail": "A presentational native button: it runs no fetch and has no async of its own, so there is no initial, refresh, failure or stale render. The disabled look arrives from its owner's busy state."
     },
     "migration": {
       "status": "unassessed",
@@ -6720,25 +6743,64 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/onboarding/OnboardingMemoryStage.vue",
       "web/src/components/onboarding/OnboardingRuntimeStage.vue"
     ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variants": [
+      "checked",
+      "disabled"
+    ],
+    "variantNotes": "A native radio row: checked follows the group's model; disabled comes from its own prop or the group's disabled. The description slot is optional.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingChoice.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice--default"
+        ],
+        "note": "Unchecked row with a plain title: no description element, data-checked and data-disabled both false. Rendered inside the production OnboardingChoiceGroup host."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "checked",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice--checked"
+        ],
+        "note": "The group model matches the value: the native radio is checked and data-checked is true. Clicking the checked radio fires no change, and the group still re-selects it, so it cannot be toggled off."
+      },
+      {
+        "name": "description",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice--description"
+        ],
+        "note": "The description slot renders inside the title block (.ob-choice-desc) with its own text."
+      },
+      {
+        "name": "select",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice--select"
+        ],
+        "note": "A click on the second radio moves the group model; the owner's pick() re-syncs the native group so exactly one radio stays checked."
+      },
+      {
+        "name": "disabled",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice--disabled"
+        ],
+        "note": "The choice's own disabled prop: data-disabled is true and the native radio is disabled. A click does not check it, while an enabled sibling still works."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice--keyboard-focus"
+        ],
+        "note": "Tab lands on the checked radio with :focus-visible; ArrowDown moves focus to the next choice and checks it."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingChoice.vue has not yet been audited."
+      "status": "none",
+      "detail": "Presentational radio row: it runs no fetch and has no async state. Initial, refresh, failure and stale renders do not apply; the group's model supplies every value."
     },
     "migration": {
       "status": "unassessed",
@@ -6761,25 +6823,67 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/onboarding/OnboardingMemoryStage.vue",
       "web/src/components/onboarding/OnboardingRuntimeStage.vue"
     ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variants": [
+      "list",
+      "cards",
+      "segmented",
+      "disabled",
+      "after"
+    ],
+    "variantNotes": "layout is list (default), cards or segmented, set on the radiogroup as data-layout; disabled reaches every choice through the group context; the after slot renders under the choices.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingChoiceGroup.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice-group--default"
+        ],
+        "note": "List layout (the default): a role=radiogroup labelled by the group label, data-layout list, three choices with one checked."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "cards",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice-group--cards"
+        ],
+        "note": "layout cards: data-layout cards on the radiogroup; the choices are the same native radios."
+      },
+      {
+        "name": "segmented",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice-group--segmented"
+        ],
+        "note": "layout segmented: one wrapping row with data-layout segmented; the checked choice carries data-checked."
+      },
+      {
+        "name": "disabled",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice-group--disabled"
+        ],
+        "note": "Group-level disabled: every native radio is disabled and blocked, and a click leaves the checked value unchanged."
+      },
+      {
+        "name": "after-slot",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice-group--after-slot"
+        ],
+        "note": "The after slot renders below the choices container, as guidance under the group."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice-group--keyboard-focus"
+        ],
+        "note": "One tab stop for the group; ArrowDown walks the radios and each move fires select."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingChoiceGroup.vue has not yet been audited."
+      "status": "none",
+      "detail": "Presentational grouping: it renders its label and choices from props and runs no fetch. No initial, refresh, failure or stale render."
     },
     "migration": {
       "status": "unassessed",
@@ -6800,25 +6904,66 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/onboarding/OnboardingCareStage.vue",
       "web/src/components/onboarding/OnboardingLocationStage.vue"
     ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variants": [
+      "help",
+      "help-slot",
+      "error",
+      "below"
+    ],
+    "variantNotes": "help is the prop text and the help slot overrides it with rich markup; error adds the role=alert line and the invalid flag; below holds chips or suggestions under the control.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingField.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-field--default"
+        ],
+        "note": "Label and slotted control only: the help element is present but empty, there is no error line, and aria-describedby names the help element."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "help",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-field--help"
+        ],
+        "note": "The help prop fills the help element, which the control's aria-describedby names."
+      },
+      {
+        "name": "help-slot",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-field--help-slot"
+        ],
+        "note": "The help slot replaces the help prop with rich markup: two paragraphs and a link."
+      },
+      {
+        "name": "error",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-field--error"
+        ],
+        "note": "error renders a role=alert paragraph with its own id; aria-describedby lists help then error, and the slotted control gets aria-invalid=true."
+      },
+      {
+        "name": "below",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-field--below"
+        ],
+        "note": "The below slot sits between the control and the help element."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-field--keyboard-focus"
+        ],
+        "note": "Tab reaches the slotted input, which shows :focus-visible."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingField.vue has not yet been audited."
+      "status": "none",
+      "detail": "A labelled control wrapper with no async state: the value and any error come from the stage. No initial, refresh, failure or stale render."
     },
     "migration": {
       "status": "unassessed",
@@ -7086,39 +7231,99 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/onboarding/OnboardingView.vue"
     ],
     "variants": [
+      "step",
+      "busy",
+      "canContinue",
       "conflict",
-      "error"
+      "error",
+      "summary"
     ],
-    "variantNotes": "Observed branches in OnboardingShell.vue; remaining variants have not been audited.",
+    "variantNotes": "step picks the heading and the current step; busy, canContinue, conflict and error are props; the target kind picks the context line; the summary slot adds an aside.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingShell.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--default"
+        ],
+        "note": "Installation context on the first step: heading, steps nav with one aria-current, Back, Leave setup and an enabled Continue; no alert and no aside."
+      },
+      {
+        "name": "workspace-target",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--workspace"
+        ],
+        "note": "A workspace target reads Workspace with the workspace name on the context line."
+      },
+      {
+        "name": "finish",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--finish"
+        ],
+        "note": "The last step relabels the primary control Finish setup and marks Finish as current."
+      },
+      {
+        "name": "busy",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--busy"
+        ],
+        "note": "busy disables Back, Leave setup and Continue; no alert is shown."
+      },
+      {
+        "name": "blocked",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--blocked"
+        ],
+        "note": "canContinue false disables only Continue; Back and Leave stay enabled."
       },
       {
         "name": "conflict",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingShell.vue has a conflict branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--conflict"
+        ],
+        "note": "conflict shows the role=alert paragraph and an enabled Reload, which the host records."
       },
       {
         "name": "error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingShell.vue has a error branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--error"
+        ],
+        "note": "error shows the message in the alert with no conflict paragraph."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "conflict-error",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--conflict-error"
+        ],
+        "note": "Both flags at once: two paragraphs over one Reload."
+      },
+      {
+        "name": "summary-slot",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--summary-slot"
+        ],
+        "note": "The summary slot renders an aside labelled Setup summary."
+      },
+      {
+        "name": "step-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--step-focus"
+        ],
+        "note": "Back moves one step and the step heading takes focus (activeElement). The h1 keeps its outline hidden by design, so only the focus move is asserted, not a visible ring."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingShell.vue has not yet been audited."
+      "status": "known",
+      "detail": "The shell loads nothing itself: initial, refresh and stale loading belong to the stage slot. Its in-flight render is busy (story Busy), which disables Back, Leave setup and Continue with no spinner. A failed save renders as the error alert (story Error); there is no stale render."
     },
     "migration": {
       "status": "unassessed",
@@ -7145,25 +7350,68 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/onboarding/OnboardingSummary.vue",
       "web/src/components/onboarding/OnboardingView.vue"
     ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variants": [
+      "sm",
+      "md",
+      "xl",
+      "2xl",
+      "section",
+      "form"
+    ],
+    "variantNotes": "gap sets data-gap (sm, md by default, xl, 2xl); as renders a section or form instead of the default div.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingStack.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-stack--default"
+        ],
+        "note": "Default gap md on a div: data-gap md and the rendered element is a DIV."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "small",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-stack--small"
+        ],
+        "note": "gap sm: data-gap sm."
+      },
+      {
+        "name": "large",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-stack--large"
+        ],
+        "note": "gap xl: data-gap xl."
+      },
+      {
+        "name": "double-large",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-stack--double-large"
+        ],
+        "note": "gap 2xl around a nested default stack: the row gap scales with the prop, so the outer stack's gap is larger than the inner one."
+      },
+      {
+        "name": "section",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-stack--section"
+        ],
+        "note": "as section with an aria-label, as the stages and the summary render it."
+      },
+      {
+        "name": "form",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-stack--form"
+        ],
+        "note": "as form: its submit is prevented in place and recorded on the element."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingStack.vue has not yet been audited."
+      "status": "none",
+      "detail": "A spacing wrapper with no data or async state. No initial, refresh, failure or stale render."
     },
     "migration": {
       "status": "unassessed",
@@ -7184,24 +7432,28 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/onboarding/OnboardingShell.vue"
     ],
     "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variantNotes": "No configurable props: the start and default slots fill the two rows, and the phone layout is a CSS media query.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingStepFooter.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-step-footer--default"
+        ],
+        "note": "Two rows: the start slot (Back) and the default slot (Leave setup, Continue), with 44px buttons."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-step-footer--narrow"
+        ],
+        "note": "At a 390px viewport the rows stop wrapping (nowrap) with no horizontal overflow and the same 44px targets."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingStepFooter.vue has not yet been audited."
+      "status": "none",
+      "detail": "A presentational footer with no data or async state. No initial, refresh, failure or stale render."
     },
     "migration": {
       "status": "unassessed",
@@ -7221,25 +7473,83 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/onboarding/OnboardingFinishStage.vue"
     ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variants": [
+      "loading",
+      "ready",
+      "deferred",
+      "attention",
+      "unknown"
+    ],
+    "variantNotes": "loading swaps the list for one status line; each item state is ready, deferred, attention or unknown; an in-app href adds a Review link and any other href is dropped.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingSummary.vue implements this render; no rendered-state story exists."
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-summary--loading"
+        ],
+        "note": "Initial load: loading=true renders one role=status line, Checking setup, and no list."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "empty",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-summary--empty"
+        ],
+        "note": "Loaded with no rows: the list element renders with no rows and no status line."
+      },
+      {
+        "name": "ready",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-summary--ready"
+        ],
+        "note": "A ready row shows its label, its value, the ready marker and an in-app Review link."
+      },
+      {
+        "name": "deferred",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-summary--deferred"
+        ],
+        "note": "A deferred row shows the deferred marker with its value."
+      },
+      {
+        "name": "attention",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-summary--attention"
+        ],
+        "note": "An attention row shows the attention marker with its value."
+      },
+      {
+        "name": "unknown-item",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-summary--unknown"
+        ],
+        "note": "An unreadable source renders the unknown marker and its explanation, never a guessed value."
+      },
+      {
+        "name": "review-link",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-summary--review-link"
+        ],
+        "note": "An in-app href gains a Review link that is at least 44px tall."
+      },
+      {
+        "name": "external-href",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-summary--external-href"
+        ],
+        "note": "A non-internal href renders no link at all."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingSummary.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial: loading=true shows one role=status line (Checking setup) instead of the list (story Loading). The owner has no refresh, failure or stale render of its own: an unreadable source arrives as an unknown row. The placeholder is one line while the loaded state is a list of rows, so the two geometries differ."
     },
     "migration": {
       "status": "unassessed",
