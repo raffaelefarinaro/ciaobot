@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Any
 
 import acp
+from acp.connection import StreamDirection
 from acp.schema import (
     AgentCapabilities,
     AuthenticateResponse,
@@ -188,6 +189,20 @@ class FakeAgent:
             if not future.done():
                 future.cancel()
 
+    def observe_stream(self, event: Any) -> None:
+        """Log a permission reply when it is read off the wire.
+
+        The reply resolves a future that wakes several tasks later, while a
+        following ``session/cancel`` is logged by its own task. Logging from the
+        awaiting coroutine therefore did not reflect arrival order.
+        """
+        message = event.message
+        if event.direction != StreamDirection.INCOMING or "method" in message:
+            return
+        result = message.get("result")
+        if isinstance(result, dict) and "outcome" in result:
+            self.log("permission_outcome", result)
+
     async def _send_update(self, session_id: str, update: dict[str, Any]) -> None:
         note = SessionNotification.model_validate({"sessionId": session_id, "update": update})
         await self.conn.session_update(session_id=session_id, update=note.update)
@@ -210,8 +225,7 @@ class FakeAgent:
                     session_id=session_id, tool_call=request.tool_call, options=request.options))
                 self.pending_permissions.setdefault(session_id, set()).add(future)
                 try:
-                    response = await future
-                    self.log("permission_outcome", _dump(response))
+                    await future
                 except asyncio.CancelledError:
                     self.log("permission_outcome", {"outcome": {"outcome": "cancelled"}})
                     return PromptResponse(stop_reason="cancelled")
@@ -284,7 +298,7 @@ async def main(scenario_path: Path) -> None:
         _spawn_tree(scenario_path)
     if agent.scenario.get("ignore_sigterm"):
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    await acp.run_agent(agent)
+    await acp.run_agent(agent, observers=[agent.observe_stream])
 
 
 if __name__ == "__main__":
