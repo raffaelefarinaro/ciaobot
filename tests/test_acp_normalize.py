@@ -276,7 +276,7 @@ def test_subagent_text_not_in_result() -> None:
         ("max_tokens", "", True, False, "The model hit its output limit before finishing."),
         ("max_turn_requests", "text", True, False, "The agent stopped after too many steps in one turn."),
         ("refusal", "text", True, False, "The model declined to continue this request."),
-        ("mystery", "text", True, False, "The agent ended the turn with an unknown reason: mystery"),
+        ("mystery", "text", True, False, "The agent ended the turn for an unrecognised reason."),
     ],
 )
 def test_stop_reason_mapping(stop: str, body: str, is_error: bool, stopped: bool, expected: str) -> None:
@@ -288,6 +288,20 @@ def test_stop_reason_mapping(stop: str, body: str, is_error: bool, stopped: bool
     assert (event.is_error, event.stopped) == (is_error, stopped)
     assert (event.session_id, event.effective_model, event.usage, event.origin) == ("s1", "m", {"context_used": "1"}, "o")
     assert event.final_text is None
+
+
+def test_unknown_stop_reason_is_logged_not_quoted(caplog: pytest.LogCaptureFixture) -> None:
+    secret = "SECRET_STOP_REASON_42"
+    caplog.set_level(logging.WARNING, logger="ciao.providers.acp.normalize")
+    t = TurnText()
+    t.feed(_delta("partial"))
+    event = result_event(
+        f"weird {secret} at /Users/alice/x", text=t, session_id="s", model="m", usage={},
+    )
+    assert event.result == "The agent ended the turn for an unrecognised reason."
+    assert secret not in repr(event)
+    assert "/Users/alice" not in repr(event)
+    assert secret in caplog.text
 
 
 def test_result_event_carries_final_text_and_copies_usage() -> None:

@@ -369,7 +369,9 @@ def result_event(
     elif stop_reason == "refusal":
         body = _REFUSAL_TEXT
     else:
-        body = f"The agent ended the turn with an unknown reason: {stop_reason}"
+        # The value is adapter-controlled and unbounded: logged, never quoted to the PWA.
+        logger.warning("ACP agent ended a turn with an unrecognised stop reason: %r", stop_reason)
+        body = "The agent ended the turn for an unrecognised reason."
     return ResultEvent(
         type="result",
         result=body,

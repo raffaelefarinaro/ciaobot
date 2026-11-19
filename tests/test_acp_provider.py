@@ -27,8 +27,7 @@ from ciao.models import (
 )
 from ciao.provider_registry import ProviderDescriptor
 from ciao.provider_service import ProviderService
-from ciao.providers.acp.connection import AgentStartError
-from ciao.providers.acp.provider import AcpProvider, start_failure_reason
+from ciao.providers.acp.provider import AcpProvider
 from ciao.providers.acp.session import AcpSession, SessionJournal, journal_file
 from ciao.providers.acp.spec import AgentSpec
 from tests.acp_helpers import read_calls, write_scenario
@@ -555,22 +554,107 @@ async def test_agent_start_error_becomes_error_result(
     event = events[0]
     assert isinstance(event, ResultEvent)
     assert event.is_error is True
-    # The PWA never sees raw adapter output: the event carries only the sanitized reason.
-    assert secret not in event.result
-    assert "/Users/alice" not in event.result
-    # ...and the raw tail reaches the log, so the failure stays diagnosable.
+    # The exit is reported as the fixed sentence, never the exit detail or the adapter output.
+    assert event.result == "fake agent did not start."
+    assert secret not in repr(events)
+    assert "/Users/alice" not in repr(events)
+    # ...and the adapter output reaches the log, so the failure stays diagnosable.
+    assert "fake agent did not start" in caplog.text
+    assert "exited with code 1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_initialize_error_secret_and_path_never_reach_events(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    secret = "sk-live-INIT_SECRET_777"
+    caplog.set_level(logging.WARNING, logger="ciao.providers.acp.provider")
+    config, _ = _install(
+        monkeypatch, tmp_path,
+        initialize_error=f"invalid API key {secret} for org Acme at /Users/alice/.cfg",
+    )
+    service = ProviderService(config)  # type: ignore[arg-type]
+
+    events = await _turn(service, _request())
+
+    assert len(events) == 1
+    assert isinstance(events[0], ResultEvent)
+    assert events[0].is_error is True
+    assert events[0].result == "fake agent did not start."
+    assert secret not in repr(events)
+    assert "/Users/alice" not in repr(events)
+    # The adapter's own error text is what the log is for.
     assert secret in caplog.text
+    assert "/Users/alice/.cfg" in caplog.text
 
 
-def test_start_failure_reason_masks_paths_and_caps_length() -> None:
-    masked = start_failure_reason(AgentStartError("binary /opt/tools/agent-bin is missing\nsecond line"))
-    assert masked == "binary <path> is missing"
+@pytest.mark.asyncio
+async def test_start_failure_stderr_is_redacted_in_warning_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    config, _ = _install(
+        monkeypatch, tmp_path, exit_during_initialize=True,
+        stderr=["boom access_token=abc123secret"],
+    )
+    service = ProviderService(config)  # type: ignore[arg-type]
+    caplog.set_level(logging.WARNING, logger="ciao.providers.acp.provider")
 
-    long = start_failure_reason(AgentStartError("x" * 500))
-    assert len(long) <= 200
-    assert long.endswith("…")
+    events = await _turn(service, _request())
 
-    assert start_failure_reason(AgentStartError("")) == "The agent did not start."
+    assert events[0].result == "fake agent did not start."
+    assert "abc123secret" not in caplog.text
+    assert "access_token=[redacted]" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unknown_provider_root_fails_loudly_instead_of_using_workspace_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    config, _ = _install(monkeypatch, tmp_path, sessions=["a"])
+    no_state = SimpleNamespace(workspace_root=config.workspace_root)
+    provider = FakeAcpProvider(config.workspace_root, config=no_state)
+    try:
+        events = await asyncio.wait_for(_run_turn(provider, _request()), timeout=10)
+    finally:
+        await provider.disconnect()
+
+    assert len(events) == 1
+    assert isinstance(events[0], ResultEvent)
+    assert events[0].is_error is True
+    assert events[0].result == "fake could not complete the turn."
+    assert "state_path" in caplog.text
+    assert not (config.workspace_root / ".runtime").exists()
+
+
+@pytest.mark.asyncio
+async def test_late_update_after_close_is_not_routed_to_closed_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config, _ = _install(monkeypatch, tmp_path, sessions=["a"])
+    provider = FakeAcpProvider(config.workspace_root, config=config)
+    routed: list[AcpSession] = []
+    real_on_update = AcpSession.on_update
+
+    def recording_on_update(self: AcpSession, update: Any) -> Any:
+        routed.append(self)
+        return real_on_update(self, update)
+
+    try:
+        await asyncio.wait_for(_run_turn(provider, _request()), timeout=10)
+        connection = provider._connection
+        assert connection is not None
+        # Once the session is open, the connection no longer routes updates to it on its own.
+        assert getattr(connection, "_pending_session", None) is None
+
+        await provider._close_session()
+        monkeypatch.setattr(AcpSession, "on_update", recording_on_update)
+        late = SimpleNamespace(model_dump=lambda **_: dict(_TEXT))
+        await provider._client.session_update("a", late)
+        assert routed == []
+    finally:
+        await provider.disconnect()
+
+
 
 
 # -- session metadata reload ------------------------------------------------------------

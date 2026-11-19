@@ -208,15 +208,15 @@ class AcpSession:
             session_meta=meta,
         )
         # The client forwards updates here while load replays, before ``open`` returns.
+        # Cleared on every exit: after open, routing belongs to the provider's client slot,
+        # and a closed session must never keep receiving updates through this fallback.
         setattr(connection, "_pending_session", session)
         try:
             session_id, replaced, options, replay = await session._establish(
                 cwd, resume, additional_dirs, meta
             )
-        except BaseException:
-            # A failed open leaves no session to route updates to.
+        finally:
             setattr(connection, "_pending_session", None)
-            raise
         session.session_id = session_id
         session._normalizer.session_id = session_id
         session.config_options = options

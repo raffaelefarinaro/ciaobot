@@ -12,7 +12,6 @@ import contextlib
 import json
 import logging
 import math
-import re
 import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import aclosing
@@ -36,6 +35,7 @@ from ciao.providers.acp.connection import AcpConnection, AgentStartError
 from ciao.providers.acp.permissions import PermissionBroker
 from ciao.providers.acp.session import AcpSession, SessionJournal, journal_file
 from ciao.providers.acp.spec import AgentSpec
+from ciao.redact import redact_text
 from ciao.providers.base import (
     ActiveHandle,
     BaseProvider,
@@ -46,23 +46,6 @@ from ciao.providers.base import (
 )
 
 logger = logging.getLogger(__name__)
-
-_REASON_CHARS = 200
-_PATH = re.compile(r"(?:[A-Za-z]:\\|~?/)[^\s'\"):,;]*")
-
-
-def start_failure_reason(exc: AgentStartError) -> str:
-    """A short reason safe to show in the PWA.
-
-    ``AgentStartError.stderr_tail`` is raw adapter output and is never part of
-    it. The message itself can carry a path (a resolved binary, an SDK error),
-    so absolute paths are masked and the text is cut to its first line.
-    """
-    first = (str(exc).strip().splitlines() or [""])[0]
-    reason = _PATH.sub("<path>", first)
-    if len(reason) > _REASON_CHARS:
-        reason = reason[: _REASON_CHARS - 1].rstrip() + "…"
-    return reason or "The agent did not start."
 
 
 @dataclass(slots=True)
@@ -122,11 +105,11 @@ class _Client(acp.Client):
         raise RequestError.method_not_found("fs/write_text_file")
 
 
-def _runtime_dir(workspace_root: Path, config: object | None) -> Path:
+def _runtime_dir(config: object | None) -> Path:
     state_path = getattr(config, "state_path", None)
-    if state_path is not None:
-        return Path(state_path).parent
-    return workspace_root / ".runtime"
+    if state_path is None:
+        raise RuntimeError("AcpProvider needs config.state_path to place its session journals.")
+    return Path(state_path).parent
 
 
 class AcpProvider(BaseProvider):
@@ -179,11 +162,15 @@ class AcpProvider(BaseProvider):
                 try:
                     await self._start(request, key)
                 except AgentStartError as exc:
-                    # Raw adapter output stays in the log; the PWA gets a short reason.
+                    # The adapter's error text and stderr stay in the log (stderr keyword-redacted);
+                    # the PWA gets a fixed sentence built from the agent id only.
                     logger.warning(
-                        "%s agent did not start: %s\n%s", self.spec.id, exc, exc.stderr_tail
+                        "%s agent did not start: %s\n%s",
+                        self.spec.id, exc, redact_text(exc.stderr_tail),
                     )
-                    yield ResultEvent(type="result", is_error=True, result=start_failure_reason(exc))
+                    yield ResultEvent(
+                        type="result", is_error=True, result=f"{self.spec.id} agent did not start."
+                    )
                     return
             connection = self._connection
             assert connection is not None
@@ -251,7 +238,7 @@ class AcpProvider(BaseProvider):
                 cwd=self.workspace_root,
                 resume=resume,
                 additional_dirs=[linked] if linked else [],
-                journal_dir=_runtime_dir(self.workspace_root, self.config),
+                journal_dir=_runtime_dir(self.config),
                 broker=broker,
                 session_meta=meta,
             )

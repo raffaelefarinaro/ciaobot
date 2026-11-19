@@ -28,6 +28,7 @@ Scenario JSON (every key optional):
 - ``stderr``: lines written to stderr at startup.
 - ``initialize_delay_ms``: sleep before answering ``initialize``.
 - ``exit_during_initialize``: exit 1 when ``initialize`` arrives.
+- ``initialize_error``: answer ``initialize`` with a JSON-RPC error carrying that message.
 - ``spawn_tree``: at startup start a process tree and write ``{"pid", "child",
   "grandchild", "great"}`` to ``<scenario>.pids.json``: ``child`` is a plain
   ``sleep 60``; ``grandchild`` is a separate Python process that ignores SIGTERM
@@ -106,6 +107,8 @@ class FakeAgent:
         await asyncio.sleep(self.scenario.get("initialize_delay_ms", 0) / 1000)
         if self.scenario.get("exit_during_initialize"):
             os._exit(1)
+        if self.scenario.get("initialize_error"):
+            raise acp.RequestError(-32000, str(self.scenario["initialize_error"]))
         from acp.schema import InitializeResponse
         return InitializeResponse(
             protocol_version=1,

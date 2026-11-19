@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import stat
 import sys
@@ -130,6 +131,26 @@ async def test_initialize_timeout_closes_process_and_reports_stderr(tmp_path: Pa
         await _assert_tree_gone(pids)
     finally:
         _reap_leftovers(pids)
+
+
+@pytest.mark.asyncio
+async def test_stderr_lines_are_redacted_in_the_debug_log(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    spec, _calls = write_scenario(tmp_path, stderr=["loading access_token=abc123secret now"])
+    caplog.set_level(logging.DEBUG, logger="ciao.providers.acp.fake")
+    conn = await _open(spec, tmp_path)
+    try:
+        deadline = time.monotonic() + 5.0
+        while "loading" not in conn.stderr_tail():
+            assert time.monotonic() < deadline, "the stderr line never arrived"
+            await asyncio.sleep(0.02)
+    finally:
+        await conn.close()
+    assert "abc123secret" not in caplog.text
+    assert "access_token=[redacted]" in caplog.text
+    # The ring keeps the raw line for the start-failure log; only the log line is redacted.
+    assert "abc123secret" in conn.stderr_tail()
 
 
 @pytest.mark.asyncio
