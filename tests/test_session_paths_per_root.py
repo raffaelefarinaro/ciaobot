@@ -27,6 +27,7 @@ from ciao.providers import claude as claude_adapter
 from ciao.providers import opencode as opencode_adapter
 from ciao.providers.base import BaseProvider, ProviderCapabilities
 from ciao.providers.claude import ClaudeProvider
+from ciao.providers.acp.agents import OpencodeAcpProvider
 from ciao.providers.opencode import OpencodeProvider
 from ciao.transcripts import _claude_projects_dir
 from ciao.web.project_chats import ProjectChatManager, ChatInfo
@@ -350,7 +351,7 @@ def _install_forbidden_start_counters(
         counts["builtin_reader"] += 1
         raise AssertionError("cleanup must not fall back to built-in readers")
 
-    monkeypatch.setattr(OpencodeProvider, "read_thread", counting_read_thread)
+    monkeypatch.setattr(OpencodeAcpProvider, "read_thread", counting_read_thread)
 
     def counting_sdk_info(*args: Any, **kwargs: Any) -> Any:
         counts["sdk_reader"] += 1
@@ -939,28 +940,28 @@ def test_reset_reclaims_captured_old_lineage_after_disconnect(
         return result
 
     monkeypatch.setattr(pcm._transcripts, "archive_session", recording_archive)
-    monkeypatch.setattr(OpencodeProvider, "delete_session", fake_delete)
+    monkeypatch.setattr(OpencodeAcpProvider, "delete_session", fake_delete)
     # The live provider is what reset pops and disconnects before reclaiming;
     # a blocking disconnect gates every deletion deterministically.
     pcm._providers[chat.chat_id] = _BlockingDisconnect()
     counts: dict[str, int] = {"constructor": 0, "stream": 0}
     _install_forbidden_start_counters(monkeypatch, counts)
 
-    real_init = OpencodeProvider.__init__
+    real_init = OpencodeAcpProvider.__init__
 
     def counting_init(self, *args: Any, **kwargs: Any):
         counts.setdefault("constructor", 0)
         counts["constructor"] += 1
         return real_init(self, *args, **kwargs)
 
-    monkeypatch.setattr(OpencodeProvider, "__init__", counting_init)
+    monkeypatch.setattr(OpencodeAcpProvider, "__init__", counting_init)
 
     def counting_stream(self, *args: Any, **kwargs: Any):
         counts.setdefault("stream", 0)
         counts["stream"] += 1
         raise AssertionError("reset cleanup must not stream a turn")
 
-    monkeypatch.setattr(OpencodeProvider, "run_streaming", counting_stream)
+    monkeypatch.setattr(OpencodeAcpProvider, "run_streaming", counting_stream)
 
     def chat_row() -> dict[str, Any]:
         payload = json.loads(pcm._path.read_text(encoding="utf-8"))

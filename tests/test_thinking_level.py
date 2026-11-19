@@ -135,14 +135,13 @@ def _models_body(monkeypatch, claude_catalog: list[dict]) -> dict:
 
     from starlette.requests import Request
 
-    from ciao.providers.acp.agents import ClaudeAcpProvider, CodexAcpProvider
-    from ciao.providers.opencode import OpencodeProvider
+    from ciao.providers.acp.agents import ClaudeAcpProvider, CodexAcpProvider, OpencodeAcpProvider
     from ciao.web.routes_api import list_models
 
     # A unit test must never start a real `opencode serve` (#803) or an ACP adapter:
     # the catalogs are stubbed, so the assertions are about what /api/models builds
     # from them, not about what the installed CLIs happen to report.
-    monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[]))
+    monkeypatch.setattr(OpencodeAcpProvider, "model_catalog", AsyncMock(return_value=[]))
     monkeypatch.setattr(ClaudeAcpProvider, "model_catalog", AsyncMock(return_value=claude_catalog))
     monkeypatch.setattr(CodexAcpProvider, "model_catalog", AsyncMock(return_value=[]))
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")

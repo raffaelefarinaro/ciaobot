@@ -720,6 +720,106 @@ async def test_delete_session_counts_a_cli_file_alone(tmp_path: Path, cli_sessio
     assert not cli_session.exists()
 
 
+class _FakeOpencodeConnection:
+    """Stands in for ``opencode acp``: records the cleanup calls and advertises ``delete``."""
+
+    def __init__(self, calls: list[str], *, delete_advertised: bool = True, delete_error=None) -> None:
+        self.calls = calls
+        self.agent_capabilities = {"sessionCapabilities": {"delete": {}}} if delete_advertised else {}
+        self._delete_error = delete_error
+        self.conn = self
+
+    async def delete_session(self, *, session_id: str) -> None:
+        self.calls.append(f"session/delete:{session_id}")
+        if self._delete_error is not None:
+            raise self._delete_error
+
+    async def close(self) -> None:
+        self.calls.append("close")
+
+
+def _fake_opencode_open(monkeypatch: pytest.MonkeyPatch, calls: list[str], connection=None, error=None):
+    async def open_fake(spec, *, cwd, env, client):
+        calls.append(f"open:{spec.id}:{cwd.name}")
+        if error is not None:
+            raise error
+        return connection
+
+    monkeypatch.setattr(agents.AcpConnection, "open", open_fake)
+
+
+@pytest.mark.asyncio
+async def test_opencode_delete_session_asks_the_agent_to_delete_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """opencode keeps the session in its own store: the agent deletes it, not only the journal."""
+    from ciao.providers.acp.session import journal_file
+
+    runtime = tmp_path / "runtime"
+    journal = journal_file(runtime, OPENCODE.id, SESSION)
+    journal.parent.mkdir(parents=True)
+    journal.write_text("{}\n", encoding="utf-8")
+    calls: list[str] = []
+    _fake_opencode_open(monkeypatch, calls, _FakeOpencodeConnection(calls))
+
+    result = await OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=runtime)
+
+    assert result is True
+    assert not journal.exists()
+    assert calls == ["open:opencode:ws", f"session/delete:{SESSION}", "close"]
+
+
+@pytest.mark.asyncio
+async def test_opencode_delete_session_without_the_capability_only_drops_the_journal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+    _fake_opencode_open(monkeypatch, calls, _FakeOpencodeConnection(calls, delete_advertised=False))
+
+    assert await OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=tmp_path / "rt") is None
+    assert calls == ["open:opencode:ws", "close"]
+
+
+@pytest.mark.asyncio
+async def test_opencode_delete_session_refusal_is_quiet_and_still_closes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls: list[str] = []
+    connection = _FakeOpencodeConnection(calls, delete_error=RuntimeError(f"denied {SESSION}"))
+    _fake_opencode_open(monkeypatch, calls, connection)
+
+    with caplog.at_level("WARNING", logger="ciao.providers.acp.agents"):
+        result = await OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=tmp_path / "rt")
+
+    assert result is None
+    assert calls[-1] == "close"
+    assert "could not delete a session (RuntimeError)" in caplog.text
+    assert SESSION not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_opencode_delete_session_start_failure_keeps_the_journal_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from ciao.providers.acp.connection import AgentStartError
+    from ciao.providers.acp.session import journal_file
+
+    runtime = tmp_path / "runtime"
+    journal = journal_file(runtime, OPENCODE.id, SESSION)
+    journal.parent.mkdir(parents=True)
+    journal.write_text("{}\n", encoding="utf-8")
+    calls: list[str] = []
+    _fake_opencode_open(monkeypatch, calls, error=AgentStartError("opencode was not found on PATH."))
+
+    with caplog.at_level("WARNING", logger="ciao.providers.acp.agents"):
+        result = await OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=runtime)
+
+    assert result is True  # the journal was removed
+    assert not journal.exists()
+    assert calls == ["open:opencode:ws"]
+    assert "could not start to delete a session" in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_delete_session_warns_without_the_path_when_the_cli_file_cannot_go(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture

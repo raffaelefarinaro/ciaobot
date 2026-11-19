@@ -66,10 +66,10 @@ def _stub_catalog(monkeypatch, catalog=None) -> None:
     async def fake_catalog(cls, workspace_root, *, force=False):
         return [dict(row) for row in (_CATALOG if catalog is None else catalog)]
 
-    from ciao.providers.opencode import OpencodeProvider
+    from ciao.providers.acp.agents import OpencodeAcpProvider
 
     monkeypatch.setattr(
-        OpencodeProvider, "model_catalog", classmethod(fake_catalog)
+        OpencodeAcpProvider, "model_catalog", classmethod(fake_catalog)
     )
 
 
@@ -378,7 +378,7 @@ async def test_claude_chat_preflight_does_no_catalog_work(
 ) -> None:
     """A Claude image turn asks Claude's catalog (empty) and is never questioned."""
     from ciao.providers.acp.agents import ClaudeAcpProvider
-    from ciao.providers.opencode import OpencodeProvider
+    from ciao.providers.acp.agents import OpencodeAcpProvider
 
     claude_calls: list[Path] = []
     opencode_calls: list[Path] = []
@@ -393,7 +393,7 @@ async def test_claude_chat_preflight_does_no_catalog_work(
 
     monkeypatch.setattr(ClaudeAcpProvider, "model_catalog", classmethod(claude_catalog))
     monkeypatch.setattr(
-        OpencodeProvider, "model_catalog", classmethod(opencode_catalog)
+        OpencodeAcpProvider, "model_catalog", classmethod(opencode_catalog)
     )
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("cap", workspace="personal")

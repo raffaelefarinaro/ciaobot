@@ -25,8 +25,9 @@ from typing import Any
 from ciao import claude_sessions
 from ciao.claude_trim import claude_settings_layer
 from ciao.models import AgentRequest, AssistantTextDelta, StreamEvent, ThinkingEvent, ToolUseEvent
+from ciao.providers.acp.connection import AcpConnection, AgentStartError
 from ciao.providers.acp.normalize import UpdateNormalizer, child_tool_id, loggable_kind
-from ciao.providers.acp.provider import AcpProvider
+from ciao.providers.acp.provider import AcpProvider, AgentClient
 from ciao.providers.acp.spec import AgentSpec, ModeChoice, VersionGate
 from ciao.providers.base import ActiveHandle
 from ciao.providers.opencode import (
@@ -290,6 +291,39 @@ class OpencodeAcpProvider(AcpProvider):
         if not self._children_limit_logged:
             self._children_limit_logged = True
             logger.debug("OpenCode child sessions over %d live at once are not shown", _CHILD_LIMIT)
+
+    @classmethod
+    async def delete_session(
+        cls, workspace_root: Path, session_id: str, *, runtime_root: Path
+    ) -> bool | None:
+        """Remove the chat's session from opencode's own store, then its journal.
+
+        opencode keeps each session in its store under the agent root, so the cleanup starts
+        ``opencode acp`` there and sends ``session/delete`` when the agent advertises it. A start
+        or delete failure is quiet, as the journal removal is: the caller only sees whether
+        either one removed something.
+        """
+        journal = await super().delete_session(workspace_root, session_id, runtime_root=runtime_root)
+        if not session_id:
+            return True if journal else None
+        try:
+            connection = await AcpConnection.open(
+                cls.spec, cwd=workspace_root, env=cls.spawn_env(), client=AgentClient()  # type: ignore[abstract]
+            )
+        except AgentStartError:
+            logger.warning("opencode could not start to delete a session; its store kept it.")
+            return True if journal else None
+        removed = False
+        try:
+            caps = connection.agent_capabilities.get("sessionCapabilities")
+            if isinstance(caps, Mapping) and caps.get("delete") is not None:
+                await connection.conn.delete_session(session_id=session_id)
+                removed = True
+        except Exception as exc:  # noqa: BLE001 — the adapter's error text is never logged
+            logger.warning("opencode could not delete a session (%s).", type(exc).__name__)
+        finally:
+            await connection.close()
+        return True if (journal or removed) else None
 
     def ext_update(
         self, normalizer: UpdateNormalizer, method: str, payload: Mapping[str, Any]

@@ -1129,11 +1129,10 @@ async def provider_connection_action(request: Request) -> JSONResponse:
 
                 await asyncio.to_thread(clear_claude_discovery_cache)
             if provider == "opencode":
-                from ciao.providers.acp.provider import invalidate_acp_catalog
                 from ciao.providers.opencode import invalidate_opencode_model_cache
 
                 invalidate_opencode_model_cache()
-                invalidate_acp_catalog("opencode")
+                provider_registry.require(provider).factory().invalidate_model_catalog()
                 payload = await asyncio.to_thread(_provider_config_payload_with_inventory, config)
                 return JSONResponse(payload["connections"].get(provider, {}), headers={"Cache-Control": "no-store"})
             payload = await asyncio.to_thread(_provider_config_payload, config)

@@ -799,7 +799,7 @@ async def test_delete_and_archive_reclaim_opencode_sessions(
             lifecycle.append("disconnect-done")
 
     monkeypatch.setattr(
-        "ciao.providers.opencode.OpencodeProvider.delete_session",
+        "ciao.providers.acp.agents.OpencodeAcpProvider.delete_session",
         _fake_opencode_delete,
     )
     opencode = pcm.create_chat(project.project_id, title="opencode-to-delete")
@@ -881,7 +881,7 @@ async def test_reclaim_failure_leaves_deletes_and_archives_durable(
         raise RuntimeError("cleanup refused")
 
     monkeypatch.setattr(
-        "ciao.providers.opencode.OpencodeProvider.delete_session",
+        "ciao.providers.acp.agents.OpencodeAcpProvider.delete_session",
         _failing_delete,
     )
     with caplog.at_level(logging.INFO, logger="ciao.web.project_chats"):

@@ -504,6 +504,10 @@ class AcpProvider(BaseProvider):
     # -- model catalog ---------------------------------------------------------------
 
     @classmethod
+    def invalidate_model_catalog(cls) -> None:
+        invalidate_acp_catalog(cls.spec.id)
+
+    @classmethod
     async def model_catalog(
         cls, workspace_root: Path, *, force: bool = False
     ) -> list[dict[str, Any]]:

@@ -5678,9 +5678,9 @@ class ProjectChatManager:
         were in) into a ~2 s warm turn instead of a cold start.
 
         Bounded by count and by idle age so neither a long day of chat-hopping
-        nor a chat left open for days pins a process per chat. opencode is
-        never kept: its provider is a whole `opencode serve` with a port and an
-        SSE stream, which is what the idle timeout exists for.
+        nor a chat left open for days pins a process per chat. Every ACP agent
+        (opencode included, as `opencode acp`) qualifies; a provider that is not
+        an ACP agent is reclaimed by the idle timeout.
         """
         candidates = [
             (self._provider_last_used[chat_id], chat_id)

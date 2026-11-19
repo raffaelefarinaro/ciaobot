@@ -337,6 +337,11 @@ class BaseProvider(ABC):
         """Optional dynamic model catalog; empty when none is exposed."""
         return []
 
+    @classmethod
+    def invalidate_model_catalog(cls) -> None:
+        """Drop any cached model catalog so the next ``model_catalog`` probes again."""
+        return None
+
     @abstractmethod
     def run_streaming(
         self,
