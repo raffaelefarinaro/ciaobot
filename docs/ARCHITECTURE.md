@@ -1081,22 +1081,15 @@ active workspace's project, and copies it when the terminal is not ready. It
 does not edit provider files or start an MCP process. *Ask Ciao to add one*
 still opens a chat titled "Add an MCP server".
 
-The frontend MCP surface is owned by `web/src/components/ChatMcpConnections.vue`
-(health and managed controls), `web/src/components/ChatMcpTerminalRecovery.vue`
-(copy-only terminal preview), `web/src/composables/useChatMcpConnections.ts`
-(scoped read observer and deterministic duplicate/action derivation), and
-`web/src/composables/useMcpAuthStart.ts` (shared start lease and popup owner).
-The observer tracks the actual chat provider and owning workspace outside the
-drawer; missing observations are unknown, and historical Skills and MCP is
-tool-use history, not health. A disposed popup owner retains safe-link recovery.
-MCP-only actions do not project into inline cards or Needs you; real turn
-failures, questions, permission/task blockers and generic actions still do.
-The engine action store, OAuth, callback, verification and cancellation remain
-unchanged. Manual recovery copies a literal provider/workspace command only;
-the user separately opens Terminal, chooses Workspace if offered, and reviews,
-pastes and runs it. It never writes terminal bytes or changes terminal target.
-Generic reviewed command cards and Settings terminal actions remain separate.
-The standalone app `/mcp` is local navigation, not the provider CLI command. Shared settings styling lives
+The frontend MCP surface is `web/src/components/ProviderMcpButton.vue`, used in
+Settings → MCP and in Chat details (`ChatPanel.vue`). Chat details reads
+`/api/settings/providers` once, the first time it opens, and passes the chat's
+provider row; the button types that row's `mcp_command` into the chat's
+terminal (`composables/useRunInTerminal.ts`) and copies it when the terminal is
+not ready. The page keeps no MCP health or sign-in state and shows no
+`mcp_auth` card. Generic reviewed command cards and Settings terminal actions
+remain separate.
+The standalone composer `/mcp` opens Chat details on the MCP section; it is not the provider CLI command. Shared settings styling lives
 in `components/settings/settingsPanels.css`, pulled into both `SettingsView`
 and the panel with `<style scoped src>`. Origin badges for skills, subagents,
 and commands come from the Vue-free `lib/assetOrigin.ts`.

@@ -3965,7 +3965,7 @@ describe('server-owned chat pins', () => {
 })
 
 describe('needs-you chat actions', () => {
-  // A transient needs-you action on a chat (an MCP sign-in, ...). The engine
+  // A transient needs-you action on a chat (a command to run, ...). The engine
   // owns it and sends it on the chat row, the snapshot and the event; the
   // client holds a copy under the same read-start watermark as the offers.
 
@@ -3986,10 +3986,10 @@ describe('needs-you chat actions', () => {
 
   const action = (id: string, over: Partial<ChatAction> = {}): ChatAction => ({
     id,
-    kind: 'mcp_auth',
+    kind: 'command',
     origin: 'engine',
     state: 'open',
-    params: { server: 'linear', provider: 'opencode' },
+    params: { command: 'echo review-only' },
     error: '',
     created_at: 1,
     ...over,
@@ -4080,59 +4080,49 @@ describe('needs-you chat actions', () => {
   })
 
   test.each(['open', 'working', 'waiting', 'done', 'failed'] as const)(
-    'MCP action in %s state is retained without creating attention',
+    'an action in %s state creates attention and clears with its card',
     (state) => {
       const store = useProjectStore()
       store.chats = [chatInfo('c-1')]
       const sock = events(store)
-      const mcp = action('a1', { state })
-      sock.onmessage?.(frame(actionsChanged('c-1', [mcp])))
-      expect(store.chatActions['c-1']).toEqual([mcp])
-      expect(store.chatNeedsYou('c-1')).toBe(false)
+      const card = action('a1', { state })
+      sock.onmessage?.(frame(actionsChanged('c-1', [card])))
+      expect(store.chatActions['c-1']).toEqual([card])
+      expect(store.chatNeedsYou('c-1')).toBe(true)
       sock.onmessage?.(frame(actionsChanged('c-1', [])))
       expect(store.chatActions['c-1']).toBeUndefined()
+      expect(store.chatNeedsYou('c-1')).toBe(false)
     },
   )
 
   test.each(['command', 'gws_auth', 'permission_mode', 'device_code', 'system_setting', 'restart', 'limit'] as const)(
-    'non-MCP %s action still creates attention alongside MCP',
+    'a %s action creates attention',
     (kind) => {
       const store = useProjectStore()
       store.chats = [chatInfo('c-1')]
-      store.chatActions['c-1'] = [action('mcp'), action('other', { kind })]
+      store.chatActions['c-1'] = [action('other', { kind })]
       expect(store.chatNeedsYou('c-1')).toBe(true)
     },
   )
 
-  test.each([
-    { last_error: 'MCP turn failed' },
-    { pending_permission: '{"tool":"Bash"}' },
-    { pending_question: JSON.stringify({ questions: [{ question: 'Proceed?' }] }) },
-  ])('real chat blocker remains attention alongside MCP: %o', (blocker) => {
-    const store = useProjectStore()
-    store.chats = [chatInfo('c-1', blocker)]
-    store.chatActions['c-1'] = [action('mcp')]
-    expect(store.chatNeedsYou('c-1')).toBe(true)
-  })
-
-  test('snapshot and subsequent event retain and clear MCP without attention', () => {
+  test('snapshot and subsequent event retain and clear an action', () => {
     const store = useProjectStore()
     store.chats = [chatInfo('c-1')]
     const sock = events(store)
-    sock.onmessage?.(frame(snapshotFrame({ chat_actions: { 'c-1': [action('mcp')] } })))
-    expect(store.chatActions['c-1']).toEqual([action('mcp')])
-    expect(store.chatNeedsYou('c-1')).toBe(false)
+    sock.onmessage?.(frame(snapshotFrame({ chat_actions: { 'c-1': [action('card')] } })))
+    expect(store.chatActions['c-1']).toEqual([action('card')])
+    expect(store.chatNeedsYou('c-1')).toBe(true)
     sock.onmessage?.(frame(actionsChanged('c-1', [])))
     expect(store.chatActions['c-1']).toBeUndefined()
   })
 
-  test('memory pass remains excluded even with a real blocker and MCP', () => {
+  test('memory pass remains excluded even with a real blocker and an action', () => {
     const store = useProjectStore()
     store.chats = [chatInfo('c-1', {
       last_error: 'failed turn',
       helper: { kind: 'memory_pass', state: 'running' } as never,
     })]
-    store.chatActions['c-1'] = [action('mcp'), action('command', { kind: 'command' })]
+    store.chatActions['c-1'] = [action('card'), action('command', { kind: 'command' })]
     expect(store.chatNeedsYou('c-1')).toBe(false)
   })
 
@@ -4147,7 +4137,7 @@ describe('needs-you chat actions', () => {
 
   test('startChatAction posts to the start route and adopts the returned action', async () => {
     const store = useProjectStore()
-    apiPost.mockResolvedValueOnce({ action: action('a1', { state: 'waiting', params: { server: 'linear', provider: 'opencode', url: 'https://mcp.linear.app/authorize' } }) })
+    apiPost.mockResolvedValueOnce({ action: action('a1', { state: 'waiting', params: { url: 'https://example.com/authorize' } }) })
     const result = await store.startChatAction('c-1', 'a1')
     expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/a1/start', {})
     expect(result?.state).toBe('waiting')
@@ -4183,21 +4173,6 @@ describe('needs-you chat actions', () => {
     expect(store.chatActions['c-1']?.[0]?.state).toBe('waiting')
   })
 
-  test('requestMcpAuth posts the server and adopts the returned card', async () => {
-    const store = useProjectStore()
-    apiPost.mockResolvedValueOnce({ action: action('a1', { params: { server: 'notion', provider: 'opencode' } }) })
-    const result = await store.requestMcpAuth('c-1', 'notion')
-    expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/mcp-auth', { server: 'notion' })
-    expect(result?.id).toBe('a1')
-    expect(store.chatActions['c-1']?.[0]?.id).toBe('a1')
-  })
-
-  test('requestMcpAuth rethrows a refusal', async () => {
-    const store = useProjectStore()
-    apiPost.mockRejectedValueOnce(Object.assign(new Error('invalid_state'), { status: 400, payload: { error: 'invalid_state', action: null } }))
-    await expect(store.requestMcpAuth('c-1', 'notion')).rejects.toThrow('invalid_state')
-  })
-
   test('dismissChatAction applies the remaining list', async () => {
     const store = useProjectStore()
     const sock = events(store)
@@ -4220,28 +4195,6 @@ describe('needs-you chat actions', () => {
     expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a9'])
   })
 
-  test('turnOffChatActionServer applies the remaining list', async () => {
-    const store = useProjectStore()
-    const sock = events(store)
-    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1'), action('a2')])))
-    apiPost.mockResolvedValueOnce({ actions: [action('a2')], reload: { reloaded: [], pending: [] } })
-    await expect(store.turnOffChatActionServer('c-1', 'a1')).resolves.toBe('turned_off')
-    expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/a1/turn-off', {})
-    expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a2'])
-  })
-
-  test('a turn-off refusal keeps the card and rethrows', async () => {
-    const store = useProjectStore()
-    const sock = events(store)
-    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1', { state: 'open' })])))
-    apiPost.mockRejectedValueOnce(Object.assign(new Error('config_has_comments'), {
-      status: 400,
-      payload: { error: 'config_has_comments', action: action('a1', { state: 'open' }) },
-    }))
-    await expect(store.turnOffChatActionServer('c-1', 'a1')).rejects.toThrow('config_has_comments')
-    expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a1'])
-  })
-
   test('continueChatAction posts to the continue route', async () => {
     const store = useProjectStore()
     apiPost.mockResolvedValueOnce({ actions: [], delivery: 'started' })
@@ -4251,7 +4204,7 @@ describe('needs-you chat actions', () => {
 
   test('submitChatActionCallback posts the url to the callback route and adopts the action', async () => {
     const store = useProjectStore()
-    apiPost.mockResolvedValueOnce({ action: action('a1', { state: 'waiting', params: { server: 'linear', provider: 'opencode', url: 'https://x/authorize', callback_used: '1' } }) })
+    apiPost.mockResolvedValueOnce({ action: action('a1', { state: 'waiting', params: { url: 'https://x/authorize', callback_used: '1' } }) })
     await expect(store.submitChatActionCallback('c-1', 'a1', 'http://127.0.0.1:5/cb?code=x')).resolves.toEqual({ ok: true })
     expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/a1/callback', { url: 'http://127.0.0.1:5/cb?code=x' })
     expect(store.chatActions['c-1']?.[0]?.params.callback_used).toBe('1')
@@ -10133,12 +10086,8 @@ describe('delegated task signals', () => {
     expect(store.chatNeedsYou('c-plain')).toBe(false)
   })
 
-  test('a scoped blocked task still needs you with MCP, but another workspace does not', async () => {
+  test('a scoped blocked task still needs you, but another workspace does not', async () => {
     const store = await seeded([taskRow({ attempt_outcome: 'blocked' })])
-    store.chatActions['c-task'] = [{
-      id: 'mcp', kind: 'mcp_auth', origin: 'engine', state: 'open',
-      params: { server: 'linear', provider: 'claude' }, error: '', created_at: 1,
-    }]
     expect(store.chatNeedsYou('c-task')).toBe(true)
     store.projects[0].workspace = 'other'
     expect(store.chatNeedsYou('c-task')).toBe(false)

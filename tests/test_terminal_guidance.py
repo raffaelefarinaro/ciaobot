@@ -117,19 +117,18 @@ def _terminal_button_label() -> str:
 
 
 def _inventory_command_names() -> set[str]:
-    """The MCP command names the Settings inventory puts in front of the user.
+    """The MCP command names the Settings MCP buttons type for the user.
 
-    Derived from the inventory rather than listed here, so a command it
-    starts handing out has to be documented, and one it stops handing out
-    does not have to be un-documented.
+    Taken from the backend constants the buttons use, so a command the
+    buttons start typing has to be documented.
     """
-    # The Settings page builds its commands in the PWA (web/src/lib/shellQuote.ts,
-    # `mcpCommand`); the inventory only supplies the `cd` prefix.
-    builder = (REPO / "web" / "src" / "lib" / "shellQuote.ts").read_text(encoding="utf-8")
-    names = set(re.findall(r"\b((?:claude|opencode) mcp [a-z][a-z-]*)", builder))
-    assert {"claude mcp add", "opencode mcp add"} <= names, (
-        "shellQuote.ts no longer parses into MCP commands"
-    )
+    # Settings -> MCP servers and Chat details render one button per agent that
+    # types the agent's own MCP command (`mcp_command` in /api/settings/providers).
+    from ciao.providers.opencode import OPENCODE_MCP_COMMAND
+    from ciao.setup_status import claude_mcp_command
+
+    assert claude_mcp_command().endswith(" mcp"), "the Claude MCP command changed shape"
+    names = {"claude mcp", OPENCODE_MCP_COMMAND}
     return names
 
 

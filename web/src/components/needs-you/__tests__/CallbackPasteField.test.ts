@@ -67,8 +67,8 @@ describe('CallbackPasteField', () => {
   it('submits, clears and emits sent', async () => {
     apiPost.mockResolvedValueOnce({
       action: {
-        id: 'a1', kind: 'mcp_auth', origin: 'engine', state: 'waiting',
-        params: { server: 's', provider: 'claude', url: 'https://x', callback_used: '1' },
+        id: 'a1', kind: 'gws_auth', origin: 'engine', state: 'waiting',
+        params: { url: 'https://x', callback_used: '1' },
         error: '', created_at: 1,
       },
     })

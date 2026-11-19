@@ -2,7 +2,6 @@
 import type { Component } from 'vue'
 import type { AppIconName } from '../AppIcon.vue'
 import type { ChatActionKind } from '../../lib/types'
-import McpAuthBody from './McpAuthBody.vue'
 import RestartBody from './RestartBody.vue'
 import CommandBody from './CommandBody.vue'
 import PermissionModeBody from './PermissionModeBody.vue'
@@ -12,7 +11,6 @@ import GwsAuthBody from './GwsAuthBody.vue'
 
 /** One body per kind; each later child registers its own here. */
 export const NEEDS_YOU_BODIES: Partial<Record<ChatActionKind, Component>> = {
-  mcp_auth: McpAuthBody,
   command: CommandBody,
   permission_mode: PermissionModeBody,
   system_setting: SystemSettingBody,
@@ -23,7 +21,6 @@ export const NEEDS_YOU_BODIES: Partial<Record<ChatActionKind, Component>> = {
 
 /** `command` has no entry on purpose: it shows the default 'activity' icon. */
 export const NEEDS_YOU_ICONS: Partial<Record<ChatActionKind, AppIconName>> = {
-  mcp_auth: 'shield',
   permission_mode: 'shield',
   system_setting: 'shield',
   device_code: 'shield',
