@@ -811,7 +811,6 @@ const GET_PATTERNS = [
   // `env.items`. The transcript is per-session, so a spec opts in through
   // POST /__fixture__/transcript rather than giving every spec one.
   [/^\/api\/chats\/[^/]+\/messages$/, (req) => sessionOf(req).transcript || []],
-  [/^\/api\/chats\/[^/]+\/subagents$/, () => ({ subagents: [] })],
   // One chat's row, with this session's needs-you actions on it.
   [/^\/api\/chats\/[^/]+$/, (req, url) => chatDetail(sessionOf(req), decodeURIComponent(url.pathname.split('/')[3] || ''))],
   [/^\/api\/tasks\/[0-9a-f]{32}$/, (req, url) => {

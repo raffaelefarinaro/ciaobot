@@ -8,7 +8,7 @@
       :style="sidebarStyle"
       @toggle="sidebarCollapsed = !sidebarCollapsed"
       @chat-selected="onChatSelected"
-      :can-open-beside="splitFits && !!activePinKey && !subagentRoute"
+      :can-open-beside="splitFits && !!activePinKey"
       :focused-beside-chat-id="besideInTile && focusedPane === 'beside' ? besideChat?.chat_id ?? '' : ''"
       @new-schedule="showNewSchedule = true"
       @new-task="taskBoardRef?.openCreate?.()"
@@ -54,14 +54,7 @@
         </div>
         <!-- Split view when a file is pinned and holds the slot -->
         <template v-if="fileInTile">
-          <SubagentChatView
-            v-if="subagentRoute"
-            :key="subagentRoute.agentId"
-            :chat-id="subagentRoute.chatId"
-            :agent-id="subagentRoute.agentId"
-            @open-sidebar="sidebarCollapsed = false"
-          />
-          <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" file-pinned :inactive="besideInTile && focusedPane === 'beside'" @close="closeChat" :class="{ 'chat-rise': chatRising }" :style="pullStyle" @pull="onItemPull" @pull-end="onItemPullEnd" @open-sidebar="sidebarCollapsed = false" />
+          <ChatPanel v-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" file-pinned :inactive="besideInTile && focusedPane === 'beside'" @close="closeChat" :class="{ 'chat-rise': chatRising }" :style="pullStyle" @pull="onItemPull" @pull-end="onItemPullEnd" @open-sidebar="sidebarCollapsed = false" />
           <!-- The route names a chat the catalog has not delivered yet: the
                pane is on its way, so it shows the skeleton rather than
                nothing (#1651). -->
@@ -154,13 +147,6 @@
             @close="closeProject"
             @pull="onItemPull"
             @pull-end="onItemPullEnd"
-            @open-sidebar="sidebarCollapsed = false"
-          />
-          <SubagentChatView
-            v-else-if="subagentRoute"
-            :key="subagentRoute.agentId"
-            :chat-id="subagentRoute.chatId"
-            :agent-id="subagentRoute.agentId"
             @open-sidebar="sidebarCollapsed = false"
           />
           <template v-else-if="store.activeChat">
@@ -327,7 +313,6 @@ import { prefersReducedMotion } from '../lib/motion'
 // cache-first in the service worker after that), so the first switch is not
 // perceptibly slower.
 const MemoryMapView = defineAsyncComponent(() => import('./MemoryMapView.vue'))
-const SubagentChatView = defineAsyncComponent(() => import('./SubagentChatView.vue'))
 const ProjectView = defineAsyncComponent(() => import('./ProjectView.vue'))
 const SchedulePanel = defineAsyncComponent(() => import('./SchedulePanel.vue'))
 const TaskBoardView = defineAsyncComponent(() => import('./TaskBoardView.vue'))
@@ -598,15 +583,6 @@ const route = useRoute()
 const router = useRouter()
 prefetchChatPanelForRoute(route.path, route.params.chatId as string | undefined)
 const projectIdParam = computed(() => (route.params.projectId as string) || '')
-// /chat/:chatId/subagent/:agentId — a read-only view of one subagent's own
-// conversation. It replaces the chat pane rather than opening beside it: the
-// parent chat is one click away in the header, and the sidebar row stays
-// selected so the relationship is still visible.
-const subagentRoute = computed(() => {
-  const chatId = (route.params.chatId as string) || ''
-  const agentId = (route.params.agentId as string) || ''
-  return chatId && agentId ? { chatId, agentId } : null
-})
 // The route names a chat, but the catalog has not caught up with it yet:
 // `activeChat` is still null while the selection and the URL already point at
 // the conversation (a reload, a desktop deep link, a chat the poll has not
@@ -895,7 +871,7 @@ function setBeside(chatId: string): void {
 /** The remembered chat, shown only beside a chat route and never as a copy of the main pane. */
 const besideChat = computed(() => {
   const id = besideWanted.value
-  if (!id || !activePinKey.value || id === activePinKey.value || subagentRoute.value) return null
+  if (!id || !activePinKey.value || id === activePinKey.value) return null
   return store.chats.find(c => c.chat_id === id && !c.archived && c.local !== false) || null
 })
 const splitFits = computed(() => !isMobile.value && chatMainWidth.value !== null
@@ -1098,8 +1074,7 @@ watch(() => route.path, (p) => {
 // The path is watched, not just `params.chatId`: a move from a secondary page
 // to `/` leaves chatId undefined on *both* routes, so a chatId-keyed watcher
 // never fired and the retained chat resurfaced on Home. Watching the path also
-// keeps the explicit `/chat/:chatId` and subagent routes working exactly as
-// before.
+// keeps the explicit `/chat/:chatId` route working exactly as before.
 watch(
   () => route.path,
   (path) => {
@@ -1392,15 +1367,6 @@ function onUnreservedKeydown(e: KeyboardEvent) {
       void router.push('/')
       return
     }
-    // A subagent view is a mode within the chat, not a separate chat: the
-    // first Esc goes back to the chat that spawned it, and only the next one
-    // closes that chat. Closing outright would disconnect a chat the user
-    // never left.
-    if (subagentRoute.value) {
-      e.preventDefault()
-      void router.push(`/chat/${subagentRoute.value.chatId}`)
-      return
-    }
     // The second chat, when it has the keyboard, closes alone: the main chat stays.
     if (besideInTile.value && focusedPane.value === 'beside') {
       e.preventDefault()
@@ -1526,7 +1492,7 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // would otherwise toggle back and forth for as long as the key was held.
   if (e.repeat) {
     if ((e.altKey || (!isTypingTarget(e.target) && !isTypingTarget(document.activeElement)))
-      && store.activeChat && !subagentRoute.value && !besideInTile.value
+      && store.activeChat && !besideInTile.value
       && (matchesShortcut(e, 'previousChat') || matchesShortcut(e, 'nextChat'))) e.preventDefault()
     return
   }
@@ -1564,7 +1530,7 @@ function onShortcutKeydown(e: KeyboardEvent) {
     // Only take the key when the chord acts: otherwise it stays with the page.
     if (besideInTile.value) { e.preventDefault(); closeBeside(); return }
     const next = store.recentChats.find(c => c.chat_id !== activePinKey.value)
-    if (next && store.activeChat && splitFits.value && !subagentRoute.value) {
+    if (next && store.activeChat && splitFits.value) {
       e.preventDefault()
       void openBeside(next.chat_id)
     }
@@ -1607,7 +1573,7 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // Each pane has its own rail; the chord steps the pane with the keyboard.
   const chatStep = matchesShortcut(e, 'previousChat') ? -1 : matchesShortcut(e, 'nextChat') ? 1 : 0
   if (chatStep) {
-    if (!store.activeChat || subagentRoute.value) return
+    if (!store.activeChat) return
     e.preventDefault()
     if (focusedPanel.value?.selectAdjacentChat?.(chatStep)) invalidatePull()
     return

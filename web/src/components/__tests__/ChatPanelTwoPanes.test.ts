@@ -69,7 +69,7 @@ function mountTwoPanes() {
     return Promise.resolve([]) as never
   })
   const stubs = {
-    PaneHeader: PaneHeaderStub, SubagentPanel: ChildStub, RouterLink: ChildStub,
+    PaneHeader: PaneHeaderStub, RouterLink: ChildStub,
     ChatCommentPopover: ChatCommentPopoverStub, CommentComposePopover: ChildStub,
   }
   const a = shallowMount(ChatPanel, {

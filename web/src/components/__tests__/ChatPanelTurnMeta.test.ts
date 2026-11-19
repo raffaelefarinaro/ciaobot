@@ -120,7 +120,6 @@ async function mountPanel(): Promise<{
       stubs: {
         PaneHeader: PaneHeaderStub,
         ModelSelector: ChildStub,
-        SubagentPanel: ChildStub,
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,
         RouterLink: ChildStub,

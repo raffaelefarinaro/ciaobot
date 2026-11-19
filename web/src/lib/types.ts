@@ -449,30 +449,6 @@ export interface ChatMessage {
   full_length?: number
 }
 
-// Subagent transcripts from /api/chats/{id}/subagents. One entry per subagent
-// spawned inside the chat's parent Claude session. Messages share the same
-// shape as /messages (role, content, tool_name for _activity rollups).
-// Dispatch metadata (tool_use_id, description, status, turn_index) is parsed
-// from the parent session JSONL and may be absent for sessions the server
-// can't inspect locally. `turn_index` matches the index stamped on user
-// bubbles by /messages, anchoring the panel to the dispatching turn.
-export interface SubagentTranscript {
-  agent_id: string
-  parent_agent_id?: string
-  messages: ChatMessage[]
-  tool_use_id?: string
-  description?: string
-  subagent_type?: string
-  is_async?: boolean
-  status?: 'running' | 'completed' | 'failed' | 'stopped' | ''
-  turn_index?: number
-  // Run length in milliseconds, when the provider can report it without the
-  // transcript (opencode child sessions carry their own timestamps).
-  duration_ms?: number | null
-  // Provider start time as Unix milliseconds, when available.
-  started_at?: number | null
-}
-
 // ── WebSocket events ────────────────────────────────────────────────────
 
 export type WsEvent =

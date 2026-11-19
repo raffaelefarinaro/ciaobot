@@ -3750,12 +3750,32 @@ describe('ephemeral status events', () => {
   })
 })
 
+describe('subagent trace lines', () => {
+  test('renders a subagent tool call as an indented line under the parent trace', () => {
+    const store = useProjectStore()
+    const chatId = 'c-subagent-line'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const send = (event: Record<string, unknown>) => fakeSockets[0].onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'Agent', tool_input: 'Explore the repo', tool_use_id: 'p1' })
+    send({ type: 'tool_use', tool_name: 'Read', tool_input: 'a.py', tool_use_id: 'c1', parent_tool_use_id: 'p1' })
+
+    const tool = store.currentTimeline.find(e => e.kind === 'tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    const lines = tool.content.split('\n')
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).not.toMatch(/^↳/)
+    expect(lines[1]).toMatch(/^↳ .*Read a\.py$/)
+    expect(tool.tool_use_ids).toEqual(['p1', 'c1'])
+  })
+})
+
 describe('subagent thinking deltas', () => {
-  test('do not leak a subagent thinking delta into the parent turn trace or messages', () => {
+  test('drops subagent thinking: do not leak a subagent thinking delta into the parent turn trace or messages', () => {
     // Regression: thinking deltas fired from inside a Task subagent arrive
-    // with parent_tool_use_id set. The subagent's transcript belongs to its
-    // own read-only view, so accumulating the
-    // delta into the parent's thinking buffer used to produce a stray
+    // with parent_tool_use_id set. Subagent reasoning is not shown, so
+    // accumulating the delta into the parent's thinking buffer used to produce a stray
     // _thinking message at the end of the parent turn's trace block and
     // persist it into the chat history after the result event.
     apiGet.mockResolvedValue([])
@@ -8952,28 +8972,6 @@ describe('switchChat workspace alignment', () => {
     expect(store.activeWorkspace).toBe('work')
     expect(store.activeChatId).toBe('c-work')
   })
-
-  // `/chat/:chatId/subagent/:agentId` carries the same chatId, so matching on
-  // that alone made the chat's own sidebar row a dead click while one of its
-  // subagents was open.
-  test('navigates back to the chat from one of its subagent views', async () => {
-    const { router } = await import('../router')
-    const store = useProjectStore()
-    store.projects = [
-      { project_id: 'p1', name: 'Proj', workspace: 'personal' } as unknown as ProjectInfo,
-    ]
-    store.chats = [
-      { chat_id: 'c1', project_id: 'p1', title: 'Chat' } as unknown as ChatInfo,
-    ]
-    store.activeChatId = 'c1'
-    router.currentRoute.value.params = { chatId: 'c1', agentId: 'a1b2c3d4' }
-    routerPush.mockClear()
-
-    await store.switchChat('c1')
-
-    expect(routerPush).toHaveBeenCalledWith('/chat/c1')
-    router.currentRoute.value.params = {}
-  })
 })
 
 describe('workspaceNeedsInput', () => {
@@ -9979,38 +9977,6 @@ describe('chatLastSnippet', () => {
     expect(store.lastResultSnippetAt.c1).toBe('2026-08-27T01:00:00Z')
     expect(store.chatLastSnippet('c1')).toBe('Response B.')
     expect(store.lastResultSnippetNeedsRebase.has('c1')).toBe(false)
-  })
-})
-
-describe('loadSubagent', () => {
-  test('fetches one agent and merges it without dropping the others', async () => {
-    const store = useProjectStore()
-    store.subagents = {
-      c1: [
-        { agent_id: 'a1', messages: [], description: 'first' },
-        { agent_id: 'a2', messages: [], description: 'second' },
-      ],
-    } as never
-
-    apiGet.mockResolvedValue([{ agent_id: 'a2', messages: [{ role: 'assistant', content: 'fresh' }], description: 'second' }])
-
-    await store.loadSubagent('c1', 'a2')
-
-    expect(apiGet).toHaveBeenCalledWith('/api/chats/c1/subagents?agent_id=a2')
-    expect(store.subagents.c1).toHaveLength(2)
-    expect(store.subagents.c1[0].agent_id).toBe('a1')
-    expect(store.subagents.c1[1].messages).toHaveLength(1)
-  })
-
-  test('matches across the agent- prefix rather than adding a duplicate row', async () => {
-    const store = useProjectStore()
-    store.subagents = { c1: [{ agent_id: 'agent-a1', messages: [], description: 'first' }] } as never
-    apiGet.mockResolvedValue([{ agent_id: 'a1', messages: [{ role: 'assistant', content: 'fresh' }] }])
-
-    await store.loadSubagent('c1', 'a1')
-
-    expect(store.subagents.c1).toHaveLength(1)
-    expect(store.subagents.c1[0].messages).toHaveLength(1)
   })
 })
 

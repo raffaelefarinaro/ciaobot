@@ -234,12 +234,10 @@
         <ChatTurnActivity
           v-if="item.kind === 'trace'"
           :steps="item.steps"
-          :subs="item.subs"
           :outputs="item.outputs"
           :outputs-open="Boolean(openOutputs[i])"
           :outputs-id="domId(`outputs-${i}`)"
           :open="Boolean(openTraces[i])"
-          :chat-id="chat.chat_id"
           :thinking-expanded="thinkingExpanded"
           :render-markdown="renderMarkdown"
           :render-activity-line="renderActivityLine"
@@ -567,7 +565,7 @@
           <span class="sr-only">, {{ liveTraceOpen ? 'expanded' : 'collapsed' }}</span>
         </button>
         <div
-          v-if="liveTraceOpen && (view.currentTimeline.length || view.currentStreamingText || view.currentStreamingThinking || liveSubagents.length)"
+          v-if="liveTraceOpen && (view.currentTimeline.length || view.currentStreamingText || view.currentStreamingThinking)"
           ref="liveTraceBodyEl"
           class="trace-body"
           @click="onLiveTraceBodyClick"
@@ -646,11 +644,6 @@
           <div v-if="view.currentStreamingText" class="trace-step trace-step--note trace-step--now">
             <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z" /></svg></span>
             <div class="trace-text trace-streaming" v-html="renderMarkdown(view.currentStreamingText)"></div>
-          </div>
-          <!-- Subagents for the in-flight turn nest in the live trace -->
-          <div v-if="liveSubagents.length" class="trace-step trace-step--subagent">
-            <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3" /><path d="M6 20a6 6 0 0 1 12 0" /></svg></span>
-            <SubagentPanel :subagents="liveSubagents" :chat-id="chat.chat_id" />
           </div>
         </div>
       </div>
@@ -1423,10 +1416,6 @@ import { useKeyboardSettings } from '../composables/useKeyboardSettings'
 import { memoryPassChatId, memoryPassSource } from '../lib/memoryPass'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useTerminalStore } from '../stores/terminal'
-// Subagent transcripts carry `turn_index` (the user turn that dispatched
-// them, parsed server-side from the session JSONL), so each panel anchors
-// under the turn that spawned its agents.
-import SubagentPanel from './SubagentPanel.vue'
 import AgentContextSection from './AgentContextSection.vue'
 import { latestContextUsage } from '../lib/contextUsage'
 import ChatTurnActivity from './ChatTurnActivity.vue'
@@ -1436,7 +1425,7 @@ import { recordSentPrompt } from '../lib/chatDrafts'
 import { splitAttachmentBlock, type AttachedFile } from '../lib/chatAttachments'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useArchiveChat } from '../composables/useArchiveChat'
-import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatInfo, ChatMessage, SubagentTranscript, TurnVerification } from '../lib/types'
+import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatInfo, ChatMessage, TurnVerification } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
@@ -1541,7 +1530,7 @@ type RenderItemInput =
   | { kind: 'user'; msg: ChatMessage; turnIndex?: number }
   | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; turnIndex?: number; meta?: TurnMeta }
   | { kind: 'system'; msg: ChatMessage }
-  | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[]; turnIndex?: number }
+  | { kind: 'trace'; steps: ChatMessage[]; outputs?: TraceOutput[]; turnIndex?: number }
 
 type RenderItem = RenderItemInput & { key: string }
 
@@ -2092,8 +2081,8 @@ const inspectorOutputs = computed<TraceOutput[]>(() => collapseOutputsByName(mer
     .reverse()
     .map(outputs => outputs && [...outputs].reverse()),
 ).filter(output => !isScratchPath(output.file_path))))
-// Every activity line this chat has produced: its turns, the subagents they
-// ran, and the turn in flight. The rail reads skills and MCP tools from it.
+// Every activity line this chat has produced: its turns and the turn in
+// flight. The rail reads skills and MCP tools from it.
 const chatActivityLines = computed<string[]>(() => {
   const lines: string[] = []
   const take = (messages: ChatMessage[] | undefined) => {
@@ -2104,7 +2093,6 @@ const chatActivityLines = computed<string[]>(() => {
   for (const item of renderItems.value) {
     if (item.kind !== 'trace') continue
     take(item.steps)
-    for (const sub of item.subs ?? []) take(sub.messages)
   }
   for (const entry of view.currentTimeline) {
     if (entry.kind === 'tool') lines.push(...activityLines(entry.content))
@@ -2649,8 +2637,8 @@ function onLiveBodyScroll() {
 }
 
 // Click on an expanded activity/thinking bubble body collapses it, unless the
-// click landed on an interactive descendant (a link, file card/chip, subagent
-// panel, inline code, copy button, or anything stopPropagation-bearing).
+// click landed on an interactive descendant (a link, file card/chip,
+// inline code, copy button, or anything stopPropagation-bearing).
 // Selection drags that happen to end inside the body are ignored so users
 // can highlight text without accidentally closing the bubble.
 function isInteractiveTraceChild(target: EventTarget | null): boolean {
@@ -2658,7 +2646,6 @@ function isInteractiveTraceChild(target: EventTarget | null): boolean {
   if (target.closest('a')) return true
   if (target.closest('button, [role="button"]')) return true
   if (target.closest('.file-card, .answer-outputs')) return true
-  if (target.closest('.subagent-rows')) return true
   if (target.closest('code, pre, kbd')) return true
   return false
 }
@@ -2764,7 +2751,7 @@ function scrollToBottom() {
 // later. The height of the transcript keeps changing for a few hundred
 // milliseconds after its rows first paint — the history fetch resolves after
 // the skeleton has already been measured, images and avatars load, the
-// subagent fetch adds trace blocks, the composer resizes — and each of those
+// composer resizes — and each of those
 // growths leaves the viewport where it was, i.e. at the top. The
 // stick-to-bottom watcher only catches up on the *next* change, so the
 // correction was always visible as a scroll.
@@ -4314,39 +4301,13 @@ function attachTurnMeta(items: RenderItem[], meta: TurnMeta | null): void {
   if (last && last.kind === 'assistant') last.meta = meta
 }
 
-const renderData = computed<{
-  items: RenderItem[]
-  liveSubs: SubagentTranscript[]
-  liveStandaloneSubs: SubagentTranscript[]
-}>(() => {
+const renderItems = computed<RenderItem[]>(() => {
   const items: RenderItem[] = []
   let buffer: ChatMessage[] = []
 
-  // Subagent transcripts grouped by the user turn that dispatched them.
-  // Entries without a resolvable turn (older sessions, remote chats) attach
-  // to the last turn so they stay visible.
-  const subsByTurn = new Map<number, SubagentTranscript[]>()
-  const unanchoredSubs: SubagentTranscript[] = []
-  for (const sub of view.activeSubagents) {
-    if (typeof sub.turn_index === 'number') {
-      const list = subsByTurn.get(sub.turn_index) || []
-      list.push(sub)
-      subsByTurn.set(sub.turn_index, list)
-    } else {
-      unanchoredSubs.push(sub)
-    }
-  }
   let currentTurnIndex: number | null = null
   // The current turn's footer facts, carried across flushes of one turn.
   let turnMeta: TurnMeta | null = null
-
-  const takeForegroundSubs = (turnIndex: number | null): SubagentTranscript[] => {
-    if (turnIndex === null) return []
-    const subs = subsByTurn.get(turnIndex)
-    if (!subs?.length) return []
-    subsByTurn.delete(turnIndex)
-    return subs
-  }
 
   const flushTurn = (isFinal = false) => {
     if (!buffer.length) return
@@ -4373,12 +4334,10 @@ const renderData = computed<{
     // a normal assistant bubble; the trailing tools just join the trace.
 
     if (finalMsg && isInterruptedTail(finalMsg, trailing)) {
-      const traceSubs = takeForegroundSubs(currentTurnIndex)
       items.push(withKey({
         kind: 'trace',
         steps: buffer.slice(),
         turnIndex: currentTurnIndex ?? undefined,
-        ...(traceSubs.length ? { subs: traceSubs } : {}),
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
       }))
       buffer = []
@@ -4397,7 +4356,6 @@ const renderData = computed<{
       return
     }
 
-    const traceSubs = takeForegroundSubs(currentTurnIndex)
     // Earlier explicitly completed replies are bubbles of their own; the rest
     // is Activity. Only the final reply owns the turn footer and Outputs.
     const turnItems: RenderItem[] = buildTurnParts(buffer, finalIdx).map((part) =>
@@ -4405,13 +4363,11 @@ const renderData = computed<{
         ? withKey({ kind: 'assistant', msg: part.msg, turnIndex: currentTurnIndex ?? undefined })
         : withKey({ kind: 'trace', steps: part.steps, turnIndex: currentTurnIndex ?? undefined }),
     )
-    // Foreground subagents and (when there's no answer bubble) file outputs
-    // belong to the one Activity trace that sits right before the reply. Reuse
-    // the trailing trace if there is one; otherwise mint an empty one so those
-    // attachments still have a home adjacent to the answer.
-    const needsHost =
-      traceSubs.length > 0
-      || ((!finalMsg || finalMsg.is_error) && turnOutputs.length > 0)
+    // When there's no answer bubble, file outputs belong to the one Activity
+    // trace that sits right before the reply. Reuse the trailing trace if
+    // there is one; otherwise mint an empty one so the outputs still have a
+    // home adjacent to the answer.
+    const needsHost = (!finalMsg || finalMsg.is_error) && turnOutputs.length > 0
     const last = turnItems[turnItems.length - 1]
     let host = last && last.kind === 'trace' ? last : null
     if (!host && needsHost) {
@@ -4419,7 +4375,6 @@ const renderData = computed<{
       turnItems.push(host)
     }
     if (host) {
-      if (traceSubs.length) host.subs = traceSubs
       if ((!finalMsg || finalMsg.is_error) && turnOutputs.length) host.outputs = turnOutputs
     }
     for (const it of turnItems) items.push(it)
@@ -4458,101 +4413,10 @@ const renderData = computed<{
     }
   }
   flushTurn(true)
-  // Only the latest messages are loaded, so subagents of older turns find no
-  // rendered turn to attach to. A finished one stays out of view until its turn
-  // loads; it must not pile into the live trace or the last turn's trace.
-  let firstRenderedTurn: number | null = null
-  for (const it of items) {
-    if (it.kind === 'user' && typeof it.turnIndex === 'number') { firstRenderedTurn = it.turnIndex; break }
-  }
-  const belongsToUnloadedTurn = (sub: SubagentTranscript): boolean =>
-    sub.status !== 'running'
-    && typeof sub.turn_index === 'number'
-    && firstRenderedTurn !== null
-    && sub.turn_index < firstRenderedTurn
-  // While streaming, the in-flight turn's subagents nest in the live trace,
-  // along with any still running from an earlier turn. Drop settled children
-  // created before this stream, even when background wakes share a turn index.
-  if (view.isStreaming) {
-    const streamStartedAt = view.currentStreamStartedAt
-    const live = [...subsByTurn.values()].flat().concat(unanchoredSubs)
-      .filter(sub => !belongsToUnloadedTurn(sub))
-      .filter(sub => sub.status === 'running'
-        || !streamStartedAt
-        || typeof sub.started_at !== 'number'
-        || sub.started_at >= streamStartedAt)
-    return { items, liveSubs: live, liveStandaloneSubs: [] }
-  }
-  // Anything still unplaced (turn not in history yet, or no turn info):
-  // attach anchored subagents to their actual user-turn's trace block so a
-  // late-finishing agent doesn't drift to the most recent trace. Unanchored
-  // leftovers still fall back to the last trace block, or a fresh block if
-  // there is none.
-  const leftovers = [...subsByTurn.values()].flat().concat(unanchoredSubs)
-    .filter(sub => !belongsToUnloadedTurn(sub))
-  if (leftovers.length) {
-    const anchored = new Map<number, SubagentTranscript[]>()
-    const unanchored: SubagentTranscript[] = []
-    for (const sub of leftovers) {
-      if (typeof sub.turn_index === 'number') {
-        const list = anchored.get(sub.turn_index) || []
-        list.push(sub)
-        anchored.set(sub.turn_index, list)
-      } else {
-        unanchored.push(sub)
-      }
-    }
-
-    // Attach each anchored group to the matching turn's trace block. If the
-    // turn has no trace block (e.g. the model replied with plain text), mint
-    // one right before the first assistant/system item of that turn.
-    for (const [turnIdx, subs] of anchored) {
-      let turnStart = -1
-      for (let i = 0; i < items.length; i++) {
-        const it = items[i]
-        if (it.kind === 'user' && it.turnIndex === turnIdx) {
-          turnStart = i
-        }
-      }
-      if (turnStart === -1) {
-        // Matching user turn isn't rendered yet; keep with unanchored fallback.
-        unanchored.push(...subs)
-        continue
-      }
-      let traceIdx = -1
-      for (let i = turnStart + 1; i < items.length && items[i].kind !== 'user'; i++) {
-        if (items[i].kind === 'trace') traceIdx = i
-      }
-      if (traceIdx >= 0) {
-        const host = items[traceIdx]
-        if (host.kind === 'trace') {
-          host.subs = [...(host.subs || []), ...subs]
-        }
-      } else {
-        let insertAt = turnStart + 1
-        while (insertAt < items.length && items[insertAt].kind === 'user') insertAt++
-        items.splice(insertAt, 0, withKey({ kind: 'trace', steps: [], subs, turnIndex: turnIdx }))
-      }
-    }
-
-    if (unanchored.length) {
-      let lastTrace: RenderItem | undefined
-      for (let i = items.length - 1; i >= 0; i--) {
-        if (items[i].kind === 'trace') { lastTrace = items[i]; break }
-      }
-      if (lastTrace && lastTrace.kind === 'trace') {
-        lastTrace.subs = [...(lastTrace.subs || []), ...unanchored]
-      } else {
-        items.push(withKey({ kind: 'trace', steps: [], subs: unanchored }))
-      }
-    }
-  }
-  return { items: dedupeRenderItemKeys(items), liveSubs: [], liveStandaloneSubs: [] }
+  return dedupeRenderItemKeys(items)
 })
 
-const renderItems = computed<RenderItem[]>(() => renderData.value.items)
 const transcriptEmpty = computed(() => renderItems.value.length === 0)
-const liveSubagents = computed<SubagentTranscript[]>(() => renderData.value.liveSubs)
 
 // One consistent full-screen state for "this chat isn't ready to show yet" —
 // previously this forked three ways depending on whether stale cached

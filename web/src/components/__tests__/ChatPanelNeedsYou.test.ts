@@ -56,7 +56,6 @@ const CommentPopoverStub = vi.hoisted(() => ({
   },
 }))
 vi.mock('../PaneHeader.vue', () => ({ default: { template: '<header><slot name="title" /><slot name="actions" /></header>' } }))
-vi.mock('../SubagentPanel.vue', () => ({ default: NoopStub }))
 vi.mock('../ChatCommentPopover.vue', () => ({ default: CommentPopoverStub }))
 vi.mock('../CommentComposePopover.vue', () => ({ default: NoopStub }))
 
