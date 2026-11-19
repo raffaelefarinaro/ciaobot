@@ -6777,6 +6777,7 @@ class ProjectChatManager:
             # parsing delimiters.
             injected_context_prefix=prefix,
             compact=compact,
+            unattended=unattended,
         )
 
     # ── Image-capability pre-flight ──────────────────────────────────────

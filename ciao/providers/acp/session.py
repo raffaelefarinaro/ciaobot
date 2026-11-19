@@ -45,7 +45,7 @@ _CONTENT_BLOCK: TypeAdapter[Any] = TypeAdapter(
 )
 
 
-def _journal_file(runtime_dir: Path, agent_id: str, session_id: str) -> Path:
+def journal_file(runtime_dir: Path, agent_id: str, session_id: str) -> Path:
     digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32]
     return runtime_dir / "acp-journal" / agent_id / f"{digest}.jsonl"
 
@@ -66,7 +66,7 @@ def _prepare_journal_file(path: Path) -> None:
 
 def journal_path(runtime_dir: Path, agent_id: str, session_id: str) -> Path:
     """``<runtime_dir>/acp-journal/<agent_id>/<sha256(session_id)[:32]>.jsonl`` (0600 file, 0700 dirs)."""
-    path = _journal_file(runtime_dir, agent_id, session_id)
+    path = journal_file(runtime_dir, agent_id, session_id)
     _prepare_journal_file(path)
     return path
 
@@ -200,7 +200,7 @@ class AcpSession:
             spec,
             session_id=resume or "",
             config_options=[],
-            journal=SessionJournal(_journal_file(journal_dir, spec.id, provisional)),
+            journal=SessionJournal(journal_file(journal_dir, spec.id, provisional)),
             broker=broker,
             session_meta=meta,
         )
@@ -213,7 +213,7 @@ class AcpSession:
         session._normalizer.session_id = session_id
         session.config_options = options
         session._seed_values()
-        path = _journal_file(journal_dir, spec.id, session_id)
+        path = journal_file(journal_dir, spec.id, session_id)
         existed = path.exists()
         session._journal = SessionJournal(path)
         if replay and not existed:
