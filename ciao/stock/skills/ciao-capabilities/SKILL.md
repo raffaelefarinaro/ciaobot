@@ -16,7 +16,7 @@ You are running inside Ciaobot. The app's feature surface is not otherwise visib
 
 ## The one-paragraph pitch
 
-Ciaobot is a local-first personal assistant and second brain: a persistent personal workspace for Claude Code and OpenCode. Your agents do the work; Ciaobot keeps project context, chats, files, schedules, and reviewable memory together. Notes and remembered knowledge stay in plain Markdown you own and can use without Ciaobot. Technically, it is a meta-harness around existing agent execution loops, not a replacement for them. Changing models or harnesses keeps the workspace, but does not make provider sessions, tools, or permissions interchangeable.
+Ciaobot is a local-first personal assistant and second brain: a persistent personal workspace for Claude Code, Codex and OpenCode. Your agents do the work; Ciaobot keeps project context, chats, files, schedules, and reviewable memory together. Notes and remembered knowledge stay in plain Markdown you own and can use without Ciaobot. Technically, it is a meta-harness around existing agent execution loops, not a replacement for them. Changing models or harnesses keeps the workspace, but does not make provider sessions, tools, or permissions interchangeable.
 
 ## Connecting providers
 
@@ -24,8 +24,9 @@ Ciaobot uses the provider CLI the user already has, rather than creating a
 second model account or storing a second provider credential. For Anthropic,
 the user installs and signs into [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview),
 then chooses Claude Code in Ciaobot; Ciaobot adds workspace/project context and
-handles the end-of-conversation memory pass around that session. For
-OpenAI access, OpenRouter, Ollama, or another cloud/local backend, the user
+handles the end-of-conversation memory pass around that session. For Codex, the user installs the Codex CLI and signs in with `codex login`
+(install and sign-in are in Settings → Providers), then chooses Codex in Ciaobot.
+For OpenRouter, Ollama, or another cloud/local backend, the user
 installs [OpenCode 2.3.2+](https://opencode.ai/v2/docs/), configures and
 authenticates the provider there, then chooses OpenCode in Ciaobot. Its connected models appear
 in the Ciaobot picker. Point users to the live

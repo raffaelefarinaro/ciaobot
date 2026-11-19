@@ -373,6 +373,28 @@ def _load_retry_kind(raw: object) -> str:
     return "quota" if kind == "quota_terminal" else kind
 
 
+# Retry kinds no failure arms any more. A pending retry persisted under one is dropped on
+# load (the chat keeps its transcript and queue) instead of replayed under a kind the
+# classifier no longer produces.
+_RETIRED_RETRY_KINDS = frozenset({"startup"})
+
+
+def _drop_retired_retry(cd: dict) -> dict:
+    """The chat record with a retired-kind retry cleared; any other record is returned as is."""
+    if cd.get("retry_kind") not in _RETIRED_RETRY_KINDS:
+        return cd
+    return {
+        **cd,
+        "retry_status": "",
+        "retry_prompt": "",
+        "retry_image_refs": [],
+        "retry_next_at": "",
+        "retry_kind": "",
+        "retry_attempts": 0,
+        "retry_unattended": False,
+    }
+
+
 def _literal_schedule_id(chat_id: str, row: dict[str, Any]) -> str:
     if row.get("archived") or row.get("retry_status") != "pending" or row.get("retry_recovery", "") != "":
         return ""
@@ -469,7 +491,7 @@ def _retry_cap(kind: str) -> int | None:
     """
     if kind == "quota":
         return _MAX_QUOTA_RETRIES
-    if kind in {"connection", "startup", "auth"}:
+    if kind in {"connection", "auth"}:
         return _MAX_CONNECTION_DROP_RETRIES
     return None
 
@@ -929,7 +951,7 @@ class ChatInfo:
     retry_last_error: str = ""
     retry_attempts: int = 0
     # Kind of the failure that armed the pending retry ("quota",
-    # "connection", "startup", "auth", and "network", which
+    # "connection", "auth", and "network", which
     # the agent arms itself). The attempt counter
     # belongs to one kind: arming a retry of a different kind starts that
     # kind's budget at zero.
@@ -1472,6 +1494,7 @@ class ProjectChatManager:
                 repo_path=pd.get("repo_path", ""),
             )
         for cid, cd in data.get("chats", {}).items():
+            cd = _drop_retired_retry(cd)
             chat_model = cd.get("model", self._config.claude_default_model)
             self._chats[cid] = ChatInfo(
                 chat_id=cid,
@@ -4980,7 +5003,7 @@ class ProjectChatManager:
 
         Both providers store a session under the agent root the chat ran in —
         the Claude SDK by hashing that path into its projects directory, and
-        opencode because its server is started there. Reclaiming against
+        opencode because its agent process is started there. Reclaiming against
         ``workspace_root`` therefore found nothing for a workspace-scoped chat
         and leaked every blob and session it was meant to drop.
 
@@ -5634,7 +5657,7 @@ class ProjectChatManager:
         if task is not None and not task.done():
             return True
         # A parked question or approval card is held by the provider session
-        # (for opencode, by the server process itself), and the reply routes
+        # (for opencode, by its agent process), and the reply routes
         # back through it. The stream may already be closed, so this is not
         # covered by `active_chat_ids`: tearing the provider down here would
         # strand the card the user is looking at.
@@ -7484,17 +7507,15 @@ class ProjectChatManager:
         reason: str,
         unattended: bool,
     ) -> bool:
-        """Arm a deferred retry for a quota/connection/startup/auth failure.
+        """Arm a deferred retry for a quota/connection/auth failure.
 
         ``kind`` is ``"quota"`` (any usage limit, retried hourly),
-        ``"connection"``, ``"startup"``, or ``"auth"``.
+        ``"connection"`` or ``"auth"``.
         A connection/auth failure that dropped *after* streaming output
         (``had_progress``) resumes the session with a "continue" nudge instead
         of replaying the prompt — replaying could re-run tool calls the partial
         turn already executed — and is capped at
-        ``_MAX_CONNECTION_DROP_RETRIES``. Provider startup failures use the
-        same cap because they are safe to replay but should not retry forever
-        when the local runtime is persistently unhealthy. Every armed retry
+        ``_MAX_CONNECTION_DROP_RETRIES``. Every armed retry
         parks queued follow-ups onto the chat so they survive to the retried
         turn. ``unattended`` is the failed turn's flag; the replay keeps it.
         Returns True if a retry was armed.
@@ -7520,7 +7541,7 @@ class ProjectChatManager:
             and chat is not None
             and bool(chat.session_id)
         )
-        # Every kind is capped: the connection/startup/auth cap guards against
+        # Every kind is capped: the connection/auth cap guards against
         # a transient-looking local failure looping forever, and the quota caps
         # stop retries against a limit that is not clearing.
         cap = _retry_cap(kind)
@@ -7550,7 +7571,7 @@ class ProjectChatManager:
         else:
             prompt = current_prompt
             image_refs = self._image_refs(current_images)
-        if kind in {"connection", "startup", "auth"}:
+        if kind in {"connection", "auth"}:
             interval = _RETRY_CONNECTION_INTERVAL_SECONDS
         else:
             interval = _RETRY_INTERVAL_SECONDS
@@ -9760,7 +9781,7 @@ class ProjectChatManager:
 
     async def _finish_background_stop(self, chat_id: str) -> None:
         """Abort OpenCode's follow-up execution and release the parked announce."""
-        # OpenCode's follow-up execution runs in the server, not in the
+        # OpenCode's follow-up execution runs in its agent process, not in the
         # drain: ending the drain alone would leave it running (#1391).
         service = self._providers.get(chat_id)
         live = service.provider if service is not None else None
@@ -9801,7 +9822,7 @@ class ProjectChatManager:
            park.
         """
         # A Stop must also cancel any retry armed for this chat (quota /
-        # connection / startup / auth). The turn that armed it already errored,
+        # connection / auth). The turn that armed it already errored,
         # so no stream is live and the retry would otherwise replay after the
         # stop (#1109). Only fire when a retry is actually pending: clearing
         # unconditionally would stamp ``retry_status="stopped"`` (with no path
@@ -9861,8 +9882,8 @@ class ProjectChatManager:
         # and the pending ack unwinds when the escalation disconnect (or
         # the generator's own cleanup) tears the transport down.
         # Tracked, not fire-and-forget: an untracked task can be collected
-        # while still pending, and a provider stop that raises anything but an
-        # httpx error (opencode's abort path) would surface only as "Task
+        # while still pending, and a provider stop that raises (opencode's abort
+        # path included) would surface only as "Task
         # exception was never retrieved" at GC time.
         if handle is not None:
             self._spawn_detached(handle.stop(), f"stop-{chat_id}")
@@ -9923,12 +9944,6 @@ class ProjectChatManager:
 
     # ── Auto-title generation ────────────────────────────────────────────
 
-    # OpenCode writes its native title after the first exchange, so allow its
-    # title agent time to finish. Claude Code commonly does not generate one
-    # for our context-prefixed prompts; do not hold its one-shot titler behind
-    # this entire poll window.
-    _TITLE_POLL_DELAYS: tuple[float, ...] = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0, 60.0)
-
     async def auto_title_if_default(
         self, chat_id: str, user_text: str, assistant_text: str = ""
     ) -> str | None:
@@ -9962,17 +9977,10 @@ class ProjectChatManager:
 
         chat = self._chats.get(chat_id)
         provider = getattr(chat, "provider", "claude") if chat else "claude"
-        delays: tuple[float, ...] = self._TITLE_POLL_DELAYS
-        descriptor = provider_registry.get(provider)
-        if provider == "claude":
-            # Claude's title arrives as a session_info_update event (see tier 1): no native read,
-            # so no poll. Polling would hold the LLM title back by the schedule's tail.
-            delays = ()
-        elif descriptor is not None and descriptor.acp_spec_path:
-            # Other ACP agents are read once, with no wait: their title, if any, is on the
-            # event stream, so a poll has nothing to catch up with.
-            delays = (0.0,)
-        stopped, native = await self._poll_native_title(chat_id, delays, _is_titling_target)
+        stopped, native = False, None
+        if provider != "claude":
+            # Claude's title arrives as a session_info_update event (see tier 1): no native read.
+            stopped, native = await self._adopt_native_title(chat_id, _is_titling_target)
         if stopped:
             return None
         if native:
@@ -10001,41 +10009,32 @@ class ProjectChatManager:
         self._save()
         return fallback
 
-    async def _poll_native_title(
-        self, chat_id: str, delays: Sequence[float], is_target: Callable[[ChatInfo], bool]
+    async def _adopt_native_title(
+        self, chat_id: str, is_target: Callable[[ChatInfo], bool]
     ) -> tuple[bool, str | None]:
-        """Wait through ``delays`` for the provider's native title and write it when it lands.
+        """Read the provider's native title once, and write it when it is there.
 
         Returns ``(stopped, title)``: ``stopped`` when the chat was renamed, deleted or left
         the titling targets, so no further titling applies; ``title`` when a native title
-        was written.
+        was written. A session the turn has not created yet is not an error: the fallback
+        tiers run, and the end-of-turn pass can still upgrade the title.
         """
-        for delay in delays:
-            if delay:
-                await asyncio.sleep(delay)
-            chat = self._chats.get(chat_id)
-            # Bail on rename/delete, but not on a missing session: the turn
-            # may still be creating it, and a later poll will find it.
-            # The fallback title is still considered title-able so the late
-            # poll (fired after the turn) can upgrade it to the native title.
-            if chat is None or not is_target(chat):
-                return True, None
-            if not chat.session_id:
-                continue
-
-            title = await self._native_chat_title(chat)
-            if not title:
-                continue
-
-            # Re-check: user may have renamed while we were reading.
-            chat = self._chats.get(chat_id)
-            if chat is None or not is_target(chat):
-                return True, None
-            chat.title = title
-            chat.title_origin = "adapter"
-            self._save()
-            return False, title
-        return False, None
+        chat = self._chats.get(chat_id)
+        if chat is None or not is_target(chat):
+            return True, None
+        if not chat.session_id:
+            return False, None
+        title = await self._native_chat_title(chat)
+        if not title:
+            return False, None
+        # Re-check: user may have renamed while we were reading.
+        chat = self._chats.get(chat_id)
+        if chat is None or not is_target(chat):
+            return True, None
+        chat.title = title
+        chat.title_origin = "adapter"
+        self._save()
+        return False, title
 
     async def _llm_chat_title(
         self, chat: ChatInfo, user_text: str, assistant_text: str

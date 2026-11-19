@@ -1,7 +1,6 @@
 """Provider-specific tool summaries shared by live streams and transcript replay."""
 
 import json
-from collections.abc import Mapping
 from typing import cast
 
 
@@ -71,31 +70,3 @@ def summarize_claude_tool_input(name: str, tool_input: dict) -> str:
     return ""
 
 
-def summarize_opencode_tool_input(tool: str, raw: object) -> str:
-    """Short, non-secret one-liner describing an OpenCode tool call for the UI."""
-    if not isinstance(raw, Mapping):
-        return ""
-    for key in ("filePath", "path", "file", "pattern", "query", "command", "description"):
-        value = raw.get(key)
-        if isinstance(value, str) and value.strip():
-            lines = [line.strip() for line in value.splitlines() if line.strip()]
-            more = f" (+{len(lines) - 1} lines)" if len(lines) > 1 else ""
-            return lines[0][:400] + more
-    return json.dumps(raw, ensure_ascii=False)[:200] if raw else ""
-
-
-def opencode_file_touches(tool: str, raw: object) -> list[dict[str, str]] | None:
-    """Paths an OpenCode tool call writes, for the PWA's file-change cards."""
-    if not isinstance(raw, Mapping):
-        return None
-    if tool.lower() in {"shell", "bash"}:
-        from ciao.web.chat_broker import extract_file_touches
-
-        return extract_file_touches("bash", raw) or None
-    action = {"write": "write", "edit": "edit", "patch": "edit"}.get(tool.lower())
-    if action is None:
-        return None
-    path = raw.get("filePath") or raw.get("path")
-    if not isinstance(path, str) or not path.strip():
-        return None
-    return [{"file_path": path.strip(), "action": action}]

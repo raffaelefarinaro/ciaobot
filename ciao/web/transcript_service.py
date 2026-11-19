@@ -11,8 +11,8 @@ It covers the whole read path:
   which tool calls earn a file card, which user turns are the CLI talking to
   itself rather than the human, and which injected context is stripped back
   off a prompt before it is shown;
-* the per-session renderers - the Claude session JSONL and an opencode
-  thread;
+* the per-session renderers - the Claude session JSONL and an ACP session
+  journal (:func:`_render_acp_journal`);
 * the assembly that stitches a chat's sessions, handover messages and durable
   transcript metadata into one chronological list
   (:func:`_assemble_chat_messages`);
@@ -40,16 +40,8 @@ from pathlib import Path
 from typing import Any
 
 from ciao import cli_envelopes, provider_registry
-from ciao.tool_summary import (
-    opencode_file_touches,
-    summarize_claude_tool_input,
-    summarize_opencode_tool_input,
-)
-from ciao.background_notice import (
-    NATIVE_WAKE_TAIL_LINES,
-    format_finished_runs,
-    native_wake_run,
-)
+from ciao.tool_summary import summarize_claude_tool_input
+from ciao.background_notice import format_finished_runs
 from ciao.models import ChatContext
 from ciao.rate_limits import is_rate_limit_telemetry
 from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
@@ -533,172 +525,6 @@ def _mark_preceding_answer(rows: list[dict]) -> None:
         return
 
 
-def _render_opencode_thread(
-    thread: dict,
-    chat,
-    *,
-    metadata: bool = True,
-    start_user_idx: int = 0,
-    workspace_root: Path | None = None,
-    agent_root: Path | None = None,
-) -> list[dict]:
-    """Render opencode session messages into the provider-neutral PWA row shape.
-
-    ``thread`` is :meth:`BaseProvider.read_thread`'s ``{"info", "messages"}``
-    payload; each message is ``{"info": {role, ...}, "parts": [...]}``.
-
-    ``metadata`` overlays ``chat``'s per-turn images/timings/unattended/origin flags
-    onto the rows. Pass ``False`` when ``thread`` is a *child* session: its
-    turn numbering restarts at 0, so the parent chat's turn metadata does not
-    apply to it.
-
-    ``start_user_idx`` offsets per-session user numbering when stitching
-    ``previous_session_ids``.
-
-    ``workspace_root`` and ``agent_root`` normalise file-card paths the way the
-    Claude replay does (see :func:`normalize_file_touch_paths`).
-    """
-    messages = thread.get("messages")
-    if not isinstance(messages, list):
-        messages = []
-    result: list[dict] = []
-    user_idx = int(start_user_idx) if isinstance(start_user_idx, int) else 0
-    pending_tools: list[str] = []
-    pending_runs: list[dict] = []
-
-    def flush_tools() -> None:
-        if pending_tools:
-            result.append({
-                "role": "system",
-                "content": "\n".join(pending_tools),
-                "tool_name": "_activity",
-            })
-            pending_tools.clear()
-
-    def flush_notice() -> None:
-        # Shells and subagents that finished together draw one card, ahead of
-        # the reply; it also splits the wake from the turn before it.
-        if pending_runs:
-            result.append({
-                "role": "system",
-                "content": format_finished_runs(pending_runs, tail_lines=NATIVE_WAKE_TAIL_LINES)[0],
-                "origin": "background_run",
-            })
-            pending_runs.clear()
-
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        info = message.get("info")
-        info = info if isinstance(info, dict) else {}
-        role = str(info.get("role") or "")
-        parts = message.get("parts")
-        parts = [part for part in parts if isinstance(part, dict)] if isinstance(parts, list) else []
-        if role == "synthetic":
-            flush_tools()
-            run = native_wake_run(
-                "\n".join(str(part.get("text") or "") for part in parts),
-                info.get("description"),
-                info.get("metadata"),
-            )
-            if run is not None:
-                pending_runs.append(run)
-            continue
-        flush_notice()
-        if role == "user":
-            flush_tools()
-            # A prompt can span several text parts; synthetic ones are
-            # opencode's own injections (compaction summaries), not something
-            # the user typed.
-            texts = [
-                str(part.get("text") or "")
-                for part in parts
-                if part.get("type") == "text" and not part.get("synthetic")
-            ]
-            raw_prompt = "\n".join(texts)
-            content = _strip_injected_context(raw_prompt).strip()
-            if not content:
-                continue
-            # Hidden continuation: skipped before user_idx += 1 so
-            # markers keep their turn_index.
-            if cli_envelopes.is_hidden_continuation(content):
-                if metadata:
-                    _mark_preceding_answer(result)
-                continue
-            entry: dict = {
-                "role": "user",
-                "content": content,
-                "turn_index": user_idx,
-            }
-            if metadata:
-                _stamp_turn_metadata(entry, chat, user_idx)
-            result.append(entry)
-            user_idx += 1
-            continue
-        if role != "assistant":
-            continue
-        for part in parts:
-            kind = str(part.get("type") or "")
-            if kind == "text":
-                flush_tools()
-                text = str(part.get("text") or "").strip()
-                if text:
-                    result.append({"role": "assistant", "content": text})
-                continue
-            if kind == "reasoning":
-                # Same `_thinking` tag as the Claude replay path: the PWA
-                # folds it into the collapsed Activity trace.
-                flush_tools()
-                text = str(part.get("text") or "").strip()
-                if text:
-                    result.append({
-                        "role": "system",
-                        "content": text,
-                        "tool_name": "_thinking",
-                    })
-                continue
-            if kind == "tool":
-                tool = str(part.get("tool") or "tool")
-                state = part.get("state")
-                state = state if isinstance(state, dict) else {}
-                raw_input = state.get("input")
-                touches = normalize_file_touch_paths(
-                    opencode_file_touches(tool, raw_input) or [],
-                    workspace_root,
-                    agent_root=agent_root,
-                )
-                if str(state.get("status") or "") == "error":
-                    # A failed/denied write or edit reached nothing on disk:
-                    # match the live path (and the Claude replay path) by
-                    # rendering a plain activity row instead of a file card.
-                    touches = []
-                if touches:
-                    flush_tools()
-                    for touch in touches:
-                        result.append({
-                            "role": "system",
-                            "tool_name": "_filecard",
-                            "content": touch["file_path"],
-                            "file_path": touch["file_path"],
-                            "action": touch.get("action") or "touched",
-                            "tool": tool,
-                        })
-                    continue
-                summary = summarize_opencode_tool_input(tool, raw_input)
-                line = f"{_tool_icon(tool)} {tool}"
-                if summary:
-                    line += f" {summary}"
-                pending_tools.append(line)
-        flush_tools()
-    flush_notice()
-    if metadata:
-        _overlay_assistant_timings(result, chat.user_turn_timings)
-        _overlay_turn_verification(
-            result, getattr(chat, "turn_verification", None) or {}
-        )
-    return result
-
-
 def _stamp_turn_metadata(entry: dict, chat: Any, user_idx: int) -> None:
     """Overlay one user turn's send-time facts (images, send time, unattended, origin)."""
     refs = chat.user_turn_images.get(str(user_idx))
@@ -726,8 +552,8 @@ def _render_acp_journal(
 
     ``records`` is the ``acp_journal`` a provider's ``read_thread`` returns: user prompts and
     the ``event_to_json`` payloads of each turn, in the order they happened. The rows
-    follow the same shape as :func:`_render_opencode_thread`. Consecutive text deltas
-    join into one assistant row; a tool call, a thinking block or a prompt ends that
+    are the provider-neutral shape the PWA renders. Consecutive text deltas join into
+    one assistant row; a tool call, a thinking block or a prompt ends that
     row. Subagent text (a payload with ``parent_tool_use_id``) stays out of the
     parent's reply. A ``result`` row carries no text of its own (the text was already
     streamed), so it only ends a run.
@@ -870,7 +696,7 @@ async def _acp_history_rows(
             logger.warning("Could not render an ACP session journal; its turns are left out.")
             continue
         if segment:
-            # Advance the turn offset by this segment's user rows, as the opencode branch does.
+            # Advance the turn offset by this segment's user rows.
             rendered.extend(segment)
             start_user_idx += sum(1 for row in segment if row.get("role") == "user")
     return rendered
@@ -1434,75 +1260,10 @@ async def _assemble_chat_messages(
                 acp_rows, getattr(chat, "turn_verification", None) or {}
             )
             return [*handover_messages, *acp_rows]
-    # opencode chats reach this point only when their ACP journal had no rows. The legacy branch
-    # below then reads the same session through `read_thread`, which returns `{"acp_journal": ...}`
-    # for ACP agents; `_render_opencode_thread` reads only `{"info", "messages"}`, so it renders
-    # nothing for a real chat and the durable transcript serves it. It is kept only until slice D2
-    # removes the opencode HTTP renderer.
-    if provider not in {"claude", "opencode"}:
+    if provider != "claude":
         current = pcm._transcripts.current_messages(
             ChatContext.for_web(chat_id), provider
         )
-        if current:
-            _overlay_assistant_timings(current, chat.user_turn_timings)
-            _overlay_turn_verification(
-                current, getattr(chat, "turn_verification", None) or {}
-            )
-            return [*handover_messages, *current]
-        archived = _messages_from_archived_transcript(pcm, config, chat)
-        if archived is not None:
-            return [*handover_messages, *archived]
-        return list(handover_messages)
-    if provider == "opencode":
-        if getattr(chat, "archived", False):
-            # An archived chat is read-only and its provider-side session may
-            # be gone; serve the vault markdown without paying a provider
-            # session read (for opencode, a throwaway server spawn) first.
-            archived = _messages_from_archived_transcript(pcm, config, chat)
-            if archived is not None:
-                return [*handover_messages, *archived]
-        # Stitch the same lineage Claude uses: each provider keeps its turns
-        # only in the session that wrote them, and ciaobot rotates via
-        # ``_rotate_session_id`` (autocompact / resume-fallback / continuation).
-        # Reading only ``chat.session_id`` blanked every chat that had rotated
-        # — exactly the bug that hid the first turn of chat-a495fc8f.
-        session_ids = _session_lineage(chat)
-        rendered: list[dict] = []
-        start_user_idx = chat.turn_index_base
-        provider_cls = provider_registry.require(provider).factory()
-        for sid in session_ids:
-            try:
-                opencode_thread = await provider_cls.read_thread(
-                    session_root, sid, runtime_root=config.state_path.parent
-                )
-                if not opencode_thread:
-                    continue
-                segment = _render_opencode_thread(
-                    opencode_thread,
-                    chat,
-                    start_user_idx=start_user_idx,
-                    workspace_root=config.workspace_root,
-                    agent_root=session_root,
-                )
-            except Exception:  # noqa: BLE001 — one missing segment must not blank siblings
-                continue
-            if segment:
-                # Advance the global turn offset by the user-bubble count in
-                # this segment so the next segment's ``turn_index`` + timings
-                # stay aligned with ``chat.user_turn_timings``.
-                user_count = sum(1 for row in segment if row.get("role") == "user")
-                rendered.extend(segment)
-                start_user_idx += user_count
-        current = pcm._transcripts.current_messages(
-            ChatContext.for_web(chat_id), provider
-        )
-        if rendered:
-            _append_unrendered_error(rendered, current)
-            _overlay_transcript_metadata(
-                rendered,
-                current,
-            )
-            return [*handover_messages, *rendered]
         if current:
             _overlay_assistant_timings(current, chat.user_turn_timings)
             _overlay_turn_verification(
@@ -1762,8 +1523,8 @@ async def _assemble_chat_messages(
     # Stitch the durable transcript's per-turn metadata (token usage with the
     # context %, quota, effective model) onto the rendered rows — the session
     # JSONL carries none of it, so without this the turn footer showed only
-    # the completion time and duration. The opencode branch has made the same
-    # overlay since the transcript store gained these fields.
+    # the completion time and duration. The ACP journal path applies the same
+    # overlay.
     current = pcm._transcripts.current_messages(
         ChatContext.for_web(chat_id), provider
     )

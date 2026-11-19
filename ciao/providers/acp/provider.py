@@ -509,9 +509,8 @@ class AcpProvider(BaseProvider):
     async def read_thread(
         cls, workspace_root: Path, session_id: str, *, runtime_root: Path
     ) -> dict[str, Any]:
-        # Returned as {"acp_journal": rows}, a shape the transcript renderer does not read yet
-        # (it expects {"info", "messages"}; a missing "messages" renders as an empty segment).
-        # ACP history rendering is deferred to slice A5 ("journal history").
+        # Returned as {"acp_journal": rows}; the transcript renders it through
+        # ``transcript_service._render_acp_journal``.
         path = journal_file(runtime_root, cls.spec.id, session_id)
         if not path.exists():
             return {}
