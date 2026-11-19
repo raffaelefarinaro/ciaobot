@@ -638,3 +638,119 @@ def test_cli_service_group_help_is_not_macos_only(monkeypatch, capsys):
     )
     assert "macOS" in service_line
     assert "Linux" in service_line
+
+
+def _installer_stub(monkeypatch, *, fetch_error=None):
+    """Replace the network fetch; record what was asked for and what was run."""
+    from ciao import linux_service
+
+    calls = {"fetched": [], "ran": []}
+
+    def fetch(url, dest):
+        calls["fetched"].append(url)
+        if fetch_error is not None:
+            raise fetch_error
+        dest.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def run(argv):
+        calls["ran"].append(list(argv))
+        return calls.get("exit", 0)
+
+    return linux_service, calls, fetch, run
+
+
+def test_linux_update_runs_the_latest_installer_with_passthrough_args(monkeypatch):
+    linux_service, calls, fetch, run = _installer_stub(monkeypatch)
+
+    assert linux_service.run_update(["--no-service"], fetch=fetch, run=run) == 0
+
+    assert calls["fetched"] == [linux_service.LATEST_INSTALLER_URL]
+    assert linux_service.LATEST_INSTALLER_URL.startswith("https://github.com/")
+    assert linux_service.LATEST_INSTALLER_URL.endswith("/releases/latest/download/install.sh")
+    [argv] = calls["ran"]
+    assert argv[:1] == ["sh"]
+    assert argv[1].endswith("install.sh")
+    assert argv[2:] == ["--no-service"]
+
+
+def test_linux_update_propagates_child_exit(monkeypatch):
+    linux_service, calls, fetch, run = _installer_stub(monkeypatch)
+    calls["exit"] = 3
+
+    assert linux_service.run_update([], fetch=fetch, run=run) == 3
+
+
+def test_linux_update_download_failure_is_reported_not_run(monkeypatch, capsys):
+    linux_service, calls, fetch, run = _installer_stub(
+        monkeypatch, fetch_error=OSError("no route to github")
+    )
+
+    assert linux_service.run_update([], fetch=fetch, run=run) == 1
+
+    assert calls["ran"] == []
+    assert "could not download the installer" in capsys.readouterr().err
+
+
+def test_downloader_refuses_a_non_https_installer(tmp_path):
+    from ciao import linux_service
+
+    with pytest.raises(ValueError):
+        linux_service._download("http://example.invalid/install.sh", tmp_path / "install.sh")
+
+
+def test_cli_update_on_linux_runs_the_installer(monkeypatch):
+    from ciao import engine_update, linux_service
+
+    seen = []
+    monkeypatch.setattr(cli.sys, "platform", "linux")
+
+    def installer(argv):
+        seen.append(("installer", list(argv)))
+        return 0
+
+    monkeypatch.setattr(linux_service, "run_update", installer)
+    monkeypatch.setattr(
+        engine_update, "main", lambda argv: pytest.fail("receiver must not run for install flags")
+    )
+
+    assert cli.main(["update", "--no-service"]) == 0
+    assert cli.main(["update"]) == 0
+    assert seen == [("installer", ["--no-service"]), ("installer", [])]
+
+
+def test_cli_update_on_linux_keeps_the_receiver_verbs(monkeypatch):
+    # Precedence: `status`, `run-apply` and `run-recover` stay with
+    # engine_update, the update record and the hop's detached job. Dropping
+    # this check sends them to the installer instead.
+    from ciao import engine_update, linux_service
+
+    monkeypatch.setattr(cli.sys, "platform", "linux")
+    monkeypatch.setattr(
+        linux_service, "run_update", lambda argv: pytest.fail("installer must not run")
+    )
+    received = []
+    monkeypatch.setattr(engine_update, "main", lambda argv: received.append(list(argv)) or 0)
+
+    for argv in (["status"], ["status", "--json"], ["run-apply", "--operation", "x"],
+                 ["run-recover", "--operation", "x"]):
+        assert cli.main(["update", *argv]) == 0
+    assert received == [
+        ["status"], ["status", "--json"],
+        ["run-apply", "--operation", "x"], ["run-recover", "--operation", "x"],
+    ]
+
+
+def test_cli_update_on_macos_is_not_the_installer(monkeypatch):
+    # The Linux dispatch is platform-gated: a Mac keeps engine_update for
+    # every `ciao update` verb, as before.
+    from ciao import engine_update, linux_service
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        linux_service, "run_update", lambda argv: pytest.fail("installer must not run on macOS")
+    )
+    received = []
+    monkeypatch.setattr(engine_update, "main", lambda argv: received.append(list(argv)) or 0)
+
+    assert cli.main(["update", "--no-service"]) == 0
+    assert received == [["--no-service"]]

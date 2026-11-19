@@ -10143,7 +10143,16 @@ def _dispatch(argv_list: list[str]) -> int:
     if argv_list[:1] == ["update"]:
         from ciao.engine_update import main as update_main
 
-        return update_main(argv_list[1:])
+        rest = argv_list[1:]
+        # On Linux `ciao update` re-runs the latest installer. The receiving
+        # verbs keep meaning the update record and the 1.x hop's detached job,
+        # so they stay on engine_update, which the updater job also runs.
+        receiver_verbs = {"status", "run-apply", "run-recover"}
+        if sys.platform.startswith("linux") and not (rest and rest[0] in receiver_verbs):
+            from ciao.linux_service import run_update  # noqa: PLC0415
+
+            return run_update(rest)
+        return update_main(rest)
     if argv_list[:1] == ["gws"]:
         # Passthrough: forward everything (including leading gws options such as
         # `--version`) untouched, keeping argparse out of the way.

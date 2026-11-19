@@ -300,9 +300,10 @@ def test_update_package_installer_checked_before_linux(monkeypatch) -> None:
     assert result["ok"] is False
     assert result["mode"] == "installer"
     assert "no longer updates itself" in result["error"]
+    assert "Run `ciao update`" in result["error"]
     assert "docs/LINUX.md" in result["error"]
     assert "Ciaobot for Mac" not in result["error"]
-    assert result["command"] == ""
+    assert result["command"] == "ciao update"
 
 
 def test_linux_source_export_never_recommends_the_mac_installer(monkeypatch) -> None:
@@ -314,6 +315,67 @@ def test_linux_source_export_never_recommends_the_mac_installer(monkeypatch) -> 
         assert result["mode"] == mode
         assert "docs/LINUX.md" in result["error"]
         assert result["command"] == ""
+
+
+def _uv_tool_prefix(monkeypatch, root) -> None:
+    """Make ``root`` look like a uv tool env: its prefix holds uv's receipt."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "uv-receipt.toml").write_text('[tool]\nrequirements = [{ name = "ciaobot" }]\n', encoding="utf-8")
+    monkeypatch.setattr(sys, "prefix", str(root))
+
+
+def test_detect_install_mode_uv_tool_only_on_linux_with_receipt(monkeypatch, tmp_path) -> None:
+    _no_bundle_site_packages(monkeypatch, tmp_path)
+    _uv_tool_prefix(monkeypatch, tmp_path / "uv" / "tools" / "ciaobot")
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    assert detect_install_mode() == "uv_tool"
+
+    # Mutation guard: the platform test is what keeps a Mac or Windows
+    # interpreter that happens to hold a uv receipt out of the Linux answer.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert detect_install_mode() == "unknown"
+
+
+def test_detect_install_mode_uv_tool_needs_the_receipt(monkeypatch, tmp_path) -> None:
+    _no_bundle_site_packages(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "bare-venv"))
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    assert detect_install_mode() == "unknown"
+
+
+def test_editable_linux_source_install_keeps_administrator_answer(monkeypatch, tmp_path) -> None:
+    # F6: a source checkout on Linux is `editable` even when its venv carries a
+    # uv receipt, so it keeps the administrator answer and not `ciao update`.
+    repo = tmp_path / "repo"
+    (repo / "ciao").mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (repo / "pyproject.toml").write_text("", encoding="utf-8")
+    _fake_ciao_module(monkeypatch, repo / "ciao" / "__init__.py")
+    _uv_tool_prefix(monkeypatch, repo / ".venv")
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    assert detect_install_mode() == "editable"
+    result = update_package()
+
+    assert result["mode"] == "editable"
+    assert result["command"] == ""
+    assert "administrator" in result["error"]
+    assert "ciao update" not in result["error"]
+
+
+def test_update_package_uv_tool_points_at_ciao_update(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "uv_tool")
+
+    result = update_package()
+
+    assert result["ok"] is False
+    assert result["mode"] == "uv_tool"
+    assert result["command"] == "ciao update"
+    assert "`ciao update`" in result["error"]
+    assert "administrator" not in result["error"]
 
 
 def test_package_update_endpoint_explains_app_owned_updates() -> None:
