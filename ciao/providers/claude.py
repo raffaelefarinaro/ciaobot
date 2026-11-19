@@ -58,15 +58,10 @@ from claude_agent_sdk import (
     delete_session as sdk_delete_session,
     get_session_info,
 )
-from claude_agent_sdk.types import TERMINAL_TASK_STATUSES, HookContext, HookEvent, HookInput, HookJSONOutput, PermissionMode, SandboxSettings, SystemPromptPreset
+from claude_agent_sdk.types import TERMINAL_TASK_STATUSES, HookContext, HookEvent, HookInput, HookJSONOutput, PermissionMode, SystemPromptPreset
 
 from ciao.tool_summary import summarize_claude_tool_input
 from ciao.mcp_names import is_claudeai_connector
-from ciao.fs_sandbox import (
-    CLAUDE_FILE_TOOL_PATH_KEYS,
-    claude_file_tool_guard,
-    claude_sandbox_settings,
-)
 from ciao.models import (
     COMPACT_COMMAND,
     AgentRequest,
@@ -636,8 +631,6 @@ class ClaudeProvider(BaseSDKProvider):
         # merge queue so late approvals can't land in a stale stream.
         self._permission_gate = PermissionGate()
         self._mcp_token = ""
-        # Filesystem scope and roots the live CLI process was started with.
-        self._fs_scope_key: tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]] = ("machine", (), (), ())
         # Spawn-only options the live CLI process was started with.
         self._spawn_key: tuple[object, ...] = ()
         # Fire-and-forget closes of dead clients, held so they are not collected.
@@ -924,16 +917,12 @@ class ClaudeProvider(BaseSDKProvider):
         if (
             self._client is not None
             and self._connected
-            and (
-                provider_reuse_key(request) != self._mcp_token
-                or (request.agent_fs_scope, request.agent_roots, request.agent_denied, request.agent_denied_except) != self._fs_scope_key
-            )
+            and provider_reuse_key(request) != self._mcp_token
         ):
-            # MCP configuration, the shell environment and the filesystem
-            # sandbox are fixed when the managed CLI process starts. Reconnect
-            # when a chat switches surfaces, receives a refreshed ephemeral
-            # token (on either surface), or its workspace scope changes;
-            # model/mode alone can still change in place.
+            # MCP configuration and the shell environment are fixed when the
+            # managed CLI process starts. Reconnect when a chat switches
+            # surfaces or receives a refreshed ephemeral token (on either
+            # surface); model/mode alone can still change in place.
             reconnect_reason = "other"
             self._warn_tasks_stopped(reconnect_reason)
             await self.disconnect()
@@ -1018,51 +1007,16 @@ class ClaudeProvider(BaseSDKProvider):
 
         system_prompt = system_prompt_payload("")
 
-        sandbox: SandboxSettings | None = None
-        add_dirs: list[str | Path] = []
-        file_tool_hooks: list[HookMatcher] = []
         cli_env = dict(request.extra_env or {})
         self._claudeai_expected = cli_env.get("ENABLE_CLAUDEAI_MCP_SERVERS") != "false"
-        if request.agent_fs_scope == "workspace":
-            roots = [Path(root) for root in request.agent_roots]
-            sandbox_dict: dict[str, Any] | None = claude_sandbox_settings(
-                scope=request.agent_fs_scope,
-                mode=request.mode,
-                roots=roots,
-                read_only=[Path(p) for p in request.agent_read_only],
-                denied=[Path(p) for p in request.agent_denied],
-                regrant=[Path(p) for p in request.agent_denied_except],
-            )
-            sandbox = cast(SandboxSettings, sandbox_dict)
-            agent_root, *other_roots = request.agent_roots
-            add_dirs = [
-                root for root in other_roots if not Path(root).is_relative_to(agent_root)
-            ]
-            # The sandbox covers Bash only; the CLI's own file tools are
-            # confined to the same roots by this hook.
-            file_tool_hooks = [HookMatcher(
-                matcher="|".join(CLAUDE_FILE_TOOL_PATH_KEYS),
-                hooks=[claude_file_tool_guard(
-                    cwd=Path(self.workspace_root),
-                    roots=roots,
-                    cli_tmp_base=cli_env.get("CLAUDE_CODE_TMPDIR")
-                    or os.environ.get("CLAUDE_CODE_TMPDIR"),
-                    read_only=[Path(p) for p in request.agent_read_only],
-                )],
-            )]
-        # The linked repository is added in every scope: it is what loads the
-        # repo's .claude/skills and .claude/commands. Workspace scope may already
-        # list it among the roots above. It is added even inside the workspace
-        # root, because the CLI only discovers skills from cwd and its parents.
+        # The linked repository is what loads the repo's .claude/skills and
+        # .claude/commands. It is added even inside the workspace root, because
+        # the CLI only discovers skills from cwd and its parents.
         linked_repo = linked_repo_of(request)
-        if linked_repo and linked_repo not in {str(d) for d in add_dirs}:
-            add_dirs.append(linked_repo)
-        self._fs_scope_key = (request.agent_fs_scope, request.agent_roots, request.agent_denied, request.agent_denied_except)
+        add_dirs: list[str | Path] = [linked_repo] if linked_repo else []
         hooks: dict[HookEvent, list[HookMatcher]] = {
             "UserPromptSubmit": [HookMatcher(hooks=[self._slash_context_hook])]
         }
-        if file_tool_hooks:
-            hooks["PreToolUse"] = file_tool_hooks
 
         # The SDK reads the initialize deadline from os.environ when it builds
         # the client, so it has to be set before ClaudeSDKClient() below.
@@ -1081,7 +1035,6 @@ class ClaudeProvider(BaseSDKProvider):
             fallback_model=_fallback_model_for(requested_model),
             permission_mode=_sdk_permission_mode(request.mode),
             cwd=str(self.workspace_root),
-            sandbox=sandbox,
             add_dirs=add_dirs,
             include_partial_messages=True,
             # Raise the CLI-stdout decode buffer above the SDK's 1 MiB default

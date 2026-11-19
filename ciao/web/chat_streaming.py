@@ -184,8 +184,6 @@ class ChatStreamingHost(Protocol):
         self, chat: ChatInfo, request: AgentRequest, event: ToolUseEvent
     ) -> None: ...
 
-    async def warm_gh_token(self, chat: ChatInfo) -> None: ...
-
     def build_agent_request(
         self,
         chat: ChatInfo,
@@ -1823,7 +1821,6 @@ class ChatStreaming:
             chat.handover_context_pending and chat.handover_messages
         )
 
-        await self._host.warm_gh_token(chat)
         request = self._host.build_agent_request(
             chat,
             prompt=prompt,

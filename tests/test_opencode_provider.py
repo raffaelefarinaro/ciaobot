@@ -169,10 +169,6 @@ async def test_successful_cleanup_sanitizes_startup_exception(
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda *args: "fake")
     monkeypatch.setattr(mod, "_spawn_server", spawn)
@@ -207,10 +203,6 @@ async def test_chat_spawn_exception_is_sanitized(monkeypatch, tmp_path, boundary
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     def resolve(*args):
         if boundary == "resolve":
@@ -336,10 +328,6 @@ async def test_chat_real_startup_contract_failure_has_safe_actionable_message(
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     async def spawn(*args, **kwargs):
         return Process(), Tree()
@@ -400,10 +388,6 @@ async def test_cancellation_during_failed_startup_cleanup_has_no_raw_context(
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     async def spawn(*args, **kwargs):
         return Process(), Tree()
@@ -475,10 +459,6 @@ async def test_chat_cancellation_while_waiting_for_exited_server_stderr(monkeypa
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     async def spawn(*args, **kwargs):
         return Process(), Tree()
@@ -530,10 +510,6 @@ def test_forcibly_closed_loop_quarantines_real_startup_owner(monkeypatch, tmp_pa
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     async def spawn(*args, **kwargs):
         if phase == "spawn":
@@ -615,10 +591,6 @@ async def test_cancellation_during_failing_spawn_has_no_raw_context(monkeypatch,
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda *args: "fake")
     monkeypatch.setattr(mod, "_spawn_server", spawn)
@@ -918,10 +890,6 @@ async def test_chat_immediate_post_spawn_failure_is_cleaned(monkeypatch, tmp_pat
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda *args: "fake")
     monkeypatch.setattr(mod, "_spawn_server", spawn)
@@ -1198,10 +1166,6 @@ def test_cross_loop_startup_serializes_chat_and_ephemeral(monkeypatch, tmp_path,
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     async def chat_health(*args):
         nonlocal active
@@ -1298,10 +1262,6 @@ async def test_transient_chat_retry_releases_gate_to_queued_contender(monkeypatc
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     async def spawn(*args, **kwargs):
         return Process(), Tree()
@@ -1673,7 +1633,7 @@ async def test_real_enter_cleanup_precedes_waiter_and_quarantines(monkeypatch, t
         return Process(), Tree()
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
-    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform), raising=False)
     monkeypatch.setattr(mod, "_spawn_server", spawn)
     monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
     owner = asyncio.create_task(mod._EphemeralServer(tmp_path).__aenter__())
@@ -1756,7 +1716,7 @@ async def test_cancelled_spawn_is_owned_until_child_is_reaped(monkeypatch, tmp_p
             pass
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
-    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform), raising=False)
     monkeypatch.setattr(mod, "_spawn_server", spawn)
     monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
     owner = asyncio.create_task(mod._EphemeralServer(tmp_path).__aenter__())
@@ -1813,7 +1773,7 @@ async def test_tree_construction_failure_quarantines_uncertain_spawn(
     def tree(*args, **kwargs):
         raise OSError("tree-secret")
 
-    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform), raising=False)
     monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", create)
     monkeypatch.setattr(mod, "tree_spawn_options", lambda **kwargs: {})
     monkeypatch.setattr(mod, "ProcessTree", tree)
@@ -2005,7 +1965,7 @@ def test_real_enter_cleanup_blocks_other_loop_and_quarantines(monkeypatch, tmp_p
         asyncio.run(run())
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
-    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform), raising=False)
     monkeypatch.setattr(mod, "_spawn_server", spawn)
     monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
     owner, waiter = threading.Thread(target=worker), threading.Thread(target=worker)
@@ -2117,7 +2077,7 @@ def test_cross_loop_cancelled_owner_drains_cleanup_before_waiter(
             asyncio.set_event_loop(None)
             loop.close()
 
-    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform), raising=False)
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
     monkeypatch.setattr(mod, "_spawn_server", spawn)
     monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
@@ -3731,7 +3691,6 @@ def test_v2_form_validation_covers_typed_constraints():
         _validate_form_field({"type": "string", "custom": True}, ["option", "other"])
 
 
-
 # ── permission.asked surfaces a card ────────────────────────────────────
 # The auto ruleset keeps shell and destructive control-plane tools behind an
 # operator approval card.
@@ -5158,7 +5117,7 @@ async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch, p
         return FakeProcess()
 
     monkeypatch.setattr("ciao.providers.opencode.ProcessTree", FakeTree)
-    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform), raising=False)
 
     monkeypatch.setattr(
         "ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: "/bin/opencode"
@@ -5173,10 +5132,6 @@ async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch, p
     class Request:
         extra_env: dict = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots: tuple = ()
-        agent_denied: tuple = ()
-        agent_denied_except: tuple = ()
 
     with pytest.raises(RuntimeError, match="OpenCode startup failed"):
         await provider._ensure_server(Request())  # type: ignore[arg-type]
@@ -5185,101 +5140,6 @@ async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch, p
     assert provider._process is None
     assert provider._client is None
     FakeProcess.returncode = None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("live_roots", "expect_restart"),
-    [(("/w/agent",), True), (("/w/agent", "/w/data"), False)],
-)
-async def test_a_changed_root_set_restarts_the_opencode_server(
-    tmp_path, monkeypatch, live_roots, expect_restart
-):
-    """The sandbox profile wraps the server process, so a changed root set (a
-    setup chat granted the data root) must restart it; an unchanged one keeps it."""
-    from types import SimpleNamespace
-
-    from ciao.models import provider_reuse_key
-
-    provider = _provider(tmp_path)
-    live_client = object()
-    provider._client = live_client  # type: ignore[assignment]
-    provider._process = SimpleNamespace(returncode=None)  # type: ignore[assignment]
-
-    class Request:
-        extra_env: dict = {}
-        mcp_token = ""
-        agent_fs_scope = "workspace"
-        agent_roots = ("/w/agent", "/w/data")
-        agent_denied: tuple = ()
-        agent_denied_except: tuple = ()
-        agent_read_only: tuple = ()
-
-    request = Request()
-    provider._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
-    provider._fs_scope_key = ("workspace", live_roots, (), ())
-    stopped: list[bool] = []
-
-    async def fake_disconnect() -> None:
-        stopped.append(True)
-        provider._client = None
-        provider._process = None
-
-    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
-    # Stop after the reuse decision: with no binary, a restart raises here.
-    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: None)
-
-    if expect_restart:
-        with pytest.raises(FileNotFoundError):
-            await provider._ensure_server(request)  # type: ignore[arg-type]
-        assert stopped == [True]
-    else:
-        assert await provider._ensure_server(request) is live_client  # type: ignore[arg-type]
-        assert stopped == []
-
-
-@pytest.mark.asyncio
-async def test_a_changed_denied_except_restarts_the_opencode_server(tmp_path, monkeypatch):
-    """Re-linking a Google account changes the re-allowed folder in the sandbox
-    profile, so the server must restart."""
-    from types import SimpleNamespace
-
-    from ciao.models import provider_reuse_key
-
-    provider = _provider(tmp_path)
-    provider._client = object()  # type: ignore[assignment]
-    provider._process = SimpleNamespace(returncode=None)  # type: ignore[assignment]
-
-    class Request:
-        extra_env: dict = {}
-        mcp_token = ""
-        agent_fs_scope = "workspace"
-        agent_roots = ("/w/agent",)
-        agent_denied = ("/w/agent/secrets",)
-        agent_denied_except = ("/w/agent/secrets/gws-b",)
-        agent_read_only: tuple = ()
-
-    request = Request()
-    provider._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
-    provider._fs_scope_key = (
-        "workspace",
-        ("/w/agent",),
-        ("/w/agent/secrets",),
-        ("/w/agent/secrets/gws-a",),
-    )
-    stopped: list[bool] = []
-
-    async def fake_disconnect() -> None:
-        stopped.append(True)
-        provider._client = None
-        provider._process = None
-
-    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
-    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: None)
-
-    with pytest.raises(FileNotFoundError):
-        await provider._ensure_server(request)  # type: ignore[arg-type]
-    assert stopped == [True]
 
 
 @pytest.mark.asyncio
@@ -5331,10 +5191,6 @@ async def test_database_lock_during_startup_retries_after_contention(tmp_path, m
     class Request:
         extra_env: dict = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots: tuple = ()
-        agent_denied: tuple = ()
-        agent_denied_except: tuple = ()
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]
 
@@ -5398,10 +5254,6 @@ async def test_never_healthy_server_gets_startup_retries(tmp_path, monkeypatch):
     class Request:
         extra_env: dict = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots: tuple = ()
-        agent_denied: tuple = ()
-        agent_denied_except: tuple = ()
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]
 
@@ -5496,8 +5348,6 @@ async def test_missing_binary_says_how_to_fix_it(tmp_path, monkeypatch):
     class Request:
         extra_env: dict = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots: tuple = ()
 
     with pytest.raises(FileNotFoundError, match="login shell PATH"):
         await provider._ensure_server(Request())  # type: ignore[arg-type]
@@ -5546,10 +5396,6 @@ async def test_the_servers_stderr_is_drained_and_kept_for_errors(tmp_path, monke
     class Request:
         extra_env: dict = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots: tuple = ()
-        agent_denied: tuple = ()
-        agent_denied_except: tuple = ()
 
     with pytest.raises(RuntimeError, match="OpenCode startup failed"):
         await provider._ensure_server(Request())  # type: ignore[arg-type]
@@ -5596,10 +5442,6 @@ async def test_opencode_process_does_not_inherit_the_agent_token(tmp_path, monke
     class Request:
         extra_env: dict = {"CIAO_AGENT_TOKEN": "stale-from-request-env"}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots: tuple = ()
-        agent_denied: tuple = ()
-        agent_denied_except: tuple = ()
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]
 
@@ -7382,15 +7224,10 @@ async def test_a_changed_linked_repo_restarts_the_opencode_server(
     class Request:
         extra_env: dict = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots: tuple = ()
-        agent_denied: tuple = ()
-        agent_denied_except: tuple = ()
         linked_repo = "/r/new"
 
     request = Request()
     provider._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
-    provider._fs_scope_key = ("machine", (), (), ())
     provider._linked_repo = live_repo
     stopped: list[bool] = []
 
@@ -7447,10 +7284,6 @@ async def test_the_server_env_carries_the_linked_repo_skills(tmp_path, monkeypat
     class Request:
         extra_env: dict = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots: tuple = ()
-        agent_denied: tuple = ()
-        agent_denied_except: tuple = ()
         linked_repo = str(repo)
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]
@@ -7509,11 +7342,6 @@ async def test_concurrent_ensure_server_calls_start_one_server(tmp_path, monkeyp
     class Request:
         extra_env: dict = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots: tuple = ()
-        agent_denied: tuple = ()
-        agent_denied_except: tuple = ()
-        agent_read_only: tuple = ()
 
     request = Request()
     starts: list[int] = []
@@ -7524,8 +7352,6 @@ async def test_concurrent_ensure_server_calls_start_one_server(tmp_path, monkeyp
         self._client = object()  # type: ignore[assignment]
         self._process = SimpleNamespace(returncode=None)  # type: ignore[assignment]
         self._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
-        self._fs_scope_key = ("machine", (), (), ())
-        self._read_only_snapshot = ()
         self._linked_repo = ""
         return self._client
 
@@ -7537,6 +7363,45 @@ async def test_concurrent_ensure_server_calls_start_one_server(tmp_path, monkeyp
     )
 
     assert len(starts) == 1
+
+
+def test_server_argv_is_bare_for_every_workspace(tmp_path: Path) -> None:
+    """A stored workspace scope does not prefix the server or set a cache home."""
+    from ciao.config import CiaoConfig
+    from ciao.sessions import StateStore
+    from ciao.transcripts import TranscriptStore
+    from ciao.web.project_chats import ProjectChatManager
+    from tests.conftest import attach_stub_mcp
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    (runtime / "workspaces.json").write_text(
+        json.dumps([{
+            "name": "personal",
+            "vault_root": "memory-vault/personal",
+            "agent_fs_scope": "workspace",
+        }]),
+        encoding="utf-8",
+    )
+    config = CiaoConfig.from_env({
+        "PWA_AUTH_TOKEN": "t",
+        "CIAO_WORKSPACE": str(tmp_path),
+        "CIAO_RUNTIME_ROOT": str(runtime),
+    })
+    manager = attach_stub_mcp(ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    ))
+    project = manager.create_project("plain", workspace="personal")
+    chat = manager.create_chat(project.project_id, provider="opencode")
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert _provider(tmp_path)._server_launch(request, "/x/opencode", 4000) == (
+        ["/x/opencode", "serve", "--port", "4000", "--hostname", "127.0.0.1"],
+        {},
+    )
 
 
 def test_installed_status_row_carries_mcp_command(monkeypatch):

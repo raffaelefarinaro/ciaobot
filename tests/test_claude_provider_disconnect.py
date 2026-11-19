@@ -221,9 +221,6 @@ def _connected_provider(tmp_path: Path, monkeypatch, request: AgentRequest):
     provider._connected = True
     provider._current_model = request.model
     provider._current_mode = request.mode
-    provider._fs_scope_key = (
-        request.agent_fs_scope, request.agent_roots, request.agent_denied, request.agent_denied_except,
-    )
     provider._mcp_token = provider_reuse_key(request)
     provider._spawn_key = provider._spawn_key_for(request)
     stopped: list[bool] = []

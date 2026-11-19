@@ -22,7 +22,6 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
-from ciao.fs_sandbox import AGENT_FS_SCOPES
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web import request_limits, routes_api, routes_helpers
@@ -392,15 +391,8 @@ def test_agent_grants_do_not_expand_discovery(tmp_path):
     manager = _manager(config)
     chat = _chat(manager, "work")
     client = _client(manager, config)
-    # The agent FS scope is set per workspace (CiaoConfig has no scope field).
-    # Each scope must be in effect when the lookup runs, and neither may widen it.
-    for scope in AGENT_FS_SCOPES:
-        config.workspaces["work"] = WorkspaceConfig(
-            name="work", vault_root="memory-vault/work", agent_fs_scope=scope
-        )
-        assert config.workspace("work").effective_agent_fs_scope() == scope
-        result = _results(_post(client, chat.chat_id, [str(credentials), str(data_root), "n.md"]))
-        assert result == [None, None, _canon(vault_note)], scope
+    result = _results(_post(client, chat.chat_id, [str(credentials), str(data_root), "n.md"]))
+    assert result == [None, None, _canon(vault_note)]
 
 
 def test_line_suffix_and_file_type_size_rules(tmp_path):

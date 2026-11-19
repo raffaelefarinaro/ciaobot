@@ -23,7 +23,6 @@ from ciao.claude_trim import (
     load_claude_trim,
     trim_tool_denies,
 )
-from ciao.fs_sandbox import AGENT_FS_SCOPES
 from ciao.models import THINKING_LEVELS, BridgeMode
 from ciao.os_support.paths import resolve_path
 from ciao.providers.opencode import OpencodeSettings
@@ -391,25 +390,6 @@ def coerce_workspace_color(raw: object) -> str:
     )
 
 
-def default_agent_fs_scope() -> str:
-    """Filesystem scope for a workspace with none stored. A stored value is never overridden by this."""
-    return "workspace"
-
-
-def coerce_agent_fs_scope(raw: object) -> str | None:
-    """Normalize a workspace filesystem scope. Missing/empty → None (no choice made)."""
-    if raw is None:
-        return None
-    cleaned = str(raw).strip()
-    if not cleaned:
-        return None
-    if cleaned in AGENT_FS_SCOPES:
-        return cleaned
-    raise ValueError(
-        f"agent_fs_scope must be one of: {', '.join(AGENT_FS_SCOPES)}"
-    )
-
-
 # Execution (permission) modes a provider default may pin. ``manual`` is the
 # PWA-facing name for the BridgeMode ``normal`` (ask for every action);
 # ``plan`` stays chat-only and is not a settings default.
@@ -523,12 +503,6 @@ class WorkspaceConfig:
     gws_profile: str = ""
     # PWA accent preset id. Defaults to Ciao orange (amber).
     color: str = DEFAULT_WORKSPACE_COLOR
-    # Filesystem scope for agent tool execution: "workspace" confines the agent
-    # and its shell to the workspace; "machine" is the whole-machine escape
-    # hatch. ``None`` means the workspace never chose one: it follows
-    # default_agent_fs_scope() on whichever platform reads it. Only an explicit
-    # value is persisted, so the platform default is never frozen into storage.
-    agent_fs_scope: str | None = None
     # Whether Workspace care may act on its own [memory]/[profile] verdicts
     # (off, dismiss, all). Operator-only: never set from an agent surface.
     memory_handover: str = DEFAULT_MEMORY_HANDOVER
@@ -538,10 +512,6 @@ class WorkspaceConfig:
     provider_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
     # Sparse per-workspace Claude context-trim overrides (ciao/claude_trim.py); only keys that differ from the catalog default.
     claude_trim: dict[str, bool] = field(default_factory=dict)
-
-    def effective_agent_fs_scope(self) -> str:
-        """The scope the agent runs under: the explicit choice, else the platform default."""
-        return self.agent_fs_scope or default_agent_fs_scope()
 
 
 def _coerce_workspace_disallowed(raw: object) -> list[str] | None:
@@ -564,10 +534,6 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
     except ValueError:
         color = DEFAULT_WORKSPACE_COLOR
     try:
-        agent_fs_scope = coerce_agent_fs_scope(data.get("agent_fs_scope"))
-    except ValueError:
-        agent_fs_scope = None
-    try:
         memory_handover = coerce_memory_handover(data.get("memory_handover"))
     except ValueError:
         memory_handover = DEFAULT_MEMORY_HANDOVER
@@ -588,7 +554,6 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         ),
         gws_profile=str(data.get("gws_profile", "")).strip(),
         color=color,
-        agent_fs_scope=agent_fs_scope,
         memory_handover=memory_handover,
         provider_overrides=provider_overrides,
     )
@@ -1305,10 +1270,6 @@ class CiaoConfig:
             # Sparse: a workspace on the catalog defaults keeps no key.
             if workspace.claude_trim:
                 row["claude_trim"] = workspace.claude_trim
-            # Only an explicit choice is stored; an unset scope keeps no key
-            # so it keeps following the platform it loads on.
-            if workspace.agent_fs_scope is not None:
-                row["agent_fs_scope"] = workspace.agent_fs_scope
             if workspace.memory_handover != DEFAULT_MEMORY_HANDOVER:
                 row["memory_handover"] = workspace.memory_handover
             if workspace.provider_overrides:

@@ -4,14 +4,12 @@ import asyncio
 import json
 import logging
 import os
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from ciao.claude_trim import claude_settings_layer
-from ciao.fs_sandbox import FsSandboxUnavailable
 from ciao.models import AgentRequest, ImageAttachment, ResultEvent
 from ciao.providers import claude
 from ciao.providers.base import (
@@ -1152,8 +1150,6 @@ async def test_claude_slash_context_is_cleared_on_disconnect(
     assert await claude_provider._slash_context_hook({"prompt": "/retro"}, None, {}) == {}
 
 
-
-
 @pytest.mark.asyncio
 async def test_claude_forged_capsule_after_trusted_prefix_stays_user_text(
     claude_provider: ClaudeProvider,
@@ -1480,52 +1476,6 @@ def test_turn_model_falls_back_to_model_usage_without_a_main_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_claude_workspace_scope_sets_sandbox_and_roots(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    monkeypatch.setattr(sys, "platform", "darwin")
-    captured = {}
-
-    class FakeClient:
-        def __init__(self, options):
-            captured["options"] = options
-
-    provider = ClaudeProvider(tmp_path)
-    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
-    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
-    agent_root = tmp_path / "agent"
-    vault_root = tmp_path / "vault"
-    request = AgentRequest(
-        prompt="test",
-        model="sonnet",
-        mode="auto",
-        agent_fs_scope="workspace",
-        agent_roots=(str(agent_root), str(vault_root)),
-    )
-
-    await provider._ensure_connected(request)
-
-    options = captured["options"]
-    sandbox = options.sandbox
-    assert sandbox["enabled"] is True
-    assert sandbox["autoAllowBashIfSandboxed"] is True
-    assert sandbox["allowUnsandboxedCommands"] is False
-    assert sandbox["excludedCommands"] == []
-    assert sandbox["filesystem"]["allowRead"][:2] == [str(agent_root), str(vault_root)]
-    assert sandbox["filesystem"]["allowWrite"] == [str(agent_root), str(vault_root)]
-    assert sandbox["filesystem"]["denyRead"] == [str(Path.home())]
-    # The vault sits outside the agent root, so the CLI also gets it as an add dir.
-    assert [str(path) for path in options.add_dirs] == [str(vault_root)]
-    # The CLI's own file tools are outside the Bash sandbox; a hook confines them.
-    matchers = options.hooks["PreToolUse"]
-    guard = [m for m in matchers if "Read" in (m.matcher or "").split("|")]
-    assert len(guard) == 1
-    assert set(guard[0].matcher.split("|")) >= {"Read", "Write", "Edit", "Glob", "Grep"}
-    assert all("Bash" not in (m.matcher or "") for m in matchers)
-    assert options.settings == json.dumps(claude_settings_layer({}))
-
-
-@pytest.mark.asyncio
 async def test_claude_settings_from_request_reach_options(tmp_path: Path, monkeypatch) -> None:
     captured = {}
 
@@ -1552,242 +1502,6 @@ async def test_claude_settings_from_request_reach_options(tmp_path: Path, monkey
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("extra_env", "process_env", "expected"),
-    [
-        ({"CLAUDE_CODE_TMPDIR": "/from/extra"}, None, "/from/extra"),
-        ({}, "/from/process", "/from/process"),
-        ({"CLAUDE_CODE_TMPDIR": "/from/extra"}, "/from/process", "/from/extra"),
-        ({}, None, None),
-    ],
-)
-async def test_claude_workspace_scope_passes_the_cli_tmp_base_to_the_guard(
-    tmp_path: Path, monkeypatch, extra_env, process_env, expected,
-) -> None:
-    monkeypatch.setattr(sys, "platform", "darwin")
-    if process_env is None:
-        monkeypatch.delenv("CLAUDE_CODE_TMPDIR", raising=False)
-    else:
-        monkeypatch.setenv("CLAUDE_CODE_TMPDIR", process_env)
-    captured: dict = {}
-
-    def fake_guard(**kwargs):
-        captured.update(kwargs)
-
-        async def hook(*args):
-            return {}
-
-        return hook
-
-    class FakeClient:
-        def __init__(self, options):
-            pass
-
-    provider = ClaudeProvider(tmp_path)
-    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
-    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
-    monkeypatch.setattr("ciao.providers.claude.claude_file_tool_guard", fake_guard)
-    request = AgentRequest(
-        prompt="test",
-        model="sonnet",
-        mode="auto",
-        agent_fs_scope="workspace",
-        agent_roots=(str(tmp_path / "agent"),),
-        extra_env=extra_env,
-    )
-
-    await provider._ensure_connected(request)
-
-    assert captured["cli_tmp_base"] == expected
-
-
-@pytest.mark.asyncio
-async def test_claude_workspace_scope_hands_the_read_only_grant_to_the_guard(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    # The memory pass's source archive is the one read-only file the guard lets through (#2459).
-    monkeypatch.setattr(sys, "platform", "darwin")
-    archive = tmp_path / "Logs" / "Chats" / "src-1" / "claude" / "s.md"
-    captured: dict = {}
-
-    def fake_guard(**kwargs):
-        captured.update(kwargs)
-
-        async def hook(*args):
-            return {}
-
-        return hook
-
-    class FakeClient:
-        def __init__(self, options):
-            pass
-
-    provider = ClaudeProvider(tmp_path)
-    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
-    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
-    monkeypatch.setattr("ciao.providers.claude.claude_file_tool_guard", fake_guard)
-    request = AgentRequest(
-        prompt="test",
-        model="sonnet",
-        mode="auto",
-        agent_fs_scope="workspace",
-        agent_roots=(str(tmp_path / "agent"),),
-        agent_read_only=(str(archive),),
-    )
-
-    await provider._ensure_connected(request)
-
-    assert captured["read_only"] == [archive]
-
-
-@pytest.mark.asyncio
-async def test_claude_workspace_scope_keeps_vault_inside_agent_root_out_of_add_dirs(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    monkeypatch.setattr(sys, "platform", "darwin")
-    captured = {}
-
-    class FakeClient:
-        def __init__(self, options):
-            captured["options"] = options
-
-    provider = ClaudeProvider(tmp_path)
-    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
-    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
-    agent_root = tmp_path / "agent"
-    request = AgentRequest(
-        prompt="test",
-        model="sonnet",
-        mode="normal",
-        agent_fs_scope="workspace",
-        agent_roots=(str(agent_root), str(agent_root / "memory-vault")),
-    )
-
-    await provider._ensure_connected(request)
-
-    options = captured["options"]
-    assert options.sandbox["autoAllowBashIfSandboxed"] is False
-    assert options.add_dirs == []
-
-
-@pytest.mark.asyncio
-async def test_a_changed_root_set_rebuilds_the_claude_client(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    """The sandbox is fixed when the CLI process starts, so a turn whose roots
-    differ from the live client's (a setup chat granted the data root) must
-    disconnect it and build a new one with the widened sandbox."""
-    monkeypatch.setattr(sys, "platform", "darwin")
-    captured = {}
-    stopped: list[bool] = []
-
-    class FakeClient:
-        def __init__(self, options):
-            captured["options"] = options
-
-    provider = ClaudeProvider(tmp_path)
-    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
-    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
-    agent_root = tmp_path / "agent"
-    data_root = tmp_path
-    provider._client = object()  # type: ignore[assignment]
-    provider._connected = True
-    provider._fs_scope_key = ("workspace", (str(agent_root),), (), ())
-
-    async def fake_disconnect() -> None:
-        stopped.append(True)
-        provider._client = None
-        provider._connected = False
-
-    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
-    request = AgentRequest(
-        prompt="test",
-        model="sonnet",
-        mode="auto",
-        agent_fs_scope="workspace",
-        agent_roots=(str(agent_root), str(data_root)),
-    )
-
-    await provider._ensure_connected(request)
-
-    assert stopped == [True]
-    assert captured["options"].sandbox["filesystem"]["allowWrite"] == [
-        str(agent_root),
-        str(data_root),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_an_unchanged_root_set_reuses_the_claude_client(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    monkeypatch.setattr(sys, "platform", "darwin")
-    stopped: list[bool] = []
-    provider = ClaudeProvider(tmp_path)
-    live = object()
-    provider._client = live  # type: ignore[assignment]
-    provider._connected = True
-    # Model and mode already match the turn, so only the roots can decide.
-    provider._current_model = "sonnet"
-    provider._current_mode = "auto"
-    agent_root = str(tmp_path / "agent")
-    provider._fs_scope_key = ("workspace", (agent_root,), (), ())
-
-    async def fake_disconnect() -> None:
-        stopped.append(True)
-
-    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
-    request = AgentRequest(
-        prompt="test",
-        model="sonnet",
-        mode="auto",
-        agent_fs_scope="workspace",
-        agent_roots=(agent_root,),
-    )
-    provider._spawn_key = provider._spawn_key_for(request)
-
-    assert await provider._ensure_connected(request) is live
-    assert stopped == []
-
-
-@pytest.mark.asyncio
-async def test_a_changed_denied_except_restarts_the_claude_client(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    monkeypatch.setattr(sys, "platform", "darwin")
-    stopped: list[bool] = []
-    provider = ClaudeProvider(tmp_path)
-    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
-    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", lambda options: object())
-    provider._client = object()  # type: ignore[assignment]
-    provider._connected = True
-    provider._current_model = "sonnet"
-    provider._current_mode = "auto"
-    agent_root = str(tmp_path / "agent")
-    provider._fs_scope_key = ("workspace", (agent_root,), (), ())
-
-    async def fake_disconnect() -> None:
-        stopped.append(True)
-        provider._client = None
-        provider._connected = False
-
-    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
-    request = AgentRequest(
-        prompt="test",
-        model="sonnet",
-        mode="auto",
-        agent_fs_scope="workspace",
-        agent_roots=(agent_root,),
-        agent_denied_except=(str(tmp_path / "agent" / "secrets" / "gws-a"),),
-    )
-    provider._spawn_key = provider._spawn_key_for(request)
-
-    await provider._ensure_connected(request)
-
-    assert stopped == [True]
-
-
-@pytest.mark.asyncio
 async def test_claude_machine_scope_omits_sandbox(tmp_path: Path, monkeypatch) -> None:
     captured = {}
 
@@ -1807,328 +1521,6 @@ async def test_claude_machine_scope_omits_sandbox(tmp_path: Path, monkeypatch) -
     assert options.add_dirs == []
     assert set(options.hooks) == {"UserPromptSubmit"}
     assert options.settings == json.dumps(claude_settings_layer({}))
-
-
-@pytest.mark.asyncio
-async def test_claude_scope_change_reconnects_live_process(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    monkeypatch.setattr(sys, "platform", "darwin")
-    from ciao.models import provider_reuse_key
-
-    captured = {"disconnects": 0, "constructed": 0}
-
-    class FakeClient:
-        def __init__(self, options):
-            captured["constructed"] += 1
-            captured["options"] = options
-
-    provider = ClaudeProvider(tmp_path)
-    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
-    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
-    request = AgentRequest(
-        prompt="test",
-        model="sonnet",
-        mode="auto",
-        agent_fs_scope="workspace",
-        agent_roots=(str(tmp_path / "agent"),),
-    )
-    # A live machine-scope process, unsandboxed, with a matching control token.
-    provider._client = object()
-    provider._connected = True
-    provider._mcp_token = provider_reuse_key(request)
-    provider._fs_scope_key = ("machine", (), (), ())
-
-    async def fake_disconnect() -> None:
-        captured["disconnects"] += 1
-        provider._client = None
-        provider._connected = False
-
-    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
-
-    await provider._ensure_connected(request)
-
-    assert captured["disconnects"] == 1
-    assert captured["constructed"] == 1
-    assert captured["options"].sandbox["enabled"] is True
-# -- OpenCode server filesystem scope (issue #1150) ---------------------------
-
-
-class _SpawnCaptured(Exception):
-    """Stops ``_start_server_once`` right after the spawn argv is recorded."""
-
-
-def _opencode_scope_fixture(tmp_path: Path, scope: str):
-    roots = (str(tmp_path / "agent"), str(tmp_path / "vault")) if scope == "workspace" else ()
-    request = AgentRequest(
-        prompt="hi",
-        model="model",
-        mode="auto",
-        agent_fs_scope=scope,
-        agent_roots=roots,
-    )
-    return OpencodeProvider(tmp_path), request
-
-
-def _capture_spawn(monkeypatch, envs: list[dict] | None = None) -> list[tuple[str, ...]]:
-    spawned: list[tuple[str, ...]] = []
-
-    async def fake_spawn(*argv, **kwargs):
-        spawned.append(argv)
-        if envs is not None:
-            envs.append(kwargs.get("env") or {})
-        raise _SpawnCaptured("spawn-capture-private-sentinel")
-
-    monkeypatch.setattr("ciao.providers.opencode._spawn_server", fake_spawn)
-    return spawned
-
-
-async def test_opencode_workspace_scope_prefixes_sandbox_exec(tmp_path, monkeypatch):
-    provider, request = _opencode_scope_fixture(tmp_path, "workspace")
-    request.extra_env = {"PATH": str(tmp_path / "node-bin")}
-    node_code = tmp_path / "node-code"
-    paths: list[str] = []
-
-    def native_node_roots(path):
-        paths.append(path)
-        return [node_code]
-
-    monkeypatch.setattr("ciao.providers.opencode.node_tool_read_roots", native_node_roots)
-    envs: list[dict] = []
-    spawned = _capture_spawn(monkeypatch, envs)
-    calls: list[tuple[list[Path], list[Path]]] = []
-    xdg = tmp_path / "xdg"
-    for name in ("DATA", "STATE", "CONFIG"):
-        monkeypatch.setenv(f"XDG_{name}_HOME", str(xdg / name.lower()))
-    (xdg / "config" / "opencode").mkdir(parents=True)
-    binary = tmp_path / "install" / "bin" / "opencode"
-    binary.parent.mkdir(parents=True)
-    binary.write_text("", encoding="utf-8")
-
-    def fake_prefix(*, roots, read_only=(), denied=(), regrant=()):
-        calls.append((list(roots), list(read_only)))
-        return ["sandbox-exec", "-p", "PROFILE"]
-
-    monkeypatch.setattr("ciao.providers.opencode.opencode_sandbox_prefix", fake_prefix)
-
-    with pytest.raises(SanitizedStartupError, match="OpenCode startup failed") as error:
-        await provider._start_server_once(request, str(binary))
-    assert error.value.__cause__ is None and error.value.__context__ is None
-    assert "spawn-capture-private-sentinel" not in str(error.value)
-
-    roots, read_only = calls[0]
-    assert paths == [str(tmp_path / "node-bin")]
-    assert node_code in read_only
-    assert roots[:2] == [tmp_path / "agent", tmp_path / "vault"]
-    sandbox_cache = Path.home() / ".cache" / "ciaobot-opencode-sandbox"
-    # The server writes its data and state, and a cache no unconfined server
-    # loads. Its config and install are code an unconfined server runs later,
-    # so they are readable only (#1174).
-    assert (xdg / "data" / "opencode").resolve() in roots
-    assert (xdg / "state" / "opencode").resolve() in roots
-    assert (sandbox_cache / "opencode").resolve() in roots
-    assert (xdg / "config" / "opencode").resolve() in read_only
-    assert (tmp_path / "install").resolve() in read_only
-    assert (sandbox_cache / "npm").resolve() in roots
-    assert not set(read_only) & set(roots)
-    assert envs[0]["XDG_CACHE_HOME"] == str(sandbox_cache)
-    assert envs[0]["npm_config_cache"] == str(sandbox_cache / "npm")
-    argv = spawned[0]
-    assert argv[:3] == ("sandbox-exec", "-p", "PROFILE")
-    assert argv[3:6] == (str(binary), "serve", "--port")
-    assert argv[7:] == ("--hostname", "127.0.0.1")
-
-
-async def test_opencode_machine_scope_spawns_the_binary_directly(tmp_path, monkeypatch):
-    provider, request = _opencode_scope_fixture(tmp_path, "machine")
-    spawned = _capture_spawn(monkeypatch)
-
-    def no_prefix(*, roots, read_only=()):
-        raise AssertionError("machine scope must not build a sandbox prefix")
-
-    monkeypatch.setattr("ciao.providers.opencode.opencode_sandbox_prefix", no_prefix)
-
-    with pytest.raises(SanitizedStartupError, match="OpenCode startup failed") as error:
-        await provider._start_server_once(request, "/bin/opencode")
-    assert error.value.__cause__ is None and error.value.__context__ is None
-    assert "spawn-capture-private-sentinel" not in str(error.value)
-
-    argv = spawned[0]
-    assert argv[0] == "/bin/opencode"
-    assert argv[1:2] == ("serve",)
-    assert argv[-2:] == ("--hostname", "127.0.0.1")
-
-
-async def test_opencode_workspace_scope_does_not_spawn_when_the_sandbox_is_missing(
-    tmp_path, monkeypatch
-):
-    provider, request = _opencode_scope_fixture(tmp_path, "workspace")
-    spawned = _capture_spawn(monkeypatch)
-
-    def missing_sandbox(*, roots, read_only=(), denied=(), regrant=()):
-        raise FsSandboxUnavailable("no sandbox tool")
-
-    monkeypatch.setattr("ciao.providers.opencode.opencode_sandbox_prefix", missing_sandbox)
-
-    with pytest.raises(FsSandboxUnavailable, match="no sandbox tool"):
-        await provider._start_server_once(request, "/bin/opencode")
-
-    assert spawned == []
-
-
-async def test_opencode_scope_change_restarts_the_live_server(tmp_path, monkeypatch):
-    from ciao.models import provider_reuse_key
-
-    provider, request = _opencode_scope_fixture(tmp_path, "workspace")
-    live = object()
-    provider._client = live
-    provider._process = SimpleNamespace(returncode=None)
-    provider._mcp_token = provider_reuse_key(request)
-    provider._fs_scope_key = ("machine", (), (), ())
-    events: list[str] = []
-
-    async def fake_disconnect():
-        events.append("disconnect")
-        provider._client = None
-        provider._process = None
-
-    async def fake_start(req, binary):
-        events.append("start")
-        return "fresh"
-
-    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
-    monkeypatch.setattr(provider, "_start_server_once", fake_start)
-    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda env: "/bin/opencode")
-
-    assert await provider._ensure_server(request) == "fresh"
-    assert events == ["disconnect", "start"]
-
-    # Same scope and roots: the live server is reused.
-    provider._client = live
-    provider._process = SimpleNamespace(returncode=None)
-    provider._fs_scope_key = (
-        request.agent_fs_scope,
-        request.agent_roots,
-        request.agent_denied,
-        request.agent_denied_except,
-    )
-    assert await provider._ensure_server(request) is live
-
-
-def _live_scoped_opencode(tmp_path, monkeypatch, granted):
-    """A workspace-scoped provider with a live server started with ``granted`` read-only."""
-    from ciao.models import provider_reuse_key
-    from ciao.providers.opencode import _read_only_snapshot
-
-    provider, request = _opencode_scope_fixture(tmp_path, "workspace")
-    request.agent_read_only = (str(granted),)
-    live = object()
-    provider._client = live
-    provider._process = SimpleNamespace(returncode=None)
-    provider._mcp_token = provider_reuse_key(request)
-    provider._fs_scope_key = (
-        request.agent_fs_scope,
-        request.agent_roots,
-        request.agent_denied,
-        request.agent_denied_except,
-    )
-    provider._read_only_snapshot = _read_only_snapshot(request)
-    events: list[str] = []
-
-    async def fake_disconnect():
-        events.append("disconnect")
-        provider._client = None
-        provider._process = None
-
-    async def fake_start(req, binary):
-        events.append("start")
-        return "fresh"
-
-    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
-    monkeypatch.setattr(provider, "_start_server_once", fake_start)
-    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda env: "/bin/opencode")
-    return provider, request, live, events
-
-
-def _replace_by_rename(path: Path, text: str) -> None:
-    staged = path.with_name(path.name + ".new")
-    staged.write_text(text, encoding="utf-8")
-    os.replace(staged, path)
-
-
-async def test_opencode_linux_restarts_when_a_granted_file_is_replaced(tmp_path, monkeypatch):
-    # bwrap binds the registry by inode: a rename-replaced file needs a new server (#1960).
-    monkeypatch.setattr(sys, "platform", "linux")
-    registry = tmp_path / "workspaces.json"
-    registry.write_text("[]", encoding="utf-8")
-    provider, request, live, events = _live_scoped_opencode(tmp_path, monkeypatch, registry)
-
-    assert await provider._ensure_server(request) is live
-    assert events == []
-
-    _replace_by_rename(registry, '[{"name": "work"}]')
-    assert await provider._ensure_server(request) == "fresh"
-    assert events == ["disconnect", "start"]
-
-
-async def test_opencode_linux_restarts_when_a_granted_file_appears(tmp_path, monkeypatch):
-    # A receipt missing at launch is never bound; once written, the server restarts (#1960).
-    monkeypatch.setattr(sys, "platform", "linux")
-    receipt = tmp_path / "workspace-rooting.json"
-    provider, request, live, events = _live_scoped_opencode(tmp_path, monkeypatch, receipt)
-
-    assert await provider._ensure_server(request) is live
-    receipt.write_text('{"status": "migrated"}', encoding="utf-8")
-    assert await provider._ensure_server(request) == "fresh"
-    assert events == ["disconnect", "start"]
-
-
-async def test_opencode_linux_restarts_when_a_granted_file_is_deleted(tmp_path, monkeypatch):
-    monkeypatch.setattr(sys, "platform", "linux")
-    registry = tmp_path / "workspaces.json"
-    registry.write_text("[]", encoding="utf-8")
-    provider, request, live, events = _live_scoped_opencode(tmp_path, monkeypatch, registry)
-
-    registry.unlink()
-    assert await provider._ensure_server(request) == "fresh"
-    assert events == ["disconnect", "start"]
-
-
-async def test_opencode_snapshot_predates_the_sandbox_binds(tmp_path, monkeypatch):
-    # A receipt written while the bwrap argv is built was skipped by it, so the
-    # recorded snapshot must still say "missing" and the next turn must restart.
-    from ciao.providers.opencode import _read_only_snapshot
-
-    monkeypatch.setattr(sys, "platform", "linux")
-    provider, request = _opencode_scope_fixture(tmp_path, "workspace")
-    receipt = tmp_path / "workspace-rooting.json"
-    request.agent_read_only = (str(receipt),)
-    _capture_spawn(monkeypatch)
-
-    def racing_launch(req, binary, port):
-        receipt.write_text('{"status": "migrated"}', encoding="utf-8")
-        return ["opencode", "serve"], {}
-
-    monkeypatch.setattr(provider, "_server_launch", racing_launch)
-    with pytest.raises(SanitizedStartupError, match="OpenCode startup failed") as error:
-        await provider._start_server_once(request, "/bin/opencode")
-    assert error.value.__cause__ is None and error.value.__context__ is None
-    assert "spawn-capture-private-sentinel" not in str(error.value)
-
-    assert provider._read_only_snapshot == ((str(receipt), None),)
-    assert provider._read_only_snapshot != _read_only_snapshot(request)
-
-
-async def test_opencode_darwin_keeps_the_server_when_a_granted_file_is_replaced(tmp_path, monkeypatch):
-    # Seatbelt grants by path, so a replaced file is already visible.
-    monkeypatch.setattr(sys, "platform", "darwin")
-    registry = tmp_path / "workspaces.json"
-    registry.write_text("[]", encoding="utf-8")
-    provider, request, live, events = _live_scoped_opencode(tmp_path, monkeypatch, registry)
-
-    _replace_by_rename(registry, '[{"name": "work"}]')
-    assert await provider._ensure_server(request) is live
-    assert events == []
 
 
 # -- Claude turn client decision log -----------------------------------------
@@ -2531,14 +1923,6 @@ async def test_claude_first_turn_connects_without_prompt_then_queries(
     assert claude_provider._connected is True
 
 
-
-
-
-
-
-
-
-
 class _StopFakeClient:
     def __init__(self, cancelled=None, still_queued=None) -> None:
         self.control_requests: list[dict] = []
@@ -2557,8 +1941,6 @@ class _StopFakeClient:
         self.plain_interrupts += 1
 
 
-
-
 @pytest.mark.asyncio
 async def test_claude_stop_after_the_echo_uses_plain_interrupt(
     claude_provider: ClaudeProvider,
@@ -2572,8 +1954,6 @@ async def test_claude_stop_after_the_echo_uses_plain_interrupt(
 
     assert client.plain_interrupts == 1
     assert client.control_requests == []
-
-
 
 
 @pytest.mark.asyncio
@@ -2607,12 +1987,6 @@ async def _run_turn(provider: ClaudeProvider, handles: list | None = None):
     ]
 
 
-
-
-
-
-
-
 @pytest.mark.asyncio
 async def test_claude_stop_cancel_failure_warns_and_falls_back_to_interrupt(
     claude_provider: ClaudeProvider, caplog,
@@ -2631,18 +2005,6 @@ async def test_claude_stop_cancel_failure_warns_and_falls_back_to_interrupt(
 
     assert client.plain_interrupts == 1
     assert "cancel" in caplog.text.lower()
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 @pytest.mark.asyncio
@@ -3049,7 +2411,7 @@ async def test_claude_cli_death_after_the_echo_on_stop_keeps_the_interrupted_err
 
 
 @pytest.mark.asyncio
-async def test_claude_machine_scope_adds_the_linked_repo_dir(tmp_path: Path, monkeypatch) -> None:
+async def test_claude_lists_the_linked_repo_as_the_only_add_dir(tmp_path: Path, monkeypatch) -> None:
     captured = {}
 
     class FakeClient:
@@ -3072,33 +2434,55 @@ async def test_claude_machine_scope_adds_the_linked_repo_dir(tmp_path: Path, mon
 
 
 @pytest.mark.asyncio
-async def test_claude_workspace_scope_lists_the_linked_repo_once(
-    tmp_path: Path, monkeypatch
-) -> None:
-    monkeypatch.setattr(sys, "platform", "darwin")
-    captured = {}
+async def test_claude_options_have_no_sandbox(tmp_path: Path, monkeypatch) -> None:
+    """A stored workspace scope does not confine Claude or add roots."""
+    from ciao.sessions import StateStore
+    from ciao.transcripts import TranscriptStore
+    from tests.conftest import attach_stub_mcp
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (runtime / "workspaces.json").write_text(
+        json.dumps([{
+            "name": "personal",
+            "vault_root": "memory-vault/personal",
+            "agent_fs_scope": "workspace",
+        }]),
+        encoding="utf-8",
+    )
+    from ciao.config import CiaoConfig
+
+    config = CiaoConfig.from_env({
+        "PWA_AUTH_TOKEN": "t",
+        "CIAO_WORKSPACE": str(tmp_path),
+        "CIAO_RUNTIME_ROOT": str(runtime),
+    })
+    manager = attach_stub_mcp(ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    ))
+    project = manager.create_project("linked", workspace="personal")
+    project.repo_path = str(repo)
+    chat = manager.create_chat(project.project_id, provider="claude")
+    request = manager.build_agent_request(chat, prompt="hi")
+    captured: dict = {}
 
     class FakeClient:
         def __init__(self, options):
             captured["options"] = options
 
-    provider = ClaudeProvider(tmp_path)
+    provider = ClaudeProvider(config.agent_root("personal"))
     monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
     monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
-    agent_root = tmp_path / "agent"
-    repo = str(tmp_path / "repo")
-    request = AgentRequest(
-        prompt="test",
-        model="sonnet",
-        mode="normal",
-        agent_fs_scope="workspace",
-        agent_roots=(str(agent_root), str(agent_root / "memory-vault"), repo),
-        linked_repo=repo,
-    )
-
     await provider._ensure_connected(request)
 
-    assert [str(p) for p in captured["options"].add_dirs] == [repo]
+    options = captured["options"]
+    assert options.sandbox is None
+    assert [str(p) for p in options.add_dirs] == [str(repo.resolve())]
 
 
 def test_a_changed_linked_repo_changes_the_claude_spawn_key(tmp_path: Path) -> None:
@@ -3337,61 +2721,3 @@ async def test_claude_second_initialize_timeout_is_not_retried_again(
     assert len(attempts) == 2
 
 
-@pytest.mark.asyncio
-async def test_claude_workspace_scope_passes_read_only_files_to_the_sandbox(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    monkeypatch.setattr(sys, "platform", "darwin")
-    captured = {}
-
-    class FakeClient:
-        def __init__(self, options):
-            captured["options"] = options
-
-    provider = ClaudeProvider(tmp_path)
-    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
-    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
-    registry = tmp_path / "rt" / "workspaces.json"
-    request = AgentRequest(
-        prompt="test",
-        model="sonnet",
-        mode="auto",
-        agent_fs_scope="workspace",
-        agent_roots=(str(tmp_path / "agent"), str(tmp_path / "vault")),
-        agent_read_only=(str(registry),),
-    )
-
-    await provider._ensure_connected(request)
-
-    filesystem = captured["options"].sandbox["filesystem"]
-    assert str(registry) in filesystem["allowRead"]
-    assert str(registry) not in filesystem["allowWrite"]
-
-
-async def test_opencode_workspace_scope_passes_read_only_files_to_the_prefix(tmp_path, monkeypatch):
-    provider, request = _opencode_scope_fixture(tmp_path, "workspace")
-    request.extra_env = {"PATH": str(tmp_path / "node-bin")}
-    request.agent_read_only = (str(tmp_path / "rt" / "workspaces.json"),)
-    monkeypatch.setattr("ciao.providers.opencode.node_tool_read_roots", lambda path: [])
-    _capture_spawn(monkeypatch, [])
-    calls: list[list[Path]] = []
-    xdg = tmp_path / "xdg"
-    for name in ("DATA", "STATE", "CONFIG"):
-        monkeypatch.setenv(f"XDG_{name}_HOME", str(xdg / name.lower()))
-    (xdg / "config" / "opencode").mkdir(parents=True)
-    binary = tmp_path / "install" / "bin" / "opencode"
-    binary.parent.mkdir(parents=True)
-    binary.write_text("", encoding="utf-8")
-
-    def fake_prefix(*, roots, read_only=(), denied=(), regrant=()):
-        calls.append(list(read_only))
-        return ["sandbox-exec", "-p", "PROFILE"]
-
-    monkeypatch.setattr("ciao.providers.opencode.opencode_sandbox_prefix", fake_prefix)
-
-    with pytest.raises(SanitizedStartupError, match="OpenCode startup failed") as error:
-        await provider._start_server_once(request, str(binary))
-    assert error.value.__cause__ is None and error.value.__context__ is None
-    assert "spawn-capture-private-sentinel" not in str(error.value)
-
-    assert Path(request.agent_read_only[0]) in calls[0]

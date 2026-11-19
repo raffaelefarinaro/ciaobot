@@ -7,7 +7,6 @@ workspace claims. Readers scan every root.
 
 from __future__ import annotations
 
-import dataclasses
 import inspect
 import json
 import sys
@@ -291,54 +290,6 @@ def test_reconcile_sees_a_per_workspace_archive(tmp_path: Path) -> None:
     assert healed.archive_path == archived_md.relative_to(tmp_path).as_posix()
 
 
-# --- memory-pass grant --------------------------------------------------------
-
-
-@pytest.fixture
-def workspace_scope_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ProjectChatManager:
-    monkeypatch.setattr("ciao.fs_sandbox.gws_tool_read_roots", lambda path: [])
-    manager = _manager(tmp_path)
-    workspace = manager._config.workspace("personal")
-    assert workspace is not None
-    manager._config.workspaces["personal"] = dataclasses.replace(
-        workspace, agent_fs_scope="workspace"
-    )
-    return manager
-
-
-def _memory_pass_chat_for(manager: ProjectChatManager, source_chat_id: str, archive: Path) -> ChatInfo:
-    project = manager._memory_pass.ensure_project("personal")
-    return manager.create_chat(
-        project.project_id,
-        provider="claude",
-        helper={
-            "kind": "memory_pass",
-            "source_chat_id": source_chat_id,
-            "archive_path": str(archive),
-            "archive_policy": "when_clean",
-        },
-    )
-
-
-def test_memory_pass_grant_accepts_a_per_workspace_archive(
-    workspace_scope_manager: ProjectChatManager, tmp_path: Path
-) -> None:
-    manager = workspace_scope_manager
-    archive = tmp_path / "personal" / "Logs" / "Chats" / "src-1" / "claude" / "x.md"
-    archive.parent.mkdir(parents=True)
-    archive.write_text("transcript", encoding="utf-8")
-    chat = _memory_pass_chat_for(manager, "src-1", archive)
-
-    request = manager.build_agent_request(chat, prompt="hi")
-
-    assert str(archive.resolve()) in request.agent_read_only
-    # A helper pointing at a sibling chat's folder grants nothing.
-    (tmp_path / "personal" / "Logs" / "Chats" / "src-2").mkdir()
-    sibling = _memory_pass_chat_for(manager, "src-2", archive)
-    sibling_request = manager.build_agent_request(sibling, prompt="hi")
-    assert str(archive.resolve()) not in sibling_request.agent_read_only
-
-
 def test_chat_workspaces_is_gone() -> None:
     assert not hasattr(ProjectChatManager, "chat_workspaces")
 
@@ -525,63 +476,3 @@ def test_locate_archive_refuses_a_symlink_escaping_the_roots(tmp_path: Path) -> 
     assert pcm._locate_archive("chat-y", "Logs/Chats/chat-y/claude/s.md") is None
 
 
-# --- memory-pass grant edges (finding 6) -------------------------------------
-
-
-def test_memory_pass_grant_accepts_an_archive_in_the_shared_root(
-    workspace_scope_manager: ProjectChatManager, tmp_path: Path
-) -> None:
-    manager = workspace_scope_manager
-    archive = tmp_path / "Logs" / "Chats" / "src-s" / "claude" / "x.md"
-    archive.parent.mkdir(parents=True)
-    archive.write_text("transcript", encoding="utf-8")
-    chat = _memory_pass_chat_for(manager, "src-s", archive)
-
-    request = manager.build_agent_request(chat, prompt="hi")
-
-    assert str(archive.resolve()) in request.agent_read_only
-
-
-def test_memory_pass_grant_refuses_a_source_with_no_folder_in_any_root(
-    workspace_scope_manager: ProjectChatManager, tmp_path: Path
-) -> None:
-    manager = workspace_scope_manager
-    archive = tmp_path / "personal" / "Logs" / "Chats" / "src-1" / "claude" / "x.md"
-    archive.parent.mkdir(parents=True)
-    archive.write_text("transcript", encoding="utf-8")
-    chat = _memory_pass_chat_for(manager, "src-missing", archive)
-
-    request = manager.build_agent_request(chat, prompt="hi")
-
-    assert str(archive.resolve()) not in request.agent_read_only
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="needs a symlink privilege")
-def test_memory_pass_grant_refuses_a_symlinked_source_folder(
-    workspace_scope_manager: ProjectChatManager, tmp_path: Path
-) -> None:
-    manager = workspace_scope_manager
-    chats_root = tmp_path / "personal" / "Logs" / "Chats"
-    archive = chats_root / "src-real" / "claude" / "x.md"
-    archive.parent.mkdir(parents=True)
-    archive.write_text("transcript", encoding="utf-8")
-    (chats_root / "src-link").symlink_to(chats_root / "src-real", target_is_directory=True)
-    chat = _memory_pass_chat_for(manager, "src-link", archive)
-
-    request = manager.build_agent_request(chat, prompt="hi")
-
-    assert str(archive.resolve()) not in request.agent_read_only
-
-
-def test_memory_pass_grant_refuses_a_traversal_source_id(
-    workspace_scope_manager: ProjectChatManager, tmp_path: Path
-) -> None:
-    manager = workspace_scope_manager
-    archive = tmp_path / "personal" / "Logs" / "x" / "claude" / "x.md"
-    archive.parent.mkdir(parents=True)
-    archive.write_text("transcript", encoding="utf-8")
-    chat = _memory_pass_chat_for(manager, "../x", archive)
-
-    request = manager.build_agent_request(chat, prompt="hi")
-
-    assert str(archive.resolve()) not in request.agent_read_only

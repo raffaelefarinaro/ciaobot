@@ -155,26 +155,8 @@ class AgentRequest:
     # no user prompt, context capsule, file references or images: Claude sends
     # the bare ``/compact`` command, and opencode calls its compact endpoint.
     compact: bool = False
-    # Filesystem scope of the owning workspace ("machine" or "workspace", see
-    # ``ciao.fs_sandbox``). ``agent_roots`` are the resolved directories a
-    # workspace-scoped turn may read and write: the agent root first, then the
-    # workspace vault root, de-duplicated. Machine scope ignores both.
-    # ``agent_read_only`` are files a workspace-scoped turn may read but never
-    # write: the runtime's re-rooting receipt and workspace registry, so the
-    # agent's own `ciao` CLI resolves the same paths as the engine (#1945).
-    # Machine scope ignores it.
-    agent_fs_scope: str = "machine"
-    agent_roots: tuple[str, ...] = ()
-    agent_read_only: tuple[str, ...] = ()
-    # Workspace scope only (#1968): ``agent_denied`` is the resolved ``secrets``
-    # directory when it lies inside a granted root, hidden from the agent;
-    # ``agent_denied_except`` is the linked account's directory inside it,
-    # re-allowed read-write. Empty when ``secrets`` is not covered by a root.
-    agent_denied: tuple[str, ...] = ()
-    agent_denied_except: tuple[str, ...] = ()
     # Resolved path of the project's linked git repository ("" = none). Both
-    # providers load its skills and allow it in every filesystem scope; it is
-    # fixed when the provider process starts.
+    # providers load its skills; it is fixed when the provider process starts.
     linked_repo: str = ""
 
     @property

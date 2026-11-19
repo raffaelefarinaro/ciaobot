@@ -80,16 +80,6 @@ def test_system_prompt_keeps_diagnostic_entrypoint_compact() -> None:
     assert "ciao context logs" in append
 
 
-def test_system_prompt_states_workspace_scope_limits() -> None:
-    payload = mi.system_prompt_payload("")
-    assert payload is not None
-    append = payload["append"]
-    assert "file_access=workspace only" in append
-    assert "Do not probe excluded paths or retry denied access" in append
-    assert "Settings → Overview → File access" in append
-    assert "do not assume integrations are signed out" in append
-
-
 def test_system_prompt_includes_project_canonical_doc_notes() -> None:
     """Vault-backed project chats should instruct agents to maintain canonical docs."""
     payload = mi.system_prompt_payload("")
