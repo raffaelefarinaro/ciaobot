@@ -1,4 +1,4 @@
-"""Signed engine release manifest (#562): build, verify, and check packaged assets."""
+"""Signed engine release manifest (#562): build, verify, stamp the installer, check packaged assets."""
 
 from __future__ import annotations
 
@@ -14,50 +14,9 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from ciao.server_host import DEVELOPER_ID_SIGNING_KIND, DeveloperIDSigning
-
 MANIFEST_NAME = "ciaobot-engine-manifest.json"
 SIGNATURE_NAME = MANIFEST_NAME + ".sig"
 SCHEMA_VERSION = 1
-# The prebuilt universal macOS server host (#1022, child D of #1008). Its
-# identity metadata is fixed and independent of the engine version; only a
-# deliberate host upgrade changes it. The fields are exact because a consumer
-# that trusts the manifest also trusts them to pick and stage the one host it
-# will run.
-SERVER_HOST_KIND = "server-host"
-SERVER_HOST_PLATFORM = "macos"
-SERVER_HOST_ARCH = "universal"
-SERVER_HOST_REVISION = 4
-SERVER_HOST_PROTOCOL = 2
-SERVER_HOST_BUNDLE_ID = "local.ciaobot.server"
-SERVER_HOST_FILENAME = "ciaobot-server-host-macos-universal-v1.tar.gz"
-#: The opt-in signed-host policy (#2329). An explicitly Developer ID signed,
-#: notarized host is different bytes with its own recorded identity, so it gets
-#: its own revision and carries exactly one authenticated signing object. The
-#: production default above is unchanged: without the explicit flag the manifest
-#: still describes a revision-4 archive, and accepting a signed entry here does
-#: not publish one.
-SIGNED_SERVER_HOST_REVISION = 5
-#: The signing object is the one the private record accepts, so its ``kind`` is
-#: the runtime contract's constant rather than a second copy of the literal.
-SERVER_HOST_SIGNING_KIND = DEVELOPER_ID_SIGNING_KIND
-_SERVER_HOST_REQUIRED_FIELDS = frozenset(
-    {
-        "filename",
-        "kind",
-        "platform",
-        "arch",
-        "sha256",
-        "size",
-        "bundle_id",
-        "host_revision",
-        "host_protocol",
-    }
-)
-_SIGNED_SERVER_HOST_REQUIRED_FIELDS = _SERVER_HOST_REQUIRED_FIELDS | {"signing"}
-_SIGNING_FIELDS = frozenset({"kind", "team_id"})
-#: The only accepted team representation: ten uppercase letters or digits.
-_TEAM_ID_RE = re.compile(r"^[A-Z0-9]{10}$")
 # The release signing key, generated with the app updater back when the release
 # also shipped Ciaobot.app and every consumer of a signature trusted this one
 # key. The app and its verifier are gone (#656), so this is now the only copy
@@ -68,6 +27,10 @@ _VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ASSET_REF_RE = re.compile(r'(?:src|href)="(/assets/[^"]+)"')
 _CHUNK = 1 << 20
+#: The two placeholders in ``scripts/install.sh``. ``stamp-installer`` replaces
+#: each one exactly once, so the published installer is pinned to one wheel.
+INSTALLER_VERSION_PLACEHOLDER = "__CIAOBOT_VERSION__"
+INSTALLER_SHA256_PLACEHOLDER = "__WHEEL_SHA256__"
 
 
 class SignatureError(ValueError):
@@ -92,45 +55,6 @@ def artifact_entry(
         "sha256": digest.hexdigest(),
         "size": size,
     }
-
-
-def server_host_artifact_entry(
-    path: Path, *, signing: DeveloperIDSigning | None = None
-) -> dict[str, Any]:
-    """Describe the fixed universal macOS server host archive.
-
-    The entry carries the digest and size of ``path`` plus the host's fixed
-    identity and its revision/protocol, which are independent of the engine
-    version. ``path`` must already be named ``SERVER_HOST_FILENAME``: the
-    archive name is part of the contract, so a mismatch is refused here rather
-    than discovered by a manifest consumer.
-
-    Without ``signing`` the entry is exactly the historical revision-4 shape.
-    With it the entry describes the explicitly signed revision-5 host and adds
-    exactly one object, ``{"kind": "developer-id", "team_id": ...}`` — the team
-    the release authenticated, never one read from the archive.
-    """
-    if path.name != SERVER_HOST_FILENAME:
-        raise ValueError(
-            f"server host archive must be named {SERVER_HOST_FILENAME}, not {path.name!r}"
-        )
-    if signing is not None and not isinstance(signing, DeveloperIDSigning):
-        raise ValueError("the server host signing identity is not a Developer ID team")
-    entry = artifact_entry(
-        path,
-        kind=SERVER_HOST_KIND,
-        platform=SERVER_HOST_PLATFORM,
-        arch=SERVER_HOST_ARCH,
-    )
-    entry["bundle_id"] = SERVER_HOST_BUNDLE_ID
-    if signing is None:
-        entry["host_revision"] = SERVER_HOST_REVISION
-        entry["host_protocol"] = SERVER_HOST_PROTOCOL
-        return entry
-    entry["host_revision"] = SIGNED_SERVER_HOST_REVISION
-    entry["host_protocol"] = SERVER_HOST_PROTOCOL
-    entry["signing"] = {"kind": SERVER_HOST_SIGNING_KIND, "team_id": signing.team_id}
-    return entry
 
 
 def build_manifest(
@@ -266,68 +190,6 @@ def _check_artifact(entry: Any) -> None:
         raise ValueError("manifest artifact is malformed")
 
 
-def _check_signing_object(value: object) -> None:
-    """Refuse any signing object other than the one exact Developer ID shape."""
-    if not isinstance(value, dict) or set(value) != _SIGNING_FIELDS:
-        raise ValueError("manifest server host signing identity is not supported")
-    if value["kind"] != SERVER_HOST_SIGNING_KIND:
-        raise ValueError("manifest server host signing identity is not supported")
-    team_id = value["team_id"]
-    if not isinstance(team_id, str) or not _TEAM_ID_RE.fullmatch(team_id):
-        raise ValueError("manifest server host signing team is not supported")
-
-
-def _check_server_host_artifact(entry: dict[str, Any]) -> None:
-    """Reject a ``server-host`` entry whose fixed host identity is wrong.
-
-    A wheel is validated by the generic fields alone, but the host archive is
-    picked by its exact identity, so every field a consumer acts on — the fixed
-    filename, platform, arch, bundle id and the revision/protocol the host
-    binary answers with — is pinned here. ``host_revision`` and
-    ``host_protocol`` use ``type(...) is int`` so a boolean, which is an ``int``
-    subclass, cannot stand in for revision ``1``; the size must also be
-    positive, since a host archive is never empty.
-
-    Two policies are accepted and nothing in between: the legacy revision-4
-    entry with no ``signing`` key at all, and the signed revision-5 entry with
-    exactly one valid Developer ID signing object. A revision without its
-    policy (or the policy under the wrong revision) is refused rather than
-    guessed at, so a consumer never has to decide which half to trust.
-    """
-    if entry.get("platform") != SERVER_HOST_PLATFORM:
-        raise ValueError("manifest server host platform is not supported")
-    if entry.get("arch") != SERVER_HOST_ARCH:
-        raise ValueError("manifest server host architecture is not supported")
-    if entry.get("filename") != SERVER_HOST_FILENAME:
-        raise ValueError("manifest server host filename is not supported")
-    if entry.get("bundle_id") != SERVER_HOST_BUNDLE_ID:
-        raise ValueError("manifest server host bundle id is not supported")
-    signed = "signing" in entry
-    required = (
-        _SIGNED_SERVER_HOST_REQUIRED_FIELDS if signed else _SERVER_HOST_REQUIRED_FIELDS
-    )
-    if set(entry) != required:
-        raise ValueError("manifest server host entry has unsupported fields")
-    revision = entry.get("host_revision")
-    if type(revision) is not int:
-        raise ValueError("manifest server host revision is not supported")
-    if signed:
-        if revision != SIGNED_SERVER_HOST_REVISION:
-            raise ValueError(
-                "manifest server host signing policy does not match its revision"
-            )
-        _check_signing_object(entry["signing"])
-    elif revision != SERVER_HOST_REVISION:
-        raise ValueError("manifest server host revision is not supported")
-    if (
-        type(entry.get("host_protocol")) is not int
-        or entry["host_protocol"] != SERVER_HOST_PROTOCOL
-    ):
-        raise ValueError("manifest server host protocol is not supported")
-    if entry.get("size", 0) <= 0:
-        raise ValueError("manifest server host archive is empty")
-
-
 def verify_manifest(
     manifest_bytes: bytes, signature_text: str, public_key: str = RELEASE_PUBLIC_KEY
 ) -> dict[str, Any]:
@@ -356,64 +218,9 @@ def verify_manifest(
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
         raise ValueError("manifest lists no artifacts")
-    # The host's identity and uniqueness are checked by the selector, not here:
-    # the engine updater verifies every manifest through this function, so a
-    # future host revision pinned here would refuse the wheel update on every
-    # installed engine, including platforms that never run the host.
     for entry in artifacts:
         _check_artifact(entry)
     return manifest
-
-
-def _check_artifact_ambiguity(artifacts: list[Any]) -> None:
-    """Reject two artifacts a consumer could not tell apart.
-
-    A consumer selects the host by kind or filename, so a second ``server-host``
-    entry, or the host filename reused under another kind, makes the choice
-    ambiguous: which bytes it stages would depend on list order rather than on
-    the signed identity. Only the selector runs this: it is about the host it
-    resolves, and a manifest the wheel updater reads is never refused for it.
-    """
-    host_entries = [e for e in artifacts if e.get("kind") == SERVER_HOST_KIND]
-    if len(host_entries) > 1:
-        raise ValueError("manifest lists more than one server host artifact")
-    if host_entries:
-        host_filename = host_entries[0]["filename"]
-        for entry in artifacts:
-            if (
-                entry.get("kind") != SERVER_HOST_KIND
-                and entry["filename"] == host_filename
-            ):
-                raise ValueError(
-                    "manifest reuses the server host filename under another kind"
-                )
-
-
-def select_server_host_artifact(manifest: dict[str, Any]) -> dict[str, Any]:
-    """Return the one supported ``server-host`` entry in a verified manifest.
-
-    Absence raises a clear ``ValueError`` rather than falling back to the wheel:
-    a caller that needs the host must fail rather than run a release that never
-    shipped one. This checks shape and the supported identity only — it does
-    **not** prove the manifest authentic. The caller must have verified the
-    signature with :func:`verify_manifest` (or :func:`verify_signature`) first;
-    the selector trusts those bytes, so it must never be the only check.
-    """
-    artifacts = manifest.get("artifacts")
-    if not isinstance(artifacts, list) or not artifacts:
-        raise ValueError("manifest lists no artifacts")
-    # The same per-entry checks verify_manifest runs, so a non-object entry is
-    # a ValueError rather than an AttributeError; the ambiguity and host
-    # identity checks live only here, where a host is actually wanted.
-    for artifact in artifacts:
-        _check_artifact(artifact)
-    _check_artifact_ambiguity(artifacts)
-    hosts = [e for e in artifacts if e["kind"] == SERVER_HOST_KIND]
-    if not hosts:
-        raise ValueError("manifest has no server host artifact")
-    entry: dict[str, Any] = hosts[0]
-    _check_server_host_artifact(entry)
-    return entry
 
 
 def verify_assets(manifest: dict[str, Any], paths: list[Path]) -> None:
@@ -438,6 +245,31 @@ def verify_assets(manifest: dict[str, Any], paths: list[Path]) -> None:
             or actual["size"] != entries[0]["size"]
         ):
             raise ValueError(f"{path.name} does not match the manifest")
+
+
+def stamp_installer(template: str, *, version: str, wheel_sha256: str) -> str:
+    """Return the installer script with its version and wheel digest filled in.
+
+    Each placeholder must occur exactly once. A template with none, or with a
+    second copy, is refused rather than stamped at the first match, because a
+    stray copy in a comment would otherwise be the one that gets pinned.
+    """
+    if not _VERSION_RE.fullmatch(version):
+        raise ValueError(f"not a release version: {version!r}")
+    if not _SHA256_RE.fullmatch(wheel_sha256):
+        raise ValueError(f"not a sha256 digest: {wheel_sha256!r}")
+    stamped = template
+    for placeholder, value in (
+        (INSTALLER_VERSION_PLACEHOLDER, version),
+        (INSTALLER_SHA256_PLACEHOLDER, wheel_sha256),
+    ):
+        count = template.count(placeholder)
+        if count != 1:
+            raise ValueError(
+                f"installer template has {count} {placeholder} placeholders, expected exactly one"
+            )
+        stamped = stamped.replace(placeholder, value, 1)
+    return stamped
 
 
 def missing_static_assets(static_dir: Path) -> list[str]:
@@ -490,6 +322,14 @@ def main(argv: list[str] | None = None) -> int:
         help="release file whose bytes must match its manifest entry; repeatable",
     )
 
+    stamp = sub.add_parser(
+        "stamp-installer", help="Write the Linux installer pinned to one wheel"
+    )
+    stamp.add_argument("--template", required=True, type=Path, help="installer template")
+    stamp.add_argument("--version", required=True, help="release version, no leading v")
+    stamp.add_argument("--wheel", required=True, type=Path, help="the release wheel")
+    stamp.add_argument("--out", required=True, type=Path, help="installer path to write")
+
     check_static = sub.add_parser(
         "check-static", help="Check the packaged PWA assets"
     )
@@ -505,8 +345,10 @@ def main(argv: list[str] | None = None) -> int:
         wheels: list[Path] = args.wheels
         try:
             for wheel in wheels:
-                if f"-{version}-" not in wheel.name:
-                    raise ValueError(f"{wheel.name} is not version {version}")
+                # Only this release's wheel is listed: the name is the
+                # contract the stamped installer and the 1.x updater both read.
+                if wheel.name != f"ciaobot-{version}-py3-none-any.whl":
+                    raise ValueError(f"{wheel.name} is not the release wheel for {version}")
                 if not wheel.is_file():
                     raise ValueError(f"wheel is not a regular file: {wheel}")
             artifacts = [artifact_entry(wheel, kind="wheel") for wheel in wheels]
@@ -543,6 +385,31 @@ def main(argv: list[str] | None = None) -> int:
         print(f"verified {manifest['version']}: {trusted_comment}")
         for asset in assets:
             print(f"asset matches: {asset.name}")
+        return 0
+
+    if args.command == "stamp-installer":
+        wheel_path: Path = args.wheel
+        stamp_version: str = args.version
+        installer_out: Path = args.out
+        try:
+            if wheel_path.name != f"ciaobot-{stamp_version}-py3-none-any.whl":
+                raise ValueError(
+                    f"{wheel_path.name} is not the release wheel for {stamp_version}"
+                )
+            if not wheel_path.is_file():
+                raise ValueError(f"wheel is not a regular file: {wheel_path}")
+            digest = artifact_entry(wheel_path, kind="wheel")["sha256"]
+            stamped = stamp_installer(
+                args.template.read_text(encoding="utf-8"),
+                version=stamp_version,
+                wheel_sha256=digest,
+            )
+            installer_out.write_text(stamped, encoding="utf-8", newline="")
+            installer_out.chmod(0o755)
+        except (OSError, ValueError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        print(installer_out)
         return 0
 
     static_dir: Path = args.static_dir or packaged_static_dir()
