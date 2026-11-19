@@ -3085,24 +3085,66 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/MemoryMapView.vue"
     ],
     "variants": [],
-    "variantNotes": "Loading/error/over-cap/stats. Detailed variants are unassessed.",
+    "variantNotes": "No configurable props: geometry comes from the guide content (over-cap flag, warn bars, expiry tags) and the workspace watcher.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in MemoryGuideBudget.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["memory-guide-budget--default"],
+        "note": "The loaded read fills the v-else-if=\"guideStats\" region list: two region meters under cap, the token note and enabled Open/Discuss; the play opens the guide through the viewer store and Discuss fails closed in the toast stack."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": ["memory-guide-budget--loading"],
+        "note": "The held first read keeps guideStats null and shows the loading flag (the v-else-if=\"guideLoading\" span in the title line); both actions stay disabled until it answers."
+      },
+      {
+        "name": "over-cap",
+        "coverage": "covered",
+        "storyIds": ["memory-guide-budget--over-cap"],
+        "note": "A region over its advisory cap renders the 'over cap' flag (v-if=\"guideOverCap\"), the section's guide-budget--over class and the count/bar warn classes of that region's meter."
+      },
+      {
+        "name": "high-usage",
+        "coverage": "covered",
+        "storyIds": ["memory-guide-budget--high-usage"],
+        "note": "A region at 80% or more under cap renders the guide-region-bar--high tint without the over-cap flag or a warn count."
+      },
+      {
+        "name": "expired-and-malformed",
+        "coverage": "covered",
+        "storyIds": ["memory-guide-budget--expired-and-malformed"],
+        "note": "Entries with expiry tags fill the meta line's v-if=\"r.expiredCount\" span and the v-if=\"r.malformedCount\" span with its guide-region-meta--warn class."
+      },
+      {
+        "name": "legacy-claude-guide",
+        "coverage": "covered",
+        "storyIds": ["memory-guide-budget--legacy-claude-guide"],
+        "note": "The pre-migration lookup: a 404 on the workspace-qualified AGENTS.md resolves the legacy CLAUDE.md candidate, so the label and both actions name and act on that file."
+      },
+      {
+        "name": "no-guide",
+        "coverage": "covered",
+        "storyIds": ["memory-guide-budget--no-guide"],
+        "note": "All four candidate probes 404 (qualified AGENTS.md and CLAUDE.md, then the bare names): the silent 'No guide file found for this workspace.' rail note, the label placeholder and both actions blocked."
+      },
+      {
+        "name": "error",
+        "coverage": "covered",
+        "storyIds": ["memory-guide-budget--error"],
+        "note": "A failed qualified read renders the last error through v-if=\"guideError\" and blocks both actions; the owner stops before the bare fallback names once a qualified probe errored, so they stay undeclared routes the story must never see requested."
+      },
+      {
+        "name": "refresh",
+        "coverage": "covered",
+        "storyIds": ["memory-guide-budget--refresh"],
+        "note": "The workspace watcher re-reads: a held switched-workspace read keeps the previous regions on screen with the loading flag in the slot and both actions blocked."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in MemoryGuideBudget.vue has not yet been audited."
+      "status": "known",
+      "detail": "No skeleton: initial loading and refresh reuse the loaded rail card — title, label and both buttons — with the loading flag where the over-cap flag would sit; the region list is the only absence and a refresh keeps prior content. A failed read renders the error note instead of stale numbers, and an empty workspace is the silent no-guide state. Initial loading, refresh and the error render are covered; no loading geometry mismatch to fix."
     },
     "migration": {
       "status": "unassessed",
@@ -3123,24 +3165,30 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/MemoryMapView.vue"
     ],
     "variants": [],
-    "variantNotes": "Native disclosure/static tag table (not dynamic network content). Detailed variants are unassessed.",
+    "variantNotes": "No configurable props: the only state is the per-browser disclosure choice; content is static.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in MemoryHowItWorks.vue implements this render; no rendered-state story exists."
+        "name": "collapsed",
+        "coverage": "covered",
+        "storyIds": ["memory-how-it-works--collapsed"],
+        "note": "The v-show=\"open\" body starts display:none and outside the tab order with aria-expanded false; the keyboard path Tab-Enter opens it and Tab reaches the Categories RouterLink."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "expanded",
+        "coverage": "covered",
+        "storyIds": ["memory-how-it-works--expanded"],
+        "note": "The open body's content: the six-row tag table with its sr-only caption and the off-site noopener link; the toggle collapses and re-opens it and stores each choice per browser."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["memory-how-it-works--narrow"],
+        "note": "A 390px viewport shows the compact table paddings from the owner's @media (max-width: 640px) branch, with unsplit tags and the keyboard path intact."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in MemoryHowItWorks.vue has not yet been audited."
+      "status": "none",
+      "detail": "Static explainer with no fetch and no asynchronous state; the open choice persists in the per-browser 'ciao.memory.howOpen' storage entry."
     },
     "migration": {
       "status": "unassessed",
@@ -7488,8 +7536,8 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/SettingsView.vue",
       "web/src/components/settings/ProviderInventory.vue"
     ],
-    "variants": ["Claude", "OpenCode"],
-    "variantNotes": "Sign-in command and guidance depend on the CLI.",
+    "variants": ["Claude Code", "OpenCode", "Codex"],
+    "variantNotes": "The sign-in command is the connection payload's command for each provider; the OpenCode variant also carries its own note.",
     "states": [
       {
         "name": "default",
@@ -9125,56 +9173,92 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".btn-primary in app.css implements this family; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-buttons--default"],
+        "note": "The unclassed native button baseline: app.css's global button rules (font, tap highlight, touch-action) plus the shared :focus-visible ring; the play clicks it and asserts focus landed."
       },
       {
         "name": "btn-primary",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".btn-primary in app.css includes btn-primary; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-buttons--btn-primary"],
+        "note": "app.css .btn-primary (the anchor): accent fill, --on-accent label, no border, asserted against token probes."
       },
       {
         "name": "btn-small",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".btn-primary in app.css includes btn-small; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-buttons--btn-small"],
+        "note": "app.css .btn-small: 1px --border edge over the --bg3 fill; the play asserts fill, edge and style probes."
+      },
+      {
+        "name": "primary-small",
+        "coverage": "covered",
+        "storyIds": ["global-buttons--primary-small"],
+        "note": "app.css .btn-primary.btn-small stacking: the primary fill gains the 1px --accent outline the plain primary never has."
       },
       {
         "name": "btn-icon",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".btn-primary in app.css includes btn-icon; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-buttons--btn-icon"],
+        "note": "app.css .btn-icon: a transparent, full --touch box for icon-only controls, named through aria-label because it has no visible text."
+      },
+      {
+        "name": "btn-icon-pressed",
+        "coverage": "covered",
+        "storyIds": ["global-buttons--btn-icon-pressed"],
+        "note": "app.css .btn-icon[aria-pressed=\"true\"]: a --bg3 fill over a --border edge; the play asserts the aria state and both token probes."
       },
       {
         "name": "btn-chip",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".btn-primary in app.css includes btn-chip; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-buttons--btn-chip"],
+        "note": "app.css .btn-chip: the ghost control, transparent fill, 1px --border edge, --fg2 label."
+      },
+      {
+        "name": "btn-chip-active",
+        "coverage": "covered",
+        "storyIds": ["global-buttons--btn-chip-active"],
+        "note": "app.css .btn-chip.active: the label and the edge turn --accent; the play asserts the active class with both accent probes."
       },
       {
         "name": "btn-danger",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".btn-primary in app.css includes btn-danger; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-buttons--btn-danger"],
+        "note": "app.css .btn-danger modifies a base (production renders btn-small btn-danger on SettingsView's delete actions) by forcing edge and label to --error; it owns no fill."
+      },
+      {
+        "name": "disabled",
+        "coverage": "covered",
+        "storyIds": ["global-buttons--disabled"],
+        "note": "app.css .btn-primary:disabled: --bg3 fill, --fg3 label, not-allowed cursor; the play asserts the disabled property, that a real click reaches no handler and no focus lands on it."
       },
       {
         "name": "touch-hit",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".btn-primary in app.css includes touch-hit; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-buttons--touch-hit"],
+        "note": "app.css .touch-hit: content-box sizing with negative margin trade and the ::before at the --touch-hit-visual inset, so a compact icon keeps a full --touch hit box; the play asserts the content-box sizing, the 7px decorative inset and that the box stays within a half pixel of the --touch probe."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "name": "hover",
+        "coverage": "covered",
+        "storyIds": ["global-buttons--hover"],
+        "note": "The :hover fill rules (.btn-small, .btn-primary:not(:disabled), .btn-icon, .btn-chip) answer the browser's real pointer position, which the workshop's synthetic user event API cannot move; the play asserts the shipped .btn-primary:hover:not(:disabled) rule text instead, the same shipped-CSS pattern as the SkeletonLoader reduced-motion story."
+      },
+      {
+        "name": "active-press",
+        "coverage": "covered",
+        "storyIds": ["global-buttons--active-press"],
+        "note": "The :active press rules (scale and repaint on .btn-small, .btn-primary, .btn-icon, .btn-chip) apply only during a held pointer press the runner cannot perform; the play asserts the shipped .btn-primary:active rule text instead, the SkeletonLoader reduced-motion pattern."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": ["global-buttons--keyboard-focus"],
+        "note": "Keyboard focus draws the :where(...):focus-visible 2px --accent outline with a 2px offset; the play tabs to the anchor and asserts the ring against a token probe."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in app.css has not yet been audited."
+      "status": "none",
+      "detail": "No loading, failure or stale treatment exists: every button class is a static presentation rule whose dynamic part is hover, press and focus feedback, none of which is a data state."
     },
     "migration": {
       "status": "unassessed",
@@ -9263,50 +9347,68 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".form-grid in app.css implements this family; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-fields-forms--default"],
+        "note": "The unclassed native input baseline: app.css's global input rules (fill, 1px --border edge, --radius corners), asserted against token probes."
       },
       {
         "name": "form-grid",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".form-grid in app.css includes form-grid; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-fields-forms--form-grid"],
+        "note": "app.css .form-grid (the anchor) at a wide canvas: grid with 12px gaps; the play asserts both groups share the first row."
       },
       {
         "name": "form-group",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".form-grid in app.css includes form-group; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-fields-forms--form-group"],
+        "note": "app.css .form-group: a flex column with a 4px gap over an uppercase label."
       },
       {
         "name": "form-actions",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".form-grid in app.css includes form-actions; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-fields-forms--form-actions"],
+        "note": "app.css .form-actions: a wrapping flex row; the story carries a primary and a small secondary exactly as forms lay them out."
       },
       {
         "name": "hint",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".form-grid in app.css includes hint; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-fields-forms--hint"],
+        "note": "app.css .hint: --fg2 secondary text with no added margin, asserted against a token probe."
+      },
+      {
+        "name": "hint--warn",
+        "coverage": "covered",
+        "storyIds": ["global-fields-forms--hint-warn"],
+        "note": "app.css .hint--warn: a block-level warning callout with an opaque tinted fill and a color-mix --warning edge; the play asserts the branch paints rather than restating the mix."
       },
       {
         "name": "checkbox-pill",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".form-grid in app.css includes checkbox-pill; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-fields-forms--checkbox-pill"],
+        "note": "app.css .checkbox-pill rendered as production does (SchedulePanel): a label wrapping a hidden checkbox; the play asserts the 30px pill box and that clicking it toggles the checkbox."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "name": "checkbox-pill-active",
+        "coverage": "covered",
+        "storyIds": ["global-fields-forms--checkbox-pill-active"],
+        "note": "app.css .checkbox-pill.active: the --accent2 fill under a --fg label."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["global-fields-forms--narrow"],
+        "note": "The <=600px single-column collapse is a viewport media query; the story pins the workshop's narrow 390px viewport (the runner applies it to the page, as the ItemTitleRow phone-narrow story does) and asserts the groups stack."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": ["global-fields-forms--keyboard-focus"],
+        "note": "A real Tab focuses the field and the accent edge and focus ring settle over the token transitions; the play waits for the settled edge and asserts the ring paints."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in app.css has not yet been audited."
+      "status": "none",
+      "detail": "Static presentation rules with no data states: grid, grouping, actions, hints and pills render as given and never show loading, refresh, failure or stale treatment."
     },
     "migration": {
       "status": "unassessed",
@@ -9348,74 +9450,80 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".badge in app.css implements this family; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-badges--default"],
+        "note": "The unclassed span baseline: proportional face and no fill, the before the badge classes paint over."
       },
       {
         "name": "badge",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".badge in app.css includes badge; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-badges--badge"],
+        "note": "app.css .badge (the anchor): mono face, 10px pill radius, nowrap, 2px/8px padding."
       },
       {
         "name": "badge--accent",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".badge in app.css includes badge--accent; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-badges--badge-accent"],
+        "note": "app.css .badge--accent: accent fill with an --on-accent label, asserted against token probes."
       },
       {
         "name": "badge--accent2",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".badge in app.css includes badge--accent2; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-badges--badge-accent-2"],
+        "note": "app.css .badge--accent2: --accent2 fill with an --fg label."
       },
       {
         "name": "badge--muted",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".badge in app.css includes badge--muted; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-badges--badge-muted"],
+        "note": "app.css .badge--muted: --bg3 fill behind a --fg2 label and a --border edge."
       },
       {
         "name": "badge--builtin",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".badge in app.css includes badge--builtin; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-badges--badge-builtin"],
+        "note": "app.css .badge--builtin: the --accent2 tint over --bg3 and its tinted edge, both resolved through color-mix; the play asserts the branch paints rather than restating the mix."
+      },
+      {
+        "name": "badge--builtin-light",
+        "coverage": "covered",
+        "storyIds": ["global-badges--badge-builtin-light"],
+        "note": "app.css .theme-light .badge--builtin: the light-scope swap; production mounts the class on <html>, the selector matches any ancestor and the rule's own fallbacks carry the light values, so a .theme-light wrapper reproduces the branch."
       },
       {
         "name": "badge--success",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".badge in app.css includes badge--success; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-badges--badge-success"],
+        "note": "app.css .badge--success: the translucent green fill with a --success label."
       },
       {
         "name": "badge--warn",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".badge in app.css includes badge--warn; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-badges--badge-warn"],
+        "note": "app.css .badge--warn: the translucent amber fill with a --warning label."
       },
       {
         "name": "badge--error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".badge in app.css includes badge--error; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-badges--badge-error"],
+        "note": "app.css .badge--error: the translucent red fill with an --error label."
       },
       {
         "name": "badge--dot",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".badge in app.css includes badge--dot; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-badges--badge-dot"],
+        "note": "app.css .badge--dot: the resting dot marker, dimmed to 0.35, uppercase, no fill, --fg2 label."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "name": "badge--dot-active",
+        "coverage": "covered",
+        "storyIds": ["global-badges--badge-dot-active"],
+        "note": "app.css .badge--dot.active: full opacity over an --accent2 fill with an --fg label."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in app.css has not yet been audited."
+      "status": "none",
+      "detail": "Status badges render their class in one paint; there is no loading, empty, failure or stale appearance."
     },
     "migration": {
       "status": "unassessed",
@@ -9457,26 +9565,20 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".card in app.css implements this family; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-surfaces--default"],
+        "note": "The unclassed block baseline: no fill, no edge, plain flow, the before the card class paints over."
       },
       {
         "name": "card",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".card in app.css includes card; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "coverage": "covered",
+        "storyIds": ["global-surfaces--card"],
+        "note": "app.css .card (the anchor): a --bg2 panel with a 1px --border edge and --radius corners, a flex column with 12px row gap and 16px padding, asserted against token probes."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in app.css has not yet been audited."
+      "status": "none",
+      "detail": ".card is a static container rule: content renders as given, with no loading, empty, failure or stale treatment."
     },
     "migration": {
       "status": "unassessed",
@@ -9612,26 +9714,38 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".sr-only in app.css implements this family; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-typography--default"],
+        "note": "The unclassed heading baseline: proportional face, no uppercase, no letter spacing, the treatment the shared helpers replace."
       },
       {
         "name": "sr-only",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".sr-only in app.css includes sr-only; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-typography--sr-only"],
+        "note": "app.css .sr-only: absolute 1px clipping that screen readers still reach (the play reads the text) but that renders no visible box."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "name": "section-title",
+        "coverage": "covered",
+        "storyIds": ["global-typography--section-title"],
+        "note": "app.css .section-title (the anchor): mono extra-small face in --fg2 with 0.5px spacing at weight 600."
+      },
+      {
+        "name": "label-eyebrow",
+        "coverage": "covered",
+        "storyIds": ["global-typography--label-eyebrow"],
+        "note": "app.css .label-eyebrow: the mono face at uppercase with 0.5px spacing, for the all-caps meta headings."
+      },
+      {
+        "name": "subsection-title",
+        "coverage": "covered",
+        "storyIds": ["global-typography--subsection-title"],
+        "note": "app.css .subsection-title: a proportional --fg2 heading at weight 500, distinct from the mono anchors."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in app.css has not yet been audited."
+      "status": "none",
+      "detail": "Text helpers render instantly against the current tokens; no loading, failure or stale treatment exists."
     },
     "migration": {
       "status": "unassessed",
@@ -9763,26 +9877,20 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ":focus-visible in app.css implements this family; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-focus--default"],
+        "note": "The resting control: no focus, no outline; the family's before-state, asserted on an unfocused button."
       },
       {
         "name": "focus-visible",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ":focus-visible in app.css includes focus-visible; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "coverage": "covered",
+        "storyIds": ["global-focus--focus-visible"],
+        "note": "app.css :where(button, a, input, textarea, select, [role=button], [role=link]):focus-visible (the anchor): a real Tab paints the 2px --accent outline with a 2px offset and focus lands on the intended control."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in app.css has not yet been audited."
+      "status": "none",
+      "detail": "The outline is a focus-time paint, not a data state; no loading, failure or stale treatment exists."
     },
     "migration": {
       "status": "unassessed",
@@ -9813,32 +9921,32 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".modal-backdrop in app.css implements this family; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-modals--default"],
+        "note": "An open modal, the family's composition: the fixed rgba(0, 0, 0, 0.55) backdrop at z-index 100 centring a sheet, asserted directly because the overlay is position: fixed."
       },
       {
         "name": "modal-backdrop",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".modal-backdrop in app.css includes modal-backdrop; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-modals--modal-backdrop"],
+        "note": "app.css .modal-backdrop (the anchor) at a wide viewport: a fixed full-frame flex centre under a 16px padding inset."
       },
       {
         "name": "modal-sheet",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".modal-backdrop in app.css includes modal-sheet; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["global-modals--modal-sheet"],
+        "note": "app.css .modal-sheet at a wide viewport: --radius-lg corners, a 1px --border edge, up to 520px, scrollable, a flex column."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["global-modals--narrow"],
+        "note": "The <=600px phone branch: backdrop without inset, sheet stretched frame to frame with no corners or edge; the story pins the workshop's narrow 390px viewport (the runner applies it to the page, as the ItemTitleRow phone-narrow story does)."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in app.css has not yet been audited."
+      "status": "none",
+      "detail": "The backdrop and sheet render on open; the shared rule has no loading, empty, failure or stale treatment of its own (owners draw any placeholder inside the sheet)."
     },
     "migration": {
       "status": "unassessed",

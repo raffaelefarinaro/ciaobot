@@ -578,7 +578,13 @@ onMounted(() => {
   min-height: 0;
   min-width: min(320px, calc(100vw - 24px));
   max-width: min(480px, calc(100vw - 24px));
-  max-height: min(420px, calc(100dvh - var(--safe-top) - var(--safe-bottom) - 32px));
+  /* Reka reports the room left on the chosen side (flipped above the trigger
+     on short landscape phones); the viewport bound alone can overflow it. */
+  max-height: min(
+    420px,
+    calc(100dvh - var(--safe-top) - var(--safe-bottom) - 32px),
+    calc(var(--reka-popper-available-height, 100dvh) - 8px)
+  );
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -803,6 +809,8 @@ onMounted(() => {
   min-height: 0;
   overflow-y: auto;
   padding: 8px 10px;
+  /* A control scrolled into view keeps clear of the footer's edge. */
+  scroll-padding: 8px;
   border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
   background: var(--bg2);
   border-radius: 0 0 var(--radius) var(--radius);
