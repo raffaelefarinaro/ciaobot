@@ -17,6 +17,9 @@ struct Origin {
 
     var isLoopback: Bool { Self.loopbackHosts.contains(host) }
 
+    /// The port this origin answers on, explicit or the scheme's default.
+    var portNumber: Int { port }
+
     /// Cookies ignore ports, so a persistent sign-in store is keyed by the
     /// full canonical origin: scheme, literal host, and effective port.
     var canonicalKey: String { "\(scheme)://\(Self.bracketedHost(host)):\(port)" }

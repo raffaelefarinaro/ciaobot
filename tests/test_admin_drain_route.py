@@ -171,6 +171,25 @@ def test_drain_refuses_while_a_settings_restart_is_draining() -> None:
     assert pcm.restart_draining is True
 
 
+def test_drain_accepts_sparkle_owner_and_cancel_reopens() -> None:
+    # The Mac client's update gate names its drain `sparkle-<version>` and
+    # cancels with that same owner. Pin that contract here, so the app and the
+    # engine cannot drift apart on the owner shape or the cancel.
+    pcm = _manager()
+    client = _client(pcm)
+
+    drained = client.post("/api/admin/drain", json={"owner": "sparkle-1.10.0"})
+    assert drained.status_code == 200
+    assert drained.json() == {"draining": True, "active_chat_ids": ["c-1", "c-2"]}
+    assert pcm.restart_draining is True
+    assert pcm.owner == "sparkle-1.10.0"
+
+    cancelled = client.post("/api/admin/drain/cancel", json={"owner": "sparkle-1.10.0"})
+    assert cancelled.status_code == 200
+    assert cancelled.json() == {"draining": False}
+    assert pcm.restart_draining is False
+
+
 def test_drain_cancel_leaves_a_settings_restart_alone() -> None:
     pcm = _restarting()
     client = _client(pcm)
@@ -324,3 +343,31 @@ def test_drain_reports_the_scheduled_work_still_running() -> None:
 def test_drain_omits_the_count_without_a_schedule_manager() -> None:
     body = _client(_manager()).post("/api/admin/drain", json={"owner": "op-1"}).json()
     assert "schedule_work_count" not in body
+
+
+def test_settings_restart_takes_the_claim_from_a_held_update_drain(tmp_path: Path) -> None:
+    pcm = _real_manager(tmp_path)
+    client = _client(pcm)
+    assert client.post("/api/admin/drain", json={"owner": "sparkle-1.10.0"}).status_code == 200
+
+    # A Settings restart asks for a drain while the update's is held. It joins
+    # the held drain and takes the claim, so the update can no longer reopen
+    # admission under the pending restart.
+    pcm.begin_restart_drain()
+    assert pcm.restart_draining is True
+    assert pcm.drain_owner == ""
+
+    resp = client.post("/api/admin/drain/cancel", json={"owner": "sparkle-1.10.0"})
+    assert resp.status_code == 409
+    assert resp.json() == {"error": "drain owned by another operation"}
+    assert pcm.restart_draining is True
+    assert pcm.drain_owner == ""
+
+
+def test_an_owned_drain_is_not_taken_over_by_a_named_owner(tmp_path: Path) -> None:
+    pcm = _real_manager(tmp_path)
+    pcm.begin_restart_drain("sparkle-1.10.0")
+
+    # Only an ownerless caller takes the claim; a named one leaves it alone.
+    pcm.begin_restart_drain("sparkle-1.11.0")
+    assert pcm.drain_owner == "sparkle-1.10.0"

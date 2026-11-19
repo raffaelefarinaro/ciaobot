@@ -23,34 +23,9 @@ protocol ClientUpdaterEngine: AnyObject {
     func checkForUpdatesInBackground()
 }
 
-/// Runs Sparkle's immediate install handler on the next main-queue turn and
-/// reports that this client took control of it.
-///
-/// Sparkle calls its delegate while the update session is still unwinding. The
-/// handler terminates the running client and lets Sparkle's installer replace
-/// the bundle, so it must not run inside that call. Returning `true` first is
-/// what tells Sparkle not to wait for a quit.
-@MainActor
-struct ImmediateInstallScheduler {
-    typealias Deferral = (@escaping () -> Void) -> Void
-
-    private let deferral: Deferral
-
-    init(deferral: Deferral? = nil) {
-        self.deferral = deferral ?? { handler in
-            DispatchQueue.main.async { handler() }
-        }
-    }
-
-    func takeControl(_ immediateInstallHandler: @escaping () -> Void) -> Bool {
-        deferral(immediateInstallHandler)
-        return true
-    }
-}
-
-/// Sparkle's updater delegate for this client. It implements exactly one
-/// contract: taking an already verified, downloaded update and installing it
-/// immediately instead of waiting for the user to quit.
+/// Sparkle's updater delegate for this client. It implements one contract:
+/// taking an already verified, downloaded update and installing it, with the
+/// bundled engine drained first (`UpdateInstallGate`).
 @MainActor
 final class ClientUpdateInstallDelegate: NSObject, SPUUpdaterDelegate {
     /// The Sparkle 2.10.1 selector from `SPUUpdaterDelegate.h`. It is spelled
@@ -59,38 +34,118 @@ final class ClientUpdateInstallDelegate: NSObject, SPUUpdaterDelegate {
         "updater:willInstallUpdateOnQuit:immediateInstallationBlock:"
     )
 
-    private let immediateInstall: ImmediateInstallScheduler
-    private let updateQuit: UpdateQuitIntent
+    typealias GateFactory = @MainActor (_ owner: String) -> UpdateInstallGate
 
-    init(immediateInstall: ImmediateInstallScheduler? = nil, updateQuit: UpdateQuitIntent? = nil) {
-        self.immediateInstall = immediateInstall ?? ImmediateInstallScheduler()
-        self.updateQuit = updateQuit ?? UpdateQuitIntent()
-        super.init()
+    /// The longest drain owner the engine is asked to hold.
+    static let maxOwnerLength = 64
+
+    /// The drain owner for an install of `version`: `sparkle-` plus the version,
+    /// with every character outside letters, digits, `.`, `_` and `-` replaced,
+    /// and clipped to `maxOwnerLength`. The engine stores the owner as text and
+    /// the cancel must name it exactly, so one function builds it for both.
+    static func drainOwner(forVersion version: String) -> String {
+        let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        let owner = String("sparkle-\(version)".map { allowed.contains($0) ? $0 : "_" })
+        return String(owner.prefix(maxOwnerLength))
     }
 
-    /// Returns `true` so Sparkle hands installation to this client; the handler
-    /// is deferred by `ImmediateInstallScheduler`. The appcast item is unused:
-    /// Sparkle has already verified the archive signature and notarization
-    /// before this point, and this client never inspects or rewrites it.
+    /// The one gate factory the shipped updater uses. Every gate reads the
+    /// bundled engine through `localState`, drains it through `makeDrainer`
+    /// (the loopback client in the app), and raises `updateQuit` just before
+    /// Sparkle's handler runs, recording whether that install drained.
+    static func productionGate(
+        localState: @escaping UpdateInstallGate.LocalState,
+        updateQuit: UpdateQuitIntent,
+        makeDrainer: @escaping @MainActor () -> EngineDraining = { EngineDrainClient() }
+    ) -> GateFactory {
+        { owner in
+            UpdateInstallGate(
+                localState: localState,
+                drainer: makeDrainer(),
+                owner: owner,
+                willInstall: {
+                    // The gate re-read the engine just before this turn and it
+                    // still matches the reading that decided the install, so a
+                    // running engine here is one the gate drained.
+                    let drained: Bool
+                    if case .running = localState() { drained = true } else { drained = false }
+                    updateQuit.beginInstall(drained: drained)
+                },
+                schedule: UpdateInstallGate.mainQueueSchedule
+            )
+        }
+    }
+
+    private let makeGate: GateFactory
+    private let updateQuit: UpdateQuitIntent
+    /// The gate for the update Sparkle is installing now.
+    private var gate: UpdateInstallGate?
+
+    init(makeGate: @escaping GateFactory, updateQuit: UpdateQuitIntent) {
+        self.makeGate = makeGate
+        self.updateQuit = updateQuit
+        super.init()
+        // A quit that abandons a raised install (a cancelled quit) cancels the
+        // gate's held drain too, through the same path as Sparkle's abort.
+        updateQuit.onAbandon = { [weak self] in self?.gate?.installAborted() }
+    }
+
+    /// Hands the install to this client's gate. The appcast item is unused
+    /// beyond naming the drain owner: Sparkle has already verified the archive
+    /// signature and notarization before this point.
     @objc(updater:willInstallUpdateOnQuit:immediateInstallationBlock:)
     func updater(
         _ updater: SPUUpdater,
         willInstallUpdateOnQuit item: SUAppcastItem,
         immediateInstallationBlock immediateInstallHandler: @escaping () -> Void
     ) -> Bool {
-        takeControl(of: immediateInstallHandler)
+        takeControl(owner: Self.drainOwner(forVersion: item.versionString), of: immediateInstallHandler)
     }
 
-    /// Sparkle's handler terminates the app. Mark that terminate as an update
-    /// install first, so the quit path treats it as a system quit (no
-    /// confirmation dialog, bounded engine drain) instead of asking. The
-    /// update is the user's own choice already, and a dialog could leave
-    /// Sparkle's installer waiting behind it.
-    func takeControl(of immediateInstallHandler: @escaping () -> Void) -> Bool {
-        immediateInstall.takeControl { [updateQuit] in
-            updateQuit.beginInstall()
-            immediateInstallHandler()
+    /// Sparkle's own "Install and Relaunch" (automatic install off) has already
+    /// shown its alert, which is the user's consent, so there is no drain. The
+    /// terminate that follows is still an update quit: no dialog. Nothing was
+    /// drained, so the app's quit path may still ask about running chats.
+    @objc func updaterWillRelaunchApplication(_ updater: SPUUpdater) {
+        relaunchWillStart()
+    }
+
+    func relaunchWillStart() {
+        updateQuit.beginInstall(drained: false)
+    }
+
+    /// Sparkle reports a driver that stopped with an error. Only an install-phase
+    /// error ends the install this client holds.
+    @objc func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+        installDidAbort(error)
+    }
+
+    /// Sparkle's background checks report "no update" and appcast or download
+    /// trouble through the same method. Those must not release a drain that a
+    /// pending install is still holding, so they are ignored.
+    func installDidAbort(_ error: Error) {
+        let nsError = error as NSError
+        guard nsError.domain == SUSparkleErrorDomain,
+              UpdateInstallGate.installAbortCodes.contains(nsError.code) else { return }
+        updateQuit.abandonInstall()
+    }
+
+    /// The gate for `owner` takes the handler. A second call for the same
+    /// owner replaces the stored handler and keeps the gate. A call for another
+    /// owner first aborts the old gate, which cancels its drain under the old
+    /// owner, so that cancel is sent before the new owner's first drain. While
+    /// an install is already scheduled, another owner is refused: Sparkle keeps
+    /// that update for its install on quit.
+    func takeControl(owner: String, of immediateInstallHandler: @escaping () -> Void) -> Bool {
+        if let current = gate, current.owner != owner {
+            if current.isInstalling { return false }
+            current.installAborted()
+            gate = nil
         }
+        if gate == nil {
+            gate = makeGate(owner)
+        }
+        return gate?.takeControl(immediateInstallHandler) ?? false
     }
 }
 
@@ -104,12 +159,11 @@ final class SparkleUpdaterEngine: ClientUpdaterEngine {
     private let installDelegate: ClientUpdateInstallDelegate
     private let controller: SPUStandardUpdaterController
 
-    init(installDelegate: ClientUpdateInstallDelegate? = nil) {
-        let delegate = installDelegate ?? ClientUpdateInstallDelegate()
-        self.installDelegate = delegate
+    init(installDelegate: ClientUpdateInstallDelegate) {
+        self.installDelegate = installDelegate
         self.controller = SPUStandardUpdaterController(
             startingUpdater: false,
-            updaterDelegate: delegate,
+            updaterDelegate: installDelegate,
             userDriverDelegate: nil
         )
     }
@@ -181,28 +235,42 @@ final class ClientUpdater: ClientUpdateControlling {
     private var engine: ClientUpdaterEngine?
     private var started = false
     private(set) var unavailableReason: String?
+    /// The install delegate the shipped initializer wired to the engine. Nil
+    /// for an updater built from a test double.
+    private(set) var installDelegate: ClientUpdateInstallDelegate?
 
     typealias EngineFactory = @MainActor () -> ClientUpdaterEngine
 
     /// The shipped updater: identity from the running bundle, feed and key from
-    /// its Info.plist.
+    /// its Info.plist. `localState` reads the bundled engine and `makeDrainer`
+    /// makes the drain client; the app passes neither's default for real use.
     convenience init(
         bundle: Bundle = .main,
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        updateQuit: UpdateQuitIntent? = nil
+        updateQuit: UpdateQuitIntent? = nil,
+        localState: @escaping UpdateInstallGate.LocalState,
+        makeDrainer: @escaping @MainActor () -> EngineDraining = { EngineDrainClient() }
     ) {
+        let quit = updateQuit ?? UpdateQuitIntent()
+        let gates = ClientUpdateInstallDelegate.productionGate(
+            localState: localState,
+            updateQuit: quit,
+            makeDrainer: makeDrainer
+        )
+        let delegate = ClientUpdateInstallDelegate(makeGate: gates, updateQuit: quit)
         self.init(
             configuration: Configuration(
                 bundle: bundle,
                 allowsUpdates: Self.isReleaseBuild,
                 isTestProcess: Self.isTestProcess(environment: environment)
             ),
-            makeEngine: { SparkleUpdaterEngine(installDelegate: ClientUpdateInstallDelegate(updateQuit: updateQuit)) }
+            makeEngine: { SparkleUpdaterEngine(installDelegate: delegate) }
         )
+        installDelegate = delegate
     }
 
-    init(configuration: Configuration, makeEngine: EngineFactory? = nil) {
-        self.makeEngine = makeEngine ?? { SparkleUpdaterEngine() }
+    init(configuration: Configuration, makeEngine: @escaping EngineFactory) {
+        self.makeEngine = makeEngine
         self.unavailableReason = Self.unavailableReason(for: configuration)
     }
 
