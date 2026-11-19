@@ -536,29 +536,6 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 
-  it('does not list running subagents as rows in the tree', async () => {
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [
-        { path: '/', component: { template: '<div />' } },
-        { path: '/chat/:chatId/subagent/:agentId', component: { template: '<div />' } },
-      ],
-    })
-    await router.push(`/chat/${chatId}/subagent/a1b2c3d4`)
-    await router.isReady()
-
-    const wrapper = mount(ProjectSidebar, {
-      attachTo: document.body,
-      props: { collapsed: false, mode: 'chat' },
-      global: { plugins: [router] },
-    })
-    expect(wrapper.findAll('.chat-item')).toHaveLength(1)
-    expect(wrapper.text()).not.toContain('Sweep the callers')
-    expect(wrapper.find('.subagent-toggle').exists()).toBe(false)
-
-    wrapper.unmount()
-  })
-
   async function mountWithProjectRoute() {
     const router = createRouter({
       history: createMemoryHistory(),

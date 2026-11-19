@@ -210,7 +210,6 @@ describe('the ways into the browser terminal', () => {
         stubs: {
           PaneHeader: ChildStub,
           ModelSelector: ChildStub,
-          SubagentPanel: ChildStub,
           ChatCommentPopover: ChatCommentPopoverStub,
           CommentComposePopover: ChildStub,
           RouterLink: ChildStub,

@@ -63,7 +63,7 @@ async function mountPanel() {
       props: { chatId: 'chat-1' },
     global: {
       plugins: [pinia],
-      stubs: { PaneHeader: PaneHeaderStub, SubagentPanel: ChildStub, RouterLink: ChildStub, ChatCommentPopover: ChatCommentPopoverStub, CommentComposePopover: ChildStub },
+      stubs: { PaneHeader: PaneHeaderStub, RouterLink: ChildStub, ChatCommentPopover: ChatCommentPopoverStub, CommentComposePopover: ChildStub },
     },
   })
   await flushPromises()

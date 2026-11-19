@@ -121,7 +121,6 @@ async function mountPanel(messages: ChatMessage[] = [], chatOverrides: Partial<C
       stubs: {
         PaneHeader: PaneHeaderStub,
         ModelSelector: ChildStub,
-        SubagentPanel: ChildStub,
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,
         RouterLink: ChildStub,

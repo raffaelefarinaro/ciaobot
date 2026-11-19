@@ -373,7 +373,7 @@ const hasCenter = computed(() => !!props.pageTag)
     text-align: left;
     min-width: 0;
   }
-  /* Nothing to centre (the chat, a subagent, a pinned file): row 1 would hold
+  /* Nothing to centre (the chat, a pinned file): row 1 would hold
      only the menu, Back and the actions around an empty middle, spending a
      whole row of a phone screen on chrome. One row instead - lead, title,
      actions - with the title taking the slack between them. */

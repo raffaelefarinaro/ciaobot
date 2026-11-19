@@ -1,4 +1,4 @@
-import type { ChatMessage, SubagentTranscript } from './types'
+import type { ChatMessage } from './types'
 import { formatConnectorLabel } from './mcpLabels'
 import { isPlausibleFilePath } from './filePaths'
 
@@ -208,7 +208,7 @@ export function formatTokenUsage(usage?: Record<string, unknown>): string {
 
 /** One display part of a settled turn: an Activity trace segment or an
  *  earlier reply the server explicitly marked as completed. The turn's closing
- *  reply is never a part; the caller appends it with its outputs/subagents. */
+ *  reply is never a part; the caller appends it with its outputs. */
 export type TurnPart =
   | { kind: 'trace'; steps: ChatMessage[] }
   | { kind: 'assistant'; msg: ChatMessage }
@@ -293,7 +293,7 @@ export function findFinalAnswerIndex(
 
 /** Split one turn's buffered steps into display parts, EXCLUDING the final
  *  reply at `finalIdx` (the caller appends that itself, with the turn's
- *  outputs/subagents attached).
+ *  outputs attached).
  *
  *  Only an earlier assistant row the server explicitly marked completed
  *  (`phase: 'final_answer'`, no tool call) is a bubble: a hidden continuation
@@ -326,7 +326,7 @@ export function buildTurnParts(buffer: ChatMessage[], finalIdx: number): TurnPar
   return parts
 }
 
-export function traceSummaryMeta(steps: ChatMessage[], subs?: SubagentTranscript[]): string {
+export function traceSummaryMeta(steps: ChatMessage[]): string {
   let toolCount = 0
   let textCount = 0
   let thinkingCount = 0
@@ -347,9 +347,6 @@ export function traceSummaryMeta(steps: ChatMessage[], subs?: SubagentTranscript
   if (textCount) parts.push(`${textCount} note${textCount === 1 ? '' : 's'}`)
   if (toolCount) parts.push(`${toolCount} tool call${toolCount === 1 ? '' : 's'}`)
   if (fileCount) parts.push(`${fileCount} file${fileCount === 1 ? '' : 's'}`)
-  if (subs?.length) {
-    parts.push(`${subs.length} subagent${subs.length === 1 ? '' : 's'}`)
-  }
   return parts.join(' · ') || 'steps'
 }
 
@@ -360,7 +357,7 @@ export interface MetaPart {
   isImportant?: boolean
 }
 
-export function traceSummaryMetaParts(steps: ChatMessage[], subs?: SubagentTranscript[]): MetaPart[] {
+export function traceSummaryMetaParts(steps: ChatMessage[]): MetaPart[] {
   let toolCount = 0
   let textCount = 0
   let thinkingCount = 0
@@ -404,13 +401,6 @@ export function traceSummaryMetaParts(steps: ChatMessage[], subs?: SubagentTrans
       key: 'files',
       text: `${fileCount} file${fileCount === 1 ? '' : 's'}`,
       shortText: `${fileCount} f`
-    })
-  }
-  if (subs?.length) {
-    parts.push({
-      key: 'subagents',
-      text: `${subs.length} subagent${subs.length === 1 ? '' : 's'}`,
-      shortText: `${subs.length} sub${subs.length === 1 ? '' : 's'}`
     })
   }
   return parts

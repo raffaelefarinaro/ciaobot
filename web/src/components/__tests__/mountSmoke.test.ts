@@ -234,7 +234,6 @@ const NoopStub = { name: 'NoopStub', render: () => h('div') }
 // as the component.
 const AsyncNoopStub = { default: NoopStub, __esModule: true }
 vi.mock('../ChatPanel.vue', () => ({ default: NoopStub }))
-vi.mock('../SubagentPanel.vue', () => ({ default: NoopStub }))
 vi.mock('../PinnedFilePanel.vue', () => ({ default: NoopStub }))
 vi.mock('../FileViewerModal.vue', () => ({ default: NoopStub }))
 vi.mock('../NewScheduleForm.vue', () => ({ default: NoopStub }))

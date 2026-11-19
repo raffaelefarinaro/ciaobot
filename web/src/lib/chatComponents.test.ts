@@ -12,13 +12,12 @@ describe('chat panel route prefetch', () => {
     expect(load).not.toHaveBeenCalled()
   })
 
-  it('starts the shared chat loader for chat and subagent deep links', async () => {
+  it('starts the shared chat loader for a chat deep link', async () => {
     const load = vi.fn(async () => ({}))
 
     prefetchChatPanelForRoute('/chat/chat-1', 'chat-1', load)
-    prefetchChatPanelForRoute('/chat/chat-1/subagent/agent-1', 'chat-1', load)
     await Promise.resolve()
 
-    expect(load).toHaveBeenCalledTimes(2)
+    expect(load).toHaveBeenCalledTimes(1)
   })
 })

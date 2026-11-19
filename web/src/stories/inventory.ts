@@ -87,8 +87,7 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ChatSignals.vue",
       "web/src/components/NeedsYouCard.vue",
       "web/src/components/ProjectSidebar.vue",
-      "web/src/components/ProposalReviewPanel.vue",
-      "web/src/components/SubagentPanel.vue"
+      "web/src/components/ProposalReviewPanel.vue"
     ],
     "variants": [
       "working",
@@ -2922,7 +2921,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ProjectView.vue",
       "web/src/components/SchedulePanel.vue",
       "web/src/components/SettingsView.vue",
-      "web/src/components/SubagentChatView.vue",
       "web/src/components/TaskWorkspaceSurface.vue",
       "web/src/components/UsageView.vue"
     ],
@@ -3778,102 +3776,6 @@ export const inventory: InventoryEntry[] = [
     "loading": {
       "status": "unknown",
       "detail": "Initial and refresh loading fidelity in StartupView.vue has not yet been audited."
-    },
-    "migration": {
-      "status": "unassessed",
-      "note": "Inventory admission does not approve a design migration."
-    }
-  },
-  {
-    "id": "components-subagent-chat-view",
-    "name": "SubagentChatView",
-    "family": "Chat, messages, composer, activity and context",
-    "kind": "composition",
-    "owner": {
-      "path": "web/src/components/SubagentChatView.vue",
-      "anchor": "<template>"
-    },
-    "sources": [],
-    "consumers": [
-      "web/src/components/ChatLayout.vue"
-    ],
-    "variants": [],
-    "variantNotes": "Read-only transcript has its OWN inline message owner, loading/missing/running states; do not silently equate it with ChatPanel. Detailed variants are unassessed.",
-    "states": [
-      {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SubagentChatView.vue implements this render; no rendered-state story exists."
-      },
-      {
-        "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SubagentChatView.vue implements the loading branch; no rendered-state story exists."
-      },
-      {
-        "name": "missing",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SubagentChatView.vue implements the missing branch; no rendered-state story exists."
-      },
-      {
-        "name": "running",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SubagentChatView.vue implements the running branch; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
-    ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SubagentChatView.vue has not yet been audited."
-    },
-    "migration": {
-      "status": "unassessed",
-      "note": "Inventory admission does not approve a design migration."
-    },
-    "rationale": "Connected route or host composition; isolate its seam before rendering it in the workshop."
-  },
-  {
-    "id": "components-subagent-panel",
-    "name": "SubagentPanel",
-    "family": "Chat, messages, composer, activity and context",
-    "kind": "component",
-    "owner": {
-      "path": "web/src/components/SubagentPanel.vue",
-      "anchor": "<template>"
-    },
-    "sources": [],
-    "consumers": [
-      "web/src/components/ChatPanel.vue",
-      "web/src/components/ChatTurnActivity.vue"
-    ],
-    "variants": [],
-    "variantNotes": "Running/completed/type/duration/no agents. Detailed variants are unassessed.",
-    "states": [
-      {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SubagentPanel.vue implements this render; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
-    ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SubagentPanel.vue has not yet been audited."
     },
     "migration": {
       "status": "unassessed",
@@ -7500,7 +7402,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/SchedulePanel.vue",
       "web/src/components/SettingsView.vue",
       "web/src/components/StartupView.vue",
-      "web/src/components/SubagentChatView.vue",
       "web/src/components/TabBar.vue",
       "web/src/components/TaskOriginNote.vue",
       "web/src/components/TaskWorkspaceSurface.vue",
@@ -7934,7 +7835,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ProjectView.vue",
       "web/src/components/SchedulePanel.vue",
       "web/src/components/SettingsView.vue",
-      "web/src/components/SubagentChatView.vue",
       "web/src/components/TaskWorkspaceSurface.vue",
       "web/src/components/UsageView.vue"
     ],
@@ -8658,71 +8558,6 @@ export const inventory: InventoryEntry[] = [
     "loading": {
       "status": "unknown",
       "detail": "Initial and refresh loading fidelity in HomeIntake.vue has not yet been audited."
-    },
-    "migration": {
-      "status": "unassessed",
-      "note": "Inventory admission does not approve a design migration."
-    }
-  },
-  {
-    "id": "subagent-chat-messages",
-    "name": "Subagent messages",
-    "family": "Chat, messages, composer, activity and context",
-    "kind": "inline",
-    "owner": {
-      "path": "web/src/components/SubagentChatView.vue",
-      "anchor": "class=\"sub-msg\""
-    },
-    "sources": [],
-    "consumers": [],
-    "variants": [
-      "read-only",
-      "loading",
-      "missing",
-      "running"
-    ],
-    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers.",
-    "states": [
-      {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".sub-msg in SubagentChatView.vue implements this family; no rendered-state story exists."
-      },
-      {
-        "name": "read-only",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".sub-msg in SubagentChatView.vue includes read-only; no rendered-state story exists."
-      },
-      {
-        "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".sub-msg in SubagentChatView.vue includes loading; no rendered-state story exists."
-      },
-      {
-        "name": "missing",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".sub-msg in SubagentChatView.vue includes missing; no rendered-state story exists."
-      },
-      {
-        "name": "running",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".sub-msg in SubagentChatView.vue includes running; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further states have not yet been audited."
-      }
-    ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SubagentChatView.vue has not yet been audited."
     },
     "migration": {
       "status": "unassessed",

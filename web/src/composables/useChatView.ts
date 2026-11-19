@@ -11,7 +11,6 @@ export function useChatView(chatId: () => string) {
     project: computed(() => store.projectFor(chatId())),
     activeMessages: computed(() => store.messagesFor(chatId())),
     messageHistoryLoading: computed(() => store.isMessageHistoryLoading(chatId())),
-    activeSubagents: computed(() => store.subagentsFor(chatId())),
     isStreaming: computed(() => store.isChatStreaming(chatId())),
     isWakeStreaming: computed(() => store.isChatWakeStreaming(chatId())),
     currentStreamingText: computed(() => store.streamingTextFor(chatId())),

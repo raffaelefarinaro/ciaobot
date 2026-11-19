@@ -129,11 +129,10 @@
 @media (max-width: 640px) {
   .trace-meta-part.part-thoughts,
   .trace-meta-part.part-notes,
-  .trace-meta-part.part-files,
-  .trace-meta-part.part-subagents {
+  .trace-meta-part.part-files {
     display: none;
   }
-  .trace-meta-part:not(:has(~ .trace-meta-part:not(.part-thoughts):not(.part-notes):not(.part-files):not(.part-subagents)))::after {
+  .trace-meta-part:not(:has(~ .trace-meta-part:not(.part-thoughts):not(.part-notes):not(.part-files)))::after {
     content: none;
   }
   .trace-meta-part .part-text-long {
@@ -190,7 +189,6 @@
   color: var(--fg3);
 }
 
-.trace-step--subagent .trace-step-icon { color: var(--accent2); }
 .trace-step--now .trace-step-icon { color: var(--accent); }
 
 .trace-text {
