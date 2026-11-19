@@ -20,6 +20,7 @@ _HOST_SEAMS = (
     "read_thread",
     "abort_session",
     "model_catalog",
+    "invalidate_model_catalog",
     "native_title_candidates",
     "delete_session",
 )

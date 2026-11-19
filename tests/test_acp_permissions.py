@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -183,3 +184,29 @@ def test_mode_choice_falls_back_to_next_offered_value() -> None:
     spec = AgentSpec(id="claude", binary="claude", modes={"auto": (choice,)})
     assert mode_choices(spec, "auto") == (choice,)
     assert mode_choices(spec, "plan") == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("options", "approved", "expected"),
+    [
+        # An allow option with no usable optionId is skipped, never answered with "None".
+        ([{"kind": "allow_once", "name": "Once"}, _option("always", "allow_always")], True,
+         {"outcome": "selected", "optionId": "always"}),
+        ([{"optionId": None, "kind": "allow_once"}], True, {"outcome": "cancelled"}),
+        ([{"optionId": "   ", "kind": "allow_once"}], True, {"outcome": "cancelled"}),
+        ([{"optionId": 7, "kind": "allow_once"}], True, {"outcome": "cancelled"}),
+        # Reject follows the same rule: a blank reject_once falls through to reject_always.
+        ([{"optionId": "", "kind": "reject_once"}, _option("never", "reject_always")], False,
+         {"outcome": "selected", "optionId": "never"}),
+        ([{"optionId": "", "kind": "reject_once"}], False, {"outcome": "cancelled"}),
+    ],
+)
+async def test_option_without_a_usable_id_is_never_selected(
+    options: list[dict[str, Any]], approved: bool, expected: dict[str, Any]
+) -> None:
+    broker = PermissionBroker(lambda _event: None)
+    task = asyncio.create_task(broker.request("sess", {"toolCallId": "call-1", "title": "Bash"}, options))
+    await _settle(broker, "call-1")
+    assert broker.respond("call-1", approved, session_id="sess").ok
+    assert await task == expected

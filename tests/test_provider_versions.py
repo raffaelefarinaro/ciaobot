@@ -32,7 +32,7 @@ def _tested() -> dict:
         "providers": {
             "opencode": {
                 "status": "tested",
-                "version": "2.1.0",
+                "version": "2.4.0",
                 "package": "@opencode/cli",
             },
             "claude": {
@@ -70,7 +70,7 @@ def test_untested_seed_shape_is_valid() -> None:
 def test_tested_record_round_trips() -> None:
     record = _tested()
     assert validate_record(record) is record
-    assert _tested_version(record, "opencode") == "2.1.0"
+    assert _tested_version(record, "opencode") == "2.4.0"
     assert _tested_version(record, "claude") == "2.1.301"
 
 
@@ -177,9 +177,10 @@ def terminal_paths(monkeypatch: pytest.MonkeyPatch) -> None:
         ("opencode", "3.0.0", {}, _tested(), "unsupported"),
         ("opencode", "garbage", {}, _tested(), "unsupported"),
         ("claude", "garbage", {}, _tested(), "unknown"),
-        ("opencode", "2.0.32", {}, _tested(), "below_tested"),
-        ("opencode", "2.1.0", {}, _tested(), "current"),
-        ("opencode", "2.2.0", {}, _tested(), "current"),
+        ("opencode", "2.3.1", {}, _tested(), "unsupported"),
+        ("opencode", "2.3.2", {}, _tested(), "below_tested"),
+        ("opencode", "2.4.0", {}, _tested(), "current"),
+        ("opencode", "2.5.0", {}, _tested(), "current"),
         ("claude", "2.1.0 (Claude Code)", {}, _tested(), "below_tested"),
         ("claude", "2.1.301 (Claude Code)", {}, _tested(), "current"),
     ],
@@ -203,7 +204,7 @@ def test_release_check_states(
         assert result["terminal_action"] == f"{provider}-update"
         assert result["installed"] and result["tested"]
         assert result["command"].endswith(
-            "upgrade 2.1.0" if provider == "opencode" else "update"
+            "upgrade 2.4.0" if provider == "opencode" else "update"
         )
     if state == "current":
         assert set(result) == {"state", "installed", "tested"}
@@ -221,14 +222,14 @@ def test_release_check_is_untested_when_the_record_is_from_another_version(
         ) == {"state": "untested"}
 
 
-@pytest.mark.parametrize("tested", ["1.14.0", "2.0.15", "3.0.0"])
+@pytest.mark.parametrize("tested", ["1.14.0", "2.0.15", "2.1.0", "2.3.1", "3.0.0"])
 def test_release_check_is_untested_when_the_tested_opencode_is_outside_the_contract(
     terminal_paths: None, tested: str
 ) -> None:
     record = _tested()
     record["providers"]["opencode"]["version"] = tested
     assert release_check(
-        "opencode", "2.0.32", binary="/x", record=record, running_version=RUNNING
+        "opencode", "2.3.2", binary="/x", record=record, running_version=RUNNING
     ) == {"state": "untested"}
 
 
@@ -236,9 +237,9 @@ def test_release_check_defaults_to_the_running_ciaobot_version(
     terminal_paths: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("ciao.__version__", "1.6.1")
-    assert release_check("opencode", "2.0.32", binary="/x", record=_tested())["state"] == "below_tested"
+    assert release_check("opencode", "2.3.2", binary="/x", record=_tested())["state"] == "below_tested"
     monkeypatch.setattr("ciao.__version__", "1.6.2")
-    assert release_check("opencode", "2.0.32", binary="/x", record=_tested()) == {"state": "untested"}
+    assert release_check("opencode", "2.3.2", binary="/x", record=_tested()) == {"state": "untested"}
 
 
 def test_release_check_survives_a_broken_record(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -246,7 +247,7 @@ def test_release_check_survives_a_broken_record(monkeypatch: pytest.MonkeyPatch)
         raise ProviderRecordError("provider record: broken")
 
     monkeypatch.setattr(provider_versions, "load_record", boom)
-    assert release_check("opencode", "2.0.32", running_version=RUNNING) == {"state": "untested"}
+    assert release_check("opencode", "2.3.2", running_version=RUNNING) == {"state": "untested"}
 
 
 def test_update_command_forms(monkeypatch: pytest.MonkeyPatch) -> None:

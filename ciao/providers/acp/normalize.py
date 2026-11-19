@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -34,6 +35,29 @@ _SNAKE_KEY = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$")
 _OPAQUE_KEYS = frozenset({"rawInput", "rawOutput", "_meta"})
 _COMMAND_SUMMARY_CHARS = 200
 _FILE_KINDS = frozenset({"edit", "delete", "move"})
+# A child session id names a node in the transcript: bounded, and free of control characters.
+_CHILD_ID_CHARS = 128
+_LOG_KIND = re.compile(r"[a-z_]{1,40}")
+
+
+def child_tool_id(child_id: object) -> str | None:
+    """``child:<id>`` for a usable child session id, or None when the id is unusable.
+
+    Unusable: not a string, empty, longer than ``_CHILD_ID_CHARS``, or holding a Unicode
+    control character. The id is adapter-controlled, so it is checked before any use.
+    """
+    if not isinstance(child_id, str) or not child_id or len(child_id) > _CHILD_ID_CHARS:
+        return None
+    if any(unicodedata.category(ch).startswith("C") for ch in child_id):
+        return None
+    return f"child:{child_id}"
+
+
+def loggable_kind(kind: object) -> str:
+    """A session/update kind name safe to log: the snake_case name, else a fixed placeholder."""
+    if isinstance(kind, str) and _LOG_KIND.fullmatch(kind):
+        return kind
+    return "<invalid>"
 
 _OUTPUT_LIMIT_TEXT = "The model hit its output limit before finishing."
 _TOO_MANY_STEPS_TEXT = "The agent stopped after too many steps in one turn."
@@ -147,10 +171,9 @@ class UpdateNormalizer:
         child = meta.get("opencode/child-session")
         if isinstance(child, Mapping):
             # opencode tags a child's frames with the child session itself
-            # (`{id, parentID, depth, title}`); it carries no parent tool-call id.
-            child_id = child.get("id")
-            if isinstance(child_id, str) and child_id:
-                return child_id
+            # (`{id, parentID, depth, title}`). That id is the child's own tool node
+            # (`child:<id>`, see OpencodeAcpProvider), the same id the ext path nests under.
+            return child_tool_id(child.get("id"))
         return None
 
     def record_prompt_usage(self, usage: Mapping[str, Any] | None) -> None:
@@ -195,10 +218,10 @@ class UpdateNormalizer:
             return []
         if kind in _SILENT_KINDS:
             return []
-        label = str(kind)
+        label = loggable_kind(kind)
         if label not in self._unknown_logged:
             self._unknown_logged.add(label)
-            logger.debug("ignoring unknown ACP update kind %r", label)
+            logger.debug("ignoring unknown ACP update kind %s", label)
         return []
 
     def _tool_call(self, u: dict[str, Any]) -> list[StreamEvent]:

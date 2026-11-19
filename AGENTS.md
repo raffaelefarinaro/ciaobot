@@ -129,9 +129,9 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   MCP actions are quiet in attention projections; never hide failed turns or
   questions. MCP terminal recovery copies only; the user opens Terminal and
   reviews and runs it separately. See `web/README.md` and `DESIGN.md`.
-- OpenCode provider changes must preserve the V2-only 2.0.16+ contract. Replay
-  the V2 fixtures and run one tiny real turn against the installed OpenCode 2.x
-  server; do not restore V1 route or response-shape fallbacks.
+- OpenCode provider changes run over `opencode acp` at OpenCode 2.3.2 or newer.
+  Replay the ACP fixtures and run one tiny real turn against the installed
+  OpenCode 2.x; do not restore the retired HTTP server or its V1 route fallbacks.
 
 ## Common mistakes
 - **Restarting the service.** Never restart the running engine yourself; it cuts

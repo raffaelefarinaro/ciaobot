@@ -62,7 +62,7 @@ def test_opencode_child_meta_sets_parent() -> None:
     meta = {"_meta": {"opencode/child-session": {"id": "ses_child", "parentID": "ses_root", "depth": 1}}}
     (event,) = n.feed({"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "t"}, **meta})
     assert isinstance(event, ThinkingEvent)
-    assert event.parent_tool_use_id == "ses_child"
+    assert event.parent_tool_use_id == "child:ses_child"
     assert n.parent_of({}) is None
 
 

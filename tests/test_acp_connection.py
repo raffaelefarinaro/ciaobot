@@ -3,22 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
+import re
 import stat
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import acp
 import pytest
 
+from ciao.models import AgentRequest, ResultEvent
 from ciao.os_support.tool_path import engine_bin_dir
 from ciao.providers.acp import connection as connection_module
-from ciao.providers.acp.connection import AcpConnection, AgentStartError, StderrRing
+from ciao.providers.acp.agents import OPENCODE, OpencodeAcpProvider
+from ciao.providers.acp.connection import AcpConnection, AgentStartError, AgentVersionError, StderrRing
 from ciao.providers.acp.spec import AgentSpec
+from ciao.providers.opencode import OPENCODE_V2_REQUIRED, cached_opencode_version
 from tests.acp_helpers import read_calls, write_scenario
 
 
@@ -412,3 +418,160 @@ async def test_agent_stays_in_the_engine_process_group(tmp_path: Path) -> None:
         assert params["sid"] == os.getsid(0)
     finally:
         await connection.close()
+
+
+# -- the OpenCode version floor at start (the gate in AgentSpec.version_gate) -------------------
+
+_OPENCODE_FLOOR_REFUSED = ("2.0.16", "2.3.0", "2.3.1")
+_OPENCODE_FLOOR_ACCEPTED = ("2.3.2", "2.4.0")
+
+
+def test_opencode_floor_text_names_the_floor_version() -> None:
+    assert OPENCODE_V2_REQUIRED.startswith("Ciaobot requires OpenCode 2.3.2 or newer.")
+    assert "install OpenCode 2.3.2 or newer (" in OPENCODE_V2_REQUIRED
+    # A bare "OpenCode 2" with no version is the wording the floor no longer uses.
+    assert re.search(r"OpenCode 2(?![\d.])", OPENCODE_V2_REQUIRED) is None
+
+
+def _opencode_on_fake(tmp_path: Path, **scenario: Any) -> tuple[AgentSpec, Path]:
+    """The real OpenCode spec (its version gate included), pointed at the scripted agent."""
+    spec, calls = write_scenario(tmp_path, **scenario)
+    return dataclasses.replace(OPENCODE, binary=spec.binary, args=spec.args), calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", _OPENCODE_FLOOR_REFUSED)
+async def test_version_below_the_floor_is_refused_at_start(tmp_path: Path, version: str) -> None:
+    spec, _calls = _opencode_on_fake(tmp_path, agent_info={"name": "opencode", "version": version})
+    with pytest.raises(AgentVersionError) as refused:
+        await _open(spec, tmp_path)
+    # The user-visible text is the constant alone: no version, no adapter text.
+    assert str(refused.value) == OPENCODE_V2_REQUIRED
+    assert version not in str(refused.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", _OPENCODE_FLOOR_ACCEPTED)
+async def test_version_at_or_above_the_floor_starts(tmp_path: Path, version: str) -> None:
+    spec, _calls = _opencode_on_fake(tmp_path, agent_info={"name": "opencode", "version": version})
+    connection = await _open(spec, tmp_path)
+    try:
+        assert connection.alive
+    finally:
+        await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_absent_agent_version_is_probed_from_the_binary(tmp_path: Path) -> None:
+    probed: list[str] = []
+
+    def probe(binary: str) -> str:
+        probed.append(binary)
+        return "2.0.16"
+
+    spec, _calls = _opencode_on_fake(tmp_path)  # no agent_info: the agent reports no version
+    gate = dataclasses.replace(OPENCODE.version_gate, probe=probe)
+    with pytest.raises(AgentVersionError) as refused:
+        await _open(dataclasses.replace(spec, version_gate=gate), tmp_path)
+    assert str(refused.value) == OPENCODE_V2_REQUIRED
+    assert probed == [spec.binary]
+
+
+@pytest.mark.asyncio
+async def test_absent_agent_version_probe_at_the_floor_starts(tmp_path: Path) -> None:
+    spec, _calls = _opencode_on_fake(tmp_path)
+    gate = dataclasses.replace(OPENCODE.version_gate, probe=lambda _binary: "2.3.2")
+    connection = await _open(dataclasses.replace(spec, version_gate=gate), tmp_path)
+    await connection.close()
+
+
+def test_cached_version_probe_is_keyed_by_binary_path_and_mtime(tmp_path: Path) -> None:
+    script = tmp_path / "opencode"
+    count = tmp_path / "runs.txt"
+    script.write_text(
+        f"#!/bin/sh\necho run >> '{count}'\necho 'opencode v2.3.2'\n", encoding="utf-8"
+    )
+    script.chmod(0o755)
+    assert cached_opencode_version(str(script)) == "opencode v2.3.2"
+    assert cached_opencode_version(str(script)) == "opencode v2.3.2"
+    assert count.read_text(encoding="utf-8").count("run") == 1  # the second call is cached
+    # A new mtime (an upgrade in place) probes again.
+    os.utime(script, (time.time() + 60, time.time() + 60))
+    cached_opencode_version(str(script))
+    assert count.read_text(encoding="utf-8").count("run") == 2
+
+
+def test_failed_version_probe_is_not_cached(tmp_path: Path) -> None:
+    missing = str(tmp_path / "no-such-opencode")
+    assert cached_opencode_version(missing) == ""
+    assert cached_opencode_version(missing) == ""
+
+
+def test_failed_version_probe_of_a_present_binary_is_cached_briefly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ciao.providers.opencode as opencode_module
+
+    script = tmp_path / "opencode"
+    count = tmp_path / "runs.txt"
+    script.write_text(f"#!/bin/sh\necho run >> '{count}'\nexit 1\n", encoding="utf-8")
+    script.chmod(0o755)
+    # A broken binary costs one probe per failure window, not one per chat start.
+    assert cached_opencode_version(str(script)) == ""
+    assert cached_opencode_version(str(script)) == ""
+    assert count.read_text(encoding="utf-8").count("run") == 1
+    # Once the negative entry is older than its window, the binary is probed again.
+    monkeypatch.setattr(opencode_module, "_VERSION_FAILURE_TTL", 0.0)
+    assert cached_opencode_version(str(script)) == ""
+    assert count.read_text(encoding="utf-8").count("run") == 2
+
+
+def test_version_probe_runs_with_the_agent_env_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    import ciao.providers.opencode as opencode_module
+
+    dump = tmp_path / "env.txt"
+    script = tmp_path / "opencode"
+    script.write_text(f"#!/bin/sh\nenv > '{dump}'\necho 'opencode v2.3.2'\n", encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setenv("CIAO_PROBE_SECRET", "engine-internal")
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "pwa-token")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    seen: dict[str, Any] = {}
+    real_run = subprocess.run
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    assert opencode_module.opencode_version_line(str(script)) == "opencode v2.3.2"
+    env = dict(
+        line.split("=", 1) for line in dump.read_text(encoding="utf-8").splitlines() if "=" in line
+    )
+    assert "CIAO_PROBE_SECRET" not in env
+    assert "PWA_AUTH_TOKEN" not in env
+    # The engine's bin dir leads PATH, so a `#!/usr/bin/env node` shim finds the engine's node.
+    assert env["PATH"].split(os.pathsep)[0] == engine_bin_dir()
+    assert "/usr/bin" in env["PATH"].split(os.pathsep)
+    assert seen["stdin"] is subprocess.DEVNULL
+
+
+@pytest.mark.asyncio
+async def test_refused_start_yields_the_fixed_version_result(tmp_path: Path) -> None:
+    spec, _calls = _opencode_on_fake(tmp_path, agent_info={"name": "opencode", "version": "2.0.16"})
+
+    class OpencodeOnFake(OpencodeAcpProvider):
+        pass
+
+    OpencodeOnFake.spec = spec
+    provider = OpencodeOnFake(tmp_path, config=SimpleNamespace(state_path=tmp_path / "state.json"))
+    request = AgentRequest(prompt="hi", model="", mode="auto", provider="opencode")
+    events = [event async for event in provider.run_streaming(request, lambda _handle: None)]
+    assert len(events) == 1
+    result = events[0]
+    assert isinstance(result, ResultEvent)
+    assert (result.is_error, result.result) == (True, OPENCODE_V2_REQUIRED)

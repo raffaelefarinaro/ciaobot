@@ -5,45 +5,6 @@ import pytest
 import ciao.providers.oneshot as oneshot
 
 
-@pytest.mark.asyncio
-async def test_opencode_oneshot_uses_build_with_deny_all_permissions(
-    monkeypatch, tmp_path
-) -> None:
-    from ciao.models import ResultEvent
-    from ciao.providers.opencode import OpencodeProvider
-
-    captured: dict = {}
-
-    async def fake_run(self, request, on_handle):
-        captured["request"] = request
-        captured["settings"] = self._session_settings(request)
-        captured["tools_enabled"] = self._tools_enabled
-        captured["calls"] = captured.get("calls", 0) + 1
-        yield ResultEvent(type="result", result="ok")
-
-    async def fake_delete(self):
-        pass
-
-    async def fake_disconnect(self):
-        pass
-
-    monkeypatch.setattr(OpencodeProvider, "run_streaming", fake_run)
-    monkeypatch.setattr(OpencodeProvider, "delete_current_session", fake_delete)
-    monkeypatch.setattr(OpencodeProvider, "disconnect", fake_disconnect)
-
-    assert await oneshot._run_opencode_oneshot(
-        "prompt", system_prompt="system", model="model", env=None, cwd=tmp_path
-    ) == "ok"
-    request = captured["request"]
-    agent, permissions = captured["settings"]
-    assert request.mode == "auto"
-    assert agent == "build"
-    assert permissions == [{"action": "*", "resource": "*", "effect": "deny"}]
-    assert captured["tools_enabled"] is False
-    assert captured["calls"] == 1
-    assert request.mode != "plan"
-
-
 @pytest.fixture
 def acp_calls(monkeypatch):
     """Replace the ACP one-shot. Each call takes the next scripted value, or raises it."""
@@ -157,128 +118,37 @@ async def test_run_oneshot_no_retry_when_disabled(acp_calls) -> None:
 
 
 # ── opencode one-shot ───────────────────────────────────────────────────
-# Routines (titles, insights) reach non-Anthropic, non-OpenAI models
-# through opencode, so opencode needs a one-shot path of its own.
-
-
-def _fake_opencode(captured: dict, events: list[object]):
-    """Stub OpencodeProvider recording construction and request arguments."""
-
-    class FakeOpencodeProvider:
-        def __init__(
-            self,
-            workspace_root,
-            *,
-            developer_instructions="",
-            tools_enabled=True,
-            **_kw,
-        ):
-            captured["workspace_root"] = workspace_root
-            captured["developer_instructions"] = developer_instructions
-            captured["tools_enabled"] = tools_enabled
-            captured["disconnected"] = False
-            captured["deleted"] = False
-
-        @property
-        def current_session_id(self):
-            return "one-shot-session"
-
-        async def run_streaming(self, request, register_handle):
-            captured["request"] = request
-            register_handle(None)
-            for event in events:
-                yield event
-
-        async def disconnect(self):
-            captured["disconnected"] = True
-
-        async def delete_current_session(self):
-            captured["deleted"] = True
-            return True
-
-    return FakeOpencodeProvider
+# opencode runs its one-shots over `opencode acp` like every other ACP provider.
 
 
 @pytest.mark.asyncio
-async def test_run_oneshot_dispatches_to_opencode(monkeypatch, tmp_path) -> None:
-    from ciao.models import ResultEvent
-    import ciao.providers.opencode as opencode_mod
+async def test_run_oneshot_runs_opencode_over_acp(acp_calls) -> None:
+    from ciao.providers.acp.agents import OPENCODE
 
-    captured: dict = {}
-    monkeypatch.setattr(
-        opencode_mod,
-        "OpencodeProvider",
-        _fake_opencode(captured, [ResultEvent(type="result", result="A Title")]),
-    )
+    calls, script = acp_calls
+    script.append("A Title")
 
     out = await oneshot.run_oneshot(
         "name this chat",
         system_prompt="Reply with only the title.",
         model="anthropic/claude-haiku-4.5",
         provider="opencode",
-        cwd=tmp_path,
     )
 
     assert out == "A Title"
-    # The system prompt has to arrive as developer instructions: opencode takes
-    # it in the prompt body's `system` field, not as part of the user prompt.
-    assert captured["developer_instructions"] == "Reply with only the title."
-    assert captured["request"].provider == "opencode"
-    assert captured["request"].model == "anthropic/claude-haiku-4.5"
-    # Build avoids the Plan plugin; the explicit deny-all rules still disable
-    # every tool, including writes.
-    assert captured["request"].mode == "auto"
-    assert captured["workspace_root"] != tmp_path.resolve()
-    assert not captured["workspace_root"].exists()
-    assert captured["tools_enabled"] is False
+    assert calls[0]["spec"] is OPENCODE
+    assert calls[0]["model"] == "anthropic/claude-haiku-4.5"
+    assert calls[0]["session_meta"] == {}
 
 
 @pytest.mark.asyncio
-async def test_run_oneshot_opencode_always_disconnects(monkeypatch, tmp_path) -> None:
-    """The server and session are torn down even when the turn errors."""
-    from ciao.models import ResultEvent
-    import ciao.providers.opencode as opencode_mod
+async def test_run_oneshot_opencode_empty_reply_is_not_an_error(acp_calls) -> None:
+    """An empty reply is returned as-is; the caller decides what empty means."""
+    calls, script = acp_calls
+    script.append("")
 
-    captured: dict = {}
-    monkeypatch.setattr(
-        opencode_mod,
-        "OpencodeProvider",
-        _fake_opencode(
-            captured,
-            [ResultEvent(type="result", result="model not found", is_error=True)],
-        ),
-    )
-
-    with pytest.raises(oneshot.OneShotError) as excinfo:
-        await oneshot.run_oneshot(
-            "hi", system_prompt="s", model="x/y", provider="opencode", cwd=tmp_path
-        )
-
-    assert "model not found" in excinfo.value.detail
-    # opencode does not distinguish retriable upstream flakes, so a returned
-    # error is terminal -- retrying would double-charge for the same failure.
-    assert excinfo.value.transient is False
-    assert captured["disconnected"] is True
-    assert captured["deleted"] is True
-
-
-@pytest.mark.asyncio
-async def test_run_oneshot_opencode_empty_stream_returns_empty(
-    monkeypatch, tmp_path
-) -> None:
-    """No ResultEvent is not an error -- the caller decides what empty means."""
-    import ciao.providers.opencode as opencode_mod
-
-    captured: dict = {}
-    monkeypatch.setattr(
-        opencode_mod, "OpencodeProvider", _fake_opencode(captured, [])
-    )
-
-    out = await oneshot.run_oneshot(
-        "hi", system_prompt="s", model="x/y", provider="opencode", cwd=tmp_path
-    )
-    assert out == ""
-    assert captured["disconnected"] is True
+    assert await oneshot.run_oneshot("hi", system_prompt="s", model="x/y", provider="opencode") == ""
+    assert len(calls) == 1
 
 
 @pytest.mark.asyncio
