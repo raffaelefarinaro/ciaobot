@@ -33,36 +33,6 @@ def test_the_transcript_lookup_uses_that_slug(monkeypatch: pytest.MonkeyPatch, t
     assert "." not in expected.name and "_" not in expected.name
 
 
-def _norm(p: Path) -> str:
-    return str(p)
-
-
-def _assume_no_git_above(tmp_path: Path) -> None:
-    if any((parent / ".git").exists() for parent in tmp_path.resolve().parents):
-        pytest.skip("tmp_path is inside a git repo")
-
-
-def test_claude_config_project_key_is_the_git_root(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    (repo / ".git").mkdir(parents=True)
-    key = agent_paths.claude_config_project_key(repo / "a" / "b")
-    assert key == _norm(repo.resolve())
-
-
-def test_claude_config_project_key_counts_a_git_file(tmp_path: Path) -> None:
-    wt = tmp_path / "wt"
-    (wt / "sub").mkdir(parents=True)
-    (wt / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
-    assert agent_paths.claude_config_project_key(wt / "sub") == _norm(wt.resolve())
-
-
-def test_claude_config_project_key_outside_git_is_the_folder(tmp_path: Path) -> None:
-    _assume_no_git_above(tmp_path)
-    plain = tmp_path / "plain"
-    plain.mkdir()
-    assert agent_paths.claude_config_project_key(plain) == _norm(plain.resolve())
-
-
 def test_claude_global_config_path_order(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     env = {"CLAUDE_CONFIG_PATH": str(tmp_path / "x.json"), "CLAUDE_CONFIG_DIR": str(tmp_path / "d")}
     assert agent_paths.claude_global_config_path(env) == tmp_path / "x.json"

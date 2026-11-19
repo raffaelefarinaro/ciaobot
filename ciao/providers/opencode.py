@@ -1793,40 +1793,6 @@ class OpencodeProvider(BaseSDKProvider):
     def response_session_id(self) -> str:
         return self._session_id or ""
 
-    async def read_mcp_status(self) -> dict[str, str]:
-        """Read MCP connection states from this already-running V2 server.
-
-        An absent/dead server is not started for a Settings read. The V2
-        ``/api/mcp`` contract returns ``data`` rows with a nested status
-        discriminator. Unknown or malformed rows are omitted so callers can
-        report uncertainty instead of claiming a connection.
-        """
-        client = self._client
-        if not self.is_connected or client is None:
-            return {}
-        response = await client.get("/api/mcp", timeout=2.0)
-        response.raise_for_status()
-        body = response.json()
-        rows = body.get("data") if isinstance(body, Mapping) else None
-        if not isinstance(rows, list):
-            raise ValueError("OpenCode MCP status response is malformed")
-        result: dict[str, str] = {}
-        allowed = {
-            "connected", "failed", "disabled", "needs_auth", "pending",
-            "needs_client_registration",
-        }
-        for row in rows:
-            if not isinstance(row, Mapping):
-                continue
-            name = str(row.get("name") or "").strip()
-            status = row.get("status")
-            state = str(status.get("status") or "") if isinstance(status, Mapping) else ""
-            if name and state in allowed:
-                result[name] = (
-                    "needs_auth" if state == "needs_client_registration" else state
-                )
-        return result
-
     @property
     def is_connected(self) -> bool:
         """True while this chat's own opencode server is still running.
@@ -5036,16 +5002,14 @@ def _credential_count(binary: str, *, timeout: float) -> int | None:
     return None
 
 
-_InventoryRows = tuple[
-    list[dict[str, Any]] | None, list[dict[str, Any]] | None, list[dict[str, Any]] | None
-]
-_NO_INVENTORY: _InventoryRows = (None, None, None)
+_InventoryRows = tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]
+_NO_INVENTORY: _InventoryRows = (None, None)
 
 
 def _read_loaded_inventory(
     client: httpx.Client, process: Any, *, deadline: float, location: str
 ) -> _InventoryRows:
-    """Skill, plugin and MCP rows of a private server once it has loaded.
+    """Skill and plugin rows of a private server once it has loaded.
 
     A fresh server answers before it has loaded: first nothing, then only the
     two built-in skills, then everything at once with `plugin.updated` last
@@ -5082,7 +5046,7 @@ def _read_loaded_inventory(
                 return _NO_INVENTORY
             if isinstance(data, list) and data:
                 plugin_rows = [row for row in data if isinstance(row, dict)]
-                return rows("/api/skill"), plugin_rows, rows("/api/mcp")
+                return rows("/api/skill"), plugin_rows
         time.sleep(_INVENTORY_POLL)
     return _NO_INVENTORY
 
@@ -5141,11 +5105,10 @@ class _Inventory:
 
     skills: list[str] | None
     bundled_skills: list[str] | None
-    mcps: list[str] | None
 
 
 def _opencode_inventory(binary: str) -> _Inventory:
-    """Skills and plugins, the skills opencode ships, and MCP servers.
+    """Skills and plugins, and the skills opencode ships.
 
     A skill whose path is under ``/builtin/`` ships with opencode. Built-in
     plugins are opencode internals, and a plugin that failed to load (a
@@ -5155,7 +5118,7 @@ def _opencode_inventory(binary: str) -> _Inventory:
     starts and stops, never through `opencode api`, which goes to the shared
     background service.
     """
-    skill_rows, plugin_rows, mcp_rows = _fetch_inventory_rows(binary)
+    skill_rows, plugin_rows = _fetch_inventory_rows(binary)
     skills = bundled = None
     if skill_rows is not None and plugin_rows is not None:
         bundled = _row_names([
@@ -5168,8 +5131,7 @@ def _opencode_inventory(binary: str) -> _Inventory:
             and (row.get("state") or {}).get("status", "active") == "active"
         ])
         skills = own + [name for name in plugins if name not in own]
-    mcps = _row_names(mcp_rows) if mcp_rows is not None else None
-    return _Inventory(skills=skills, bundled_skills=bundled, mcps=mcps)
+    return _Inventory(skills=skills, bundled_skills=bundled)
 
 
 def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> dict[str, Any]:
@@ -5246,7 +5208,7 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
     else:
         detail = "no credentials — free models only"
         auth = "free"
-    found = _opencode_inventory(binary) if inventory else _Inventory(None, None, None)
+    found = _opencode_inventory(binary) if inventory else _Inventory(None, None)
     return _provider(
         name="opencode",
         ok=True,
@@ -5258,7 +5220,6 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
         version=version or "unknown",
         skills=found.skills,
         bundled_skills=found.bundled_skills,
-        mcps=found.mcps,
         release_check=release_check("opencode", version, binary=binary),
     )
 
@@ -5285,7 +5246,7 @@ def opencode_system_skills(env: Mapping[str, str] | None = None) -> list[str]:
         except OSError:
             binary = None
         if binary:
-            skill_rows, _plugins, _mcps = _fetch_inventory_rows(binary)
+            skill_rows, _plugins = _fetch_inventory_rows(binary)
             if skill_rows is not None:
                 names = _row_names(skill_rows)
         _system_skills_cache = (now, tuple(names))

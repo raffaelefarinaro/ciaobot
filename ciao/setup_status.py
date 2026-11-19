@@ -29,33 +29,12 @@ from ciao.agent_paths import claude_global_config_path
 from ciao.os_support.shell_hints import path_hint
 from ciao.workspace_guide import guide_path
 
-# Claude MCP / skill discovery shells out; cache briefly so Settings refreshes
+# Claude skill discovery shells out; cache briefly so Settings refreshes
 # stay responsive without freezing status until process restart.
 _CLAUDE_DISCOVERY_TTL_SECONDS = 300.0
-# An empty discovery is usually a timeout or a transient health-check failure,
-# not a real "nothing connected" answer. Serve it only briefly so the
-# stale-while-revalidate retry lands within seconds instead of showing "(0)"
-# for the full success TTL.
-_CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS = 15.0
-# ``claude mcp list`` health-checks every configured connector before printing.
-# With ~30 claude.ai connectors a healthy run measures ~11-12s, and under load
-# it blows past 12s — at which point the old timeout swallowed the error and
-# cached the empty list for five minutes. Give the health pass real headroom.
-_CLAUDE_MCP_LIST_TIMEOUT_SECONDS = 30.0
 _CLAUDE_AUTH_STATUS_TIMEOUT_SECONDS = 5.0
 logger = logging.getLogger(__name__)
 
-_claude_mcps_cache: tuple[float, str, tuple[str, ...], int] | None = None
-_claude_mcps_refreshing = False
-_claude_mcps_lock = threading.Lock()
-# Set while one runner (startup warm-up, a request thread, or the stale-TTL
-# background refresh) is executing the ``claude mcp list`` probe, so
-# latecomers wait for it instead of stacking a second full health pass.
-_claude_mcps_inflight: threading.Event | None = None
-# Bumped on every ``clear_claude_discovery_cache`` so a probe result produced
-# from a pre-clear configuration (e.g. the startup warm-up finishing right
-# after Verify) is not served or cached as current.
-_claude_mcps_generation = 0
 _claude_skills_cache: tuple[float, tuple[str, ...]] | None = None
 
 
@@ -76,46 +55,10 @@ def _resolve_root(raw: Any) -> Path:
 
 
 def clear_claude_discovery_cache() -> None:
-    """Drop Claude MCP/skill discovery caches (tests and forced refresh).
-
-    An in-flight probe is deliberately left registered: the Verify endpoint
-    calls this while the startup warm-up may still be running, and
-    unregistering the probe would let the next payload claim single-flight
-    ownership and stack a second blocking ``claude mcp list``. Instead the
-    generation bump marks any result that pre-clear probe produces as stale,
-    so the next discovery waits it out and then re-probes with current
-    configuration. Tests that need a clean single-flight state reset
-    ``_claude_mcps_inflight`` directly.
-    """
-    global _claude_mcps_cache, _claude_skills_cache, _claude_mcps_generation
-    _claude_mcps_cache = None
+    """Drop the Claude skill discovery cache (tests and forced refresh)."""
+    global _claude_skills_cache
     _claude_skills_cache = None
-    _claude_mcps_generation += 1
     _CLI_VERSION_CACHE.cache_clear()
-
-
-def _acquire_mcps_probe() -> threading.Event | None:
-    """Try to become the sole ``claude mcp list`` runner.
-
-    Returns the event this caller owns (``release_mcps_probe`` must be called
-    on it), or ``None`` when another probe is already in flight.
-    """
-    global _claude_mcps_inflight
-    with _claude_mcps_lock:
-        if _claude_mcps_inflight is not None:
-            return None
-        event: threading.Event = threading.Event()
-        _claude_mcps_inflight = event
-        return event
-
-
-def _release_mcps_probe(event: threading.Event) -> None:
-    """Finish this caller's probe run and hand single-flight back."""
-    global _claude_mcps_inflight
-    event.set()
-    with _claude_mcps_lock:
-        if _claude_mcps_inflight is event:
-            _claude_mcps_inflight = None
 
 
 def detect_nested_workspaces(vault_path: Path) -> list[str]:
@@ -305,7 +248,6 @@ def _provider(
     protocol: str = "",
     skills: list[str] | None = None,
     bundled_skills: list[str] | None = None,
-    mcps: list[str] | None = None,
     install_url: str = "",
     app_path: str = "",
     cli_path: str = "",
@@ -332,8 +274,6 @@ def _provider(
         row["skills"] = skills
     if bundled_skills is not None:
         row["bundled_skills"] = bundled_skills
-    if mcps is not None:
-        row["mcps"] = mcps
     if install_url:
         row["install_url"] = install_url
     if app_path:
@@ -466,304 +406,29 @@ def _discover_claude_system_skills_uncached() -> list[str]:
     return sorted(skills)
 
 
-def _usable_mcps_cache(ws_key: str) -> tuple[tuple[str, ...], bool] | None:
-    """Return ``(names, fresh)`` for a cache entry usable for ``ws_key``.
-
-    An entry stamped with a superseded generation belongs to a probe that
-    started before ``clear_claude_discovery_cache`` and therefore describes
-    pre-clear configuration. Reporting it as absent (rather than merely stale)
-    keeps Verify's forced-refresh contract: the caller re-probes instead of
-    serving the answer the user just invalidated.
-    """
-    cached = _claude_mcps_cache
-    if (
-        cached is None
-        or cached[1] != ws_key
-        or cached[3] != _claude_mcps_generation
-    ):
-        return None
-    ttl = (
-        _CLAUDE_DISCOVERY_TTL_SECONDS
-        if cached[2]
-        else _CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS
-    )
-    return cached[2], (time.monotonic() - cached[0] < ttl)
-
-
-def discover_claude_mcps(
-    workspace_root: Path | str | None = None,
-    *,
-    config_path: Path | None = None,
-) -> list[str]:
-    """Discover connected+enabled Claude MCP connectors via CLI + ~/.claude.json.
-
-    ``claude mcp list`` reports health (Connected) even for connectors disabled
-    in the per-project ``/mcp`` panel. Those disables live in
-    ``~/.claude.json`` → ``projects.<path>.disabledMcpServers``.
-
-    Served stale-while-revalidate: ``claude mcp list`` health-checks every
-    connector and measures ~12s on a real install, and discovery is on the
-    Settings -> Models & providers load path, so a plain TTL made every visit after the
-    window pay the full cost. An expired entry is returned immediately and
-    refreshed on a background thread, so only the first call after startup ever
-    waits. Empty results expire fast (see ``_CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS``)
-    because they usually mean the probe timed out, not that nothing is connected.
-    """
-    global _claude_mcps_cache
-    ws_key = str(_resolve_root(workspace_root)) if workspace_root else ""
-    entry = _usable_mcps_cache(ws_key)
-    if entry is not None:
-        names, fresh = entry
-        if not fresh:
-            _refresh_claude_mcps_async(ws_key, config_path)
-        return list(names)
-
-    # Single-flight: the startup warm-up, the stale-TTL background refresh, or
-    # another request thread may already be paying for the probe. Wait for it
-    # to finish instead of stacking a second ``claude mcp list``; only become
-    # a runner once no other probe is in flight. The wait is unbounded on
-    # purpose: the owner's ``finally`` always fires and the probe itself is
-    # bounded by the subprocess timeout, so the event cannot stay unset
-    # forever. A waiter whose owner finished without a usable entry for this
-    # root (failed probe, different workspace root, or a result invalidated by
-    # a cache clear mid-probe) loops and reacquires ownership — it never times
-    # out into running a duplicate probe alongside the in-flight one.
-    while True:
-        inflight = _acquire_mcps_probe()
-        if inflight is not None:
-            # Ownership can also fall to us because the previous owner just
-            # finished. Re-check before probing: otherwise the narrow window
-            # between a failed acquire and this one turns a completed probe
-            # into a duplicate full health pass.
-            entry = _usable_mcps_cache(ws_key)
-            if entry is not None and entry[1]:
-                _release_mcps_probe(inflight)
-                return list(entry[0])
-            break
-        with _claude_mcps_lock:
-            running = _claude_mcps_inflight
-        if running is None:
-            # The owner finished between our failed acquire and this read;
-            # loop to serve its freshly stamped cache or take over.
-            continue
-        running.wait()
-        entry = _usable_mcps_cache(ws_key)
-        if entry is not None and entry[1]:
-            return list(entry[0])
-
-    probe_generation = _claude_mcps_generation
-    try:
-        connected = _discover_claude_mcps_uncached(
-            workspace_root=Path(ws_key) if ws_key else None,
-            config_path=config_path,
-        )
-        _claude_mcps_cache = (
-            time.monotonic(),
-            ws_key,
-            tuple(connected),
-            probe_generation,
-        )
-        return connected
-    finally:
-        _release_mcps_probe(inflight)
-
-
 def _claude_config_path_from_env(source: Mapping[str, str] | None = None) -> Path:
     """The Claude config file the provider payload would read.
 
     Honors ``CLAUDE_CONFIG_PATH``, then ``CLAUDE_CONFIG_DIR`` (see
-    ``agent_paths.claude_global_config_path``) so the startup warm-up probes the same
-    connector set the Settings -> Models & providers route will report.
+    ``agent_paths.claude_global_config_path``).
     """
     return claude_global_config_path(source)
 
 
-def warm_claude_discovery_cache(
-    workspace_root: Path | str | None = None,
-    *,
-    config_path: Path | None = None,
-) -> None:
-    """Pre-populate the Claude MCP/skill caches off the request path.
+def warm_claude_discovery_cache() -> None:
+    """Pre-populate the Claude skill cache off the request path.
 
-    ``claude mcp list`` health-checks every connector (~12s on a real install),
-    so run it at app startup instead of letting the first Settings -> Models & providers
-    visit block on it. ``config_path`` defaults to the same ``CLAUDE_CONFIG_PATH``
-    derivation the payload uses, so the warmed cache cannot disagree with what
-    the route would report. Fire-and-forget: a failure just leaves the cache
-    cold and the first request pays the cost as before.
+    Fire-and-forget: a failure just leaves the cache cold and the first
+    request pays the cost as before.
     """
 
     def run() -> None:
         try:
-            discover_claude_mcps(
-                workspace_root,
-                config_path=config_path or _claude_config_path_from_env(),
-            )
             discover_claude_system_skills()
         except Exception:  # noqa: BLE001 - warm-up must never break startup
             logger.debug("Claude discovery warm-up failed", exc_info=True)
 
     threading.Thread(target=run, name="claude-discovery-warmup", daemon=True).start()
-
-
-def _refresh_claude_mcps_async(ws_key: str, config_path: Path | None) -> None:
-    """Re-discover in the background, at most one refresh in flight.
-
-    The refresh joins the same single-flight as the warm-up and the request
-    path: if another probe is running it skips entirely (that probe's result
-    is at least as fresh), and while it runs, Verify's cache bust cannot stack
-    a second probe on top of it. Failures are swallowed on purpose: the stale
-    list already went out to the caller, and a discovery error must not
-    surface as a broken Settings page.
-    """
-    global _claude_mcps_refreshing
-    with _claude_mcps_lock:
-        if _claude_mcps_refreshing:
-            return
-        _claude_mcps_refreshing = True
-
-    def run() -> None:
-        global _claude_mcps_cache, _claude_mcps_refreshing
-        inflight = _acquire_mcps_probe()
-        try:
-            if inflight is None:
-                return  # a newer probe is already running; its result wins
-            # Record the generation before probing: a cache clear mid-probe
-            # must invalidate this result just like the request path's.
-            probe_generation = _claude_mcps_generation
-            connected = _discover_claude_mcps_uncached(
-                workspace_root=Path(ws_key) if ws_key else None,
-                config_path=config_path,
-            )
-            _claude_mcps_cache = (
-                time.monotonic(),
-                ws_key,
-                tuple(connected),
-                probe_generation,
-            )
-        except Exception:  # noqa: BLE001 - a stale list is already serving
-            logger.debug("background Claude MCP discovery failed", exc_info=True)
-        finally:
-            if inflight is not None:
-                _release_mcps_probe(inflight)
-            with _claude_mcps_lock:
-                _claude_mcps_refreshing = False
-
-    threading.Thread(target=run, name="claude-mcp-refresh", daemon=True).start()
-
-
-def _short_claude_mcp_name(name: str) -> str:
-    cleaned = str(name).strip()
-    if cleaned.startswith("claude.ai "):
-        return cleaned[len("claude.ai ") :].strip()
-    return cleaned
-
-
-def _disabled_claude_mcp_names(
-    *,
-    workspace_root: Path | None = None,
-    config_path: Path | None = None,
-) -> set[str]:
-    """Return short connector names disabled via the per-project ``/mcp`` panel."""
-    path = config_path or claude_global_config_path()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return set()
-    if not isinstance(data, dict):
-        return set()
-
-    disabled: set[str] = set()
-    for name in data.get("disabledMcpServers") or []:
-        short = _short_claude_mcp_name(str(name))
-        if short:
-            disabled.add(short)
-
-    projects = data.get("projects")
-    if not isinstance(projects, dict):
-        return disabled
-
-    roots: list[Path] = []
-    if workspace_root is not None:
-        try:
-            roots.append(Path(workspace_root).expanduser().resolve())
-        except OSError:
-            pass
-    try:
-        roots.append(Path.cwd().resolve())
-    except OSError:
-        pass
-
-    best_key: str | None = None
-    best_len = -1
-    for root in roots:
-        for key, meta in projects.items():
-            if not isinstance(meta, dict):
-                continue
-            try:
-                key_path = Path(str(key)).expanduser().resolve()
-            except OSError:
-                continue
-            try:
-                root.relative_to(key_path)
-            except ValueError:
-                continue
-            key_len = len(str(key_path))
-            if key_len > best_len:
-                best_key = str(key)
-                best_len = key_len
-
-    if best_key is not None:
-        meta = projects.get(best_key) or {}
-        if isinstance(meta, dict):
-            for name in meta.get("disabledMcpServers") or []:
-                short = _short_claude_mcp_name(str(name))
-                if short:
-                    disabled.add(short)
-    return disabled
-
-
-def _discover_claude_mcps_uncached(
-    *,
-    workspace_root: Path | None = None,
-    config_path: Path | None = None,
-) -> list[str]:
-    connected: list[str] = []
-    # Workspace project MCPs live in .mcp.json and are shown under MCP status,
-    # not as Claude Code platform connectors on the Models & providers tab.
-    excluded = {"n8n_mcp", "notion", "ciaobot", "ciaobot-fastmcp"}
-    disabled = _disabled_claude_mcp_names(
-        workspace_root=workspace_root,
-        config_path=config_path,
-    )
-    binary = claude_cli_path()
-    if not binary:
-        return connected
-    try:
-        res = subprocess.run(
-            [binary, "mcp", "list"],
-            capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
-            timeout=_CLAUDE_MCP_LIST_TIMEOUT_SECONDS,
-            check=False,
-        )
-        output = (res.stdout or "") + "\n" + (res.stderr or "")
-        for line in output.splitlines():
-            if "Connected" not in line:
-                continue
-            line_clean = (
-                line.split(":", 1)[0].replace("claude.ai", "").replace("✔", "").strip()
-            )
-            if (
-                line_clean
-                and line_clean not in connected
-                and line_clean not in excluded
-                and line_clean not in disabled
-            ):
-                connected.append(line_clean)
-    except Exception:
-        pass
-    return connected
 
 
 # Provider status probes share one keyword-only contract so ``setup_status``
@@ -965,7 +630,6 @@ def _claude_status(
         else None
     )
     claude_skills = discover_claude_system_skills()
-    claude_mcps = discover_claude_mcps(workspace_root, config_path=config_path)
     if not binary:
         # No CLI means no chats, whatever credentials exist: report the install
         # step rather than an auth command the user cannot run yet.
@@ -984,7 +648,6 @@ def _claude_status(
             detail=detail,
             version=version,
             skills=claude_skills,
-            mcps=claude_mcps,
             install_url=CLAUDE_INSTALL_DOCS_URL,
             app_path=app_path,
             path_command=claude_path_hint(""),
@@ -1008,7 +671,6 @@ def _claude_status(
             account=account,
             protocol="Agent SDK ready",
             skills=claude_skills,
-            mcps=claude_mcps,
             cli_path=binary,
             release_check=check,
             terminal_action="claude-login",
@@ -1037,7 +699,6 @@ def _claude_status(
             ),
             version=version,
             skills=claude_skills,
-            mcps=claude_mcps,
             install_url=CLAUDE_INSTALL_DOCS_URL,
             cli_path=binary,
             release_check=check,
@@ -1061,7 +722,6 @@ def _claude_status(
         detail=detail,
         version=version,
         skills=claude_skills,
-        mcps=claude_mcps,
         cli_path=binary,
         release_check=check,
         # An installed CLI the terminal cannot find still needs the PATH line:

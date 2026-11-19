@@ -24,17 +24,12 @@ from ciao.package_version import make_cached_package_status
 from ciao.provider_versions import make_cached_checks
 from ciao.terminal_auth import TerminalGrantStore
 from ciao.terminal_sessions import TerminalSessionManager
-from ciao.web.routes_agent import agent_dispatch_endpoint, agent_status_endpoint
+from ciao.web.routes_agent import agent_dispatch_endpoint, agent_status_endpoint, mcp_usage_endpoint
 from ciao.web.routes_chat_actions import (
     chat_action_callback,
     chat_action_continue,
     chat_action_dismiss,
     chat_action_start,
-)
-from ciao.web.routes_mcp import (
-    mcp_server_enabled_endpoint,
-    mcp_status_endpoint,
-    mcp_usage_endpoint,
 )
 from ciao.web.auth import AuthMiddleware, make_serializer
 from ciao.web.loop_watchdog import EventLoopWatchdog, InFlightRequests, RequestTimingMiddleware
@@ -682,8 +677,6 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         Route("/api/workspace-move/plan", workspace_move_plan_endpoint, methods=["POST"]),
         Route("/api/stats", usage_stats_endpoint, methods=["GET"]),
         Route("/api/agent/status", agent_status_endpoint, methods=["GET"]),
-        Route("/api/mcp/status", mcp_status_endpoint, methods=["GET"]),
-        Route("/api/mcp/servers/enabled", mcp_server_enabled_endpoint, methods=["POST"]),
         Route("/api/mcp/usage", mcp_usage_endpoint, methods=["GET"]),
         # Push notifications
         Route("/api/push/public-key", push_public_key, methods=["GET"]),
@@ -839,10 +832,9 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
     async def _lifespan(_app):
         from ciao.setup_status import warm_claude_discovery_cache
 
-        # `claude mcp list` health-checks every connector and can take ~12s;
-        # warm the discovery cache at startup so the first Settings -> Models & providers
-        # visit serves a populated list instead of blocking on the probe.
-        warm_claude_discovery_cache(getattr(config, "workspace_root", None))
+        # Warm the Claude skill discovery cache at startup so the first
+        # Settings -> Models & providers visit does not block on it.
+        warm_claude_discovery_cache()
         # The first login-shell probe can take seconds; every chat start reads
         # this cached value, so pay for it here, off the event loop.
         from ciao.tool_path import login_shell_path
