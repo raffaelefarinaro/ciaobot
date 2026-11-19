@@ -128,8 +128,8 @@ _DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
     ),
     ProviderDescriptor(
         id="opencode",
-        label="opencode",
-        short_label="opencode",
+        label="OpenCode",
+        short_label="OpenCode",
         cli_label="opencode",
         factory_path="ciao.providers.opencode:OpencodeProvider",
         auth_command_path="ciao.providers.opencode:auth_command",

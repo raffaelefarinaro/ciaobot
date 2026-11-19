@@ -12,7 +12,7 @@ function descriptor(id: string, label: string, shortLabel: string): ProviderDesc
 }
 
 const CLAUDE = descriptor('claude', 'Anthropic (via Claude Code)', 'Claude')
-const OPENCODE = descriptor('opencode', 'opencode', 'opencode')
+const OPENCODE = descriptor('opencode', 'OpenCode', 'OpenCode')
 const CODEX = descriptor('codex', 'OpenAI (via Codex)', 'Codex')
 
 describe('modelSections', () => {
@@ -35,7 +35,7 @@ describe('modelSections', () => {
 
     expect(sections.map((section) => section.label)).toEqual([
       'Claude',
-      'opencode',
+      'OpenCode',
     ])
     expect(sections.find((section) => section.key === 'anthropic')?.models).toEqual([
       'opus',
@@ -160,7 +160,7 @@ describe('opencode section', () => {
       provider_models: { opencode: ['anthropic/claude-sonnet-4-6', 'opencode/big-pickle'] },
     })
     const opencode = sections.find((s) => s.key === 'opencode')
-    expect(opencode?.label).toBe('opencode')
+    expect(opencode?.label).toBe('OpenCode')
     expect(opencode?.models).toContain('opencode/big-pickle')
   })
 

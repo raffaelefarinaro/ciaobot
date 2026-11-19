@@ -72,7 +72,7 @@ const MODELS_RESPONSE = {
   default: 'sonnet',
   providers: [
     { id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude', capabilities: {} },
-    { id: 'opencode', label: 'opencode', short_label: 'opencode', capabilities: {} },
+    { id: 'opencode', label: 'OpenCode', short_label: 'OpenCode', capabilities: {} },
     { id: 'codex', label: 'OpenAI (via Codex)', short_label: 'Codex', capabilities: {} },
   ],
   provider_models: {
