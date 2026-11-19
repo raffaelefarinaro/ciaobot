@@ -408,9 +408,6 @@ test.describe('touch targets', () => {
     await page.route('**/api/package/status', (route) => route.fulfill({ json: {
       current_version: '1.1.0', latest_version: '1.2.0', update_available: true, mode: 'installer',
     } }))
-    await page.route('**/api/update/status', (route) => route.fulfill({ json: {
-      install_mode: 'installer', can_update: true, operation: null, running: false,
-    } }))
   })
 
   test('touch emulation is a coarse pointer', async ({ page }) => {

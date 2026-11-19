@@ -86,7 +86,7 @@ async function mountOverview(active = 'work', path = '/settings/workspace') {
   const { default: SettingsView } = await import('../SettingsView.vue')
   const wrapper = mount(SettingsView, {
     attachTo: document.body,
-    global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: Stub } },
+    global: { plugins: [router], stubs: { Teleport: true } },
   })
   await flushPromises()
   await nextTick()

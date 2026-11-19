@@ -125,9 +125,10 @@ screen states that it is checking the connection, with indeterminate motion rath
 than an invented 0% boot progress. When the engine reports phases, it shows their
 real status in plain-language rows. This screen shares the calm indigo canvas,
 type hierarchy and restrained accent of the engine recovery curtain; neither
-pretends the browser is booting the host. The update overlay remains the only
-place a package update is reported, and it says a restart is pending until the
-new engine answers. In the PWA, an
+pretends the browser is booting the host. The Updates card's progress overlay
+remains the only place a running package update is reported, and a settled run
+hands over to the app-level restart notice, which stays up until the
+new engine answers and then reloads. In the PWA, an
 engine that stops answering shows a full-screen recovery curtain over the kept
 route. It uses the boot-screen language: a plain title, `ciao service
 start|status` on this computer, Retry, and automatic reconnect. It is modal

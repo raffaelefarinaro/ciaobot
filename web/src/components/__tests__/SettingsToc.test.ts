@@ -57,7 +57,7 @@ async function mountSettings(routines?: unknown, tab = '') {
   })
   const wrapper = mount(SettingsView, {
     attachTo: document.body,
-    global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: stub } },
+    global: { plugins: [router], stubs: { Teleport: true } },
   })
   await flushPromises()
   await nextTick()
