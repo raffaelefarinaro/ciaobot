@@ -12,6 +12,7 @@ runs, and Ciaobot never reads or stores the credentials it writes.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from pathlib import Path
@@ -126,7 +127,10 @@ class ClaudeAcpProvider(AcpProvider):
         # The ACP journal and the CLI's own session file both go. Either one deleting counts.
         journal = await super().delete_session(workspace_root, session_id, runtime_root=runtime_root)
         try:
-            cli_file = claude_sessions.delete_session_file(session_id, str(workspace_root))
+            # A git subprocess and file removal: run in a worker thread, not on the event loop.
+            cli_file = await asyncio.to_thread(
+                claude_sessions.delete_session_file, session_id, str(workspace_root)
+            )
         except OSError:
             # Neither the id nor the OSError text is logged: the id comes from the adapter, and
             # the error text carries the path.

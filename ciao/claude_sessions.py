@@ -1,7 +1,8 @@
 """Read Claude Code session JSONL without the Claude Agent SDK.
 
-Ported from claude-agent-sdk 0.2.178 `_internal/sessions.py` (MIT); Claude Code's
-JSONL layout is not a public contract. Chat history for chats created before the ACP
+Ported from claude-agent-sdk 0.2.178 `_internal/sessions.py` (MIT, copyright notice and
+license text in THIRD_PARTY_NOTICES.md at the repository root); Claude Code's JSONL layout
+is not a public contract. Chat history for chats created before the ACP
 switch still lives in that store, so the reader stays after the SDK is gone.
 
 Callers: transcript history (``ciao.transcripts``), the session-file delete on the
@@ -11,6 +12,7 @@ Claude ACP provider, and the golden test that pins this port to the SDK output.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -19,6 +21,8 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +38,7 @@ class SessionMessage:
 
 
 _UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
     re.IGNORECASE,
 )
 
@@ -46,8 +50,11 @@ MAX_SANITIZED_LENGTH = 200
 
 
 def validate_uuid(maybe_uuid: str) -> str | None:
-    """Returns the string if it is a valid UUID, else None."""
-    if _UUID_RE.match(maybe_uuid):
+    """Returns the string if it is a valid UUID, else None.
+
+    The whole string must match: a trailing newline is not part of a UUID.
+    """
+    if _UUID_RE.fullmatch(maybe_uuid):
         return maybe_uuid
     return None
 
@@ -189,10 +196,26 @@ _TRANSCRIPT_ENTRY_TYPES = frozenset(
 _TranscriptEntry = dict[str, Any]
 
 
+# Largest transcript read into memory. A session above it has no history here: callers
+# get the same None as for a missing file, so their existing "not in this root" path runs.
+MAX_TRANSCRIPT_BYTES = 64 * 1024 * 1024
+
+
 def _try_read_session_file(project_dir: Path, file_name: str) -> str | None:
-    """Tries to read a session JSONL file from a project directory."""
+    """Tries to read a session JSONL file from a project directory.
+
+    Returns None when the file is missing, unreadable or larger than MAX_TRANSCRIPT_BYTES.
+    """
+    path = project_dir / file_name
     try:
-        return (project_dir / file_name).read_text(encoding="utf-8")
+        if path.stat().st_size > MAX_TRANSCRIPT_BYTES:
+            # The name and the path are left out: the session id is in the file name.
+            logger.warning(
+                "A Claude session transcript is larger than %d bytes; its history is unavailable.",
+                MAX_TRANSCRIPT_BYTES,
+            )
+            return None
+        return path.read_text(encoding="utf-8")
     except OSError:
         return None
 
@@ -204,7 +227,7 @@ def read_session_file(session_id: str, directory: str | None) -> str | None:
     worktrees (with prefix-fallback for Bun/Node hash mismatches on long
     paths). Otherwise, searches all project directories.
 
-    Returns the file content, or None if not found.
+    Returns the file content, or None if not found or larger than MAX_TRANSCRIPT_BYTES.
     """
     file_name = f"{session_id}.jsonl"
 
@@ -272,7 +295,8 @@ def parse_transcript_entries(content: str) -> list[_TranscriptEntry]:
 
         try:
             entry = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            # RecursionError: a line of deeply nested brackets. It is corrupt, like any other.
             continue
 
         if not isinstance(entry, dict):
@@ -733,7 +757,12 @@ def delete_session_file(session_id: str, directory: str | None) -> bool:
         path.unlink()
     except FileNotFoundError:
         return False
-    shutil.rmtree(path.parent / session_id, ignore_errors=True)
+    subagents = path.parent / session_id
+    if subagents.is_symlink():
+        # Only the link goes. rmtree would refuse a link, so it is removed explicitly.
+        subagents.unlink(missing_ok=True)
+    else:
+        shutil.rmtree(subagents, ignore_errors=True)
     return True
 
 

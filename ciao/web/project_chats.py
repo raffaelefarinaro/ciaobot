@@ -8966,10 +8966,11 @@ class ProjectChatManager:
         Replaces a title Ciaobot wrote (the New Chat placeholder or its own auto-title) and an
         earlier adapter title, but never a user-owned title. The origin becomes "adapter" even
         when the text is unchanged, so Ciaobot's fallback stops being written. Titles that fail
-        the provider-title check are dropped, as the native reads drop them.
+        the provider-title check are dropped, as the native reads drop them. The agent's text is
+        untrusted: it is reduced to one short printable line before the check.
         """
         chat = self._chats.get(chat_id)
-        clean = chat_service._real_title(title)
+        clean = chat_service._real_title(chat_service._clean_adapter_title(title) or "")
         if chat is None or clean is None:
             return False
         if chat.title_origin not in ADAPTER_REPLACEABLE_TITLE_ORIGINS:
@@ -10130,15 +10131,14 @@ class ProjectChatManager:
 
         Three tiers, in order:
 
-        1. The provider's native session title (opencode's ``title`` agent or
-           Claude Code's ``aiTitle``). OpenCode is polled through
-           ``_TITLE_POLL_DELAYS`` before the lower tiers run. Claude (ACP) is
-           read once, with no wait. Context-prefixed Ciaobot prompts commonly
-           suppress Claude's native titler, and nothing polls after the fallback
-           is written. Every wait re-checks the chat, so a manual rename or a
-           delete stops titling. (Claude over ACP sends its title as a
-           ``session_info_update`` event, applied by ``apply_adapter_title``
-           while the turn streams, so no read is made here.)
+        1. The provider's native session title, read through
+           ``BaseProvider.native_title_candidates`` (OpenCode's ``title`` agent).
+           OpenCode is polled through ``_TITLE_POLL_DELAYS`` before the lower
+           tiers run, and every wait re-checks the chat, so a manual rename or a
+           delete stops titling. Claude (ACP) has no native read: its title
+           arrives as a ``session_info_update`` event, applied by
+           ``apply_adapter_title`` while the turn streams, so its poll is
+           skipped and the lower tiers run without a wait.
         2. A one-shot model call (``_llm_chat_title``) when the native title
            is absent, run straight after the inline native read.
         3. The deterministic ``chat_service._fallback_title`` (first 6 words of the
@@ -10154,9 +10154,9 @@ class ProjectChatManager:
 
         chat = self._chats.get(chat_id)
         provider = getattr(chat, "provider", "claude") if chat else "claude"
-        delays: tuple[float, ...] = self._TITLE_POLL_DELAYS
-        if provider == "claude":
-            delays = (0.0,)
+        # Claude has no native read (see tier 1), so it takes no poll. Polling the full schedule
+        # here would hold the LLM title back by the schedule's two-minute tail.
+        delays: tuple[float, ...] = () if provider == "claude" else self._TITLE_POLL_DELAYS
         stopped, native = await self._poll_native_title(chat_id, delays, _is_titling_target)
         if stopped:
             return None

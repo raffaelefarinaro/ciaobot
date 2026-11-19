@@ -769,3 +769,25 @@ def test_claude_acp_provider_has_no_sdk_import_or_native_title_read() -> None:
 @pytest.mark.asyncio
 async def test_claude_acp_provider_reads_no_native_title(tmp_path: Path) -> None:
     assert await ClaudeAcpProvider.native_title_candidates(tmp_path, SESSION, runtime_root=tmp_path) == ()
+
+
+@pytest.mark.asyncio
+async def test_delete_session_runs_the_blocking_file_delete_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # delete_session_file runs a git subprocess and file removal; it must not block the loop.
+    import threading
+
+    from ciao import claude_sessions
+
+    ran_on: list[int] = []
+
+    def record(session_id: str, directory: str | None) -> bool:
+        ran_on.append(threading.get_ident())
+        return False
+
+    monkeypatch.setattr(claude_sessions, "delete_session_file", record)
+    await ClaudeAcpProvider.delete_session(tmp_path, SESSION, runtime_root=tmp_path / "rt")
+
+    assert ran_on, "the CLI session delete was not attempted"
+    assert ran_on[0] != threading.get_ident()

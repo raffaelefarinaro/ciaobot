@@ -9,6 +9,9 @@ description = "Ciaobot personal assistant server."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
+# THIRD_PARTY_NOTICES.md carries the MIT notice for code ported from the Claude Agent SDK;
+# setuptools only ships the default license-file names, so it is listed here.
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 dependencies = [
   "claude-agent-sdk[otel]==0.2.178",
   # ACP client for every runtime agent (#3137).

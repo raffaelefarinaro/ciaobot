@@ -308,3 +308,65 @@ async def test_session_title_event_between_turns_titles_the_chat(tmp_path: Path)
     await manager._streaming.drain_between_turns(chat.chat_id, chat.project_id)
 
     assert chat.title == "Generated late"
+
+
+def test_a_long_multiline_agent_title_is_stored_as_one_short_clean_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Claude's fallback title can be the raw first prompt: several paragraphs, terminal escapes
+    # and a bidi override. Only one short printable line may reach the store or the broadcast.
+    manager = _make_manager(tmp_path)
+    chat = _chat(manager)
+    sent = _published(manager, monkeypatch)
+    raw = "\x1b[2JPlease fix the login redirect ‮gnp.xe\n\n" + "the body of my first prompt " * 180
+
+    assert len(raw) > 5000
+    assert manager.apply_adapter_title(chat.chat_id, raw) is True
+
+    assert chat.title == "[2JPlease fix the login redirect gnp.xe"
+    assert sent[-1]["title"] == chat.title
+    assert _reload(tmp_path)._chats[chat.chat_id].title == chat.title
+
+
+def test_a_single_huge_agent_title_line_is_truncated_to_the_llm_title_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _chat(manager)
+    sent = _published(manager, monkeypatch)
+    raw = "word " * 1000  # one line, about 5 KB
+
+    assert manager.apply_adapter_title(chat.chat_id, raw) is True
+
+    assert len(chat.title) <= 60
+    assert chat.title.endswith("...")
+    assert "\n" not in chat.title
+    assert sent[-1]["title"] == chat.title
+
+
+def test_control_and_format_characters_are_dropped_from_an_agent_title(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _chat(manager)
+
+    assert manager.apply_adapter_title(chat.chat_id, "Fix\x00 the‮ login​\tredirect") is True
+
+    assert chat.title == "Fix the login redirect"
+
+
+@pytest.mark.asyncio
+async def test_a_claude_chat_takes_no_native_title_poll(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Claude's title arrives as an event; the native poll must not hold back the LLM title by
+    # the OpenCode schedule. Checked by the schedule handed to the poll, not by elapsed time.
+    manager = _make_manager(tmp_path)
+    _no_llm_title(manager, monkeypatch)
+    chat = _chat(manager)
+    polled: list[tuple[float, ...]] = []
+
+    async def record(chat_id, delays, is_target):  # type: ignore[no-untyped-def]
+        polled.append(tuple(delays))
+        return False, None
+
+    monkeypatch.setattr(manager, "_poll_native_title", record)
+    await manager.auto_title_if_default(chat.chat_id, "Fix the login redirect bug")
+
+    assert polled == [()]

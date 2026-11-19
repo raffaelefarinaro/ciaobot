@@ -76,3 +76,24 @@ def test_runtime_security_pins_are_published_and_locked() -> None:
     versions = {pkg["name"].lower(): pkg["version"] for pkg in lock["package"]}
     assert versions["pyjwt"] == "2.15.1"
     assert versions["urllib3"] == "2.8.0"
+
+
+def test_third_party_notices_carry_the_sdk_license_and_ship_in_the_wheel() -> None:
+    # claude_sessions.py ports code from claude-agent-sdk (MIT). The MIT terms need the
+    # copyright line and the permission notice with substantial copies, so the installed
+    # SDK's own LICENSE text must appear verbatim in the notices file.
+    import importlib.metadata
+    import ciao.claude_sessions as claude_sessions
+
+    repo = Path(__file__).parents[1]
+    notices = (repo / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    sdk_license = importlib.metadata.distribution("claude-agent-sdk").read_text(
+        "licenses/LICENSE"
+    )
+    assert sdk_license is not None
+    assert sdk_license.strip() in notices
+    assert "Copyright (c) 2025 Anthropic, PBC" in notices
+
+    assert "THIRD_PARTY_NOTICES.md" in (claude_sessions.__doc__ or "")
+    project = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert "THIRD_PARTY_NOTICES.md" in project["license-files"]
