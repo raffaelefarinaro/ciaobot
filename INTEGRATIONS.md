@@ -55,6 +55,17 @@ the installer says which one applies:
 Provider logins do not depend on the shim: the setup wizard hands out each
 provider's own login command (`claude auth login`, `opencode auth login`).
 
+## Codex
+
+Codex runs through `codex-acp`, the Agent Client Protocol adapter for OpenAI's Codex CLI. Both packages are pinned: `@agentclientprotocol/codex-acp@2.7.0` and `@openai/codex@0.166.0`, which matches the codex version the adapter bundles. Node 22 or newer is required for the npm install. The Settings install action runs the command below in a terminal.
+
+```bash
+npm install -g @openai/codex@0.166.0 @agentclientprotocol/codex-acp@2.7.0
+codex login                         # the Settings sign-in action runs this in a terminal
+```
+
+Sign-in is handled entirely by the Codex CLI. Ciaobot does not implement, prompt for, or store any Codex credential, and it has no API-key field. Settings only checks `codex login status`, which reads the exit code and nothing else, so a token that command prints never reaches the PWA or the log. The adapter uses the codex it bundles, so `CODEX_PATH` is not set.
+
 ## OpenCode
 
 Ciaobot requires **OpenCode 2.0.16 or newer in the 2.x line**. OpenCode 1 is

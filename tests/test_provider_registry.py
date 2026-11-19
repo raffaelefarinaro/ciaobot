@@ -81,3 +81,28 @@ def test_default_model_settings_attr_exists_on_the_real_config(descriptor):
 
     names = {field.name for field in fields(CiaoConfig)}
     assert descriptor.default_model_settings_attr in names
+
+
+def test_codex_descriptor_resolves_spec_and_factory() -> None:
+    descriptor = provider_registry.require("codex")
+    spec = descriptor.acp_spec()
+    assert spec is not None and spec.id == "codex"
+    assert descriptor.factory().spec is spec
+    assert descriptor.label == "OpenAI (via Codex)"
+    assert descriptor.short_label == "Codex"
+    assert descriptor.thinking_levels == ("minimal", "low", "medium", "high", "xhigh")
+
+
+def test_codex_thinking_levels_are_marked_unverified() -> None:
+    from pathlib import Path
+
+    source = Path(provider_registry.__file__).read_text(encoding="utf-8")
+    codex_block = source[source.index('id="codex"') : source.index('acp_spec_path="ciao.providers.acp.agents:CODEX"')]
+    assert "UNVERIFIED DEFAULT" in codex_block
+    assert provider_registry.require("codex").thinking_levels == (
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    )

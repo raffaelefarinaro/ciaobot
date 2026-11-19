@@ -478,3 +478,25 @@ def test_non_string_ids_are_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert response.status_code == 400
     assert response.json()["reason"] == "bad_request"
     assert rec.launches == []
+
+
+def test_codex_login_without_codex_is_409_not_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.providers.acp import agents
+
+    client, rec, _ = _client(tmp_path, monkeypatch)
+
+    def launch(folder: Path, *, action: str | None, runtime_dir: Path) -> str:
+        # The real command lookup runs first, as it does inside host_terminal.launch.
+        host_terminal.action_command(action or "")
+        return rec.launch(folder, action=action, runtime_dir=runtime_dir)
+
+    monkeypatch.setattr(host_terminal, "launch", launch)
+    monkeypatch.setattr(agents, "codex_binary", lambda: None)
+    response = client.post(PATH, json={"action": "codex-login"}, headers=_signed(client))
+    assert response.status_code == 409
+    body = response.json()
+    assert body["reason"] == "not_installed"
+    assert "command" not in body
+    assert rec.launches == []

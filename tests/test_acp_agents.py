@@ -1,5 +1,5 @@
-"""Claude over ACP: its spec, Ciaobot's disable options on the wire, the slash capsule and the
-one-shot options (#3138).
+"""Claude and Codex over ACP: Claude's spec, Ciaobot's disable options on the wire, the slash
+capsule and the one-shot options (#3138), and the shipped Codex spec and login command (#3139).
 
 Options are built from a real ``CiaoConfig`` (the same methods ``build_agent_request`` calls),
 and the wire tests read the scripted agent's calls log, so a guard is observed where it acts.
@@ -12,7 +12,7 @@ import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, ClassVar
+from typing import Any, ClassVar, get_args
 
 import pytest
 from acp.exceptions import RequestError
@@ -20,15 +20,18 @@ from acp.exceptions import RequestError
 from ciao import provider_registry, setup_status
 from ciao.claude_trim import claude_settings_layer, trim_tool_denies
 from ciao.config import CiaoConfig, WorkspaceConfig
-from ciao.models import AgentRequest, ResultEvent, SystemStatusEvent
+from ciao.models import AgentRequest, BridgeMode, ResultEvent, SystemStatusEvent
 from ciao.provider_registry import ProviderDescriptor
 from ciao.provider_service import ProviderService
 from ciao.providers import oneshot
+from ciao.providers.acp import agents
 from ciao.providers.acp import oneshot as acp_oneshot
 from ciao.providers.acp.agents import (
     CLAUDE,
     CLAUDE_ONESHOT_OPTIONS,
+    CODEX,
     ClaudeAcpProvider,
+    CodexAcpProvider,
     claude_session_options,
 )
 from ciao.providers.acp.connection import AcpConnection
@@ -669,3 +672,32 @@ async def test_delete_session_reports_that_the_journal_was_deleted(
     assert await ClaudeAcpProvider.delete_session(tmp_path, "sess-1", runtime_root=runtime) is True
     assert not journal.exists()
     assert await ClaudeAcpProvider.delete_session(tmp_path, "sess-1", runtime_root=runtime) is None
+
+
+def test_codex_mode_table_covers_every_bridge_mode() -> None:
+    assert set(CODEX.modes) == set(get_args(BridgeMode))
+    assert all(choices for choices in CODEX.modes.values())
+
+
+def test_codex_spec_names_its_adapter_and_config_ids() -> None:
+    assert CODEX.id == "codex"
+    assert CODEX.binary == "codex-acp"
+    assert CODEX.model_config_id == "model"
+    assert CODEX.thought_config_id == "reasoning_effort"
+    assert CodexAcpProvider.spec is CODEX
+
+
+def test_codex_auth_command_builds_login_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(agents, "codex_binary", lambda: "/opt/tools/codex")
+    assert agents.codex_auth_command() == ["/opt/tools/codex", "login"]
+    assert agents.codex_auth_command(device_auth=True) == [
+        "/opt/tools/codex",
+        "login",
+        "--device-auth",
+    ]
+
+
+def test_codex_auth_command_raises_when_codex_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(agents, "codex_binary", lambda: None)
+    with pytest.raises(FileNotFoundError):
+        agents.codex_auth_command()

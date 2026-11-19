@@ -1,7 +1,7 @@
 """Descriptors for the runtime agent providers Ciaobot can run.
 
 A *runtime provider* is a CLI or SDK that executes a whole agentic turn:
-``claude`` and ``opencode``. Every model Ciaobot can run belongs to
+``claude``, ``opencode`` and ``codex``. Every model Ciaobot can run belongs to
 one of them, and each authenticates itself -- there is no separate notion of a
 model-routing backend layered underneath.
 
@@ -142,6 +142,20 @@ _DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         thinking_levels=("low", "medium", "high", "max"),
         # Models come from the signed-in accounts' catalog; an empty default
         # lets opencode pick, and the chat records what it resolved.
+    ),
+    ProviderDescriptor(
+        id="codex",
+        label="OpenAI (via Codex)",
+        short_label="Codex",
+        cli_label="Codex",
+        factory_path="ciao.providers.acp.agents:CodexAcpProvider",
+        auth_command_path="ciao.providers.acp.agents:codex_auth_command",
+        status_probe_path="ciao.setup_status:codex_status_probe",
+        # UNVERIFIED DEFAULT: these names are not confirmed against a live codex-acp. codex-acp
+        # reads the efforts from its runtime model catalog, which narrows this per model. Confirm
+        # them at the real-Mac/live checkpoint; do not change them before that.
+        thinking_levels=("minimal", "low", "medium", "high", "xhigh"),
+        acp_spec_path="ciao.providers.acp.agents:CODEX",
     ),
 )
 

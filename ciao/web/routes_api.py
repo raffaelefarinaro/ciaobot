@@ -1085,7 +1085,10 @@ async def provider_connection_action(request: Request) -> JSONResponse:
         login_action = f"{provider}-login"
         if login_action not in host_terminal.ACTION_IDS:
             return JSONResponse({"error": "this provider has no sign-in action"}, status_code=404)
-        command = await asyncio.to_thread(host_terminal.action_command, login_action)
+        try:
+            command = await asyncio.to_thread(host_terminal.action_command, login_action)
+        except host_terminal.NotInstalled as exc:
+            return JSONResponse({"ok": False, "reason": "not_installed", "error": str(exc)}, status_code=409)
         if not host_browser_request(request):
             return JSONResponse(
                 {

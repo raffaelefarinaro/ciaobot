@@ -81,7 +81,7 @@ def test_actions_map_to_the_commands_ciaobot_already_shows(monkeypatch: pytest.M
     assert host_terminal.action_command("skills-update") == host_terminal.SKILLS_UPDATE_COMMAND
     assert set(host_terminal.ACTION_IDS) == {
         "claude-install", "claude-login", "opencode-install",
-        "opencode-login", "gws-install", "skills-update",
+        "opencode-login", "codex-install", "codex-login", "gws-install", "skills-update",
         "opencode-update", "claude-update",
     }
     with pytest.raises(KeyError):
@@ -422,3 +422,38 @@ def test_every_emitted_terminal_action_is_allowlisted(
         rows.append(opencode.opencode_login_status(inventory=False))
     actions = [row.get("terminal_action") for row in rows]
     assert all(action in host_terminal.ACTION_IDS for action in actions)
+
+
+def test_codex_actions_are_allowlisted_constants(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao.providers.acp import agents
+
+    assert "codex-install" in host_terminal.ACTION_IDS
+    assert "codex-login" in host_terminal.ACTION_IDS
+    assert host_terminal.action_command("codex-install") == host_terminal.CODEX_INSTALL_COMMAND
+    assert "@agentclientprotocol/codex-acp@2.7.0" in host_terminal.CODEX_INSTALL_COMMAND
+    monkeypatch.setattr(agents, "codex_binary", lambda: "/opt/tools/codex")
+    assert host_terminal.action_command("codex-login") == "/opt/tools/codex login"
+
+
+def test_codex_login_without_codex_is_not_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao.providers.acp import agents
+
+    monkeypatch.setattr(agents, "codex_binary", lambda: None)
+    with pytest.raises(host_terminal.NotInstalled):
+        host_terminal.action_command("codex-login")
+
+
+def test_launch_without_codex_refuses_before_spawning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.providers.acp import agents
+
+    spawns: list[list[str]] = []
+    monkeypatch.setattr(agents, "codex_binary", lambda: None)
+    monkeypatch.setattr(
+        host_terminal, "capabilities", lambda: host_terminal.Capabilities(True, "macos", terminal="Terminal")
+    )
+    monkeypatch.setattr(host_terminal, "_spawn", lambda argv, **_kw: spawns.append(argv))
+    with pytest.raises(host_terminal.NotInstalled):
+        host_terminal.launch(tmp_path, action="codex-login", runtime_dir=tmp_path / ".runtime")
+    assert spawns == []
