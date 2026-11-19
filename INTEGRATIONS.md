@@ -279,7 +279,7 @@ workspace and choose the password.
 
 ### Anthropic credentials for Claude chats
 
-Claude chats run `claude-agent-acp`, which is spawned with the engine's environment minus provider credentials (`*_API_KEY`, `*_TOKEN`, ...). Three existing Anthropic variables are passed through by name, when they are set and non-empty, so an API key or token configured for the SDK path keeps working: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN`. No other credential is passed. These are not `CIAO_*` settings. Leaving them unset keeps the Claude CLI's own login.
+The CLIs and ACP adapters inherit the engine's process environment, so provider credentials set there (for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`) are handled by the CLI itself; only Ciaobot's own `CIAO_*` internals and the PWA token are withheld.
 
 Copy `.env.example` to `.env` and fill in the engine-level settings first:
 

@@ -12,7 +12,6 @@ runs, and Ciaobot never reads or stores the credentials it writes.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
@@ -28,6 +27,8 @@ CLAUDE = AgentSpec(
     id="claude",
     binary="claude-agent-acp",
     env={"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_ARTIFACT": "1"},
+    # The claude.ai connectors switch travels only in _meta.claudeCode.options.env (see below).
+    unset_env=("ENABLE_CLAUDEAI_MCP_SERVERS",),
     client_meta={},
     modes={
         "plan": (ModeChoice("mode", ("plan",)),),
@@ -50,8 +51,6 @@ CLAUDE_ONESHOT_OPTIONS: Mapping[str, Any] = MappingProxyType({
 
 _CONNECTORS_ENV_KEY = "ENABLE_CLAUDEAI_MCP_SERVERS"
 _CONNECTORS_OFF_ENV = {_CONNECTORS_ENV_KEY: "false"}
-# Anthropic credentials the SDK path passed to the CLI. Named here, not matched by suffix.
-_ANTHROPIC_CREDENTIAL_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
 
 
 def claude_session_options(request: AgentRequest) -> dict[str, Any]:
@@ -101,17 +100,12 @@ class ClaudeAcpProvider(AcpProvider):
 
     @classmethod
     def spawn_env(cls) -> dict[str, str]:
-        """The user's CLI path, and the Anthropic credentials the SDK path passed through.
+        """The user's own ``claude`` as ``CLAUDE_CODE_EXECUTABLE``, when one resolves.
 
-        ``_terminal_env`` strips ``*_API_KEY`` and ``*_TOKEN`` from the engine's environment,
-        so these three are added back by name, and nothing else is.
+        Credentials are not added here: the engine environment already reaches the adapter, and
+        the CLI handles its own login.
         """
-        env = _claude_cli_env()
-        for key in _ANTHROPIC_CREDENTIAL_KEYS:
-            value = os.environ.get(key)
-            if value:
-                env[key] = value
-        return env
+        return _claude_cli_env()
 
     @classmethod
     def process_env(cls, request: AgentRequest) -> dict[str, str]:

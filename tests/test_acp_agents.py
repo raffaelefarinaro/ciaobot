@@ -8,6 +8,7 @@ and the wire tests read the scripted agent's calls log, so a guard is observed w
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import sys
 from pathlib import Path
@@ -602,55 +603,66 @@ async def test_connectors_switched_back_on_reload_the_session_without_a_process_
     assert initialize["env"]["ENABLE_CLAUDEAI_MCP_SERVERS"] is None
 
 
-_ANTHROPIC_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
-_OTHER_SECRET_KEYS = ("OPENAI_API_KEY", "GITHUB_TOKEN")
+_PROVIDER_KEYS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN")
 
 
-def test_spawn_env_allowlists_exactly_the_anthropic_credentials(
+def test_spawn_env_is_the_user_cli_and_no_credential_filter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "")
-    for key in _ANTHROPIC_KEYS:
-        monkeypatch.setenv(key, f"value-for-{key.lower()}")
-    for key in _OTHER_SECRET_KEYS:
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "/opt/bin/claude")
+    for key in _PROVIDER_KEYS:
         monkeypatch.setenv(key, f"value-for-{key.lower()}")
 
-    env = ClaudeAcpProvider.spawn_env()
-
-    assert {key: env[key] for key in _ANTHROPIC_KEYS} == {
-        key: f"value-for-{key.lower()}" for key in _ANTHROPIC_KEYS
-    }
-    for key in _OTHER_SECRET_KEYS:
-        assert key not in env
-
-
-def test_spawn_env_leaves_unset_anthropic_credentials_out(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "")
-    for key in _ANTHROPIC_KEYS:
-        monkeypatch.delenv(key, raising=False)
-
-    assert ClaudeAcpProvider.spawn_env() == {}
+    # Credentials reach the agent through the inherited engine env, not through spawn_env.
+    assert ClaudeAcpProvider.spawn_env() == {"CLAUDE_CODE_EXECUTABLE": "/opt/bin/claude"}
 
 
 @pytest.mark.asyncio
-async def test_anthropic_credentials_reach_the_agent_process_and_other_secrets_do_not(
+async def test_agent_process_inherits_provider_credentials_and_not_ciao_internals(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    for key in _ANTHROPIC_KEYS:
+    for key in _PROVIDER_KEYS:
         monkeypatch.setenv(key, f"value-for-{key.lower()}")
-    for key in _OTHER_SECRET_KEYS:
-        monkeypatch.setenv(key, f"value-for-{key.lower()}")
-    config, calls = _install(monkeypatch, tmp_path, sessions=["a"], record_env=[*_ANTHROPIC_KEYS, *_OTHER_SECRET_KEYS])
-    request = _chat_request(_config(tmp_path))
+    monkeypatch.setenv("CIAO_ENGINE_SECRET", "engine-internal")
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "pwa-login-token")
+    config, calls = _install(
+        monkeypatch, tmp_path, sessions=["a"],
+        record_env=[*_PROVIDER_KEYS, "CIAO_ENGINE_SECRET", "PWA_AUTH_TOKEN", "CIAO_AGENT_URL", "CIAO_AGENT_TOKEN"],
+    )
+    request = _chat_request(
+        _config(tmp_path),
+        extra_env={"CIAO_AGENT_URL": "http://127.0.0.1:9/agent", "CIAO_AGENT_TOKEN": "turn-bearer"},
+    )
     request.provider = "fake"
 
     await _turn(ProviderService(config), request)  # type: ignore[arg-type]
 
     env = _methods(calls, "initialize")[0]["env"]
-    assert {key: env[key] for key in _ANTHROPIC_KEYS} == {
-        key: f"value-for-{key.lower()}" for key in _ANTHROPIC_KEYS
+    # (a) provider credentials set in the engine's environment reach the adapter process
+    assert {key: env[key] for key in _PROVIDER_KEYS} == {
+        key: f"value-for-{key.lower()}" for key in _PROVIDER_KEYS
     }
-    assert {key: env[key] for key in _OTHER_SECRET_KEYS} == {key: None for key in _OTHER_SECRET_KEYS}
+    # (b) Ciaobot's own internals from os.environ do not; only what extra_env passes does
+    assert env["CIAO_ENGINE_SECRET"] is None
+    assert env["PWA_AUTH_TOKEN"] is None
+    assert env["CIAO_AGENT_URL"] == "http://127.0.0.1:9/agent"
+    assert env["CIAO_AGENT_TOKEN"] == "turn-bearer"
+
+
+@pytest.mark.asyncio
+async def test_engine_connectors_env_is_withheld_from_the_claude_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ENABLE_CLAUDEAI_MCP_SERVERS", "true")
+    config, calls = _install(monkeypatch, tmp_path, sessions=["a"], record_env=["ENABLE_CLAUDEAI_MCP_SERVERS"])
+    # The fake agent takes Claude's spec policy, so this checks CLAUDE.unset_env end to end.
+    monkeypatch.setattr(ClaudeOnFake, "spec", dataclasses.replace(ClaudeOnFake.spec, unset_env=CLAUDE.unset_env))
+    request = _chat_request(_config(tmp_path))
+    request.provider = "fake"
+
+    await _turn(ProviderService(config), request)  # type: ignore[arg-type]
+
+    assert _methods(calls, "initialize")[0]["env"]["ENABLE_CLAUDEAI_MCP_SERVERS"] is None
 
 
 @pytest.mark.asyncio

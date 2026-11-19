@@ -33,11 +33,11 @@ from acp.connection import StreamDirection, StreamEvent
 from acp.schema import ClientCapabilities
 
 from ciao import __version__
-from ciao.host_terminal import _terminal_env
+from ciao.host_terminal import PLATFORM_MACOS, host_platform
 from ciao.os_support.processes import descendant_processes, process_table, signal_processes
 from ciao.providers.acp.spec import AgentSpec
 from ciao.redact import redact_text
-from ciao.tool_path import prepend_engine_path, resolve_tool
+from ciao.tool_path import prepend_engine_path, resolve_tool, terminal_path
 
 _SHUTDOWN_TIMEOUT = 5.0
 _STDIO_LIMIT = 8 * 1024 * 1024
@@ -158,6 +158,31 @@ class _FlushedResponses:
             future.set_result(None)
 
 
+# Ciaobot's own internals, withheld from every agent process: the CIAO_* settings (the agent URL
+# and token travel in the request's extra env instead) and the engine's PWA login token.
+_ENGINE_INTERNAL_ENV_KEYS = frozenset({"PWA_AUTH_TOKEN"})
+
+
+def _agent_base_env(unset: tuple[str, ...]) -> dict[str, str]:
+    """The engine's environment as an agent process inherits it.
+
+    Every variable is passed through, provider credentials included: each CLI decides what it
+    uses, so Ciaobot does not filter them. Only ``CIAO_*`` and the PWA token are withheld, and
+    the spec's ``unset`` names. On non-macOS hosts ``PATH`` is the user's terminal PATH.
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("CIAO_")
+        and key not in _ENGINE_INTERNAL_ENV_KEYS
+        and key not in unset
+    }
+    path = terminal_path()
+    if host_platform() != PLATFORM_MACOS and path:
+        env["PATH"] = path
+    return env
+
+
 class AcpConnection:
     def __init__(
         self,
@@ -197,7 +222,7 @@ class AcpConnection:
         if not os.path.isabs(binary):
             # A '.' or empty PATH entry resolves relative to the cwd we are about to set.
             raise AgentStartError(f"{spec.binary} resolved to a relative path ({binary}); refusing to start it.")
-        merged = {**_terminal_env(), **spec.env, **env}
+        merged = {**_agent_base_env(spec.unset_env), **spec.env, **env}
         merged["PATH"] = prepend_engine_path(merged.get("PATH"))
         # No start_new_session: the agent stays in the engine's process group so the
         # supervisor's group kill reaches it when the engine dies.
