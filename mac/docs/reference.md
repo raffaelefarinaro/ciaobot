@@ -328,7 +328,7 @@ CIAOBOT_RELEASE_UPDATES=1 scripts/build-app.sh
 ```
 
 The four public values live in `release/update-config.env`:
-`UPDATE_FEED_URL` (`https://github.com/raffaelefarinaro/ciaobot-mac/releases/download/updates/appcast.xml`),
+`UPDATE_FEED_URL` (`https://github.com/raffaelefarinaro/ciaobot/releases/download/updates/appcast.xml`),
 `UPDATE_PUBLIC_ED_KEY` (the project's EdDSA public key),
 `UPDATE_MIN_SYSTEM_VERSION`, which has to match `LSMinimumSystemVersion`, and
 `UPDATE_TEAM_ID`, this project's Apple team identifier. The
@@ -431,7 +431,7 @@ scripts/package-notarized.sh
 
 scripts/make-appcast.sh \
     --archive /path/to/Ciaobot-0.1.2.dmg \
-    --download-url https://github.com/raffaelefarinaro/ciaobot-mac/releases/download/updates/ \
+    --download-url https://github.com/raffaelefarinaro/ciaobot/releases/download/updates/ \
     --output appcast.xml
 ```
 

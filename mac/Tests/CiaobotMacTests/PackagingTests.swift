@@ -199,7 +199,7 @@ final class PackagingTests: XCTestCase {
         let config = try readUpdateConfig()
 
         XCTAssertEqual(config["UPDATE_FEED_URL"],
-                       "https://github.com/raffaelefarinaro/ciaobot-mac/releases/download/updates/appcast.xml")
+                       "https://github.com/raffaelefarinaro/ciaobot/releases/download/updates/appcast.xml")
         XCTAssertEqual(config["UPDATE_PUBLIC_ED_KEY"], "uLLvdsFBrO33Zb9zLZ+m/ZUun3D9vUf+9t1ufoa2guM=")
         XCTAssertEqual(config["UPDATE_MIN_SYSTEM_VERSION"], "13.0")
 
