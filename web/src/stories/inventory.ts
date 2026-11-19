@@ -1065,60 +1065,54 @@ export const inventory: InventoryEntry[] = [
       "empty",
       "parse-error"
     ],
-    "variantNotes": "Read-only/editable/commentable/header/empty/parse-error variants.",
+    "variantNotes": "Read-only/editable/commentable/header/empty/parse-error variants: the row-number column and meta bar belong to the commentable preview, the toolbar and inputs to edit mode; hasHeader is content-derived.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in CsvViewer.vue implements this render; no rendered-state story exists."
-      },
-      {
-        "name": "read-only",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "CsvViewer.vue has a read-only branch; no rendered-state story exists."
-      },
-      {
-        "name": "editable",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "CsvViewer.vue has a editable branch; no rendered-state story exists."
-      },
-      {
-        "name": "commentable",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "CsvViewer.vue has a commentable branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["csv-viewer--default"],
+        "note": "Default props: a read-only non-commentable table with no rows header-like, so headers synthesize (Column 1..N), no row-number column renders and cells are spans. The meta bar still reads 'Click a cell to comment' at these props although clicks do nothing until the commentable prop is set."
       },
       {
         "name": "header",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "CsvViewer.vue has a header branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["csv-viewer--header"],
+        "note": "A header-like first row renders as th text through parseCsv's hasHeader; in edit mode those headers become labeled inputs (covered by the editable state)."
+      },
+      {
+        "name": "commentable",
+        "coverage": "covered",
+        "storyIds": ["csv-viewer--commentable"],
+        "note": "Read-only commentable preview (how FileViewerModal renders CSVs): the row-number column, the meta bar's click hint, durable cell highlights via the cellComments prop, and the is-selected mark a click leaves."
+      },
+      {
+        "name": "editable",
+        "coverage": "covered",
+        "storyIds": ["csv-viewer--editable"],
+        "note": "Edit mode (readOnly false): the toolbar with + Row / + Column and the rows·cols count, labeled header/cell inputs, and one delete control per row. hasHeader false in edit mode synthesizes headers on add; not separately covered."
       },
       {
         "name": "empty",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "CsvViewer.vue has a empty branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["csv-viewer--empty"],
+        "note": "Content whose parse yields no rows renders 'Empty CSV.' and no table. A content row that parses with quoted cells is not a distinct branch."
       },
       {
         "name": "parse-error",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": "CsvViewer.vue has a parse-error branch; no rendered-state story exists."
+        "note": "The v-if=\"parseError\" branch is defensive only: parseCsv (papaparse, header:false) never throws for the string content props supply, so parseError cannot be set from props; no story can render it without editing the owner."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["csv-viewer--narrow"],
+        "note": "A 390px pane: the meta bar and the table's own .csv-scroll scroll container still render inside the narrow wrapper. The 640px/767px media queries are viewport-driven and belong to the visual check, not a wrapper state."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in CsvViewer.vue has not yet been audited."
+      "status": "none",
+      "detail": "CsvViewer parses its content prop synchronously and performs no fetches: there is no initial, refresh, failure or stale loading state of its own. Its parseError branch is a dead defensive path (see the parse-error state)."
     },
     "migration": {
       "status": "unassessed",
@@ -1224,60 +1218,186 @@ export const inventory: InventoryEntry[] = [
       "error",
       "editing"
     ],
-    "variantNotes": "Lazy dialog owner; preview/history/diff, text/Markdown/image/PDF/PPTX/HTML/CSV/folder, loading/error/editing/comment and pin/share branches.",
+    "variantNotes": "Lazy dialog owner. Preview branches: text/Markdown/document properties/empty, CSV, image (+ its load-failure alert), PDF (+ the LibreOffice notice), HTML artifact (preview/code/code-loading/code-error) and folder. Loading/error and the streaming-end refresh; editing (textarea/CSV/save-flight/save-failure); comment draft and read popovers; pinned and pin-pending; the More actions menu; the archived-transcript continue action; narrow.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in FileViewerModal.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--default"],
+        "note": "A chat-scoped text file loaded: title/subtitle, Edit, Discuss, unpinned pin control and the pre body; open-auto-focus lands the keyboard on the modal frame and Escape closes through requestClose."
       },
       {
-        "name": "preview",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "FileViewerModal.vue has a preview branch; no rendered-state story exists."
+        "name": "markdown",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--markdown"],
+        "note": "A .md file renders the .fv-md branch; the chat-less open keeps Edit hidden (canEdit needs a chat id)."
       },
       {
-        "name": "history",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "FileViewerModal.vue has a history branch; no rendered-state story exists."
+        "name": "document-properties",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--document-properties"],
+        "note": "YAML frontmatter renders the .fv-meta properties header (kind, status, name, summary, tags) above the markdown body."
       },
       {
-        "name": "diff",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "FileViewerModal.vue has a diff branch; no rendered-state story exists."
+        "name": "empty",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--empty"],
+        "note": "A loaded file with empty content renders the .fv-pre branch with no text."
+      },
+      {
+        "name": "csv",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--csv"],
+        "note": "A CSV path renders CsvViewer read-only and commentable inside the modal, with a durable cell highlight and the cell-select mark. Its Comment trigger is not asserted: a click fires the document selectionchange handler, which clears the CSV cell anchor (useFileComments onSelectionChange). The comment compose and read flows are their own states below."
+      },
+      {
+        "name": "image",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--image"],
+        "note": "A served attachment (imageUrl) renders the .fv-img branch; a served image has no workspace path, so pin, Discuss and Edit are absent."
+      },
+      {
+        "name": "image-error",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--image-error"],
+        "note": "A workspace-path image that fails to load: the <img> native load 404s, onImageError probes the same URL (declared route) and the role=alert error branch replaces the image. The raw 404 the img makes is a plain resource load outside the fence."
+      },
+      {
+        "name": "folder",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--folder"],
+        "note": "kind folder mounts the real FolderBrowser (VueFinder) over one declared /api/workspace-dir listing; the browser's own first fetch is the only request."
+      },
+      {
+        "name": "pdf",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--pdf"],
+        "note": "kind pdf renders the workspace-binary preview iframe; the iframe's navigation is a plain resource load outside the fence, so the story asserts the iframe attributes rather than its content."
+      },
+      {
+        "name": "libreoffice-notice",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--libreoffice-notice"],
+        "note": "A .pptx with pptxNeedsLibreoffice renders the install notice; the Install in Chat click stops at the store's fix-chat flow (no General project seeded → error toast, zero requests)."
+      },
+      {
+        "name": "html",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--html"],
+        "note": "kind html in preview view mounts HtmlArtifactViewer: the toolbar and the sandbox='allow-scripts' frame the artifact contract depends on."
+      },
+      {
+        "name": "html-code",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--html-code"],
+        "note": "Switching to Code view fetches the artifact source over /api/workspace-file (declared route) and renders the code; with sourceLoaded, Edit becomes available."
+      },
+      {
+        "name": "html-code-loading",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--html-code-loading"],
+        "note": "Code view while the source fetch is in flight renders the 'Loading source…' note and keeps Edit refused."
+      },
+      {
+        "name": "html-code-error",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--html-code-error"],
+        "note": "A failed source fetch renders the source-error note; Edit stays refused without the source."
       },
       {
         "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "FileViewerModal.vue has a loading branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--loading"],
+        "note": "Initial open held at the declared /api/workspace-file route: the .fv-loading 'Loading…' branch, driven through the store's real open() flow."
       },
       {
         "name": "error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "FileViewerModal.vue has a error branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--error"],
+        "note": "An open answered HTTP 404 sets store.error and renders the .fv-error branch (fileLoadErrorMessage wording)."
+      },
+      {
+        "name": "refresh",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--refresh"],
+        "note": "The streaming-end watcher re-opens the same file: chat path resolution then a fresh read (both routes declared) repaints the body with the new content."
+      },
+      {
+        "name": "refresh-failure",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--refresh-failure"],
+        "note": "A refresh whose read fails (HTTP 500) replaces the body with the .fv-error branch."
       },
       {
         "name": "editing",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "FileViewerModal.vue has a editing branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["file-modal-preview-editor--editing"],
+        "note": "The Edit action swaps the body for .fv-edit-shell's textarea: buffer starts from content, typing marks isDirty, Cancel restores the preview without a write."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "editing-csv",
+        "coverage": "covered",
+        "storyIds": ["file-modal-preview-editor--editing-csv"],
+        "note": "Editing a CSV path renders CsvViewer in edit mode inside .fv-edit-shell (toolbar, labeled header/cell inputs, row add/delete)."
+      },
+      {
+        "name": "saving",
+        "coverage": "covered",
+        "storyIds": ["file-modal-preview-editor--saving"],
+        "note": "A save POST held by the boundary blocks both Cancel and Save ('Saving…'), the real disabled state not a styled one."
+      },
+      {
+        "name": "save-error",
+        "coverage": "covered",
+        "storyIds": ["file-modal-preview-editor--save-error"],
+        "note": "A save answered HTTP 500 renders 'Save failed (HTTP 500).' in the editor and unblocks the controls without writing."
+      },
+      {
+        "name": "pinned",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--pinned"],
+        "note": "The dock target's pinned file shows the pin control active ('Unpin from sidebar'); unpinning keeps the modal open (only a successful pin closes it)."
+      },
+      {
+        "name": "pin-pending",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--pin-pending"],
+        "note": "A chat-scoped pin write held at PATCH /api/chats/{id} leaves the pin control actually disabled."
+      },
+      {
+        "name": "actions-menu",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--actions-menu"],
+        "note": "The More menu lists Copy path / Show in folder / Download / Open in default app (loopback page); Download is enabled on a loaded file and Open in memory map is absent for non-markdown paths. The copy/share/open-elsewhere confirmation labels are transient timers of this same menu."
+      },
+      {
+        "name": "archived-transcript",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--archived-transcript"],
+        "note": "A memory-vault Logs/Chats transcript path adds 'Continue this chat'; its click runs continueArchivedChat, and a failed declare (HTTP 500) surfaces the store's error toast then restores the button."
+      },
+      {
+        "name": "comment-draft",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--comment-draft"],
+        "note": "Selecting text in the pre body floats the Comment trigger; clicking it opens the compose popover, and saving stages the comment durably for the file and re-highlights the line."
+      },
+      {
+        "name": "comment-popover",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--comment-popover"],
+        "note": "A durable line comment highlights its .pre-line; clicking it opens the read popover (location label, note, Edit/Delete), and Delete removes the highlight."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["file-viewer-modal--narrow"],
+        "note": "The dialog is a fixed overlay teleported to body, so a 390px wrapper cannot constrain it: the story sets the narrow viewport (parameters.viewport) and asserts the modal fits it. The ≤640px media queries (Discuss into the menu, zero padding) are viewport-driven and belong to the visual check."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in FileViewerModal.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load is one GET /api/workspace-file (held in flight → the .fv-loading text line; failure → the .fv-error line): no skeleton geometry, just a centered text line that does not match the loaded table/prose geometry, so a loading-geometry follow-up applies. Loaded, empty, image-error and initial failure are rendered states; the streaming-end watcher performs the only refresh (refresh / refresh-failure; a superseded response is discarded by the store's fetch generation with no visual stale state)."
     },
     "migration": {
       "status": "unassessed",
@@ -2096,25 +2216,49 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/FileViewerModal.vue",
       "web/src/components/PinnedFilePanel.vue"
     ],
-    "variants": [],
-    "variantNotes": "Preview/code/source loading/error; no live iframe sources in catalogue. Detailed variants are unassessed.",
+    "variants": [
+      "default",
+      "code",
+      "code-loading",
+      "code-error",
+      "narrow"
+    ],
+    "variantNotes": "Preview frame (sandbox allow-scripts frame that navigates to /api/workspace-html by plain iframe navigation) with the Preview/Code toggle; code view renders the parent-loaded source one line per element, or the parent's Loading…/error notes. No live iframe sources in the catalogue.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HtmlArtifactViewer.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["html-artifact-viewer--default"],
+        "note": "Preview view: the toolbar (aria-pressed on both tabs) and the sandboxed frame — sandbox=\"allow-scripts\", referrerpolicy=\"no-referrer\", lazy load and the file-path title. The iframe's own navigation is not fenced."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "code",
+        "coverage": "covered",
+        "storyIds": ["html-artifact-viewer--code"],
+        "note": "Code view: the source renders one .hav-code-line per line inside the pre; toggling back to Preview unmounts the code and remounts the frame (the controlled view prop flips through the parent wrapper)."
+      },
+      {
+        "name": "code-loading",
+        "coverage": "covered",
+        "storyIds": ["html-artifact-viewer--code-loading"],
+        "note": "Code view while the parent's source fetch is in flight renders the 'Loading source…' note and neither frame nor code."
+      },
+      {
+        "name": "code-error",
+        "coverage": "covered",
+        "storyIds": ["html-artifact-viewer--code-error"],
+        "note": "A parent-owned source failure renders the .hav-note-error note in place of the code, never in place of the frame."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["html-artifact-viewer--narrow"],
+        "note": "A 390px pane: the toolbar and the sandboxed frame stay inside the narrow wrapper."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HtmlArtifactViewer.vue has not yet been audited."
+      "status": "none",
+      "detail": "HtmlArtifactViewer performs no transport itself: the preview frame navigates natively to /api/workspace-html and the source fetch belongs to the parent, which passes sourceLoading/sourceError in as props. There is no own initial/refresh/failure/stale state; the two note branches render the parent's loading and failure."
     },
     "migration": {
       "status": "unassessed",
@@ -2597,48 +2741,92 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/MemoryMapView.vue"
     ],
     "variants": [],
-    "variantNotes": "Initial loading/failure/stale/empty/editor/validation/action error. Detailed variants are unassessed.",
+    "variantNotes": "Initial loading/failure/stale/empty editor/validation/action error. Detailed variants are unassessed.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in MemoryCategoriesPanel.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--default"
+        ],
+        "note": "The loaded registry: the not-loading, not-failed branch at MemoryCategoriesPanel.vue:362. Play blocks the core switch (disabled, aria-disabled), toggles the custom switch to an Unsaved draft and saves, asserting the aria-checked flip and the server-adopted Saved state."
       },
       {
         "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "MemoryCategoriesPanel.vue implements the loading branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--loading"
+        ],
+        "note": "Held first read: catLoading renders the SkeletonLoader rows variant (count 6) with its Loading categories status and no table."
       },
       {
         "name": "initial-error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "MemoryCategoriesPanel.vue implements the initial-error branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--initial-error"
+        ],
+        "note": "catFailed: the role=alert failure card with Retry; play retries and the fixture refuses again, so the alert persists over two reads."
       },
       {
         "name": "stale",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "MemoryCategoriesPanel.vue implements the stale branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--stale"
+        ],
+        "note": "The refresh branch: loadError over rows already on screen keeps the table with the role=status stale banner and Retry; play switches workspaces through the fixture and retries while the banner persists."
       },
       {
         "name": "empty",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "MemoryCategoriesPanel.vue implements the empty branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--empty"
+        ],
+        "note": "catEmpty: the This vault has no categories yet hint with Add category available and Save blocked at Saved."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "saving",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--saving"
+        ],
+        "note": "A held PATCH: Save reads Saving… and is genuinely disabled, not styled; the draft keeps the user's toggles."
+      },
+      {
+        "name": "save-error",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--save-error"
+        ],
+        "note": "A refused PATCH: the role=alert action error in MemoryCategoriesPanel.vue:382 leaves the draft exactly as built (Unsaved, Save changes enabled) for a corrected retry."
+      },
+      {
+        "name": "drawer-edit",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--drawer-edit"
+        ],
+        "note": "The row-name button opens the drawer on a custom row: focus lands on Label, the id is readonly with its fixed-once note, Delete category is offered, Escape closes."
+      },
+      {
+        "name": "drawer-add",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--drawer-add"
+        ],
+        "note": "Add category opens the empty drawer: focus on the writable id, Start from presets, a non-preset id shows the inline role=alert and blocks Save, a valid id plus label unblocks it."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--narrow"
+        ],
+        "note": "Loaded in a maximum 390px container: the table keeps its columns and scrolls sideways in the Categories region with the switches reachable."
       }
     ],
     "loading": {
       "status": "known",
-      "detail": "MemoryCategoriesPanel.vue distinguishes first loading, initial failure and stale refresh retaining rows."
+      "detail": "Initial load is the SkeletonLoader rows variant (count 6) whose bar-shaped boxes do not match the loaded actions row plus six-column table geometry (recorded for a loading follow-up; not fixed here). A workspace switch re-reads in place, a failed refresh keeps the rows with the stale banner, a failed first read shows the alert with Retry, and a held write blocks Save as Saving…. Covered: loading, initial-error, stale, saving."
     },
     "migration": {
       "status": "unassessed",
@@ -2725,7 +2913,7 @@ export const inventory: InventoryEntry[] = [
     "id": "components-memory-map-view",
     "name": "MemoryMapView",
     "family": "Memory and usage",
-    "kind": "composition",
+    "kind": "component",
     "owner": {
       "path": "web/src/components/MemoryMapView.vue",
       "anchor": "<template>"
@@ -2739,26 +2927,128 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in MemoryMapView.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "memory-map-view--default"
+        ],
+        "note": "The store's default section (To decide): the review wrap's filter chips over the two queues, with zero chips dropped and All pressed, plus the never-claims static lines of the section. Queue bodies belong to their own component rows."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "graph",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-graph--graph"
+        ],
+        "note": "The map section's drawing: the graph story mounts the production owner, asserts the toolbar segment, the vault stats with the unchecked link and the zoom-controls group, and plays through the label-gate hint flip."
+      },
+      {
+        "name": "list",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-list-selection--list"
+        ],
+        "note": "The list rendering of the same map section: sortable headers with aria-sort, the dash placeholder for an undated note and the stale row's Needs review flag; play sorts by Checked."
+      },
+      {
+        "name": "selection",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-map-view--selection-detail",
+          "memory-graph--selection",
+          "memory-list-selection--selection"
+        ],
+        "note": "A selected note opens the docked tile (role=dialog naming the note, linked-note controls, the resize gutter is a viewport drag and has no story markup): covered opening from the graph path (production requestFocus), from the list's title buttons, and swapping to a neighbour inside the tile."
+      },
+      {
+        "name": "filter",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-list-selection--filter"
+        ],
+        "note": "The map section's orphan filter: Orphans only narrows the list to the unlinked note and re-frames the drawing."
+      },
+      {
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-map-view--loading"
+        ],
+        "note": "Held vault graph read: the toolbar and canvas unmount and the map body is the SkeletonLoader graph variant with its Loading vault graph status."
+      },
+      {
+        "name": "error",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-map-view--error"
+        ],
+        "note": "A failed first graph read: the mm-empty line names the failure with neither skeleton nor drawing."
+      },
+      {
+        "name": "detail-stale",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-map-view--detail-stale"
+        ],
+        "note": "The tile's stale callout: Unchecked for… with the type's horizon rule and the Review in To decide link to /memory/review?show=revisit."
+      },
+      {
+        "name": "detail-pending",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-map-view--detail-pending"
+        ],
+        "note": "The tile's pending-check callout: Being checked. with the Open the proposal link to /memory/review?show=suggested; the stale callout is suppressed while the question is in flight."
+      },
+      {
+        "name": "detail-conflicted",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-map-view--detail-conflicted"
+        ],
+        "note": "The tile's conflicted callout: A verification is out of date for this note. with the Review in To decide link; the dead verdict is never applied."
+      },
+      {
+        "name": "detail-facts",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-map-view--detail-facts"
+        ],
+        "note": "The tile's entry-coverage block: Facts inside this note with the overdue bullet's Never checked reason and excerpt."
+      },
+      {
+        "name": "categories-section",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "The categories render is the page grid around MemoryCategoriesPanel alone; the component row components-memory-categories-panel carries its rendered-state coverage."
+      },
+      {
+        "name": "import-section",
+        "coverage": "not-applicable",
+        "storyIds": [],
+        "note": "The import render is the page grid around ImportSources alone; the component row components-import-sources carries its rendered-state coverage."
+      },
+      {
+        "name": "history-section",
+        "coverage": "not-applicable",
+        "storyIds": [],
+        "note": "The history render shows ProposalReviewPanel in its history section; that panel's component row owns the rendered states."
+      },
+      {
+        "name": "retired-section",
+        "coverage": "not-applicable",
+        "storyIds": [],
+        "note": "The retired render shows VaultReviewPanel in its trash section; that panel's component row owns the rendered states."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in MemoryMapView.vue has not yet been audited."
+      "status": "known",
+      "detail": "The first vault read holds the map body behind the SkeletonLoader graph variant whose doodle geometry does not match the real canvas drawing (recorded for a loading follow-up; not fixed here). A workspace already in the store's snapshot cache paints without a skeleton and revalidates in the background, a background failure keeps the graph (no stale branch), and a foreground failure is the error line. Covered: loading, error."
     },
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
     },
-    "rationale": "Connected route or host composition; isolate its seam before rendering it in the workshop."
+    "rationale": "Connected route composition mounted isolated through the fail-closed fixture boundary; its story coverage is claimed on this row because only component rows may claim story coverage (#3263), and its section routes are covered by their child component rows."
   },
   {
     "id": "components-model-selector",
@@ -6146,24 +6436,84 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsAppearance.vue"
     ],
     "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variantNotes": "No configurable variants: one open prop plus its draft state; the audited render variants are the row states below.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in CustomColorsDialog.vue implements this render; no rendered-state story exists."
+        "name": "closed",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--closed"],
+        "note": "Props open=false, the production closed state: the portalled dialog renders nothing."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "default",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--default"],
+        "note": "Open with the shipped defaults: both theme sections show a readable ratio, Apply is blocked until something is edited and Reset is enabled."
+      },
+      {
+        "name": "seeded-custom-colours",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--seeded-custom-colours"],
+        "note": "Open with a saved pair per mode: the hex fields and swatches show the saved pair, not the theme's own colours (seedFor prefers the saved pair)."
+      },
+      {
+        "name": "edited-readable",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--edited-readable"],
+        "note": "A typed valid hex updates the draft, the ratio line and enables Apply."
+      },
+      {
+        "name": "unreadable",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--unreadable"],
+        "note": "A valid hex with too little contrast renders the refusal reason in hint--warn on the section status and keeps Apply blocked."
+      },
+      {
+        "name": "invalid-hex",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--invalid-hex"],
+        "note": "Typed text that is not a colour stays as typed, the swatch falls back to the seed and Apply stays blocked."
+      },
+      {
+        "name": "saving",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--saving"],
+        "note": "Apply while the write is held: Apply and Reset are actually disabled and Escape cannot close the dialog while a save is in flight (onOpenChange refuses)."
+      },
+      {
+        "name": "save-failure",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--save-failure"],
+        "note": "A failing Apply (PATCH 500) renders the role=alert error, the dialog stays open and Apply recovers."
+      },
+      {
+        "name": "apply",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--apply"],
+        "note": "Apply normalizes the edited pair, PATCHes the production save path (declared) and closes the dialog through update:open."
+      },
+      {
+        "name": "reset",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--reset"],
+        "note": "Reset saves custom_colors {} for both modes through the declared PATCH and closes the dialog."
+      },
+      {
+        "name": "cancel",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--cancel"],
+        "note": "Escape closes the portalled dialog through reka's DialogRoot and the singleton settings are left untouched."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--narrow"],
+        "note": "The card in a maximum 390px container: both theme section headings keep their layout at the card's mobile width."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in CustomColorsDialog.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch or loading branch on open: the dialog reads the shared appearance singleton and only Apply and Reset write (declared PATCH routes)."
     },
     "migration": {
       "status": "unassessed",
@@ -6183,25 +6533,88 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/settings/WorkspaceGoogleAccount.vue"
     ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variants": [
+      "connect",
+      "reauth"
+    ],
+    "variantNotes": "The open prop and the connect/reauth mode change the title, display-name field, setup steps, checklist, sign-in controls and footer; every audited branch is a row state below.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in GoogleConnectDialog.vue implements this render; no rendered-state story exists."
+        "name": "closed",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--closed"],
+        "note": "Props open=false: the modal backdrop (v-if=\"open\") renders nothing."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "default",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--default"],
+        "note": "Connect mode with gws not installed and no profile: focused editable display name, install step, upload client panel, a disabled Sign-in control with its reason and a disabled Done with its reason; Escape closes."
+      },
+      {
+        "name": "install-problem",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--install-problem"],
+        "note": "The install_problem branch (gwsIntegration.install_problem) renders a role=alert inside the install step."
+      },
+      {
+        "name": "install-done",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--install-done"],
+        "note": "installed=true replaces the install step with its checklist entry and keeps the OAuth client step pending."
+      },
+      {
+        "name": "client-done-ready",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--client-done-ready"],
+        "note": "Client secret present but the profile not configured: both checklist entries with the Replace file action, the ready Sign-in and Paste-a-code controls and the profile's storage hint."
+      },
+      {
+        "name": "client-gcloud",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--client-gcloud"],
+        "note": "The gcloud radio shows the derived setup command, and Check again (declared POST profiles/add then GET) registers the profile and swaps in its stored name."
+      },
+      {
+        "name": "connected",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--connected"],
+        "note": "A configured profile linked to this workspace: the connected line with the workspace link, Done enabled, no sign-in controls; Done closes the dialog."
+      },
+      {
+        "name": "expired-reauth",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--expired-reauth"],
+        "note": "Reauth mode over a profile that needs re-login: the title, the expired warning with the cached token error, sign-in controls offered and Done still blocked."
+      },
+      {
+        "name": "relogin-pending",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--relogin-pending"],
+        "note": "The loopback wait status with Stop sign-in; the declared relogin/cancel write ends the wait and restores the sign-in buttons. Google OAuth start actions (Sign in, Paste a code) deliberately fail closed: their POSTs are undeclared, so the plays assert the controls instead of running them."
+      },
+      {
+        "name": "relogin-pending-blocked",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--relogin-pending-blocked"],
+        "note": "The blocked-tab variant of the wait: the Open authorization page link points at the fixture URL."
+      },
+      {
+        "name": "paste-code-flow",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--paste-code-flow"],
+        "note": "The paste flow: Complete Sign-In is blocked while the field is empty and the declared exchange write replaces the box with the connected line."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--narrow"],
+        "note": "Reauth state in a maximum 390px container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in GoogleConnectDialog.vue has not yet been audited."
+      "status": "none",
+      "detail": "No read or loading branch at open: everything arrives through the injected Google accounts state. Reads happen only on explicit actions (Check again), which the covered states declare; OAuth writes stay undeclared and fail closed."
     },
     "migration": {
       "status": "unassessed",
@@ -6405,38 +6818,74 @@ export const inventory: InventoryEntry[] = [
     ],
     "variants": [
       "custom colours",
-      "error"
+      "soft-ignored"
     ],
-    "variantNotes": "Observed branches in SettingsAppearance.vue; remaining variants have not been audited.",
+    "variantNotes": "No props: the render comes from the appearance settings (custom colours on both themes or one theme), from Soft with a painted pair and from load and save failures; all audited in the states below.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsAppearance.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--default"],
+        "note": "Loaded defaults: Normal and System chosen, the Customise… control, the generic detail line, no Reset and no alert; the initial read is a declared fixture GET."
       },
       {
-        "name": "custom colours",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsAppearance.vue has a custom colours branch; no rendered-state story exists."
+        "name": "custom-colours-both",
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--custom-colours-both"],
+        "note": "Custom colours on for both themes: the detail line names both and the Reset control renders (v-if=\"hasCustomColors\")."
       },
       {
-        "name": "error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsAppearance.vue has a error branch; no rendered-state story exists."
+        "name": "custom-colours-one-theme",
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--custom-colours-one-theme"],
+        "note": "Custom colours on for the dark theme only: the detail line names the one theme and Reset renders."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "soft-ignored",
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--soft-ignored"],
+        "note": "Soft chosen while the active theme has a painted pair (v-if=\"softIgnored\"): the hint explains why Soft has no effect."
+      },
+      {
+        "name": "customise",
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--customise"],
+        "note": "The Customise… control opens the production CustomColorsDialog through v-model:open and Cancel closes it; the dialog makes no read of its own."
+      },
+      {
+        "name": "custom-colours-reset",
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--reset-custom-colours"],
+        "note": "Reset saves custom_colors {} through the production save path (declared PATCH); the control disappears and the detail line reverts."
+      },
+      {
+        "name": "text-contrast-soft",
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--text-contrast-soft"],
+        "note": "Choosing Soft saves through the production save path (declared PATCH), the radio moves selection and focus stays on the picked option."
+      },
+      {
+        "name": "save-failure",
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--save-failure"],
+        "note": "A failing write (PATCH 500) renders the role=alert action-result and leaves the radios on the engine's value; the save loop stops with the error."
+      },
+      {
+        "name": "load-failure",
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--load-failure"],
+        "note": "A failing initial read (GET 500) renders 'Could not load appearance settings.' as the role=alert action-result; the shipped defaults stay the model values."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--narrow"],
+        "note": "Custom colours, both radio groups and Reset inside a maximum 390px container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsAppearance.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load is a silent GET with no placeholder: until the first response the groups show the shipped defaults, so the pre-response render equals the default render and is not a separate story. A failed initial load is the covered load-failure alert. No refresh, empty, filtered-empty or stale state exists: the owner reads once on mount and writes only on a choice."
     },
     "migration": {
       "status": "unassessed",
@@ -7154,53 +7603,78 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsWorkspaceOverview.vue"
     ],
     "variants": [
-      "none",
       "connected",
       "expired",
-      "connecting"
+      "none",
+      "actions menu",
+      "advanced panel"
     ],
-    "variantNotes": "Observed branches in WorkspaceGoogleAccount.vue; remaining variants have not been audited.",
+    "variantNotes": "Observed branches audited: loading skeleton, load error with retry, none, connected, expired, actions menu (stop-using confirm and busy menu), advanced panel and narrow wrap. The old 'connecting' variant does not exist in the template: gwsAccountState renders connected, expired or none.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in WorkspaceGoogleAccount.vue implements this render; no rendered-state story exists."
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--loading"],
+        "note": "Initial: the generic SkeletonLoader placeholder (rows, one count, announced as Loading Google account) while the integration read has not settled."
+      },
+      {
+        "name": "load-error",
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--load-error", "workspace-google-account--refresh-failure"],
+        "note": "Initial failure: the warn hint and Retry (v-else-if=\"gwsIntegrationError\"). The retry's declared read replaces the error with the row (load-error) or answers another failure the hint re-renders (refresh-failure)."
       },
       {
         "name": "none",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "WorkspaceGoogleAccount.vue has a none branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--none"],
+        "note": "No linked profile (v-else): the hint, the Connect Google account control, and the Connect dialog with focus returned to the row's opener after it closes."
       },
       {
         "name": "connected",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "WorkspaceGoogleAccount.vue has a connected branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--connected"],
+        "note": "A linked configured profile: the Connected badge, label and email line, and the actions menu with Re-authenticate offered; Escape closes the menu. The profile's workspace list carries a second workspace so Stop using is offered."
       },
       {
         "name": "expired",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "WorkspaceGoogleAccount.vue has a expired branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--expired"],
+        "note": "A linked profile that needs re-login: the Sign-in expired badge, the cached token error hint, the Sign in again control and the reauth dialog with focus returned to it."
       },
       {
-        "name": "connecting",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "WorkspaceGoogleAccount.vue has a connecting branch; no rendered-state story exists."
+        "name": "advanced-panel",
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--advanced-panel"],
+        "note": "The Advanced / headless setup menu item opens the command panel (v-if=\"advancedOpen && profile\"); without a stored client the Create client command shows; Hide closes it."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "advanced-panel-secret",
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--advanced-panel-secret"],
+        "note": "The same panel with a stored client secret: the Create client block is absent and the Login, Headless and Stored commands remain."
+      },
+      {
+        "name": "stop-using-confirm",
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--stop-using-confirm"],
+        "note": "The menu's Stop using in this workspace item opens the production confirm; cancelling writes nothing and leaves the link. Confirmed destructive actions are the Overview host's composition, not this row's isolated render."
+      },
+      {
+        "name": "busy",
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--busy"],
+        "note": "Disconnect and remove while the removal write is held: the actions menu is actually disabled through the owner's busy flag, not just styled."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--narrow"],
+        "note": "The connected row in a maximum 390px container: the actions wrap onto their own line under the name and email."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in WorkspaceGoogleAccount.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial loading is the generic SkeletonLoader (rows): its two-line geometry does not match the loaded row's set-row badge and menu geometry, which a later loading slice should replace. A failed read renders the hint and Retry; the declared reads cover both a recoving retry and a refresh failure. No stale or refresh-keep state exists: the owner renders only the injected fetch result and never fetches on mount."
     },
     "migration": {
       "status": "unassessed",
@@ -9038,42 +9512,102 @@ export const inventory: InventoryEntry[] = [
       "overlay",
       "editing"
     ],
-    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are indirect composition hosts, not direct inline consumers.",
+    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are indirect composition hosts, not direct inline consumers. The sheets are fixed-position modals, so their narrow geometry is the workshop's narrow viewport preset rather than a wrapper; the page editor is covered inside a 390px block.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-sheet in TaskWorkspaceSurface.vue implements this family; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-editor--default"],
+        "note": "The create sheet: the modal .task-sheet the board's New task opens, with focus on the title, the disabled File task until a title is typed, Filing… while its POST is in flight and the refusal line under the form when it is refused. Covered by task-editor--default, --create-refused and --create-busy."
       },
       {
         "name": "page",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-sheet in TaskWorkspaceSurface.vue includes page; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-editor--page"],
+        "note": "The detail editor as a board page (task-sheet task-detail-pane): region role, the title's arrival focus, rendered description, the side column and the fields' autosave line, inside a 390px wrapper. Covered by task-editor--page."
       },
       {
         "name": "overlay",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-sheet in TaskWorkspaceSurface.vue includes overlay; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-editor--overlay"],
+        "note": "The same editor as an overlay modal sheet (task-sheet task-detail-sheet): role=dialog, aria-modal, no board chrome, and the host's awaited-close seam. Covered by task-editor--overlay."
+      },
+      {
+        "name": "title-required",
+        "coverage": "covered",
+        "storyIds": ["task-editor--title-required"],
+        "note": "An overlay close over a title it cannot write is refused: 'Add a title before closing.' and the draft stays, with nothing presented. Covered by task-editor--title-required."
+      },
+      {
+        "name": "write-refused",
+        "coverage": "covered",
+        "storyIds": ["task-editor--write-refused"],
+        "note": "A refused save before a close keeps the editor open with the server's sentence, the draft and a re-read of the rows. Covered by task-editor--write-refused."
       },
       {
         "name": "editing",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-sheet in TaskWorkspaceSurface.vue includes editing; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-editor--editing"],
+        "note": "The description edit: a click on the rendered body is the textarea, focus follows, typing pauses write and the save line moves from Saving… to Saved. Covered by task-editor--editing."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "description-loading",
+        "coverage": "covered",
+        "storyIds": ["task-editor--description-loading"],
+        "note": "The editor's per-open description read in flight: the field is absent, 'Loading description…' is role=status. Covered by task-editor--description-loading."
+      },
+      {
+        "name": "description-failed",
+        "coverage": "covered",
+        "storyIds": ["task-editor--description-failed"],
+        "note": "A refused description read leaves the field absent and offers Retry, which re-reads without closing. Covered by task-editor--description-failed."
+      },
+      {
+        "name": "body-conflict",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "note": "The description conflict needs a GET-by-id answer that changes the prose under a dirty draft mid-write — a race inside one gesture window, not a state one story render can hold deterministically. Not claimed."
+      },
+      {
+        "name": "overlay-loading",
+        "coverage": "covered",
+        "storyIds": ["task-editor--overlay-loading"],
+        "note": "The overlay task resolution in flight: the compact task-overlay-state sheet, 'Loading task…'. Covered by task-editor--overlay-loading."
+      },
+      {
+        "name": "overlay-failed",
+        "coverage": "covered",
+        "storyIds": ["task-editor--overlay-failed"],
+        "note": "The overlay read failed: its own state, the server's sentence and a Retry, never an editor over stale rows. Covered by task-editor--overlay-failed."
+      },
+      {
+        "name": "overlay-missing",
+        "coverage": "covered",
+        "storyIds": ["task-editor--overlay-missing"],
+        "note": "The host's task is not on the board: Task not found, no editor. Covered by task-editor--overlay-missing."
+      },
+      {
+        "name": "create-refused",
+        "coverage": "covered",
+        "storyIds": ["task-editor--create-refused"],
+        "note": "A refused filing keeps the New task form, what was typed and the server's sentence under the buttons. Covered by task-editor--create-refused."
+      },
+      {
+        "name": "create-busy",
+        "coverage": "covered",
+        "storyIds": ["task-editor--create-busy"],
+        "note": "Filing… is the block itself: the submit and Cancel are disabled while the POST is in flight. Covered by task-editor--create-busy."
+      },
+      {
+        "name": "record-missing",
+        "coverage": "covered",
+        "storyIds": ["task-editor--record-missing"],
+        "note": "The record vanished under an open editor with a draft: the draft is kept and named with Copy draft and Discard draft. Covered by task-editor--record-missing."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TaskWorkspaceSurface.vue has not yet been audited."
+      "status": "known",
+      "detail": "The editor's description read is an initial load per open (held GET shows Loading description… with no field); the overlay's task resolution is the same shape (Loading task…). A refresh after a refused write re-reads the list with the editor open (record-missing keeps its draft); failure is description-failed and overlay-failed; the sheet itself has no stale shape. The sheets draw no skeleton: the board's first-load placeholder geometry is owned by the components-task-workspace-surface row."
     },
     "migration": {
       "status": "unassessed",
@@ -9099,72 +9633,66 @@ export const inventory: InventoryEntry[] = [
       "edit",
       "review-ready"
     ],
-    "variantNotes": "The .task-resolution-sheet dialog owns completion and resolution editing. The .task-completion selector instead marks earlier-completion history items, not this sheet. Support sources are indirect composition hosts, not direct inline consumers.",
+    "variantNotes": "The .task-resolution-sheet dialog owns completion and resolution editing. The .task-completion selector instead marks earlier-completion history items, not this sheet. Support sources are indirect composition hosts, not direct inline consumers. The sheet is a fixed-position modal, so its narrow geometry is the workshop's narrow viewport preset rather than a wrapper.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TaskWorkspaceSurface.vue gates .task-resolution-sheet with resolutionOpen && resolutionTask; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-completion--default"],
+        "note": "TaskWorkspaceSurface.vue gates .task-resolution-sheet with resolutionOpen && resolutionTask; the sheet enters with focus on the note field. Covered by task-completion--default."
       },
       {
         "name": "complete",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "resolutionMode === 'complete' presents Complete with resolution and the Mark done action unless the task is review-ready; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-completion--complete"],
+        "note": "resolutionMode === 'complete' presents Complete with resolution and the Mark done action unless the task is review-ready; a blank draft completes with resolution ''. Covered by task-completion--complete."
       },
       {
         "name": "edit",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "resolutionMode.value === 'edit' presents Edit resolution and Save resolution. editResolution reads the stored text before opening; a failed read opens nothing. No rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-completion--edit"],
+        "note": "resolutionMode.value === 'edit' presents Edit resolution and Save resolution. editResolution reads the stored text before opening; a failed read opens nothing. Covered by task-completion--edit."
       },
       {
         "name": "review-ready",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "In complete mode, isReviewReady(resolutionTask) selects Approve done and renders DecisionReason bound to resolutionReason; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-completion--review-ready"],
+        "note": "In complete mode, isReviewReady(resolutionTask) selects Approve done and renders DecisionReason bound to resolutionReason. Covered by task-completion--review-ready."
       },
       {
         "name": "pending",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "resolutionBusy makes the textarea, DecisionReason, submit, refresh, close and Cancel controls disabled and changes the submit label to Saving…; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-completion--pending"],
+        "note": "resolutionBusy makes the textarea, DecisionReason, submit, refresh, close and Cancel controls disabled and changes the submit label to Saving…. Covered by task-completion--pending."
       },
       {
         "name": "action-error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "resolutionError renders a role=\"alert\" message with refreshResolutionTask. The refresh re-reads the board and task revision without changing the draft; refusal keeps the sheet and draft. No rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-completion--action-error"],
+        "note": "resolutionError renders a role=\"alert\" message with refreshResolutionTask. The refresh re-reads the board and task revision without changing the draft; refusal keeps the sheet and draft. Covered by task-completion--action-error."
       },
       {
         "name": "draft",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "The optional resolutionDraft textarea is initialized by openResolution. Completion sends an empty note for a blank or whitespace-only draft; edit mode preserves the exact typed text. No rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-completion--draft"],
+        "note": "The optional resolutionDraft textarea is initialized by openResolution. Completion sends an empty note for a blank or whitespace-only draft; edit mode preserves the exact typed text. Covered by task-completion--draft."
       },
       {
         "name": "submit",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "The form calls submitResolution, flushing editor changes and, for completion, releasing a held attempt before reading the current revision. Edit uses board.update; complete uses board.complete with the optional review reason. Success resets the sheet; refusal preserves the draft. No rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-completion--submit"],
+        "note": "The form calls submitResolution, flushing editor changes and, for completion, releasing a held attempt before reading the current revision. Edit uses board.update; complete uses board.complete with the optional review reason. Covered by task-completion--submit (an approved result), --complete (a blank note) and --draft (a typed note)."
       },
       {
         "name": "cancel",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "Cancel, close and backdrop invoke closeResolution without writing; Escape also closes through useModalFocus. Closing is refused while resolutionBusy; otherwise resetResolution clears the sheet and draft. No rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "coverage": "covered",
+        "storyIds": ["task-completion--cancel"],
+        "note": "Cancel, close and backdrop invoke closeResolution without writing; Escape also closes through useModalFocus. Closing is refused while resolutionBusy; otherwise resetResolution clears the sheet and draft. Covered by task-completion--cancel."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TaskWorkspaceSurface.vue has not yet been audited."
+      "status": "known",
+      "detail": "Opening the sheet is local; the only read is edit mode's GET /api/tasks/{id} before it opens, and a failed read opens nothing (the board's own save line is the surface row's). The sheet has no initial-loading or empty render to show: the busy shape is the disabled controls with Saving…, the failure shape is the action-error row with Refresh task, and refresh is refreshResolutionTask. No stale state."
     },
     "migration": {
       "status": "unassessed",
@@ -9189,36 +9717,96 @@ export const inventory: InventoryEntry[] = [
       "delegation",
       "handover"
     ],
-    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are indirect composition hosts, not direct inline consumers.",
+    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are indirect composition hosts, not direct inline consumers. The .task-delegate anchor matches the editor's Agent block and the .task-delegate-sheet preview it opens. Both are fixed-position surfaces, so their narrow geometry is the workshop's narrow viewport preset rather than a wrapper.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-delegate in TaskWorkspaceSurface.vue implements this family; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-delegation--default"],
+        "note": "No attempt_state: the Agent block says in one line what delegating does (a new chat in the task's project, approval cards asked in that chat) and its control is Delegate to agent. Covered by task-delegation--default."
       },
       {
         "name": "delegation",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-delegate in TaskWorkspaceSurface.vue includes delegation; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-delegation--delegation"],
+        "note": "A live attempt (running, needs_you): the badge is the record's own state; Stop and Detach are the run gestures; the lazy history reads and lists the attempts. Covered by task-delegation--delegation, --attempts-loading and --attempts-error."
       },
       {
         "name": "handover",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-delegate in TaskWorkspaceSurface.vue includes handover; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-delegation--handover"],
+        "note": "The delegate preview over the closed editor (.task-delegate-sheet): the facts the chat will run with (project, the model row, attendance read as attended), the read description, the per-attempt instructions field and the Delegate confirm. Covered by task-delegation--handover."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "review-ready",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--review-ready"],
+        "note": "A result waits for review: the review lead, the Approve Done and Reject… controls, and Open chat as the section's own control. Covered by task-delegation--review-ready."
+      },
+      {
+        "name": "preview-resume",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--preview-resume"],
+        "note": "A settled attempt still linked to a live chat: the preview opens in resume mode, naming both ways out (Resume, and Start a new attempt beside Cancel). Covered by task-delegation--preview-resume."
+      },
+      {
+        "name": "preview-retry",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--preview-retry"],
+        "note": "A settled attempt whose chat is archived: the preview opens in retry mode, with Start a new attempt as the confirm. Covered by task-delegation--preview-retry."
+      },
+      {
+        "name": "preview-body-loading",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--preview-body-loading"],
+        "note": "The sheet's own description read in flight: Loading description…, and no preview to confirm against. Covered by task-delegation--preview-body-loading."
+      },
+      {
+        "name": "preview-body-error",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--preview-body-error"],
+        "note": "A refused description read: the sheet explains what the chat still receives and offers Retry, which re-reads without closing. Covered by task-delegation--preview-body-error."
+      },
+      {
+        "name": "handover-busy",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--handover-busy"],
+        "note": "A hand-over in flight: the confirm reads Working… and the instructions field and model chip stop taking input. Covered by task-delegation--handover-busy."
+      },
+      {
+        "name": "attempts-loading",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--attempts-loading"],
+        "note": "The lazy history read in flight: Loading attempts… and no list. Covered by task-delegation--attempts-loading."
+      },
+      {
+        "name": "attempts-error",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--attempts-error"],
+        "note": "A refused history read: the server's sentence with a Retry that re-reads without closing the editor. Covered by task-delegation--attempts-error."
+      },
+      {
+        "name": "linked-chats",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--linked-chats"],
+        "note": "The task names chats that worked on it: the Linked chats section with unlink as an ordinary write the row adopts. Covered by task-delegation--linked-chats."
+      },
+      {
+        "name": "reconcile",
+        "coverage": "covered",
+        "storyIds": ["task-delegation--reconcile"],
+        "note": "A row that disagrees with itself (a settled attempt still holding the task): the block says what disagrees and which controls resolve it, never a rewrite. Covered by task-delegation--reconcile."
+      },
+      {
+        "name": "open-chat-preview",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "note": "The preview's open_chat mode can only render through a programmatic openDelegate call: delegateFromDetail diverts a live attempt to its chat before any preview opens, and both card and editor Open chat gestures navigate there directly."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TaskWorkspaceSurface.vue has not yet been audited."
+      "status": "known",
+      "detail": "Two reads, both theirs: the Agent block's lazy history (initial, with its own failure shape and Retry) and the delegate preview's description read (the sheet's initial load, Loading description…, refusal keeps the sheet with a Retry). The block itself draws no skeleton; the badge and gestures render from the row."
     },
     "migration": {
       "status": "unassessed",
@@ -9243,36 +9831,42 @@ export const inventory: InventoryEntry[] = [
       "move",
       "ordering"
     ],
-    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are indirect composition hosts, not direct inline consumers.",
+    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are indirect composition hosts, not direct inline consumers. The sheet is a fixed-position modal, so its narrow geometry is the workshop's narrow viewport preset rather than a wrapper.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-move-sheet in TaskWorkspaceSurface.vue implements this family; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-ordering--default"],
+        "note": "The .task-move-sheet the card menu's Move… opens for one task: its column preselected, the landing rows its lane offers, a Move confirm and Escape's write-free close. Covered by task-ordering--default."
       },
       {
         "name": "move",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-move-sheet in TaskWorkspaceSurface.vue includes move; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-ordering--move"],
+        "note": "A cross-lane placement: another column lists another set of landing rows, and one write carries the status and the placement (PATCH with placement anchors); the card lands in its lane. Covered by task-ordering--move."
       },
       {
-        "name": "ordering",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-move-sheet in TaskWorkspaceSurface.vue includes ordering; no rendered-state story exists."
+        "name": "done-append",
+        "coverage": "covered",
+        "storyIds": ["task-ordering--done-append"],
+        "note": "When the Done lane is not drawn (no done rows, the collapsed tab's lane absent), the completion appends when confirmed: the sheet's note says so, the position list is the single appends row, and confirming opens the completion sheet writing nothing. Covered by task-ordering--done-append."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "name": "done-position",
+        "coverage": "covered",
+        "storyIds": ["task-ordering--done-position"],
+        "note": "When the Done lane is drawn, Done keeps the chosen position: Top and after each row, and the note says the position is saved with the confirmation. Covered by task-ordering--done-position (drawn with the workshop's per-browser Done-tab preference held on for the story)."
+      },
+      {
+        "name": "order-error",
+        "coverage": "covered",
+        "storyIds": ["task-ordering--order-error"],
+        "note": "The order file could not be read (the 'ordering' variant renamed to name its branch): the drawn menu's Move up, Move down and Move… are disabled and carry the reason as their title, beside the order notice the board draws. Covered by task-ordering--order-error."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TaskWorkspaceSurface.vue has not yet been audited."
+      "status": "none",
+      "detail": "The move sheet opens from rows already on screen and reads nothing: every position option is computed from the held order, so it has no initial, refresh, failure or stale shape."
     },
     "migration": {
       "status": "unassessed",
@@ -9300,48 +9894,42 @@ export const inventory: InventoryEntry[] = [
       "diff",
       "editing"
     ],
-    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are renderer support components.",
+    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are renderer support components. History and diff branches no longer exist in the template: the scoped style still carries .fv-history-*/.fv-diff-* rules nothing renders.",
     "states": [
       {
         "name": "default",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": ".fv-body in FileViewerModal.vue implements this family; no rendered-state story exists."
+        "note": "The .fv-body preview states are proven by components-file-viewer-modal's covered states (default/markdown/document-properties/empty/csv/image/image-error/folder/pdf/libreoffice-notice/html stories render exactly this body); inline rows cannot claim story coverage."
       },
       {
         "name": "preview",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": ".fv-body in FileViewerModal.vue includes preview; no rendered-state story exists."
+        "note": "Same body as default, named for the preview-vs-editor split this family owns; covered through components-file-viewer-modal (including html-code/code-loading/code-error for the artifact panel). Inline rows cannot claim story coverage."
       },
       {
         "name": "history",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": ".fv-body in FileViewerModal.vue includes history; no rendered-state story exists."
+        "note": "No history branch exists in .fv-body's template: the history UI was removed (only its .fv-history-* CSS remains in the scoped style) and no web surface consumes file snapshots."
       },
       {
         "name": "diff",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": ".fv-body in FileViewerModal.vue includes diff; no rendered-state story exists."
+        "note": "No diff branch exists in .fv-body's template: the diff UI was removed (only its .fv-diff-* CSS remains in the scoped style)."
       },
       {
         "name": "editing",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": ".fv-body in FileViewerModal.vue includes editing; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "note": "The edit shell is exercised end to end by components-file-viewer-modal's editing, editing-csv, saving and save-error states (the file-modal-preview-editor--* stories, claimed by the modal component row); inline rows cannot claim story coverage."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in FileViewerModal.vue has not yet been audited."
+      "status": "known",
+      "detail": "The .fv-body shows the modal's 'Loading…'/error text lines for the initial load and the streaming-end refresh failure — no separate skeleton geometry (initial loading and failure are the modal row's covered loading/error stories). Loaded content replaces the whole body, so the loading line does not match the loaded table/prose geometry and a loading-geometry follow-up applies."
     },
     "migration": {
       "status": "unassessed",
@@ -9422,32 +10010,38 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": ".mm-canvas-wrap in MemoryMapView.vue implements this family; no rendered-state story exists."
+        "note": "The wrap at rest is the baseline of the drawn-graph state: its rendered story memory-graph--graph is claimed on the owner row components-memory-map-view (story coverage lives on component rows only)."
       },
       {
         "name": "graph",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": ".mm-canvas-wrap in MemoryMapView.vue includes graph; no rendered-state story exists."
+        "note": "The drawn canvas with toolbar stats, zoom controls and hint: memory-graph--graph mounts the production owner and is claimed on components-memory-map-view; its play flips the label-gate hint by zooming in."
+      },
+      {
+        "name": "zoomed-out",
+        "coverage": "not-applicable",
+        "storyIds": [],
+        "note": "The labels-hidden fit scale (more than 40 visible notes): the initial render of memory-graph--graph's dense synthetic vault, claimed on components-memory-map-view."
       },
       {
         "name": "selection",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": ".mm-canvas-wrap in MemoryMapView.vue includes selection; no rendered-state story exists."
+        "note": "Selecting a note flies the camera in and opens its tile: memory-graph--selection drives the production requestFocus and is claimed on components-memory-map-view."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "hover-tip",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "note": "The v-if hoveredNode tooltip needs a pointer over a node's settled canvas position; the simulation's coordinates are not deterministic in the workshop, so no story asserts it."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in MemoryMapView.vue has not yet been audited."
+      "status": "none",
+      "detail": "The wrap renders only after the owner's graph load settles; the loading branch and its skeleton belong to the map-view row, which documents them."
     },
     "migration": {
       "status": "unassessed",
@@ -9474,38 +10068,32 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": ".mm-list-wrap in MemoryMapView.vue implements this family; no rendered-state story exists."
+        "note": "The wrap at rest is the baseline of the list state: its rendered story memory-list-selection--list is claimed on the owner row components-memory-map-view (story coverage lives on component rows only)."
       },
       {
         "name": "list",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": ".mm-list-wrap in MemoryMapView.vue includes list; no rendered-state story exists."
+        "note": "The sortable table with aria-sort headers, the dash placeholder for an undated note and the stale row's Needs review flag: memory-list-selection--list is claimed on components-memory-map-view and its play sorts by Checked."
       },
       {
         "name": "selection",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": ".mm-list-wrap in MemoryMapView.vue includes selection; no rendered-state story exists."
+        "note": "A row's title button selects the row (aria-pressed, the current class) and opens the tile: memory-list-selection--selection is claimed on components-memory-map-view."
       },
       {
         "name": "filter",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": ".mm-list-wrap in MemoryMapView.vue includes filter; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "note": "The orphans filter narrows the table to unlinked notes: memory-list-selection--filter is claimed on components-memory-map-view."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in MemoryMapView.vue has not yet been audited."
+      "status": "none",
+      "detail": "The wrap renders only after the owner's graph load settles; there is no loading branch inside the list. The owner's loading states are on the map-view row."
     },
     "migration": {
       "status": "unassessed",
