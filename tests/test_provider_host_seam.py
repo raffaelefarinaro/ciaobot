@@ -25,7 +25,6 @@ _HOST_SEAMS = (
     "background_count",
     "background_shell_rows",
     "background_child_ids",
-    "stop_background_task",
     "abort_session",
     "interrupted_background_work",
     "read_mcp_status",

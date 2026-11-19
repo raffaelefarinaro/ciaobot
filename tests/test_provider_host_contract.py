@@ -59,7 +59,6 @@ async def test_base_defaults_are_inert(tmp_path: Path) -> None:
     assert p.background_count == 0
     assert p.background_shell_rows() == []
     assert p.background_child_ids() == []
-    assert await p.stop_background_task("t") is False
     assert await p.abort_session("s") is None
     assert p.interrupted_background_work() is None
 

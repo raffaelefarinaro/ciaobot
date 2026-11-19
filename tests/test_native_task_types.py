@@ -3,8 +3,8 @@
 Pure-function characterization — the case-sensitive ``"agent"`` substring
 truth table, the single no-default ``get("task_type")`` read, input
 immutability and exception propagation — plus source-ownership assertions
-that both consumers take the predicate from its neutral owner rather than
-from each other.
+that the remaining caller (the host Processes projection) takes the
+predicate from its neutral owner.
 """
 
 from __future__ import annotations
@@ -148,13 +148,16 @@ def test_predicate_propagates_a_mapping_get_error_unwrapped() -> None:
 
 # ── neutral ownership ───────────────────────────────────────────────────
 #
-# The predicate is defined once, in ciao.native_task_types, and the adapter
-# and host import it from there. AST checks are pinned to the parsed source
-# trees, not line numbers: they fail before the extraction and pin the final
-# ownership afterwards.
+# The predicate is defined once, in ciao.native_task_types. The Claude
+# adapter's process-task stop guard left with the background-stop route, so
+# the host Processes projection in routes_api.py is the only remaining
+# caller and the only module these guards assert. AST checks are pinned to
+# the parsed source trees, not line numbers.
 
 _NEUTRAL_MODULE = "native_task_types.py"
 _PREDICATE = "is_process_task"
+# Production modules that still import and call the predicate.
+_REMAINING_CALLERS: tuple[tuple[str, ...], ...] = (("web", "routes_api.py"),)
 
 
 def _ciao_source(*parts: str) -> str:
@@ -184,26 +187,19 @@ def _imports_by_module(source: str) -> dict[str, set[str]]:
 
 def test_predicate_is_defined_once_in_the_neutral_module_only() -> None:
     neutral = _all_function_names(_ciao_source(_NEUTRAL_MODULE))
-    adapter = _all_function_names(_ciao_source("providers", "claude.py"))
-    host = _all_function_names(_ciao_source("web", "routes_api.py"))
 
     assert neutral.count(_PREDICATE) == 1
-    assert _PREDICATE not in adapter
-    assert _PREDICATE not in host
+    for parts in _REMAINING_CALLERS:
+        assert _PREDICATE not in _all_function_names(_ciao_source(*parts))
 
 
-def test_adapter_and_host_import_the_predicate_from_the_neutral_module() -> None:
-    adapter_imports = _imports_by_module(_ciao_source("providers", "claude.py"))
-    host_imports = _imports_by_module(_ciao_source("web", "routes_api.py"))
-
-    assert _PREDICATE in adapter_imports["ciao.native_task_types"]
-    assert _PREDICATE in host_imports["ciao.native_task_types"]
-    # The host keeps its concrete adapter import: the Processes projection and
-    # the background-stop route still read tasks through live_claude. Only the
-    # classification moved out of it, so nothing may import the predicate from
-    # the adapter any more.
-    assert _PREDICATE not in host_imports.get("ciao.providers.claude", set())
-    assert _PREDICATE not in adapter_imports.get("ciao.providers.claude", set())
+def test_remaining_callers_import_the_predicate_from_the_neutral_module() -> None:
+    for parts in _REMAINING_CALLERS:
+        imports = _imports_by_module(_ciao_source(*parts))
+        assert _PREDICATE in imports["ciao.native_task_types"]
+        # Classification stays in the neutral module: a caller must not take
+        # the predicate from the Claude adapter.
+        assert _PREDICATE not in imports.get("ciao.providers.claude", set())
 
 
 def test_native_task_types_imports_only_the_declared_stdlib_typing() -> None:
@@ -222,6 +218,6 @@ def _called_names(source: str) -> set[str]:
     }
 
 
-def test_adapter_and_host_still_call_the_neutral_predicate() -> None:
-    assert _PREDICATE in _called_names(_ciao_source("providers", "claude.py"))
-    assert _PREDICATE in _called_names(_ciao_source("web", "routes_api.py"))
+def test_remaining_callers_still_call_the_neutral_predicate() -> None:
+    for parts in _REMAINING_CALLERS:
+        assert _PREDICATE in _called_names(_ciao_source(*parts))

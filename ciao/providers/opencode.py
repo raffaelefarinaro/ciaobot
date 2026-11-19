@@ -86,7 +86,6 @@ from ciao.providers.base import (
     BaseSDKProvider,
     McpOAuthAttempt,
     McpOAuthUnavailable,
-    MoveToBackgroundOutcome,
     ProviderCapabilities,
     QuestionResponseResult,
     build_prompt,
@@ -516,9 +515,6 @@ _MODE_AGENTS: dict[str, str] = {
 # wildcard goes first and specific grants follow. ``auto`` allows routine work
 # while keeping every shell command behind an operator approval card.
 _READ_ONLY_TOOLS = ("read", "glob", "grep")
-# Tools OpenCode's POST /api/session/{id}/background can move (its job
-# types `shell` and `subagent`; verified on 2.0.27, #1413).
-_BACKGROUNDABLE_TOOLS = frozenset({"shell", "subagent"})
 # Permission changes cannot be patched onto an existing opencode session.
 # Keep the replacement-session handover bounded so a long-running chat does
 # not turn one mode switch into an unbounded prompt.
@@ -1960,19 +1956,6 @@ class OpencodeProvider(BaseSDKProvider):
         """Session ids of the background subagents tracked for this chat, sorted."""
         return sorted(self._background_children)
 
-    async def stop_background_task(self, shell_id: str) -> bool:
-        """Terminate one tracked background shell (``DELETE /api/shell/:id``).
-
-        False when the shell is not tracked here or the server refused. The
-        shell leaves the tracked set on its ``shell.exited`` event or the next
-        reconcile, not here. A transport failure propagates as ``httpx.HTTPError``.
-        """
-        client = self._client
-        if client is None or shell_id not in self._background_shells:
-            return False
-        response = await client.delete(f"/api/shell/{quote(shell_id, safe='')}")
-        return bool(response.status_code < 400)
-
     @property
     def seconds_since_activity(self) -> float:
         """Seconds since the server last sent this provider an event."""
@@ -2962,32 +2945,6 @@ class OpencodeProvider(BaseSDKProvider):
             # it can never become an unretrieved task exception.
             logger.debug("OpenCode interrupt failed for %s", session_id, exc_info=True)
 
-    async def move_to_background(self) -> MoveToBackgroundOutcome:
-        """Ask OpenCode to background this session's running shells and subagents (#1413).
-
-        POST /api/session/{id}/background moves every running foreground
-        shell or subagent call to background observation: the call succeeds
-        with a "moved to the background" result, OpenCode tells the model to
-        finish its step, and the turn ends normally. The work then finishes as
-        a wake that `drain_events` streams. An idle session is a no-op (204).
-        """
-        client, session_id = self._client, self._session_id
-        if client is None or not session_id or not self.is_connected:
-            return "not_running"
-        eligible = any(name in _BACKGROUNDABLE_TOOLS for name in self._tool_calls.values())
-        try:
-            response = await client.post(f"/api/session/{session_id}/background")
-        except httpx.HTTPError:
-            logger.info("OpenCode background request failed for %s", session_id, exc_info=True)
-            return "failed"
-        if response.status_code >= 400:
-            logger.info(
-                "OpenCode refused to background %s: %s",
-                session_id, _sanitize_error(response.text),
-            )
-            return "failed"
-        return "moved" if eligible else "nothing"
-
     async def _compact_session(
         self, client: httpx.AsyncClient, session_id: str, request: AgentRequest
     ) -> AsyncGenerator[StreamEvent, None]:
@@ -3771,7 +3728,6 @@ class OpencodeProvider(BaseSDKProvider):
                 work_dirs=tool_work_dirs(tool, raw_input) or None,
                 input_chars=input_chars,
                 control_surface=surface,
-                backgroundable=tool in _BACKGROUNDABLE_TOOLS,
             )]
         if kind in {"session.tool.success", "session.tool.failed"}:
             call_id = str(props.get("id") or "")
@@ -3930,7 +3886,6 @@ class OpencodeProvider(BaseSDKProvider):
                 work_dirs=tool_work_dirs(tool, raw_input) or None,
                 input_chars=input_chars,
                 control_surface=surface,
-                backgroundable=tool in _BACKGROUNDABLE_TOOLS,
             )]
 
         if status in {"completed", "error"}:

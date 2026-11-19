@@ -38,10 +38,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
         "sign-in tab on the host, returns no credential"
     ),
     "/api/auth/logout": "browser logout; clears the session cookie",
-    "/api/chats/{chat_id}/background-tasks/{task_id}/stop": (
-        "Processes Stop button for a running native shell or Monitor; the agent that "
-        "started the task stops it from its own session"
-    ),
     "/api/chats/{chat_id}/actions/{action_id}/start": (
         "Needs-you card buttons (Sign in / Not now / Continue); signed session, browser-only. "
         "Agents raise actions with `ciao chat needs-action` but never start, dismiss or continue them"

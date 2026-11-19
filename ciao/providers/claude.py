@@ -95,7 +95,6 @@ from ciao.providers.base import (
 )
 from ciao.rate_limits import RateLimitStore, default_store_path, is_rate_limit_telemetry
 from ciao.setup_status import record_claude_bundled_skills
-from ciao.native_task_types import is_process_task
 
 logger = logging.getLogger(__name__)
 
@@ -688,19 +687,6 @@ class ClaudeProvider(BaseSDKProvider):
             }
             for task_id in sorted(self._native_tasks)
         ]
-
-    async def stop_background_task(self, task_id: str) -> bool:
-        """Ask the CLI to stop one tracked process task; False if not tracked or an agent.
-
-        The row is not dropped here: the CLI reports the terminal status in the
-        message stream and ``_observe_message`` clears it then.
-        """
-        client = self._client
-        info = self._native_tasks.get(task_id)
-        if info is None or client is None or not is_process_task(info):
-            return False
-        await client.stop_task(task_id)
-        return True
 
     def _observe_message(self, msg: Any) -> None:
         """Record SDK activity and track background tasks from lifecycle messages.

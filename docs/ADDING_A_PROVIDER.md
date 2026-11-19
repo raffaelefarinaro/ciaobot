@@ -86,7 +86,6 @@ set and nothing else.
 |---|---|---|
 | `disconnect()` | Session reset, delete, idle reap, stop escalation. | The process is leaked. On `BaseProvider` the default is a no-op. |
 | `ActiveHandle.stop()` | The Stop button. | Registered from `run_streaming`. |
-| `move_to_background()` | The PWA's *Move to background* action (OpenCode's Ctrl+B). | On `BaseProvider` the default returns `"unsupported"` and the route answers 409. A provider that implements it sets `ToolUseEvent.backgroundable` on the calls it can move; the PWA shows the action only for those. |
 | `response_session_id` | Unheld permission and question replies, to reject replies for an old session. | Defaults to `""` when the provider has no session-scoped response fence. |
 | `current_session_id` | Turn delivery session rotation in `_drive_stream` and the host's live session probes; the service getter forwards it. | Defaults to `None`: the adapter tracks no session. A service with no provider instance reports `None` without constructing one. |
 | `has_permission_request`, `permission_request_session`, `tool_use_id_for_request` | Permission ownership, child-session selection, and capturing the tool card id before acknowledgement. | Defaults to false/empty values. |
@@ -109,7 +108,7 @@ set and nothing else.
 | `read_collab_tree(workspace_root, session_id)` (classmethod), `read_live_collab_tree(*, include_messages=False, only_child_id=None)` | Subagent panels and schedule waits: child sessions with history, from storage or from the live connection. | Defaults return `[]`. |
 | `wait_background_change(timeout)` | The subagent watcher's poll wait between background-work reads. | Defaults to `asyncio.sleep(timeout)`. OpenCode returns early on a shell exit or child end. |
 | `refresh_background_shells()`, `background_count`, `background_shell_rows()`, `background_child_ids()` | The background-process list and the Stop/restart gates. Rows are adapter-shaped, not normalised, like `model_catalog`. | Defaults return `0`, `0`, `[]`, `[]`. |
-| `stop_background_task(task_id)`, `abort_session(session_id)` | Stopping one background task or aborting a provider-side session. | `False` and a no-op. |
+| `abort_session(session_id)` | Aborting a provider-side session. | A no-op. |
 | `interrupted_background_work()` | Shutdown record of work a restart loses: `{"children": [...], "shells": [{"id", "command"}]}`. The host checks `background_work_outstanding` first. | Defaults to `None`: nothing to record. |
 | `native_title_candidates(workspace_root, session_id)` (classmethod) | `ProjectChatManager._native_chat_title`, tier 1 of the auto-title poll. | On `BaseProvider` the default returns `()` — no native title for that provider. |
 | `delete_session(workspace_root, session_id)` (classmethod) | `ProjectChatManager._reclaim_provider_sessions_async`, the delete/archive/reset cleanup. | On `BaseProvider` the default returns `None` — an adapter inheriting it intentionally does no reclaim, and the host stays quiet. |
