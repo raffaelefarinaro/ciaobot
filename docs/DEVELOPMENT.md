@@ -1013,10 +1013,16 @@ while the server is running, because the live schedule store may be writing it.
 - **`develop`** is the integration branch. Feature and fix PRs target `develop`.
 - **`main`** is release-only. Direct pushes and merges to `main` are blocked; only release PRs land there.
 - **CI** (`.github/workflows/ci.yml`) runs on pull requests into `develop` or `main` and manual dispatch.
-  Every PR runs two Linux jobs in parallel: `linux-server` (`mypy ciao`,
-  `pytest -n auto tests/`, about 4 minutes) and `linux-web` (`npm test`,
+  Every PR runs three Linux jobs in parallel: `linux-server` (`mypy ciao`,
+  `pytest -n auto tests/`, about 4 minutes), `linux-web` (`npm test`,
   `npm run build` and a package smoke test of the built wheel, about 3
-  minutes). For a PR into `develop` whose three-dot diff from its base changes
+  minutes) and `linux-install-smoke`, which builds the PWA and the engine
+  wheel this checkout would publish and proves the Linux one-line installer
+  by installing that wheel with `scripts/install.sh` inside a clean
+  `ubuntu:24.04` container as an unprivileged account (`--no-service`; the
+  planned service unit is only dry-run in the container and
+  `systemd-analyze verify` re-checks it on the host, #3131). For a PR into
+  `develop` whose three-dot diff from its base changes
   `web/`, `linux-e2e` runs alongside `linux-web`, after the fast `web-scope`
   detector: it installs Chromium on Ubuntu
   and runs `npm run test:e2e` from the PR merge checkout. That command's npm
@@ -1078,7 +1084,7 @@ scripts/prepare-release --apply --create-pr --ready
   checks, and opens a PR into `main`. Use
   `--bump minor` or `--version X.Y.Z` when needed.
 
-- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA and the engine wheel, verifies the wheel in a clean environment, signs the engine manifest with the release minisign key (`ciaobot-engine-manifest.json` + `.sig`, gated by `ciao.release_manifest verify`), which lists the wheel, the server host archive and the two installer scripts (kind `installer`), and attaches six engine assets: `install.sh`, `install-engine.sh`, the wheel, the manifest, its signature, and the universal server host archive the manifest authenticates (`ciaobot-server-host-macos-universal-v1.tar.gz`, built by `scripts/build-server-host.py`; see `docs/SERVER_HOST_RELEASE.md`). After the upload it re-downloads the manifest, its signature and the two installers from the release and fails unless `ciao.release_manifest verify --asset` matches each installer to its signed entry. Since #653 it publishes no app, no `latest.json` feed, no native verifier and no bundled runtime, and its signer is `@tauri-apps/cli` run standalone, so it never depended on the now-deleted `desktop/` tree. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`. The signed (Developer ID, notarized) host is rehearsed only by the separate, manually dispatched, protected `.github/workflows/server-host-signing-rehearsal.yml`, which uploads no release asset, needs operator-provisioned credentials (a Developer ID certificate and a notarization-capable App Store Connect API key) and is not part of `publish.yml`; see `docs/SERVER_HOST_RELEASE.md`.
+- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA and the engine wheel, verifies the wheel in a clean environment, and signs the engine manifest with the release minisign key (`ciaobot-engine-manifest.json` + `.sig`, gated by `ciao.release_manifest verify`), which lists the wheel alone. It attaches three engine assets: the wheel, the manifest and its signature (#3130 R1). The server host archive and the installer scripts are no longer built, listed or attached. After the upload it re-downloads the three and fails unless `ciao.release_manifest verify --asset` matches the wheel to its signed entry. Since #653 it publishes no app, no `latest.json` feed, no native verifier and no bundled runtime, and its signer is `@tauri-apps/cli` run standalone, so it never depended on the now-deleted `desktop/` tree. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`.
 
 One-time GitHub setup for a fresh clone or repo admin:
 
@@ -1093,9 +1099,12 @@ PRs without a `web/` change. `mac-app` is required on both branches the same
 way: it passes after the scope check on PRs that do not change `mac/` or
 `web/src/lib/workspaceColors.ts`, and
 activating it live is the same separate admin action, after it has reported on
-a PR. Admins remain exempt on `develop` so the
+a PR. `linux-install-smoke` is likewise required on both branches, with no
+scope condition: GitHub requires it once the workflow has reported on a PR,
+and activating its context live is the same admin action. Admins remain
+exempt on `develop` so the
 post-release sync PR can merge. The checked-in script continues to declare
-`linux-server`, `linux-web`, `linux-server-latest-python`, macOS `test` and
+`linux-server`, `linux-web`, `linux-install-smoke`, `linux-server-latest-python`, macOS `test` and
 `mac-app` required on `main`, including for admins.
 This source change does not update live branch protection: activating the new
 required context needs separate maintainer approval and an admin action after

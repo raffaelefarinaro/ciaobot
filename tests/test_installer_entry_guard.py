@@ -14,7 +14,9 @@ def _fresh(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, platform: str = "dar
     home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(install_discovery, "_platform", lambda: platform)
-    monkeypatch.setattr(install_discovery, "_discover_macos", lambda base: None)
+    from ciao import workspace_discovery
+
+    monkeypatch.setattr(workspace_discovery, "_discover_macos", lambda base: None)
     monkeypatch.setattr(macos_service, "server_job_registered", lambda: False)
     return {}, home
 

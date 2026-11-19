@@ -1,5 +1,7 @@
 # Ciaobot Server native host
 
+> The host is no longer built or published (2.0, #3130 R1). Hosted 1.x installs keep the copy they have; `server_host.py` still parses and verifies it.
+
 `native/server-host/ServerHost.swift` is the production, persistent macOS host
 for Ciaobot (#1009, child A of #1008). It is small on purpose: a stable,
 immutable permission identity in front of a Python engine that stays
