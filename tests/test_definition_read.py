@@ -1,8 +1,7 @@
-"""The strict definition digest the macOS service manager rechecks.
+"""The strict bounded read that digests a service definition.
 
-The reader is the one ``macos_service`` uses to digest a LaunchAgent definition
-before it is trusted. The retired native handoff had its own copy; these tests
-exercise the surviving reader.
+These tests exercise :func:`ciao.os_support.definition.read_definition` directly,
+the reader the macOS takeover digests a launchd definition with.
 """
 
 from __future__ import annotations
@@ -14,18 +13,19 @@ from typing import Callable
 
 import pytest
 
-from ciao import macos_service
+from ciao.os_support.definition import MAX_DEFINITION_BYTES, read_definition
 
-#: ``(digest, bytes)``; the service manager keeps only the digest.
+#: ``(digest, bytes)`` for one definition file.
 Reader = Callable[[Path], tuple[str, bytes | None]]
 
 
-def _macos_reader(path: Path) -> tuple[str, bytes | None]:
-    return macos_service._definition_digest(path), None
+def _definition_reader(path: Path) -> tuple[str, bytes | None]:
+    read = read_definition(path, max_bytes=MAX_DEFINITION_BYTES)
+    return read.sha256, read.data
 
 
 READERS = [
-    pytest.param(_macos_reader, id="macos_service"),
+    pytest.param(_definition_reader, id="read_definition"),
 ]
 
 
