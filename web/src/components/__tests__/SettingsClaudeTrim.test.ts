@@ -101,7 +101,6 @@ function workspaces(entryExtra: Record<string, unknown> = {}, withCatalog = true
     default_provider: 'claude',
     gws_profile: '',
     color: 'pink',
-    agent_fs_scope: null,
     ...entryExtra,
   }
   return {
@@ -109,7 +108,6 @@ function workspaces(entryExtra: Record<string, unknown> = {}, withCatalog = true
     active: 'personal',
     primary: 'personal',
     provider_options: [{ value: 'claude', label: 'Claude' }],
-    default_agent_fs_scope: 'workspace',
     ...(withCatalog ? { claude_trim_options: CATALOG } : {}),
   } as unknown as WorkspacesResponse
 }

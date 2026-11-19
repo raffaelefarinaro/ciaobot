@@ -74,11 +74,9 @@ function registry(names: string[]): WorkspacesResponse {
       default_provider: 'claude',
       gws_profile: name === 'personal' ? 'p' : '',
       color: 'pink',
-      agent_fs_scope: name === 'work' ? 'machine' : null,
     })),
     active: names[0] ?? null,
     primary: 'personal',
-    default_agent_fs_scope: 'workspace',
     provider_options: [{ value: 'claude', label: 'Anthropic (via Claude Code)' }],
   } as WorkspacesResponse
 }
@@ -139,10 +137,10 @@ describe('Settings > All workspaces', () => {
       expect(first.get('.workspace-tile').text()).toBe('1')
       expect(first.get('.workspace-title').text()).toBe('personal')
       expect(first.get('.set-tag').text()).toBe('Main workspace')
-      expect(first.get('.set-row-sub').text()).toBe('Anthropic (via Claude Code) · Workspace only · p@example.com')
+      expect(first.get('.set-row-sub').text()).toBe('Anthropic (via Claude Code) · p@example.com')
       expect(second.get('.workspace-tile').text()).toBe('2')
       expect(second.find('.set-tag').exists()).toBe(false)
-      expect(second.get('.set-row-sub').text()).toBe('Anthropic (via Claude Code) · Whole machine · no Google')
+      expect(second.get('.set-row-sub').text()).toBe('Anthropic (via Claude Code) · no Google')
     } finally {
       wrapper.unmount()
     }
@@ -265,7 +263,7 @@ describe('Settings > All workspaces', () => {
       await flushPromises()
       const panel = wrapper.get('#new-workspace')
       const labels = panel.findAll('.ws-label').map(l => l.text())
-      expect(labels).toEqual(['Name', 'Accent color', 'Agent CLI/Runtime', 'File access'])
+      expect(labels).toEqual(['Name', 'Accent color', 'Agent CLI/Runtime'])
       expect(panel.text()).toContain('in the cards above, once the new workspace is open')
       expect(panel.findAll('button').map(b => b.text())).toContain('Create and open')
     } finally {
@@ -293,7 +291,6 @@ describe('Settings > All workspaces', () => {
       const call = vi.mocked(api.post).mock.calls.find(c => c[0] === '/api/workspaces')
       const body = call?.[1] as Record<string, unknown>
       expect(body).toMatchObject({ name: 'side', vault_root: 'side', gws_profile: '' })
-      expect(body).not.toHaveProperty('agent_fs_scope')
       expect(store.activeWorkspace).toBe('side')
       expect(router.currentRoute.value.path).toBe('/settings/workspace')
     } finally {

@@ -15,11 +15,9 @@ import { SETTINGS_NAV } from './settingsNav'
  * 32-hex record id `ciao task list` returns; a short prefix is not an id. A
  * conversation is named by its own id, `chat-` plus eight lowercase hex
  * characters. A page is an exact path — no query strings, no arbitrary
- * fragments, and no `/api`, `/ws` or protocol-relative addresses. The two
- * exceptions are a workspace's File access target, whose one query parameter and
- * fixed fragment are parsed by `parseWorkspaceFileAccessHref`, and a proposal
- * review link, whose three fixed-order parameters are parsed by
- * `parseProposalReviewHref`. Adding one is a
+ * fragments, and no `/api`, `/ws` or protocol-relative addresses. The one
+ * exception is a proposal review link, whose three fixed-order parameters are
+ * parsed by `parseProposalReviewHref`. Adding one is a
  * deliberate decision: an unknown or malformed address stays an ordinary
  * browser link.
  */
@@ -55,13 +53,6 @@ const TASK_HREF = /^\/tasks\/([0-9a-f]{32})$/
 // plus eight lowercase hex characters (ciao/web/chat_service.py `_uuid8`).
 // The address is exact: no extra path, no query, no fragment.
 const CHAT_HREF = /^\/chat\/(chat-[0-9a-f]{8})$/
-// One workspace row's File access control. The name is the engine's own rule
-// (ciao/workspaces.py), and the address is exact: no extra parameter, no other
-// fragment, no other tab. The link only locates the control; it never chooses
-// a value, saves, or switches the active workspace.
-const WORKSPACE_FILE_ACCESS_HREF =
-  /^\/settings\/workspace\?workspace=([A-Za-z0-9][A-Za-z0-9_-]{0,63})#file-access$/
-
 // One pending proposal's review question, as `proposal_review_path` in
 // ciao/proposal_tracking.py emits it (that parameter order, exactly). The link
 // only locates the question; MemoryMapView's resolver decides whether it is
@@ -73,12 +64,6 @@ const PROPOSAL_REVIEW_HREF =
 export function parseProposalReviewHref(href: string): { workspace: string; proposal: string } | null {
   const match = PROPOSAL_REVIEW_HREF.exec((href || '').trim())
   return match ? { workspace: match[1]!, proposal: match[2]! } : null
-}
-
-/** The workspace an exact File access link names, or null for anything else. */
-export function parseWorkspaceFileAccessHref(href: string): string | null {
-  const match = WORKSPACE_FILE_ACCESS_HREF.exec((href || '').trim())
-  return match ? match[1]! : null
 }
 
 /** The task id an exact `/tasks/<id>` address names, or null for anything else. */
@@ -98,7 +83,6 @@ export function isAppRouteHref(href: string): boolean {
   return APP_ROUTE_HREFS.has(raw)
     || parseTaskHref(raw) !== null
     || parseChatHref(raw) !== null
-    || parseWorkspaceFileAccessHref(raw) !== null
     || parseProposalReviewHref(raw) !== null
 }
 

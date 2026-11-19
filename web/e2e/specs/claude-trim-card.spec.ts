@@ -41,10 +41,10 @@ test.describe('Claude context trimming card', () => {
     const notebook = page.getByRole('switch', { name: 'Notebook editing' })
     await expect(notebook).toHaveAttribute('aria-checked', 'false')
 
-    // Reachable by Tab: walk forward from File access, the control above the card.
-    await page.locator('#workspace-file-access-alpha').focus()
+    // Reachable by Tab: walk forward from the Name field, the first control above the card.
+    await page.locator('#workspace-name-input').focus()
     let reached = false
-    for (let i = 0; i < 6 && !reached; i++) {
+    for (let i = 0; i < 12 && !reached; i++) {
       await page.keyboard.press('Tab')
       reached = await notebook.evaluate((el) => el === document.activeElement)
     }
