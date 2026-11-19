@@ -732,3 +732,70 @@ def test_descriptor_acp_spec_resolves_module_attr(monkeypatch: pytest.MonkeyPatc
 def test_shipped_providers_do_not_run_over_acp() -> None:
     assert all(item.acp_spec() is None for item in provider_registry.descriptors())
 
+
+
+@pytest.mark.asyncio
+async def test_unexpected_stop_log_redacts_keyword_secrets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The crash log keeps the stderr tail, but a ``key=value`` secret in it is redacted."""
+    caplog.set_level(logging.WARNING, logger="ciao.providers.acp.session")
+    config, _ = _install(
+        monkeypatch, tmp_path, sessions=["a"],
+        stderr=["fatal access_token=abc123secret"],
+        prompts=[{"steps": [{"update": _TEXT}, {"crash": True}]}],
+    )
+    provider = FakeAcpProvider(config.workspace_root, config=config)
+    try:
+        events = await asyncio.wait_for(_run_turn(provider, _request()), timeout=10)
+    finally:
+        await provider.disconnect()
+
+    assert events[-1].result == "fake stopped unexpectedly."
+    assert "abc123secret" not in caplog.text
+    assert "access_token=[redacted]" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_start_failure_log_redacts_keyword_secrets_in_adapter_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The adapter's initialize error text is logged, with its ``key=value`` secrets redacted."""
+    caplog.set_level(logging.WARNING, logger="ciao.providers.acp.provider")
+    config, _ = _install(
+        monkeypatch, tmp_path, initialize_error="invalid login access_token=xyz987secret",
+    )
+    service = ProviderService(config)  # type: ignore[arg-type]
+
+    events = await _turn(service, _request())
+
+    assert events[0].result == "fake agent did not start."
+    assert "xyz987secret" not in caplog.text
+    assert "access_token=[redacted]" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_config_error_log_redacts_keyword_secrets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A rejected config write is reported to the PWA as a status; its adapter text is redacted in the log."""
+    caplog.set_level(logging.WARNING, logger="ciao.providers.acp.session")
+    config, _ = _install(
+        monkeypatch, tmp_path,
+        config_options=[{
+            "id": "model", "name": "Model", "type": "select", "currentValue": "other",
+            "options": [{"value": "fake-model", "name": "Fake"}, {"value": "other", "name": "Other"}],
+        }],
+        config_error="rejected access_token=qqq555secret",
+        prompts=[{"steps": [{"update": _TEXT}, {"stop": "end_turn"}]}],
+    )
+    provider = FakeAcpProvider(config.workspace_root, config=config)
+    try:
+        events = await asyncio.wait_for(_run_turn(provider, _request()), timeout=10)
+    finally:
+        await provider.disconnect()
+
+    statuses = [e.status for e in events if isinstance(e, SystemStatusEvent)]
+    assert statuses == ["fake could not set model."]
+    assert "qqq555secret" not in caplog.text
+    assert "access_token=[redacted]" in caplog.text

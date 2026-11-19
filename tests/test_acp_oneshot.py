@@ -1,0 +1,140 @@
+"""One-shot calls over ACP: unattended, in an empty directory, through the provider descriptor (#3137)."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from typing import Any, ClassVar
+
+import pytest
+
+from ciao import provider_registry
+from ciao.provider_registry import ProviderDescriptor
+from ciao.providers.acp.oneshot import run_acp_oneshot
+from ciao.providers.acp.provider import AcpProvider
+from ciao.providers.acp.spec import AgentSpec, ModeChoice
+from ciao.providers.oneshot import OneShotError, run_oneshot
+from tests.acp_helpers import read_calls, write_scenario
+
+SPEC: AgentSpec | None = None  # target of the fake descriptor's acp_spec_path
+
+_TEXT = {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "PONG"}}
+_OPTIONS = [
+    {
+        "id": "mode", "name": "Mode", "category": "mode", "type": "select",
+        "currentValue": "default",
+        "options": [{"value": "default", "name": "Default"}, {"value": "plan", "name": "Plan"}],
+    },
+]
+
+
+class FakeOneshotProvider(AcpProvider):
+    spec: ClassVar[AgentSpec]
+
+
+def _install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **scenario: Any) -> Path:
+    spec, calls = write_scenario(
+        tmp_path,
+        spec_modes={"plan": (ModeChoice(config_id="mode", values=("plan",)),)},
+        **scenario,
+    )
+    descriptor = ProviderDescriptor(
+        id="fake",
+        label="Fake agent",
+        short_label="Fake",
+        cli_label="Fake",
+        factory_path="tests.test_acp_oneshot:FakeOneshotProvider",
+        acp_spec_path="tests.test_acp_oneshot:SPEC",
+    )
+    monkeypatch.setattr(sys.modules[__name__], "SPEC", spec)
+    monkeypatch.setattr(FakeOneshotProvider, "spec", spec, raising=False)
+    monkeypatch.setattr(
+        provider_registry, "_DESCRIPTORS", (*provider_registry.descriptors(), descriptor)
+    )
+    monkeypatch.setattr(
+        provider_registry, "_BY_ID", {**provider_registry._BY_ID, "fake": descriptor}
+    )
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_oneshot_returns_text_and_rejects_permissions(monkeypatch, tmp_path: Path) -> None:
+    calls = _install(monkeypatch, tmp_path, prompts=[{"steps": [
+        {"permission": {
+            "toolCall": {"toolCallId": "t1", "title": "Run rm", "kind": "execute", "status": "pending"},
+            "options": [
+                {"optionId": "yes", "name": "Yes", "kind": "allow_once"},
+                {"optionId": "no", "name": "No", "kind": "reject_once"},
+            ],
+        }},
+        {"update": _TEXT},
+    ]}])
+    spec = FakeOneshotProvider.spec
+
+    text = await run_acp_oneshot(spec, "say it", system_prompt="be brief", model="", env={})
+
+    assert text == "PONG"
+    outcomes = [call["params"] for call in read_calls(calls) if call["method"] == "permission_outcome"]
+    # Unattended: the reject option is chosen, never the allow option.
+    assert outcomes == [{"outcome": {"outcome": "selected", "optionId": "no"}}]
+
+
+@pytest.mark.asyncio
+async def test_oneshot_runs_in_empty_temp_dir(monkeypatch, tmp_path: Path) -> None:
+    calls = _install(monkeypatch, tmp_path, prompts=[{"steps": [{"update": _TEXT}]}])
+
+    await run_acp_oneshot(FakeOneshotProvider.spec, "hi", system_prompt="", model="", env={})
+
+    cwd = Path(next(c for c in read_calls(calls) if c["method"] == "initialize")["params"]["cwd"])
+    assert cwd.name == "work"
+    assert cwd.parent.name.startswith("ciaobot-acp-oneshot-")
+    assert not cwd.parent.exists()  # the whole temporary tree is gone afterwards
+
+
+@pytest.mark.asyncio
+async def test_oneshot_refusal_raises_nontransient(monkeypatch, tmp_path: Path) -> None:
+    _install(monkeypatch, tmp_path, prompts=[{"steps": [{"stop": "refusal"}]}])
+
+    with pytest.raises(OneShotError) as raised:
+        await run_acp_oneshot(FakeOneshotProvider.spec, "hi", system_prompt="", model="", env={})
+
+    assert raised.value.transient is False
+
+
+@pytest.mark.asyncio
+async def test_oneshot_passes_session_meta(monkeypatch, tmp_path: Path) -> None:
+    calls = _install(monkeypatch, tmp_path, prompts=[{"steps": [{"update": _TEXT}]}])
+    meta = {"claudeCode": {"options": {"tools": [], "skills": []}}}
+
+    await run_acp_oneshot(
+        FakeOneshotProvider.spec, "hi", system_prompt="", model="", env={}, session_meta=meta,
+    )
+
+    new = next(call for call in read_calls(calls) if call["method"] == "session/new")
+    assert new["params"]["_meta"] == meta
+    assert new["params"]["mcpServers"] == []
+
+
+@pytest.mark.asyncio
+async def test_oneshot_applies_plan_mode_and_model(monkeypatch, tmp_path: Path) -> None:
+    calls = _install(
+        monkeypatch, tmp_path, config_options=_OPTIONS, prompts=[{"steps": [{"update": _TEXT}]}],
+    )
+
+    await run_acp_oneshot(FakeOneshotProvider.spec, "hi", system_prompt="", model="", env={})
+
+    set_calls = [c["params"] for c in read_calls(calls) if c["method"] == "session/set_config_option"]
+    assert [call.get("value") for call in set_calls] == ["plan"]
+
+
+@pytest.mark.asyncio
+async def test_run_oneshot_dispatches_acp_descriptor(monkeypatch, tmp_path: Path) -> None:
+    calls = _install(monkeypatch, tmp_path, prompts=[{"steps": [{"update": _TEXT}]}])
+
+    text = await run_oneshot(
+        "hi", system_prompt="", model="", provider="fake", env={}, max_retries=0,
+    )
+
+    assert text == "PONG"
+    assert any(call["method"] == "session/new" for call in read_calls(calls))
+

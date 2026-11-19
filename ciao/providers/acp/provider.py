@@ -7,13 +7,14 @@ it only through the ``BaseProvider`` contract.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import json
 import logging
 import math
 import time
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +48,47 @@ from ciao.providers.base import (
 
 logger = logging.getLogger(__name__)
 
+_CATALOG_TTL_S = 300.0
+# Successful probes only: a failed probe is retried on the next call.
+_catalog_cache: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
+_catalog_locks: dict[tuple[str, str], asyncio.Lock] = {}
+
+
+def _option_items(options: list[dict[str, Any]], config_id: str) -> list[tuple[str, str]]:
+    """``(value, label)`` for every value of one config option, grouped or flat, first wins."""
+    items: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for option in options:
+        if option.get("id") != config_id:
+            continue
+        for item in option.get("options") or []:
+            if not isinstance(item, Mapping):
+                continue
+            entries = item["options"] if isinstance(item.get("options"), list) else [item]
+            for entry in entries:
+                if not isinstance(entry, Mapping):
+                    continue
+                value = entry.get("value")
+                if not isinstance(value, str) or not value or value in seen:
+                    continue
+                seen.add(value)
+                name = entry.get("name")
+                items.append((value, name if isinstance(name, str) and name else value))
+        break
+    return items
+
+
+def _catalog_rows(spec: AgentSpec, options: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per model: ``{"model", "label", "variants"}``; variants are the thinking levels."""
+    variants = (
+        [value for value, _label in _option_items(options, spec.thought_config_id)]
+        if spec.thought_config_id else []
+    )
+    return [
+        {"model": value, "label": label, "variants": list(variants)}
+        for value, label in _option_items(options, spec.model_config_id)
+    ]
+
 
 @dataclass(slots=True)
 class AcpHandle(ActiveHandle):
@@ -57,7 +99,7 @@ class AcpHandle(ActiveHandle):
 
 
 # acp.Client is a Protocol whose optional methods have no body; the SDK runs without them.
-class _Client(acp.Client):
+class AgentClient(acp.Client):
     """The SDK client: routes agent calls to the live session and broker."""
 
     def __init__(self) -> None:
@@ -129,7 +171,7 @@ class AcpProvider(BaseProvider):
 
     def __init__(self, workspace_root: Path, *, config: object | None = None) -> None:
         super().__init__(workspace_root, config=config)
-        self._client = _Client()  # type: ignore[abstract]
+        self._client = AgentClient()  # type: ignore[abstract]
         self._connection: AcpConnection | None = None
         self._session: AcpSession | None = None
         self._broker: PermissionBroker | None = None
@@ -166,7 +208,7 @@ class AcpProvider(BaseProvider):
                     # the PWA gets a fixed sentence built from the agent id only.
                     logger.warning(
                         "%s agent did not start: %s\n%s",
-                        self.spec.id, exc, redact_text(exc.stderr_tail),
+                        self.spec.id, redact_text(str(exc)), redact_text(exc.stderr_tail),
                     )
                     yield ResultEvent(
                         type="result", is_error=True, result=f"{self.spec.id} agent did not start."
@@ -380,3 +422,54 @@ class AcpProvider(BaseProvider):
         if not path.exists():
             return {}
         return {"acp_journal": SessionJournal.read(path)}
+
+    # -- model catalog ---------------------------------------------------------------
+
+    @classmethod
+    async def model_catalog(
+        cls, workspace_root: Path, *, force: bool = False
+    ) -> list[dict[str, Any]]:
+        """Models the agent offers in ``workspace_root``; ``[]`` when the probe fails.
+
+        Runs on the catalog route only, never on status polls. Successful results are
+        cached per (agent, workspace) for ``_CATALOG_TTL_S``; ``force`` bypasses the cache.
+        """
+        key = (cls.spec.id, str(workspace_root))
+        lock = _catalog_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            cached = _catalog_cache.get(key)
+            if not force and cached is not None and time.monotonic() - cached[0] < _CATALOG_TTL_S:
+                return [dict(row) for row in cached[1]]
+            try:
+                rows = await cls._probe_catalog(Path(workspace_root))
+            except Exception as exc:  # noqa: BLE001 — a failed probe is an empty catalog
+                # The adapter's error text stays out of the log, as in the turn path.
+                logger.warning("%s model catalog probe failed (%s).", cls.spec.id, type(exc).__name__)
+                return []
+            _catalog_cache[key] = (time.monotonic(), rows)
+            return [dict(row) for row in rows]
+
+    @classmethod
+    async def _probe_catalog(cls, workspace_root: Path) -> list[dict[str, Any]]:
+        connection = await AcpConnection.open(
+            cls.spec, cwd=workspace_root, env={}, client=AgentClient()  # type: ignore[abstract]
+        )
+        try:
+            # No prompt is sent, so the session's journal file is never written; the
+            # journal directory only has to be a path.
+            session, _replaced = await AcpSession.open(
+                connection,
+                cls.spec,
+                cwd=workspace_root,
+                resume=None,
+                additional_dirs=[],
+                journal_dir=workspace_root,
+                broker=PermissionBroker(lambda _event: None),
+                session_meta={},
+            )
+            try:
+                return _catalog_rows(cls.spec, session.config_options)
+            finally:
+                await session.close()
+        finally:
+            await connection.close()
