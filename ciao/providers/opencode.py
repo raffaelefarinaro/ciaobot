@@ -734,6 +734,51 @@ def server_version_error(payload: object) -> str | None:
     return None
 
 
+def opencode_version_line(binary: str, *, timeout: float = 5.0) -> str:
+    """The first line of ``<binary> --version``, or ``""`` when it cannot be read.
+
+    The one version probe: the Settings status row and the ACP start gate both use it.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, encoding="utf-8", timeout=timeout
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+
+
+_VERSION_CACHE: dict[tuple[str, int], str] = {}
+_VERSION_CACHE_GUARD = threading.Lock()
+
+
+def cached_opencode_version(binary: str) -> str:
+    """``opencode_version_line`` cached per binary path and mtime, so an upgrade is seen.
+
+    Only a readable version is cached: a failed probe is retried on the next call.
+    """
+    try:
+        key = (binary, os.stat(binary).st_mtime_ns)
+    except OSError:
+        return opencode_version_line(binary)
+    with _VERSION_CACHE_GUARD:
+        cached = _VERSION_CACHE.get(key)
+    if cached is not None:
+        return cached
+    version = opencode_version_line(binary)
+    if version:
+        with _VERSION_CACHE_GUARD:
+            _VERSION_CACHE[key] = version
+    return version
+
+
+def opencode_start_supported(version: str) -> bool:
+    """True when ``version`` is in the OpenCode floor: the ACP start gate's ``supported``."""
+    return server_version_error({"version": version}) is None
+
+
 def _health_failure_reason(
     last_status: int | None, last_error: Exception | None
 ) -> str:
@@ -4806,8 +4851,6 @@ def _opencode_inventory(binary: str) -> _Inventory:
 
 def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> dict[str, Any]:
     """Bounded, credential-free opencode install/auth status for Settings."""
-    import subprocess
-
     from ciao.provider_versions import release_check
     from ciao.setup_status import _provider
 
@@ -4844,15 +4887,8 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
             # the provider. Empty when the installer used needs none.
             path_command=opencode_path_hint(),
         )
-    version = ""
-    try:
-        # Unlike auth-list, this version probe still captures unbounded output.
-        result = subprocess.run(
-            [binary, "--version"], capture_output=True, text=True, encoding="utf-8", timeout=timeout
-        )
-        version = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
-    except (OSError, subprocess.SubprocessError):
-        version = ""
+    # Unlike auth-list, this version probe still captures unbounded output.
+    version = opencode_version_line(binary, timeout=timeout)
     if server_version_error({"version": version}) is not None:
         return _provider(
             name="opencode",

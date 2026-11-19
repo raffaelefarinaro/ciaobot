@@ -39,8 +39,13 @@ from ciao.providers.acp.spec import AgentSpec
 from ciao.redact import redact_text
 from ciao.tool_path import prepend_engine_path, resolve_tool, terminal_path
 
+logger = logging.getLogger(__name__)
+
 _SHUTDOWN_TIMEOUT = 5.0
-_STDIO_LIMIT = 31 * 1024 * 1024  # one JSON-RPC line; larger frames fail the read
+# The stream's buffer size. It is NOT a cap on one JSON-RPC line: the SDK's reader catches
+# LimitOverrunError and keeps appending chunks, so a longer line is assembled in memory.
+# No hard cap is enforced (the SDK offers no hook; docs/ARCHITECTURE.md, Known gaps).
+_STDIO_LIMIT = 31 * 1024 * 1024
 _WATCH_FAST_POLLS = 40
 _WATCH_FAST_INTERVAL = 0.25
 _WATCH_SLOW_INTERVAL = 3.0
@@ -81,6 +86,10 @@ class AgentStartError(RuntimeError):
     def __init__(self, message: str, *, stderr_tail: str = "") -> None:
         super().__init__(message)
         self.stderr_tail = stderr_tail
+
+
+class AgentVersionError(AgentStartError):
+    """The agent reports a version below its floor. The message is the gate's fixed refusal text."""
 
 
 class _TreeWatch:
@@ -187,6 +196,7 @@ class AcpConnection:
     def __init__(
         self,
         spec: AgentSpec,
+        binary: str,
         process: asyncio.subprocess.Process,
         watch: _TreeWatch,
         conn: acp.ClientSideConnection,
@@ -195,6 +205,7 @@ class AcpConnection:
         flushed: _FlushedResponses,
     ) -> None:
         self.spec = spec
+        self._binary = binary
         self._process = process
         self._watch = watch
         self._conn = conn
@@ -249,7 +260,7 @@ class AcpConnection:
         except BaseException:
             await asyncio.shield(asyncio.ensure_future(_stop(process, watch, stderr_task)))
             raise
-        self = cls(spec, process, watch, conn, ring, stderr_task, flushed)
+        self = cls(spec, binary, process, watch, conn, ring, stderr_task, flushed)
         try:
             await self._initialize()
         except BaseException as exc:
@@ -301,6 +312,7 @@ class AcpConnection:
                     if response.agent_capabilities is not None
                     else {}
                 )
+                await self._check_version(response)
                 return
             await self._reap_stderr()
             if request in done:
@@ -326,6 +338,24 @@ class AcpConnection:
             # Retrieve any exception so asyncio does not log it as never retrieved;
             # gather lets a cancellation of this caller through.
             await asyncio.gather(request, exited, return_exceptions=True)
+
+    async def _check_version(self, response: Any) -> None:
+        """Refuse an agent below the spec's version floor, before any session opens.
+
+        The version comes from ``agentInfo``; an agent that reports none is probed with the
+        spec's probe on the same binary. The refusal is the gate's constant text only.
+        """
+        gate = self.spec.version_gate
+        if gate is None:
+            return
+        info = getattr(response, "agent_info", None)
+        version = getattr(info, "version", "") if info is not None else ""
+        if not isinstance(version, str) or not version.strip():
+            version = await asyncio.to_thread(gate.probe, self._binary)
+        if not gate.supported(version.strip()):
+            # The reported version is adapter-controlled: it is neither shown nor logged.
+            logger.warning("%s agent refused: its version is below the supported floor.", self.spec.id)
+            raise AgentVersionError(gate.refusal)
 
     async def _reap_stderr(self) -> None:
         """Let the stderr reader see what the agent wrote before it died."""

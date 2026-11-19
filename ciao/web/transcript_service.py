@@ -1434,6 +1434,11 @@ async def _assemble_chat_messages(
                 acp_rows, getattr(chat, "turn_verification", None) or {}
             )
             return [*handover_messages, *acp_rows]
+    # opencode chats reach this point only when their ACP journal had no rows. The legacy branch
+    # below then reads the same session through `read_thread`, which returns `{"acp_journal": ...}`
+    # for ACP agents; `_render_opencode_thread` reads only `{"info", "messages"}`, so it renders
+    # nothing for a real chat and the durable transcript serves it. It is kept only until slice D2
+    # removes the opencode HTTP renderer.
     if provider not in {"claude", "opencode"}:
         current = pcm._transcripts.current_messages(
             ChatContext.for_web(chat_id), provider

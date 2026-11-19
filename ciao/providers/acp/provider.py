@@ -32,7 +32,7 @@ from ciao.models import (
     linked_repo_of,
     provider_reuse_key,
 )
-from ciao.providers.acp.connection import AcpConnection, AgentStartError
+from ciao.providers.acp.connection import AcpConnection, AgentStartError, AgentVersionError
 from ciao.providers.acp.normalize import UpdateNormalizer
 from ciao.providers.acp.permissions import PermissionBroker
 from ciao.providers.acp.session import AcpSession, ModeNotApplied, SessionJournal, journal_file
@@ -55,6 +55,12 @@ _CATALOG_PROBE_TIMEOUT_S = 25.0
 # Successful probes only: a failed probe is retried on the next call.
 _catalog_cache: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
 _catalog_locks: dict[tuple[str, str], asyncio.Lock] = {}
+
+
+def invalidate_acp_catalog(agent_id: str) -> None:
+    """Drop the cached model catalog of one ACP agent, in every workspace."""
+    for key in [key for key in _catalog_cache if key[0] == agent_id]:
+        _catalog_cache.pop(key, None)
 
 
 def _option_items(options: list[dict[str, Any]], config_id: str) -> list[tuple[str, str]]:
@@ -130,9 +136,8 @@ class AgentClient(acp.Client):
         stored = [option.model_dump(by_alias=True, exclude_none=True) for option in options]
         outcome = await broker.request(session_id, call, stored)
         if outcome.get("outcome") == "selected":
-            return RequestPermissionResponse(
-                outcome=AllowedOutcome(option_id=str(outcome.get("optionId")))
-            )
+            # The broker selects only options with a usable optionId, so this is never None.
+            return RequestPermissionResponse(outcome=AllowedOutcome(option_id=outcome["optionId"]))
         return RequestPermissionResponse(outcome=DeniedOutcome())
 
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
@@ -253,6 +258,10 @@ class AcpProvider(BaseProvider):
             if self._connection is None:
                 try:
                     await self._start(request, key)
+                except AgentVersionError as exc:
+                    # The gate's refusal is a fixed, user-facing sentence by design.
+                    yield ResultEvent(type="result", is_error=True, result=str(exc))
+                    return
                 except AgentStartError as exc:
                     # The adapter's error text and stderr stay in the log (stderr keyword-redacted);
                     # the PWA gets a fixed sentence built from the agent id only.
@@ -547,8 +556,8 @@ class AcpProvider(BaseProvider):
             try:
                 return _catalog_rows(cls.spec, session.config_options)
             finally:
-                # A close failure must not discard the catalog already read.
-                with contextlib.suppress(Exception):
-                    await session.close()
+                # The probe session is removed from the user's CLI history; a failure
+                # to remove it must not discard the catalog already read.
+                await session.discard()
         finally:
             await connection.close()

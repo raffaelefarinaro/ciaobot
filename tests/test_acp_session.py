@@ -828,3 +828,172 @@ def test_journal_path_is_hashed_and_private(tmp_path: Path) -> None:
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(path.parent.parent.stat().st_mode) == 0o700
+
+
+# -- AcpSession.on_ext and discard, without a live agent ------------------------------------------
+
+class _NoConnection:
+    alive = True
+    agent_capabilities: Mapping[str, Any] = {}
+
+
+def _bare_session(tmp_path: Path, spec: Any = None) -> AcpSession:
+    from ciao.providers.acp.agents import OPENCODE
+
+    return AcpSession(
+        _NoConnection(),  # type: ignore[arg-type]
+        spec or OPENCODE,
+        session_id="ses_root",
+        config_options=[],
+        journal=SessionJournal(tmp_path / "journal.jsonl"),
+        broker=PermissionBroker(lambda _event: None),
+    )
+
+
+def _recording_hook(events: list[Any] | None = None):
+    calls: list[tuple[str, Any]] = []
+
+    def hook(_normalizer: Any, method: str, payload: Any) -> list[Any]:
+        calls.append((method, payload))
+        return list(events or [])
+
+    return hook, calls
+
+
+def _text_event(text: str) -> Any:
+    from ciao.models import AssistantTextDelta
+
+    return AssistantTextDelta(type="text", text=text, parent_tool_use_id=None)
+
+
+@pytest.mark.asyncio
+async def test_on_ext_during_replay_is_not_delivered(tmp_path: Path) -> None:
+    session = _bare_session(tmp_path)
+    hook, calls = _recording_hook([_text_event("replayed")])
+    session._replaying = True
+    session.on_ext("opencode/session/child_update", {"rootSessionId": "ses_root"}, hook)
+    assert calls == []
+    assert session._queue.empty() and session._late_queue.empty()
+    assert session.late_turn_open is False
+    session._replaying = False
+    session.on_ext("opencode/session/child_update", {"rootSessionId": "ses_root"}, hook)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [["not", "a", "mapping"], "text", None, 7])
+async def test_on_ext_non_mapping_payload_is_ignored(tmp_path: Path, payload: Any) -> None:
+    session = _bare_session(tmp_path)
+    hook, calls = _recording_hook([_text_event("x")])
+    session.on_ext("opencode/session/child_update", payload, hook)
+    assert calls == []
+    assert session._queue.empty() and session._late_queue.empty()
+    assert session.late_turn_open is False
+
+
+@pytest.mark.asyncio
+async def test_on_ext_during_a_prompt_goes_to_the_turn_queue(tmp_path: Path) -> None:
+    session = _bare_session(tmp_path)
+    hook, _calls = _recording_hook([_text_event("in turn")])
+    session._prompt_active = True
+    session.on_ext("opencode/session/child_update", {"rootSessionId": "ses_root"}, hook)
+    assert session._queue.get_nowait().text == "in turn"
+    assert session._late_queue.empty()
+    assert session.late_turn_open is False
+
+
+@pytest.mark.asyncio
+async def test_on_ext_after_a_turn_opens_a_late_turn(tmp_path: Path) -> None:
+    session = _bare_session(tmp_path)
+    hook, _calls = _recording_hook([_text_event("late")])
+    session.on_ext("opencode/session/child_update", {"rootSessionId": "ses_root"}, hook)
+    assert session.late_turn_open is True
+    assert session._queue.empty()
+    assert session._late_queue.get_nowait().text == "late"
+    session._close_late()
+
+
+@pytest.mark.asyncio
+async def test_child_compaction_through_on_ext_is_not_reported_by_the_parent(tmp_path: Path) -> None:
+    from ciao.models import ContextCompactedEvent
+    from ciao.providers.acp.agents import OpencodeAcpProvider
+
+    provider = OpencodeAcpProvider(tmp_path)
+    session = _bare_session(tmp_path)
+    session._prompt_active = True
+    compaction = {
+        "rootSessionId": "ses_root", "childSessionId": "ses_child", "parentSessionId": "ses_root",
+        "depth": 1, "type": "update",
+        "update": {"sessionUpdate": "compaction_update", "compactionId": "c1", "status": "completed"},
+    }
+    session.on_ext("opencode/session/child_update", compaction, provider.ext_update)
+    # The parent's next update must not report the child's compaction.
+    session.on_update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "p"}})
+    queued = []
+    while not session._queue.empty():
+        queued.append(session._queue.get_nowait())
+    assert not any(isinstance(event, ContextCompactedEvent) for event in queued)
+
+
+@pytest.mark.asyncio
+async def test_discard_deletes_when_the_agent_advertises_delete(tmp_path: Path) -> None:
+    deleted: list[str] = []
+    closed: list[str] = []
+
+    class _Conn:
+        alive = True
+        agent_capabilities = {"sessionCapabilities": {"delete": {}, "close": {}}}
+
+        class conn:  # noqa: N801 — stands in for the SDK connection
+            @staticmethod
+            async def delete_session(session_id: str, **_kwargs: Any) -> None:
+                deleted.append(session_id)
+
+            @staticmethod
+            async def close_session(session_id: str, **_kwargs: Any) -> None:
+                closed.append(session_id)
+
+    session = _bare_session(tmp_path)
+    session._connection = _Conn()  # type: ignore[assignment]
+    await session.discard()
+    assert (deleted, closed) == (["ses_root"], [])
+
+
+@pytest.mark.asyncio
+async def test_discard_closes_when_delete_is_not_advertised_and_never_raises(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    closed: list[str] = []
+
+    class _Conn:
+        alive = True
+        agent_capabilities = {"sessionCapabilities": {"close": {}}}
+
+        class conn:  # noqa: N801
+            @staticmethod
+            async def close_session(session_id: str, **_kwargs: Any) -> None:
+                closed.append(session_id)
+
+            @staticmethod
+            async def delete_session(session_id: str, **_kwargs: Any) -> None:  # pragma: no cover
+                raise AssertionError("delete is not advertised")
+
+    session = _bare_session(tmp_path)
+    session._connection = _Conn()  # type: ignore[assignment]
+    await session.discard()
+    assert closed == ["ses_root"]
+
+    class _Failing:
+        alive = True
+        agent_capabilities = {"sessionCapabilities": {"delete": {}}}
+
+        class conn:  # noqa: N801
+            @staticmethod
+            async def delete_session(session_id: str, **_kwargs: Any) -> None:
+                raise RuntimeError("/private/secret-path failed with token sk-123")
+
+    session._connection = _Failing()  # type: ignore[assignment]
+    caplog.set_level(logging.WARNING)
+    await session.discard()  # no raise
+    assert "secret-path" not in caplog.text and "sk-123" not in caplog.text
+    assert "RuntimeError" in caplog.text

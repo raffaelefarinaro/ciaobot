@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 import sys
 from pathlib import Path
@@ -761,44 +762,50 @@ def _child_update(child: str, body: dict[str, Any], *, parent: str = "ses_root")
     }
 
 
+_CHILD_FIXTURE = Path(__file__).parent / "fixtures" / "acp" / "opencode_child_updates.jsonl"
+
+
+def _fixture_payloads() -> list[dict[str, Any]]:
+    return [json.loads(line) for line in _CHILD_FIXTURE.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 def test_opencode_child_update_nests_under_child_tool(tmp_path: Path) -> None:
     provider = OpencodeAcpProvider(tmp_path)
     normalizer = UpdateNormalizer(OPENCODE, "ses_root")
-    opened = provider.ext_update(normalizer, _CHILD, _child_status("ses_child", "running"))
-    assert len(opened) == 1
-    node = opened[0]
-    assert isinstance(node, ToolUseEvent)
-    assert (node.type, node.tool_name, node.tool_input) == ("tool_use", "Subagent", "Explore")
-    assert (node.tool_use_id, node.parent_tool_use_id) == ("child:ses_child", None)
+    events: list[Any] = []
+    for payload in _fixture_payloads():
+        events.extend(provider.ext_update(normalizer, _CHILD, payload))
 
-    text = provider.ext_update(normalizer, _CHILD, _child_update("ses_child", {
-        "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "NESTED"},
-        "_meta": {"opencode/child-session": {"id": "ses_child", "parentID": "ses_root", "depth": 1}},
-    }))
-    assert len(text) == 1
-    assert isinstance(text[0], AssistantTextDelta)
-    assert (text[0].text, text[0].parent_tool_use_id) == ("NESTED", "child:ses_child")
+    # The fixture's four parent-state updates (usage, model, mode, compaction) are dropped.
+    assert [
+        (event.type, getattr(event, "tool_use_id", None), event.parent_tool_use_id) for event in events
+    ] == [
+        ("tool_use", "child:ses_child", None),
+        ("text", None, "child:ses_child"),
+        ("tool_use", "ses_child:call_1", "child:ses_child"),
+        ("tool_result", "ses_child:call_1", "child:ses_child"),
+        ("tool_result", "child:ses_child", None),
+    ]
+    node = events[0]
+    assert (node.tool_name, node.tool_input) == ("Subagent", "Explore")
+    assert events[1].text == "NESTED"
+    assert events[2].tool_name == "bash"
+    assert events[-1].is_error is False
+    assert normalizer.usage == {}
+    assert normalizer.current_values == {}
+    assert normalizer.compacted is False
 
-    call = provider.ext_update(normalizer, _CHILD, _child_update("ses_child", {
-        "sessionUpdate": "tool_call", "toolCallId": "ses_child:call_1", "title": "bash",
-        "kind": "execute", "rawInput": {"command": "ls"}, "status": "pending",
-    }))
-    assert [event.parent_tool_use_id for event in call] == ["child:ses_child"]
-    assert call[0].tool_use_id == "ses_child:call_1"
 
+def test_opencode_grandchild_nests_under_its_child(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    provider.ext_update(normalizer, _CHILD, _child_status("ses_child", "running"))
     # A grandchild names its parent child, so it nests under that child's node.
     grand = provider.ext_update(normalizer, _CHILD, {
         **_child_status("ses_grand", "running", parent="ses_child"), "depth": 2,
     })
     assert grand[0].tool_use_id == "child:ses_grand"
     assert grand[0].parent_tool_use_id == "child:ses_child"
-
-    done = provider.ext_update(normalizer, _CHILD, _child_status("ses_child", "completed"))
-    assert len(done) == 1
-    assert (done[0].type, done[0].tool_use_id, done[0].parent_tool_use_id) == (
-        "tool_result", "child:ses_child", None,
-    )
-    assert done[0].is_error is False
 
 
 def test_opencode_child_failure_is_an_error_result(tmp_path: Path) -> None:
@@ -807,6 +814,38 @@ def test_opencode_child_failure_is_an_error_result(tmp_path: Path) -> None:
     provider.ext_update(normalizer, _CHILD, _child_status("ses_child", "running"))
     failed = provider.ext_update(normalizer, _CHILD, _child_status("ses_child", "failed"))
     assert [(event.type, event.is_error) for event in failed] == [("tool_result", True)]
+
+
+_DROPPED_CHILD_UPDATES = [
+    pytest.param({"sessionUpdate": "usage_update", "used": 900, "size": 1000,
+                  "cost": {"amount": "9.99", "currency": "USD"}}, id="usage_update"),
+    pytest.param({"sessionUpdate": "config_option_update", "configOptions": [
+        {"id": "model", "currentValue": "child-model", "options": []}]}, id="config_option_update"),
+    pytest.param({"sessionUpdate": "current_mode_update", "currentModeId": "plan"}, id="current_mode_update"),
+    pytest.param({"sessionUpdate": "compaction_update", "compactionId": "c1", "status": "completed"},
+                 id="compaction_update"),
+    pytest.param({"sessionUpdate": "plan", "entries": []}, id="plan"),
+]
+
+
+@pytest.mark.parametrize("body", _DROPPED_CHILD_UPDATES)
+def test_opencode_child_drops_parent_state_updates(
+    tmp_path: Path, body: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    normalizer.current_values.update({"model": "chat-model", "mode": "build"})
+    provider.ext_update(normalizer, _CHILD, _child_status("ses_child", "running"))
+    caplog.set_level(logging.DEBUG, logger="ciao.providers.acp.agents")
+    for _ in range(2):
+        assert provider.ext_update(normalizer, _CHILD, _child_update("ses_child", body)) == []
+    # The chat's own gauges, model, mode and compaction are untouched by the child.
+    assert normalizer.usage == {}
+    assert normalizer.current_values == {"model": "chat-model", "mode": "build"}
+    assert normalizer.compacted is False
+    # One DEBUG line per kind, however many times it arrives.
+    kind = body["sessionUpdate"]
+    assert [r.getMessage() for r in caplog.records].count(f"dropped child session update kind {kind}") == 1
 
 
 def test_opencode_child_guards_drop_foreign_unknown_and_malformed(tmp_path: Path) -> None:
@@ -820,11 +859,57 @@ def test_opencode_child_guards_drop_foreign_unknown_and_malformed(tmp_path: Path
     # A non-string status is not a terminal status: the child opens and nothing ends it.
     events = provider.ext_update(normalizer, _CHILD, _child_status("ses_child", ["completed"]))
     assert [event.type for event in events] == ["tool_use"]
-    # A child's compaction is not the chat's: the session must not report it.
-    provider.ext_update(normalizer, _CHILD, _child_update("ses_child", {
-        "sessionUpdate": "compaction_update", "compactionId": "c1", "status": "completed",
-    }))
-    assert normalizer.compacted is False
+
+
+def test_opencode_child_title_is_capped_and_stripped_of_control_characters(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    opened = provider.ext_update(normalizer, _CHILD, _child_status("ses_child", "running", title="Ex\x1b[2Jplore\x00" + "x" * 500))
+    title = opened[0].tool_input
+    assert len(title) == 200
+    assert not any(ch in title for ch in "\x00\x1b")
+    assert title.startswith("Ex[2Jplore")
+
+
+@pytest.mark.parametrize("child", ["ses\x00child", "x" * 129, ""])
+def test_opencode_child_with_unusable_id_is_dropped(tmp_path: Path, child: str) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    assert provider.ext_update(normalizer, _CHILD, _child_status(child, "running")) == []
+
+
+def test_opencode_child_id_at_the_length_cap_is_kept(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    child = "c" * 128
+    opened = provider.ext_update(normalizer, _CHILD, _child_status(child, "running"))
+    assert opened[0].tool_use_id == f"child:{child}"
+
+
+def test_opencode_child_set_is_capped_per_root_session(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    for index in range(256):
+        assert provider.ext_update(normalizer, _CHILD, _child_status(f"ses_{index}", "running"))
+    # The 257th child has no node, and no event for it is emitted.
+    assert provider.ext_update(normalizer, _CHILD, _child_status("ses_overflow", "running")) == []
+    assert provider.ext_update(normalizer, _CHILD, _child_update("ses_overflow", _TEXT)) == []
+    # Children already open keep working.
+    assert provider.ext_update(normalizer, _CHILD, _child_status("ses_0", "completed"))[0].type == "tool_result"
+
+
+def test_plain_update_child_meta_names_the_same_node_as_the_ext_path(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    provider.ext_update(normalizer, _CHILD, _child_status("ses_child", "running"))
+    plain = normalizer.feed({
+        **_TEXT,
+        "_meta": {"opencode/child-session": {"id": "ses_child", "parentID": "ses_root", "depth": 1}},
+    })
+    assert [event.parent_tool_use_id for event in plain] == ["child:ses_child"]
+    # Unusable ids are not used as a parent at all.
+    bad = normalizer.feed({**_TEXT, "_meta": {"opencode/child-session": {"id": "ses\x00child"}}})
+    assert [event.parent_tool_use_id for event in bad] == [None]
 
 
 @pytest.mark.asyncio

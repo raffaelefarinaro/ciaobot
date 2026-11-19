@@ -12,6 +12,8 @@ runs, and Ciaobot never reads or stores the credentials it writes.
 
 from __future__ import annotations
 
+import logging
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -20,10 +22,17 @@ from typing import Any
 
 from ciao.claude_trim import claude_settings_layer
 from ciao.models import AgentRequest, AssistantTextDelta, StreamEvent, ThinkingEvent, ToolUseEvent
-from ciao.providers.acp.normalize import UpdateNormalizer
+from ciao.providers.acp.normalize import UpdateNormalizer, child_tool_id, loggable_kind
 from ciao.providers.acp.provider import AcpProvider
-from ciao.providers.acp.spec import AgentSpec, ModeChoice
+from ciao.providers.acp.spec import AgentSpec, ModeChoice, VersionGate
+from ciao.providers.opencode import (
+    OPENCODE_V2_REQUIRED,
+    cached_opencode_version,
+    opencode_start_supported,
+)
 from ciao.tool_path import resolve_tool
+
+logger = logging.getLogger(__name__)
 
 CLAUDE = AgentSpec(
     id="claude",
@@ -202,11 +211,36 @@ OPENCODE = AgentSpec(
     },
     model_config_id="model",
     thought_config_id="effort",
+    # The floor is the one in ciao.providers.opencode (shared with the Settings status row).
+    version_gate=VersionGate(
+        supported=opencode_start_supported,
+        refusal=OPENCODE_V2_REQUIRED,
+        probe=cached_opencode_version,
+    ),
 )
 
 _OPENCODE_CHILD_UPDATE = "opencode/session/child_update"
 # Terminal child statuses, and whether each one failed.
 _OPENCODE_CHILD_END = {"completed": False, "failed": True, "interrupted": True}
+# The only child updates that reach the parent transcript. Everything else would rewrite the
+# chat's own state: usage_update the context and cost gauges, config_option_update the tracked
+# model, current_mode_update the mode, compaction_update the parent's compaction status.
+_CHILD_UPDATE_KINDS = frozenset({"agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update"})
+# A child's title is shown on its node; the child set bounds memory per root session.
+_CHILD_TITLE_CHARS = 200
+_CHILD_LIMIT = 256
+
+
+def _safe_title(raw: object) -> str:
+    if not isinstance(raw, str):
+        return ""
+    kept = "".join(ch for ch in raw if not unicodedata.category(ch).startswith("C"))
+    return kept[:_CHILD_TITLE_CHARS]
+
+
+def _update_kind(body: Mapping[str, Any]) -> object:
+    kind = body.get("sessionUpdate")
+    return kind if kind is not None else body.get("session_update")
 
 
 class OpencodeAcpProvider(AcpProvider):
@@ -216,8 +250,9 @@ class OpencodeAcpProvider(AcpProvider):
     from ``packages/cli/src/acp/child.ts`` in opencode v2.3.2. Its payload is
     ``{rootSessionId, childSessionId, parentSessionId, depth, title?, type}``, where:
 
-    - ``type: "update"`` carries ``update``, a session/update body. Its tool ids are prefixed
-      ``<childSessionId>:<id>`` and its ``_meta["opencode/child-session"]`` names the child.
+    - ``type: "update"`` carries ``update``, a session/update body. Only its message and thought
+      chunks and its tool calls are kept (see ``_CHILD_UPDATE_KINDS``); its tool ids are prefixed
+      ``<childSessionId>:<id>``.
     - ``type: "status"`` carries ``status`` (``created``, ``running``, ``completed``, ``failed``,
       ``interrupted``) and an optional ``error``.
 
@@ -231,7 +266,8 @@ class OpencodeAcpProvider(AcpProvider):
     def __init__(self, workspace_root: Path, *, config: object | None = None) -> None:
         super().__init__(workspace_root, config=config)
         self._children: set[str] = set()
-        self._children_root = ""
+        self._children_root: object = None
+        self._dropped_kinds: set[str] = set()
 
     def ext_update(
         self, normalizer: UpdateNormalizer, method: str, payload: Mapping[str, Any]
@@ -240,27 +276,26 @@ class OpencodeAcpProvider(AcpProvider):
             return []
         root = payload.get("rootSessionId")
         child = payload.get("childSessionId")
+        tool_id = child_tool_id(child)
         # A child of another session is not this chat's: its events are dropped.
-        if root != normalizer.session_id or not isinstance(child, str) or not child:
+        if root != normalizer.session_id or tool_id is None:
             return []
+        # Validated by child_tool_id, so the id is a plain string here.
+        child_id = tool_id.removeprefix("child:")
         if root != self._children_root:
             self._children_root, self._children = root, set()
-        tool_id = f"child:{child}"
         parent_session = payload.get("parentSessionId")
-        parent = (
-            f"child:{parent_session}"
-            if isinstance(parent_session, str) and parent_session and parent_session != root
-            else None
-        )
+        parent = None if parent_session == root else child_tool_id(parent_session)
         events: list[StreamEvent] = []
-        if child not in self._children:
+        if child_id not in self._children:
             # The first event for a child opens its node, whether a status or an update came first.
-            self._children.add(child)
-            title = payload.get("title")
+            if len(self._children) >= _CHILD_LIMIT:
+                return []
+            self._children.add(child_id)
             events.append(ToolUseEvent(
                 type="tool_use",
                 tool_name="Subagent",
-                tool_input=title if isinstance(title, str) else "",
+                tool_input=_safe_title(payload.get("title")),
                 tool_use_id=tool_id,
                 parent_tool_use_id=parent,
             ))
@@ -268,12 +303,14 @@ class OpencodeAcpProvider(AcpProvider):
         if kind == "update":
             body = payload.get("update")
             if isinstance(body, Mapping):
+                body_kind = _update_kind(body)
+                if body_kind not in _CHILD_UPDATE_KINDS:
+                    self._drop_kind(body_kind)
+                    return events
                 for event in normalizer.feed(dict(body)):
                     if isinstance(event, (AssistantTextDelta, ThinkingEvent, ToolUseEvent)):
                         event = replace(event, parent_tool_use_id=tool_id)
                     events.append(event)
-                # A child's compaction is not the chat's, so the session must not report it.
-                normalizer.compacted = False
         elif kind == "status":
             status = payload.get("status")
             if isinstance(status, str) and status in _OPENCODE_CHILD_END:
@@ -284,6 +321,12 @@ class OpencodeAcpProvider(AcpProvider):
                     is_error=_OPENCODE_CHILD_END[status],
                 ))
         return events
+
+    def _drop_kind(self, kind: object) -> None:
+        label = loggable_kind(kind)
+        if label not in self._dropped_kinds:
+            self._dropped_kinds.add(label)
+            logger.debug("dropped child session update kind %s", label)
 
 
 def codex_binary() -> str | None:

@@ -211,6 +211,26 @@ def test_list_models_includes_acp_provider_catalog(monkeypatch, tmp_path: Path) 
     assert {item["id"] for item in body["providers"]} >= {"fake"}
 
 
+def test_list_models_takes_the_opencode_catalog_from_the_acp_probe_only(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The HTTP opencode catalog is no longer read: /api/models asks the ACP provider."""
+    from ciao.providers.acp.agents import OpencodeAcpProvider
+
+    http_catalog = AsyncMock(side_effect=AssertionError("the HTTP opencode catalog must not run"))
+    acp_catalog = AsyncMock(return_value=[{"model": "oc/a", "label": "OC A", "variants": []}])
+    monkeypatch.setattr(OpencodeProvider, "model_catalog", http_catalog)
+    monkeypatch.setattr(OpencodeAcpProvider, "model_catalog", acp_catalog)
+    config = _route_config(tmp_path)
+
+    body = json.loads(asyncio.run(list_models(_models_request(config))).body)
+
+    assert body["provider_models"]["opencode"] == ["oc/a"]
+    assert body["backends"]["opencode"] is True
+    http_catalog.assert_not_awaited()
+    acp_catalog.assert_awaited()
+
+
 def test_list_models_keeps_an_acp_provider_empty_when_its_probe_fails(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -223,3 +243,91 @@ def test_list_models_keeps_an_acp_provider_empty_when_its_probe_fails(
     assert body["provider_models"]["fake"] == []
     assert body["provider_catalog_evidence"]["fake"]["status"] == "unknown"
     assert "opencode" in body["provider_models"]  # the route still answers for the others
+
+
+_DELETE_ADVERTISED = {"sessionCapabilities": {"delete": {}, "close": {}}}
+
+
+@pytest.mark.asyncio
+async def test_catalog_probe_session_is_deleted_when_the_agent_advertises_delete(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls = _install(monkeypatch, tmp_path, config_options=_OPTIONS, initialize=_DELETE_ADVERTISED)
+
+    assert await FakeCatalogProvider.model_catalog(_workspace(tmp_path), force=True) == _ROWS
+    new_id = _session_ids(calls, "session/new")[0]
+    # The probe leaves nothing in the user's CLI history: deleted, not merely closed.
+    assert _session_ids(calls, "session/delete") == [new_id]
+    assert _session_ids(calls, "session/close") == []
+
+
+@pytest.mark.asyncio
+async def test_catalog_probe_session_is_closed_when_delete_is_not_advertised(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls = _install(monkeypatch, tmp_path, config_options=_OPTIONS, initialize={"sessionCapabilities": {"close": {}}})
+
+    assert await FakeCatalogProvider.model_catalog(_workspace(tmp_path), force=True) == _ROWS
+    assert _session_ids(calls, "session/delete") == []
+    assert _session_ids(calls, "session/close") == _session_ids(calls, "session/new")
+
+
+@pytest.mark.asyncio
+async def test_catalog_keeps_rows_when_the_probe_delete_fails_and_logs_no_adapter_text(
+    monkeypatch, tmp_path: Path, caplog
+) -> None:
+    _install(
+        monkeypatch, tmp_path, config_options=_OPTIONS, initialize=_DELETE_ADVERTISED,
+        delete_error="secret-token /private/path boom",
+    )
+    caplog.set_level(logging.WARNING)
+
+    assert await FakeCatalogProvider.model_catalog(_workspace(tmp_path), force=True) == _ROWS
+    assert "secret-token" not in caplog.text and "/private/path" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_verify_invalidates_the_acp_catalog_cache(monkeypatch, tmp_path: Path) -> None:
+    calls = _install(monkeypatch, tmp_path, config_options=_OPTIONS)
+    workspace = _workspace(tmp_path)
+    await FakeCatalogProvider.model_catalog(workspace)
+    assert _session_news(calls) == 1
+
+    provider_module.invalidate_acp_catalog(FakeCatalogProvider.spec.id)
+    await FakeCatalogProvider.model_catalog(workspace)
+    assert _session_news(calls) == 2
+
+
+def _session_ids(calls: Path, method: str) -> list[str]:
+    return [call["params"]["sessionId"] for call in read_calls(calls) if call["method"] == method]
+
+
+@pytest.mark.asyncio
+async def test_verify_drops_the_cached_acp_catalog_so_the_next_read_probes(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The opencode verify action clears the ACP catalog cache, not only the HTTP one."""
+    from starlette.requests import Request
+
+    from ciao.web import routes_api
+
+    workspace = _workspace(tmp_path)
+    key = ("opencode", str(workspace))
+    provider_module._catalog_cache[key] = (provider_module.time.monotonic(), list(_ROWS))
+    monkeypatch.setattr(
+        routes_api, "_provider_config_payload_with_inventory",
+        lambda _config: {"connections": {"opencode": {}}},
+    )
+    request = Request({
+        "type": "http", "method": "POST",
+        "path": "/api/settings/providers/opencode/verify",
+        "headers": [],
+        "app": SimpleNamespace(state=SimpleNamespace(config=SimpleNamespace(workspace_root=workspace))),
+        "path_params": {"provider": "opencode", "action": "verify"},
+        "query_string": b"",
+    })
+
+    response = await routes_api.provider_connection_action(request)
+
+    assert response.status_code == 200
+    assert key not in provider_module._catalog_cache

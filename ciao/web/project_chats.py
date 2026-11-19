@@ -10205,10 +10205,10 @@ class ProjectChatManager:
         `BaseProvider.native_title_candidates` contract, in provider
         preference order; each is validated here with `_real_title`, so a
         contaminated candidate keeps losing to a clean one. Returns None when
-        the provider has not yet produced a real title — including its
-        placeholder default (e.g. opencode's ``New session - <timestamp>``) —
-        so the caller keeps polling until the generated title lands instead
-        of accepting the placeholder as final.
+        the provider has no real title, including its placeholder default
+        (e.g. opencode's ``New session - <timestamp>``), which is refused and
+        never written. The caller reads once per trigger; it does not poll
+        for a title that lands later.
         """
         provider = getattr(chat, "provider", "claude")
         # The chat's OWN agent root, not the install root. Every adapter's

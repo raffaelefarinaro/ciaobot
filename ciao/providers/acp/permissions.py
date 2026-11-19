@@ -64,11 +64,23 @@ def _tool_input(tool_call: Mapping[str, Any], title: str) -> str:
     return title
 
 
+def _usable_option_id(option: Mapping[str, Any]) -> str | None:
+    option_id = option.get("optionId")
+    if isinstance(option_id, str) and option_id.strip():
+        return option_id
+    return None
+
+
 def _selected(options: Sequence[Mapping[str, Any]], kinds: tuple[str, ...]) -> dict[str, Any] | None:
+    """The first option of the first kind in ``kinds`` that has a usable ``optionId``.
+
+    An option without one (missing, not a string, or blank) cannot be answered, so it is skipped.
+    """
     for kind in kinds:
         for option in options:
-            if option.get("kind") == kind:
-                return {"outcome": "selected", "optionId": option.get("optionId")}
+            option_id = _usable_option_id(option)
+            if option.get("kind") == kind and option_id is not None:
+                return {"outcome": "selected", "optionId": option_id}
     return None
 
 
