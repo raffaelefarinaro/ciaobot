@@ -366,6 +366,11 @@ class PromptCancelledEvent(StreamEvent):
 
 
 @dataclass(slots=True)
+class ContextCompactedEvent(StreamEvent):
+    """The agent compacted its session; the next prompt must carry the stable context again."""
+
+
+@dataclass(slots=True)
 class ResultEvent(StreamEvent):
     """Terminal stream event."""
 
