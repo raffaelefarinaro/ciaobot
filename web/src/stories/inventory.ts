@@ -1243,21 +1243,57 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Detailed configurable variants have not yet been audited.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in EngineOfflineView.vue implements this render; no rendered-state story exists."
+        "name": "unreachable-loopback",
+        "coverage": "covered",
+        "storyIds": [
+          "engine-offline-view--unreachable-loopback"
+        ],
+        "note": "Default: 'Ciaobot isn't running' with the two copyable service commands and the logs hint (v-if unreachable && loopback); the story asserts the mount takes focus on Retry, its click emits retry, and Tab wraps inside the capture-phase focus trap."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "unreachable-remote",
+        "coverage": "covered",
+        "storyIds": [
+          "engine-offline-view--unreachable-remote"
+        ],
+        "note": "loopback false: the title and text name the host instead of the commands, and the command rows with their copy buttons are absent."
+      },
+      {
+        "name": "restarting",
+        "coverage": "covered",
+        "storyIds": [
+          "engine-offline-view--restarting"
+        ],
+        "note": "state 'updating': title 'Ciaobot is restarting' and text 'This page reconnects by itself.', with no commands and no host name regardless of loopback."
+      },
+      {
+        "name": "retrying",
+        "coverage": "covered",
+        "storyIds": [
+          "engine-offline-view--retrying"
+        ],
+        "note": "retrying true: Retry keeps the mount focus, carries the disabled attribute and reads 'Checking…', so the control is actually blocked."
+      },
+      {
+        "name": "command-copied",
+        "coverage": "covered",
+        "storyIds": [
+          "engine-offline-view--command-copied"
+        ],
+        "note": "Copy on one command row flips its label to 'Copied' through the component's own writeClipboard path against a stubbed clipboard; the other row keeps 'Copy'."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "engine-offline-view--narrow"
+        ],
+        "note": "The fixed inset-0 curtain at a 390px viewport: the content column (max-width 34rem) still fits and the loopback command rows render."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in EngineOfflineView.vue has not yet been audited."
+      "status": "none",
+      "detail": "The curtain owns no data loading: outage, restart and retrying visuals arrive as props (retrying is the only in-flight look, asserted by the retrying state)."
     },
     "migration": {
       "status": "unassessed",
@@ -2943,21 +2979,181 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Login/bootstrap/native-bootstrap/restarting/provider diagnostics; connected composition. Detailed variants are unassessed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in LoginView.vue implements this render; no rendered-state story exists."
+        "name": "login",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--login"
+        ],
+        "note": "The standard login branch (isBootstrap false after the probe answers non-bootstrap): 'Enter your password', the empty password field blocking the submit, the /login shell bar and the help link; on a loopback hostname like the workshop's (isHostOrigin), the PWA host sign-in block also renders, and a remote hostname hides it."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "login-error",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--login-error"
+        ],
+        "note": "A submitted wrong password: POST /api/auth answers 401 and the form records 'That password did not work. Check it and try again.' (role=alert), with aria-invalid, aria-describedby and loading released, so the attempt is usable again."
+      },
+      {
+        "name": "login-submitting",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--login-submitting"
+        ],
+        "note": "The login write held: the submit reads 'Logging in…' and both the password input and the submit carry disabled while the write is in flight."
+      },
+      {
+        "name": "setup-probe-failed",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--setup-probe-failed"
+        ],
+        "note": "Initial-loading contract, initial failure: the mount probe GET /api/setup-status answers 500, fetchSetupStatus catches it and the page stays on the standard login branch — a render identical to login, distinguished by the failed read in the story's ledger."
+      },
+      {
+        "name": "host-sign-in",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--host-sign-in"
+        ],
+        "note": "The busy host sign-in: clicking 'Sign in on this computer' holds POST /api/auth/host-sign-in, so the control reads 'Opening…' and carries aria-disabled while busy. The success path (an /api/auth/check poll and a navigation to '/') is not covered: it must not run in the workshop."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--narrow"
+        ],
+        "note": "The /login page at a 390px viewport: the shell, the password row and the submit still render without overflowing."
+      },
+      {
+        "name": "bootstrap-setup",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--bootstrap-setup"
+        ],
+        "note": "The v-else-if isBootstrap wizard on a non-native install: first-run shell bar, run note, tour, the workspace field with its mount note, the claude '[ok] Ready' card, and Finish Setup blocked while the form is incomplete; GET /api/setup/inspect-folder answers for ~/ciaobot."
+      },
+      {
+        "name": "bootstrap-native",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--bootstrap-native"
+        ],
+        "note": "native_bootstrap: no shell bar, run note or tour, the native-bootstrap form styles, and the suggested ~/Ciaobot workspace is what the probe answers about."
+      },
+      {
+        "name": "bootstrap-detected-workspaces",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--bootstrap-detected-workspaces"
+        ],
+        "note": "The folder probe reports existing workspaces: the logical-name field is hidden for the chips and the 'Found 2 workspaces' copy, and the fixture's cloud_sync_warning renders its warn note."
+      },
+      {
+        "name": "bootstrap-folder-inspecting",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--bootstrap-folder-inspecting"
+        ],
+        "note": "The folder probe held: 'Checking the folder for existing workspaces…' with no chips and no name field; the hint replaces the field, no skeleton (see loading)."
+      },
+      {
+        "name": "bootstrap-provider-setup",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--bootstrap-provider-setup"
+        ],
+        "note": "A provider not installed: the '[!] Not Installed' error badge, the instruction wording for a desktop app present, the command box with Copy (the stubbed clipboard) and the PATH step, the install link and the auto-refresh hint; the opencode radio swaps the card, and the finish stays blocked without a provider."
+      },
+      {
+        "name": "bootstrap-advanced",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--bootstrap-advanced"
+        ],
+        "note": "The Advanced disclosure (aria-expanded) opens Port, Python Path and the 'I will set provider keys manually in .env later' checkbox, and closes back."
+      },
+      {
+        "name": "bootstrap-password-hint",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--bootstrap-password-hint"
+        ],
+        "note": "passwordProblem: a too-short pair gives 'Use at least 4 characters.', a mismatching pair 'The two passwords do not match.', and matching values unblock Finish Setup."
+      },
+      {
+        "name": "workspace-picker",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--workspace-picker"
+        ],
+        "note": "Browse… opens the server-backed picker (GET /api/setup/list-dirs), the '↑ Up' control is disabled with no parent, stepping into a folder shows its empty listing and names the select, and 'Use this folder: storybook-alpha' writes the field and re-probes the chosen folder."
+      },
+      {
+        "name": "workspace-picker-create",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--workspace-picker-create"
+        ],
+        "note": "An empty folder shows 'No subfolders here — create one below' and enables Create folder once named; the POST /api/setup/mkdir steps into the created folder, and Cancel closes without changing the field."
+      },
+      {
+        "name": "restarting",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--restarting"
+        ],
+        "note": "The RESTARTING branch (isRestarting), reached the way production reaches it: the non-native wizard completes, POST /api/setup/finish answers, and the wizard form is replaced by the restarting copy with the 'ciaobot@local · restarting' shell bar while the probe poll keeps running."
+      },
+      {
+        "name": "restarting-native",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--restarting-native"
+        ],
+        "note": "The nativeBootstrap restarting copy ('Setup saved. Ciaobot is starting on this Mac.') with no shell bar and no banner, also reached through the finish write."
+      },
+      {
+        "name": "finish-error",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--finish-error"
+        ],
+        "note": "doFinish failure: POST /api/setup/finish answers 500 and the wizard records the error line with the '!' prompt while the submit returns usable, with no restart."
+      },
+      {
+        "name": "host-sign-in-fallback",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--host-sign-in-fallback"
+        ],
+        "note": "The host sign-in answers with reason no_desktop (also open_failed or no_workspace): the status line says Ciaobot could not open a browser here and the terminal command ciao setup-url --workspace ~/Ciaobot renders; the control is usable again afterwards."
+      },
+      {
+        "name": "picker-error",
+        "coverage": "covered",
+        "storyIds": [
+          "login-view--picker-error"
+        ],
+        "note": "The folder picker's list-dirs read fails for the field folder and for home: the picker stays open with the error line and 'Use this folder' disabled."
+      },
+      {
+        "name": "login-remote-origin",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "The login page opened at a non-loopback hostname hides the PWA host sign-in block (isHostOrigin false). isHostOrigin reads the page hostname with no parameter from the component, and the workshop always runs on a loopback name, so this branch cannot render in isolation here."
+      },
+      {
+        "name": "provider-terminal-action",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "A provider row with terminal_action renders HostTerminalButton inside the card; its capability read is a module-level ref shared across the whole runner page, so the branch cannot render in isolation from the workshop here. It stays with its own owner's slice (C7)."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in LoginView.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial: the mount probes GET /api/setup-status with no loading geometry — the standard login form shows while the probe resolves (the login story) and after a caught failure (setup-probe-failed); the wizard polls that route every 2s in place, and polled errors are swallowed (no stale or refresh-failure UI). Loaded: login plus the bootstrap states. The folder probe swaps the field for a transient 'Checking the folder…' hint of the same resolved size (bootstrap-folder-inspecting), and the picker's pickerLoading only disables its buttons — both text-shaped, so there is no placeholder/loaded geometry mismatch to flag. Empty and filtered-empty: none."
     },
     "migration": {
       "status": "unassessed",
@@ -5037,21 +5233,69 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Detailed configurable variants have not yet been audited.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in StartupView.vue implements this render; no rendered-state story exists."
+        "name": "connecting",
+        "coverage": "covered",
+        "storyIds": [
+          "startup-view--connecting"
+        ],
+        "note": "The empty-phases v-else branch before any status answers: h1 'Connecting to Ciaobot', the 'Checking the connection to your workspace.' description and the .startup-wait bar; the story also asserts the Continue to app button (v-if overallReady false) emits skip."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "phase-progress",
+        "coverage": "covered",
+        "storyIds": [
+          "startup-view--phase-progress"
+        ],
+        "note": "The v-if phases.length list with done, in_progress and waiting rows (is-done/is-in_progress classes, phaseLabel's known names and the unknown-name fallback); description 'Getting your workspace ready.'."
+      },
+      {
+        "name": "phase-failed",
+        "coverage": "covered",
+        "storyIds": [
+          "startup-view--phase-failed"
+        ],
+        "note": "A phase with status 'failed' renders statusLabel's 'Needs attention' with the is-failed error class."
+      },
+      {
+        "name": "phase-message",
+        "coverage": "covered",
+        "storyIds": [
+          "startup-view--phase-message"
+        ],
+        "note": "The v-if phase.message line under a phase row, asserted with a synthetic in_progress phase."
+      },
+      {
+        "name": "ready",
+        "coverage": "covered",
+        "storyIds": [
+          "startup-view--ready"
+        ],
+        "note": "overallReady true with phases present: the h1 turns to 'Connected to Ciaobot' and the continue button is gone."
+      },
+      {
+        "name": "ready-no-phases",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "Implemented prop combination that renders a contradictory pair: overallReady true keeps the 'Connected to Ciaobot' h1 while the empty-phases description still says 'Checking the connection to your workspace.' over the wait bar. Recorded as found, not fixed in this slice."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "startup-view--narrow"
+        ],
+        "note": "The fixed inset-0 overlay at a 390px viewport: the content column (max-width 34rem) still fits and the same empty-phases branches render."
+      },
+      {
+        "name": "reduced-motion",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "The @media (prefers-reduced-motion: reduce) variant of the .startup-wait bar swaps the connecting animation for a static bar; the media query cannot be forced from the workshop, so the coverage stays with the component's own CSS."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in StartupView.vue has not yet been audited."
+      "status": "known",
+      "detail": "The curtain is the loading owner itself: the empty-phases wait bar (state connecting) is its initial look, with exactly one loading geometry and no counters. App.vue's poll updates phases and overall-ready in place, so there is no refresh, failure or stale loading state inside this owner; reduced motion swaps the wait-bar animation, not the geometry."
     },
     "migration": {
       "status": "unassessed",
