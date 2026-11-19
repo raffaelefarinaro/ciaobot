@@ -38,7 +38,7 @@ def _tested() -> dict:
             "claude": {
                 "status": "tested",
                 "version": "2.1.301",
-                "source": "claude-agent-sdk 0.2.168",
+                "source": "claude 2.1.301",
             },
         },
     }
@@ -171,7 +171,6 @@ def terminal_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     ("provider", "installed", "kwargs", "record", "state"),
     [
         ("opencode", "2.0.32", {}, _untested(), "untested"),
-        ("claude", "2.1.0", {"bundled": True}, _tested(), "bundled"),
         ("opencode", "1.14.0", {}, _tested(), "unsupported"),
         ("opencode", "2.0.15", {}, _tested(), "unsupported"),
         ("opencode", "3.0.0", {}, _tested(), "unsupported"),
@@ -197,7 +196,7 @@ def test_release_check_states(
         provider, installed, binary="/x/bin", record=record, running_version=RUNNING, **kwargs
     )
     assert result["state"] == state
-    if state in {"bundled", "unsupported", "unknown"}:
+    if state in {"unsupported", "unknown"}:
         assert result["tested"] == record["providers"][provider]["version"]
         assert "command" not in result
     if state == "below_tested":

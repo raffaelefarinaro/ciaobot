@@ -1,8 +1,7 @@
 """BaseProvider host-contract defaults and built-in overrides (#3201, slice S0).
 
 The base defaults are inert (no work, nothing started, fresh containers per
-call). Claude and OpenCode ``is_connected`` follow their own live-connection
-state.
+call). OpenCode ``is_connected`` follows its own live-connection state.
 """
 
 from __future__ import annotations
@@ -15,7 +14,6 @@ from typing import Any
 import pytest
 
 from ciao.providers.base import ActiveHandle, BaseProvider
-from ciao.providers.claude import ClaudeProvider
 from ciao.providers.opencode import OpencodeProvider
 
 
@@ -48,17 +46,6 @@ async def test_base_containers_are_fresh_per_call(tmp_path: Path) -> None:
 def test_is_connected_is_read_only(tmp_path: Path) -> None:
     with pytest.raises(AttributeError):
         setattr(_Minimal(tmp_path), "is_connected", True)
-
-
-@pytest.mark.parametrize("client", [None, object()])
-@pytest.mark.parametrize("connected", [True, False])
-def test_claude_is_connected_follows_flag(
-    tmp_path: Path, client: object | None, connected: bool
-) -> None:
-    p = ClaudeProvider(tmp_path)
-    p._client = client
-    p._connected = connected
-    assert p.is_connected is connected
 
 
 @pytest.mark.parametrize("returncode", [None, 0])

@@ -200,6 +200,27 @@ async def test_rotated_token_respawns_agent(monkeypatch: pytest.MonkeyPatch, tmp
 
 
 @pytest.mark.asyncio
+async def test_a_linked_repo_change_respawns_agent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Link, relink and unlink each change the agent's working root, so the next turn restarts it;
+    a turn with the same link reuses the running agent."""
+    config, calls = _install(monkeypatch, tmp_path, sessions=["a", "a", "a", "a"])
+    service = ProviderService(config)  # type: ignore[arg-type]
+    repo_a = str(tmp_path / "repo-a")
+    repo_b = str(tmp_path / "repo-b")
+
+    await _turn(service, _request())
+    assert _count(calls, "initialize") == 1
+    await _turn(service, _request(resume_session="a", linked_repo=repo_a))
+    assert _count(calls, "initialize") == 2
+    await _turn(service, _request(resume_session="a", linked_repo=repo_a))
+    assert _count(calls, "initialize") == 2
+    await _turn(service, _request(resume_session="a", linked_repo=repo_b))
+    assert _count(calls, "initialize") == 3
+    await _turn(service, _request(resume_session="a", linked_repo=""))
+    assert _count(calls, "initialize") == 4
+
+
+@pytest.mark.asyncio
 async def test_replaced_session_prepends_stable_context(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # No loadSession/resume capability, so resuming "gone" falls back to session/new: replaced.
     config, calls = _install(monkeypatch, tmp_path, sessions=["fresh"])

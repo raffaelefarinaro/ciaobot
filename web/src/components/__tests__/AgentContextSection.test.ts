@@ -61,7 +61,7 @@ describe('AgentContextSection', () => {
     expect(wrapper.get('.agent-context-rows').element.firstElementChild).toBe(row.element)
     expect(row.text()).toContain('Ciaobot system prompt')
     expect(row.text()).toContain('1.4k tokens')
-    expect(row.text()).toContain("Added to the provider's own system prompt")
+    expect(row.text()).toContain('Sent to every session')
     // 1.4k prompt + 1k guide + a small brief; without the prompt the total would read 1k.
     expect(wrapper.get('.agent-context-summary .agent-context-meta').text()).toBe('2.4k tokens')
   })

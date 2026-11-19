@@ -22,7 +22,7 @@ import time
 from functools import lru_cache
 from pathlib import Path
 from xml.parsers.expat import ExpatError
-from typing import Iterable, Mapping, Any
+from typing import Mapping, Any
 
 from ciao import provider_registry
 from ciao.agent_paths import claude_global_config_path
@@ -309,22 +309,6 @@ def _cli_version(binary: str) -> str:
 _CLI_VERSION_CACHE = _cli_version
 
 
-# Skills Claude Code ships itself (code-review, dataviz, ...). Nothing lists
-# them without a model turn, so the Claude provider records them from each
-# chat's init payload; until the first chat of this engine run they are
-# unknown, and Settings says so rather than showing an empty list.
-_claude_bundled_skills: tuple[str, ...] | None = None
-
-
-def record_claude_bundled_skills(names: Iterable[str]) -> None:
-    global _claude_bundled_skills
-    _claude_bundled_skills = tuple(sorted({str(n).strip() for n in names if str(n).strip()}))
-
-
-def claude_bundled_skills() -> list[str] | None:
-    return None if _claude_bundled_skills is None else list(_claude_bundled_skills)
-
-
 def discover_claude_system_skills() -> list[str]:
     """Discover enabled Claude Code plugins plus standalone ~/.claude/skills."""
     global _claude_skills_cache
@@ -441,11 +425,7 @@ def claude_status_probe(
     workspace_root: Path | None = None,
     **_unused: Any,
 ) -> dict[str, Any]:
-    row = _claude_status(env, config_path, workspace_root=workspace_root)
-    bundled = claude_bundled_skills()
-    if bundled is not None:
-        row["bundled_skills"] = bundled
-    return row
+    return _claude_status(env, config_path, workspace_root=workspace_root)
 
 
 def opencode_status_probe(
@@ -625,7 +605,6 @@ def claude_path_hint(cli_path: str) -> str:
     directory does not belong on anybody's PATH, and ``claude_auth_command``
     names that binary in full instead.
     """
-    from ciao.providers.claude import get_bundled_claude_path
     from ciao.tool_path import resolve_on_terminal_path
 
     try:
@@ -636,12 +615,6 @@ def claude_path_hint(cli_path: str) -> str:
     if not cli_path:
         # Not installed yet: point at where the documented installer puts it.
         return claude_path_command()
-    try:
-        bundled = get_bundled_claude_path()
-    except Exception:
-        bundled = None
-    if bundled and cli_path == bundled:
-        return ""
     directory = os.path.dirname(cli_path)
     return claude_path_command(directory) if directory else ""
 
@@ -661,9 +634,9 @@ def claude_auth_command(cli_path: str = "") -> str:
     augmented lookup Ciaobot uses to *run* the CLI: that one adds
     ``~/.local/bin`` and Homebrew whether or not the user's shell has them, so
     it would answer "yes" for exactly the newly installed CLI whose directory
-    is still missing from PATH. Ciaobot itself usually runs the ``claude``
-    bundled with the Agent SDK, which is inside the app and on nobody's PATH;
-    that binary is named by absolute path instead.
+    is still missing from PATH. Ciaobot runs the ``claude`` it resolves by
+    absolute path, so the command names that binary instead when the bare word
+    would not resolve in the user's terminal.
     """
     from ciao.tool_path import resolve_on_terminal_path
 
@@ -722,19 +695,14 @@ def claude_app_path() -> str:
 
 
 def claude_cli_path() -> str:
-    """Absolute path to the ``claude`` CLI Ciaobot would run, or "".
+    """Absolute path to the user's ``claude`` CLI, or "".
 
-    Prefers the binary bundled with the desktop build, then the user's own
-    install. ``resolve_tool`` (not ``shutil.which``) because the engine often
-    runs under launchd with a stripped PATH that omits ``~/.local/bin`` and
-    Homebrew, where the documented installers put ``claude``.
+    ``resolve_tool`` (not ``shutil.which``) because the engine often runs under
+    launchd with a stripped PATH that omits ``~/.local/bin`` and Homebrew, where
+    the documented installers put ``claude``.
     """
-    from ciao.providers.claude import get_bundled_claude_path
     from ciao.tool_path import resolve_tool
 
-    bundled = get_bundled_claude_path()
-    if bundled:
-        return str(bundled)
     try:
         resolved = resolve_tool("claude")
     except Exception:
@@ -749,21 +717,10 @@ def _claude_status(
     workspace_root: Path | None = None,
 ) -> dict[str, Any]:
     from ciao.provider_versions import release_check
-    from ciao.providers.claude import get_bundled_claude_path
 
     binary = claude_cli_path()
     version = _cli_version(binary) if binary else "not installed"
-    bundled_path = get_bundled_claude_path()
-    check = (
-        release_check(
-            "claude",
-            version,
-            bundled=bool(bundled_path) and binary == str(bundled_path),
-            binary=binary,
-        )
-        if binary
-        else None
-    )
+    check = release_check("claude", version, binary=binary) if binary else None
     claude_skills = discover_claude_system_skills()
     if binary and not claude_adapter_path():
         # Claude chats run through the adapter, so a CLI without it cannot run a turn.

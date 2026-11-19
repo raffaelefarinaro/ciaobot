@@ -44,7 +44,7 @@ adapter implementing only `run_streaming` satisfies that contract. A
 missing override for any other row below still degrades to that row's
 base default, an unsupported-feature answer or a silent skip — check each
 row's last column before assuming one fits. No code under `ciao/web`
-names `OpencodeProvider`, `ClaudeProvider` or a provider's private connection
+names `OpencodeProvider`, `ClaudeAcpProvider` or a provider's private connection
 flag (`tests/test_provider_host_seam.py` fails if one appears). What is
 still branched on the provider id, not the class, is in the skip list
 below.
@@ -90,7 +90,7 @@ set and nothing else.
 | `current_session_id` | Turn delivery session rotation in `_drive_stream` and the host's live session probes; the service getter forwards it. | Defaults to `None`: the adapter tracks no session. A service with no provider instance reports `None` without constructing one. |
 | `has_permission_request`, `permission_request_session`, `tool_use_id_for_request` | Permission ownership, child-session selection, and capturing the tool card id before acknowledgement. | Defaults to false/empty values. |
 | `has_question_request`, `question_request_session` | Native-form ownership and child-session selection. | Defaults to false/empty values. |
-| `respond_permission` | The approval card; return `QuestionResponseResult` after acknowledgement. | Explicit nonretryable unsupported result. Claude adapts its local `PermissionGate` boolean at this boundary. |
+| `respond_permission` | The approval card; return `QuestionResponseResult` after acknowledgement. | Explicit nonretryable unsupported result. Claude's ACP adapter maps the answer onto the agent's permission options at this boundary. |
 | `respond_question` | A native question card; return `QuestionResponseResult` after acknowledgement. | Explicit nonretryable unsupported result. |
 | `can_drain` | The between-turns drain scheduler in `ciao/web/chat_streaming.py`: true only when the adapter permits a between-turn reader right now. | Defaults to `False`, and eligibility is dynamic, not a static capability: OpenCode reports true only with a live server, a session and outstanding background work, Claude additionally requires a connected client. The service forwards `drain_events` without re-checking this. |
 | `cli_connected` | No host reader remains; the value is only reported through the service. | Defaults to `True`: an adapter that keeps no long-lived subprocess reports no owner loss. A service holding no provider instance reports `False`. OpenCode inherits this default — inherited `True` says nothing about whether a server is running. |
@@ -270,7 +270,10 @@ calls it (opencode caches a private-server read for 300 s).
 Claude Code hides harness surfaces the PWA already owns (plan mode, its
 own scheduler, notifications). The trim catalog is `TRIM_OPTIONS` in
 `ciao/claude_trim.py`: tool denies, bundled-skill overrides and `disable*`
-settings, each with its default. A
+settings, each with its default. The options travel to the Claude
+adapter as `_meta.claudeCode.options` (`disallowedTools`, `settings` as an
+object, and `env` for the claude.ai connectors switch); `claude_session_options`
+in `ciao/providers/acp/agents.py` builds them. A
 new CLI that ships the same tools needs the equivalent, in its own
 permission language. See `docs/AGENT_CLI.md`.
 

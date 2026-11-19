@@ -13,7 +13,6 @@ license = "Apache-2.0"
 # setuptools only ships the default license-file names, so it is listed here.
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 dependencies = [
-  "claude-agent-sdk[otel]==0.2.178",
   # ACP client for every runtime agent (#3137).
   "agent-client-protocol==1.0.0",
   # Runtime security pins for transitive dependencies (#953, #1081). `mcp`
@@ -34,9 +33,6 @@ dependencies = [
   # `httpx` and `requests` accept any certifi, so the floor is the current
   # release.
   "certifi>=2026.10.23",
-  # opentelemetry-api before 1.45.1 parses tracestate without bounds
-  # (GHSA-xcq7-p3pf-p88h); `claude-agent-sdk[otel]` accepts older releases.
-  "opentelemetry-api>=1.45.2",
   # Agent-facing control plane shared by Claude Code and Codex.
   "mcp>=1.30.0,<2.0",
   "starlette==1.10.0",

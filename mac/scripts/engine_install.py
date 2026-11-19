@@ -52,7 +52,7 @@ SMOKE_MODULES = (
     "ssl", "pyexpat", "sqlite3", "_ctypes", "cryptography.hazmat.bindings._rust", "cffi",
     "pydantic_core", "uvloop", "httptools", "websockets", "yarl", "multidict", "frozenlist",
     "propcache", "aiohttp", "rpds", "yaml", "watchfiles", "charset_normalizer", "http_ece",
-    "pywebpush", "py_vapid", "claude_agent_sdk", "anydoc", "mcp", "starlette",
+    "pywebpush", "py_vapid", "acp", "anydoc", "mcp", "starlette",
     "uvicorn", "certifi",
 )
 SCRIPT_DIR = Path(__file__).resolve().parent

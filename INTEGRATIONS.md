@@ -4,7 +4,7 @@ One-time setup for external tools and CLI dependencies.
 
 The Chat details window displays project context and a link to its canonical document; this is a presentation of existing context, with no new integration, configuration, or change to what providers receive.
 
-SDK-level wiring notes (fallback_model, hooks, setting_sources) live in the module docstring of `ciao/providers/claude.py`.
+Claude's disable options reach the claude-agent-acp adapter as `_meta.claudeCode.options`; `ciao/providers/acp/agents.py` owns that mapping.
 
 ## Install
 
@@ -44,6 +44,17 @@ the installer says which one applies:
 
 Provider logins do not depend on the shim: the setup wizard hands out each
 provider's own login command (`claude auth login`, `opencode auth login`).
+
+## Claude
+
+Claude runs through `claude-agent-acp`, the Agent Client Protocol adapter for Claude Code. The adapter is pinned at `@agentclientprotocol/claude-agent-acp@0.108.1`, and it drives the `claude` CLI that Ciaobot resolves (`CLAUDE_CODE_EXECUTABLE`). Node 22 or newer is required.
+
+```bash
+npm install -g @agentclientprotocol/claude-agent-acp@0.108.1
+claude auth login                   # the Settings sign-in action runs this in a terminal
+```
+
+Sign-in is handled by the Claude CLI. Ciaobot never reads or stores a Claude credential.
 
 ## Codex
 

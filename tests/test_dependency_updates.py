@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from ciao.dependency_updates import (
-    AUTO_UPDATE_KEYS,
     _pinned_version,
     apply_auto_updates,
     check_available_updates,
@@ -25,7 +24,7 @@ def _write_update_tree(root: Path) -> None:
         'name = "ciao"\n'
         'version = "0.4.5"\n'
         "dependencies = [\n"
-        '  "claude-agent-sdk==0.2.111",\n'
+        '  "anyio==0.2.111",\n'
         '  "openai==2.44.0",\n'
         "]\n",
         encoding="utf-8",
@@ -50,7 +49,8 @@ def test_pinned_version_extracts_python_and_npm_specs() -> None:
 
 def test_check_available_updates_marks_safe_and_major_updates(tmp_path: Path, monkeypatch) -> None:
     _write_update_tree(tmp_path)
-    pypi = {"claude-agent-sdk": "0.2.200", "openai": "2.44.0"}
+    monkeypatch.setattr(depupdates, "AUTO_UPDATE_KEYS", ("anyio",))
+    pypi = {"anyio": "0.2.200", "openai": "2.44.0"}
     npm = {"vue": "4.0.0"}
     monkeypatch.setattr(depupdates, "get_latest_pypi_version", lambda name: pypi.get(name))
     monkeypatch.setattr(depupdates, "get_latest_npm_version", lambda name: npm.get(name))
@@ -58,7 +58,7 @@ def test_check_available_updates_marks_safe_and_major_updates(tmp_path: Path, mo
     updates = {update.key: update for update in check_available_updates(tmp_path)}
 
     assert "openai" not in updates
-    sdk = updates["claude-agent-sdk"]
+    sdk = updates["anyio"]
     assert (sdk.current, sdk.latest) == ("0.2.111", "0.2.200")
     assert sdk.auto is True and sdk.is_safe is True
     assert updates["vue"].auto is False
@@ -66,11 +66,12 @@ def test_check_available_updates_marks_safe_and_major_updates(tmp_path: Path, mo
 
 
 def test_apply_auto_updates_only_touches_release_allowlist(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(depupdates, "AUTO_UPDATE_KEYS", ("anyio",))
     _write_update_tree(tmp_path)
     monkeypatch.setattr(
         depupdates,
         "get_latest_pypi_version",
-        lambda name: {"claude-agent-sdk": "0.2.200", "openai": "3.0.0"}.get(name),
+        lambda name: {"anyio": "0.2.200", "openai": "3.0.0"}.get(name),
     )
     monkeypatch.setattr(depupdates, "get_latest_npm_version", lambda _name: "4.0.0")
     monkeypatch.setattr(depupdates, "regenerate_python_lock", lambda _root: None)
@@ -78,10 +79,10 @@ def test_apply_auto_updates_only_touches_release_allowlist(tmp_path: Path, monke
     updates = check_available_updates(tmp_path)
     applied = apply_auto_updates(tmp_path, updates, reinstall=False)
 
-    assert "claude-agent-sdk" in AUTO_UPDATE_KEYS
-    assert applied == ["claude-agent-sdk (Python: 0.2.111 -> 0.2.200)"]
+    assert "anyio" in depupdates.AUTO_UPDATE_KEYS
+    assert applied == ["anyio (Python: 0.2.111 -> 0.2.200)"]
     pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'claude-agent-sdk==0.2.200' in pyproject
+    assert 'anyio==0.2.200' in pyproject
     assert 'openai==2.44.0' in pyproject
     assert '"vue": "^3.5.0"' in (tmp_path / "web" / "package.json").read_text(
         encoding="utf-8"
@@ -89,10 +90,11 @@ def test_apply_auto_updates_only_touches_release_allowlist(tmp_path: Path, monke
 
 
 def test_apply_auto_updates_skips_major_auto_candidates(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(depupdates, "AUTO_UPDATE_KEYS", ("anyio",))
     _write_update_tree(tmp_path)
     updates = [
         depupdates.AvailableUpdate(
-            key="claude-agent-sdk",
+            key="anyio",
             ecosystem="python",
             current="0.2.111",
             latest="1.0.0",
@@ -107,7 +109,7 @@ def test_apply_auto_updates_skips_major_auto_candidates(tmp_path: Path, monkeypa
 
     assert apply_auto_updates(tmp_path, updates, reinstall=False) == []
     assert regenerate_calls == []
-    assert 'claude-agent-sdk==0.2.111' in (tmp_path / "pyproject.toml").read_text(
+    assert 'anyio==0.2.111' in (tmp_path / "pyproject.toml").read_text(
         encoding="utf-8"
     )
 
@@ -115,11 +117,12 @@ def test_apply_auto_updates_skips_major_auto_candidates(tmp_path: Path, monkeypa
 def test_apply_auto_updates_restores_uv_lock_after_install_failure(
     tmp_path: Path, monkeypatch
 ) -> None:
+    monkeypatch.setattr(depupdates, "AUTO_UPDATE_KEYS", ("anyio",))
     _write_update_tree(tmp_path)
     uv_lock = tmp_path / "uv.lock"
     uv_lock.write_text("original lock\n", encoding="utf-8")
     update = depupdates.AvailableUpdate(
-        key="claude-agent-sdk",
+        key="anyio",
         ecosystem="python",
         current="0.2.111",
         latest="0.2.200",

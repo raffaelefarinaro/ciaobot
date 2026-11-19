@@ -46,7 +46,7 @@
             <AppIcon class="cd-icon" name="spark" />
             <span class="cd-main">
               <span class="cd-primary agent-context-name">Ciaobot system prompt</span>
-              <span class="cd-detail">Added to the provider's own system prompt · every session</span>
+              <span class="cd-detail">Sent to every session: as a system instruction for OpenCode, at the head of the first prompt for ACP agents</span>
             </span>
             <span class="cd-trail cd-value agent-context-meta">{{ formatTokens(systemPromptTokens) }} tokens</span>
           </button>

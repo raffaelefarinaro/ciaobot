@@ -101,7 +101,7 @@ def test_update_actions_resolve_from_current_checks(
         lambda: {provider: {"state": "below_tested", "command": command}},
     )
     assert host_terminal.action_command(f"{provider}-update") == command
-    for state in ("current", "untested", "bundled", "unsupported", "unknown"):
+    for state in ("current", "untested", "unsupported", "unknown"):
         monkeypatch.setattr(
             provider_versions, "current_checks", lambda s=state: {provider: {"state": s}}
         )

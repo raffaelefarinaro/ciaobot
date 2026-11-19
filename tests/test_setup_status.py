@@ -485,18 +485,54 @@ def test_setup_status_offers_claudes_own_login_not_ciao_auth(tmp_path, monkeypat
     assert claude["command"] == "claude auth login"
 
 
-def test_setup_status_names_a_bundled_claude_by_path(tmp_path, monkeypatch) -> None:
-    """Ciaobot normally runs the `claude` bundled with the Agent SDK, which is
-    on nobody's PATH: when the user's own shell has no `claude`, a bare
-    `claude auth login` would fail for them too."""
-    bundled = "/opt/sdk/claude_agent_sdk/_bundled/claude"
-    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: bundled)
+def _unpatched_claude_cli_path():
+    """The real ``claude_cli_path``: the autouse fixture above replaces the module attribute."""
+    import importlib.util
+
+    from ciao import setup_status as module
+
+    spec = importlib.util.spec_from_file_location("ciao._setup_status_unpatched", module.__file__)
+    fresh = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fresh)
+    return fresh
+
+
+def test_claude_cli_path_resolves_the_users_cli_through_the_engine_path(monkeypatch) -> None:
+    fresh = _unpatched_claude_cli_path()
+    monkeypatch.setattr(
+        "ciao.tool_path.resolve_tool",
+        lambda name: "/opt/user/bin/claude" if name == "claude" else None,
+    )
+
+    assert fresh.claude_cli_path() == "/opt/user/bin/claude"
+
+
+def test_claude_cli_path_falls_back_to_the_login_path_then_is_empty(monkeypatch) -> None:
+    fresh = _unpatched_claude_cli_path()
+
+    def unresolvable(name: str) -> str:
+        raise OSError("no tool path")
+
+    monkeypatch.setattr("ciao.tool_path.resolve_tool", unresolvable)
+    monkeypatch.setattr(fresh.shutil, "which", lambda name: "/usr/bin/claude")
+    assert fresh.claude_cli_path() == "/usr/bin/claude"
+
+    monkeypatch.setattr(fresh.shutil, "which", lambda name: None)
+    assert fresh.claude_cli_path() == ""
+
+
+def test_setup_status_names_the_claude_by_absolute_path(tmp_path, monkeypatch) -> None:
+    """Ciaobot runs the `claude` it resolves by absolute path, which the user's
+    shell may not find: when it does not, a bare `claude auth login` would fail
+    for them too."""
+    resolved = "/usr/local/bin/claude"
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: resolved)
     monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
     config = _config(tmp_path)
 
     claude = setup_status(config, env={})["providers"]["claude"]
 
-    assert claude["command"] == f"{bundled} auth login"
+    assert claude["command"] == f"{resolved} auth login"
 
 
 def test_setup_status_offers_the_path_line_for_a_cli_the_terminal_cannot_find(
@@ -515,20 +551,6 @@ def test_setup_status_offers_the_path_line_for_a_cli_the_terminal_cannot_find(
     claude = setup_status(config, env={})["providers"]["claude"]
 
     assert claude["path_command"].startswith("echo 'export PATH=\"$HOME/.local/bin")
-
-
-def test_setup_status_offers_no_path_line_for_the_bundled_cli(tmp_path, monkeypatch) -> None:
-    """The CLI inside the app is not something to add to a user's PATH -- the
-    login command names it in full instead."""
-    bundled = "/opt/sdk/claude_agent_sdk/_bundled/claude"
-    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: bundled)
-    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: bundled)
-    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
-    config = _config(tmp_path)
-
-    claude = setup_status(config, env={})["providers"]["claude"]
-
-    assert "path_command" not in claude
 
 
 def test_setup_status_offers_no_path_line_when_the_terminal_finds_claude(
@@ -1601,9 +1623,7 @@ async def test_provider_logout_action_runs_auth_logout(monkeypatch, tmp_path) ->
     monkeypatch.setattr(routes_api.subprocess, "run", fake_run)
     monkeypatch.setattr(routes_api.asyncio, "to_thread", fake_to_thread)
     # The derivation is under test, not where this machine keeps `claude`.
-    from ciao.providers import claude as claude_provider
-
-    monkeypatch.setattr(claude_provider, "get_bundled_claude_path", lambda: str(tmp_path / "claude"))
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: str(tmp_path / "claude"))
 
     config = _config(tmp_path)
     request = SimpleNamespace(
@@ -1731,24 +1751,6 @@ def test_discover_claude_system_skills_lists_synced_skills_and_loaded_plugins(
         "pdf",
         "skill-creator",
     ]
-
-
-def test_claude_probe_reports_bundled_skills_once_a_chat_recorded_them(
-    monkeypatch, tmp_path
-) -> None:
-    from ciao import setup_status
-
-    monkeypatch.setattr(setup_status, "_claude_bundled_skills", None)
-    monkeypatch.setattr(
-        setup_status, "_claude_status", lambda *_a, **_k: {"name": "claude", "ok": True}
-    )
-    probe = lambda: setup_status.claude_status_probe({}, config_path=tmp_path / "c.yaml")  # noqa: E731
-
-    assert "bundled_skills" not in probe()
-
-    setup_status.record_claude_bundled_skills(["simplify", "code-review", " "])
-
-    assert probe()["bundled_skills"] == ["code-review", "simplify"]
 
 
 def test_discover_claude_system_skills_falls_back_to_installed_plugins(
@@ -2069,24 +2071,9 @@ def _tested_record(running: str) -> dict:
         "recorded": "2026-10-20",
         "providers": {
             "opencode": {"status": "tested", "version": "2.4.0", "package": "@opencode/cli"},
-            "claude": {"status": "tested", "version": "2.1.301", "source": "claude-agent-sdk 0.2.168"},
+            "claude": {"status": "tested", "version": "2.1.301", "source": "claude 2.1.301"},
         },
     }
-
-
-def test_claude_row_marks_bundled_release_check(tmp_path, monkeypatch) -> None:
-    import ciao
-    from ciao import provider_versions
-
-    bundled = "/opt/sdk/claude_agent_sdk/_bundled/claude"
-    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: bundled)
-    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: bundled)
-    monkeypatch.setattr(provider_versions, "load_record", lambda: _tested_record(ciao.__version__))
-    config = _config(tmp_path)
-
-    claude = setup_status(config, env={})["providers"]["claude"]
-
-    assert claude["release_check"] == {"state": "bundled", "tested": "2.1.301"}
 
 
 def test_opencode_unsupported_row_keeps_v2_migration_text(monkeypatch) -> None:

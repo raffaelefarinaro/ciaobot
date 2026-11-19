@@ -125,28 +125,6 @@ def test_blockers_are_a_superset_of_active_chat_ids(tmp_path: Path) -> None:
     assert blocked == {streaming, asking}
 
 
-def test_claude_background_task_reports_background_work(tmp_path: Path) -> None:
-    from claude_agent_sdk import TaskStartedMessage
-
-    from ciao.provider_service import ProviderService
-    from ciao.providers.claude import ClaudeProvider
-
-    manager = _make_manager(tmp_path)
-    cid = _chat(manager)
-    provider = ClaudeProvider(tmp_path)
-    provider._observe_message(
-        TaskStartedMessage(
-            subtype="task_started", data={}, task_id="bash-1",
-            description="sleep 600", uuid="u", session_id="s", task_type="local_bash",
-        )
-    )
-    service = ProviderService(manager._config, provider="claude")
-    service._provider = provider  # type: ignore[assignment]
-    manager._providers[cid] = service  # type: ignore[assignment]
-
-    assert manager.restart_blockers() == [{"chat_id": cid, "reasons": ["background_work"]}]
-
-
 # ── The unattended-update idle snapshot and its claim ───────────────────
 #
 # `update_idle_reasons` is the conservative proof an automatic update needs: it

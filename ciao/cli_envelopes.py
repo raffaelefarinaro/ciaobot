@@ -17,7 +17,7 @@ from dataclasses import dataclass
 # user-role messages wrapped in these XML tags to feed the parent agent
 # subagent completion, bash output, slash-command invocations, etc. They are
 # NOT from the human; they're the CLI talking to its own model. The tag names
-# come from the constant table in claude_agent_sdk/_bundled/claude
+# come from the constant table in the Claude Code CLI itself
 # (IO="task-notification", EtH="bash-input", WV="command-name", and so on).
 #
 # Without this filter the envelopes leak into chat history as user bubbles:
@@ -68,9 +68,9 @@ TASK_NOTIFICATION_RE = re.compile(
 # summary, plus an optional task-type).
 INNER_TAG_RE = re.compile(r"<([a-z-]+)>(.*?)</\1>", re.DOTALL)
 
-# Slash commands the Claude Agent SDK injects as user turns when the PWA
-# changes model or mode mid-session (via ClaudeSDKClient.set_model /
-# set_permission_mode). They end up in the session JSONL and would otherwise
+# Slash commands the Claude Code CLI records as user turns when the model or
+# mode changes mid-session (the SDK sent them before the ACP switch, #3138). They
+# end up in the session JSONL and would otherwise
 # render as user bubbles the user didn't type. The assistant acknowledgement
 # ("Set model to ..." / "Set mode to ...") is collapsed into a single system
 # bubble by the transcript renderer.
@@ -78,7 +78,7 @@ CONTROL_SLASH_PREFIXES = ("/model", "/mode")
 
 # Sentinel that the Claude Code CLI writes into the session JSONL when a turn
 # is interrupted (queued interrupts mid-stream) or hits an empty rate-limit error.
-# It's the `UXH` constant in claude_agent_sdk/_bundled/claude. Claude Code's
+# It's the `UXH` constant in the Claude Code CLI. Claude Code's
 # own UI hides these (`case UXH: return null`); we mirror that so reloads
 # don't render a literal "No response requested." bubble after every interrupt.
 NO_RESPONSE_SENTINEL = "No response requested."

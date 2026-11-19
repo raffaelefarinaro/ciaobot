@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import base64
 import math
 import os
 import re
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator, AsyncIterable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,7 +15,6 @@ from typing import Any
 from ciao.models import (
     AgentRequest,
     BridgeMode,
-    ImageAttachment,
     StreamEvent,
 )
 
@@ -131,48 +129,6 @@ def prepend_stable_context(request: AgentRequest) -> None:
     request.injected_context_prefix = prefix + request.injected_context_prefix
 
 
-def build_claude_message_content(request: AgentRequest) -> str | list[dict[str, Any]]:
-    """Build Claude SDK message content with native image blocks when present."""
-    prompt = build_prompt(request)
-    if not request.images:
-        return prompt
-
-    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-    for image in request.images:
-        content.append(_claude_image_block(image))
-    return content
-
-
-def build_claude_message_stream(
-    request: AgentRequest,
-    *,
-    session_id: str = "default",
-    uuid: str = "",
-) -> AsyncIterable[dict[str, Any]]:
-    """Build a one-message async stream for Claude structured input.
-
-    ``uuid`` tags the message so the CLI's user-message replay echoes it back
-    unchanged (the echo ``ClaudeProvider`` uses to tell its own prompt from an
-    earlier CLI turn).
-    """
-
-    async def _stream() -> AsyncGenerator[dict[str, Any], None]:
-        message: dict[str, Any] = {
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": build_claude_message_content(request),
-            },
-            "parent_tool_use_id": None,
-            "session_id": session_id,
-        }
-        if uuid:
-            message["uuid"] = uuid
-        yield message
-
-    return _stream()
-
-
 def build_runtime_context(request: AgentRequest) -> str:
     """Compact per-request runtime context for system_prompt append.
 
@@ -203,52 +159,6 @@ def build_runtime_context(request: AgentRequest) -> str:
     if len(lines) == 1:  # only today=
         return lines[0]
     return "\n".join(lines)
-
-
-def rate_limit_quota_payload(rate_limit_info: Any) -> dict[str, str]:
-    """Normalize Claude rate-limit info into persisted quota fields."""
-    quota: dict[str, str] = {}
-    status = getattr(rate_limit_info, "status", None)
-    if status:
-        quota["status"] = str(status)
-    rate_limit_type = getattr(rate_limit_info, "rate_limit_type", None)
-    if rate_limit_type:
-        quota["rateLimitType"] = str(rate_limit_type)
-    resets_at = getattr(rate_limit_info, "resets_at", None)
-    if resets_at is not None:
-        quota["resetsAt"] = str(resets_at)
-    utilization = getattr(rate_limit_info, "utilization", None)
-    if utilization is not None:
-        quota["utilization"] = f"{float(utilization):.3f}"
-    overage_status = getattr(rate_limit_info, "overage_status", None)
-    if overage_status:
-        quota["overageStatus"] = str(overage_status)
-    overage_resets_at = getattr(rate_limit_info, "overage_resets_at", None)
-    if overage_resets_at is not None:
-        quota["overageResetsAt"] = str(overage_resets_at)
-    overage_disabled_reason = getattr(rate_limit_info, "overage_disabled_reason", None)
-    if overage_disabled_reason:
-        quota["overageDisabledReason"] = str(overage_disabled_reason)
-    return quota
-
-
-def rate_limit_status_text(quota: dict[str, str]) -> str:
-    """Render a short human-facing rate-limit status."""
-    parts = ["Rate limit"]
-    status = quota.get("status")
-    if status:
-        parts.append(str(status))
-    rate_limit_type = quota.get("rateLimitType")
-    if rate_limit_type:
-        parts.append(f"({rate_limit_type})")
-    utilization = quota.get("utilization")
-    if utilization:
-        try:
-            pct = float(utilization) * 100
-            parts.append(f"{pct:.1f}% used")
-        except ValueError:
-            parts.append(f"utilization {utilization}")
-    return ": ".join([parts[0], " ".join(parts[1:])]) if len(parts) > 1 else parts[0]
 
 
 class CleanupTimedOut(TimeoutError):
@@ -443,7 +353,7 @@ class BaseProvider(ABC):
 
 
 class BaseSDKProvider(BaseProvider):
-    """Shared state and helpers for SDK-backed providers."""
+    """Shared settings-change tracking for providers that run an SDK-style session."""
 
     def __init__(self, workspace_root: Path, *, config: object | None = None) -> None:
         super().__init__(workspace_root, config=config)
@@ -463,15 +373,3 @@ class BaseSDKProvider(BaseProvider):
     def _reset_settings(self) -> None:
         self._current_model = ""
         self._current_mode = "auto"
-
-
-def _claude_image_block(image: ImageAttachment) -> dict[str, Any]:
-    data = base64.b64encode(image.path.read_bytes()).decode("ascii")
-    return {
-        "type": "image",
-        "source": {
-            "type": "base64",
-            "media_type": image.mime_type,
-            "data": data,
-        },
-    }

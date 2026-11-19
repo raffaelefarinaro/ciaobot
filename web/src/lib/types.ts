@@ -913,7 +913,7 @@ export interface HostTerminalLaunchResult {
 
 /** What `ciao/provider_versions.py::release_check` says about an installed CLI. */
 export interface ProviderReleaseCheck {
-  state: 'untested' | 'bundled' | 'unsupported' | 'unknown' | 'below_tested' | 'current'
+  state: 'untested' | 'unsupported' | 'unknown' | 'below_tested' | 'current'
   tested?: string
   installed?: string
   command?: string
