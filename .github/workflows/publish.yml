@@ -17,7 +17,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Nothing after this step pushes with git: uploads go through GH_TOKEN.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
@@ -179,16 +182,8 @@ jobs:
           sort -o "$expected" "$expected"
           listed="$RUNNER_TEMP/published-assets.txt"
           gh release view "$TAG" --json assets --jq '.assets[].name' | sort > "$listed"
-          for retired in install-engine.sh install.ps1; do
-            if grep -qx "$retired" "$listed"; then
-              echo "retired asset is still attached: $retired" >&2
-              exit 1
-            fi
-          done
-          if grep -q '^ciaobot-server-host' "$listed"; then
-            echo "the server host archive is still attached" >&2
-            exit 1
-          fi
+          # The exact-set diff refuses retired installers and the server host
+          # archive too: any name not in $expected fails it.
           if ! diff "$expected" "$listed"; then
             echo "the release's assets are not the expected set for $TAG (diff above)" >&2
             exit 1
@@ -205,10 +200,25 @@ jobs:
             echo "expected exactly one wheel attached, found ${#wheels[@]}" >&2
             exit 1
           fi
-          grep -qx "CIAOBOT_VERSION=$version" "$downloaded/install.sh"
+          grep -Fx "CIAOBOT_VERSION=$version" "$downloaded/install.sh" || {
+            echo "install.sh does not pin version $version" >&2
+            exit 1
+          }
           digest="$(shasum -a 256 "${wheels[0]}" | cut -d' ' -f1)"
-          grep -qx "WHEEL_SHA256=$digest" "$downloaded/install.sh"
-          cmp "${wheels[0]}" "$GITHUB_WORKSPACE/dist/ciaobot-$version-py3-none-any.whl"
+          grep -Fx "WHEEL_SHA256=$digest" "$downloaded/install.sh" || {
+            echo "install.sh does not pin the attached wheel's sha256 $digest" >&2
+            exit 1
+          }
+          # The published installer is the stamped one this job built, byte for
+          # byte, and the published wheel is the one it built.
+          cmp "$downloaded/install.sh" "$GITHUB_WORKSPACE/install.sh" || {
+            echo "the published install.sh is not the stamped installer built for $TAG" >&2
+            exit 1
+          }
+          cmp "${wheels[0]}" "$GITHUB_WORKSPACE/dist/ciaobot-$version-py3-none-any.whl" || {
+            echo "the published wheel is not the wheel built for $TAG" >&2
+            exit 1
+          }
 
   release-smoke:
     needs: build-engine

@@ -632,6 +632,9 @@ _GATE_ENVIRON = {
     "TMPDIR": "/private/tmp",
     "SSL_CERT_FILE": "/etc/ssl/cert.pem",
     "UV_CACHE_DIR": "/var/cache/uv",
+    "UV_PYTHON_INSTALL_DIR": "/var/uv-python",
+    "UV_INDEX_URL": "https://attacker.example/simple",
+    "UV_NO_CONFIG": "1",
     "HOME": "/Users/operator",
     "GH_TOKEN": "gh-secret",
     "CIAO_PWA_AUTH_TOKEN": "ciao-secret",
@@ -668,12 +671,15 @@ def test_legacy_gate_commands_are_argv_lists_with_python_isolated(tmp_path: Path
 def test_legacy_gate_child_env_is_an_allowlist_with_a_temp_home(tmp_path: Path) -> None:
     env = GATE.child_env(_GATE_ENVIRON, tmp_path)
 
+    # Only the two uv paths the gate needs cross over; every other UV_* (an
+    # index URL, a config switch) stays with the caller.
     assert env == {
         "PATH": "/usr/bin:/bin",
         "LANG": "en_US.UTF-8",
         "TMPDIR": "/private/tmp",
         "SSL_CERT_FILE": "/etc/ssl/cert.pem",
         "UV_CACHE_DIR": "/var/cache/uv",
+        "UV_PYTHON_INSTALL_DIR": "/var/uv-python",
         "HOME": str(tmp_path),
     }
 
@@ -697,7 +703,22 @@ def test_legacy_gate_refuses_a_1x_wheel_whose_digest_differs(
         GATE._gate_one("1.10.0", "2.0.0", "file:///r", "/bin/uv", _GATE_ENVIRON, tmp_path)
 
     # Refused before uv or the 1.x updater runs at all.
-    assert [cmd for cmd in calls if cmd[0] == "/bin/uv" or cmd[1] == "-I"] == []
+    assert [cmd for cmd, _ in calls if cmd[0] == "/bin/uv" or cmd[1] == "-I"] == []
+
+
+def test_legacy_gate_runs_every_child_in_the_scratch_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # gh, uv venv, uv pip and the 1.x runner all start in the per-release scratch
+    # dir, never in the caller's working directory.
+    wheel = b"a stand-in 1.x wheel"
+    monkeypatch.setitem(GATE.LEGACY_WHEEL_SHA256, "1.10.0", hashlib.sha256(wheel).hexdigest())
+    calls = _fake_gate_run(monkeypatch, wheel=wheel)
+
+    GATE._gate_one("1.10.0", "2.0.0", "file:///r", "/bin/uv", _GATE_ENVIRON, tmp_path)
+
+    assert [cmd[0] for cmd, _ in calls] == ["gh", "/bin/uv", "/bin/uv", str(tmp_path / "venv" / "bin" / "python")]
+    assert {cwd for _, cwd in calls} == {tmp_path}
 
 
 def test_legacy_gate_prints_the_1x_stderr_before_refusing(
@@ -713,20 +734,29 @@ def test_legacy_gate_prints_the_1x_stderr_before_refusing(
     assert "Traceback: no manifest" in capsys.readouterr().err
 
 
-def test_legacy_gate_turns_a_missing_binary_into_a_gate_error() -> None:
+def test_legacy_gate_run_starts_the_child_in_the_scratch_dir(tmp_path: Path) -> None:
+    # The real subprocess call, not a stand-in: the child reports its own cwd.
+    probe = [sys.executable, "-c", "import os, sys; sys.stdout.write(os.getcwd())"]
+    result = GATE._run(probe, {"PATH": os.environ["PATH"]}, tmp_path)
+
+    assert Path(result.stdout).resolve() == tmp_path.resolve()
+
+
+def test_legacy_gate_turns_a_missing_binary_into_a_gate_error(tmp_path: Path) -> None:
     with pytest.raises(GATE.GateError, match="cannot run ciaobot-no-such-binary"):
-        GATE._run(["ciaobot-no-such-binary", "venv"], {"PATH": ""})
+        GATE._run(["ciaobot-no-such-binary", "venv"], {"PATH": ""}, tmp_path)
 
 
 def _fake_gate_run(
     monkeypatch: pytest.MonkeyPatch, *, wheel: bytes, stage_rc: int = 0, stage_stderr: str = ""
-) -> list[list[str]]:
+) -> list[tuple[list[str], Path]]:
     # Stands in for every child process: gh writes the wheel into --dir, uv
     # succeeds, and the 1.x runner (python -I) returns the requested outcome.
-    calls: list[list[str]] = []
+    # Each call is recorded with the cwd it was asked to run in.
+    calls: list[tuple[list[str], Path]] = []
 
-    def fake(cmd: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-        calls.append(cmd)
+    def fake(cmd: list[str], env: dict[str, str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        calls.append((cmd, cwd))
         if cmd[:3] == ["gh", "release", "download"]:
             dest = Path(cmd[cmd.index("--dir") + 1])
             (dest / "ciaobot-1.10.0-py3-none-any.whl").write_bytes(wheel)

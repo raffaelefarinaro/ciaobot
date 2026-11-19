@@ -58,9 +58,9 @@ print(json.dumps(asdict(op), indent=2, sort_keys=True))
 sys.exit(0 if op.phase == "staged" else 2)
 """
 
-#: Variables the child processes may inherit. Everything else, CIAO_* above all,
-#: stays out of the 1.x updater and its uv.
-_ALLOWED_ENV = ("PATH", "LANG", "TMPDIR", "SSL_CERT_FILE")
+#: Variables the child processes may inherit. Everything else, CIAO_* and every
+#: other UV_* above all, stays out of the 1.x updater and its uv.
+_ALLOWED_ENV = ("PATH", "LANG", "TMPDIR", "SSL_CERT_FILE", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR")
 
 
 class GateError(RuntimeError):
@@ -91,9 +91,7 @@ def runner_argv(py: Path, target: str, base: str, uv: str, state: Path) -> list[
 
 
 def _allowed(environ: dict[str, str]) -> dict[str, str]:
-    env = {k: environ[k] for k in _ALLOWED_ENV if k in environ}
-    env.update({k: v for k, v in environ.items() if k.startswith("UV_")})
-    return env
+    return {k: environ[k] for k in _ALLOWED_ENV if k in environ}
 
 
 def gh_env(environ: dict[str, str]) -> dict[str, str]:
@@ -128,9 +126,10 @@ def verify_wheel_digest(legacy: str, wheel: Path) -> None:
         )
 
 
-def _run(cmd: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def _run(cmd: list[str], env: dict[str, str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    # cwd is the per-release scratch dir, never the caller's working directory.
     try:
-        return subprocess.run(cmd, env=env, check=False, text=True, capture_output=True)
+        return subprocess.run(cmd, env=env, cwd=cwd, check=False, text=True, capture_output=True)
     except FileNotFoundError as exc:
         raise GateError(f"cannot run {cmd[0]}: {exc}") from exc
 
@@ -138,7 +137,7 @@ def _run(cmd: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str
 def _gate_one(legacy: str, target: str, base: str, uv: str, environ: dict[str, str], tmp: Path) -> None:
     wheel_dir = tmp / "wheel"
     wheel_dir.mkdir()
-    fetched = _run(gh_download_argv(legacy, wheel_dir), gh_env(environ))
+    fetched = _run(gh_download_argv(legacy, wheel_dir), gh_env(environ), tmp)
     if fetched.returncode != 0:
         raise GateError(f"could not download the {legacy} wheel: {fetched.stderr.strip()}")
     wheels = sorted(wheel_dir.glob(f"ciaobot-{legacy}-py3-none-any.whl"))
@@ -150,15 +149,15 @@ def _gate_one(legacy: str, target: str, base: str, uv: str, environ: dict[str, s
     home.mkdir()
     env = child_env(environ, home)
     venv = tmp / "venv"
-    created = _run(uv_venv_argv(uv, venv), env)
+    created = _run(uv_venv_argv(uv, venv), env, tmp)
     if created.returncode != 0:
         raise GateError(f"uv venv failed: {created.stderr.strip()}")
     py = venv / "bin" / "python"
-    installed = _run(uv_pip_install_argv(uv, py, wheels[0]), env)
+    installed = _run(uv_pip_install_argv(uv, py, wheels[0]), env, tmp)
     if installed.returncode != 0:
         raise GateError(f"installing the {legacy} wheel failed: {installed.stderr.strip()}")
 
-    staged = _run(runner_argv(py, target, base, uv, tmp / "state"), env)
+    staged = _run(runner_argv(py, target, base, uv, tmp / "state"), env, tmp)
     print(staged.stdout, end="")
     if staged.returncode != 0:
         print(staged.stderr, end="", file=sys.stderr)

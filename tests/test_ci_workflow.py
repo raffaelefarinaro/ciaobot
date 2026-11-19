@@ -10,6 +10,9 @@ import sys
 
 import pytest
 
+from ciao.release_manifest import build_manifest
+from tests.test_release_manifest import _keypair, _sign
+
 
 def test_public_ci_matches_release_contract() -> None:
     workflow = (
@@ -159,8 +162,8 @@ def test_publish_uploads_the_stamped_linux_installer() -> None:
     # The published copy is read back and must pin this version and the
     # attached wheel's digest, so a stale or swapped installer fails the job.
     check = _step(steps, "Check the published assets")["run"]
-    assert 'grep -qx "CIAOBOT_VERSION=$version" "$downloaded/install.sh"' in check
-    assert 'grep -qx "WHEEL_SHA256=$digest" "$downloaded/install.sh"' in check
+    assert 'grep -Fx "CIAOBOT_VERSION=$version" "$downloaded/install.sh" || {' in check
+    assert 'grep -Fx "WHEEL_SHA256=$digest" "$downloaded/install.sh" || {' in check
 
 
 def test_publish_runs_the_legacy_update_gate_before_upload() -> None:
@@ -206,10 +209,13 @@ def test_publish_ships_the_legacy_manifest_for_2_0_0_only() -> None:
     assert "ciaobot-engine-manifest" not in _step(steps, "Attach release assets")["run"]
 
 
-def _run_bash_step(run: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def _run_bash_step(
+    run: str, env: dict[str, str], cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["bash", "-c", run],
         env={"PATH": os.environ["PATH"], **env},
+        cwd=cwd,
         capture_output=True,
         text=True,
         check=False,
@@ -1050,15 +1056,34 @@ def test_publish_verifies_the_attached_files_after_the_manifest_upload() -> None
     assert '"${asset_args[@]}"' in step[verify:]
 
 
-def test_publish_check_step_refuses_retired_assets_and_compares_the_wheel_last() -> None:
+def test_publish_check_step_pins_the_installer_and_compares_the_bytes_last() -> None:
+    # Retired installers and the server host archive are refused by the exact
+    # asset-set diff, so no separate name list is kept here.
     check = _step(_publish_steps(), "Check the published assets")["run"]
 
-    assert "for retired in install-engine.sh install.ps1; do" in check
-    assert "grep -q '^ciaobot-server-host' \"$listed\"" in check
-    digest_pin = check.index('grep -qx "WHEEL_SHA256=$digest" "$downloaded/install.sh"')
-    compare = check.index('cmp "${wheels[0]}" "$GITHUB_WORKSPACE/dist/ciaobot-$version-py3-none-any.whl"')
-    assert digest_pin < compare
-    assert check.rstrip().splitlines()[-1].startswith("cmp ")
+    assert "if ! diff \"$expected\" \"$listed\"; then" in check
+    assert 'grep -qx "CIAOBOT' not in check
+    assert "|| true" not in check
+    digest_pin = check.index('grep -Fx "WHEEL_SHA256=$digest"')
+    installer_cmp = check.index('cmp "$downloaded/install.sh" "$GITHUB_WORKSPACE/install.sh"')
+    wheel_cmp = check.index('cmp "${wheels[0]}"')
+    assert digest_pin < installer_cmp < wheel_cmp
+    assert check.count("cmp ") == 2
+
+
+def test_publish_checkout_keeps_no_git_credentials_for_later_steps() -> None:
+    # A checkout leaves a token in .git/config unless told not to. Nothing in the
+    # publish job pushes with git, so the token is never persisted.
+    steps = _publish_steps()
+    checkouts = [step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@")]
+
+    assert checkouts, "publish.yml has no checkout step to pin"
+    for step in checkouts:
+        assert step.get("with", {}).get("persist-credentials") is False, step
+    for step in steps:
+        assert not re.search(r"\bgit (push|fetch|pull|commit|tag|remote)\b", step.get("run", "")), step.get(
+            "name"
+        )
 
 
 # A stand-in gh and shasum for the published-assets step. gh answers `release view`
@@ -1075,6 +1100,17 @@ if args[:2] == ["release", "download"]:
     target = args[args.index("--dir") + 1]
     for name in os.listdir(os.environ["FAKE_RELEASE"]):
         shutil.copy(os.path.join(os.environ["FAKE_RELEASE"], name), target)
+    sys.exit(0)
+if args[:2] == ["release", "upload"]:
+    # The release now serves the uploaded bytes, as the real one does.
+    for name in args[3:]:
+        if not name.startswith("--"):
+            shutil.copy(name, os.environ["FAKE_RELEASE"])
+    # A test can make the release serve other bytes than were uploaded.
+    override = os.environ.get("FAKE_SERVE_OVERRIDE")
+    if override:
+        for name in os.listdir(override):
+            shutil.copy(os.path.join(override, name), os.environ["FAKE_RELEASE"])
     sys.exit(0)
 sys.stderr.write(f"unexpected gh call: {args}\\n")
 sys.exit(1)
@@ -1109,15 +1145,25 @@ def _check_release() -> dict[str, bytes]:
     }
 
 
-def _run_check(
-    tmp_path: Path, *, legacy: str, listed: list[str], released: dict[str, bytes]
-) -> subprocess.CompletedProcess[str]:
+def _fake_tools(tmp_path: Path) -> Path:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     for name, body in (("gh", _FAKE_GH), ("shasum", _FAKE_SHASUM)):
         exe = bin_dir / name
         exe.write_text(body.replace("__PYTHON__", sys.executable), encoding="utf-8")
         exe.chmod(0o755)
+    return bin_dir
+
+
+def _run_check(
+    tmp_path: Path,
+    *,
+    legacy: str,
+    listed: list[str],
+    released: dict[str, bytes],
+    workspace_wheel: bytes | None = None,
+) -> subprocess.CompletedProcess[str]:
+    bin_dir = _fake_tools(tmp_path)
     listing = tmp_path / "listing.txt"
     listing.write_text("".join(f"{name}\n" for name in listed), encoding="utf-8")
     release = tmp_path / "release"
@@ -1126,7 +1172,11 @@ def _run_check(
         (release / name).write_bytes(body)
     workspace = tmp_path / "workspace"
     (workspace / "dist").mkdir(parents=True)
-    (workspace / "dist" / _CHECK_WHEEL).write_bytes(released[_CHECK_WHEEL])
+    # The wheel this job built. A different one here is the L3 case below.
+    built = released[_CHECK_WHEEL] if workspace_wheel is None else workspace_wheel
+    (workspace / "dist" / _CHECK_WHEEL).write_bytes(built)
+    # The installer this job stamped. Tests alter only the released copy.
+    (workspace / "install.sh").write_bytes(_check_release()["install.sh"])
     runner_temp = tmp_path / "runner"
     runner_temp.mkdir()
 
@@ -1215,6 +1265,67 @@ def test_published_assets_check_refuses_an_installer_pinning_another_digest(tmp_
     )
 
     assert result.returncode != 0
+    assert "install.sh does not pin the attached wheel's sha256" in result.stderr
+
+
+def test_published_assets_check_refuses_an_installer_pinning_another_version(tmp_path: Path) -> None:
+    released = _check_release()
+    released["install.sh"] = released["install.sh"].replace(
+        _CHECK_VERSION.encode(), b"9.8.6"
+    )
+
+    result = _run_check(
+        tmp_path, legacy="false", listed=["install.sh", _CHECK_WHEEL], released=released
+    )
+
+    assert result.returncode != 0
+    assert f"install.sh does not pin version {_CHECK_VERSION}" in result.stderr
+
+
+def test_published_assets_check_pins_the_version_as_literal_text(tmp_path: Path) -> None:
+    # A regex would read the dots in 9.8.7 as any character and accept 9x8x7.
+    released = _check_release()
+    released["install.sh"] = released["install.sh"].replace(
+        _CHECK_VERSION.encode(), b"9x8x7"
+    )
+
+    result = _run_check(
+        tmp_path, legacy="false", listed=["install.sh", _CHECK_WHEEL], released=released
+    )
+
+    assert result.returncode != 0
+    assert "does not pin version" in result.stderr
+
+
+def test_published_assets_check_refuses_an_installer_that_is_not_the_stamped_one(
+    tmp_path: Path,
+) -> None:
+    # Both pins still match, so only the byte comparison with the stamped
+    # installer can refuse a published copy that carries extra content.
+    released = _check_release()
+    released["install.sh"] += b"# swapped after stamping\n"
+
+    result = _run_check(
+        tmp_path, legacy="false", listed=["install.sh", _CHECK_WHEEL], released=released
+    )
+
+    assert result.returncode != 0
+    assert "is not the stamped installer built for" in result.stderr
+
+
+def test_published_assets_check_refuses_a_wheel_the_job_did_not_build(tmp_path: Path) -> None:
+    # The published wheel matches the installer's pin, so the only thing that
+    # can refuse it is the comparison with the wheel this job built.
+    result = _run_check(
+        tmp_path,
+        legacy="false",
+        listed=["install.sh", _CHECK_WHEEL],
+        released=_check_release(),
+        workspace_wheel=b"a different wheel",
+    )
+
+    assert result.returncode != 0
+    assert "is not the wheel built for" in result.stderr
 
 
 def test_legacy_gate_is_named_only_in_publish_yml_in_the_scripts_readme() -> None:
@@ -1230,3 +1341,138 @@ def test_development_doc_warns_that_patch_releases_before_2_0_0_strand_1x() -> N
 
     assert "Cutting a patch release before 2.0.0 strands 1.x engines" in text
     assert "`release-smoke.yml` still expects the old macOS flow until L6" in text
+
+
+# The 1.x manifest step signs nothing itself, but its verify runs with the
+# release key, which no test holds. The stand-in engine-check python verifies
+# against a throwaway key handed in through the environment instead.
+_KEYED_VERIFY = """import os, sys
+import ciao.release_manifest as release_manifest
+release_manifest.RELEASE_PUBLIC_KEY = os.environ["TEST_RELEASE_PUBLIC_KEY"]
+args = sys.argv[1:]
+if args[:2] == ["-m", "ciao.release_manifest"]:
+    args = args[2:]
+raise SystemExit(release_manifest.main(args))
+"""
+
+
+def _release_manifest_for(wheel: bytes) -> bytes:
+    import hashlib
+
+    artifact = {
+        "filename": _CHECK_WHEEL,
+        "kind": "wheel",
+        "platform": "any",
+        "arch": "any",
+        "sha256": hashlib.sha256(wheel).hexdigest(),
+        "size": len(wheel),
+    }
+    manifest = build_manifest(_CHECK_VERSION, [artifact], created="2026-11-19T00:00:00+00:00")
+    return (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
+
+
+def _run_attach_legacy(
+    tmp_path: Path,
+    *,
+    built: bytes,
+    signed: bytes,
+    served: bytes,
+    served_manifest_for: bytes | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run the real "Attach the 1.x engine manifest" step against a fake release.
+
+    ``built`` is the wheel this job built; the manifest is signed over ``signed``
+    and written to the workspace; ``served`` is the wheel the release holds
+    under the wheel's name before the step runs. ``served_manifest_for``, when
+    given, is a validly signed manifest for another wheel that the release
+    serves in place of the uploaded one.
+    """
+    priv, public_key, key_id = _keypair()
+    manifest = _release_manifest_for(signed)
+    signature = _sign(manifest, priv, key_id)
+    override = tmp_path / "override"
+    override.mkdir()
+    if served_manifest_for is not None:
+        served_manifest = _release_manifest_for(served_manifest_for)
+        (override / _CHECK_MANIFEST).write_bytes(served_manifest)
+        (override / _CHECK_SIGNATURE).write_text(_sign(served_manifest, priv, key_id), encoding="utf-8")
+
+    bin_dir = _fake_tools(tmp_path)
+    workspace = tmp_path / "workspace"
+    (workspace / "dist").mkdir(parents=True)
+    (workspace / "dist" / _CHECK_WHEEL).write_bytes(built)
+    (workspace / _CHECK_MANIFEST).write_bytes(manifest)
+    (workspace / _CHECK_SIGNATURE).write_text(signature, encoding="utf-8")
+
+    release = tmp_path / "release"
+    release.mkdir()
+    (release / _CHECK_WHEEL).write_bytes(served)
+
+    runner_temp = tmp_path / "runner"
+    engine_bin = runner_temp / "engine-check" / "bin"
+    engine_bin.mkdir(parents=True)
+    keyed = tmp_path / "keyed_verify.py"
+    keyed.write_text(_KEYED_VERIFY, encoding="utf-8")
+    python = engine_bin / "python"
+    python.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{keyed}" "$@"\n', encoding="utf-8")
+    python.chmod(0o755)
+
+    step = _step(_publish_steps(), "Attach the 1.x engine manifest")
+    return _run_bash_step(
+        step["run"],
+        {
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_WORKSPACE": str(workspace),
+            "TAG": f"v{_CHECK_VERSION}",
+            "GH_TOKEN": "test-token",
+            "FAKE_RELEASE": str(release),
+            "FAKE_SERVE_OVERRIDE": str(override),
+            "PYTHONPATH": str(Path(__file__).parents[1]),
+            "TEST_RELEASE_PUBLIC_KEY": public_key,
+        },
+        cwd=workspace,
+    )
+
+
+def test_attached_1x_manifest_verifies_the_wheel_the_release_serves(tmp_path: Path) -> None:
+    wheel = b"the wheel bytes"
+
+    result = _run_attach_legacy(tmp_path, built=wheel, signed=wheel, served=wheel)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_attached_1x_manifest_refuses_a_tampered_attached_wheel(tmp_path: Path) -> None:
+    # The release serves different bytes under the wheel's name. The workspace
+    # copy is still good, so only a verify against the downloaded wheel fails.
+    result = _run_attach_legacy(
+        tmp_path, built=b"the wheel bytes", signed=b"the wheel bytes", served=b"tampered bytes"
+    )
+
+    assert result.returncode != 0
+    assert "does not match the manifest" in result.stderr
+
+
+def test_attached_1x_manifest_is_verified_as_the_release_serves_it(tmp_path: Path) -> None:
+    # The workspace manifest is good; the release serves a validly signed manifest
+    # for another wheel after the upload. Only the re-downloaded copy can refuse it.
+    result = _run_attach_legacy(
+        tmp_path,
+        built=b"the wheel bytes",
+        signed=b"the wheel bytes",
+        served=b"the wheel bytes",
+        served_manifest_for=b"another wheel",
+    )
+
+    assert result.returncode != 0
+    assert "does not match the manifest" in result.stderr
+
+
+def test_attached_1x_manifest_refuses_a_manifest_for_another_wheel(tmp_path: Path) -> None:
+    result = _run_attach_legacy(
+        tmp_path, built=b"the wheel bytes", signed=b"another wheel", served=b"the wheel bytes"
+    )
+
+    assert result.returncode != 0
+    assert "does not match the manifest" in result.stderr
