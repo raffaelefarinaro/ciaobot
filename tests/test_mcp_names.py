@@ -24,13 +24,11 @@ from ciao.mcp_names import is_claudeai_connector
 _REPO = Path(__file__).resolve().parents[1]
 _NAMES = _REPO / "ciao" / "mcp_names.py"
 
-# The adapter (its catalog watcher) and the three web hosts that classify
-# server names: mcp_auth refusal, auth-card suppression and inventory scope.
+# The adapter (its catalog watcher) and the web host that classifies server
+# names for the inventory scope.
 _CONSUMERS = (
     "ciao/providers/claude.py",
     "ciao/web/mcp_inventory.py",
-    "ciao/web/mcp_auth_claude.py",
-    "ciao/web/chat_actions_runtime.py",
 )
 
 

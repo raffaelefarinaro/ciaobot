@@ -28,12 +28,6 @@ _HOST_SEAMS = (
     "abort_session",
     "interrupted_background_work",
     "read_mcp_status",
-    "reconnect_mcp_server",
-    "mcp_sign_in_exempt",
-    "start_mcp_oauth",
-    "read_mcp_oauth_attempt",
-    "cancel_mcp_oauth",
-    "ensure_server",
     "model_catalog",
     "native_title_candidates",
     "delete_session",
@@ -52,3 +46,18 @@ def test_web_sources_name_no_concrete_provider_class_or_private_flag() -> None:
 @pytest.mark.parametrize("name", _HOST_SEAMS)
 def test_base_provider_defines_every_host_seam(name: str) -> None:
     assert hasattr(BaseProvider, name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "reconnect_mcp_server",
+        "mcp_sign_in_exempt",
+        "start_mcp_oauth",
+        "read_mcp_oauth_attempt",
+        "cancel_mcp_oauth",
+        "ensure_server",
+    ),
+)
+def test_base_provider_has_no_mcp_management_seam(name: str) -> None:
+    assert not hasattr(BaseProvider, name)

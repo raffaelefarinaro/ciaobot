@@ -209,7 +209,7 @@ that simply finished: a turn ending is not a verified edit.
 `ciao chat needs-action KIND [flags]` puts a request in front of the user in
 the calling chat: a card the user acts on. The kinds are the engine's
 `AGENT_ACTION_KINDS` in `ciao/chat_actions.py`: `command`, `gws_auth`,
-`permission_mode`, `device_code`, `system_setting`, `restart` and `mcp_auth`.
+`permission_mode`, `device_code`, `system_setting` and `restart`.
 `limit` is the engine's own and is never agent-raisable.
 
 ```
@@ -219,7 +219,6 @@ ciao chat needs-action permission_mode --mode MODE [--note TEXT]
 ciao chat needs-action device_code --tool gh|az
 ciao chat needs-action system_setting --setting NAME [--note TEXT]
 ciao chat needs-action restart --reason config|update [--note TEXT]
-ciao chat needs-action mcp_auth --server NAME [--provider claude|opencode]
 ```
 
 The CLI routes each flag to the one kind that takes it; a flag that does not

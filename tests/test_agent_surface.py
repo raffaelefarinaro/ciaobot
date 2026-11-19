@@ -1350,8 +1350,8 @@ def test_cli_help_topics_retain_operational_guards(capsys: pytest.CaptureFixture
     assert "`/mcp`, `/reload-plugins`" in chat
     assert "ciao chat reload" in chat
     assert "Standalone `/mcp` is app navigation" in chat
-    assert "Chat details → MCP → Sign in" in chat
-    assert "ciao chat needs-action mcp_auth --server" in chat
+    assert "Chat details → MCP, which runs the agent's own MCP command" in chat
+    assert "mcp_auth" not in chat
 
     webhook = topic_help("webhook")
     assert "never save a copy in notes, memory or source files" in webhook
@@ -2145,6 +2145,22 @@ def test_a_needs_action_lands_in_the_calling_chat(tmp_path: Path) -> None:
     assert len(action["id"]) == 32
     # The state the manager holds is the state the caller was told about.
     assert manager.get_chat(chat.chat_id).actions[0].id == action["id"]
+
+
+def test_an_agent_cannot_raise_the_retired_mcp_auth_kind(tmp_path: Path) -> None:
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager)
+    token = _offer_token(service, chat, project)
+    with _client(service) as client:
+        response = _post(
+            client,
+            token,
+            "chat_needs_action",
+            {"kind": "mcp_auth", "params": {"server": "linear", "provider": "claude"}},
+        )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_action_kind"
+    assert manager.get_chat(chat.chat_id).actions == []
 
 
 def test_a_needs_action_cannot_target_another_chat(tmp_path: Path) -> None:

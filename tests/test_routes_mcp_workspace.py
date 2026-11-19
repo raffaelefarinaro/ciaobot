@@ -94,14 +94,10 @@ async def test_status_refuses_unknown_workspace() -> None:
 class _Manager:
     def __init__(self) -> None:
         self.reloads: list[tuple[str, str]] = []
-        self.forgets: list[tuple[str, str, str]] = []
 
     async def reload_workspace_providers(self, workspace: str, provider: str) -> dict[str, list[str]]:
         self.reloads.append((workspace, provider))
         return {"reloaded": ["c1"], "pending": ["c2"]}
-
-    def forget_mcp_auth_decline(self, workspace: str, provider: str, server: str) -> None:
-        self.forgets.append((workspace, provider, server))
 
 
 @pytest.fixture
@@ -146,10 +142,9 @@ def test_enabled_route_turns_a_claude_server_off_and_reloads(native_home: tuple[
         "reload": {"reloaded": ["c1"], "pending": ["c2"]},
     }
     assert manager.reloads == [("work", "claude")]
-    assert manager.forgets == []
 
 
-def test_enabled_route_without_change_does_not_reload_and_turning_on_forgets_the_decline(
+def test_enabled_route_without_change_does_not_reload(
     native_home: tuple[Path, Path],
 ) -> None:
     _home, root = native_home
@@ -162,7 +157,6 @@ def test_enabled_route_without_change_does_not_reload_and_turning_on_forgets_the
     assert body["changed"] is False
     assert body["reload"] == {"reloaded": [], "pending": []}
     assert manager.reloads == []
-    assert manager.forgets == [("work", "claude", "notion")]
 
 
 def test_enabled_route_refuses_bad_bodies(native_home: tuple[Path, Path]) -> None:

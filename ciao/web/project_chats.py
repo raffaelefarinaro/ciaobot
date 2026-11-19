@@ -1256,14 +1256,6 @@ class ProjectChatManager:
         self._path = path
         self._projects: dict[str, ProjectInfo] = {}
         self._chats: dict[str, ChatInfo] = {}
-        #: Engine-detected MCP sign-ins the user turned down with Not now, by
-        #: workspace, provider and dedupe key. Detection runs after every turn
-        #: of every chat and a provider can list every connector of the
-        #: account, so a per-chat memory raised the same cards again in each
-        #: new chat. Workspaces configure their own servers, so a decline in
-        #: one does not silence a same-named server in another. The set lives
-        #: as long as the engine, like the cards themselves.
-        self.declined_mcp_auth: set[tuple[str, str, str]] = set()
         self._file_refs: dict[str, tuple[str, str, float]] = {}
         # Canonical-doc frontmatter memo, keyed by path -> ((mtime_ns, size),
         # (name, context)). Vault discovery re-reads every project doc on each
@@ -4589,18 +4581,8 @@ class ProjectChatManager:
         del chat.actions[index]
         if remember:
             chat.dismissed_action_keys.add(action_key(action.kind, action.params))
-            if action.kind == "mcp_auth" and action.origin == "engine":
-                self.declined_mcp_auth.add(self.mcp_auth_decline_key(chat, action_key(action.kind, action.params)))
         self._publish_actions(chat)
         return action_payload(action)
-
-    def mcp_auth_decline_key(self, chat: ChatInfo, key: str) -> tuple[str, str, str]:
-        """Where a Not now on a detected sign-in applies: the chat's workspace and provider."""
-        return (self._workspace_for_chat(chat.chat_id), chat.provider, key)
-
-    def forget_mcp_auth_decline(self, workspace: str, provider: str, server: str) -> None:
-        """Let a turned-on server's sign-in card come back: drop the Not now remembered for it."""
-        self.declined_mcp_auth.discard((workspace, provider, action_key("mcp_auth", {"server": server})))
 
     def get_action(self, chat_id: str, action_id: str) -> ChatAction | None:
         chat = self._chats.get(chat_id)
@@ -4638,15 +4620,6 @@ class ProjectChatManager:
             self._publish_actions(chat)
             self.actions_runtime.cancel_removed(chat.chat_id, removed)
         return had
-
-    def _schedule_action_detection(self, chat_id: str) -> None:
-        """After a turn, look for MCP sign-ins. Spawns work only for a live OpenCode server or a connected Claude session."""
-        if self.actions_runtime.detection_provider(chat_id) is None:
-            return
-        self._spawn_detached(
-            self.actions_runtime.detect_mcp_auth(chat_id),
-            f"chat-actions-detect-{chat_id}",
-        )
 
     def _parse_transcript_messages(self, text: str) -> list[dict]:
         """Extract user and assistant messages from transcript markdown."""
@@ -5540,38 +5513,6 @@ class ProjectChatManager:
         self._provider_disconnect_failures.pop(chat_id, None)
         self._provider_kind.pop(chat_id, None)
         return self._providers.pop(chat_id, None)
-
-    async def ensure_opencode_server(self, chat_id: str) -> BaseProvider:
-        """Start an OpenCode chat's server without a turn, or return the live one.
-
-        The MCP sign-in card needs the server a turn would start; the idle sweep
-        may have stopped it (``_PROVIDER_IDLE_TIMEOUT_SECONDS``). The request is
-        built exactly as a turn builds it, so the next turn reuses this server.
-        ``compact=True`` only skips the capsule and prefix, whose builder mutates
-        chat state. The provider is registered and freshly stamped, so the sweep
-        keeps it for the whole sign-in wait (``POLL_DEADLINE_S`` < the timeout).
-        """
-        chat = self._chats.get(chat_id)
-        if chat is None or chat.archived or chat.provider != "opencode":
-            raise ValueError(f"chat {chat_id} is not an active OpenCode chat")
-        existing = self._providers.get(chat_id)
-        live = existing.provider if existing is not None else None
-        if live is not None and live.is_connected:
-            self._provider_last_used[chat_id] = time.monotonic()
-            return live
-        service = self._get_provider(chat_id)
-        provider = service.ensure_provider(chat.provider)
-        request = self.build_agent_request(
-            chat, prompt="", resume_session=chat.session_id or None, compact=True
-        )
-        await provider.ensure_server(request)
-        if self._providers.get(chat_id) is not service:
-            # Archive, new session, handover or reload dropped this service while
-            # the server started; nothing else holds it, so stop it here.
-            await service.disconnect()
-            raise RuntimeError(f"chat {chat_id} changed while its OpenCode server started")
-        self._provider_last_used[chat_id] = time.monotonic()
-        return provider
 
     def evict_workspace_providers(self, workspace: str) -> list[str]:
         """Disconnect and forget the cached providers of *workspace*'s chats.

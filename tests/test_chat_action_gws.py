@@ -31,9 +31,8 @@ from tests.test_agent_surface import _offer_chat, _offer_service, _offer_token
 from tests.test_agent_surface import _post as _agent_post
 from tests.test_chat_action_callback_route import _client as _route_client
 from tests.test_chat_action_callback_route import _post as _route_post
-from tests.test_chat_action_callback_route import _recorder
 from tests.test_chat_actions_runtime import make_manager
-from tests.test_mcp_auth_claude import FakePcm
+from tests.test_device_code_auth import FakePcm
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/auth?x"
 
@@ -361,7 +360,6 @@ def test_the_callback_route_reaches_the_gws_handler(
     chat = manager.create_chat(project.project_id, title="Google")
     aid = str(manager.raise_action(chat.chat_id, "gws_auth", {"profile": "work"}, origin="engine")["id"])
     manager.update_action(chat.chat_id, aid, state="waiting", params_update={"url": AUTH_URL})
-    calls = _recorder(monkeypatch)
     body = {"url": "http://127.0.0.1:5555/?code=a&state=b"}
 
     refused = _route_post(_route_client(manager), chat.chat_id, aid, body)
@@ -375,4 +373,3 @@ def test_the_callback_route_reaches_the_gws_handler(
 
     assert accepted.status_code == 200
     assert accepted.json()["action"]["state"] == "done"
-    assert calls == []
