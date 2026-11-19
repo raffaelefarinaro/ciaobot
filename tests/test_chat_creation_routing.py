@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ciao.config import CiaoConfig, WorkspaceConfig
-from ciao.providers.opencode import OpencodeSettings
+from ciao.opencode_cli import OpencodeSettings
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager

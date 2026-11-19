@@ -1,3 +1,0 @@
-{"id":"evt_failure_connected","type":"server.connected","data":{}}
-{"id":"evt_failure_01","type":"session.execution.started","data":{"sessionID":"ses_0034015a8ffetzCVc5kq6mI2oW"}}
-{"id":"evt_failure_02","type":"session.execution.failed","data":{"sessionID":"ses_0034015a8ffetzCVc5kq6mI2oW","error":{"type":"provider.no-route","message":"Model unavailable: opencode/missing-model"}}}

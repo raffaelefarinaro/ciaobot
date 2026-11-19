@@ -11,7 +11,7 @@ import ciao.web
 from ciao.providers.base import BaseProvider
 
 _WEB_ROOT = Path(ciao.web.__file__).parent
-_FORBIDDEN = re.compile(r"OpencodeProvider|ClaudeProvider|\._connected")
+_FORBIDDEN = re.compile(r"OpencodeAcpProvider|ClaudeProvider|\._connected")
 
 # Every operation the hosts under ciao/web call on a provider object.
 _HOST_SEAMS = (

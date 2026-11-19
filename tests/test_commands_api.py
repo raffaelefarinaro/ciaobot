@@ -181,7 +181,7 @@ def test_picker_merges_provider_page_skills_and_deduplicates_workspace_skills(
 
 def test_picker_lists_opencode_system_skills(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
-        "ciao.providers.opencode.opencode_system_skills",
+        "ciao.opencode_cli.opencode_system_skills",
         lambda env=None: ["loop-engineering"],
     )
     commands_module._provider_skills_cache.clear()

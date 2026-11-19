@@ -271,7 +271,7 @@ provider:
 | Provider | Default | Why |
 | --- | --- | --- |
 | `claude` | `auto` | Claude's `auto` is classifier-backed and lets the eval's tool calls through. |
-| `opencode` | `bypass` | OpenCode's `auto` keeps every shell call behind an approval card (`_permissive_auto_rules` in `ciao/providers/opencode.py`). Nobody answers that card in an eval, so the turn hangs to its timeout with zero usage. The default matches a typical operator install, which pins `opencode: bypass`. |
+| `opencode` | `bypass` | OpenCode's `auto` keeps every shell call behind an approval card (its ACP mode map in `ciao/providers/acp/agents.py`). Nobody answers that card in an eval, so the turn hangs to its timeout with zero usage. The default matches a typical operator install, which pins `opencode: bypass`. |
 
 The defaults live in `DEFAULT_MODES` in `ciao/task_eval.py`. An explicit
 `--mode manual|auto|bypass` replaces the default for both providers' runs. The

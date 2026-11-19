@@ -1741,24 +1741,6 @@ def test_no_argv_allow_or_ask_patterns_remain() -> None:
     assert not hasattr(em, "agent_cli_permission_rules")
 
 
-def test_opencode_cli_auto_mode_keeps_shell_ask_for_ciao_commands() -> None:
-    """Auto mode emits one generic V2 `shell: ask` rule."""
-    from ciao.providers.opencode import mode_settings
-
-    _agent, rules = mode_settings("auto")
-    shell = [rule for rule in rules if rule["action"] == "shell"]
-    assert shell == [{"action": "shell", "resource": "*", "effect": "ask"}]
-    assert rules[-1] == {"action": "shell", "resource": "*", "effect": "ask"}
-
-
-@pytest.mark.parametrize("mode", ["plan", "normal", "bypass"])
-def test_opencode_cli_rules_are_auto_mode_only(mode: str) -> None:
-    from ciao.providers.opencode import mode_settings
-
-    rules = mode_settings(mode)[1]
-    assert not any(rule["resource"].startswith("ciao ") for rule in rules)
-
-
 # ── release-gate fixes (v0.18.0) ───────────────────────────────────────────
 #
 # The release review found real issues in the new surface; each fix below

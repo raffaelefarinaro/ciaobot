@@ -1119,18 +1119,7 @@ class ChatStreaming:
                                     "Failed to persist stream error for chat %s",
                                     chat_id,
                                 )
-                        if chat_service._is_retryable_provider_startup_error(error_msg):
-                            _arm_retry(
-                                chat_id,
-                                stream,
-                                kind="startup",
-                                current_prompt=current_prompt,
-                                current_images=current_images,
-                                had_progress=had_provider_progress,
-                                reason=error_msg,
-                                unattended=turn_unattended,
-                            )
-                        elif chat_service._is_retryable_quota_error(error_msg):
+                        if chat_service._is_retryable_quota_error(error_msg):
                             _arm_retry(
                                 chat_id,
                                 stream,

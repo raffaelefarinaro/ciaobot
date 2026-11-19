@@ -45,8 +45,7 @@ import inspect
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import httpx
 import pytest
@@ -58,7 +57,7 @@ from ciao.provider_registry import ProviderDescriptor
 from ciao.provider_service import ProviderService
 from ciao.providers.base import ActiveHandle, BaseProvider, ProviderCapabilities
 from ciao.providers.acp.agents import ClaudeAcpProvider
-from ciao.providers.opencode import OpencodeProvider
+from ciao.providers.acp.agents import OpencodeAcpProvider
 
 
 def _config(tmp_path: Path) -> CiaoConfig:
@@ -71,7 +70,7 @@ def _config(tmp_path: Path) -> CiaoConfig:
 
 
 # The actual constructor boundaries the registry can resolve today.
-_PROVIDER_CLASSES: tuple[type[BaseProvider], ...] = (ClaudeAcpProvider, OpencodeProvider)
+_PROVIDER_CLASSES: tuple[type[BaseProvider], ...] = (ClaudeAcpProvider, OpencodeAcpProvider)
 
 
 @dataclass
@@ -1003,116 +1002,6 @@ async def test_service_propagates_cancellation_and_awaits_the_unwind(
 # ── built-in inheritance ─────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize(
-    ("client", "connected", "expected"),
-    [
-        (None, False, (False, False)),  # unconnected
-        (object(), True, (True, True)),  # connected client
-        (object(), False, (False, False)),  # flag already down
-        (None, True, (False, False)),  # flag up but no client
-    ],
-)
-def _attach_live(
-    provider: OpencodeProvider, session: str, *, dead: bool = False
-) -> None:
-    """Make the provider look attached to a live server, in-memory only."""
-    provider._client = cast(httpx.AsyncClient, object())
-    provider._process = cast(
-        asyncio.subprocess.Process, SimpleNamespace(returncode=1 if dead else None)
-    )
-    provider._session_id = session
-
-
-async def test_opencode_inherits_owner_health_and_uses_dynamic_eligibility(
-    tmp_path: Path,
-) -> None:
-    """OpenCode tracks no CLI owner (inherited True) while eligibility follows work."""
-    service = ProviderService(_config(tmp_path))
-    provider = OpencodeProvider(tmp_path)
-    service._provider = provider
-
-    # No server yet: ineligible, but no owner is tracked, so health is inherited True.
-    assert service.can_drain is False
-    assert service.cli_connected is True
-
-    # Live server with a session but no outstanding work: still ineligible.
-    _attach_live(provider, "ses_a")
-    assert provider.is_connected is True
-    assert service.can_drain is False
-    assert service.cli_connected is True
-
-    # Background shell work outstanding for the session: eligible, still healthy.
-    provider._background_shells = {"sh"}
-    assert service.can_drain is True
-    assert service.cli_connected is True
-
-    # Health never tracks server state: a dead process stays healthy, ineligible.
-    _attach_live(provider, "ses_a", dead=True)
-    assert service.can_drain is False
-    assert service.cli_connected is True
-
-    # Missing session with work outstanding: ineligible again.
-    provider._background_children = {"ses_child"}
-    _attach_live(provider, "")
-    assert service.can_drain is False
-    assert service.cli_connected is True
-
-    # Child work alone (shells cleared) makes the live session eligible.
-    provider._background_shells.clear()
-    _attach_live(provider, "ses_b")
-    assert service.can_drain is True
-    assert service.cli_connected is True
-
-
-async def test_builtin_session_ids_are_observed_exactly(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Claude forwards its stored id verbatim; OpenCode maps its "" to None.
-
-    Both are attached to a real service without any connection. The counters
-    are installed after construction, so setup is never mistaken for
-    forbidden accessor work; the getters and their unknown representations
-    are used exactly as the built-ins define them.
-    """
-    provider = ClaudeAcpProvider(tmp_path)
-    opencode = OpencodeProvider(tmp_path)
-    service = ProviderService(_config(tmp_path))
-    counts = _count_provider_seams(monkeypatch, service)
-    handle = _CountingHandle()
-    service._active_handle = handle
-
-    service._provider = provider
-    assert service.current_session_id is None  # no live ACP session yet
-    provider._session = SimpleNamespace(session_id="sid-1")
-    assert service.current_session_id == "sid-1"
-    provider._session = SimpleNamespace(session_id="sid-2")
-    assert service.current_session_id == "sid-2"
-    provider._session = None  # the session closed
-    assert service.current_session_id is None
-
-    service._provider = opencode
-    assert service.current_session_id is None  # "" internally: OpenCode's unknown
-    opencode._session_id = "sid-1"
-    assert service.current_session_id == "sid-1"
-    opencode._session_id = "sid-2"
-    assert service.current_session_id == "sid-2"
-    opencode._session_id = ""  # OpenCode's existing unknown representation
-    assert service.current_session_id is None
-
-    # Exact zero read work: no lookup, resolution, construction or teardown.
-    assert counts.ensure == []
-    assert counts.streams == []
-    assert counts.disconnects == []
-    assert counts.registrations == []
-    assert counts.registry_lookups == []
-    assert counts.factory_resolutions == []
-    assert counts.constructions == []
-    assert counts.server_invocations == []
-    assert counts.subprocess_invocations == []
-    assert handle.stops == 0
-    assert service.provider is opencode
-
-
 # ── service disconnect ───────────────────────────────────────────────────
 
 
@@ -1431,136 +1320,3 @@ async def test_model_catalog_override_failures_are_not_wrapped(
     assert counts.subprocess_invocations == []
 
 
-async def test_opencode_catalog_override_satisfies_shared_type(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """OpenCode's existing override satisfies the shared typed contract.
-
-    The real classmethod runs end to end with only ``_fetch_model_catalog``
-    faked, so descriptor dispatch, per-root caching and keyword-only force
-    invalidation all stay real. Precedence:
-    ``tests/test_opencode_provider.py::test_model_catalog_is_cached_between_calls``.
-    No assertion claims that real OpenCode discovery is side-effect free.
-    """
-    import ciao.providers.opencode as mod
-
-    service = ProviderService(_config(tmp_path))
-    counts = _count_provider_seams(monkeypatch, service)
-    root = tmp_path / "catalog-opencode-unique"
-    root.mkdir()
-    catalog_class: type[BaseProvider] = OpencodeProvider
-    fetch_calls: list[tuple[str, Path]] = []
-    fetch_payloads: list[list[dict[str, Any]]] = []
-
-    async def counting_fetch(
-        cls: type[OpencodeProvider], workspace_root: Path
-    ) -> list[dict[str, Any]]:
-        fetch_calls.append((cls.__name__, workspace_root))
-        generation = len(fetch_payloads) + 1
-        rows: list[dict[str, Any]] = [
-            {
-                "model": f"acme/gen-{generation}",
-                "label": f"Gen {generation}",
-                "variants": ["fast"],
-            },
-            {
-                "model": f"acme/gen-{generation}-vision",
-                "label": f"Vision {generation}",
-                "variants": [],
-                "images": True,
-                "extension": "kept",
-            },
-        ]
-        fetch_payloads.append(rows)
-        return rows
-
-    monkeypatch.setattr(
-        OpencodeProvider, "_fetch_model_catalog", classmethod(counting_fetch)
-    )
-    # The override is the adapter's own, and it answers through a base-typed
-    # call site below.
-    assert "model_catalog" in vars(OpencodeProvider)
-
-    try:
-        first: list[dict[str, Any]] = await catalog_class.model_catalog(root)
-        second: list[dict[str, Any]] = await catalog_class.model_catalog(root)
-        forced: list[dict[str, Any]] = await catalog_class.model_catalog(
-            root, force=True
-        )
-
-        assert fetch_calls == [
-            ("OpencodeProvider", root),
-            ("OpencodeProvider", root),
-        ]
-        assert len(fetch_payloads) == 2  # the cache served the second call
-
-        # Every result is compared against expected generation-labelled values
-        # written out as literals here — independent of the fake's own
-        # construction, so the two sides cannot share an object or drift
-        # together and mask a caching bug.
-        expected_first: list[dict[str, Any]] = [
-            {
-                "model": "acme/gen-1",
-                "label": "Gen 1",
-                "variants": ["fast"],
-            },
-            {
-                "model": "acme/gen-1-vision",
-                "label": "Vision 1",
-                "variants": [],
-                "images": True,
-                "extension": "kept",
-            },
-        ]
-        expected_forced: list[dict[str, Any]] = [
-            {
-                "model": "acme/gen-2",
-                "label": "Gen 2",
-                "variants": ["fast"],
-            },
-            {
-                "model": "acme/gen-2-vision",
-                "label": "Vision 2",
-                "variants": [],
-                "images": True,
-                "extension": "kept",
-            },
-        ]
-
-        # First call: exact generation-1 rows with the extension field intact.
-        assert first == expected_first
-        assert first is not fetch_payloads[0]
-        assert first[0] is not fetch_payloads[0][0]
-        assert first[1] is not fetch_payloads[0][1]
-        assert first[1]["images"] is True
-        assert first[1]["extension"] == "kept"
-
-        # The uncached second call is served from cache: generation-1 values
-        # again, a fresh object against the prior result and the payload —
-        # top level and every row — with no second fetch.
-        assert second == expected_first
-        assert second is not first
-        assert second is not fetch_payloads[0]
-        assert second[0] is not first[0]
-        assert second[1] is not first[1]
-        assert second[0] is not fetch_payloads[0][0]
-        assert second[1] is not fetch_payloads[0][1]
-
-        # The forced call refetches generation 2, not the cached generation 1.
-        assert forced == expected_forced
-        assert forced != expected_first
-        assert forced is not fetch_payloads[1]
-        assert forced[0] is not fetch_payloads[1][0]
-        assert forced[1] is not fetch_payloads[1][1]
-
-        # The fetch seam is faked, so no real construction, streaming, HTTP
-        # connection or subprocess happened behind the catalog read.
-        assert counts.constructions == []
-        assert counts.streams == []
-        assert counts.server_invocations == []
-        assert counts.subprocess_invocations == []
-    finally:
-        # Only this unique root's cache entry is removed; other roots and the
-        # production cache code are untouched.
-        with mod._MODEL_CACHE_GUARD:
-            mod._MODEL_CACHE.pop(str(root), None)

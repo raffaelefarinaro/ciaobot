@@ -2614,27 +2614,23 @@ def _check_approval(scenario_set: ScenarioSet, tmp_root: Path) -> list[ContractC
     Since S6 every Ciaobot operation runs as ``ciao <noun> <verb>`` and no
     ``ciao …`` prefix is pre-approved on the harness: auto mode keeps a card on
     every shell command (an allow prefix is a shell-suffix bypass risk), and
-    users who want no cards switch to ``bypass``. This contract inspects the
-    providers' effective permission policies — not a hardcoded ``True`` — so a
-    reintroduced ``Bash(ciao …)`` allow entry or opencode ``bash`` allow rule
-    fails the deterministic security gate.
+    users who want no cards switch to ``bypass``. OpenCode has no bypass mode,
+    so its approval seam is checked separately (see
+    ``_check_opencode_approval_seam``). This contract inspects the providers'
+    effective permission policies — not a hardcoded ``True`` — so a
+    reintroduced ``Bash(ciao …)`` allow entry fails the deterministic security gate.
     """
     checks: list[ContractCheck] = []
     claude_allowed = _claude_allowed_tools()
-    opencode_rules = _opencode_bash_rules()
     checks.append(
         ContractCheck(
             id="approval-auto-approved-excludes-destructive",
             category="approval_deferral",
-            passed=not claude_allowed and not opencode_rules,
+            passed=not claude_allowed,
             detail=(
-                "no argv auto-approval: no Claude Bash(ciao …) allow entry and "
-                "no opencode bash allow rule"
-                if not claude_allowed and not opencode_rules
-                else (
-                    f"argv allow rules present: claude={sorted(claude_allowed)} "
-                    f"opencode={sorted(opencode_rules)}"
-                )
+                "no argv auto-approval: no Claude Bash(ciao …) allow entry"
+                if not claude_allowed
+                else f"argv allow rules present: claude={sorted(claude_allowed)}"
             ),
             zero_tolerance=True,
         )
@@ -2655,17 +2651,75 @@ def _check_approval(scenario_set: ScenarioSet, tmp_root: Path) -> list[ContractC
             # No argv allow-list exists, so no destructive verb can be
             # pre-approved: every shell command (including `ciao …`) stays
             # behind the classifier / a card, and `bypass` is the no-card mode.
-            passed=not claude_allowed and not opencode_rules,
+            passed=not claude_allowed,
             detail=(
                 "no argv auto-approval: every ciao command stays behind a card"
-                if not claude_allowed and not opencode_rules
+                if not claude_allowed
                 else "argv allow rules reintroduced"
             ),
             zero_tolerance=True,
         )
     )
     checks.append(_check_unattended_forbidden(tmp_root, scenario_set))
+    checks.extend(_check_opencode_approval_seam())
     return checks
+
+
+def _check_opencode_approval_seam() -> list[ContractCheck]:
+    """OpenCode's approval seam: auto is the normal mode, and a request waits for an answer.
+
+    OpenCode's permission cards come from its own config, so this checks the two
+    facts the engine controls: the mode table maps ``auto`` to the same config as
+    ``normal`` (no silent escalation), and ``PermissionBroker.request`` with
+    ``unattended=False`` emits a card and stays pending until something answers it.
+    """
+    import asyncio
+
+    from ciao.models import PermissionRequestEvent
+    from ciao.providers.acp.agents import OPENCODE
+    from ciao.providers.acp.permissions import PermissionBroker, mode_choices
+
+    same_modes = mode_choices(OPENCODE, "auto") == mode_choices(OPENCODE, "normal")
+    emitted: list[object] = []
+    broker = PermissionBroker(emitted.append)
+    broker.unattended = False
+
+    async def probe() -> tuple[bool, bool]:
+        task = asyncio.ensure_future(broker.request(
+            "probe-session", {"toolCallId": "probe-call"},
+            [{"optionId": "allow", "kind": "allow_once", "name": "Allow"}],
+        ))
+        await asyncio.sleep(0.05)
+        resolved_alone = task.done()
+        broker.cancel_all()
+        await task
+        card = any(isinstance(event, PermissionRequestEvent) for event in emitted)
+        return card, resolved_alone
+
+    card_shown, resolved_alone = asyncio.run(probe())
+    return [
+        ContractCheck(
+            id="approval-opencode-auto-is-normal",
+            category="approval_deferral",
+            passed=same_modes,
+            detail=(
+                "opencode auto maps to the normal mode's config"
+                if same_modes else "opencode auto differs from normal"
+            ),
+            zero_tolerance=True,
+        ),
+        ContractCheck(
+            id="approval-opencode-request-waits",
+            category="approval_deferral",
+            passed=card_shown and not resolved_alone,
+            detail=(
+                "an attended permission request emits a card and waits for a reply"
+                if card_shown and not resolved_alone
+                else f"card_shown={card_shown} resolved_alone={resolved_alone}"
+            ),
+            zero_tolerance=True,
+        ),
+    ]
 
 
 def _claude_allowed_tools() -> set[str]:
@@ -2677,40 +2731,6 @@ def _claude_allowed_tools() -> set[str]:
     fails the deterministic gate.
     """
     return set()
-
-
-def _opencode_bash_rules() -> set[str]:
-    """``ciao …`` shell commands effectively allowed by OpenCode auto mode."""
-    from ciao.providers.opencode import mode_settings
-
-    try:
-        _agent, rules = mode_settings("auto")  # type: ignore[arg-type]
-    except Exception:  # noqa: BLE001
-        return set()
-    shell_rules = [r for r in rules if r.get("action") == "shell"]
-    samples = {"ciao memory status", "ciao chat delete", "ciao project delete"}
-
-    def effective(cmd: str) -> str | None:
-        for rule in reversed(shell_rules):
-            resource = str(rule.get("resource") or "")
-            if _glob_matches(resource, cmd):
-                return str(rule.get("effect") or "")
-        return None
-
-    allowed = {cmd for cmd in samples if effective(cmd) == "allow"}
-    for cmd in samples:
-        if effective(cmd) is None:
-            allowed.add(cmd)
-    return allowed
-
-
-def _glob_matches(pattern: str, value: str) -> bool:
-    """A minimal glob: ``*`` matches any suffix, otherwise a prefix match."""
-    if pattern == "*":
-        return True
-    if pattern.endswith("*"):
-        return value.startswith(pattern[:-1])
-    return value.startswith(pattern)
 
 
 def _check_unattended_forbidden(tmp_root: Path, scenario_set: ScenarioSet) -> ContractCheck:

@@ -25,7 +25,7 @@ from ciao.claude_trim import (
 )
 from ciao.models import THINKING_LEVELS, BridgeMode
 from ciao.os_support.paths import resolve_path
-from ciao.providers.opencode import OpencodeSettings
+from ciao.opencode_cli import OpencodeSettings
 
 if TYPE_CHECKING:
     from ciao.provider_registry import ProviderDescriptor
