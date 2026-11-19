@@ -9743,7 +9743,7 @@ export const inventory: InventoryEntry[] = [
         "name": "load-failed",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "OWNER BUG, not fixed here: on a first-load failure loaded stays false, so the Checking the update task history line stays on screen beside the role=alert read error. The panel says it is still checking while the check has failed. Recorded for a follow-up; no story."
+        "note": "Fixed: a first-load failure now settles the panel, so the Checking the update task history line is gone and the role=alert read error shows alone; a later successful refresh clears the error. Covered by a component test, not a story; no story exists for this state."
       },
       {
         "name": "empty",

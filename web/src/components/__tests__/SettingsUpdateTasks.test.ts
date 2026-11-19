@@ -660,6 +660,28 @@ describe('a read that failed', () => {
     expect(buttonLabels(wrapper)).not.toContain('Reopen')
     wrapper.unmount()
   })
+
+  it('stops saying it is checking once a first load has failed, and recovers on refresh', async () => {
+    // The first read settled, with an error. The panel must not keep saying it is
+    // still checking beside that error; the error alone is the statement. A later
+    // successful refresh clears the error and shows the history.
+    apiGet.mockRejectedValueOnce(new Error('offline'))
+    const wrapper = mount(SettingsUpdateTasks)
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('Checking the update task history')
+    expect(wrapper.find('[role="alert"]').text()).toContain('Could not read the update task history')
+    expect(wrapper.text()).not.toContain('Nothing to show here yet')
+
+    apiGet.mockResolvedValueOnce(listing([task({ status: 'dismissed' })]))
+    await button(wrapper, 'Check again').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Checking the update task history')
+    expect(wrapper.findAll('.set-row')).toHaveLength(1)
+    wrapper.unmount()
+  })
 })
 
 describe('reading order and touch targets', () => {
