@@ -44,7 +44,7 @@ ciao run
 
 `python -m ciao <command>` runs the same CLI as the `ciao` console script, from any interpreter that has the package installed.
 
-`ciao setup` is idempotent and defers Git history unless explicitly requested with `--initialize-git`. That option creates local history and an initial commit of nonignored workspace and external-vault contents; it configures no remote and uploads nothing. `--yes` is not Git consent. Existing repositories still receive missing ignore guards. It writes the initial `.env` (including the selected port), seeds stock workspace files, copies the editable `AGENTS.md` workspace guide (both providers discover it natively; nothing writes a `CLAUDE.md` any more) and copies `CIAO_CUSTOMIZATION.md`. On macOS it also renders the server plist under `~/Library/LaunchAgents/` and removes retired launcher bundles. Existing custom `AGENTS.md` files and configuration values are preserved. By default setup does not load launchd; add `--load-launchd` on macOS to run `launchctl`. Linux setup creates no desktop/service files unless an explicit `--launch-agents-dir` requests an offline plist export. See [Linux hosting](LINUX.md) for systemd and HTTPS deployment.
+`ciao setup` is idempotent and defers Git history unless explicitly requested with `--initialize-git`. That option creates local history and an initial commit of nonignored workspace and external-vault contents; it configures no remote and uploads nothing. `--yes` is not Git consent. Existing repositories still receive missing ignore guards. It writes the initial `.env` (including the selected port), seeds stock workspace files, copies the editable `AGENTS.md` workspace guide (both providers discover it natively; nothing writes a `CLAUDE.md` any more) and copies `CIAO_CUSTOMIZATION.md`. On macOS it also renders the server plist under `~/Library/LaunchAgents/` and removes retired launcher bundles. Existing custom `AGENTS.md` files and configuration values are preserved. By default setup does not load launchd; add `--load-launchd` on macOS to run `launchctl`. Linux setup creates no desktop/service files unless an explicit `--launch-agents-dir` requests an offline plist export. See [Linux hosting](LINUX.md) for the Linux install, the systemd unit and HTTPS deployment.
 
 Onboarding lifecycle is recorded separately in the owner-private `.runtime/onboarding.json` receipt; it is not the provisioning timestamp or welcome-password flag. A fresh supported setup starts `in_progress`; an existing receipt is always preserved. Receipt-less established installs are marked `legacy_exempt`, based on setup registry/legacy workspace evidence or durable runtime state—not notes-folder contents, unrelated `.env` files, or bootstrap auth/lock files. Startup creates a pending receipt for a fresh configured install before importing legacy workspace configuration. Invalid existing receipts fail closed and are never overwritten.
 A genuinely new install also writes `backup_enabled: false` into its app settings before the engine starts: adopting a folder that already sits inside a repository with an `origin` must not begin unattended commits or uploads. Existing installs, explicit choices and unreadable settings files are left untouched, and local history (`--initialize-git`) is not consent to backup. An operator turns backup on later from Settings → Memory (the backup settings route) or by running the guided backup setup, both of which are explicit actions.
@@ -1013,10 +1013,16 @@ while the server is running, because the live schedule store may be writing it.
 - **`develop`** is the integration branch. Feature and fix PRs target `develop`.
 - **`main`** is release-only. Direct pushes and merges to `main` are blocked; only release PRs land there.
 - **CI** (`.github/workflows/ci.yml`) runs on pull requests into `develop` or `main` and manual dispatch.
-  Every PR runs two Linux jobs in parallel: `linux-server` (`mypy ciao`,
-  `pytest -n auto tests/`, about 4 minutes) and `linux-web` (`npm test`,
+  Every PR runs three Linux jobs in parallel: `linux-server` (`mypy ciao`,
+  `pytest -n auto tests/`, about 4 minutes), `linux-web` (`npm test`,
   `npm run build` and a package smoke test of the built wheel, about 3
-  minutes). For a PR into `develop` whose three-dot diff from its base changes
+  minutes) and `linux-install-smoke`, which builds the PWA and the engine
+  wheel this checkout would publish and proves the Linux one-line installer
+  by installing that wheel with `scripts/install.sh` inside a clean
+  `ubuntu:24.04` container as an unprivileged account (`--no-service`; the
+  planned service unit is only dry-run in the container and
+  `systemd-analyze verify` re-checks it on the host, #3131). For a PR into
+  `develop` whose three-dot diff from its base changes
   `web/`, `linux-e2e` runs alongside `linux-web`, after the fast `web-scope`
   detector: it installs Chromium on Ubuntu
   and runs `npm run test:e2e` from the PR merge checkout. That command's npm
@@ -1093,9 +1099,12 @@ PRs without a `web/` change. `mac-app` is required on both branches the same
 way: it passes after the scope check on PRs that do not change `mac/` or
 `web/src/lib/workspaceColors.ts`, and
 activating it live is the same separate admin action, after it has reported on
-a PR. Admins remain exempt on `develop` so the
+a PR. `linux-install-smoke` is likewise required on both branches, with no
+scope condition: GitHub requires it once the workflow has reported on a PR,
+and activating its context live is the same admin action. Admins remain
+exempt on `develop` so the
 post-release sync PR can merge. The checked-in script continues to declare
-`linux-server`, `linux-web`, `linux-server-latest-python`, macOS `test` and
+`linux-server`, `linux-web`, `linux-install-smoke`, `linux-server-latest-python`, macOS `test` and
 `mac-app` required on `main`, including for admins.
 This source change does not update live branch protection: activating the new
 required context needs separate maintainer approval and an admin action after
