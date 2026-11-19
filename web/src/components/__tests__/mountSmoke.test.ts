@@ -826,7 +826,6 @@ describe('component mount smoke', () => {
         ...original.connections,
         claude: {
           ...original.connections.claude,
-          mcps: ['ciao-memory', 'github'],
           skills: ['frontend-design'],
           bundled_skills: ['code-review', 'dataviz'],
         },
@@ -848,14 +847,13 @@ describe('component mount smoke', () => {
       // Collapsed by default: the chip lists are there but folded away.
       for (const d of disclosures) {
         expect((d.element as HTMLDetailsElement).open).toBe(false)
-        expect(d.find('.provider-mcps-preview').exists()).toBe(true)
       }
       const claude = disclosures[0]!
-      expect(claude.find('summary').text()).toMatch(/What this CLI brings \(\d+ MCP servers?, 1 skill or plugin, 2 built in\)/)
+      expect(claude.find('summary').text()).toMatch(/What this CLI brings \(1 skill or plugin, 2 built in\)/)
       expect(claude.text()).toContain('frontend-design')
       expect(claude.text()).toMatch(/Built into .+ \(2\)/)
       expect(claude.text()).toContain('dataviz')
-      expect(disclosures[1]!.find('summary').text()).toContain('0 MCP servers, 0 skills & plugins)')
+      expect(disclosures[1]!.find('summary').text()).toContain('0 skills & plugins)')
       // The defaults and actions stay outside the disclosure.
       expect(wrapper.find('details.provider-brings .provider-inline-defaults').exists()).toBe(false)
       expect(wrapper.find('details.provider-brings .provider-connection-actions').exists()).toBe(false)

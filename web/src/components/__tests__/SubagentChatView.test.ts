@@ -113,13 +113,9 @@ describe('SubagentChatView', () => {
     wrapper.unmount()
   })
 
-  // The sidebar row disappears when the agent finishes, so the view has to
-  // keep reporting live state on its own while it is open.
-  it('shows a running status while the sidebar still lists the agent', async () => {
+  it('shows a running status from the transcript', async () => {
     const store = useProjectStore()
-    store.runningSubagents = {
-      [CHAT_ID]: [{ agent_id: 'a1b2c3d4', status: 'running' }],
-    }
+    store.subagents = { [CHAT_ID]: [transcript({ status: 'running' })] }
 
     const wrapper = await mountView()
 

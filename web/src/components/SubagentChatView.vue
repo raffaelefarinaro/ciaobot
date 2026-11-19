@@ -147,14 +147,7 @@ const agentLabel = computed(
   () => (subagent.value?.description || '').trim() || shortAgentId(props.agentId),
 )
 
-// The sidebar row only exists while the agent runs, but this view is also
-// reachable from the in-chat panel long after it finished, so fall back to the
-// transcript's own status.
-const status = computed(() => {
-  const live = store.runningSubagentsFor(props.chatId)
-    .some(s => sameAgent(s.agent_id, props.agentId))
-  return live ? 'running' : (subagent.value?.status || '')
-})
+const status = computed(() => subagent.value?.status || '')
 
 const statusLabel = computed(() => {
   const s = status.value
@@ -181,7 +174,7 @@ async function refresh(): Promise<void> {
 // dispatch never writes the record that moves the transcript's status off
 // "running", so an unbounded timer polled a dead agent every four seconds for
 // as long as the tab stayed open — each poll a full parse of the parent
-// session file. The store's sidebar poll already bounds itself the same way.
+// session file.
 const POLL_MS = 4000
 const POLL_LIMIT_MS = 15 * 60 * 1000
 let timer: ReturnType<typeof setInterval> | null = null

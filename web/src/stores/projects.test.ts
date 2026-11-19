@@ -3630,15 +3630,6 @@ describe('result frames and unread state', () => {
   })
 })
 
-describe('stop a background task', () => {
-  test('stopBackgroundTask posts to the chat-scoped route with the id escaped', async () => {
-    const store = useProjectStore()
-    apiPost.mockResolvedValueOnce({ ok: true })
-    await store.stopBackgroundTask('c1', 'task/1')
-    expect(apiPost).toHaveBeenLastCalledWith('/api/chats/c1/background-tasks/task%2F1/stop', {})
-  })
-})
-
 describe('ephemeral status events', () => {
   test('does not render Claude requesting status as a system message', () => {
     apiGet.mockResolvedValue([])
@@ -6446,99 +6437,6 @@ describe('latest status sync', () => {
     expect(store.isStreaming).toBe(true)
     expect(store.streamingText[chatId]).toBe('I\'m in the ciao repo')
   })
-})
-
-describe('background agents indicator', () => {
-  test('tracks the running count and only reconciles on a drop', () => {
-    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
-    // /messages returns a settled assistant turn so the reconcile fired on a
-    // drop resolves on its first pass (no lingering timers after teardown).
-    apiGet.mockImplementation((path: string) =>
-      path.endsWith('/messages')
-        ? Promise.resolve([{ role: 'assistant', content: 'ok', sent_at: '' }])
-        : Promise.resolve([]),
-    )
-    const store = useProjectStore()
-    const chatId = 'c-bg'
-    store.activeChatId = chatId
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-    const fire = (remaining: number) =>
-      sock.onmessage?.({
-        data: JSON.stringify({ type: 'chat_subagents_ready', chat_id: chatId, project_id: 'p1', remaining }),
-      })
-
-    fire(2) // initial announcement
-    expect(store.backgroundAgents[chatId]).toBe(2)
-    fire(3) // a subagent spawned children — still just a badge update
-    expect(store.backgroundAgents[chatId]).toBe(3)
-    fire(2) // one finished (drop)
-    expect(store.backgroundAgents[chatId]).toBe(2)
-    fire(0) // all finished
-    expect(store.backgroundAgents[chatId]).toBeUndefined()
-    expect(store.activeBackgroundAgents).toBe(0)
-  })
-
-  test('ignores an older poll that resolves after a newer poll', async () => {
-    const responses: Array<(value: unknown) => void> = []
-    apiGet.mockImplementation((path: string) => {
-      if (path === '/api/subagents/running') {
-        return new Promise(resolve => responses.push(resolve))
-      }
-      return Promise.resolve([])
-    })
-    const store = useProjectStore()
-
-    const older = store.refreshRunningSubagents()
-    const newer = store.refreshRunningSubagents()
-    responses[1]({ chats: {} })
-    await newer
-    responses[0]({ chats: { 'chat-finished': [{ agent_id: 'stale-agent' }] } })
-    await older
-
-    expect(store.runningSubagents).toEqual({})
-  })
-
-  test('does not set toast or unread marker on background agent completion', () => {
-    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    const chatId = 'c-follow-up'
-    store.activeChatId = 'some-other-chat'
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-    const fire = (remaining: number) =>
-      sock.onmessage?.({
-        data: JSON.stringify({ type: 'chat_subagents_ready', chat_id: chatId, project_id: 'p1', remaining }),
-      })
-
-    fire(1)
-    expect(store.backgroundAgents[chatId]).toBe(1)
-
-    fire(0)
-    expect(store.toasts).toHaveLength(0)
-    expect(store.unread[chatId]).toBeUndefined()
-
-    store.backgroundAgents[chatId] = 1
-
-    fire(0)
-    expect(store.toasts).toHaveLength(0)
-    expect(store.unread[chatId]).toBeUndefined()
-  })
-
-  test('a new turn keeps the background-agents count (agents outlive turns)', () => {
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    const chatId = 'c-bg2'
-    store.activeChatId = chatId
-    store.backgroundAgents[chatId] = 4
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-    sock.onmessage?.({
-      data: JSON.stringify({ type: 'chat_streaming_started', chat_id: chatId, project_id: 'p1' }),
-    })
-    expect(store.backgroundAgents[chatId]).toBe(4)
-  })
 
   test('active-only syncLatest preserves locally-held archived chats', async () => {
     Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
@@ -6566,23 +6464,127 @@ describe('background agents indicator', () => {
     expect(store.chats.find(c => c.chat_id === activeId)?.title).toBe('Fresh')
     expect(store.chats.some(c => c.chat_id === archivedId && c.archived)).toBe(true)
   })
+})
 
-  test('the events snapshot replaces background-agent counts wholesale', () => {
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    store.backgroundAgents['c-stale'] = 7
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-    sock.onmessage?.({
-      data: JSON.stringify({
-        type: 'snapshot',
-        active_streams: [],
-        background_agents: { 'c-live': 2 },
-        chat_pins: {},
-      }),
-    })
-    expect(store.backgroundAgents['c-stale']).toBeUndefined()
-    expect(store.backgroundAgents['c-live']).toBe(2)
+describe('store disposal', () => {
+  test('a disposed store stops its liveness watchdog and window listeners', async () => {
+    // The watcher-owned polls were only half the leak. `checkWsLiveness` and the
+    // focus/blur/visibility listeners are registered at setup time, so every
+    // store a test builds kept a real-clock 2s timer and a live focus handler
+    // for the rest of the run — and `checkWsLiveness` can reach `apiGet` and
+    // push a FakeWebSocket onto the module-level array later tests read.
+    // Hidden, so the assertion is this store's socket and focus frame: a visible
+    // page would also poll from stores earlier tests stranded on an untracked pinia.
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
+    try {
+      const store = useProjectStore()
+      apiGet.mockImplementation(() => Promise.resolve([]))
+      const chatId = 'c-dispose-live'
+      store.activeChatId = chatId
+      // A frame time of 0 is "never", so open the sockets after the clock moves.
+      await vi.advanceTimersByTimeAsync(1)
+      store.connectWs(chatId)
+      store.connectEventsWs()
+      const chatSock = fakeSockets.find(s => s.url.includes('/ws/chat/'))!
+      const events = fakeSockets.find(s => s.url.includes('/ws/events'))!
+
+      store.$dispose()
+      const socketsBefore = fakeSockets.length
+      const sendsBefore = chatSock.send.mock.calls.length
+      apiGet.mockClear()
+
+      // Nothing the disposed store registered may still fire. A leftover
+      // watchdog would see the events socket go stale and close it; a leftover
+      // focus listener would send another focus frame.
+      await vi.advanceTimersByTimeAsync(30_000)
+      window.dispatchEvent(new Event('focus'))
+      window.dispatchEvent(new Event('blur'))
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(apiGet.mock.calls).toEqual([])
+      expect(fakeSockets.length).toBe(socketsBefore)
+      expect(events.readyState).toBe(FakeWebSocket.OPEN)
+      expect(chatSock.send.mock.calls.length).toBe(sendsBefore)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a store left on a superseded pinia is disposed too', async () => {
+    // A test that swaps the pinia mid-run strands its first store on an
+    // instance `getActivePinia()` can no longer reach. Disposing only the
+    // survivor left that one holding its watchdog and listeners, which is the
+    // leak this file's cleanup exists to prevent — so the cleanup tracks every
+    // pinia it created rather than the current one.
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
+    try {
+      const stranded = useProjectStore()
+      stranded.activeChatId = 'c1'
+      stranded.streaming = { c1: true }
+      // A frame time of 0 is "never", so open the sockets after the clock moves.
+      await vi.advanceTimersByTimeAsync(1)
+      stranded.connectWs('c1')
+      stranded.connectEventsWs()
+      const chatSock = fakeSockets.find(s => s.url.includes('/ws/chat/'))!
+      const events = fakeSockets.find(s => s.url.includes('/ws/events'))!
+      await Promise.resolve()
+
+      setActivePinia(createPinia())
+      const current = useProjectStore()
+      expect(current).not.toBe(stranded)
+
+      // Both are reachable for disposal, which is what afterEach relies on.
+      expect(piniasCreated.length).toBeGreaterThanOrEqual(2)
+      for (const pinia of piniasCreated) {
+        pinia._s.forEach((store) => store.$dispose())
+      }
+
+      const sendsBefore = chatSock.send.mock.calls.length
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(30_000)
+      window.dispatchEvent(new Event('focus'))
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(apiGet.mock.calls).toEqual([])
+      expect(events.readyState).toBe(FakeWebSocket.OPEN)
+      expect(chatSock.send.mock.calls.length).toBe(sendsBefore)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a disposed store does not resume a settled-reply retry it already scheduled', async () => {
+    // The open path re-fetches /messages on delays while it waits for a settled
+    // reply. Those waits are timers the store owns; a disposed store must cancel
+    // them rather than resume and call the API, or an earlier test's store keeps
+    // calling it on the real clock during a later test.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-dispose-retry'
+      const unsettled: ChatMessage = { role: 'user', content: 'Question', timestamp: '2026-08-27T00:00:00Z', turn_index: 0 }
+      store.activeChatId = chatId
+      store.messages[chatId] = [unsettled]
+      apiGet.mockImplementation((path: string) => {
+        if (!String(path).includes('/messages')) return Promise.resolve([])
+        return Promise.resolve([unsettled])
+      })
+
+      void store.loadMessages(chatId, { waitForSettledReply: true })
+      // The first fetch lands and the first retry wait is now pending.
+      await vi.advanceTimersByTimeAsync(0)
+      expect(apiGet.mock.calls.filter(c => String(c[0]).includes('/messages')).length).toBeGreaterThan(0)
+
+      store.$dispose()
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(apiGet.mock.calls).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -9980,406 +9982,6 @@ describe('chatLastSnippet', () => {
   })
 })
 
-describe('running subagent poll', () => {
-  // The server keeps a row "running" until the agent's transcript goes idle,
-  // which lags the parent turn by up to 60s. One refresh on the falling edge
-  // therefore left rows spinning in the sidebar until the next turn.
-  function mockRunning(rows: Record<string, unknown[]>): void {
-    apiGet.mockImplementation((path: string) => {
-      if (path === '/api/subagents/running') return Promise.resolve({ chats: rows })
-      return Promise.resolve([])
-    })
-  }
-
-  test('keeps polling after work stops until the rows clear', async () => {
-    const store = useProjectStore()
-    const row = [{ agent_id: 'a1', description: 'digging', subagent_type: '', status: 'running', is_async: true, turn_index: 0 }]
-    mockRunning({ c1: row })
-
-    vi.useFakeTimers()
-    try {
-      store.streaming = { c1: true }
-      await vi.advanceTimersByTimeAsync(0)
-      expect(store.runningSubagents.c1).toHaveLength(1)
-
-      // Work stops, but the server still names the agent.
-      store.streaming = { c1: false }
-      await vi.advanceTimersByTimeAsync(0)
-      await vi.advanceTimersByTimeAsync(8000)
-      expect(store.runningSubagents.c1).toHaveLength(1)
-
-      // The transcript finally goes idle; the drain picks that up and the row
-      // disappears without needing another turn.
-      mockRunning({})
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(store.runningSubagents.c1).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a disposed store stops polling', async () => {
-    // The watcher owns the interval, so stopping the watcher is not enough —
-    // an interval it already created keeps firing on its own. Without the
-    // store's onScopeDispose cleanup, every test in this file left one behind
-    // and they went on making requests for the rest of the run.
-    const store = useProjectStore()
-    const row = [{ agent_id: 'a1', description: 'digging', subagent_type: '', status: 'running', is_async: true, turn_index: 0 }]
-    mockRunning({ c1: row })
-
-    vi.useFakeTimers()
-    try {
-      store.streaming = { c1: true }
-      await vi.advanceTimersByTimeAsync(0)
-      await vi.advanceTimersByTimeAsync(8000)
-      expect(apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length).toBeGreaterThan(0)
-
-      store.$dispose()
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(30_000)
-      expect(apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running')).toEqual([])
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a disposed store stops its liveness watchdog and window listeners', async () => {
-    // The watcher-owned polls were only half the leak. `checkWsLiveness` and the
-    // focus/blur/visibility listeners are registered at setup time, so every
-    // store a test builds kept a real-clock 2s timer and a live focus handler
-    // for the rest of the run — and `checkWsLiveness` can reach `apiGet` and
-    // push a FakeWebSocket onto the module-level array later tests read.
-    const store = useProjectStore()
-    apiGet.mockImplementation(() => Promise.resolve([]))
-
-    vi.useFakeTimers()
-    try {
-      store.$dispose()
-      const socketsBefore = fakeSockets.length
-      apiGet.mockClear()
-
-      // Nothing the disposed store registered may still fire.
-      await vi.advanceTimersByTimeAsync(30_000)
-      window.dispatchEvent(new Event('focus'))
-      window.dispatchEvent(new Event('blur'))
-      document.dispatchEvent(new Event('visibilitychange'))
-      await vi.advanceTimersByTimeAsync(0)
-
-      expect(apiGet.mock.calls).toEqual([])
-      expect(fakeSockets.length).toBe(socketsBefore)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a store left on a superseded pinia is disposed too', async () => {
-    // A test that swaps the pinia mid-run strands its first store on an
-    // instance `getActivePinia()` can no longer reach. Disposing only the
-    // survivor left that one holding its watchdog and listeners, which is the
-    // leak this file's cleanup exists to prevent — so the cleanup tracks every
-    // pinia it created rather than the current one.
-    const stranded = useProjectStore()
-    stranded.streaming = { c1: true }
-    await Promise.resolve()
-
-    setActivePinia(createPinia())
-    const current = useProjectStore()
-    expect(current).not.toBe(stranded)
-
-    // Both are reachable for disposal, which is what afterEach relies on.
-    expect(piniasCreated.length).toBeGreaterThanOrEqual(2)
-    for (const pinia of piniasCreated) {
-      pinia._s.forEach((store) => store.$dispose())
-    }
-
-    apiGet.mockClear()
-    vi.useFakeTimers()
-    try {
-      await vi.advanceTimersByTimeAsync(30_000)
-      window.dispatchEvent(new Event('focus'))
-      await vi.advanceTimersByTimeAsync(0)
-      expect(apiGet.mock.calls).toEqual([])
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a disposed store does not resume a settled-reply retry it already scheduled', async () => {
-    // The open path re-fetches /messages on delays while it waits for a settled
-    // reply. Those waits are timers the store owns; a disposed store must cancel
-    // them rather than resume and call the API, or an earlier test's store keeps
-    // calling it on the real clock during a later test.
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      const chatId = 'c-dispose-retry'
-      const unsettled: ChatMessage = { role: 'user', content: 'Question', timestamp: '2026-08-27T00:00:00Z', turn_index: 0 }
-      store.activeChatId = chatId
-      store.messages[chatId] = [unsettled]
-      apiGet.mockImplementation((path: string) => {
-        if (!path.includes('/messages')) return Promise.resolve([])
-        return Promise.resolve([unsettled])
-      })
-
-      void store.loadMessages(chatId, { waitForSettledReply: true })
-      // The first fetch lands and the first retry wait is now pending.
-      await vi.advanceTimersByTimeAsync(0)
-      expect(apiGet.mock.calls.filter(c => String(c[0]).includes('/messages')).length).toBeGreaterThan(0)
-
-      store.$dispose()
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(30_000)
-      expect(apiGet.mock.calls).toEqual([])
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('the drain is bounded, so a row the server never retires cannot poll forever', async () => {
-    const store = useProjectStore()
-    const row = [{ agent_id: 'a1', description: 'stuck', subagent_type: '', status: 'running', is_async: true, turn_index: 0 }]
-    mockRunning({ c1: row })
-
-    vi.useFakeTimers()
-    try {
-      store.streaming = { c1: true }
-      await vi.advanceTimersByTimeAsync(0)
-      store.streaming = { c1: false }
-      await vi.advanceTimersByTimeAsync(0)
-
-      await vi.advanceTimersByTimeAsync(95_000)
-      // Count from a clean slate rather than diffing two totals: the totals
-      // include anything else that polled this endpoint, so a stray request
-      // between the two reads used to fail this test for reasons that had
-      // nothing to do with the drain.
-      apiGet.mockClear()
-
-      await vi.advanceTimersByTimeAsync(60_000)
-      const pollsAfterDeadline = apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length
-      expect(pollsAfterDeadline).toBe(0)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a shell row keeps the poll alive past the drain budget until the server omits it', async () => {
-    const store = useProjectStore()
-    const shell = [{ agent_id: 'task:b1', description: 'sleep 3600', subagent_type: 'shell', status: 'running', is_async: true, turn_index: null, stoppable: true }]
-    let rows: unknown[] = shell
-    apiGet.mockImplementation((path: string) => {
-      if (path === '/api/subagents/running') return Promise.resolve({ chats: rows.length ? { c1: rows } : {} })
-      return Promise.resolve([])
-    })
-    const polls = () => apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length
-
-    vi.useFakeTimers()
-    try {
-      store.streaming = { c1: true }
-      await vi.advanceTimersByTimeAsync(0)
-      store.streaming = { c1: false }
-      await vi.advanceTimersByTimeAsync(0)
-
-      await vi.advanceTimersByTimeAsync(95_000)
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(60_000)
-      expect(polls()).toBeGreaterThan(10)
-
-      rows = []
-      await vi.advanceTimersByTimeAsync(8_000)
-      expect(store.runningSubagentsFor('c1')).toEqual([])
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(30_000)
-      expect(polls()).toBe(0)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a shell row discovered while nothing is working starts the poll', async () => {
-    const store = useProjectStore()
-    const shell = [{ agent_id: 'task:b1', description: 'sleep 3600', subagent_type: 'shell', status: 'running', is_async: true, turn_index: null }]
-    mockRunning({ c1: shell })
-
-    vi.useFakeTimers()
-    try {
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(0)
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(120_000)
-      expect(apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length).toBeGreaterThan(10)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-})
-
-describe('running-row reconciliation while the engine count is zero', () => {
-  // The engine count (`backgroundAgents`, from chat_subagents_ready) and the
-  // cheap running list (/api/subagents/running) are separate owners. A row the
-  // list names while the count is 0 on an idle chat used to start nothing: the
-  // full-list poll was gated on the count alone and the running poll only
-  // started on a working edge.
-  const row = { agent_id: 'a1', description: 'digging', subagent_type: '', status: 'running', is_async: true, turn_index: 0 }
-  let running: Record<string, unknown[]>
-  const calls = (suffix: string) => apiGet.mock.calls.filter(c => String(c[0]).endsWith(suffix)).length
-  function mockEndpoints(): void {
-    apiGet.mockImplementation((path: string) => {
-      if (path === '/api/subagents/running') return Promise.resolve({ chats: running })
-      if (path === '/api/chats/c1/subagents') return Promise.resolve([{ ...row, messages: [] }])
-      return Promise.resolve([])
-    })
-  }
-
-  beforeEach(() => {
-    running = { c1: [row] }
-    mockEndpoints()
-  })
-
-  test('known running rows keep an idle active chat refreshing when the event count is zero', async () => {
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(0)
-      expect(store.backgroundAgents.c1).toBeUndefined()
-      expect(store.isStreaming).toBe(false)
-
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(calls('/subagents')).toBeGreaterThan(0)
-      expect(calls('/api/subagents/running')).toBeGreaterThan(0)
-      // The engine count is never written from the cheap list.
-      expect(store.backgroundAgents.c1).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('running-row discovery immediately refreshes the full active list once', async () => {
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      apiGet.mockClear()
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(0)
-      expect(apiGet.mock.calls.filter(c => c[0] === '/api/chats/c1/subagents')).toHaveLength(1)
-      expect(store.subagents.c1).toHaveLength(1)
-
-      // A second refresh that still lists the row is not a new discovery.
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(0)
-      expect(apiGet.mock.calls.filter(c => c[0] === '/api/chats/c1/subagents')).toHaveLength(1)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('completion and disposal stop both polls', async () => {
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(4000)
-
-      running = {}
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(store.runningSubagents.c1).toBeUndefined()
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(30_000)
-      expect(apiGet.mock.calls).toEqual([])
-
-      // Disposal while rows are still known.
-      running = { c1: [row] }
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(4000)
-      store.$dispose()
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(30_000)
-      expect(apiGet.mock.calls).toEqual([])
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a failed running request does not clear the known rows or stop the poll', async () => {
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      await store.refreshRunningSubagents()
-      apiGet.mockImplementation((path: string) =>
-        path === '/api/subagents/running' ? Promise.reject(new Error('offline')) : Promise.resolve([]))
-      await vi.advanceTimersByTimeAsync(8000)
-      expect(store.runningSubagents.c1).toHaveLength(1)
-
-      mockEndpoints()
-      running = {}
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(store.runningSubagents.c1).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a dedicated subagent view does not trigger full-list polling', async () => {
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      store.setSubagentViewActive('c1')
-      apiGet.mockClear()
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(12_000)
-      expect(calls('/api/chats/c1/subagents')).toBe(0)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('rows for another chat do not poll the active chat', async () => {
-    vi.useFakeTimers()
-    try {
-      running = { other: [row] }
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      apiGet.mockClear()
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(12_000)
-      expect(calls('/api/chats/c1/subagents')).toBe(0)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('late old responses do not restore completed agents', async () => {
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      const pending: Array<(v: unknown) => void> = []
-      apiGet.mockImplementation((path: string) => {
-        if (path === '/api/subagents/running') return Promise.resolve({ chats: running })
-        if (path === '/api/chats/c1/subagents') return new Promise(resolve => pending.push(resolve))
-        return Promise.resolve([])
-      })
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(pending.length).toBeGreaterThanOrEqual(2)
-      const last = pending.length - 1
-      pending[last]([{ ...row, status: 'completed', messages: [] }])
-      await vi.advanceTimersByTimeAsync(0)
-      pending[0]([{ ...row, status: 'running', messages: [] }])
-      await vi.advanceTimersByTimeAsync(0)
-      expect(store.subagents.c1?.[0]?.status).toBe('completed')
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-})
-
 describe('loadSubagent', () => {
   test('fetches one agent and merges it without dropping the others', async () => {
     const store = useProjectStore()
@@ -11330,84 +10932,26 @@ describe('chatsHealth', () => {
   })
 })
 
-describe('stopBackgroundTask', () => {
-  const shellRow = (id: string) => ({ agent_id: `task:${id}`, description: id, subagent_type: 'shell', stoppable: true })
 
-  beforeEach(() => {
-    setActivePinia(newPinia())
-    apiPost.mockReset()
-    apiPost.mockResolvedValue({ ok: true })
-    vi.useFakeTimers()
-  })
-  afterEach(() => vi.useRealTimers())
-
-  it('counts a chat holding only a native shell as busy', () => {
+describe('chatIsWorking', () => {
+  test('chatIsWorking is true only while a turn streams', () => {
     const store = useProjectStore()
-    expect(store.anyChatBusy).toBe(false)
-    store.runningSubagents = { c1: [shellRow('b1')] } as never
-    expect(store.anyChatBusy).toBe(true)
+    expect(store.chatIsWorking('c1')).toBe(false)
+    store.streaming = { c1: true }
     expect(store.chatIsWorking('c1')).toBe(true)
-  })
+    store.streaming = {}
+    expect(store.chatIsWorking('c1')).toBe(false)
 
-  it('posts to the stop route and marks the task stopping, per chat', async () => {
-    const store = useProjectStore()
-    await store.stopBackgroundTask('c1', 'b1')
-    expect(apiPost).toHaveBeenCalledWith('/api/chats/c1/background-tasks/b1/stop', {})
-    expect(store.stoppingTasks).toEqual({ c1: { b1: true } })
-    expect(store.stopTaskErrors).toEqual({})
-  })
-
-  it('ignores a second stop while one is pending', async () => {
-    const store = useProjectStore()
-    await store.stopBackgroundTask('c1', 'b1')
-    await store.stopBackgroundTask('c1', 'b1')
-    expect(apiPost).toHaveBeenCalledTimes(1)
-  })
-
-  it('lets go of the lock after 15 s so Stop can be retried', async () => {
-    const store = useProjectStore()
-    await store.stopBackgroundTask('c1', 'b1')
-    vi.advanceTimersByTime(14_999)
-    expect(store.stoppingTasks.c1?.b1).toBe(true)
-    vi.advanceTimersByTime(1)
-    expect(store.stoppingTasks.c1?.b1).toBeUndefined()
-    await store.stopBackgroundTask('c1', 'b1')
-    expect(apiPost).toHaveBeenCalledTimes(2)
-  })
-
-  it('records an error and releases the lock when the stop is rejected, clearing it on retry', async () => {
-    const store = useProjectStore()
-    apiPost.mockRejectedValueOnce(new Error('boom'))
-    await store.stopBackgroundTask('c1', 'b1')
-    expect(store.stoppingTasks.c1?.b1).toBeUndefined()
-    expect(store.stopTaskErrors.c1?.b1).toBe('Could not stop this process. Try again.')
-    await store.stopBackgroundTask('c1', 'b1')
-    expect(store.stopTaskErrors.c1?.b1).toBeUndefined()
-    expect(store.stoppingTasks.c1?.b1).toBe(true)
-  })
-
-  it('releases a task, and its error, once its row leaves the running list', async () => {
-    const store = useProjectStore()
-    store.runningSubagents = { c1: [shellRow('b1'), shellRow('b2')] } as unknown as typeof store.runningSubagents
-    await store.stopBackgroundTask('c1', 'b1')
-    await store.stopBackgroundTask('c1', 'b2')
-    store.stopTaskErrors = { c1: { b2: 'Could not stop this process. Try again.' } }
-    store.runningSubagents = { c1: [shellRow('b2')] } as unknown as typeof store.runningSubagents
-    await nextTick()
-    expect(store.stoppingTasks.c1?.b1).toBeUndefined()
-    expect(store.stoppingTasks.c1?.b2).toBe(true)
-    store.runningSubagents = {}
-    await nextTick()
-    expect(store.stoppingTasks).toEqual({})
-    expect(store.stopTaskErrors).toEqual({})
-  })
-
-  it('stops its timers when the store is disposed', async () => {
-    const store = useProjectStore()
-    const before = vi.getTimerCount()
-    await store.stopBackgroundTask('c1', 'b1')
-    expect(vi.getTimerCount()).toBe(before + 1)
-    store.$dispose()
-    expect(vi.getTimerCount()).toBe(0)
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'snapshot',
+        active_streams: [],
+        background_agents: { c1: 4 },
+        chat_pins: {},
+      }),
+    })
+    expect(store.chatIsWorking('c1')).toBe(false)
   })
 })

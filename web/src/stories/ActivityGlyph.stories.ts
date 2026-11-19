@@ -29,18 +29,6 @@ export const Working: Story = {
   },
 }
 
-// A background run: the drawn shell prompt with a blinking block cursor, never
-// the pixel grid.
-export const Run: Story = {
-  args: { kind: 'run' },
-  play: async ({ canvasElement }) => {
-    const glyph = canvasElement.querySelector('.activity-glyph--run')
-    expect(glyph?.querySelector('svg.activity-glyph-prompt path')).not.toBeNull()
-    expect(glyph?.querySelector('.activity-glyph-cursor')).not.toBeNull()
-    expect(glyph?.querySelectorAll('.activity-glyph-pixel')).toHaveLength(0)
-  },
-}
-
 // A filled alert triangle with the knocked-out mark: still, never animated,
 // for a failure or a question that wants its owner.
 export const Alert: Story = {

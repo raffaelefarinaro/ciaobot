@@ -48,7 +48,7 @@
       <component :is="hasTitle ? 'span' : 'h2'" v-if="pageTag" class="page-tag">{{ pageTag }}</component>
     </div>
     <div class="header-trail">
-      <div v-if="$slots.actions" class="header-actions" :key="activeBgAgents">
+      <div v-if="$slots.actions" class="header-actions">
         <slot name="actions" />
       </div>
       <!-- Phones only: the sidebar (and its bell) is a drawer there. The drawer
@@ -65,7 +65,6 @@ import NotificationBell from './NotificationBell.vue'
 import { useHistoryNav } from '../composables/useHistoryNav'
 
 const props = withDefaults(defineProps<{
-  activeBgAgents?: number
   /** Short marker for the current view: 'home', 'settings', 'automations', … */
   pageTag?: string
   /** Phones only: Back and the bell move into the view's own overflow menu, so

@@ -102,31 +102,22 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/ChatPanel.vue",
       "web/src/components/ChatSignals.vue",
-      "web/src/components/ComposerActivity.vue",
       "web/src/components/NeedsYouCard.vue",
       "web/src/components/ProjectSidebar.vue",
       "web/src/components/ProposalReviewPanel.vue",
-      "web/src/components/ShellRows.vue",
       "web/src/components/SubagentPanel.vue"
     ],
     "variants": [
       "working",
-      "run",
       "alert"
     ],
-    "variantNotes": "One mark per kind: working is a 3x3 pixel grid with one lit pixel chasing the perimeter, run is a drawn shell prompt with a blinking cursor, alert is a filled still triangle. Shape and motion carry the meaning, never hue.",
+    "variantNotes": "One mark per kind: working is a 3x3 pixel grid with one lit pixel chasing the perimeter, alert is a filled still triangle. Shape and motion carry the meaning, never hue.",
     "states": [
       {
         "name": "working",
         "coverage": "covered",
         "storyIds": ["activity-glyph--working"],
         "note": "Working renders the nine-cell grid with one fixed dim centre; its reduced-motion frame is the checker."
-      },
-      {
-        "name": "run",
-        "coverage": "covered",
-        "storyIds": ["activity-glyph--run"],
-        "note": "Run renders the drawn prompt and the block cursor, with no pixel grid."
       },
       {
         "name": "alert",
@@ -137,7 +128,7 @@ export const inventory: InventoryEntry[] = [
     ],
     "loading": {
       "status": "none",
-      "detail": "Static SVG marks with no fetch, so there is no initial, refresh, failure or stale state. The working grid and the run cursor animate."
+      "detail": "Static SVG marks with no fetch, so there is no initial, refresh, failure or stale state. The working grid animates."
     },
     "migration": {
       "status": "unassessed",
@@ -1057,44 +1048,6 @@ export const inventory: InventoryEntry[] = [
     "loading": {
       "status": "unknown",
       "detail": "Initial and refresh loading fidelity in CommentComposePopover.vue has not yet been audited."
-    },
-    "migration": {
-      "status": "unassessed",
-      "note": "Inventory admission does not approve a design migration."
-    }
-  },
-  {
-    "id": "components-composer-activity",
-    "name": "ComposerActivity",
-    "family": "Chat, messages, composer, activity and context",
-    "kind": "component",
-    "owner": {
-      "path": "web/src/components/ComposerActivity.vue",
-      "anchor": "<template>"
-    },
-    "sources": [],
-    "consumers": [
-      "web/src/components/ChatPanel.vue"
-    ],
-    "variants": [],
-    "variantNotes": "Compact/expanded agents and processes; ShellRows. Detailed variants are unassessed.",
-    "states": [
-      {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ComposerActivity.vue implements this render; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
-    ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in ComposerActivity.vue has not yet been audited."
     },
     "migration": {
       "status": "unassessed",
@@ -3629,45 +3582,6 @@ export const inventory: InventoryEntry[] = [
     "rationale": "Connected route or host composition; isolate its seam before rendering it in the workshop."
   },
   {
-    "id": "components-shell-rows",
-    "name": "ShellRows",
-    "family": "Chat, messages, composer, activity and context",
-    "kind": "component",
-    "owner": {
-      "path": "web/src/components/ShellRows.vue",
-      "anchor": "<template>"
-    },
-    "sources": [],
-    "consumers": [
-      "web/src/components/ChatPanel.vue",
-      "web/src/components/ComposerActivity.vue"
-    ],
-    "variants": [],
-    "variantNotes": "Rail/other template variant, elapsed/error/stoppable; chatDetails.css. Detailed variants are unassessed.",
-    "states": [
-      {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ShellRows.vue implements this render; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
-    ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in ShellRows.vue has not yet been audited."
-    },
-    "migration": {
-      "status": "unassessed",
-      "note": "Inventory admission does not approve a design migration."
-    }
-  },
-  {
     "id": "components-sidebar-list-skeleton",
     "name": "SidebarListSkeleton",
     "family": "Root, navigation and common presentation",
@@ -4064,7 +3978,6 @@ export const inventory: InventoryEntry[] = [
     },
     "sources": [],
     "consumers": [
-      "web/src/components/settings/SettingsMcpServers.vue"
     ],
     "variants": [
       "selected",
@@ -6545,71 +6458,23 @@ export const inventory: InventoryEntry[] = [
     }
   },
   {
-    "id": "components-settings-settings-mcp-servers",
-    "name": "SettingsMcpServers",
-    "family": "Settings",
-    "kind": "component",
-    "owner": {
-      "path": "web/src/components/settings/SettingsMcpServers.vue",
-      "anchor": "<template>"
-    },
-    "sources": [],
-    "consumers": [
-      "web/src/components/SettingsView.vue"
+    id: 'components-provider-mcp-button',
+    name: 'ProviderMcpButton',
+    family: 'Settings',
+    kind: 'component',
+    owner: { path: 'web/src/components/ProviderMcpButton.vue', anchor: '<template>' },
+    sources: ['web/src/composables/useRunInTerminal.ts'],
+    consumers: ['web/src/components/SettingsView.vue'],
+    variants: [],
+    variantNotes: 'Open, copy and terminal outcomes have not yet been audited.',
+    states: [
+      { name: 'default', coverage: 'uncovered', storyIds: [], note: 'The button, command and reload note render when mcp_command is set; no story exists.' },
+      { name: 'typed', coverage: 'uncovered', storyIds: [], note: 'A typed terminal run has no story.' },
+      { name: 'copied', coverage: 'uncovered', storyIds: [], note: 'A copied terminal fallback has no story.' },
+      { name: 'failed', coverage: 'uncovered', storyIds: [], note: 'A failed terminal run has no story.' },
     ],
-    "variants": [
-      "provider",
-      "unknown-inventory",
-      "empty",
-      "server"
-    ],
-    "variantNotes": "Observed branches in SettingsMcpServers.vue; remaining variants have not been audited.",
-    "states": [
-      {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsMcpServers.vue implements this render; no rendered-state story exists."
-      },
-      {
-        "name": "provider",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMcpServers.vue implements the provider branch; no rendered-state story exists."
-      },
-      {
-        "name": "unknown-inventory",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMcpServers.vue implements the unknown-inventory branch; no rendered-state story exists."
-      },
-      {
-        "name": "empty",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMcpServers.vue implements the empty branch; no rendered-state story exists."
-      },
-      {
-        "name": "server",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMcpServers.vue implements the server branch; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
-    ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsMcpServers.vue has not yet been audited."
-    },
-    "migration": {
-      "status": "unassessed",
-      "note": "Inventory admission does not approve a design migration."
-    }
+    loading: { status: 'none', detail: 'No fetch. The command arrives on the provider row.' },
+    migration: { status: 'unassessed', note: 'Inventory admission does not approve a design migration.' },
   },
   {
     "id": "components-settings-settings-memory-backup",
@@ -7219,7 +7084,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/BrowserTerminalButton.vue",
       "web/src/components/ChatPanel.vue",
       "web/src/components/ChatRepoSection.vue",
-      "web/src/components/ShellRows.vue",
       "web/src/components/TaskOriginNote.vue"
     ],
     "variants": ["cd-section", "cd-heading", "cd-row", "cd-action"],
@@ -7550,7 +7414,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsDevices.vue",
       "web/src/components/settings/SettingsEngineLogin.vue",
       "web/src/components/settings/SettingsKeyboardShortcuts.vue",
-      "web/src/components/settings/SettingsMcpServers.vue",
       "web/src/components/settings/SettingsMemoryBackup.vue",
       "web/src/components/settings/SettingsMemoryHandover.vue",
       "web/src/components/settings/SettingsNotifications.vue",
@@ -7728,7 +7591,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ChatRetryState.vue",
       "web/src/components/ChatTurnActivity.vue",
       "web/src/components/CommentComposePopover.vue",
-      "web/src/components/ComposerActivity.vue",
       "web/src/components/ConfirmDialog.vue",
       "web/src/components/CsvViewer.vue",
       "web/src/components/DecisionReason.vue",
@@ -7776,7 +7638,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/RepoPickerDialog.vue",
       "web/src/components/SchedulePanel.vue",
       "web/src/components/SettingsView.vue",
-      "web/src/components/ShellRows.vue",
       "web/src/components/StartupView.vue",
       "web/src/components/SubagentChatView.vue",
       "web/src/components/TabBar.vue",
@@ -7808,7 +7669,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsDevices.vue",
       "web/src/components/settings/SettingsEngineLogin.vue",
       "web/src/components/settings/SettingsKeyboardShortcuts.vue",
-      "web/src/components/settings/SettingsMcpServers.vue",
       "web/src/components/settings/SettingsMemoryBackup.vue",
       "web/src/components/settings/SettingsMemoryHandover.vue",
       "web/src/components/settings/SettingsNotifications.vue",
@@ -7951,7 +7811,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsDevices.vue",
       "web/src/components/settings/SettingsEngineLogin.vue",
       "web/src/components/settings/SettingsKeyboardShortcuts.vue",
-      "web/src/components/settings/SettingsMcpServers.vue",
       "web/src/components/settings/SettingsMemoryBackup.vue",
       "web/src/components/settings/SettingsMemoryHandover.vue",
       "web/src/components/settings/SettingsNotifications.vue",
@@ -8046,7 +7905,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/SettingsView.vue",
       "web/src/components/TaskWorkspaceSurface.vue",
       "web/src/components/WebhookTriggers.vue",
-      "web/src/components/settings/SettingsMcpServers.vue",
       "web/src/components/settings/WorkspaceGoogleAccount.vue"
     ],
     "consumers": [],
@@ -8157,7 +8015,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsDevices.vue",
       "web/src/components/settings/SettingsEngineLogin.vue",
       "web/src/components/settings/SettingsKeyboardShortcuts.vue",
-      "web/src/components/settings/SettingsMcpServers.vue",
       "web/src/components/settings/SettingsMemoryBackup.vue",
       "web/src/components/settings/SettingsMemoryHandover.vue",
       "web/src/components/settings/SettingsNotifications.vue",
@@ -8289,7 +8146,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ChatPanel.vue",
       "web/src/components/ChatRepoSection.vue",
       "web/src/components/ChatTurnActivity.vue",
-      "web/src/components/ComposerActivity.vue",
       "web/src/components/FileViewerModal.vue",
       "web/src/components/HomeIntake.vue",
       "web/src/components/HomeRecentChats.vue",
@@ -8312,7 +8168,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsDevices.vue",
       "web/src/components/settings/SettingsEngineLogin.vue",
       "web/src/components/settings/SettingsKeyboardShortcuts.vue",
-      "web/src/components/settings/SettingsMcpServers.vue",
       "web/src/components/settings/SettingsMemoryBackup.vue",
       "web/src/components/settings/SettingsMemoryHandover.vue",
       "web/src/components/settings/SettingsNotifications.vue",
@@ -8381,7 +8236,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ChatRetryState.vue",
       "web/src/components/ChatTurnActivity.vue",
       "web/src/components/CommentComposePopover.vue",
-      "web/src/components/ComposerActivity.vue",
       "web/src/components/ConfirmDialog.vue",
       "web/src/components/CsvViewer.vue",
       "web/src/components/DecisionReason.vue",
@@ -8429,7 +8283,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/RepoPickerDialog.vue",
       "web/src/components/SchedulePanel.vue",
       "web/src/components/SettingsView.vue",
-      "web/src/components/ShellRows.vue",
       "web/src/components/StartupView.vue",
       "web/src/components/TabBar.vue",
       "web/src/components/TaskOriginNote.vue",
@@ -8467,7 +8320,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsDevices.vue",
       "web/src/components/settings/SettingsEngineLogin.vue",
       "web/src/components/settings/SettingsKeyboardShortcuts.vue",
-      "web/src/components/settings/SettingsMcpServers.vue",
       "web/src/components/settings/SettingsMemoryBackup.vue",
       "web/src/components/settings/SettingsMemoryHandover.vue",
       "web/src/components/settings/SettingsNotifications.vue",

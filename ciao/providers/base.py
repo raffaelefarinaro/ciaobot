@@ -160,7 +160,8 @@ def build_claude_message_stream(
     """Build a one-message async stream for Claude structured input.
 
     ``uuid`` tags the message so the CLI's user-message replay echoes it back
-    unchanged (the delivery signal for ``steer_turn``).
+    unchanged (the echo ``ClaudeProvider`` uses to tell its own prompt from an
+    earlier CLI turn).
     """
 
     async def _stream() -> AsyncGenerator[dict[str, Any], None]:
@@ -353,13 +354,6 @@ class BaseProvider(ABC):
         coroutine that *returns* a generator instead.
         """
         ...
-
-    async def steer_turn(self, request: AgentRequest) -> str | None:
-        """Inject a user message into the running foreground turn.
-
-        Returns a delivery id, or None when the provider cannot steer now.
-        """
-        return None
 
     async def move_to_background(self) -> MoveToBackgroundOutcome:
         """Move the running turn's foreground tools to the background (OpenCode's Ctrl+B).
