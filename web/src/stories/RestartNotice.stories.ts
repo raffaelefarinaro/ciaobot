@@ -121,10 +121,12 @@ export const KeyboardMove: Story = {
     expect(moved.left).toBeCloseTo(before.left, 0)
     // Focus stays on the card that just moved, and the drop is remembered.
     expect(document.activeElement).toBe(card)
-    expect(JSON.parse(localStorage.getItem(POS_KEY)!)).toEqual({
-      x: Number.parseFloat(card.style.left),
-      y: Number.parseFloat(card.style.top),
-    })
+    // The stored value keeps full precision, while the browser serialises
+    // style.left/top to about six significant digits, so compare per coordinate.
+    const stored = JSON.parse(localStorage.getItem(POS_KEY)!) as { x: number, y: number }
+    expect(stored.x).toBeCloseTo(Number.parseFloat(card.style.left), 0)
+    expect(stored.y).toBeCloseTo(Number.parseFloat(card.style.top), 0)
+    expect(stored.y).toBeCloseTo(before.top - 16, 0)
     fireEvent.keyDown(card, { key: 'ArrowDown' })
     await waitFor(() => expect(card.getBoundingClientRect().top).toBeCloseTo(before.top, 0))
   },
@@ -152,7 +154,7 @@ export const Drag: Story = {
     await waitFor(() => expect(card.classList.contains('restart-card--dragging')).toBe(false))
     expect(card.classList.contains('restart-card--moved')).toBe(true)
     const stored = JSON.parse(localStorage.getItem(POS_KEY)!) as { x: number, y: number }
-    expect(Math.round(stored.x)).toBe(Math.round(during.left))
-    expect(Math.round(stored.y)).toBe(Math.round(during.top))
+    expect(stored.x).toBeCloseTo(during.left, 0)
+    expect(stored.y).toBeCloseTo(during.top, 0)
   },
 }
