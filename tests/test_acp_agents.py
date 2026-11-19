@@ -676,25 +676,66 @@ async def test_engine_connectors_env_is_withheld_from_the_claude_process(
     assert _methods(calls, "initialize")[0]["env"]["ENABLE_CLAUDEAI_MCP_SERVERS"] is None
 
 
+SESSION = "11111111-2222-4333-8444-555555555599"
+
+
+@pytest.fixture
+def cli_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The Claude CLI's own session file for SESSION, under a temporary config dir."""
+    from ciao import claude_sessions
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    key = claude_sessions.project_key_for_directory(str(workspace))
+    project = tmp_path / "claude-config" / "projects" / key
+    project.mkdir(parents=True)
+    path = project / f"{SESSION}.jsonl"
+    path.write_text("{}\n", encoding="utf-8")
+    return path
+
+
 @pytest.mark.asyncio
-async def test_delete_session_reports_that_the_journal_was_deleted(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+async def test_delete_session_removes_journal_and_cli_file(
+    tmp_path: Path, cli_session: Path
 ) -> None:
     from ciao.providers.acp.session import journal_file
-    from ciao.providers.claude import ClaudeProvider
 
     runtime = tmp_path / "runtime"
-    journal = journal_file(runtime, CLAUDE.id, "sess-1")
+    journal = journal_file(runtime, CLAUDE.id, SESSION)
     journal.parent.mkdir(parents=True)
     journal.write_text("{}\n", encoding="utf-8")
+    workspace = tmp_path / "ws"
 
-    async def sdk_nothing(cls: Any, _workspace: Path, _session_id: str, *, runtime_root: Path) -> None:
-        return None
-
-    monkeypatch.setattr(ClaudeProvider, "delete_session", classmethod(sdk_nothing))
-    assert await ClaudeAcpProvider.delete_session(tmp_path, "sess-1", runtime_root=runtime) is True
+    assert await ClaudeAcpProvider.delete_session(workspace, SESSION, runtime_root=runtime) is True
     assert not journal.exists()
-    assert await ClaudeAcpProvider.delete_session(tmp_path, "sess-1", runtime_root=runtime) is None
+    assert not cli_session.exists()
+    assert await ClaudeAcpProvider.delete_session(workspace, SESSION, runtime_root=runtime) is None
+
+
+@pytest.mark.asyncio
+async def test_delete_session_counts_a_cli_file_alone(tmp_path: Path, cli_session: Path) -> None:
+    runtime = tmp_path / "runtime"
+    assert await ClaudeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=runtime) is True
+    assert not cli_session.exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_session_warns_without_the_path_when_the_cli_file_cannot_go(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from ciao import claude_sessions
+
+    def refuse(session_id: str, directory: str | None) -> bool:
+        raise PermissionError(f"denied: {tmp_path / 'secret-dir'}")
+
+    monkeypatch.setattr(claude_sessions, "delete_session_file", refuse)
+    with caplog.at_level("WARNING", logger="ciao.providers.acp.agents"):
+        result = await ClaudeAcpProvider.delete_session(tmp_path, SESSION, runtime_root=tmp_path / "rt")
+    assert result is None
+    assert "left in place" in caplog.text
+    assert SESSION not in caplog.text
+    assert "secret-dir" not in caplog.text
 
 
 def test_codex_mode_table_covers_every_bridge_mode() -> None:
@@ -952,3 +993,40 @@ async def test_ext_notification_reaches_the_live_session() -> None:
     unhooked.session = session  # type: ignore[assignment]
     await unhooked.ext_notification(_CHILD, {"rootSessionId": "ses_root"})
     assert len(session.calls) == 1
+
+
+def test_claude_acp_provider_has_no_sdk_import_or_native_title_read() -> None:
+    # The title comes from the protocol (session_info_update) and the session file is read
+    # by claude_sessions, so the ACP agents module must not import the SDK-era provider.
+    from ciao.providers.acp import agents
+
+    source = Path(agents.__file__).read_text(encoding="utf-8")
+    assert "ciao.providers.claude" not in source
+    assert "native_title_candidates" not in ClaudeAcpProvider.__dict__
+
+
+@pytest.mark.asyncio
+async def test_claude_acp_provider_reads_no_native_title(tmp_path: Path) -> None:
+    assert await ClaudeAcpProvider.native_title_candidates(tmp_path, SESSION, runtime_root=tmp_path) == ()
+
+
+@pytest.mark.asyncio
+async def test_delete_session_runs_the_blocking_file_delete_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # delete_session_file runs a git subprocess and file removal; it must not block the loop.
+    import threading
+
+    from ciao import claude_sessions
+
+    ran_on: list[int] = []
+
+    def record(session_id: str, directory: str | None) -> bool:
+        ran_on.append(threading.get_ident())
+        return False
+
+    monkeypatch.setattr(claude_sessions, "delete_session_file", record)
+    await ClaudeAcpProvider.delete_session(tmp_path, SESSION, runtime_root=tmp_path / "rt")
+
+    assert ran_on, "the CLI session delete was not attempted"
+    assert ran_on[0] != threading.get_ident()

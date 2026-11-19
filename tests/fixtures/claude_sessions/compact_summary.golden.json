@@ -1,0 +1,58 @@
+[
+  {
+    "message": {
+      "content": "Summary: the release plan has three steps.",
+      "role": "user"
+    },
+    "parent_agent_id": null,
+    "parent_tool_use_id": null,
+    "session_id": "11111111-2222-4333-8444-555555555552",
+    "type": "user",
+    "uuid": "c4"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "text": "Continuing from the summary.",
+          "type": "text"
+        }
+      ],
+      "id": "msg_c2",
+      "role": "assistant"
+    },
+    "parent_agent_id": null,
+    "parent_tool_use_id": null,
+    "session_id": "11111111-2222-4333-8444-555555555552",
+    "type": "assistant",
+    "uuid": "c5"
+  },
+  {
+    "message": {
+      "content": "Start step one",
+      "role": "user"
+    },
+    "parent_agent_id": null,
+    "parent_tool_use_id": null,
+    "session_id": "11111111-2222-4333-8444-555555555552",
+    "type": "user",
+    "uuid": "c6"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "text": "Step one is done.",
+          "type": "text"
+        }
+      ],
+      "id": "msg_c3",
+      "role": "assistant"
+    },
+    "parent_agent_id": null,
+    "parent_tool_use_id": null,
+    "session_id": "11111111-2222-4333-8444-555555555552",
+    "type": "assistant",
+    "uuid": "c7"
+  }
+]

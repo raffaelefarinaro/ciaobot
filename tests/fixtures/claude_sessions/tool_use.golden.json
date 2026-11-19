@@ -1,0 +1,106 @@
+[
+  {
+    "message": {
+      "content": "List the files",
+      "role": "user"
+    },
+    "parent_agent_id": null,
+    "parent_tool_use_id": null,
+    "session_id": "11111111-2222-4333-8444-555555555551",
+    "type": "user",
+    "uuid": "u1"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "id": "toolu_1",
+          "input": {
+            "command": "ls"
+          },
+          "name": "Bash",
+          "type": "tool_use"
+        }
+      ],
+      "id": "msg_1",
+      "role": "assistant"
+    },
+    "parent_agent_id": null,
+    "parent_tool_use_id": null,
+    "session_id": "11111111-2222-4333-8444-555555555551",
+    "type": "assistant",
+    "uuid": "a1"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "id": "toolu_2",
+          "input": {
+            "file_path": "notes.txt"
+          },
+          "name": "Read",
+          "type": "tool_use"
+        }
+      ],
+      "id": "msg_1",
+      "role": "assistant"
+    },
+    "parent_agent_id": null,
+    "parent_tool_use_id": null,
+    "session_id": "11111111-2222-4333-8444-555555555551",
+    "type": "assistant",
+    "uuid": "a2"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "content": "a.txt",
+          "tool_use_id": "toolu_1",
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    },
+    "parent_agent_id": null,
+    "parent_tool_use_id": null,
+    "session_id": "11111111-2222-4333-8444-555555555551",
+    "type": "user",
+    "uuid": "r1"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "content": "hello",
+          "tool_use_id": "toolu_2",
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    },
+    "parent_agent_id": null,
+    "parent_tool_use_id": null,
+    "session_id": "11111111-2222-4333-8444-555555555551",
+    "type": "user",
+    "uuid": "r2"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "text": "Found a.txt and read notes.txt.",
+          "type": "text"
+        }
+      ],
+      "id": "msg_2",
+      "role": "assistant"
+    },
+    "parent_agent_id": null,
+    "parent_tool_use_id": null,
+    "session_id": "11111111-2222-4333-8444-555555555551",
+    "type": "assistant",
+    "uuid": "a3"
+  }
+]

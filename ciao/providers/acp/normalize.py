@@ -18,6 +18,7 @@ from ciao.models import (
     AssistantTextDelta,
     ModelChangedEvent,
     ResultEvent,
+    SessionTitleEvent,
     StreamEvent,
     SystemStatusEvent,
     ThinkingEvent,
@@ -208,6 +209,8 @@ class UpdateNormalizer:
             if isinstance(mode, str):
                 self.current_values["mode"] = mode
             return []
+        if kind == "session_info_update":
+            return self._session_info(u)
         if kind == "compaction_update":
             if u.get("status") == "completed":
                 self.compacted = True
@@ -304,6 +307,13 @@ class UpdateNormalizer:
             control_surface=control_surface,
         )
 
+    def _session_info(self, u: Mapping[str, Any]) -> list[StreamEvent]:
+        # A null or blank title means the agent has none yet: nothing to apply.
+        title = u.get("title")
+        if not isinstance(title, str) or not title.strip():
+            return []
+        return [SessionTitleEvent(type="session_title", title=title.strip())]
+
     def _usage_update(self, u: Mapping[str, Any]) -> None:
         used, size = u.get("used"), u.get("size")
         if used is not None:
@@ -335,7 +345,6 @@ _SILENT_KINDS = frozenset(
     {
         "plan",
         "available_commands_update",
-        "session_info_update",
         "notice",
         "user_message_chunk",
         "compaction_summary_chunk",

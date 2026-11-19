@@ -6626,25 +6626,48 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/onboarding/OnboardingRuntimeStage.vue",
       "web/src/components/onboarding/OnboardingShell.vue"
     ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variants": [
+      "primary",
+      "secondary",
+      "link",
+      "disabled"
+    ],
+    "variantNotes": "One variant prop over one native button: secondary (the default) is the outlined rest, primary the filled continue action, link the accent text action; disabled is a fall-through attribute the owners pass while a save is in flight.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingButton.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["onboarding-button--default"],
+        "note": "The secondary default render: one native `type=\"button\"` at the 44px touch height carrying `data-variant=\"secondary\"`."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "primary",
+        "coverage": "covered",
+        "storyIds": ["onboarding-button--primary"],
+        "note": "`variant=\"primary\"` sets `data-variant=\"primary\"`; the Shell's Continue is the production use."
+      },
+      {
+        "name": "link",
+        "coverage": "covered",
+        "storyIds": ["onboarding-button--link"],
+        "note": "`variant=\"link\"` drops the border and reads as accent text; Leave setup, Change and Change name are the production uses."
+      },
+      {
+        "name": "disabled",
+        "coverage": "covered",
+        "storyIds": ["onboarding-button--disabled"],
+        "note": "Attributes fall through to the native button, so the owners' busy flags disable it (Shell busy, RuntimeStage loadingStatus and saving); the story asserts the control is actually blocked."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": ["onboarding-button--keyboard-focus"],
+        "note": "`:focus-visible` draws the 2px accent outline; the story tabs to the button, asserts focus-visible and that Enter fires the click."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingButton.vue has not yet been audited."
+      "status": "none",
+      "detail": "A presentational native button: it runs no fetch and has no async of its own, so there is no initial, refresh, failure or stale render. The disabled look arrives from its owner's busy state."
     },
     "migration": {
       "status": "unassessed",
@@ -6720,25 +6743,64 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/onboarding/OnboardingMemoryStage.vue",
       "web/src/components/onboarding/OnboardingRuntimeStage.vue"
     ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variants": [
+      "checked",
+      "disabled"
+    ],
+    "variantNotes": "A native radio row: checked follows the group's model; disabled comes from its own prop or the group's disabled. The description slot is optional.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingChoice.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice--default"
+        ],
+        "note": "Unchecked row with a plain title: no description element, data-checked and data-disabled both false. Rendered inside the production OnboardingChoiceGroup host."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "checked",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice--checked"
+        ],
+        "note": "The group model matches the value: the native radio is checked and data-checked is true. Clicking the checked radio fires no change, and the group still re-selects it, so it cannot be toggled off."
+      },
+      {
+        "name": "description",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice--description"
+        ],
+        "note": "The description slot renders inside the title block (.ob-choice-desc) with its own text."
+      },
+      {
+        "name": "select",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice--select"
+        ],
+        "note": "A click on the second radio moves the group model; the owner's pick() re-syncs the native group so exactly one radio stays checked."
+      },
+      {
+        "name": "disabled",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice--disabled"
+        ],
+        "note": "The choice's own disabled prop: data-disabled is true and the native radio is disabled. A click does not check it, while an enabled sibling still works."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice--keyboard-focus"
+        ],
+        "note": "Tab lands on the checked radio with :focus-visible; ArrowDown moves focus to the next choice and checks it."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingChoice.vue has not yet been audited."
+      "status": "none",
+      "detail": "Presentational radio row: it runs no fetch and has no async state. Initial, refresh, failure and stale renders do not apply; the group's model supplies every value."
     },
     "migration": {
       "status": "unassessed",
@@ -6761,25 +6823,67 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/onboarding/OnboardingMemoryStage.vue",
       "web/src/components/onboarding/OnboardingRuntimeStage.vue"
     ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variants": [
+      "list",
+      "cards",
+      "segmented",
+      "disabled",
+      "after"
+    ],
+    "variantNotes": "layout is list (default), cards or segmented, set on the radiogroup as data-layout; disabled reaches every choice through the group context; the after slot renders under the choices.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingChoiceGroup.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice-group--default"
+        ],
+        "note": "List layout (the default): a role=radiogroup labelled by the group label, data-layout list, three choices with one checked."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "cards",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice-group--cards"
+        ],
+        "note": "layout cards: data-layout cards on the radiogroup; the choices are the same native radios."
+      },
+      {
+        "name": "segmented",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice-group--segmented"
+        ],
+        "note": "layout segmented: one wrapping row with data-layout segmented; the checked choice carries data-checked."
+      },
+      {
+        "name": "disabled",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice-group--disabled"
+        ],
+        "note": "Group-level disabled: every native radio is disabled and blocked, and a click leaves the checked value unchanged."
+      },
+      {
+        "name": "after-slot",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice-group--after-slot"
+        ],
+        "note": "The after slot renders below the choices container, as guidance under the group."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-choice-group--keyboard-focus"
+        ],
+        "note": "One tab stop for the group; ArrowDown walks the radios and each move fires select."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingChoiceGroup.vue has not yet been audited."
+      "status": "none",
+      "detail": "Presentational grouping: it renders its label and choices from props and runs no fetch. No initial, refresh, failure or stale render."
     },
     "migration": {
       "status": "unassessed",
@@ -6800,25 +6904,66 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/onboarding/OnboardingCareStage.vue",
       "web/src/components/onboarding/OnboardingLocationStage.vue"
     ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variants": [
+      "help",
+      "help-slot",
+      "error",
+      "below"
+    ],
+    "variantNotes": "help is the prop text and the help slot overrides it with rich markup; error adds the role=alert line and the invalid flag; below holds chips or suggestions under the control.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingField.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-field--default"
+        ],
+        "note": "Label and slotted control only: the help element is present but empty, there is no error line, and aria-describedby names the help element."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "help",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-field--help"
+        ],
+        "note": "The help prop fills the help element, which the control's aria-describedby names."
+      },
+      {
+        "name": "help-slot",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-field--help-slot"
+        ],
+        "note": "The help slot replaces the help prop with rich markup: two paragraphs and a link."
+      },
+      {
+        "name": "error",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-field--error"
+        ],
+        "note": "error renders a role=alert paragraph with its own id; aria-describedby lists help then error, and the slotted control gets aria-invalid=true."
+      },
+      {
+        "name": "below",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-field--below"
+        ],
+        "note": "The below slot sits between the control and the help element."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-field--keyboard-focus"
+        ],
+        "note": "Tab reaches the slotted input, which shows :focus-visible."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingField.vue has not yet been audited."
+      "status": "none",
+      "detail": "A labelled control wrapper with no async state: the value and any error come from the stage. No initial, refresh, failure or stale render."
     },
     "migration": {
       "status": "unassessed",
@@ -7086,39 +7231,99 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/onboarding/OnboardingView.vue"
     ],
     "variants": [
+      "step",
+      "busy",
+      "canContinue",
       "conflict",
-      "error"
+      "error",
+      "summary"
     ],
-    "variantNotes": "Observed branches in OnboardingShell.vue; remaining variants have not been audited.",
+    "variantNotes": "step picks the heading and the current step; busy, canContinue, conflict and error are props; the target kind picks the context line; the summary slot adds an aside.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingShell.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--default"
+        ],
+        "note": "Installation context on the first step: heading, steps nav with one aria-current, Back, Leave setup and an enabled Continue; no alert and no aside."
+      },
+      {
+        "name": "workspace-target",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--workspace"
+        ],
+        "note": "A workspace target reads Workspace with the workspace name on the context line."
+      },
+      {
+        "name": "finish",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--finish"
+        ],
+        "note": "The last step relabels the primary control Finish setup and marks Finish as current."
+      },
+      {
+        "name": "busy",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--busy"
+        ],
+        "note": "busy disables Back, Leave setup and Continue; no alert is shown."
+      },
+      {
+        "name": "blocked",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--blocked"
+        ],
+        "note": "canContinue false disables only Continue; Back and Leave stay enabled."
       },
       {
         "name": "conflict",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingShell.vue has a conflict branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--conflict"
+        ],
+        "note": "conflict shows the role=alert paragraph and an enabled Reload, which the host records."
       },
       {
         "name": "error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingShell.vue has a error branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--error"
+        ],
+        "note": "error shows the message in the alert with no conflict paragraph."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "conflict-error",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--conflict-error"
+        ],
+        "note": "Both flags at once: two paragraphs over one Reload."
+      },
+      {
+        "name": "summary-slot",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--summary-slot"
+        ],
+        "note": "The summary slot renders an aside labelled Setup summary."
+      },
+      {
+        "name": "step-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-shell--step-focus"
+        ],
+        "note": "Back moves one step and the step heading takes focus (activeElement). The h1 keeps its outline hidden by design, so only the focus move is asserted, not a visible ring."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingShell.vue has not yet been audited."
+      "status": "known",
+      "detail": "The shell loads nothing itself: initial, refresh and stale loading belong to the stage slot. Its in-flight render is busy (story Busy), which disables Back, Leave setup and Continue with no spinner. A failed save renders as the error alert (story Error); there is no stale render."
     },
     "migration": {
       "status": "unassessed",
@@ -7145,25 +7350,68 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/onboarding/OnboardingSummary.vue",
       "web/src/components/onboarding/OnboardingView.vue"
     ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variants": [
+      "sm",
+      "md",
+      "xl",
+      "2xl",
+      "section",
+      "form"
+    ],
+    "variantNotes": "gap sets data-gap (sm, md by default, xl, 2xl); as renders a section or form instead of the default div.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingStack.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-stack--default"
+        ],
+        "note": "Default gap md on a div: data-gap md and the rendered element is a DIV."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "small",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-stack--small"
+        ],
+        "note": "gap sm: data-gap sm."
+      },
+      {
+        "name": "large",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-stack--large"
+        ],
+        "note": "gap xl: data-gap xl."
+      },
+      {
+        "name": "double-large",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-stack--double-large"
+        ],
+        "note": "gap 2xl around a nested default stack: the row gap scales with the prop, so the outer stack's gap is larger than the inner one."
+      },
+      {
+        "name": "section",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-stack--section"
+        ],
+        "note": "as section with an aria-label, as the stages and the summary render it."
+      },
+      {
+        "name": "form",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-stack--form"
+        ],
+        "note": "as form: its submit is prevented in place and recorded on the element."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingStack.vue has not yet been audited."
+      "status": "none",
+      "detail": "A spacing wrapper with no data or async state. No initial, refresh, failure or stale render."
     },
     "migration": {
       "status": "unassessed",
@@ -7184,24 +7432,28 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/onboarding/OnboardingShell.vue"
     ],
     "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variantNotes": "No configurable props: the start and default slots fill the two rows, and the phone layout is a CSS media query.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingStepFooter.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-step-footer--default"
+        ],
+        "note": "Two rows: the start slot (Back) and the default slot (Leave setup, Continue), with 44px buttons."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-step-footer--narrow"
+        ],
+        "note": "At a 390px viewport the rows stop wrapping (nowrap) with no horizontal overflow and the same 44px targets."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingStepFooter.vue has not yet been audited."
+      "status": "none",
+      "detail": "A presentational footer with no data or async state. No initial, refresh, failure or stale render."
     },
     "migration": {
       "status": "unassessed",
@@ -7221,25 +7473,83 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/onboarding/OnboardingFinishStage.vue"
     ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variants": [
+      "loading",
+      "ready",
+      "deferred",
+      "attention",
+      "unknown"
+    ],
+    "variantNotes": "loading swaps the list for one status line; each item state is ready, deferred, attention or unknown; an in-app href adds a Review link and any other href is dropped.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingSummary.vue implements this render; no rendered-state story exists."
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-summary--loading"
+        ],
+        "note": "Initial load: loading=true renders one role=status line, Checking setup, and no list."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "empty",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-summary--empty"
+        ],
+        "note": "Loaded with no rows: the list element renders with no rows and no status line."
+      },
+      {
+        "name": "ready",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-summary--ready"
+        ],
+        "note": "A ready row shows its label, its value, the ready marker and an in-app Review link."
+      },
+      {
+        "name": "deferred",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-summary--deferred"
+        ],
+        "note": "A deferred row shows the deferred marker with its value."
+      },
+      {
+        "name": "attention",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-summary--attention"
+        ],
+        "note": "An attention row shows the attention marker with its value."
+      },
+      {
+        "name": "unknown-item",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-summary--unknown"
+        ],
+        "note": "An unreadable source renders the unknown marker and its explanation, never a guessed value."
+      },
+      {
+        "name": "review-link",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-summary--review-link"
+        ],
+        "note": "An in-app href gains a Review link that is at least 44px tall."
+      },
+      {
+        "name": "external-href",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-summary--external-href"
+        ],
+        "note": "A non-internal href renders no link at all."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingSummary.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial: loading=true shows one role=status line (Checking setup) instead of the list (story Loading). The owner has no refresh, failure or stale render of its own: an unreadable source arrives as an unknown row. The placeholder is one line while the loaded state is a list of rows, so the two geometries differ."
     },
     "migration": {
       "status": "unassessed",
@@ -7811,20 +8121,64 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsDevices.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "settings-devices--default"
+        ],
+        "note": "Default renders the loaded list: a Tailscale-served trusted row, a LAN row and a loopback row. The QR control is absent on the loopback row, the Tailscale tag shows and the plain-HTTP hint is hidden."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "no-tailscale",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-devices--no-tailscale"
+        ],
+        "note": "NoTailscale renders only the LAN and loopback rows, so no Tailscale address is found and the Tailscale serve hint shows."
+      },
+      {
+        "name": "qr-open",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-devices--qr-open"
+        ],
+        "note": "QrOpen clicks the trusted row's QR control: aria-expanded becomes true, the label reads Hide QR and the generated SVG renders."
+      },
+      {
+        "name": "copied",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-devices--copied"
+        ],
+        "note": "Copied clicks Copy on the LAN row through a stubbed clipboard; the button reads Copied."
+      },
+      {
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-devices--loading"
+        ],
+        "note": "Loading holds the one /api/addresses read: the Looking up addresses line shows and no list renders."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-devices--failed"
+        ],
+        "note": "Failed answers the read with a 500: the role=alert line names the lookup failure and no list renders."
+      },
+      {
+        "name": "empty",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-devices--empty"
+        ],
+        "note": "Empty answers an empty address list: no rows render and the Tailscale serve hint shows."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsDevices.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load: one GET /api/addresses on mount (loading state, held). Failure: the failed state. There is no refresh and no stale state; the lookup runs once per mount. The placeholder is a one-line hint and the loaded list is a multi-row block, so the two heights differ; not measured in this slice."
     },
     "migration": {
       "status": "unassessed",
@@ -7947,60 +8301,156 @@ export const inventory: InventoryEntry[] = [
       "ready",
       "paused"
     ],
-    "variantNotes": "Observed branches in SettingsMemoryBackup.vue; remaining variants have not been audited.",
+    "variantNotes": "Each observed branch of SettingsMemoryBackup.vue is a state below; the states are the audit of these variants.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsMemoryBackup.vue implements this render; no rendered-state story exists."
-      },
-      {
         "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMemoryBackup.vue implements the loading branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--loading"
+        ],
+        "note": "Loading: the first status read is held; the checking line shows and no status or setup actions render."
       },
       {
         "name": "failed",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMemoryBackup.vue implements the failed branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--failed"
+        ],
+        "note": "Failed: a first-load failure shows the role=alert read error with Check again; no setup actions or status render."
       },
       {
-        "name": "stale",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMemoryBackup.vue implements the stale branch; no rendered-state story exists."
+        "name": "not-configured",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--not-configured"
+        ],
+        "note": "NotConfigured: a not_configured status shows the saved-on-this-device lede with Set up in Ciaobot and Copy setup prompt enabled."
       },
       {
-        "name": "scope-gap",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMemoryBackup.vue implements the scope-gap branch; no rendered-state story exists."
+        "name": "setup-started",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--setup-started"
+        ],
+        "note": "SetupStarted: a started setup chat shows its confirmation and Open the setup chat; that button emits open-chat with the chat id."
+      },
+      {
+        "name": "setup-failed",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--setup-failed"
+        ],
+        "note": "SetupFailed: a refused setup request shows the server message and no started-chat confirmation."
+      },
+      {
+        "name": "setup-prompt-copied",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--setup-prompt-copied"
+        ],
+        "note": "SetupPromptCopied: Copy setup prompt fetches the prompt and writes it to a stubbed clipboard; the confirmation shows."
       },
       {
         "name": "ready",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMemoryBackup.vue implements the ready branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--ready"
+        ],
+        "note": "Ready: the Backed up label with Pause and Back up now."
       },
       {
         "name": "paused",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMemoryBackup.vue implements the paused branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--paused"
+        ],
+        "note": "Paused: the paused label with Resume; Resume patches the setting and shows the running-again result."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "running",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--running"
+        ],
+        "note": "Running: the Backing up now label with its running detail line."
+      },
+      {
+        "name": "offline",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--offline"
+        ],
+        "note": "Offline: the Offline label, its detail line and the server reason inside Backup details."
+      },
+      {
+        "name": "needs-attention",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--needs-attention"
+        ],
+        "note": "NeedsAttention: the Needs attention label; Review details opens the disclosure that holds the server reason."
+      },
+      {
+        "name": "deferred",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--deferred"
+        ],
+        "note": "Deferred: the Backup deferred label and the update-in-progress detail."
+      },
+      {
+        "name": "pending",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--pending"
+        ],
+        "note": "Pending: pending commits show the Waiting to upload label."
+      },
+      {
+        "name": "scope-gap",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--scope-gap"
+        ],
+        "note": "ScopeGap: a non-zero coverage_gap shows the count warning under the Backed up state."
+      },
+      {
+        "name": "stale",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--stale"
+        ],
+        "note": "Stale: a failed refresh over a paused status keeps the status and shows Could not refresh with the last known status line."
+      },
+      {
+        "name": "run-pending",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--run-pending"
+        ],
+        "note": "RunPending: a held backup run disables Back up now and reads Backing up."
+      },
+      {
+        "name": "run-failed",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--run-failed"
+        ],
+        "note": "RunFailed: a refused run answers with the status object; the error says the local copy is safe and the state line moves to Offline."
+      },
+      {
+        "name": "flag-pending",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--flag-pending"
+        ],
+        "note": "FlagPending: a held Pause patch shows Working on the flag button, which is disabled."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsMemoryBackup.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load: one status read on mount (loading state). Refresh: Check again, and while not set up a bounded re-read every 10 seconds (at most 36 times); a failed refresh keeps the last status (stale state). The placeholder is a one-line checking hint and the loaded status is a multi-row block, so the heights differ; not measured in this slice."
     },
     "migration": {
       "status": "unassessed",
@@ -8024,21 +8474,87 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Detailed configurable variants have not yet been audited.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsMemoryHandover.vue implements this render; no rendered-state story exists."
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-handover--loading"
+        ],
+        "note": "Loading holds the first handover read: the reading line shows and the radio group does not render."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-handover--failed"
+        ],
+        "note": "Failed answers the first read with an error: the role=alert message and a Try again control show; no radio group renders."
+      },
+      {
+        "name": "no-decisions",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-handover--no-decisions"
+        ],
+        "note": "NoDecisions renders the no-prediction line. The keyboard path (ArrowRight on Off) saves Dismiss and moves focus to it."
+      },
+      {
+        "name": "evidence",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-handover--evidence"
+        ],
+        "note": "Evidence renders the agreement sentence with the percent and the per-direction counts; Refresh re-reads the same answer."
+      },
+      {
+        "name": "suggest-handover",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-handover--suggest-handover"
+        ],
+        "note": "SuggestHandover shows the status line saying the operator could let dismiss suggestions be handed over."
+      },
+      {
+        "name": "cannot-act",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-handover--cannot-act"
+        ],
+        "note": "CannotAct: acting_available false shows the cannot-act note and disables the Dismiss and Dismiss-and-accept radios; Off stays enabled."
+      },
+      {
+        "name": "stale",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-handover--stale"
+        ],
+        "note": "Stale keeps the last known rate on screen when a refresh fails and shows the Could not refresh alert."
+      },
+      {
+        "name": "saving",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-handover--saving"
+        ],
+        "note": "Saving: a held save keeps the chosen radio checked and every option aria-disabled, while none is disabled."
+      },
+      {
+        "name": "save-failed",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-handover--save-failed"
+        ],
+        "note": "SaveFailed: a refused save shows the server message and hands the choice back to the saved value."
+      },
+      {
+        "name": "confirm-all",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "Not isolable: choosing Dismiss and accept opens the app-level askConfirm prompt, which is drawn by the global confirm host, not by this card. The host is not mounted in the workshop, so this state cannot render in isolation and is not played."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsMemoryHandover.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load: one read on mount (loading state). Failure: the failed state with Try again. Refresh: the Refresh control re-reads (evidence state) and a failed refresh keeps the last rate (stale state). A workspace switch re-reads and clears the previous rate. Not measured in this slice."
     },
     "migration": {
       "status": "unassessed",
@@ -8216,21 +8732,73 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Detailed configurable variants have not yet been audited.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsServer.vue implements this render; no rendered-state story exists."
+        "name": "network-default",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-server--network-default"
+        ],
+        "note": "NetworkDefault renders the Listen on select with the default host (empty value) and no restart hint. Choosing This computer only calls the save callback with pwa_host 127.0.0.1."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "network-restart-pending",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-server--network-restart-pending"
+        ],
+        "note": "NetworkRestartPending: the stored host differs from the running host, so the Saved, restart to listen hint shows and the select reads the stored host."
+      },
+      {
+        "name": "network-custom-host",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-server--network-custom-host"
+        ],
+        "note": "NetworkCustomHost: a stored host that is neither the default nor loopback adds a Custom address option; the running host matches, so no hint shows."
+      },
+      {
+        "name": "network-unloaded",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-server--network-unloaded"
+        ],
+        "note": "NetworkUnloaded: routines are not loaded yet (null), so the Listen on select is disabled."
+      },
+      {
+        "name": "developer-closed",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-server--developer-closed"
+        ],
+        "note": "DeveloperClosed: the disclosure is collapsed (aria-expanded false) and its panel is not in the page; the toggle opens it."
+      },
+      {
+        "name": "developer-open",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-server--developer-open"
+        ],
+        "note": "DeveloperOpen: the opened disclosure shows the native Developer mode switch (aria-checked false) and a disabled Save while the checkout path is unchanged. Clicking the switch calls the save callback with dev_mode true."
+      },
+      {
+        "name": "developer-log-level-pending",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-server--developer-log-level-pending"
+        ],
+        "note": "DeveloperLogLevelPending: the stored log level differs from the running one, so the Saved, restart to log at debug hint shows."
+      },
+      {
+        "name": "developer-saving",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-server--developer-saving"
+        ],
+        "note": "DeveloperSaving: while routinesSaving is true the Developer switch, the checkout Save and the log level select are disabled, and a click does not save."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsServer.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch: routines arrive as a prop from SettingsView. Routines null (not loaded yet) is the network-unloaded state. There is no refresh or stale state in this component."
     },
     "migration": {
       "status": "unassessed",
@@ -8254,21 +8822,79 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Detailed configurable variants have not yet been audited.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsUpdateTasks.vue implements this render; no rendered-state story exists."
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-update-tasks--loading"
+        ],
+        "note": "Loading: the first read is held; the checking line shows and no rows render."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "load-failed",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "OWNER BUG, not fixed here: on a first-load failure loaded stays false, so the Checking the update task history line stays on screen beside the role=alert read error. The panel says it is still checking while the check has failed. Recorded for a follow-up; no story."
+      },
+      {
+        "name": "empty",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-update-tasks--empty"
+        ],
+        "note": "Empty: a loaded list with no finished, failed or hidden rows shows Nothing to show here yet."
+      },
+      {
+        "name": "default",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-update-tasks--default"
+        ],
+        "note": "Default: the install and workspace groups, the hidden task's Reopen and the failed task's Recheck. Finished work stays collapsed behind Show N done."
+      },
+      {
+        "name": "done-shown",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-update-tasks--done-shown"
+        ],
+        "note": "DoneShown: Show done expands the finished rows and the toggle reads Hide done."
+      },
+      {
+        "name": "live-chat",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-update-tasks--live-chat"
+        ],
+        "note": "LiveChat: a row whose chat is still open shows Open its chat. Play asserts the control and does not click it, since following it would push a route into the workshop page."
+      },
+      {
+        "name": "reopen-pending",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-update-tasks--reopen-pending"
+        ],
+        "note": "ReopenPending: a held reopen disables the row's button and reads Reopening."
+      },
+      {
+        "name": "reopen-refused",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-update-tasks--reopen-refused"
+        ],
+        "note": "ReopenRefused: a 409 refusal shows the in-place Could not reopen it message and the row stays listed."
+      },
+      {
+        "name": "refresh-failed",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-update-tasks--refresh-failed"
+        ],
+        "note": "RefreshFailed: a failed Check again shows the role=alert read error and keeps the last rows on screen."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsUpdateTasks.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load: one read on mount (loading state, held). Refresh: Check again and the per-row Recheck re-read; a failed refresh keeps the last rows (refresh-failed state). A workspace switch clears the rows and re-reads. The first-load failure path shows the checking line beside the error (load-failed, uncovered). Not measured in this slice."
     },
     "migration": {
       "status": "unassessed",

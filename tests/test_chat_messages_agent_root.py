@@ -92,7 +92,7 @@ async def test_a_session_recorded_under_the_agent_root_renders(
     pcm = _manager(tmp_path, migrated=True)
     project = pcm.create_project("Sweep", workspace="work")
     chat = pcm.create_chat(project.project_id, title="weekly sweep")
-    chat.session_id = "sess-under-work"
+    chat.session_id = "8abd8e52-50bf-54e3-80d0-868b99edfee7"
     pcm._save()
 
     agent_root = str(tmp_path / "work")
@@ -101,8 +101,7 @@ async def test_a_session_recorded_under_the_agent_root_renders(
             return [_Msg("user", "run the sweep"), _Msg("assistant", "swept 12 accounts")]
         return []
 
-    monkeypatch.setitem(sys.modules, "claude_agent_sdk",
-                        SimpleNamespace(get_session_messages=fake))
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", fake)
 
     payload = (await chat_messages(_request(pcm, chat.chat_id))).body.decode()
 
@@ -118,7 +117,7 @@ async def test_a_pre_migration_session_under_the_install_root_still_renders(
     pcm = _manager(tmp_path, migrated=True)
     project = pcm.create_project("Old", workspace="work")
     chat = pcm.create_chat(project.project_id, title="older chat")
-    chat.session_id = "sess-under-install"
+    chat.session_id = "ad727ef7-02ed-5369-9f5f-2f5a374c255a"
     pcm._save()
 
     install_root = str(tmp_path)
@@ -127,8 +126,7 @@ async def test_a_pre_migration_session_under_the_install_root_still_renders(
             return [_Msg("user", "an older question"), _Msg("assistant", "an older answer")]
         return []
 
-    monkeypatch.setitem(sys.modules, "claude_agent_sdk",
-                        SimpleNamespace(get_session_messages=fake))
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", fake)
 
     payload = (await chat_messages(_request(pcm, chat.chat_id))).body.decode()
 
@@ -185,7 +183,7 @@ async def test_when_both_roots_hold_the_session_the_agent_root_wins(
     pcm = _manager(tmp_path, migrated=True)
     project = pcm.create_project("Both", workspace="work")
     chat = pcm.create_chat(project.project_id, title="resumed chat")
-    chat.session_id = "sess-in-both"
+    chat.session_id = "0cf8889e-bdbc-5658-9379-db25634a4fb6"
     pcm._save()
 
     agent_root = str(tmp_path / "work")
@@ -194,8 +192,7 @@ async def test_when_both_roots_hold_the_session_the_agent_root_wins(
             return [_Msg("assistant", "the current turns")]
         return [_Msg("assistant", "a stale copy")]
 
-    monkeypatch.setitem(sys.modules, "claude_agent_sdk",
-                        SimpleNamespace(get_session_messages=fake))
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", fake)
 
     payload = (await chat_messages(_request(pcm, chat.chat_id))).body.decode()
 

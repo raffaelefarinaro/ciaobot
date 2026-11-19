@@ -720,7 +720,7 @@ async def test_a_queued_flush_prunes_the_send_id_history(tmp_path: Path) -> None
         yield ResultEvent(
             type="result",
             result="assistant answer",
-            session_id="sess-sid",
+            session_id="1c446bfc-cecb-571e-85c3-f55a9429df79",
             is_error=False,
             effective_model=chat.model,
             usage={},
@@ -845,20 +845,14 @@ async def test_the_history_row_does_not_carry_the_send_id(
     project = pcm.create_project("sendids", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="send-id")
     pcm.start_stream(chat.chat_id, "hello", send_id="s-1")
-    chat.session_id = "sess-a"
+    chat.session_id = "a0764c30-d9b6-57fb-a0ea-c0b1a04c9f50"
     pcm._save()
-    monkeypatch.setitem(
-        sys.modules,
-        "claude_agent_sdk",
-        SimpleNamespace(
-            get_session_messages=lambda session_id, directory: [
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", lambda session_id, directory: [
                 SimpleNamespace(
                     type="user",
                     message={"role": "user", "content": "hello"},
                 ),
-            ]
-        ),
-    )
+            ])
 
     from ciao.web import transcript_service
 

@@ -83,7 +83,7 @@ async def test_a_legacy_code_mode_continuation_keeps_turn_markers_aligned(
     chat = pcm.create_chat(project.project_id, title="code-markers")
     cid = chat.chat_id
 
-    chat.session_id = "sess-markers"
+    chat.session_id = "bbec684a-36a8-5c2a-97b7-ccb38d8129d8"
     fake_sdk = SimpleNamespace(
         get_session_messages=lambda session_id, directory: [
             _Msg("user", "initial"),
@@ -94,7 +94,7 @@ async def test_a_legacy_code_mode_continuation_keeps_turn_markers_aligned(
             _Msg("assistant", "a3"),
         ]
     )
-    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", fake_sdk.get_session_messages)
 
     response = await chat_messages(_request(pcm, pcm._config, cid))
     messages = json.loads(response.body)
@@ -328,7 +328,7 @@ async def test_claude_hidden_continuation_marks_completed_answer_without_adding_
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Claude", workspace="work")
     chat = pcm.create_chat(project.project_id, title="claude-continue")
-    chat.session_id = "sess-continue"
+    chat.session_id = "5ae8436a-7f55-582e-8ef3-c24a8a4a9b6b"
     chat.user_turn_count = 2
     chat.user_turn_timings = _completion_timings()
     messages = _claude_continuation(tmp_path, prompt, capsule=capsule)
@@ -578,7 +578,7 @@ async def test_consecutive_hidden_continuations_mark_answers_idempotently(
         expected_assistant_content = [ANSWER_ONE, NARRATION, ANSWER_TWO]
 
     if reader == "claude":
-        chat.session_id = "sess-consecutive"
+        chat.session_id = "43af4230-3a25-5e66-a7af-5a6934cfe641"
         rows = await _claude_rows(pcm, chat.chat_id, monkeypatch, claude_messages)
     else:
         rows = _render_opencode_thread(oc_thread, chat, workspace_root=tmp_path)
@@ -619,7 +619,7 @@ async def test_hidden_continuation_without_preceding_answer_adds_no_row(
     chat = pcm.create_chat(project.project_id, title="no-answer")
     chat.user_turn_count = 2
     if reader == "claude":
-        chat.session_id = "sess-no-answer"
+        chat.session_id = "4e2e8992-2b0b-5768-a5a6-b020917e8689"
         messages = [
             _Msg("user", "First question."),
             _Msg("user", LEGACY_CODE_MODE_CONTINUE_PROMPT),
