@@ -75,6 +75,43 @@ def test_ci_builds_and_cold_starts_the_engine_not_the_app() -> None:
     assert "/api/startup-status" in workflow
 
 
+def test_publish_workflow_uploads_wheel_manifest_and_sig_only() -> None:
+    # #3130 R1: the 2.x release carries the engine wheel and the signed manifest
+    # that lists it. The installer scripts and the server host archive are no
+    # longer built, listed or attached, so the upload step's asset list is
+    # exactly those three names. Parsed from the YAML so a re-added line fails
+    # here, not in a release.
+    import shlex
+
+    import yaml
+
+    workflow = yaml.safe_load(
+        (Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    steps = workflow["jobs"]["build-engine"]["steps"]
+    attach = next(step for step in steps if step.get("name") == "Attach release assets")
+    script = attach["run"].replace("\\\n", " ")
+    upload = next(
+        line for line in script.splitlines() if line.lstrip().startswith("gh release upload")
+    )
+    tokens = shlex.split(upload.split("#", 1)[0], posix=True)
+    assets = tokens[tokens.index('"$TAG"') + 1 :] if '"$TAG"' in tokens else tokens[4:]
+    assets = [token for token in assets if not token.startswith("--")]
+    assert assets == [
+        "dist/ciaobot-*.whl",
+        "ciaobot-engine-manifest.json",
+        "ciaobot-engine-manifest.json.sig",
+    ], assets
+
+    text = (Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml").read_text(
+        encoding="utf-8"
+    )
+    for gone in ("install.sh", "install-engine.sh", "server-host", "--server-host", "--installer"):
+        assert gone not in text, f"publish.yml still ships or lists {gone!r}"
+
+
 def test_publish_workflow_ships_signed_engine_manifest() -> None:
     workflow = (
         Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"
@@ -135,14 +172,6 @@ def test_publish_workflow_ships_signed_engine_manifest() -> None:
     assert "cd desktop" not in workflow
 
 
-def test_publish_uploads_engine_installer() -> None:
-    # The engine-only installer is served from /releases/latest/download, which
-    # is a release asset, so it has to be attached with the rest (#568).
-    workflow = (
-        Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"
-    ).read_text(encoding="utf-8")
-
-    assert "scripts/install-engine.sh" in workflow
 
 
 def test_retired_app_installer_is_not_in_the_source_tree() -> None:
@@ -179,84 +208,8 @@ def test_release_smoke_only_runs_with_a_published_version() -> None:
     assert 'LaunchAgents/com.ciao.server.plist")' not in workflow
 
 
-def test_publish_attaches_only_the_six_engine_assets() -> None:
-    # #653: the release carries the engine and nothing else. #1022 adds one
-    # prebuilt universal server host archive the signed manifest authenticates.
-    # Exactly six assets - the macOS installer under both names, the wheel, the
-    # manifest with its signature, and the host - each pinned here so a
-    # re-added app asset is a failing test rather than a surprise in a
-    # published release.
-    workflow = (
-        Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"
-    ).read_text(encoding="utf-8")
-
-    attached = """
-          gh release upload "$TAG" \\
-            install.sh \\
-            scripts/install-engine.sh \\
-            dist/ciaobot-*.whl \\
-            ciaobot-engine-manifest.json \\
-            ciaobot-engine-manifest.json.sig \\
-            "$host_archive" \\
-            --clobber
-"""
-    assert attached in workflow, (
-        "publish.yml no longer attaches exactly the six engine assets"
-    )
-
-    # Every name is attached and proven present on the release where the tag is
-    # still known - a missing asset would otherwise only surface as a failed
-    # install on a user's machine.
-    assert "cp scripts/install-engine.sh install.sh" in workflow
-    assert "s/__VERIFIER_SHA256__/" not in workflow
-    assert "verifier_name" not in workflow
-    assert "grep -qx install.sh" in workflow
-    assert "grep -qx install-engine.sh" in workflow
-    assert "install.ps1" not in workflow
-    assert "grep -qx ciaobot-server-host-macos-universal-v1.tar.gz" in workflow
 
 
-def test_publish_host_asset_is_built_and_signed_in_manifest() -> None:
-    # #1022: the signed manifest authenticates one prebuilt universal macOS host
-    # archive. The builder runs before the manifest is written, the manifest
-    # names the exact archive, and the release attaches that same archive as the
-    # seventh asset - proven present where the tag is still known.
-    workflow = (
-        Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"
-    ).read_text(encoding="utf-8")
-
-    # The builder is the clean-environment Python the wheel was verified with,
-    # and it writes to a scratch directory outside the repo so the signed app is
-    # never modified and no build output lands in the checkout.
-    assert "scripts/build-server-host.py" in workflow
-    assert '--output "$RUNNER_TEMP/server-host-build"' in workflow
-    assert workflow.index("Build universal server host") < workflow.index(
-        "Write and sign engine manifest"
-    )
-    assert workflow.index("Write and sign engine manifest") < workflow.index(
-        "Attach release assets"
-    )
-
-    # The manifest step passes the exact fixed archive through --server-host,
-    # and the archive it names is the one the release uploads.
-    assert (
-        "ciaobot-server-host-macos-universal-v1.tar.gz"
-        in workflow
-    )
-    assert "--server-host \"$host_archive\"" in workflow
-    assert '"$host_archive" \\' in workflow
-
-    # The builder is invoked with the same Python that verifies the wheel, not a
-    # system interpreter that might predate tarfile's data filter.
-    assert '"$RUNNER_TEMP/engine-check/bin/python" scripts/build-server-host.py' in workflow
-
-    # The manifest step and the upload step each define the archive path; both
-    # must be the builder's --output directory plus the fixed archive name, so
-    # the bytes uploaded are the bytes the signed manifest digested.
-    archive_paths = re.findall(r'^\s*host_archive="([^"]+)"$', workflow, re.MULTILINE)
-    assert archive_paths == [
-        "$RUNNER_TEMP/server-host-build/ciaobot-server-host-macos-universal-v1.tar.gz"
-    ] * 2
 
 
 def test_release_smoke_installs_the_engine_instead_of_the_app() -> None:
@@ -300,13 +253,6 @@ def test_release_smoke_installs_the_engine_instead_of_the_app() -> None:
             f"release-smoke.yml still expects the app release: {gone!r}"
         )
 
-    # The two installer assets have to be the same bytes: the app's Move action
-    # fetches install-engine.sh (#604) and would be stranded by a release where
-    # the public install.sh and that alias drift apart.
-    assert "grep -q -- '--migrate' install.sh" in workflow
-    assert "shasum -a 256 install.sh" in workflow
-    assert "shasum -a 256 install-engine.sh" in workflow
-    assert "--pattern install.sh --pattern install-engine.sh" in workflow
 
 
 def test_release_smoke_finishes_the_setup_wizard_and_is_bounded() -> None:
@@ -854,523 +800,37 @@ def test_develop_prs_run_linux_split_gates() -> None:
     assert not [name for name in by_name if name.startswith("windows")]
 
 
-def _rehearsal_workflow() -> str:
-    return (
-        Path(__file__).parents[1]
-        / ".github"
-        / "workflows"
-        / "server-host-signing-rehearsal.yml"
-    ).read_text(encoding="utf-8")
 
 
-def test_signing_rehearsal_is_manual_protected_and_no_release_upload() -> None:
-    # #2331: a maintainer-requested rehearsal of the signed host. It is a
-    # separate manual workflow on purpose: dispatching publish.yml cannot run
-    # build-engine (it is release-only), and a green skipped job proves nothing.
-    workflow = _rehearsal_workflow()
-
-    assert "workflow_dispatch:" in workflow
-    for untriggered in ("pull_request", "pull_request_target", "release:", "push:", "schedule:"):
-        assert untriggered not in workflow, (
-            f"the signing rehearsal must stay manually dispatched: {untriggered!r}"
-        )
-
-    # An unchecked confirmation is a refusal, never a successful skip.
-    assert "confirm_no_release_upload:" in workflow
-    assert "type: boolean" in workflow
-    assert "required: true" in workflow
-    assert "default: false" in workflow
-
-    # Read-only, with no release or OIDC permission to upload anything.
-    assert "permissions:\n  contents: read\n" in workflow
-    for forbidden in ("contents: write", "id-token", "releases:", "packages:"):
-        assert forbidden not in workflow, (
-            f"the signing rehearsal grants a write permission: {forbidden!r}"
-        )
-
-    # The environment carries the required reviewers and allowed branches; the
-    # workflow states the maintenance prerequisite rather than pretending YAML
-    # proves protection.
-    assert "environment: server-host-signing-rehearsal" in workflow
-    assert "provisioned by a maintainer" in workflow
-
-    # Bounded and serialized: one engine host signing run at a time.
-    assert "timeout-minutes: 90" in workflow
-    assert "concurrency:" in workflow
-    assert "group: server-host-signing-rehearsal" in workflow
-
-    # Untrusted refs and an unconfirmed run are refused before any credential
-    # is bound to a step.
-    guard = workflow.split("    - uses: actions/checkout@v7")[0]
-    assert "refs/heads/develop|refs/heads/main" in guard
-    assert "confirm_no_release_upload" in guard
-    assert "exit 1" in guard
-    assert "secrets." not in guard, "the refusal step must not receive a secret"
-    assert "SERVER_HOST_CERTIFICATE_P12_BASE64" not in guard
-
-    # Nothing is uploaded or distributed. The one permitted network write is the
-    # Apple notary submission inside the release build.
-    commands = "\n".join(
-        line for line in workflow.splitlines() if not line.lstrip().startswith("#")
-    )
-    for forbidden in (
-        "actions/upload-artifact",
-        "actions/cache",
-        "gh release upload",
-        "gh release",
-        "--clobber",
-        "git push",
-        "npm publish",
-        "uv publish",
-        "aws s3",
-    ):
-        assert forbidden not in commands, (
-            f"the signing rehearsal would distribute or implicitly fetch: {forbidden!r}"
-        )
-    # No dependency cache and no registry audit/funding traffic: a cache action
-    # or setup-node caching uploads and downloads behind the workflow's back.
-    assert "cache:" not in commands, "the rehearsal caches dependencies"
-    assert "cache-dependency-path" not in commands
-    assert "npm ci --no-audit --no-fund" in commands
-    assert "npm audit" not in commands
-    assert 'npm_config_audit: "false"' in commands
-    assert 'npm_config_fund: "false"' in commands
-    assert "continue-on-error" not in commands
-
-    # The scratch directory is unique per run, and cleanup only removes a
-    # directory this run created (the helper writes the ownership marker).
-    assert (
-        "server-host-signing-rehearsal-${{ github.run_id }}-${{ github.run_attempt }}"
-        in commands
-    )
-    assert "always() && steps.claim-scratch.outcome == 'success'" in commands
-    # Deleting is gated on the receipt the helper wrote after its own exclusive
-    # mkdir, not on a marker string a pre-existing directory could carry.
-    assert 'receipt="${REHEARSAL_DIR}.owned"' in commands
-    assert '[ "$(cat "$receipt")" = "$REHEARSAL_DIR" ]' in commands
-    assert 'rm -rf "$REHEARSAL_DIR"' in commands
-    assert 'rm -f "$receipt"' in commands
-    assert '[ -f "$REHEARSAL_DIR/.rehearsal-owned" ]' not in commands
-
-    # Current repo-pinned action versions, not floating ones.
-    assert "actions/checkout@v7" in workflow
-    assert "actions/setup-node@v7" in workflow
-    assert "astral-sh/setup-uv@v10.3.3" in workflow
-
-    # The named CI inputs only, and they are bound to the signing step alone.
-    signing_step = workflow.split("      - name: Rehearse the signed server host")[1]
-    signing_step = signing_step.split("      - name: Remove runner-local")[0]
-    for name in (
-        "SERVER_HOST_CERTIFICATE_P12_BASE64",
-        "SERVER_HOST_CERTIFICATE_PASSWORD",
-        "SERVER_HOST_NOTARY_KEY_P8_BASE64",
-        "SERVER_HOST_NOTARY_KEY_ID",
-        "SERVER_HOST_NOTARY_ISSUER_ID",
-        "SERVER_HOST_SIGNING_IDENTITY",
-        "SERVER_HOST_TEAM_ID",
-    ):
-        assert name in signing_step, f"the signing step never receives {name}"
-    assert "SERVER_HOST_SIGNING_IDENTITY: ${{ vars." in signing_step
-    assert "SERVER_HOST_TEAM_ID: ${{ vars." in signing_step
-    assert "SERVER_HOST_NOTARY_KEY_ID: ${{ vars." in signing_step
-    assert "SERVER_HOST_NOTARY_ISSUER_ID: ${{ vars." in signing_step
-    assert "SERVER_HOST_NOTARY_KEY_P8_BASE64: ${{ secrets." in signing_step
-    assert "set -x" not in commands
 
 
-def test_signing_rehearsal_binds_source_sha_and_clean_wheel_verifier() -> None:
-    workflow = _rehearsal_workflow()
-
-    # The event's exact commit is what runs and what the report names. Checkout
-    # keeps no push credential, and the SHA is re-read from the checkout.
-    assert "persist-credentials: false" in workflow
-    assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in workflow
-    assert '--source-sha "$GITHUB_SHA"' in workflow
-
-    # The wheel a real release would publish is built, then verified by an
-    # interpreter that only holds the installed wheel - never the checkout.
-    assert workflow.index("Build PWA assets") < workflow.index("Build engine wheel")
-    assert workflow.index("Build engine wheel") < workflow.index(
-        "Verify engine wheel in a clean environment"
-    )
-    assert 'uv build --wheel --out-dir dist' in workflow
-    assert 'uv venv --python 3.13 "$RUNNER_TEMP/engine-check"' in workflow
-    assert (
-        'uv pip install --python "$RUNNER_TEMP/engine-check/bin/python" '
-        "dist/ciaobot-*.whl" in workflow
-    )
-    assert 'cd "$RUNNER_TEMP"' in workflow
-    assert (
-        '"$RUNNER_TEMP/engine-check/bin/python" -m ciao.release_manifest check-static'
-        in workflow
-    )
-
-    # The helper runs from the checkout with that clean interpreter, a fresh
-    # scratch output and the single candidate wheel; the report stays local and
-    # only the sanitized summary reaches the step summary.
-    helper = workflow.split("      - name: Rehearse the signed server host")[1]
-    helper = helper.split("      - name: Remove runner-local")[0]
-    assert "scripts/rehearse-server-host-signing.py" in helper
-    # The receipt is claimed in an earlier step, before the guard can refuse.
-    assert 'rm -f "${REHEARSAL_DIR}.owned"' not in helper
-    assert '--output "$REHEARSAL_DIR"' in helper
-    assert '--python "$RUNNER_TEMP/engine-check/bin/python"' in helper
-    assert "--wheel dist/ciaobot-*.whl" in helper
-    assert 'cat "$REHEARSAL_DIR/summary.txt" >> "$GITHUB_STEP_SUMMARY"' in helper
-    assert "verification.json" not in helper, (
-        "the raw runner-local report must not be echoed into the summary"
-    )
 
 
-def test_signing_rehearsal_still_reports_its_sanitized_summary_when_the_helper_fails() -> None:
-    # #41221404339: the helper writes a sanitized summary.txt on a failed stage
-    # too, but the step ran under `set -e`, which aborted at the failed command
-    # before the append, so the run showed no reason at all. The step must
-    # append the summary and still fail with the helper's status.
-    workflow = _rehearsal_workflow()
-    helper = workflow.split("      - name: Rehearse the signed server host")[1]
-    helper = helper.split("      - name: Remove runner-local")[0]
-
-    capture = '|| status=$?'
-    report = 'cat "$REHEARSAL_DIR/summary.txt" >> "$GITHUB_STEP_SUMMARY"'
-    propagate = 'exit "$status"'
-    assert capture in helper
-    assert helper.index(capture) < helper.index(report) < helper.index(propagate)
-    # A failure before the scratch directory exists has no summary; the guard
-    # keeps the append from becoming a second, masking error.
-    assert '[ -f "$REHEARSAL_DIR/summary.txt" ]' in helper
-    # The only file the step reads is that summary: nothing else is cat'd, so
-    # the raw runner-local report can never reach the job summary.
-    reads = [
-        line.strip() for line in helper.splitlines() if line.split()[:1] == ["cat"]
-    ]
-    assert reads == [report], reads
-    assert "verification.json" not in helper
 
 
-def test_production_publish_remains_usable_without_apple_credentials() -> None:
-    # #2331 prepares CI; it does not activate signed publishing. Today's release
-    # must keep working with no Apple secret, no signed-mode switch and no
-    # dependency on the rehearsal.
-    workflow = (
-        Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"
-    ).read_text(encoding="utf-8")
-
-    for forbidden in (
-        "SERVER_HOST_CERTIFICATE_P12_BASE64",
-        "SERVER_HOST_CERTIFICATE_PASSWORD",
-        "SERVER_HOST_NOTARY_KEY_P8_BASE64",
-        "SERVER_HOST_NOTARY_KEY_ID",
-        "SERVER_HOST_NOTARY_ISSUER_ID",
-        "SERVER_HOST_SIGNING_IDENTITY",
-        "SERVER_HOST_TEAM_ID",
-    ):
-        assert forbidden not in workflow, (
-            f"publish.yml grew a mandatory Apple-secret dependency: {forbidden!r}"
-        )
-    for flag in ("--release", "--signing-identity", "--team-id", "--notary-profile"):
-        assert flag not in workflow, (
-            f"publish.yml switched the production host build to signed mode: {flag!r}"
-        )
-    assert "--server-host-team-id" not in workflow
-    assert "server-host-signing-rehearsal" not in workflow
-    assert "rehearsal" not in workflow.lower()
-
-    # The ordinary ad-hoc build, its scratch output and the seven assets are
-    # untouched, and the production job has no edge to the rehearsal.
-    assert '"$RUNNER_TEMP/engine-check/bin/python" scripts/build-server-host.py' in workflow
-    assert '--output "$RUNNER_TEMP/server-host-build"' in workflow
-    assert "gh release upload \"$TAG\"" in workflow
-    assert workflow.count("needs: build-engine") == 1
 
 
-def _dispatch_guard_script() -> str:
-    """The guard step's shell, extracted so a test can actually execute it."""
-    workflow = _rehearsal_workflow()
-    step = workflow.split(
-        "      - name: Refuse an unconfirmed or untrusted run", 1
-    )[1]
-    run = step.split("        run: |\n", 1)[1]
-    lines: list[str] = []
-    for line in run.splitlines():
-        if line.startswith("          "):
-            lines.append(line[10:])
-        elif not line.strip():
-            lines.append("")
-        else:
-            break
-    return "\n".join(lines)
 
 
-@pytest.mark.skipif(
-    shutil.which("bash") is None,
-    reason="the guard runs on the macOS runner under bash",
-)
-@pytest.mark.parametrize(
-    ("event", "confirmed", "ref", "allowed"),
-    [
-        ("workflow_dispatch", "true", "refs/heads/develop", True),
-        ("workflow_dispatch", "true", "refs/heads/main", True),
-        ("workflow_dispatch", "false", "refs/heads/develop", False),
-        ("workflow_dispatch", "", "refs/heads/develop", False),
-        ("workflow_dispatch", "TRUE", "refs/heads/develop", False),
-        ("workflow_dispatch", "true", "refs/heads/feature/x", False),
-        ("workflow_dispatch", "true", "refs/pull/1/merge", False),
-        ("push", "true", "refs/heads/develop", False),
-    ],
-)
-def test_dispatch_guard_refuses_untrusted_refs_and_unconfirmed_runs(
-    event: str, confirmed: str, ref: str, allowed: bool
-) -> None:
-    script = _dispatch_guard_script()
-    result = subprocess.run(
-        ["bash", "--noprofile", "--norc", "-c", script],
-        env={
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "EVENT_NAME": event,
-            "CONFIRMED": confirmed,
-            "DISPATCHED_REF": ref,
-        },
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == (0 if allowed else 1), (
-        result.stdout,
-        result.stderr,
-    )
 
 
-def test_signing_rehearsal_claims_the_receipt_before_the_guard() -> None:
-    # Cleanup runs always(), so the stale receipt must be cleared before the
-    # confirmation/ref guard: otherwise a refused run could leave a planted
-    # matching receipt that cleanup then trusts.
-    workflow = _rehearsal_workflow()
-    claim = workflow.index("      - name: Claim the run-scoped scratch receipt")
-    guard = workflow.index("      - name: Refuse an unconfirmed or untrusted run")
-    assert claim < guard
-    claim_step = workflow[claim:guard]
-    assert 'rm -f "${REHEARSAL_DIR}.owned"' in claim_step
-    assert "secrets." not in claim_step, "the claim step must not receive a secret"
-
-    helper = workflow.split("      - name: Rehearse the signed server host")[1]
-    helper = helper.split("      - name: Remove runner-local")[0]
-    assert 'rm -f "${REHEARSAL_DIR}.owned"' not in helper
 
 
-def _cleanup_step(workflow: str) -> str:
-    return workflow[
-        workflow.index("      - name: Remove runner-local candidate and credential files") :
-    ]
 
 
-def _guard_step(workflow: str) -> str:
-    return workflow[
-        workflow.index("      - name: Refuse an unconfirmed or untrusted run") :
-        workflow.index("      - uses: actions/checkout@v7")
-    ]
 
 
-def _claim_step(workflow: str) -> str:
-    return workflow[
-        workflow.index("      - name: Claim the run-scoped scratch receipt") :
-        workflow.index("      - name: Refuse an unconfirmed or untrusted run")
-    ]
 
 
-def test_signing_rehearsal_cleanup_requires_a_successful_claim() -> None:
-    workflow = _rehearsal_workflow()
-    claim = _claim_step(workflow)
-    cleanup = _cleanup_step(workflow)
-
-    # The claim step is identifiable, cannot mask its own failure, and is the
-    # first step of the job.
-    assert "        id: claim-scratch" in claim
-    assert "continue-on-error" not in claim
-    assert workflow.index("      - name: Claim the run-scoped scratch receipt") == (
-        workflow.index("    steps:\n") + len("    steps:\n")
-    )
-
-    # Cleanup only deletes when the claim succeeded: a failed, skipped or
-    # cancelled claim leaves the condition false, so a pre-existing receipt is
-    # never trusted.
-    assert (
-        "if: ${{ always() && steps.claim-scratch.outcome == 'success' }}"
-        in cleanup
-    )
-    assert "continue-on-error" not in cleanup
-    assert 'rm -rf "$REHEARSAL_DIR"' in cleanup
-    # The id is defined exactly once, and the cleanup step follows every step
-    # that could fail or be cancelled before the claim completes.
-    assert workflow.count("id: claim-scratch") == 1
-    assert workflow.index("      - name: Claim the run-scoped scratch receipt") < workflow.index(
-        "      - name: Refuse an unconfirmed or untrusted run"
-    )
-    assert workflow.index("      - name: Claim the run-scoped scratch receipt") < workflow.index(
-        "      - uses: actions/checkout@v7"
-    )
 
 
-@pytest.mark.parametrize(
-    ("claim_outcome", "deletes"),
-    [
-        ("success", True),
-        ("failure", False),
-        ("cancelled", False),
-        ("skipped", False),
-    ],
-)
-def test_cleanup_gate_opens_only_for_a_successful_claim(
-    claim_outcome: str, deletes: bool
-) -> None:
-    # This models the workflow's step condition literally:
-    #   always() && steps.claim-scratch.outcome == 'success'
-    condition = (
-        "always() && steps.claim-scratch.outcome == 'success'"
-    )
-    assert condition in _cleanup_step(_rehearsal_workflow())
-    gate_open = "always()" in condition and (
-        claim_outcome == "success"
-        if "steps.claim-scratch.outcome == 'success'" in condition
-        else False
-    )
-    assert gate_open is deletes
 
 
-def test_dispatch_guard_binds_the_real_event_expressions() -> None:
-    # The shell harness injects CONFIRMED/DISPATCHED_REF/EVENT_NAME, so the
-    # bindings themselves must be asserted: a literal binding would keep the
-    # harness green while the real workflow trusted the wrong value.
-    step = _guard_step(_rehearsal_workflow())
-    assert "CONFIRMED: ${{ github.event.inputs.confirm_no_release_upload }}" in step
-    assert "DISPATCHED_REF: ${{ github.ref }}" in step
-    assert "EVENT_NAME: ${{ github.event_name }}" in step
-    assert step.count("CONFIRMED:") == 1
-    assert step.count("DISPATCHED_REF:") == 1
-    assert step.count("EVENT_NAME:") == 1
-    for literal in (
-        'CONFIRMED: "true"',
-        "CONFIRMED: 'true'",
-        "CONFIRMED: true",
-        'DISPATCHED_REF: "refs/heads/develop"',
-        'EVENT_NAME: "workflow_dispatch"',
-    ):
-        assert literal not in step
-
-    # And the guard consumes exactly the bound names.
-    script = _dispatch_guard_script()
-    for name in ("CONFIRMED", "DISPATCHED_REF", "EVENT_NAME"):
-        assert f'"${name}"' in script, name
-
-def test_workflow_expressions_are_valid_for_github() -> None:
-    """A `runner` context in a job-level `env` block fails to parse the workflow.
-
-    GitHub then refuses the dispatch with 422 and the run never starts, which no
-    text assertion over the file previously noticed.
-    """
-    workflow_path = (
-        Path(__file__).parents[1] / ".github" / "workflows" / "server-host-signing-rehearsal.yml"
-    )
-    lines = workflow_path.read_text(encoding="utf-8").splitlines()
-    in_jobs = False
-    job_indent: int | None = None
-    in_job_env = False
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        indent = len(line) - len(line.lstrip())
-        if stripped == "jobs:":
-            in_jobs = True
-            continue
-        if not in_jobs:
-            continue
-        if indent == 2:
-            job_indent = indent
-            in_job_env = False
-            continue
-        if job_indent is not None and indent == job_indent + 2 and stripped == "env:":
-            in_job_env = True
-            continue
-        if job_indent is not None and indent <= job_indent + 2:
-            if stripped != "env:":
-                in_job_env = False
-        if in_job_env:
-            assert "runner." not in stripped, (
-                "a job-level env value may not use the runner context: " + stripped
-            )
 
 
-def test_publish_lists_installers_in_the_signed_manifest() -> None:
-    # #2483: a client authenticates install.sh from the signed manifest, so the
-    # two installers are listed in the build, by the exact files that are
-    # uploaded later, and the manifest is built after Prepare release assets has
-    # copied install.sh.
-    workflow = (
-        Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"
-    ).read_text(encoding="utf-8")
-
-    build = next(
-        line for line in workflow.splitlines() if "-m ciao.release_manifest build" in line
-    )
-    for installer in (
-        '--installer "$ws/install.sh"',
-        '--installer "$ws/scripts/install-engine.sh"',
-    ):
-        assert installer in build, f"the manifest build does not list {installer}"
-    assert "install.ps1" not in build
-    assert workflow.index("Prepare release assets") < workflow.index(
-        "Write and sign engine manifest"
-    )
-    # The upload block ships the same install.sh the build lists: the bare name
-    # is the workspace copy that "$ws/install.sh" points at.
-    upload = workflow[workflow.index('gh release upload "$TAG"'):]
-    upload = upload[: upload.index("--clobber")]
-    assert any(line.strip() == "install.sh \\" for line in upload.splitlines()), (
-        "gh release upload does not ship the install.sh the manifest lists"
-    )
 
 
-def test_publish_rechecks_uploaded_installers_against_the_manifest() -> None:
-    # #2483: the bytes that matter are the ones on the release, so the publish
-    # job re-downloads them after the upload and verifies each against the
-    # signed manifest. The checks read only the slice from the upload to the
-    # next job, so a commented-out or `|| true` verify cannot pass on a
-    # fragment that happens to sit elsewhere in the file.
-    workflow = (
-        Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"
-    ).read_text(encoding="utf-8")
 
-    attach = workflow.index("- name: Attach release assets")
-    upload = workflow.index('gh release upload "$TAG"', attach)
-    step = workflow[upload : workflow.index("\n  release-smoke:")]
-
-    # The Attach step fails the job on the first error, before anything uploads.
-    assert "set -euo pipefail" in workflow[attach:upload]
-
-    download = step.index('gh release download "$TAG" --dir "$uploaded"')
-    assert download < step.index("ciao.release_manifest verify")
-    for asset in (
-        '"$uploaded/ciaobot-engine-manifest.json" "$uploaded/ciaobot-engine-manifest.json.sig"',
-        '--asset "$uploaded/install.sh"',
-        '--asset "$uploaded/install-engine.sh"',
-    ):
-        assert asset in step, f"publish.yml does not verify {asset}"
-
-    # The verify statement itself: a live call, the two installers in it, and
-    # no `||` on any of its lines, so a failure cannot be swallowed.
-    lines = step.splitlines()
-    start_line = next(i for i, line in enumerate(lines) if "ciao.release_manifest verify" in line)
-    assert not lines[start_line].lstrip().startswith("#"), "the verify call is commented out"
-    end_line = next(i for i in range(start_line, len(lines)) if ")" in lines[i])
-    statement = lines[start_line : end_line + 1]
-    for asset in (
-        '--asset "$uploaded/install.sh"',
-        '--asset "$uploaded/install-engine.sh"',
-    ):
-        assert any(asset in line for line in statement), f"verify does not check {asset}"
-    assert not any("||" in line for line in statement), (
-        "the manifest verify can fail without failing the job"
-    )
 
 
 def test_docs_drop_the_pinned_install_sh_digest() -> None:
