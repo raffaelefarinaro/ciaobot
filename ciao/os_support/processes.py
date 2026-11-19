@@ -70,6 +70,83 @@ def tree_spawn_options(*, dies_with_engine: bool = False) -> dict[str, Any]:
     """Keyword arguments for ``Popen``/``create_subprocess_exec``."""
     return {} if dies_with_engine else {"start_new_session": True}
 
+def process_table() -> dict[int, tuple[int, str]]:
+    """Every process as ``pid -> (ppid, start time)`` from one ``ps`` snapshot.
+
+    Empty when ``ps`` cannot be read (and always on Windows, which has no ``ps``).
+    The start time makes a pid identifiable: a recycled pid has a different one.
+    """
+    if sys.platform == "win32":
+        return {}
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,lstart="],
+            capture_output=True, text=True, encoding="utf-8", timeout=5,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    table: dict[int, tuple[int, str]] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) != 3:
+            continue
+        try:
+            table[int(parts[0])] = (int(parts[1]), parts[2].strip())
+        except ValueError:
+            continue
+    return table
+
+
+def descendant_processes(
+    root_pid: int,
+    *,
+    table: dict[int, tuple[int, str]],
+    max_depth: int = 32,
+    max_count: int = 1024,
+) -> dict[int, str]:
+    """Descendants of ``root_pid`` in ``table`` (not the root itself) as ``pid -> start time``.
+
+    Walks ppid links breadth-first, at most ``max_depth`` levels and
+    ``max_count`` processes. Never returns pid 1 or below, or this process.
+    """
+    children: dict[int, list[int]] = {}
+    for pid, (ppid, _start) in table.items():
+        children.setdefault(ppid, []).append(pid)
+    found: dict[int, str] = {}
+    frontier = [root_pid]
+    own = os.getpid()
+    for _ in range(max_depth):
+        nxt: list[int] = []
+        for parent in frontier:
+            for pid in children.get(parent, ()):
+                if pid <= 1 or pid == own or pid == root_pid or pid in found:
+                    continue
+                if len(found) >= max_count:
+                    return found
+                found[pid] = table[pid][1]
+                nxt.append(pid)
+        if not nxt:
+            break
+        frontier = nxt
+    return found
+
+
+def signal_processes(
+    processes: dict[int, str], sig: int, *, table: dict[int, tuple[int, str]]
+) -> None:
+    """Send ``sig`` to each of ``processes`` that ``table`` still shows with the same start time."""
+    if sys.platform == "win32":
+        return
+    for pid, start in processes.items():
+        if pid <= 1 or pid not in table or table[pid][1] != start:
+            continue
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
 class ProcessTree:
     """A child spawned with ``tree_spawn_options()`` and all it starts."""
 
