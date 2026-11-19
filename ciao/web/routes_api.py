@@ -2990,59 +2990,6 @@ async def chat_stop(request: Request) -> JSONResponse:
     return JSONResponse({"stopped": stopped})
 
 
-async def chat_move_to_background(request: Request) -> JSONResponse:
-    """Move a running turn's foreground shell or subagent to the background (#1413).
-
-    OpenCode's Ctrl+B. 200 ``{"moved": true}`` when a running shell or
-    subagent was moved, ``{"moved": false}`` when nothing could move;
-    409 ``unsupported`` for a provider without the feature (Claude) and
-    ``not_running`` when the chat has no live provider; 502 when OpenCode
-    refused or could not be reached.
-    """
-    pcm = request.app.state.project_chat_manager
-    chat_id = request.path_params["chat_id"]
-    if pcm.get_chat(chat_id) is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    outcome = await pcm.move_chat_to_background(chat_id)
-    if outcome in {"moved", "nothing"}:
-        return JSONResponse({"moved": outcome == "moved"})
-    if outcome == "failed":
-        return JSONResponse(
-            {"error": "OpenCode did not accept the request"}, status_code=502
-        )
-    return JSONResponse({"error": outcome}, status_code=409)
-
-
-async def chat_background_task_stop(request: Request) -> JSONResponse:
-    """Stop one running native background task (Claude) or shell (OpenCode).
-
-    ``task_id`` is the bare id from the Processes row (``task:<id>`` or
-    ``shell:<id>`` with the prefix removed). 404 when the chat, its live
-    provider or the id is unknown; the row leaves ``/api/subagents/running``
-    once the provider reports the task finished. 502 when OpenCode cannot be
-    reached.
-    """
-    pcm = request.app.state.project_chat_manager
-    chat_id = request.path_params["chat_id"]
-    task_id = request.path_params["task_id"]
-    if pcm.get_chat(chat_id) is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    service = pcm._providers.get(chat_id)
-    provider = service.provider if service is not None else None
-    stopped = False
-    try:
-        if isinstance(provider, BaseProvider):
-            stopped = await provider.stop_background_task(task_id)
-    except Exception:  # noqa: BLE001 - a provider failure must answer, not 500
-        logger.warning("stopping background task %s failed", task_id, exc_info=True)
-        return JSONResponse(
-            {"error": "the provider could not be reached or refused"}, status_code=502
-        )
-    if not stopped:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return JSONResponse({"ok": True})
-
-
 async def chat_prompt(request: Request) -> JSONResponse:
     """Send a prompt to start a model turn in the chat (background task)."""
     from ciao.models import ImageAttachment
