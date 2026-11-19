@@ -468,7 +468,11 @@ describe('production ownership', () => {
     for (const [id, path] of Object.entries(owners)) expect(inventory.find((entry) => entry.id === id)?.owner.path).toBe(`web/src/${path}`)
     for (const id of ['components-skeleton-loader', 'components-sidebar-list-skeleton', 'components-chat-pane-skeleton', 'components-chat-panel', 'components-task-workspace-surface']) expect(inventory.find((entry) => entry.id === id)?.loading.status).toBe('known')
     const task = inventory.find((entry) => entry.id === 'components-task-workspace-surface')!
-    for (const name of ['firstLoad', 'loadFailed', 'loadStale', 'filteredEmpty', 'boardEmpty', 'ordering']) expect(task.states.some((state) => state.name === name && state.coverage === 'uncovered')).toBe(true)
+    // The board states the TaskWorkspaceSurface stories claim (#3296): each one
+    // is covered by exactly its own story, and the other surface states stay uncovered.
+    const claimed: Record<string, string> = { firstLoad: 'first-load', loadFailed: 'load-failed', loadStale: 'load-stale', filteredEmpty: 'filtered-empty', boardEmpty: 'board-empty', ordering: 'ordering' }
+    for (const [name, story] of Object.entries(claimed)) expect(task.states.find((state) => state.name === name)).toMatchObject({ coverage: 'covered', storyIds: [`task-workspace-surface--${story}`] })
+    expect(task.states.find((state) => state.name === 'missingTaskId')?.coverage).toBe('uncovered')
   })
 })
 
