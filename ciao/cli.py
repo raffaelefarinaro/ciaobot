@@ -80,17 +80,14 @@ def _app_engine_refuses_installer_flags(args: argparse.Namespace) -> bool:
     """Whether ``--app-engine`` arrives with any installer flag provided.
 
     The optional installer values are compared with ``is not None``, not
-    truthiness: ``--installer-native-fd 0`` names a real (stdio) descriptor,
-    and an empty run id is a provided value, not an absent one. Its own
-    function so the check is testable without the pre-block guards that
-    normally refuse most of these combinations first.
+    truthiness: an empty run id is a provided value, not an absent one. Its own
+    function so the check is testable without the pre-block guards that normally
+    refuse most of these combinations first.
     """
     return bool(
         args.installer_bootstrap
         or args.installer_suggest_workspace is not None
         or args.installer_run_id is not None
-        or args.installer_native_workspace is not None
-        or args.installer_native_fd is not None
     )
 
 
@@ -104,18 +101,6 @@ def _run_command(args: argparse.Namespace) -> int:
     if args.installer_bootstrap and args.supervised:
         print("--installer-bootstrap cannot be combined with --supervised", file=sys.stderr)
         return 2
-    if args.installer_native_workspace is not None and not args.installer_bootstrap:
-        print("--installer-native-workspace requires --installer-bootstrap", file=sys.stderr)
-        return 2
-    if args.installer_native_fd is not None and not args.installer_bootstrap:
-        print("--installer-native-fd requires --installer-bootstrap", file=sys.stderr)
-        return 2
-    if args.installer_native_fd is not None and args.installer_native_fd < 3:
-        print("--installer-native-fd must be a non-stdio descriptor", file=sys.stderr)
-        return 2
-    if args.installer_native_workspace is not None and args.installer_native_fd is None:
-        print("--installer-native-workspace requires --installer-native-fd", file=sys.stderr)
-        return 2
     if args.port is not None and not args.app_engine:
         print("--port requires --app-engine", file=sys.stderr)
         return 2
@@ -123,7 +108,7 @@ def _run_command(args: argparse.Namespace) -> int:
         # App-mode: the Mac app owns this engine. The installer handshake has no
         # parent to hand off to here, and the bundle check keeps the flag out of
         # reach everywhere else; the refusal helper treats every provided value
-        # (`--installer-native-fd 0` included) as one.
+        # as one.
         if _app_engine_refuses_installer_flags(args):
             print("--app-engine cannot be combined with installer options", file=sys.stderr)
             return 2
@@ -144,27 +129,14 @@ def _run_command(args: argparse.Namespace) -> int:
     if not args.installer_run_id:
         # A person resumed setup by hand (the installers print this command for
         # a cancelled run), so there is no installer parent to activate the
-        # service: this process becomes one. A native notification descriptor
-        # has no parent left to read it, so that combination is refused above.
-        if args.installer_native_fd is not None:
-            print("--installer-native-fd requires --installer-run-id", file=sys.stderr)
-            return 2
+        # service: this process becomes one.
         return _resume_installer_bootstrap(args.installer_suggest_workspace)
-    if args.installer_native_fd is None:
-        # The legacy call shape, unchanged; the exact-kwargs tests pin it.
-        return _run_server(
-            supervised=args.supervised,
-            installer_bootstrap=True,
-            installer_run_id=args.installer_run_id,
-            installer_suggest_workspace=args.installer_suggest_workspace,
-        )
+    # The legacy call shape, unchanged; the exact-kwargs tests pin it.
     return _run_server(
         supervised=args.supervised,
         installer_bootstrap=True,
         installer_run_id=args.installer_run_id,
         installer_suggest_workspace=args.installer_suggest_workspace,
-        installer_native_fd=args.installer_native_fd,
-        installer_native_workspace=args.installer_native_workspace,
     )
 
 
@@ -236,8 +208,6 @@ def _run_server(
     installer_bootstrap: bool = False,
     installer_run_id: str | None = None,
     installer_suggest_workspace: str | None = None,
-    installer_native_fd: int | None = None,
-    installer_native_workspace: str | None = None,
     app_engine: bool = False,
     app_engine_port: int | None = None,
 ) -> int:
@@ -245,22 +215,13 @@ def _run_server(
     from ciao.main import main as server_main
 
     try:
-        if installer_bootstrap and installer_native_fd is None:
+        if installer_bootstrap:
             # The legacy bootstrap keeps its exact call shape.
             server_main(
                 supervised=supervised,
                 installer_bootstrap=True,
                 installer_run_id=installer_run_id,
                 installer_suggest_workspace=installer_suggest_workspace,
-            )
-        elif installer_bootstrap:
-            server_main(
-                supervised=supervised,
-                installer_bootstrap=True,
-                installer_run_id=installer_run_id,
-                installer_suggest_workspace=installer_suggest_workspace,
-                installer_native_fd=installer_native_fd,
-                installer_native_workspace=installer_native_workspace,
             )
         elif app_engine and app_engine_port is not None:
             server_main(supervised=supervised, app_engine=True, app_engine_port=app_engine_port)
@@ -508,16 +469,8 @@ def _write_launchd_plist(
     confirm_repoint: bool = False,
     host: HostOwnership | None = None,
     host_python: str | None = None,
-    exclusive: bool = False,
 ) -> Path:
-    """Render the server plist and write it, or refuse.
-
-    ``exclusive`` is the native installer's one addition: it creates the
-    definition with ``O_CREAT | O_EXCL`` and ``O_NOFOLLOW`` at ``0o600`` so an
-    existing name, a symlink or a concurrent creator is a refusal instead of an
-    overwrite. The legacy ``ciao setup`` and ``ciao service`` callers leave it
-    False and keep the byte-for-byte ``write_text`` path.
-    """
+    """Render the server plist and write it."""
     if not confirm_repoint:
         allow_env = os.environ.get("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", "").strip().lower() in (
             "1",
@@ -556,56 +509,7 @@ def _write_launchd_plist(
         host=host,
         host_python=host_python,
     )
-    if not exclusive:
-        plist.write_text(rendered, encoding="utf-8", newline="")
-        return plist
-    # The native path never replaces a definition. O_EXCL is the creation
-    # itself; O_NOFOLLOW refuses a symlink at the name. A failure before the
-    # open creates nothing, and a failure after it removes only the file this
-    # call created.
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(plist, flags, 0o600)
-    except FileExistsError:
-        raise RuntimeError(
-            f"a service definition already exists at {plist.name}; the native "
-            "installer never overwrites one"
-        ) from None
-    except OSError as exc:
-        raise RuntimeError(
-            f"could not create the service definition {plist.name}: {exc}"
-        ) from exc
-    try:
-        # umask may have stripped the requested mode; the native definition is
-        # exactly owner-only, like the ownership record it is bound to.
-        os.fchmod(descriptor, 0o600)
-    except OSError as exc:
-        try:
-            os.close(descriptor)
-            plist.unlink()
-        except OSError:
-            pass
-        raise RuntimeError(
-            f"could not secure the service definition {plist.name}: {exc}"
-        ) from exc
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
-            descriptor = -1
-            handle.write(rendered)
-    except OSError as exc:
-        try:
-            plist.unlink()
-        except OSError:
-            pass
-        raise RuntimeError(
-            f"could not write the service definition {plist.name}: {exc}"
-        ) from exc
-    finally:
-        if descriptor >= 0:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+    plist.write_text(rendered, encoding="utf-8", newline="")
     return plist
 
 
@@ -1489,8 +1393,6 @@ def setup_workspace(
     confirm_repoint: bool = False,
     initialize_git: bool = False,
     sync_failures: list[str] | None = None,
-    exclusive_service_definition: bool = False,
-    verified_host: HostOwnership | None = None,
     _vault_selection: SetupVaultSelection | None = None,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
@@ -1544,11 +1446,7 @@ def setup_workspace(
     if write_launchd:
         from ciao.setup_status import tcc_protected_location
 
-        host = (
-            verified_host
-            if verified_host is not None
-            else _verified_host_if_installed()
-        )
+        host = _verified_host_if_installed()
         # Non-None only on macOS.
         protected = tcc_protected_location(root)
         if protected and host is None:
@@ -2002,7 +1900,6 @@ def setup_workspace(
                         if host is not None
                         else None
                     ),
-                    exclusive=exclusive_service_definition,
                 ))
             except ValueError as exc:
                 # The render-time refusal B2 defines (a host given without
@@ -8149,19 +8046,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Installer-only correlation id for the handoff result (requires --installer-bootstrap).",
     )
     run_parser.add_argument("--installer-suggest-workspace", type=_absolute_installer_path, default=None)
-    # Internal native-installer handover (#2340). Not operator surface: the
-    # native coordinator passes the inherited private notification descriptor
-    # and, when it has fixed the choice, the one accepted workspace. Hidden
-    # from --help, and the legacy installer passes neither.
-    run_parser.add_argument(
-        "--installer-native-fd", type=int, default=None, help=argparse.SUPPRESS
-    )
-    run_parser.add_argument(
-        "--installer-native-workspace",
-        type=_absolute_installer_path,
-        default=None,
-        help=argparse.SUPPRESS,
-    )
     # App-owned engine mode (#3129): the Mac app launches this exact flag and
     # supervises the process itself. Not operator surface: hidden from --help,
     # and refused outside the bundle at dispatch.
@@ -8275,8 +8159,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Separate from `service`, which controls the launchd engine. This group
     # only removes an old app bundle, for the compatibility window: the app
-    # itself is retired, and installation and updates are owned by
-    # scripts/install-engine.sh.
+    # itself is retired, and installation and updates are owned by the release
+    # installers.
     desktop_parser = subparsers.add_parser(
         "desktop",
         help="Remove an installed Ciaobot.app desktop bundle.",

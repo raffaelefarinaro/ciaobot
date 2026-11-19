@@ -611,7 +611,6 @@ def test_setup_status_route_is_public_before_login(tmp_path) -> None:
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["native_bootstrap"] is False
     assert {
         "configured",
         "bootstrap",
@@ -624,45 +623,6 @@ def test_setup_status_route_is_public_before_login(tmp_path) -> None:
         "provider_ready",
     } <= payload.keys()
     assert payload["checks"][0]["id"] == "workspace"
-
-
-def test_setup_status_route_reports_native_bootstrap_context(tmp_path) -> None:
-    config = _config(tmp_path)
-    config.suggested_workspace = tmp_path / "suggested-workspace"
-    (tmp_path / "memory-vault").mkdir()
-    serializer = URLSafeTimedSerializer("test-secret")
-    app = Starlette(
-        routes=[Route("/api/setup-status", setup_status_endpoint, methods=["GET"])],
-        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
-    )
-    app.state.config = config
-    app.state.installer_bootstrap = False
-    app.state.installer_run_id = None
-    app.state.native_bootstrap = {
-        "run_id": "native-run-id-sentinel-76-a91f",
-        "workspace": "/private/native-bootstrap-workspace-sentinel-76-a91f",
-    }
-    app.state.serializer = serializer
-
-    resp = TestClient(app).get("/api/setup-status")
-
-    assert resp.status_code == 200
-    payload = resp.json()
-    assert payload["native_bootstrap"] is True
-    assert {
-        "configured",
-        "bootstrap",
-        "mode",
-        "workspace_root",
-        "vault_root",
-        "suggested_workspace",
-        "checks",
-        "providers",
-        "provider_ready",
-    } <= payload.keys()
-    assert payload["suggested_workspace"] == str(config.suggested_workspace)
-    assert "native-run-id-sentinel-76-a91f" not in resp.text
-    assert "/private/native-bootstrap-workspace-sentinel-76-a91f" not in resp.text
 
 
 def _fake_engine_python(tmp_path: Path) -> str:
@@ -2624,3 +2584,20 @@ def test_codex_status_probe_child_env_drops_secrets_and_keeps_path(
         assert "CIAO_PROBE_TEST_API_KEY" not in env
         assert "sk-probe-secret-123" not in env.values()
         assert env.get("PATH") == os.environ.get("PATH")
+
+
+def test_setup_finish_has_no_native_branch() -> None:
+    """The native installer is gone: no native state reaches the app factory and
+    no hidden native flag parses, so setup finish has only the legacy paths."""
+    import inspect
+
+    from ciao import cli
+    from ciao.web.app import create_app
+
+    assert "native_bootstrap" not in inspect.signature(create_app).parameters
+    with pytest.raises(SystemExit) as caught:
+        cli.build_parser().parse_args(["run", "--installer-native-fd", "5"])
+    assert caught.value.code == 2
+    with pytest.raises(SystemExit) as caught:
+        cli.build_parser().parse_args(["run", "--installer-native-workspace", "/tmp/x"])
+    assert caught.value.code == 2

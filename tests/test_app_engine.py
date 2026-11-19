@@ -543,9 +543,6 @@ def test_app_engine_refused_outside_the_bundle(
         pytest.param(["--installer-bootstrap"], id="bootstrap"),
         pytest.param(["--installer-run-id", "run-1"], id="run-id"),
         pytest.param(["--installer-suggest-workspace", "/tmp/elsewhere"], id="suggest-workspace"),
-        pytest.param(["--installer-native-fd", "7"], id="native-fd"),
-        pytest.param(["--installer-native-fd", "0"], id="native-fd-0"),
-        pytest.param(["--installer-native-workspace", "/tmp/elsewhere"], id="native-workspace"),
     ],
 )
 def test_app_engine_refuses_each_installer_flag(
@@ -557,8 +554,7 @@ def test_app_engine_refuses_each_installer_flag(
     at all contradicts it.
 
     The provided-flag check compares the optional values with ``is not None``,
-    not truthiness: ``--installer-native-fd 0`` names a real (stdio)
-    descriptor, and an empty run id is an empty value, not an absent one.
+    not truthiness: an empty run id is an empty value, not an absent one.
     """
     from ciao import cli, package_version
 
@@ -597,8 +593,6 @@ def _installer_args(**overrides: object) -> "argparse.Namespace":
         "installer_bootstrap": False,
         "installer_suggest_workspace": None,
         "installer_run_id": None,
-        "installer_native_workspace": None,
-        "installer_native_fd": None,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -611,9 +605,6 @@ def _installer_args(**overrides: object) -> "argparse.Namespace":
         pytest.param({"installer_run_id": "run-1"}, id="run-id"),
         pytest.param({"installer_run_id": ""}, id="empty-run-id"),
         pytest.param({"installer_suggest_workspace": "/tmp/elsewhere"}, id="suggest-workspace"),
-        pytest.param({"installer_native_fd": 7}, id="native-fd"),
-        pytest.param({"installer_native_fd": 0}, id="native-fd-stdio"),
-        pytest.param({"installer_native_workspace": "/tmp/elsewhere"}, id="native-workspace"),
     ],
 )
 def test_the_app_engine_refusal_treats_every_provided_installer_value_as_one(
