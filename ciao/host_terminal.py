@@ -42,6 +42,10 @@ class NothingToUpdate(Exception):
     """An ``*-update`` action was requested but the provider is not older than tested."""
 
 
+class NotInstalled(Exception):
+    """An action needs a CLI that is not on this computer's terminal PATH, so there is no command to run."""
+
+
 ACTION_IDS: tuple[str, ...] = (
     "claude-install",
     "claude-login",
@@ -214,7 +218,11 @@ def action_command(action: str) -> str:
     if action == "codex-login":
         from ciao.providers.acp import agents
 
-        return shlex.join(agents.codex_auth_command())
+        try:
+            argv = agents.codex_auth_command()
+        except FileNotFoundError as exc:
+            raise NotInstalled(str(exc)) from exc
+        return shlex.join(argv)
     if action == "gws-install":
         return GWS_INSTALL_COMMAND
     return SKILLS_UPDATE_COMMAND

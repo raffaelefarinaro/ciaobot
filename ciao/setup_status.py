@@ -457,6 +457,37 @@ def opencode_status_probe(
     return opencode_login_status()
 
 
+# What the Codex CLI child may see: what it needs to run and find its own login state, and
+# nothing else. Provider keys and tokens in the engine environment are not passed on.
+_CODEX_PROBE_ENV_KEYS = (
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "CODEX_HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "SYSTEMROOT",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PATHEXT",
+)
+
+
+def _codex_probe_env(source: Mapping[str, str]) -> dict[str, str]:
+    env = {key: source[key] for key in _CODEX_PROBE_ENV_KEYS if source.get(key)}
+    if not env.get("PATH"):
+        from ciao.tool_path import terminal_path
+
+        path = terminal_path()
+        if path:
+            env["PATH"] = path
+    return env
+
+
 def codex_status_probe(
     env: Mapping[str, str],
     *,
@@ -475,6 +506,7 @@ def codex_status_probe(
 
     codex = codex_binary()
     adapter = codex_acp_binary()
+    probe_env = _codex_probe_env(env)
     if codex is None or adapter is None:
         return _provider(
             name="codex",
@@ -496,6 +528,7 @@ def codex_status_probe(
             errors="replace",
             timeout=timeout,
             check=False,
+            env=probe_env,
         )
         version = parse_cli_version(found.stdout) or "unknown"
     except (OSError, subprocess.SubprocessError):
@@ -507,6 +540,7 @@ def codex_status_probe(
             stdin=subprocess.DEVNULL,
             timeout=timeout,
             check=False,
+            env=probe_env,
         )
     except (OSError, subprocess.SubprocessError):
         return _provider(

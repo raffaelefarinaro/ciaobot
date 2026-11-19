@@ -91,3 +91,18 @@ def test_codex_descriptor_resolves_spec_and_factory() -> None:
     assert descriptor.label == "OpenAI (via Codex)"
     assert descriptor.short_label == "Codex"
     assert descriptor.thinking_levels == ("minimal", "low", "medium", "high", "xhigh")
+
+
+def test_codex_thinking_levels_are_marked_unverified() -> None:
+    from pathlib import Path
+
+    source = Path(provider_registry.__file__).read_text(encoding="utf-8")
+    codex_block = source[source.index('id="codex"') : source.index('acp_spec_path="ciao.providers.acp.agents:CODEX"')]
+    assert "UNVERIFIED DEFAULT" in codex_block
+    assert provider_registry.require("codex").thinking_levels == (
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    )

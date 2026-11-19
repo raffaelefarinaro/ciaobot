@@ -412,3 +412,27 @@ def test_codex_actions_are_allowlisted_constants(monkeypatch: pytest.MonkeyPatch
     assert "@agentclientprotocol/codex-acp@2.7.0" in host_terminal.CODEX_INSTALL_COMMAND
     monkeypatch.setattr(agents, "codex_binary", lambda: "/opt/tools/codex")
     assert host_terminal.action_command("codex-login") == "/opt/tools/codex login"
+
+
+def test_codex_login_without_codex_is_not_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao.providers.acp import agents
+
+    monkeypatch.setattr(agents, "codex_binary", lambda: None)
+    with pytest.raises(host_terminal.NotInstalled):
+        host_terminal.action_command("codex-login")
+
+
+def test_launch_without_codex_refuses_before_spawning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.providers.acp import agents
+
+    spawns: list[list[str]] = []
+    monkeypatch.setattr(agents, "codex_binary", lambda: None)
+    monkeypatch.setattr(
+        host_terminal, "capabilities", lambda: host_terminal.Capabilities(True, "macos", terminal="Terminal")
+    )
+    monkeypatch.setattr(host_terminal, "_spawn", lambda argv, **_kw: spawns.append(argv))
+    with pytest.raises(host_terminal.NotInstalled):
+        host_terminal.launch(tmp_path, action="codex-login", runtime_dir=tmp_path / ".runtime")
+    assert spawns == []

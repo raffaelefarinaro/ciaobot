@@ -2594,3 +2594,28 @@ def test_codex_status_probe_never_logs_token_text(
     assert row["ok"] is True
     assert token not in json.dumps(row)
     assert token not in caplog.text
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fake CLI is a POSIX shell script")
+def test_codex_status_probe_child_env_drops_secrets_and_keeps_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import setup_status
+
+    _fake_codex(tmp_path, monkeypatch, code=0)
+    monkeypatch.setenv("CIAO_PROBE_TEST_API_KEY", "sk-probe-secret-123")
+    seen: list[dict[str, str] | None] = []
+    real_run = subprocess.run
+
+    def spy(argv, **kwargs):  # type: ignore[no-untyped-def]
+        seen.append(kwargs.get("env"))
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(setup_status.subprocess, "run", spy)
+    codex_status_probe(dict(os.environ))
+    assert len(seen) == 2
+    for env in seen:
+        assert env is not None
+        assert "CIAO_PROBE_TEST_API_KEY" not in env
+        assert "sk-probe-secret-123" not in env.values()
+        assert env.get("PATH") == os.environ.get("PATH")

@@ -173,3 +173,22 @@ def test_every_provider_has_a_login_action() -> None:
 
 def test_the_macos_only_launcher_is_gone() -> None:
     assert not hasattr(routes_api, "_launch_provider_login")
+
+
+_REAL_ACTION_COMMAND = host_terminal.action_command
+
+
+def test_codex_connect_without_codex_is_409_not_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.providers.acp import agents
+
+    client, rec = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr(host_terminal, "action_command", _REAL_ACTION_COMMAND)
+    monkeypatch.setattr(agents, "codex_binary", lambda: None)
+    response = client.post("/api/settings/providers/codex/connect", headers=_signed(client))
+    assert response.status_code == 409
+    body = response.json()
+    assert body["reason"] == "not_installed"
+    assert "command" not in body
+    assert rec.launches == []
