@@ -126,16 +126,16 @@ async def test_catalog_probe_that_never_answers_session_new_is_bounded(
     monkeypatch, tmp_path: Path, caplog
 ) -> None:
     calls = _install(monkeypatch, tmp_path, config_options=_OPTIONS, new_hang=True)
-    monkeypatch.setattr(provider_module, "_CATALOG_PROBE_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(provider_module, "_CATALOG_PROBE_TIMEOUT_S", 5.0)
     workspace = _workspace(tmp_path)
     caplog.set_level(logging.WARNING)
 
-    # The outer guard turns a missing bound into a failed test instead of a hung run.
-    first = await asyncio.wait_for(FakeCatalogProvider.model_catalog(workspace), 15)
+    # The bound must outlast a slow CI runner reaching session/new (a 0.5 s bound timed out in initialize there). The outer guard turns a missing bound into a failed test instead of a hung run.
+    first = await asyncio.wait_for(FakeCatalogProvider.model_catalog(workspace), 30)
     assert first == []
     assert "timed out" in caplog.text
     # The per-key lock is released and a timed-out probe is not cached: a second call probes again.
-    second = await asyncio.wait_for(FakeCatalogProvider.model_catalog(workspace), 15)
+    second = await asyncio.wait_for(FakeCatalogProvider.model_catalog(workspace), 30)
     assert second == []
     assert _session_news(calls) == 2
 
