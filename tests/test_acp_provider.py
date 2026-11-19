@@ -776,10 +776,10 @@ async def test_start_failure_log_redacts_keyword_secrets_in_adapter_error(
 
 
 @pytest.mark.asyncio
-async def test_config_error_log_redacts_keyword_secrets(
+async def test_config_error_log_omits_adapter_text(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A rejected config write is reported to the PWA as a status; its adapter text is redacted in the log."""
+    """A rejected config write is reported to the PWA as a status; the log names only the error's type."""
     caplog.set_level(logging.WARNING, logger="ciao.providers.acp.session")
     config, _ = _install(
         monkeypatch, tmp_path,
@@ -799,4 +799,5 @@ async def test_config_error_log_redacts_keyword_secrets(
     statuses = [e.status for e in events if isinstance(e, SystemStatusEvent)]
     assert statuses == ["fake could not set model."]
     assert "qqq555secret" not in caplog.text
-    assert "access_token=[redacted]" in caplog.text
+    assert "access_token" not in caplog.text
+    assert "could not set model (RequestError)" in caplog.text

@@ -15,13 +15,14 @@ from typing import Any
 
 import acp
 import pytest
+from acp.exceptions import RequestError
 from acp.schema import AllowedOutcome, DeniedOutcome, RequestPermissionResponse
 
 from ciao.models import ContextCompactedEvent, PermissionRequestEvent, ResultEvent, SystemStatusEvent
 from ciao.providers.acp import connection as connection_module
 from ciao.providers.acp.connection import AcpConnection
 from ciao.providers.acp.permissions import PermissionBroker
-from ciao.providers.acp.session import AcpSession, SessionJournal, journal_path
+from ciao.providers.acp.session import AcpSession, ModeNotApplied, SessionJournal, journal_path
 from ciao.providers.acp.spec import ModeChoice
 from tests.acp_helpers import read_calls, write_scenario
 
@@ -480,15 +481,138 @@ async def test_apply_sets_only_changed_options(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_apply_unknown_mode_reports_status_not_error(tmp_path: Path) -> None:
+async def test_apply_unoffered_strict_mode_raises_and_sends_nothing(tmp_path: Path) -> None:
     config = [_select("mode", "default", ["default", "acceptEdits"])]
     async with _started(tmp_path, config_options=config) as harness:
-        events = await harness.session.apply(mode="plan", model="", thinking="")
+        with pytest.raises(ModeNotApplied):
+            await harness.session.apply(mode="plan", model="", thinking="")
+        assert not any(call["method"] == "session/set_config_option" for call in read_calls(harness.calls))
+
+
+@pytest.mark.asyncio
+async def test_apply_unoffered_bypass_reports_status_and_keeps_current(tmp_path: Path) -> None:
+    config = [_select("mode", "default", ["default", "acceptEdits"])]
+    async with _started(tmp_path, config_options=config) as harness:
+        events = await harness.session.apply(mode="bypass", model="", thinking="")
         assert events == [SystemStatusEvent(
             type="system",
-            status="fake does not offer a mode for 'plan'; keeping default.",
+            status="fake does not offer a mode for 'bypass'.",
         )]
         assert not any(call["method"] == "session/set_config_option" for call in read_calls(harness.calls))
+
+
+@pytest.mark.asyncio
+async def test_warm_session_mode_switch_failure_raises_before_any_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A chat moved from bypass to normal must never run in bypass when the switch fails."""
+    config = [_select("mode", "default", ["default", "bypassPermissions"])]
+    async with _started(tmp_path, config_options=config) as harness:
+        assert await harness.session.apply(mode="bypass", model="", thinking="") == []
+
+        async def refuse(config_id: str, session_id: str, value: str, **_kwargs: Any) -> None:
+            raise RequestError(-32602, "adapter says /Users/alice/settings.json is bad")
+
+        monkeypatch.setattr(harness.connection.conn, "set_config_option", refuse)
+        with pytest.raises(ModeNotApplied) as raised:
+            await harness.session.apply(mode="normal", model="", thinking="")
+        assert "alice" not in str(raised.value)
+        # The adapter's error is not chained: a traceback logged for this would carry it.
+        assert raised.value.__context__ is None
+        assert not any(call["method"] == "session/prompt" for call in read_calls(harness.calls))
+
+
+@pytest.mark.asyncio
+async def test_failed_bypass_switch_reports_status_only(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    secret = "SECRET_CONFIG_789"
+    caplog.set_level(logging.WARNING, logger="ciao.providers.acp.session")
+    config = [_select("mode", "default", ["default", "bypassPermissions"])]
+    async with _started(
+        tmp_path,
+        config_options=config,
+        config_error=f"bad value {secret} in /Users/alice/settings.json",
+    ) as harness:
+        events = await harness.session.apply(mode="bypass", model="", thinking="")
+        assert events == [SystemStatusEvent(type="system", status="fake could not set mode.")]
+        assert secret not in repr(events)
+        assert "/Users/alice" not in repr(events)
+        assert secret not in caplog.text
+        assert "could not set mode (RequestError)" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_failed_strict_switch_on_a_fresh_session_raises_with_no_adapter_text(
+    tmp_path: Path,
+) -> None:
+    secret = "SECRET_CONFIG_790"
+    # The adapter starts in bypass; auto resolves to default, which is a real switch.
+    config = [_select("mode", "bypassPermissions", ["default", "bypassPermissions"])]
+    async with _started(
+        tmp_path,
+        config_options=config,
+        config_error=f"bad value {secret} in /Users/alice/settings.json",
+    ) as harness:
+        with pytest.raises(ModeNotApplied) as raised:
+            await harness.session.apply(mode="auto", model="", thinking="")
+        assert secret not in str(raised.value)
+        assert "alice" not in str(raised.value)
+
+
+_LEGACY_MODELS = [
+    {"value": "claude-sonnet-4-6", "name": "Sonnet"},
+    {"value": "claude-opus-4-8", "name": "Opus"},
+]
+
+
+@pytest.mark.asyncio
+async def test_legacy_full_model_id_resolves_to_its_offered_tier(tmp_path: Path) -> None:
+    config = [
+        _select("mode", "default", ["default", "bypassPermissions"]),
+        {
+            "id": "model", "name": "model", "type": "select", "currentValue": "claude-sonnet-4-6",
+            "options": _LEGACY_MODELS,
+        },
+    ]
+    async with _started(tmp_path, config_options=config) as harness:
+        events = await harness.session.apply(mode="normal", model="claude-opus-4-1", thinking="")
+        sets = [c["params"] for c in read_calls(harness.calls) if c["method"] == "session/set_config_option"]
+        assert [(s["configId"], s["value"]) for s in sets] == [("model", "claude-opus-4-8")]
+        assert events == []
+
+
+@pytest.mark.asyncio
+async def test_unoffered_model_is_reported_once_per_session(tmp_path: Path) -> None:
+    config = [
+        _select("mode", "default", ["default", "bypassPermissions"]),
+        {
+            "id": "model", "name": "model", "type": "select", "currentValue": "claude-sonnet-4-6",
+            "options": _LEGACY_MODELS,
+        },
+    ]
+    async with _started(tmp_path, config_options=config) as harness:
+        first = await harness.session.apply(mode="normal", model="gpt-5.6", thinking="")
+        second = await harness.session.apply(mode="normal", model="gpt-5.6", thinking="")
+        assert first == [SystemStatusEvent(type="system", status="fake does not offer the model 'gpt-5.6'.")]
+        assert second == []
+
+
+@pytest.mark.asyncio
+async def test_tier_without_an_offered_match_is_reported_once_and_not_sent(tmp_path: Path) -> None:
+    config = [
+        _select("mode", "default", ["default", "bypassPermissions"]),
+        {
+            "id": "model", "name": "model", "type": "select", "currentValue": "claude-sonnet-4-6",
+            "options": _LEGACY_MODELS,
+        },
+    ]
+    async with _started(tmp_path, config_options=config) as harness:
+        first = await harness.session.apply(mode="normal", model="haiku", thinking="")
+        second = await harness.session.apply(mode="normal", model="haiku", thinking="")
+        assert [e.status for e in first] == ["fake does not offer the model 'haiku'."]
+        assert second == []
+        assert not any(c["method"] == "session/set_config_option" for c in read_calls(harness.calls))
 
 
 @pytest.mark.asyncio
@@ -611,17 +735,18 @@ async def test_failed_config_set_logs_exception_and_reports_fixed_status(
 ) -> None:
     secret = "SECRET_CONFIG_789"
     caplog.set_level(logging.WARNING, logger="ciao.providers.acp.session")
-    config = [_select("mode", "default", ["default", "acceptEdits"])]
+    config = [_select("mode", "default", ["default", "bypassPermissions"])]
     async with _started(
         tmp_path,
         config_options=config,
         config_error=f"bad value {secret} in /Users/alice/settings.json",
     ) as harness:
-        events = await harness.session.apply(mode="auto", model="", thinking="")
+        events = await harness.session.apply(mode="bypass", model="", thinking="")
         assert events == [SystemStatusEvent(type="system", status="fake could not set mode.")]
         assert secret not in repr(events)
         assert "/Users/alice" not in repr(events)
-        assert secret in caplog.text
+        assert secret not in caplog.text
+        assert "could not set mode (RequestError)" in caplog.text
 
 
 def test_journal_skips_torn_last_line(tmp_path: Path) -> None:

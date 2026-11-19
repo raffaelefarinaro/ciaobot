@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from pathlib import Path
 from types import SimpleNamespace
@@ -1083,36 +1085,149 @@ async def test_llm_fallback_titles_chat_when_native_never_lands(monkeypatch) -> 
     assert calls[0]["model"] == "opus"
 
 
+async def _settle_late_titles() -> None:
+    """Wait for the background native-title polls a test started, so none outlives it."""
+    from ciao.web import project_chats as pc
+
+    await asyncio.gather(*list(pc._LATE_TITLE_TASKS), return_exceptions=True)
+
+
 @pytest.mark.asyncio
 async def test_claude_title_does_not_wait_for_native_poll(monkeypatch) -> None:
+    """The fallback title is never held behind the native polls: none is slept on before it returns."""
     from ciao.web import project_chats as pc
 
     manager = _manager(chats={"chat-1": _chat(provider="claude")})
     manager._TITLE_POLL_DELAYS = (0.0, 60.0)
     native_reads = 0
+    slept: list[float] = []
 
     def missing_session_info(_sid, directory=None):
         nonlocal native_reads
         native_reads += 1
         return None
 
-    async def unexpected_sleep(_delay):
-        pytest.fail("Claude titling must not wait through the native poll")
+    async def recording_sleep(delay):
+        slept.append(delay)
 
     async def fake_oneshot(*_args, **_kwargs):
         return "System One Decision Models"
 
     monkeypatch.setattr(claude_adapter, "get_session_info", missing_session_info)
-    monkeypatch.setattr(pc.asyncio, "sleep", unexpected_sleep)
+    monkeypatch.setattr(pc.asyncio, "sleep", recording_sleep)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
-    assert (
-        await manager.auto_title_if_default(
-            "chat-1", "I want to find out where System One models help"
-        )
-        == "System One Decision Models"
+    title = await manager.auto_title_if_default(
+        "chat-1", "I want to find out where System One models help"
     )
+    assert title == "System One Decision Models"
     assert native_reads == 1
+    assert slept == []
+    await _settle_late_titles()
+
+
+@pytest.mark.asyncio
+async def test_claude_fallback_title_is_not_held_behind_native_polls(monkeypatch) -> None:
+    """With no native title and no model title, the fallback comes back at once, and no poll is waited on."""
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(provider="claude")})
+    manager._TITLE_POLL_DELAYS = (0.0, 60.0, 60.0)
+    slept: list[float] = []
+
+    async def recording_sleep(delay):
+        slept.append(delay)
+
+    async def failing_oneshot(*_args, **_kwargs):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(claude_adapter, "get_session_info", lambda _sid, directory=None: None)
+    monkeypatch.setattr(pc.asyncio, "sleep", recording_sleep)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
+
+    assert await manager.auto_title_if_default("chat-1", "Check Zendesk ticket 152025") == (
+        "Check Zendesk ticket 152025"
+    )
+    assert manager._chats["chat-1"].title == "Check Zendesk ticket 152025"
+    assert slept == []
+    await _settle_late_titles()
+
+
+@pytest.mark.asyncio
+async def test_claude_late_native_title_upgrades_the_fallback_in_the_background(monkeypatch) -> None:
+    """The fallback is set first; a native title that lands in a later poll replaces it and is published."""
+    manager = _manager(chats={"chat-1": _chat(provider="claude")})
+    manager._TITLE_POLL_DELAYS = (0.0, 0.001, 0.001)
+    published: list[dict] = []
+    manager._events = SimpleNamespace(publish=published.append)
+    reads = 0
+
+    class FakeInfo:
+        custom_title = "Claude Late Title"
+        summary = ""
+
+    def late_session_info(_sid, directory=None):
+        nonlocal reads
+        reads += 1
+        return FakeInfo() if reads >= 3 else None
+
+    async def failing_oneshot(*_args, **_kwargs):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(claude_adapter, "get_session_info", late_session_info)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
+
+    assert await manager.auto_title_if_default("chat-1", "hello") == "hello"
+    assert manager._chats["chat-1"].title == "hello"
+    await _settle_late_titles()
+
+    assert manager._chats["chat-1"].title == "Claude Late Title"
+    assert reads == 3
+    assert published == [{
+        "type": "chat_title", "chat_id": "chat-1", "title": "Claude Late Title", "status": "ready",
+    }]
+
+
+@pytest.mark.asyncio
+async def test_claude_late_native_title_does_not_overwrite_a_rename(monkeypatch) -> None:
+    """A rename made while the background poll waits must win over the provider's title."""
+    chat = _chat(provider="claude")
+    manager = _manager(chats={"chat-1": chat})
+    manager._TITLE_POLL_DELAYS = (0.0, 0.001)
+    published: list[dict] = []
+    manager._events = SimpleNamespace(publish=published.append)
+
+    class FakeInfo:
+        custom_title = "Claude Late Title"
+        summary = ""
+
+    async def failing_oneshot(*_args, **_kwargs):
+        raise RuntimeError("model unavailable")
+
+    async def rename_then_wait(delay):
+        chat.title = "User Picked This"
+
+    reads = 0
+
+    def native_after_the_inline_read(_sid, directory=None):
+        # The inline read misses, so the title is only ever found by the background poll.
+        nonlocal reads
+        reads += 1
+        return FakeInfo() if reads >= 2 else None
+
+    monkeypatch.setattr(claude_adapter, "get_session_info", native_after_the_inline_read)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
+
+    from ciao.web import project_chats as pc
+    monkeypatch.setattr(pc.asyncio, "sleep", rename_then_wait)
+
+    await manager.auto_title_if_default("chat-1", "hello")
+    await _settle_late_titles()
+
+    assert chat.title == "User Picked This"
+    assert published == []
+    # The background poll stops before it reads the provider: only the inline read happened.
+    assert reads == 1
 
 
 @pytest.mark.asyncio

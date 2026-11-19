@@ -634,6 +634,9 @@ def _has_running_loop() -> bool:
 # local backend simply times out and the deterministic fallback applies, the
 # same trade the schedule attention classifier makes with a longer window.
 _TITLE_LLM_TIMEOUT_S = 45.0
+# Native-title polls that run after the fallback title is already set (ACP providers). Held
+# so the event loop does not drop them while they wait.
+_LATE_TITLE_TASKS: set[asyncio.Task[None]] = set()
 
 _TITLE_SYSTEM_PROMPT = """\
 You name chat sessions for a sidebar. Reply with ONLY the title: a short \
@@ -10075,16 +10078,18 @@ class ProjectChatManager:
         Three tiers, in order:
 
         1. The provider's native session title (opencode's ``title`` agent or
-           Claude Code's ``aiTitle``). Poll OpenCode via ``_TITLE_POLL_DELAYS``;
-           check Claude once, since context-prefixed Ciaobot prompts commonly
-           suppress its native titler. Every wait re-checks the chat, so a
-           manual rename or a delete stops titling.
+           Claude Code's ``aiTitle``). OpenCode is polled through
+           ``_TITLE_POLL_DELAYS`` before the lower tiers run. Claude (ACP) is
+           read once here; its remaining polls run in the background and only
+           upgrade a title this call already set, so they never hold up the
+           fallback. Context-prefixed Ciaobot prompts commonly suppress Claude's
+           native titler. Every wait re-checks the chat, so a manual rename or a
+           delete stops titling.
         2. A one-shot model call (``_llm_chat_title``) when the native title
-           is absent. For Claude this runs immediately, not after the full
-           OpenCode poll window.
+           is absent, run straight after the inline native read.
         3. The deterministic ``chat_service._fallback_title`` (first 6 words of the
-           prompt) so the sidebar never stays stuck on "New Chat". An end-of-turn
-           pass can still upgrade it when a title becomes available.
+           prompt) so the sidebar never stays stuck on "New Chat". A late native
+           title, or an end-of-turn pass, can still upgrade it.
         """
         fallback = chat_service._fallback_title(user_text)
 
@@ -10096,31 +10101,15 @@ class ProjectChatManager:
 
         chat = self._chats.get(chat_id)
         provider = getattr(chat, "provider", "claude") if chat else "claude"
-        delays = (0.0,) if provider == "claude" else self._TITLE_POLL_DELAYS
-        for delay in delays:
-            if delay:
-                await asyncio.sleep(delay)
-            chat = self._chats.get(chat_id)
-            # Bail on rename/delete, but not on a missing session: the turn
-            # may still be creating it, and a later poll will find it.
-            # The fallback title is still considered title-able so the late
-            # poll (fired after the turn) can upgrade it to the native title.
-            if chat is None or not _is_titling_target(chat.title):
-                return None
-            if not chat.session_id:
-                continue
-
-            title = await self._native_chat_title(chat)
-            if not title:
-                continue
-
-            # Re-check: user may have renamed while we were reading.
-            chat = self._chats.get(chat_id)
-            if chat is None or not _is_titling_target(chat.title):
-                return None
-            chat.title = title
-            self._save()
-            return title
+        inline: tuple[float, ...] = self._TITLE_POLL_DELAYS
+        later: tuple[float, ...] = ()
+        if provider == "claude":
+            inline, later = (0.0,), self._TITLE_POLL_DELAYS[1:]
+        stopped, native = await self._poll_native_title(chat_id, inline, _is_titling_target)
+        if stopped:
+            return None
+        if native:
+            return native
         # Native title was absent. A model-generated label beats the raw
         # prompt snippet; the end-of-turn pass can retry a failed early call.
         chat = self._chats.get(chat_id)
@@ -10132,15 +10121,88 @@ class ProjectChatManager:
                 if chat is not None and _is_titling_target(chat.title):
                     chat.title = llm_title
                     self._save()
+                    self._upgrade_native_title_later(chat_id, later, llm_title)
                     return llm_title
         if fallback is None:
+            self._upgrade_native_title_later(chat_id, later, None)
             return None
         chat = self._chats.get(chat_id)
         if chat is None or not _is_titling_target(chat.title):
             return None
         chat.title = fallback
         self._save()
+        self._upgrade_native_title_later(chat_id, later, fallback)
         return fallback
+
+    async def _poll_native_title(
+        self, chat_id: str, delays: Sequence[float], is_target: Callable[[str], bool]
+    ) -> tuple[bool, str | None]:
+        """Wait through ``delays`` for the provider's native title and write it when it lands.
+
+        Returns ``(stopped, title)``: ``stopped`` when the chat was renamed, deleted or left
+        the titling targets, so no further titling applies; ``title`` when a native title
+        was written.
+        """
+        for delay in delays:
+            if delay:
+                await asyncio.sleep(delay)
+            chat = self._chats.get(chat_id)
+            # Bail on rename/delete, but not on a missing session: the turn
+            # may still be creating it, and a later poll will find it.
+            # The fallback title is still considered title-able so the late
+            # poll (fired after the turn) can upgrade it to the native title.
+            if chat is None or not is_target(chat.title):
+                return True, None
+            if not chat.session_id:
+                continue
+
+            title = await self._native_chat_title(chat)
+            if not title:
+                continue
+
+            # Re-check: user may have renamed while we were reading.
+            chat = self._chats.get(chat_id)
+            if chat is None or not is_target(chat.title):
+                return True, None
+            chat.title = title
+            self._save()
+            return False, title
+        return False, None
+
+    def _upgrade_native_title_later(
+        self, chat_id: str, delays: Sequence[float], written: str | None
+    ) -> None:
+        """Keep polling for the native title in the background after a fallback title was set.
+
+        Only a title this call wrote (or the default "New Chat") is upgraded; a rename wins.
+        """
+        if not delays:
+            return
+        owned = frozenset(title for title in ("New Chat", written) if title)
+        task = asyncio.create_task(self._late_native_title(chat_id, delays, owned))
+        _LATE_TITLE_TASKS.add(task)
+        task.add_done_callback(_LATE_TITLE_TASKS.discard)
+
+    async def _late_native_title(
+        self, chat_id: str, delays: Sequence[float], owned: frozenset[str]
+    ) -> None:
+        try:
+            _stopped, title = await self._poll_native_title(
+                chat_id, delays, lambda current: current in owned
+            )
+        except Exception:
+            logger.exception("Late native title poll failed for %s", chat_id)
+            return
+        chat = self._chats.get(chat_id)
+        if title is None or chat is None or chat.title != title:
+            return
+        chat.title_status = "ready"
+        self._events.publish({
+            "type": "chat_title",
+            "chat_id": chat_id,
+            "title": title,
+            "status": "ready",
+        })
 
     async def _llm_chat_title(
         self, chat: ChatInfo, user_text: str, assistant_text: str

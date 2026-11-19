@@ -34,7 +34,7 @@ from ciao.models import (
 )
 from ciao.providers.acp.connection import AcpConnection, AgentStartError
 from ciao.providers.acp.permissions import PermissionBroker
-from ciao.providers.acp.session import AcpSession, SessionJournal, journal_file
+from ciao.providers.acp.session import AcpSession, ModeNotApplied, SessionJournal, journal_file
 from ciao.providers.acp.spec import AgentSpec
 from ciao.redact import redact_text
 from ciao.providers.base import (
@@ -209,6 +209,11 @@ class AcpProvider(BaseProvider):
         """Env added to the agent process at spawn, under the request's own env."""
         return {}
 
+    @classmethod
+    def process_env(cls, request: AgentRequest) -> dict[str, str]:
+        """The env the agent process is spawned with for this request's connection."""
+        return {**cls.spawn_env(), **request.extra_env}
+
     # -- turn ------------------------------------------------------------------
 
     async def run_streaming(
@@ -239,9 +244,20 @@ class AcpProvider(BaseProvider):
             session, replaced = await self._session_for(connection, request)
             if replaced:
                 prepend_stable_context(request)
-            for event in await session.apply(
-                mode=request.mode, model=request.model, thinking=request.thinking_level
-            ):
+            try:
+                applied = await session.apply(
+                    mode=request.mode, model=request.model, thinking=request.thinking_level
+                )
+            except ModeNotApplied:
+                # The chat asked for a mode the agent would not hold, so nothing runs.
+                logger.warning("%s did not start the turn: the requested mode was not applied.", self.spec.id)
+                yield ResultEvent(
+                    type="result",
+                    is_error=True,
+                    result=f"{self.spec.id} could not set the requested mode; the turn did not run.",
+                )
+                return
+            for event in applied:
                 yield self._seen(event)
             blocks = self._blocks(connection, request)
             register_handle(AcpHandle(session))
@@ -272,7 +288,7 @@ class AcpProvider(BaseProvider):
         self._connection = await AcpConnection.open(
             self.spec,
             cwd=self.workspace_root,
-            env={**type(self).spawn_env(), **request.extra_env},
+            env=type(self).process_env(request),
             client=self._client,
         )
         self._client.connection = self._connection
@@ -398,12 +414,7 @@ class AcpProvider(BaseProvider):
     ) -> QuestionResponseResult:
         broker = self._broker
         if broker is None:
-            return QuestionResponseResult(
-                ok=False,
-                error="This approval has already been answered.",
-                retryable=False,
-                already_resolved=True,
-            )
+            return QuestionResponseResult(ok=True, already_resolved=True)
         return broker.respond(request_id, approved, session_id=session_id)
 
     async def _close_session(self) -> None:

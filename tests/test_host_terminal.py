@@ -48,8 +48,27 @@ def _setup(
     return spawns
 
 
+def test_claude_install_runs_the_cli_installer_then_the_adapter_when_no_cli_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "")
+    assert host_terminal.action_command("claude-install") == (
+        f"{setup_status.claude_install_command()} && {setup_status.claude_adapter_install_command()}"
+    )
+
+
+def test_claude_install_runs_only_the_adapter_when_the_cli_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "/Users/me/.local/bin/claude")
+    command = host_terminal.action_command("claude-install")
+    assert command == setup_status.claude_adapter_install_command()
+    assert setup_status.claude_install_command() not in command
+
+
 def test_actions_map_to_the_commands_ciaobot_already_shows(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(host_terminal, "host_platform", lambda: host_terminal.PLATFORM_MACOS)
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "")
     assert host_terminal.action_command("claude-install") == (
         f"{setup_status.claude_install_command()} && {setup_status.claude_adapter_install_command()}"
     )

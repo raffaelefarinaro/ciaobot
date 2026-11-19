@@ -36,6 +36,8 @@ class FakeOneshotProvider(AcpProvider):
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **scenario: Any) -> Path:
+    # A one-shot runs in plan mode, which is fail-closed: the agent must offer plan.
+    scenario.setdefault("config_options", _OPTIONS)
     spec, calls = write_scenario(
         tmp_path,
         spec_modes={"plan": (ModeChoice(config_id="mode", values=("plan",)),)},

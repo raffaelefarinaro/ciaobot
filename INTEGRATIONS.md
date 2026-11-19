@@ -266,6 +266,10 @@ workspace and choose the password.
 
 ## Environment Variables
 
+### Anthropic credentials for Claude chats
+
+Claude chats run `claude-agent-acp`, which is spawned with the engine's environment minus provider credentials (`*_API_KEY`, `*_TOKEN`, ...). Three existing Anthropic variables are passed through by name, when they are set and non-empty, so an API key or token configured for the SDK path keeps working: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN`. No other credential is passed. These are not `CIAO_*` settings. Leaving them unset keeps the Claude CLI's own login.
+
 Copy `.env.example` to `.env` and fill in the engine-level settings first:
 
 **Required for a configured workspace:** `PWA_AUTH_TOKEN` — the dashboard password. Password protection is always on and cannot be turned off.

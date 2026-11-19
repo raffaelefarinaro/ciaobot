@@ -902,6 +902,64 @@ async def test_respond_permission_returns_false_when_no_provider(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_respond_permission_unknown_request_id_is_acknowledged_on_the_acp_path(
+    tmp_path: Path,
+) -> None:
+    """A stale id on the ACP provider (Claude) is already settled: acknowledged, so the card clears."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="t", provider="claude")
+    provider_service = pcm._get_provider(chat.chat_id)
+    assert provider_service.provider.response_session_id == ""  # no live session behind the reply
+
+    ok = await pcm.respond_permission(
+        chat.chat_id, request_id="never-asked", approved=True, reason=""
+    )
+
+    # A stale id is already settled; acknowledge it so clients clear the card.
+    assert ok.ok is True
+
+
+@pytest.mark.asyncio
+async def test_respond_permission_strips_buffered_event_from_active_stream_on_the_acp_path(
+    tmp_path: Path,
+) -> None:
+    """An answered permission must not replay on the next subscribe, on the ACP path too.
+
+    Repro: the user opens a chat, the agent asks for Bash approval, the user taps Approve,
+    then reopens the chat. Without buffer cleanup the broker replays the original
+    ``permission_request`` and the PWA renders a phantom card for a settled request.
+    """
+    from ciao.web.chat_broker import ChatStream
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="t", provider="claude")
+
+    stream = ChatStream("hi")
+    pcm._broker.register(chat.chat_id, stream)
+    stream.publish({
+        "type": "permission_request",
+        "tool_name": "Bash",
+        "tool_input": "ls",
+        "message": "Approve use of Bash?",
+        "request_id": "tool-99",
+    })
+
+    pcm._get_provider(chat.chat_id)
+
+    # Stale reply (the ACP provider holds nothing pending) must still strip the buffer.
+    await pcm.respond_permission(
+        chat.chat_id, request_id="tool-99", approved=True, reason=""
+    )
+
+    replay = stream.buffered_events()
+    assert all(
+        ev.get("type") != "permission_request" for ev in replay
+    ), f"buffered permission_request leaked into replay: {replay}"
+
+
+@pytest.mark.asyncio
 async def test_denial_retracts_the_tool_card_before_v2_consumes_the_request(
     tmp_path: Path,
 ) -> None:

@@ -15,11 +15,12 @@ from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import pytest
+from acp.exceptions import RequestError
 
 from ciao import provider_registry, setup_status
 from ciao.claude_trim import claude_settings_layer, trim_tool_denies
 from ciao.config import CiaoConfig, WorkspaceConfig
-from ciao.models import AgentRequest, SystemStatusEvent
+from ciao.models import AgentRequest, ResultEvent, SystemStatusEvent
 from ciao.provider_registry import ProviderDescriptor
 from ciao.provider_service import ProviderService
 from ciao.providers import oneshot
@@ -466,3 +467,205 @@ async def test_unknown_model_value_is_not_sent(monkeypatch: pytest.MonkeyPatch, 
         isinstance(event, SystemStatusEvent) and "does not offer the model 'gpt-5.6'" in event.status
         for event in events
     )
+
+
+# -- fail-closed mode, connectors, credentials, delete (review fixes on C1) ------------------
+
+_MODE_OPTION_DEFAULT = {
+    "id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": "default",
+    "options": [{"value": "default", "name": "Default"}, {"value": "bypassPermissions", "name": "Bypass"}],
+}
+_MODE_BYPASS_ONLY = {
+    "id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": "bypassPermissions",
+    "options": [{"value": "bypassPermissions", "name": "Bypass"}],
+}
+
+
+def _record_spawns(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, str]]:
+    spawned: list[dict[str, str]] = []
+    original = AcpConnection.open
+
+    async def recording(spec: AgentSpec, *, cwd: Path, env: dict[str, str], client: Any) -> Any:
+        spawned.append(dict(env))
+        return await original(spec, cwd=cwd, env=env, client=client)
+
+    monkeypatch.setattr(AcpConnection, "open", staticmethod(recording))
+    return spawned
+
+
+@pytest.mark.asyncio
+async def test_failed_switch_to_a_strict_mode_ends_the_turn_before_the_prompt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A chat moved from bypass to normal must not run in bypass when the switch fails."""
+    config, calls = _install(monkeypatch, tmp_path, sessions=["a"], spec_modes=CLAUDE.modes, config_options=[_MODE_OPTION_DEFAULT])
+    service = ProviderService(config)  # type: ignore[arg-type]
+    first = _chat_request(_config(tmp_path), mode="bypass")
+    first.provider = "fake"
+    await _turn(service, first)
+    assert _count(calls, "session/prompt") == 1
+
+    async def refuse(config_id: str, session_id: str, value: str, **_kwargs: Any) -> None:
+        raise RequestError(-32602, "adapter detail /Users/alice/settings.json")
+
+    provider = service.provider
+    assert provider is not None
+    monkeypatch.setattr(provider._connection.conn, "set_config_option", refuse)  # type: ignore[union-attr]
+    # Same session: a resume id keeps the live (warm) session, without which a turn opens a new one.
+    second = _chat_request(_config(tmp_path), mode="normal", resume_session="a")
+    second.provider = "fake"
+    events = await _turn(service, second)
+
+    results = [event for event in events if isinstance(event, ResultEvent)]
+    assert [(r.is_error, r.result) for r in results] == [
+        (True, "fake could not set the requested mode; the turn did not run."),
+    ]
+    assert "alice" not in repr(events)
+    assert "alice" not in caplog.text  # the abort is logged with a fixed sentence, not adapter text
+    assert _count(calls, "session/prompt") == 1  # nothing ran after the failed switch
+
+
+@pytest.mark.asyncio
+async def test_fresh_session_without_the_strict_mode_value_ends_the_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config, calls = _install(monkeypatch, tmp_path, sessions=["a"], spec_modes=CLAUDE.modes, config_options=[_MODE_BYPASS_ONLY])
+    service = ProviderService(config)  # type: ignore[arg-type]
+    request = _chat_request(_config(tmp_path), mode="normal")
+    request.provider = "fake"
+
+    events = await _turn(service, request)
+
+    assert [(e.is_error, e.result) for e in events if isinstance(e, ResultEvent)] == [
+        (True, "fake could not set the requested mode; the turn did not run."),
+    ]
+    assert _count(calls, "session/prompt") == 0
+
+
+@pytest.mark.asyncio
+async def test_bypass_switch_failure_is_status_only_and_the_turn_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config, calls = _install(
+        monkeypatch, tmp_path, sessions=["a"], spec_modes=CLAUDE.modes, config_options=[_MODE_OPTION_DEFAULT],
+        config_error="adapter detail /Users/alice/settings.json",
+    )
+    service = ProviderService(config)  # type: ignore[arg-type]
+    request = _chat_request(_config(tmp_path), mode="bypass")
+    request.provider = "fake"
+
+    events = await _turn(service, request)
+
+    assert SystemStatusEvent(type="system", status="fake could not set mode.") in events
+    assert [e for e in events if isinstance(e, ResultEvent) and e.is_error] == []
+    assert _count(calls, "session/prompt") == 1
+
+
+@pytest.mark.asyncio
+async def test_connectors_switched_back_on_reload_the_session_without_a_process_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("ENABLE_CLAUDEAI_MCP_SERVERS", raising=False)
+    config, calls = _install(
+        monkeypatch, tmp_path, sessions=["a"], initialize={"loadSession": True},
+        record_env=["ENABLE_CLAUDEAI_MCP_SERVERS"],
+    )
+    spawned = _record_spawns(monkeypatch)
+    service = ProviderService(config)  # type: ignore[arg-type]
+    base = _config(tmp_path)
+
+    off = _chat_request(base, extra_env={"ENABLE_CLAUDEAI_MCP_SERVERS": "false"})
+    off.provider = "fake"
+    await _turn(service, off)
+    assert _methods(calls, "session/new")[0]["_meta"]["claudeCode"]["options"]["env"] == {
+        "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+    }
+
+    base.workspaces["work"].claude_trim = {"setting:claude_ai_connectors": True}
+    on = _chat_request(base, resume_session="a")
+    on.provider = "fake"
+    await _turn(service, on)
+
+    # Same connection, same session, reloaded with the connectors' env dropped from _meta.
+    assert _count(calls, "initialize") == 1
+    assert _count(calls, "session/new") == 1
+    loads = _methods(calls, "session/load")
+    assert len(loads) == 1
+    assert "env" not in loads[0]["_meta"]["claudeCode"]["options"]
+    assert loads[0]["_meta"] == {"claudeCode": {"options": claude_session_options(on)}}
+    # The variable never reached the process: not in the spawn env, not in the agent's own env.
+    assert spawned and all("ENABLE_CLAUDEAI_MCP_SERVERS" not in env for env in spawned)
+    initialize = _methods(calls, "initialize")[0]
+    assert initialize["env"]["ENABLE_CLAUDEAI_MCP_SERVERS"] is None
+
+
+_ANTHROPIC_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+_OTHER_SECRET_KEYS = ("OPENAI_API_KEY", "GITHUB_TOKEN")
+
+
+def test_spawn_env_allowlists_exactly_the_anthropic_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "")
+    for key in _ANTHROPIC_KEYS:
+        monkeypatch.setenv(key, f"value-for-{key.lower()}")
+    for key in _OTHER_SECRET_KEYS:
+        monkeypatch.setenv(key, f"value-for-{key.lower()}")
+
+    env = ClaudeAcpProvider.spawn_env()
+
+    assert {key: env[key] for key in _ANTHROPIC_KEYS} == {
+        key: f"value-for-{key.lower()}" for key in _ANTHROPIC_KEYS
+    }
+    for key in _OTHER_SECRET_KEYS:
+        assert key not in env
+
+
+def test_spawn_env_leaves_unset_anthropic_credentials_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "")
+    for key in _ANTHROPIC_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
+    assert ClaudeAcpProvider.spawn_env() == {}
+
+
+@pytest.mark.asyncio
+async def test_anthropic_credentials_reach_the_agent_process_and_other_secrets_do_not(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    for key in _ANTHROPIC_KEYS:
+        monkeypatch.setenv(key, f"value-for-{key.lower()}")
+    for key in _OTHER_SECRET_KEYS:
+        monkeypatch.setenv(key, f"value-for-{key.lower()}")
+    config, calls = _install(monkeypatch, tmp_path, sessions=["a"], record_env=[*_ANTHROPIC_KEYS, *_OTHER_SECRET_KEYS])
+    request = _chat_request(_config(tmp_path))
+    request.provider = "fake"
+
+    await _turn(ProviderService(config), request)  # type: ignore[arg-type]
+
+    env = _methods(calls, "initialize")[0]["env"]
+    assert {key: env[key] for key in _ANTHROPIC_KEYS} == {
+        key: f"value-for-{key.lower()}" for key in _ANTHROPIC_KEYS
+    }
+    assert {key: env[key] for key in _OTHER_SECRET_KEYS} == {key: None for key in _OTHER_SECRET_KEYS}
+
+
+@pytest.mark.asyncio
+async def test_delete_session_reports_that_the_journal_was_deleted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from ciao.providers.acp.session import journal_file
+    from ciao.providers.claude import ClaudeProvider
+
+    runtime = tmp_path / "runtime"
+    journal = journal_file(runtime, CLAUDE.id, "sess-1")
+    journal.parent.mkdir(parents=True)
+    journal.write_text("{}\n", encoding="utf-8")
+
+    async def sdk_nothing(cls: Any, _workspace: Path, _session_id: str, *, runtime_root: Path) -> None:
+        return None
+
+    monkeypatch.setattr(ClaudeProvider, "delete_session", classmethod(sdk_nothing))
+    assert await ClaudeAcpProvider.delete_session(tmp_path, "sess-1", runtime_root=runtime) is True
+    assert not journal.exists()
+    assert await ClaudeAcpProvider.delete_session(tmp_path, "sess-1", runtime_root=runtime) is None

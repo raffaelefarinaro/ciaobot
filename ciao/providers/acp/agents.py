@@ -8,6 +8,7 @@ the CLI owns, so nothing else is sent.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
@@ -42,7 +43,10 @@ CLAUDE_ONESHOT_OPTIONS: Mapping[str, Any] = MappingProxyType({
     "strictMcpConfig": True,
 })
 
-_CONNECTORS_OFF_ENV = {"ENABLE_CLAUDEAI_MCP_SERVERS": "false"}
+_CONNECTORS_ENV_KEY = "ENABLE_CLAUDEAI_MCP_SERVERS"
+_CONNECTORS_OFF_ENV = {_CONNECTORS_ENV_KEY: "false"}
+# Anthropic credentials the SDK path passed to the CLI. Named here, not matched by suffix.
+_ANTHROPIC_CREDENTIAL_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
 
 
 def claude_session_options(request: AgentRequest) -> dict[str, Any]:
@@ -92,20 +96,39 @@ class ClaudeAcpProvider(AcpProvider):
 
     @classmethod
     def spawn_env(cls) -> dict[str, str]:
-        return _claude_cli_env()
+        """The user's CLI path, and the Anthropic credentials the SDK path passed through.
+
+        ``_terminal_env`` strips ``*_API_KEY`` and ``*_TOKEN`` from the engine's environment,
+        so these three are added back by name, and nothing else is.
+        """
+        env = _claude_cli_env()
+        for key in _ANTHROPIC_CREDENTIAL_KEYS:
+            value = os.environ.get(key)
+            if value:
+                env[key] = value
+        return env
+
+    @classmethod
+    def process_env(cls, request: AgentRequest) -> dict[str, str]:
+        # The connectors switch travels only in _meta.claudeCode.options.env. A process
+        # env value would outlive a reload, since the connection is reused across it.
+        env = super().process_env(request)
+        env.pop(_CONNECTORS_ENV_KEY, None)
+        return env
 
     @classmethod
     async def delete_session(
         cls, workspace_root: Path, session_id: str, *, runtime_root: Path
     ) -> bool | None:
         # The ACP journal goes first; the CLI's own session file goes too, which the
-        # SDK-era deleter still removes until C2a replaces it.
+        # SDK-era deleter still removes until C2a replaces it. Either one deleting counts.
         from ciao.providers.claude import ClaudeProvider
 
-        await super().delete_session(workspace_root, session_id, runtime_root=runtime_root)
-        return await ClaudeProvider.delete_session(
+        journal = await super().delete_session(workspace_root, session_id, runtime_root=runtime_root)
+        cli_file = await ClaudeProvider.delete_session(
             workspace_root, session_id, runtime_root=runtime_root
         )
+        return True if (journal or cli_file) else None
 
     @classmethod
     async def native_title_candidates(
