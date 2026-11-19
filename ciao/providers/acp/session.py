@@ -39,6 +39,7 @@ from ciao.providers.acp.connection import AcpConnection
 from ciao.providers.acp.normalize import TurnText, UpdateNormalizer, canonical, result_event
 from ciao.providers.acp.permissions import PermissionBroker, mode_choices, pick_value
 from ciao.providers.acp.spec import AgentSpec
+from ciao.redact import redact_text
 
 logger = logging.getLogger(__name__)
 
@@ -442,7 +443,7 @@ class AcpSession:
             await self._connection.conn.set_config_option(config_id, self.session_id, value)
         except RequestError as exc:
             # The adapter's error text can carry paths and settings; it stays in the log.
-            logger.warning("%s could not set %s: %s", self.spec.id, config_id, exc)
+            logger.warning("%s could not set %s: %s", self.spec.id, config_id, redact_text(str(exc)))
             return [SystemStatusEvent(
                 type="system",
                 status=f"{self.spec.id} could not set {config_id}.",
@@ -561,7 +562,7 @@ class AcpSession:
         logger.warning(
             "%s stopped unexpectedly; stderr tail:\n%s",
             self.spec.id,
-            self._connection.stderr_tail(5),
+            redact_text(self._connection.stderr_tail(5)),
         )
         return ResultEvent(
             type="result",

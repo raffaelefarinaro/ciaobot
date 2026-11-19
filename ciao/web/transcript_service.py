@@ -631,17 +631,7 @@ def _render_opencode_thread(
                 "turn_index": user_idx,
             }
             if metadata:
-                refs = chat.user_turn_images.get(str(user_idx))
-                if refs:
-                    entry["images"] = list(refs)
-                timing = chat.user_turn_timings.get(str(user_idx)) or {}
-                if timing.get("sent_at"):
-                    entry["sent_at"] = timing["sent_at"]
-                if chat.user_turn_unattended.get(str(user_idx)):
-                    entry["unattended"] = True
-                origin = chat.user_turn_origin.get(str(user_idx))
-                if origin:
-                    entry["origin"] = origin
+                _stamp_turn_metadata(entry, chat, user_idx)
             result.append(entry)
             user_idx += 1
             continue
@@ -707,6 +697,183 @@ def _render_opencode_thread(
             result, getattr(chat, "turn_verification", None) or {}
         )
     return result
+
+
+def _stamp_turn_metadata(entry: dict, chat: Any, user_idx: int) -> None:
+    """Overlay one user turn's send-time facts (images, send time, unattended, origin)."""
+    refs = chat.user_turn_images.get(str(user_idx))
+    if refs:
+        entry["images"] = list(refs)
+    timing = chat.user_turn_timings.get(str(user_idx)) or {}
+    if timing.get("sent_at"):
+        entry["sent_at"] = timing["sent_at"]
+    if chat.user_turn_unattended.get(str(user_idx)):
+        entry["unattended"] = True
+    origin = chat.user_turn_origin.get(str(user_idx))
+    if origin:
+        entry["origin"] = origin
+
+
+def _render_acp_journal(
+    records: list[dict],
+    chat: Any,
+    *,
+    start_user_idx: int,
+    workspace_root: Path | None,
+    agent_root: Path | None,
+) -> list[dict]:
+    """Render one ACP session's journal rows into the provider-neutral PWA row shape.
+
+    ``records`` is the ``acp_journal`` a provider's ``read_thread`` returns: user prompts and
+    the ``event_to_json`` payloads of each turn, in the order they happened. The rows
+    follow the same shape as :func:`_render_opencode_thread`. Consecutive text deltas
+    join into one assistant row; a tool call, a thinking block or a prompt ends that
+    row. Subagent text (a payload with ``parent_tool_use_id``) stays out of the
+    parent's reply. A ``result`` row carries no text of its own (the text was already
+    streamed), so it only ends a run.
+    """
+    result: list[dict] = []
+    user_idx = int(start_user_idx)
+    text_run: list[str] = []
+    pending_tools: list[str] = []
+
+    def flush_text() -> None:
+        if text_run:
+            text = "".join(text_run).strip()
+            text_run.clear()
+            if text:
+                result.append({"role": "assistant", "content": text})
+
+    def flush_tools() -> None:
+        if pending_tools:
+            result.append({
+                "role": "system",
+                "content": "\n".join(pending_tools),
+                "tool_name": "_activity",
+            })
+            pending_tools.clear()
+
+    for record in records:
+        kind = record.get("type")
+        if kind == "user":
+            flush_text()
+            flush_tools()
+            content = _strip_injected_context(str(record.get("text") or "")).strip()
+            if not content:
+                continue
+            entry: dict = {"role": "user", "content": content, "turn_index": user_idx}
+            _stamp_turn_metadata(entry, chat, user_idx)
+            result.append(entry)
+            user_idx += 1
+        elif kind == "text_delta":
+            if record.get("parent_tool_use_id"):
+                continue
+            flush_tools()
+            text_run.append(str(record.get("text") or ""))
+        elif kind == "thinking":
+            if record.get("parent_tool_use_id"):
+                continue
+            flush_text()
+            flush_tools()
+            text = str(record.get("text") or "").strip()
+            if text:
+                result.append({"role": "system", "content": text, "tool_name": "_thinking"})
+        elif kind == "tool_use":
+            tool = str(record.get("tool_name") or "tool")
+            raw_touches = record.get("file_touches") or (
+                [record["file_touch"]] if record.get("file_touch") else []
+            )
+            touches = normalize_file_touch_paths(
+                [t for t in raw_touches if isinstance(t, dict) and t.get("file_path")],
+                workspace_root,
+                agent_root=agent_root,
+            )
+            if touches:
+                flush_text()
+                flush_tools()
+                for touch in touches:
+                    result.append({
+                        "role": "system",
+                        "tool_name": "_filecard",
+                        "content": touch["file_path"],
+                        "file_path": touch["file_path"],
+                        "action": touch.get("action") or "touched",
+                        "tool": tool,
+                    })
+                continue
+            flush_text()
+            line = f"{_tool_icon(tool)} {tool}"
+            summary = str(record.get("tool_input") or "")
+            if summary:
+                line += f" {summary}"
+            pending_tools.append(line)
+        # Any other kind (tool_result, result, status, permission_request, ...) adds no
+        # row: a call is one activity line, and the terminal result's text was streamed.
+    flush_text()
+    flush_tools()
+    return result
+
+
+def _session_lineage(chat: Any) -> list[str]:
+    """Every session id a chat has used, oldest first, without blanks or repeats.
+
+    Each provider keeps its turns only in the session that wrote them, and ciaobot rotates
+    through ``_rotate_session_id`` (autocompact, resume fallback, continuation), so history
+    is stitched across the whole lineage.
+    """
+    session_ids: list[str] = []
+    seen: set[str] = set()
+    for sid in (*getattr(chat, "previous_session_ids", []), chat.session_id):
+        sid_str = str(sid or "").strip()
+        if not sid_str or sid_str in seen:
+            continue
+        seen.add(sid_str)
+        session_ids.append(sid_str)
+    return session_ids
+
+
+def _append_unrendered_error(rendered: list[dict], current: list[dict]) -> None:
+    """Keep the chat's persisted error turn when the provider's history does not show it."""
+    if not current or current[-1].get("role") != "assistant" or not current[-1].get("is_error"):
+        return
+    for row in reversed(rendered):
+        if row.get("role") == "assistant":
+            if row.get("is_error") or row.get("content") == current[-1].get("content"):
+                return
+            break
+    rendered.append(dict(current[-1]))
+
+
+async def _acp_history_rows(
+    pcm: Any, config: Any, provider: str, chat: Any, session_root: Path
+) -> list[dict]:
+    """Rendered history for every session in a chat's lineage, from each session's journal."""
+    provider_cls = provider_registry.require(provider).factory()
+    rendered: list[dict] = []
+    start_user_idx = chat.turn_index_base
+    for sid in _session_lineage(chat):
+        try:
+            thread = await provider_cls.read_thread(
+                session_root, sid, runtime_root=config.state_path.parent
+            )
+            records = thread.get("acp_journal") if isinstance(thread, dict) else None
+            if not isinstance(records, list) or not records:
+                continue
+            segment = _render_acp_journal(
+                records,
+                chat,
+                start_user_idx=start_user_idx,
+                workspace_root=Path(config.workspace_root),
+                agent_root=session_root,
+            )
+        except Exception:  # noqa: BLE001 — one unreadable journal must not blank its siblings
+            logger.warning("Could not render an ACP session journal; its turns are left out.")
+            continue
+        if segment:
+            # Advance the turn offset by this segment's user rows, as the opencode branch does.
+            rendered.extend(segment)
+            start_user_idx += sum(1 for row in segment if row.get("role") == "user")
+    return rendered
 
 
 def _stamp_user_turn(
@@ -1253,6 +1420,20 @@ async def _assemble_chat_messages(
     session_root = Path(
         _resolver(chat_id) if _resolver is not None else config.workspace_root
     )
+    descriptor = provider_registry.get(provider)
+    if descriptor is not None and descriptor.acp_spec_path:
+        # An ACP agent's history is its session journal (the provider read_thread). With no
+        # journal, the neutral branch below serves the local transcript instead.
+        acp_rows = await _acp_history_rows(pcm, config, provider, chat, session_root)
+        if acp_rows:
+            current = pcm._transcripts.current_messages(ChatContext.for_web(chat_id), provider)
+            _append_unrendered_error(acp_rows, current)
+            _overlay_transcript_metadata(acp_rows, current)
+            _overlay_assistant_timings(acp_rows, chat.user_turn_timings)
+            _overlay_turn_verification(
+                acp_rows, getattr(chat, "turn_verification", None) or {}
+            )
+            return [*handover_messages, *acp_rows]
     if provider not in {"claude", "opencode"}:
         current = pcm._transcripts.current_messages(
             ChatContext.for_web(chat_id), provider
@@ -1280,14 +1461,7 @@ async def _assemble_chat_messages(
         # ``_rotate_session_id`` (autocompact / resume-fallback / continuation).
         # Reading only ``chat.session_id`` blanked every chat that had rotated
         # — exactly the bug that hid the first turn of chat-a495fc8f.
-        session_ids: list[str] = []
-        seen: set[str] = set()
-        for sid in (*getattr(chat, "previous_session_ids", []), chat.session_id):
-            sid_str = str(sid or "").strip()
-            if not sid_str or sid_str in seen:
-                continue
-            seen.add(sid_str)
-            session_ids.append(sid_str)
+        session_ids = _session_lineage(chat)
         rendered: list[dict] = []
         start_user_idx = chat.turn_index_base
         provider_cls = provider_registry.require(provider).factory()
@@ -1318,16 +1492,7 @@ async def _assemble_chat_messages(
             ChatContext.for_web(chat_id), provider
         )
         if rendered:
-            if current and current[-1].get("role") == "assistant" and current[-1].get("is_error"):
-                has_error_in_rendered = False
-                for row in reversed(rendered):
-                    if row.get("role") == "assistant":
-                        if row.get("is_error") or row.get("content") == current[-1].get("content"):
-                            has_error_in_rendered = True
-                        break
-                if not has_error_in_rendered:
-                    err_msg = dict(current[-1])
-                    rendered.append(err_msg)
+            _append_unrendered_error(rendered, current)
             _overlay_transcript_metadata(
                 rendered,
                 current,

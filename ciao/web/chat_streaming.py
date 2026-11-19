@@ -2134,10 +2134,10 @@ class ChatStreaming:
             return
         await self._host._drain_between_turns(chat_id, project_id)
 
-    def _record_opencode_wake_turn(self, chat_id: str, event: ResultEvent) -> None:
-        """File the execution OpenCode ran after background work finished.
+    def _record_wake_turn(self, chat_id: str, event: ResultEvent) -> None:
+        """File a turn the provider ran on its own after background work finished.
 
-        OpenCode's own session store holds the wake, but the durable transcript
+        The provider's own session store holds the wake, but the durable transcript
         is the fallback copy a reload reads when that store is unreadable. The
         notice is the turn's prompt; ``origin`` keeps it a system row. A wake
         whose wake item was missed has no notice and records nothing, by design.
@@ -2145,7 +2145,6 @@ class ChatStreaming:
         chat = self._host._chats.get(chat_id)
         if (
             chat is None
-            or chat.provider != "opencode"
             or event.origin != "task-notification"
             or not event.wake_notice
             or not (event.result or "").strip()
@@ -2273,7 +2272,7 @@ class ChatStreaming:
                     )
                     drain_segment = FinalAnswerTracker()
                     is_error = bool(event.is_error)
-                    self._record_opencode_wake_turn(chat_id, event)
+                    self._record_wake_turn(chat_id, event)
                     settled = not self._host._background_work_outstanding(chat_id)
                     chat_now = self._host._chats.get(chat_id)
                     last_error = (

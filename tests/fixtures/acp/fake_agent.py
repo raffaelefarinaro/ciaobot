@@ -24,6 +24,7 @@ Scenario JSON (every key optional):
 - ``load_error`` / ``resume_error``: fail ``session/load`` or ``session/resume``
   with that message.
 - ``new_error``: fail ``session/new`` with that message.
+- ``new_hang``: never answer ``session/new`` (the request blocks until the client goes away).
 - ``config_error``: fail ``session/set_config_option`` with that message.
 - ``stderr``: lines written to stderr at startup.
 - ``initialize_delay_ms``: sleep before answering ``initialize``.
@@ -141,6 +142,8 @@ class FakeAgent:
         })
         if self.scenario.get("new_error"):
             raise acp.RequestError(-32002, str(self.scenario["new_error"]))
+        if self.scenario.get("new_hang"):
+            await asyncio.Event().wait()
         return NewSessionResponse.model_validate({
             "sessionId": self._next_session_id(),
             "configOptions": self.scenario.get("config_options", []),

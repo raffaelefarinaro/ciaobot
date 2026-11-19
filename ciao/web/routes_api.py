@@ -6181,6 +6181,12 @@ async def schedule_detail(request: Request) -> JSONResponse:
 
 # ── Models ───────────────────────────────────────────────────────────────
 
+async def _acp_catalog(
+    descriptor: provider_registry.ProviderDescriptor, workspace_root: Path, refresh: bool
+) -> list[dict[str, Any]]:
+    return await descriptor.factory().model_catalog(workspace_root, force=refresh)
+
+
 async def list_models(request: Request) -> JSONResponse:
     config = request.app.state.config
     from ciao.providers.catalog_evidence import claude_catalog_evidence, invalidate_claude_catalog
@@ -6228,20 +6234,58 @@ async def list_models(request: Request) -> JSONResponse:
         for item in opencode_catalog
         if item.get("model")
     }
-    model_reasoning_levels = opencode_reasoning_levels
     # Claude Code serves one upstream, so its models are a single list rather
     # than the work/personal split the routing-backend era needed.
     claude_models = list(CLAUDE_MODELS)
     claude_default = config.default_model_for_provider("claude") or config.claude_default_model
+    # Every descriptor that runs over ACP reports its own catalog. A probe that raises
+    # leaves that provider with an empty catalog; the exception is logged by type only.
+    acp_descriptors = [item for item in provider_registry.descriptors() if item.acp_spec_path]
+    acp_results = await asyncio.gather(
+        *(_acp_catalog(item, workspace_root, refresh) for item in acp_descriptors),
+        return_exceptions=True,
+    )
+    acp_models: dict[str, list[str]] = {}
+    acp_defaults: dict[str, str] = {}
+    acp_evidence: dict[str, dict[str, Any]] = {}
+    acp_levels: dict[str, list[str]] = {}
+    for item, result in zip(acp_descriptors, acp_results, strict=True):
+        if isinstance(result, BaseException):
+            logger.warning("%s model catalog failed (%s).", item.id, type(result).__name__)
+        rows = result if isinstance(result, list) else []
+        models = [str(row["model"]) for row in rows if row.get("model")]
+        operator_default = config.default_model_for_provider(item.id)
+        acp_models[item.id] = models
+        acp_defaults[item.id] = (
+            operator_default if operator_default in models else (models[0] if models else "")
+        )
+        acp_evidence[item.id] = {
+            "status": "observed" if models else "unknown",
+            "source": "acp_config_options" if models else None,
+            "models": [
+                {"id": str(row["model"]), "label": str(row.get("label") or row["model"])}
+                for row in rows if row.get("model")
+            ],
+            "reason": None if models else "no_models_reported",
+        }
+        # Reasoning levels are keyed by bare model id, as the PWA reads them. A model
+        # id that opencode also reports keeps opencode's levels (see below).
+        for row in rows:
+            if row.get("model"):
+                acp_levels.setdefault(str(row["model"]), list(row.get("variants") or []))
 
     return JSONResponse({
         "models": list(CLAUDE_MODELS),
         "default": claude_default,
+        # ACP entries come first so an ACP descriptor id that matches a legacy provider
+        # can never replace that provider's entry.
         "provider_models": {
+            **acp_models,
             "claude": claude_models,
             "opencode": opencode_models,
         },
         "provider_defaults": {
+            **acp_defaults,
             "claude": claude_default,
             "opencode": opencode_default,
         },
@@ -6261,9 +6305,10 @@ async def list_models(request: Request) -> JSONResponse:
             }
             for item in provider_registry.descriptors()
         ],
-        "model_reasoning_levels": model_reasoning_levels,
+        "model_reasoning_levels": {**acp_levels, **opencode_reasoning_levels},
         "thinking_levels": {k: list(v) for k, v in THINKING_LEVELS.items()},
         "provider_catalog_evidence": {
+            **acp_evidence,
             "claude": {
                 "status": claude_evidence.status,
                 "source": claude_evidence.source,

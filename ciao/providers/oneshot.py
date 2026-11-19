@@ -1,7 +1,8 @@
 """One-shot model calls, dispatched to a runtime provider.
 
-``provider`` selects the runner: ``claude`` (Claude Agent SDK) or
-``opencode``.
+``provider`` selects the runner: a provider whose descriptor names an ACP
+``AgentSpec`` (see :mod:`ciao.providers.acp.oneshot`), otherwise ``claude``
+(Claude Agent SDK) or ``opencode``.
 
 Calls are intentionally bare: custom system prompt, no filesystem
 settings/skills, no tools, no MCP discovery. Titles, insights,
@@ -25,6 +26,7 @@ from claude_agent_sdk import (
     query,
 )
 
+from ciao import provider_registry
 from ciao.tool_path import prepend_engine_path
 
 logger = logging.getLogger(__name__)
@@ -291,6 +293,7 @@ async def run_oneshot(
     (#1012). It is an observation point and nothing else: it sets no option, no
     existing caller passes it, and it is not called on the opencode path, whose
     deny-all is derived at session-create time rather than in an options object.
+    It is ignored for an ACP agent too: that agent has no options object here.
 
     On a transient failure (an empty-body / ``is_error`` result) the call is
     retried up to ``max_retries``
@@ -306,7 +309,28 @@ async def run_oneshot(
     if model.endswith("[1m]"):
         model = model[: -len("[1m]")]
 
-    if provider == "opencode":
+    descriptor = provider_registry.get(provider)
+    acp_spec = descriptor.acp_spec() if descriptor is not None else None
+    if acp_spec is not None and descriptor is not None:
+        # An ACP agent runs its own one-shot session. ``options_hook`` is a Claude SDK
+        # hook and is ignored here; the agent's no-tools contract is its ``oneshot_meta``.
+        provider_cls: Any = descriptor.factory()
+        session_meta = provider_cls.oneshot_meta()
+
+        async def _attempt() -> str:
+            from ciao.providers.acp.oneshot import run_acp_oneshot
+
+            acp_env = dict(env or {})
+            acp_env["PATH"] = prepend_engine_path(acp_env.get("PATH"))
+            return await run_acp_oneshot(
+                acp_spec,
+                prompt,
+                system_prompt=system_prompt,
+                model=model,
+                env=acp_env,
+                session_meta=session_meta,
+            )
+    elif provider == "opencode":
         async def _attempt() -> str:
             one_shot_env = dict(env or {})
             # The engine's own bin dir leads PATH so a ``ciao`` the one-shot's
