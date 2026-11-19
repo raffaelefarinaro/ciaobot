@@ -14,12 +14,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 
+from ciao import claude_sessions
 from ciao.models import AgentRequest, ChatContext
 from ciao.providers import claude as claude_adapter
 from ciao.providers import opencode as opencode_adapter
@@ -174,10 +176,11 @@ def test_reclaim_targets_the_chats_agent_root(
 
     seen: list[tuple[str, str]] = []
 
-    def recording_sdk_delete(session_id: str, directory: str) -> None:
-        seen.append((session_id, directory))
+    def recording_delete(session_id: str, directory: str | None) -> bool:
+        seen.append((session_id, directory or ""))
+        return False
 
-    monkeypatch.setattr(claude_adapter, "sdk_delete_session", recording_sdk_delete)
+    monkeypatch.setattr(claude_sessions, "delete_session_file", recording_delete)
 
     with caplog.at_level(logging.WARNING, logger=_RECLAIM_LOGGER):
         asyncio.run(pcm._reclaim_provider_sessions_async(chat, [session]))
@@ -208,18 +211,21 @@ def test_delete_reclaims_against_the_chats_root_not_the_primary(
     expected = pcm._agent_root_for_chat(chat.chat_id)
 
     seen: list[tuple[str, str]] = []
-    cleanup_done = asyncio.Event()
+    # The cleanup runs the file delete in a worker thread, so the signal is a
+    # threading.Event, awaited off the loop.
+    cleanup_done = threading.Event()
 
-    def recording_sdk_delete(session_id: str, directory: str) -> None:
-        seen.append((session_id, directory))
+    def recording_delete(session_id: str, directory: str | None) -> bool:
+        seen.append((session_id, directory or ""))
         cleanup_done.set()
+        return False
 
-    monkeypatch.setattr(claude_adapter, "sdk_delete_session", recording_sdk_delete)
+    monkeypatch.setattr(claude_sessions, "delete_session_file", recording_delete)
 
     async def run() -> None:
         assert pcm.delete_chat(chat.chat_id) is True
-        # The fire-and-forget cleanup ends at the SDK delete call.
-        await asyncio.wait_for(cleanup_done.wait(), 5)
+        # The fire-and-forget cleanup ends at the file delete call.
+        assert await asyncio.wait_for(asyncio.to_thread(cleanup_done.wait, 5), 10)
 
     asyncio.run(run())
     assert seen == [(session, str(expected))]
@@ -477,29 +483,32 @@ def test_claude_reclaim_never_draws_the_host_cleanup_warning(
     pcm = _rerooted_manager(tmp_path, "work")
     chat = _archived_chat(pcm, "work", "sid-claude")
 
-    for outcome in (None, FileNotFoundError("missing"), ValueError("bad id"), OSError("io")):
+    # Absent session (False), a removed one (True) and an I/O failure. The seam
+    # reports absence as False and
+    # never raises FileNotFoundError/ValueError, so those are not modelled.
+    for outcome in (False, True, OSError("io")):
         calls: list[str] = []
 
-        def outcome_sdk_delete(
+        def outcome_delete(
             session_id: str,
-            directory: str,
-            _outcome: Exception | None = outcome,
+            directory: str | None,
+            _outcome: bool | Exception = outcome,
             _calls: list = calls,
-        ) -> None:
+        ) -> bool:
             _calls.append(session_id)
-            if _outcome is not None:
+            if isinstance(_outcome, Exception):
                 raise _outcome
+            return _outcome
 
-        monkeypatch.setattr(claude_adapter, "sdk_delete_session", outcome_sdk_delete)
+        monkeypatch.setattr(claude_sessions, "delete_session_file", outcome_delete)
         caplog.clear()
-        with caplog.at_level(logging.WARNING, logger=_RECLAIM_LOGGER):
+        with caplog.at_level(logging.WARNING):
             asyncio.run(pcm._reclaim_provider_sessions_async(chat, ["sid-claude"]))
-        # The adapter saw the exact id once and the host never warned. (The
-        # adapter may keep its own established I/O error log — that is not a
-        # confirmation signal.)
+        # The seam saw the exact id once and the host never warned. The adapter
+        # may keep its own established I/O error log for the OSError arm; that
+        # is not a confirmation signal, so only the host logger is checked.
         assert calls == ["sid-claude"]
         assert [record for record in caplog.records if record.name == _RECLAIM_LOGGER] == []
-        assert [record for record in caplog.records if record.levelno == logging.WARNING] == []
 
 
 def test_claude_delete_session_propagates_cancellation(
