@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import os
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from pathlib import Path
@@ -33,6 +34,8 @@ from ciao.providers.acp.normalize import TurnText, UpdateNormalizer, canonical, 
 from ciao.providers.acp.permissions import PermissionBroker, mode_choices, pick_value
 from ciao.providers.acp.spec import AgentSpec
 
+logger = logging.getLogger(__name__)
+
 _LATE_QUIET = frozenset({"usage_update", "config_option_update", "current_mode_update"})
 _LATE_WAKE = "The agent continued after background work finished."
 
@@ -45,7 +48,7 @@ _CONTENT_BLOCK: TypeAdapter[Any] = TypeAdapter(
 )
 
 
-def _journal_file(runtime_dir: Path, agent_id: str, session_id: str) -> Path:
+def journal_file(runtime_dir: Path, agent_id: str, session_id: str) -> Path:
     digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32]
     return runtime_dir / "acp-journal" / agent_id / f"{digest}.jsonl"
 
@@ -66,7 +69,7 @@ def _prepare_journal_file(path: Path) -> None:
 
 def journal_path(runtime_dir: Path, agent_id: str, session_id: str) -> Path:
     """``<runtime_dir>/acp-journal/<agent_id>/<sha256(session_id)[:32]>.jsonl`` (0600 file, 0700 dirs)."""
-    path = _journal_file(runtime_dir, agent_id, session_id)
+    path = journal_file(runtime_dir, agent_id, session_id)
     _prepare_journal_file(path)
     return path
 
@@ -200,20 +203,25 @@ class AcpSession:
             spec,
             session_id=resume or "",
             config_options=[],
-            journal=SessionJournal(_journal_file(journal_dir, spec.id, provisional)),
+            journal=SessionJournal(journal_file(journal_dir, spec.id, provisional)),
             broker=broker,
             session_meta=meta,
         )
         # The client forwards updates here while load replays, before ``open`` returns.
+        # Cleared on every exit: after open, routing belongs to the provider's client slot,
+        # and a closed session must never keep receiving updates through this fallback.
         setattr(connection, "_pending_session", session)
-        session_id, replaced, options, replay = await session._establish(
-            cwd, resume, additional_dirs, meta
-        )
+        try:
+            session_id, replaced, options, replay = await session._establish(
+                cwd, resume, additional_dirs, meta
+            )
+        finally:
+            setattr(connection, "_pending_session", None)
         session.session_id = session_id
         session._normalizer.session_id = session_id
         session.config_options = options
         session._seed_values()
-        path = _journal_file(journal_dir, spec.id, session_id)
+        path = journal_file(journal_dir, spec.id, session_id)
         existed = path.exists()
         session._journal = SessionJournal(path)
         if replay and not existed:
@@ -424,9 +432,11 @@ class AcpSession:
         try:
             await self._connection.conn.set_config_option(config_id, self.session_id, value)
         except RequestError as exc:
+            # The adapter's error text can carry paths and settings; it stays in the log.
+            logger.warning("%s could not set %s: %s", self.spec.id, config_id, exc)
             return [SystemStatusEvent(
                 type="system",
-                status=f"{self.spec.id} could not set {config_id}: {exc}",
+                status=f"{self.spec.id} could not set {config_id}.",
             )]
         self._normalizer.current_values[config_id] = value
         return []
@@ -538,10 +548,16 @@ class AcpSession:
         return dict(fresh.usage)
 
     def _unexpected_stop(self) -> ResultEvent:
+        # Raw adapter stderr is logged for diagnosis and never placed in the event.
+        logger.warning(
+            "%s stopped unexpectedly; stderr tail:\n%s",
+            self.spec.id,
+            self._connection.stderr_tail(5),
+        )
         return ResultEvent(
             type="result",
             is_error=True,
-            result=f"{self.spec.id} stopped unexpectedly. {self._connection.stderr_tail(5)}",
+            result=f"{self.spec.id} stopped unexpectedly.",
             session_id=self.session_id,
         )
 

@@ -282,25 +282,30 @@ class BaseProvider(ABC):
 
     @classmethod
     async def native_title_candidates(
-        cls, workspace_root: Path, session_id: str
+        cls, workspace_root: Path, session_id: str, *, runtime_root: Path
     ) -> tuple[str, ...]:
         """Read candidate titles in provider-preference order; empty means unavailable.
 
         A stateless read of the provider's persisted session, usable when no
         live provider instance exists. Adapters only translate their native
         storage into ordered candidate strings; the host validates them.
+        ``runtime_root`` is the chat's runtime directory (``config.state_path.parent``).
         """
         return ()
 
     @classmethod
     async def delete_session(
-        cls, workspace_root: Path, session_id: str
+        cls, workspace_root: Path, session_id: str, *, runtime_root: Path
     ) -> bool | None:
         """Reclaim a persisted session; False requests a cleanup warning.
 
         True is affirmative confirmation. None supplies no confirmation signal:
         an unsupported adapter or a best-effort cleanup with adapter-owned
         diagnostics. It is not a claim that anything was deleted.
+
+        ``runtime_root`` is the same runtime directory the live provider writes
+        its own state under (``config.state_path.parent``). It is required with
+        no default, so a caller cannot silently address the workspace instead.
         """
         return None
 
@@ -380,8 +385,13 @@ class BaseProvider(ABC):
         return False
 
     @classmethod
-    async def read_thread(cls, workspace_root: Path, session_id: str) -> dict[str, Any]:
-        """Session metadata plus message history for transcript replay; ``{}`` when none."""
+    async def read_thread(
+        cls, workspace_root: Path, session_id: str, *, runtime_root: Path
+    ) -> dict[str, Any]:
+        """Session metadata plus message history for transcript replay; ``{}`` when none.
+
+        ``runtime_root`` is ``config.state_path.parent``; see :meth:`delete_session`.
+        """
         return {}
 
     async def abort_session(self, session_id: str) -> None:

@@ -187,6 +187,37 @@ Declare `capabilities = ProviderCapabilities(...)` honestly.
 gates on these flags. The Vue app does not read them yet, so a flag alone
 does not hide a button or skip a backend branch.
 
+## Adding an ACP agent
+
+An agent that speaks the Agent Client Protocol needs no hand-written turn loop.
+Write two things:
+
+1. An `AgentSpec` (`ciao/providers/acp/spec.py`): the binary and argv, fixed
+   environment, `clientCapabilities._meta` opt-ins, the config option each
+   Ciaobot mode maps to, the quiet period and the initialize timeout. The spec
+   is data; no code outside it names the agent.
+2. A subclass of `ciao.providers.acp.provider.AcpProvider` that sets `spec`.
+   Override `session_meta(request)` and `oneshot_meta()` only when the agent
+   needs `_meta` on `session/new`, `session/load` and `session/resume`; both
+   default to `{}`.
+
+Then add a descriptor to `ciao/provider_registry.py` with
+`factory_path="ciao.providers.acp.provider:<Subclass>"` and
+`acp_spec_path="<module>:<attr>"` naming the `AgentSpec`. `acp_spec()` resolves
+the spec lazily, the same way `factory()` resolves the class. The subclass and
+the spec are the only ACP-specific code: hosts under `ciao/web` reach the agent
+through `BaseProvider` and the registry, never through `AcpProvider` or
+`ciao.providers.acp` (`tests/test_provider_host_seam.py` fails if one appears).
+
+`ProviderCapabilities` is declared on the subclass like any other adapter. A
+live `AgentRequest` flagged `unattended` is answered with a rejection and no
+permission card. `AgentStartError.stderr_tail` is raw adapter output: it is
+logged and never sent to the PWA, which receives a short sanitized reason.
+
+Tests for an ACP agent drive a scripted agent (`tests/fixtures/acp/fake_agent.py`)
+through `ProviderService`, the way `tests/test_acp_provider.py` does. Run one
+live turn against the real agent before shipping its descriptor.
+
 ## Call sites that still skip an unknown id
 
 These are the reason a descriptor is not enough. Each one names `claude`

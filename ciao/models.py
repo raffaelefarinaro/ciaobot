@@ -155,6 +155,8 @@ class AgentRequest:
     # no user prompt, context capsule, file references or images: Claude sends
     # the bare ``/compact`` command, and opencode calls its compact endpoint.
     compact: bool = False
+    # Automation-driven turn: the ACP layer rejects permission requests instead of raising a card.
+    unattended: bool = False
     # Resolved path of the project's linked git repository ("" = none). Both
     # providers load its skills; it is fixed when the provider process starts.
     linked_repo: str = ""

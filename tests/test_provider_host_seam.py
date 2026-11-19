@@ -34,6 +34,18 @@ def test_web_sources_name_no_concrete_provider_class_or_private_flag() -> None:
     assert offenders == []
 
 
+_ACP_FORBIDDEN = re.compile(r"\bAcpProvider\b|ciao\.providers\.acp\b")
+
+
+def test_web_sources_name_no_acp_provider_class() -> None:
+    """ACP agents reach the hosts through ``provider_registry`` and ``BaseProvider`` only (#3137)."""
+    offenders = [
+        path.relative_to(_WEB_ROOT).as_posix()
+        for path in sorted(_WEB_ROOT.rglob("*.py"))
+        if _ACP_FORBIDDEN.search(path.read_text(encoding="utf-8"))
+    ]
+    assert offenders == []
+
 @pytest.mark.parametrize("name", _HOST_SEAMS)
 def test_base_provider_defines_every_host_seam(name: str) -> None:
     assert hasattr(BaseProvider, name)

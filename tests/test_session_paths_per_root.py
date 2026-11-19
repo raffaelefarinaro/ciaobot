@@ -390,7 +390,7 @@ def test_base_delete_session_default_supplies_no_signal(tmp_path: Path) -> None:
 
     root = tmp_path / "agent-root"
     assert counts == {"constructor": 0, "stream": 0}
-    result = asyncio.run(_MinimalAdapter.delete_session(root, "sid-1"))
+    result = asyncio.run(_MinimalAdapter.delete_session(root, "sid-1", runtime_root=Path("/runtime")))
     assert result is None
     # Both forbidden entry points stayed uninvoked through the await.
     assert counts == {"constructor": 0, "stream": 0}
@@ -416,12 +416,12 @@ def test_claude_delete_session_owns_the_sdk_seam(
     monkeypatch.setattr(claude_adapter, "sdk_delete_session", recording_sdk_delete)
     root = tmp_path / "agent-root"
 
-    assert asyncio.run(ClaudeProvider.delete_session(root, "sid-1")) is None
+    assert asyncio.run(ClaudeProvider.delete_session(root, "sid-1", runtime_root=Path("/runtime"))) is None
     assert sdk_calls == [("sid-1", str(root))]
 
     # An empty id returns without SDK access.
     sdk_calls.clear()
-    assert asyncio.run(ClaudeProvider.delete_session(root, "")) is None
+    assert asyncio.run(ClaudeProvider.delete_session(root, "", runtime_root=Path("/runtime"))) is None
     assert sdk_calls == []
 
     # SDK-rejected ids and missing sessions are suppressed quietly: the
@@ -440,7 +440,7 @@ def test_claude_delete_session_owns_the_sdk_seam(
 
         monkeypatch.setattr(claude_adapter, "sdk_delete_session", failing_sdk_delete)
         with caplog.at_level(logging.INFO, logger="ciao.providers.claude"):
-            assert asyncio.run(ClaudeProvider.delete_session(root, "sid-2")) is None
+            assert asyncio.run(ClaudeProvider.delete_session(root, "sid-2", runtime_root=Path("/runtime"))) is None
         assert suppressed == [("sid-2", str(root))]
         assert caplog.records == []
 
@@ -455,7 +455,7 @@ def test_claude_delete_session_logs_io_failures_once(
     monkeypatch.setattr(claude_adapter, "sdk_delete_session", broken_sdk_delete)
     root = tmp_path / "agent-root"
     with caplog.at_level(logging.INFO, logger="ciao.providers.claude"):
-        assert asyncio.run(ClaudeProvider.delete_session(root, "sid-io")) is None
+        assert asyncio.run(ClaudeProvider.delete_session(root, "sid-io", runtime_root=Path("/runtime"))) is None
     failures = [
         record
         for record in caplog.records
@@ -511,7 +511,7 @@ def test_claude_delete_session_propagates_cancellation(
 
     monkeypatch.setattr(claude_adapter, "sdk_delete_session", cancelling_sdk_delete)
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(ClaudeProvider.delete_session(tmp_path, "sid-x"))
+        asyncio.run(ClaudeProvider.delete_session(tmp_path, "sid-x", runtime_root=Path("/runtime")))
 
 
 class _RecordingServer:
@@ -564,7 +564,7 @@ def test_opencode_delete_session_transport_contract(
                 return httpx.Response(status)
 
         transport = _install_transport(monkeypatch, _Client())
-        assert asyncio.run(OpencodeProvider.delete_session(root, "ses-x")) is expected
+        assert asyncio.run(OpencodeProvider.delete_session(root, "ses-x", runtime_root=Path("/runtime"))) is expected
         assert calls == ["/api/session/ses-x"]
         # The server was entered once and exited cleanly on every status,
         # confirmed or refused.
@@ -583,14 +583,14 @@ def test_opencode_delete_session_transport_failures(
             raise httpx.ConnectError("server vanished")
 
     transport = _install_transport(monkeypatch, _HttpFailClient())
-    assert asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x")) is False
+    assert asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x", runtime_root=Path("/runtime"))) is False
     assert len(transport["contexts"]) == 1
     # The transport method swallowed the HTTP error inside its own body, so
     # the context manager exited cleanly despite the failed DELETE.
     assert transport["contexts"][0]["exit_error"] is None
 
     transport = _install_transport(monkeypatch, None)
-    assert asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x")) is False
+    assert asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x", runtime_root=Path("/runtime"))) is False
     # The absent client yields no context observation beyond its own entry.
     assert len(transport["contexts"]) == 1
     assert transport["contexts"][0]["client"] is None
@@ -601,7 +601,7 @@ def test_opencode_delete_session_transport_failures(
             raise AssertionError("empty id must not DELETE")
 
     transport = _install_transport(monkeypatch, _AbsentDeleteClient())
-    assert asyncio.run(OpencodeProvider.delete_session(Path("/r"), "")) is False
+    assert asyncio.run(OpencodeProvider.delete_session(Path("/r"), "", runtime_root=Path("/runtime"))) is False
     # Entry happens before the empty-id check exactly as today, and the
     # suppressed-body shortcut still exits the context cleanly.
     assert len(transport["contexts"]) == 1
@@ -618,7 +618,7 @@ def test_opencode_delete_session_propagates_non_http_failures(
 
     transport = _install_transport(monkeypatch, _RuntimeFailClient())
     with pytest.raises(RuntimeError) as runtime_exc:
-        asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x"))
+        asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x", runtime_root=Path("/runtime")))
     # The exception the context manager saw on exit is the one that escaped.
     assert transport["contexts"][0]["exit_error"] is runtime_exc.value
 
@@ -628,7 +628,7 @@ def test_opencode_delete_session_propagates_non_http_failures(
 
     transport = _install_transport(monkeypatch, _CancellingClient())
     with pytest.raises(asyncio.CancelledError) as cancel_exc:
-        asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x"))
+        asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x", runtime_root=Path("/runtime")))
     assert transport["contexts"][0]["exit_error"] is cancel_exc.value
 
 
@@ -654,13 +654,15 @@ def test_third_registered_adapter_reclaims_through_the_registry(
     chat = _acme_chat(pcm, "current-old", ["old-a", "", "old-b", "old-a"])
 
     deletes: list[tuple[str, str]] = []
+    runtime_roots: list[Path] = []
 
     class _AcmeAdapter(_make_no_start_adapter("acme")):
         @classmethod
         async def delete_session(
-            cls, workspace_root: Path, session_id: str
+            cls, workspace_root: Path, session_id: str, *, runtime_root: Path
         ) -> bool | None:
             deletes.append((str(workspace_root), session_id))
+            runtime_roots.append(runtime_root)
             return True
 
     descriptor = _SyntheticDescriptor("acme", _AcmeAdapter)
@@ -677,6 +679,8 @@ def test_third_registered_adapter_reclaims_through_the_registry(
         (root, "old-b"),
         (root, "current-old"),
     ]
+    # The chat's runtime root is the config's state directory, never the workspace.
+    assert runtime_roots == [pcm._config.state_path.parent] * 3
     # The seam was actually reached once per reclaimed id: a skipped path
     # cannot satisfy the positive counts alongside the zero no-start counts.
     assert descriptor.factory_calls == ["acme", "acme", "acme"]
@@ -710,7 +714,7 @@ def test_reclaim_confirms_only_a_literal_false(
     class _ConfirmAdapter(_make_no_start_adapter("acme")):
         @classmethod
         async def delete_session(
-            cls, workspace_root: Path, session_id: str
+            cls, workspace_root: Path, session_id: str, *, runtime_root: Path
         ) -> bool | None:
             return confirmations.pop(0)
 
@@ -779,7 +783,7 @@ def test_reclaim_is_fail_open_but_cancellation_propagates(
     class _FlakyAdapter(_make_no_start_adapter("acme")):
         @classmethod
         async def delete_session(
-            cls, workspace_root: Path, session_id: str
+            cls, workspace_root: Path, session_id: str, *, runtime_root: Path
         ) -> bool | None:
             deletes.append(session_id)
             if session_id == "bad":
@@ -820,7 +824,7 @@ def test_reclaim_is_fail_open_but_cancellation_propagates(
     class _CancellingAdapter(_make_no_start_adapter("acme")):
         @classmethod
         async def delete_session(
-            cls, workspace_root: Path, session_id: str
+            cls, workspace_root: Path, session_id: str, *, runtime_root: Path
         ) -> bool | None:
             deletes.append(session_id)
             raise asyncio.CancelledError()
@@ -897,7 +901,7 @@ def test_reset_reclaims_captured_old_lineage_after_disconnect(
     release_disconnect = asyncio.Event()
     cleanup_done = asyncio.Event()
 
-    async def fake_delete(workspace_root, session_id):
+    async def fake_delete(workspace_root, session_id, *, runtime_root):
         deletes.append((str(workspace_root), session_id))
         events.append(f"delete:{session_id}")
         if session_id == "old-a":

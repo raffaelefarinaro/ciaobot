@@ -36,6 +36,7 @@ from ciao import __version__
 from ciao.host_terminal import _terminal_env
 from ciao.os_support.processes import descendant_processes, process_table, signal_processes
 from ciao.providers.acp.spec import AgentSpec
+from ciao.redact import redact_text
 from ciao.tool_path import prepend_engine_path, resolve_tool
 
 _SHUTDOWN_TIMEOUT = 5.0
@@ -387,7 +388,7 @@ async def _drain_stderr(stream: asyncio.StreamReader, ring: StderrRing, agent_id
             return
         line = raw.decode("utf-8", "replace").rstrip("\r\n")
         ring.feed(line)
-        log.debug("%s", line)
+        log.debug("%s", redact_text(line))
 
 
 def _signal_leader(process: asyncio.subprocess.Process, sig: int) -> None:

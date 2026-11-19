@@ -23,9 +23,12 @@ Scenario JSON (every key optional):
   ``after_prompt_delay_ms`` waits that long before sending them (default 50).
 - ``load_error`` / ``resume_error``: fail ``session/load`` or ``session/resume``
   with that message.
+- ``new_error``: fail ``session/new`` with that message.
+- ``config_error``: fail ``session/set_config_option`` with that message.
 - ``stderr``: lines written to stderr at startup.
 - ``initialize_delay_ms``: sleep before answering ``initialize``.
 - ``exit_during_initialize``: exit 1 when ``initialize`` arrives.
+- ``initialize_error``: answer ``initialize`` with a JSON-RPC error carrying that message.
 - ``spawn_tree``: at startup start a process tree and write ``{"pid", "child",
   "grandchild", "great"}`` to ``<scenario>.pids.json``: ``child`` is a plain
   ``sleep 60``; ``grandchild`` is a separate Python process that ignores SIGTERM
@@ -104,6 +107,8 @@ class FakeAgent:
         await asyncio.sleep(self.scenario.get("initialize_delay_ms", 0) / 1000)
         if self.scenario.get("exit_during_initialize"):
             os._exit(1)
+        if self.scenario.get("initialize_error"):
+            raise acp.RequestError(-32000, str(self.scenario["initialize_error"]))
         from acp.schema import InitializeResponse
         return InitializeResponse(
             protocol_version=1,
@@ -134,6 +139,8 @@ class FakeAgent:
             "additionalDirectories": additional_directories,
             "_meta": self._logged_meta(kwargs),
         })
+        if self.scenario.get("new_error"):
+            raise acp.RequestError(-32002, str(self.scenario["new_error"]))
         return NewSessionResponse.model_validate({
             "sessionId": self._next_session_id(),
             "configOptions": self.scenario.get("config_options", []),
@@ -174,6 +181,8 @@ class FakeAgent:
     async def set_config_option(self, config_id: str, session_id: str, value: Any, **kwargs: Any) -> Any:
         self.log("session/set_config_option",
                  {"sessionId": session_id, "configId": config_id, "value": value})
+        if self.scenario.get("config_error"):
+            raise acp.RequestError(-32602, str(self.scenario["config_error"]))
         from acp.schema import SetSessionConfigOptionResponse
         return SetSessionConfigOptionResponse.model_validate(
             {"configOptions": self.scenario.get("config_options", [])})

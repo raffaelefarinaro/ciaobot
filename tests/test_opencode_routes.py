@@ -119,9 +119,8 @@ def test_opencode_chat_messages_render_session_history(
             },
         ],
     }
-    monkeypatch.setattr(
-        OpencodeProvider, "read_thread", AsyncMock(return_value=thread)
-    )
+    read_thread = AsyncMock(return_value=thread)
+    monkeypatch.setattr(OpencodeProvider, "read_thread", read_thread)
 
     response = asyncio.run(chat_messages(_request(
         f"/api/chats/{chat.chat_id}/messages",
@@ -130,6 +129,8 @@ def test_opencode_chat_messages_render_session_history(
     )))
     rows = json.loads(response.body)
 
+    # The replay reads the session with the engine's runtime root, not the workspace's.
+    assert read_thread.await_args.kwargs["runtime_root"] == pcm._config.state_path.parent
     assert any(
         row.get("tool_name") == "_filecard"
         and row["file_path"] == "notes.md"
@@ -434,7 +435,7 @@ def test_opencode_chat_messages_read_each_lineage_session_through_the_registry(
 
     class StubProvider(BaseProvider):
         @classmethod
-        async def read_thread(cls, workspace_root, session_id):
+        async def read_thread(cls, workspace_root, session_id, **_kwargs):
             calls.append((workspace_root, session_id))
             return {
                 "info": {"id": session_id},
