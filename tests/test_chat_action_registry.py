@@ -25,6 +25,12 @@ UNSUPPORTED_KINDS = frozenset({"limit"})
 ENGINE_ONLY_KINDS: frozenset[str] = frozenset()
 
 
+#: Kinds the backend still carries but the PWA no longer knows: slice 3136-W2
+#: deleted the frontend `mcp_auth` card UI. Slice 3136-B2 deletes the backend
+#: kind; delete this constant and its uses there.
+BACKEND_ONLY_KINDS = frozenset({"mcp_auth"})
+
+
 def test_every_kind_with_a_validator_has_a_handler_and_vice_versa() -> None:
     kinds = set(ACTION_KINDS)
     assert UNSUPPORTED_KINDS <= kinds
@@ -43,14 +49,17 @@ def test_frontend_kind_union_and_list_match_the_backend_literal() -> None:
     types_path = REPO_ROOT / "web" / "src" / "lib" / "types.ts"
     lib_path = REPO_ROOT / "web" / "src" / "lib" / "chatActions.ts"
 
+    assert BACKEND_ONLY_KINDS <= set(ACTION_KINDS)
+    frontend_kinds = sorted(set(ACTION_KINDS) - BACKEND_ONLY_KINDS)
+
     types_text = types_path.read_text(encoding="utf-8")
     union = re.search(r"export type ChatActionKind =([^\n]+)", types_text)
     assert union is not None, f"ChatActionKind not found in {types_path}"
     union_kinds = re.findall(r"'([a-z_]+)'", union.group(1))
-    assert sorted(union_kinds) == sorted(ACTION_KINDS)
+    assert sorted(union_kinds) == frontend_kinds
 
     lib_text = lib_path.read_text(encoding="utf-8")
     listed = re.search(r"export const CHAT_ACTION_KINDS[^=]*=\s*\[([^\]]*)\]", lib_text)
     assert listed is not None, f"CHAT_ACTION_KINDS not found in {lib_path}"
     listed_kinds = re.findall(r"'([a-z_]+)'", listed.group(1))
-    assert sorted(listed_kinds) == sorted(ACTION_KINDS)
+    assert sorted(listed_kinds) == frontend_kinds
