@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 
 import pytest
 
 from ciao.main import _wait_for_chat_drain
 from ciao.web.chat_broker import ChatStream, ChatStreamBroker, EventsHub
 from ciao.web.project_chats import ProjectChatManager, RestartDrainingError
-from ciao.web.subagent_watchers import SubagentWatchers
 from tests.test_start_stream_enospc_repro import admission_case, consume, driver_probe
 
 
@@ -45,30 +43,15 @@ def _bare_manager() -> ProjectChatManager:
     manager._retry_generations = {}
     manager._restart_draining = False
     manager._events = EventsHub()
-    # The subagent watchers own the running counts and the live watcher
-    # tasks, so a hand-built manager has to carry the collaborator; the two
-    # assignments below write through to its state.
-    manager._subagents = SubagentWatchers(manager)
-    manager._background_agents_last = {}
-    manager._pending_subagent_watchers = {}
-    # The cancelled-drain replay also scans the chat registry for CLI tasks.
-    # Without it, the scan raises AttributeError and the replay's blanket
-    # ``except`` swallows it — the tests below would pass through a logged
-    # traceback while covering nothing.
-    manager._chats = {}
     return manager
 
 
-def test_active_chat_ids_include_unpolled_subagent_watchers() -> None:
+def test_active_chat_ids_are_the_streaming_chats() -> None:
     manager = _bare_manager()
-    manager._broker.register("streaming", ChatStream())
-    manager._background_agents_last = {"agents": 2}
-    manager._pending_subagent_watchers = {
-        "watcher": SimpleNamespace(done=lambda: False),
-        "settled": SimpleNamespace(done=lambda: True),
-    }
+    manager._broker.register("b-streaming", ChatStream())
+    manager._broker.register("a-streaming", ChatStream())
 
-    assert manager.active_chat_ids() == ["agents", "streaming", "watcher"]
+    assert manager.active_chat_ids() == ["a-streaming", "b-streaming"]
 
 
 def test_begin_restart_drain_publishes_server_restarting() -> None:

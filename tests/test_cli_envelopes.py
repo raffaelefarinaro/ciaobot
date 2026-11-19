@@ -1,23 +1,20 @@
-"""The CLI-envelope vocabulary is defined once and both readers agree.
+"""The CLI-envelope vocabulary is defined once and the renderer uses it.
 
-``ciao/subagent_tracking.py`` (turn counter) and
-``ciao/web/transcript_service.py`` (transcript renderer) have to skip exactly
-the same synthetic user records, or the ``turn_index`` each stamps drifts
-apart. They used to hold near-copies of six constants kept in sync by a
-comment, and two of them had already diverged (issue #500). These tests pin
-the unified semantics and the one call site whose behaviour that changed.
+The transcript renderer has to skip the synthetic user records the CLI
+writes. Its constants used to be near-copies kept in sync by a comment, and
+two of them had already diverged (issue #500). These tests pin the unified
+semantics and the one call site whose behaviour that changed.
 """
 
 from __future__ import annotations
 
 import ast
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from ciao import cli_envelopes, subagent_tracking
+from ciao import cli_envelopes
 from ciao.web import transcript_service
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -68,13 +65,13 @@ def test_no_module_defines_its_own_copy_of_the_shared_constants() -> None:
     }
     assert shared <= _module_level_names(REPO_ROOT / "ciao" / "cli_envelopes.py")
 
-    for module in ("ciao/subagent_tracking.py", "ciao/web/transcript_service.py"):
+    for module in ("ciao/web/transcript_service.py",):
         defined = _module_level_names(REPO_ROOT / module)
         collisions = {n for n in defined if n.lstrip("_") in shared}
         assert collisions == set(), f"{module} redefines {collisions}"
 
 
-def test_both_readers_share_one_envelope_predicate() -> None:
+def test_the_renderer_shares_the_envelope_predicates() -> None:
     """Identity, not equality: the renderer's alias *is* the shared helper."""
     assert transcript_service._is_cli_internal_envelope is cli_envelopes.is_cli_envelope
     assert (
@@ -303,11 +300,9 @@ async def test_shell_output_quoting_a_notification_stays_hidden(monkeypatch) -> 
         "  \n<teammate-message>hi</teammate-message>",
     ],
 )
-def test_records_hidden_by_the_renderer_never_advance_the_turn_counter(
+def test_records_the_renderer_hides(
     content: str,
 ) -> None:
-    """Both readers must agree, record by record, or `turn_index` drifts."""
-    assert not subagent_tracking._is_countable_user_turn(content)
     hidden = (
         transcript_service._is_control_slash_command(content)
         or transcript_service._is_no_response_sentinel(content)
@@ -321,8 +316,7 @@ def test_records_hidden_by_the_renderer_never_advance_the_turn_counter(
     "content",
     ["hello there", "why did this fail?", "Is X < Y true?", "<p>not a CLI tag</p>"],
 )
-def test_real_user_prose_counts_for_both_readers(content: str) -> None:
-    assert subagent_tracking._is_countable_user_turn(content)
+def test_real_user_prose_is_not_hidden_by_the_renderer(content: str) -> None:
     assert not transcript_service._is_cli_internal_envelope(content)
     assert not transcript_service._is_control_slash_command(content)
 
@@ -333,38 +327,6 @@ SHELL_OUTPUT = (
     f"{ONE}\n"
     "</bash-stdout>"
 )
-
-
-def _session(tmp_path, records: list[dict]) -> Path:
-    path = tmp_path / "session.jsonl"
-    path.write_text("\n".join(json.dumps(r) for r in records), encoding="utf-8")
-    return path
-
-
-_DISPATCH = {
-    "type": "assistant",
-    "message": {
-        "content": [{
-            "type": "tool_use",
-            "id": "tu1",
-            "name": "Agent",
-            "input": {
-                "description": "check the logs",
-                "subagent_type": "Explore",
-                "run_in_background": True,
-            },
-        }]
-    },
-}
-_DISPATCH_RESULT = {
-    "type": "user",
-    "message": {"content": [{"type": "tool_result", "tool_use_id": "tu1"}]},
-    "toolUseResult": {"agentId": "aaa", "isAsync": True},
-}
-
-
-def _user(text: str) -> dict:
-    return {"type": "user", "message": {"content": text}}
 
 
 def test_only_a_record_that_opens_with_the_tag_is_a_notification() -> None:
@@ -380,61 +342,6 @@ def test_only_a_record_that_opens_with_the_tag_is_a_notification() -> None:
     assert cli_envelopes.envelope_notification_fields(f"why did this fail?\n{ONE}") is None
 
 
-def test_shell_output_quoting_a_notification_never_completes_an_agent(
-    tmp_path,
-) -> None:
-    """Regression: a `grep` of a session JSONL flipped a running agent.
-
-    The tracker identified a completion by searching the record's body, so
-    the agent's own transcript being printed into the chat reported it
-    "failed".
-    """
-    state = subagent_tracking.parse_session_subagents(
-        _session(tmp_path, [_DISPATCH, _DISPATCH_RESULT, _user(SHELL_OUTPUT)])
-    )
-    assert state.subagents["aaa"].status == "running"
-
-
-def test_a_real_notification_still_completes_its_agent(tmp_path) -> None:
-    """The guard must not cost the tracker the completions it exists for."""
-    state = subagent_tracking.parse_session_subagents(
-        _session(tmp_path, [
-            _DISPATCH,
-            _DISPATCH_RESULT,
-            _user(
-                "<task-notification><task-id>aaa</task-id>"
-                "<status>completed</status><summary>done</summary>"
-                "</task-notification>"
-            ),
-        ])
-    )
-    assert state.subagents["aaa"].status == "completed"
-
-
-def test_prose_quoting_a_notification_advances_both_turn_counters(
-    tmp_path,
-) -> None:
-    """Regression: the two readers disagreed and `turn_index` drifted.
-
-    The renderer shows a quoting human message as their bubble (pinned
-    above), but the tracker treated it as a notification and skipped it, so
-    every later dispatch was stamped one turn too low and its subagent panel
-    anchored to the wrong bubble.
-    """
-    records = [
-        _user("first"),
-        _user(f"why did this fail?\n{ONE}"),
-        _user("third"),
-        _DISPATCH,
-        _DISPATCH_RESULT,
-    ]
-    state = subagent_tracking.parse_session_subagents(_session(tmp_path, records))
-    assert state.subagents["aaa"].turn_index == 2
-
-    # The renderer's side of the same claim: three user bubbles.
-    assert subagent_tracking._is_countable_user_turn(f"why did this fail?\n{ONE}")
-
-
 def test_hidden_continuations_are_recognised_with_and_without_the_capsule():
     capsule = "[CIAO_CONTEXT_BEGIN]\nx\n[CIAO_CONTEXT_END]\n\n"
     for prompt in (
@@ -444,7 +351,6 @@ def test_hidden_continuations_are_recognised_with_and_without_the_capsule():
         assert cli_envelopes.is_hidden_continuation(prompt)
         assert cli_envelopes.is_hidden_continuation(capsule + prompt)
         assert not cli_envelopes.is_hidden_continuation("please " + prompt)
-        assert not subagent_tracking._is_countable_user_turn(capsule + prompt)
     assert not cli_envelopes.is_hidden_continuation("ordinary text")
 
 

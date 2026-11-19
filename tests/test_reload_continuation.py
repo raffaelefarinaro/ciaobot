@@ -105,10 +105,10 @@ async def test_no_reload_after_a_user_stop(tmp_path: Path) -> None:
     assert provider.disconnected is False
 
 
-async def test_reload_skipped_while_background_agents_run(tmp_path: Path) -> None:
+async def test_reload_skipped_while_background_work_outstanding(tmp_path: Path) -> None:
     def first(pcm, cid):
         _arm(pcm, cid)
-        pcm._subagents._background_agents_last[cid] = 1
+        pcm._providers[cid].background_work_outstanding = True
 
     pcm, _, provider, turn_calls, _, _ = await _run(tmp_path, first)
     assert turn_calls == ["initial"]

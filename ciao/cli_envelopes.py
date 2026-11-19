@@ -2,17 +2,9 @@
 
 The Claude Code CLI writes user-role records into the session JSONL that the
 human never typed: subagent completion notifications, bash output, echoes of
-slash commands, interrupt sentinels. Two subsystems have to agree on exactly
-which records those are:
-
-- ``ciao/subagent_tracking.py`` parses the parent JSONL and must not let a
-  synthetic record advance ``turn_index``;
-- ``ciao/web/transcript_service.py`` renders the same JSONL and must not let a
-  synthetic record render as a user bubble.
-
-The two counters are anchored to each other — a record skipped by one and kept
-by the other shifts every subsequent ``turn_index`` — so the predicates live
-here once instead of as near-copies in both modules. They drifted while they
+slash commands, interrupt sentinels. ``ciao/web/transcript_service.py`` renders
+that JSONL and must not let a synthetic record render as a user bubble, so the
+predicates live here once instead of as near-copies. They drifted while they
 were copies (see issue #500), which is the reason this module exists.
 """
 

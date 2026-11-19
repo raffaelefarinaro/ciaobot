@@ -14,11 +14,10 @@ import pytest
 from ciao.config import CiaoConfig
 from ciao.models import ChatContext, ResultEvent
 from ciao.provider_service import ProviderService
-from ciao.providers import opencode as opencode_module
+from ciao.providers.base import BACKGROUND_WORK_MAX_S
 from ciao.providers.opencode import OpencodeProvider
 from ciao.web.chat_broker import ChatStream
 from ciao.web.chat_streaming import ChatStreaming
-from ciao.web.subagent_watchers import BACKGROUND_WORK_MAX_S
 from tests.test_chat_streaming_boundary import _DriveHost
 from tests.test_chat_subagents import _make_manager
 from tests.test_opencode_background_wake import (
@@ -210,57 +209,6 @@ async def test_recording_a_wake_turn_does_not_build_a_full_agent_request(tmp_pat
     assert len(pcm._transcripts._load_current(ctx, "opencode")["turns"]) == 1
 
 
-async def _watch(pcm, project, chat, provider, monkeypatch, shells):
-    pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)  # type: ignore[assignment]
-    provider._session_id = chat.session_id
-    monkeypatch.setattr(provider, "read_live_collab_tree", AsyncMock(return_value=[]))
-    refresh = AsyncMock(side_effect=shells)
-    wait = AsyncMock()
-    monkeypatch.setattr(provider, "refresh_background_shells", refresh)
-    monkeypatch.setattr(provider, "wait_background_change", wait)
-    published = _capture_publish(pcm)
-    await asyncio.wait_for(
-        pcm._subagents._watch_opencode(chat.chat_id, project.project_id, []), 5
-    )
-    return published, wait
-
-
-@pytest.mark.asyncio
-async def test_opencode_watcher_does_not_count_background_shells_as_agents(tmp_path, monkeypatch):
-    pcm, project, chat = _opencode_chat(tmp_path)
-    provider = _live_provider(tmp_path, chat.session_id)
-
-    published, wait = await _watch(pcm, project, chat, provider, monkeypatch, [1, 0])
-
-    remaining = [e["remaining"] for e in published if e.get("type") == "chat_subagents_ready"]
-    # The shell keeps the watcher polling (one wait) but is not an agent.
-    assert remaining == [0]
-    assert wait.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_opencode_watcher_waits_on_background_change_when_live(tmp_path, monkeypatch):
-    pcm, project, chat = _opencode_chat(tmp_path)
-    provider = _live_provider(tmp_path, chat.session_id)
-
-    _published, wait = await _watch(pcm, project, chat, provider, monkeypatch, [1, 1, 0])
-
-    assert [c.args for c in wait.await_args_list] == [(3.0,), (3.0,)]
-
-
-@pytest.mark.asyncio
-async def test_opencode_watcher_stops_for_a_restart_drain(tmp_path, monkeypatch):
-    pcm, project, chat = _opencode_chat(tmp_path)
-    provider = _live_provider(tmp_path, chat.session_id)
-    pcm._restart_draining = True
-
-    published, wait = await _watch(pcm, project, chat, provider, monkeypatch, [1, 1, 1])
-
-    assert wait.await_count == 0
-    remaining = [e["remaining"] for e in published if e.get("type") == "chat_subagents_ready"]
-    assert remaining == [0]
-
-
 @pytest.mark.asyncio
 async def test_idle_reaper_keeps_an_opencode_server_with_a_live_drain(tmp_path):
     pcm, _project, chat = _opencode_chat(tmp_path)
@@ -358,31 +306,6 @@ def _announce_spy(pcm) -> list[tuple]:
 
 
 @pytest.mark.asyncio
-async def test_opencode_watcher_keeps_a_parked_announce_for_the_live_drain(
-    tmp_path, monkeypatch
-):
-    pcm, project, chat = _opencode_chat(tmp_path)
-    calls = _announce_spy(pcm)
-    provider = _live_provider(tmp_path, chat.session_id)
-    pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)  # type: ignore[assignment]
-    monkeypatch.setattr(provider, "read_live_collab_tree", AsyncMock(return_value=[]))
-    monkeypatch.setattr(provider, "refresh_background_shells", AsyncMock(side_effect=[1, 0]))
-    monkeypatch.setattr(provider, "wait_background_change", AsyncMock())
-    pcm._park_result_announce(chat.chat_id, project.project_id, "T", "interim")
-    drain = asyncio.ensure_future(asyncio.Event().wait())
-    pcm._between_turn_drains[chat.chat_id] = drain  # type: ignore[assignment]
-    try:
-        await asyncio.wait_for(
-            pcm._watch_subagent_completion(chat.chat_id, project.project_id), 5
-        )
-    finally:
-        drain.cancel()
-
-    assert calls == []
-    assert chat.chat_id in pcm._parked_result_announce
-
-
-@pytest.mark.asyncio
 async def test_opencode_interim_turn_then_wake_announces_once(tmp_path, monkeypatch):
     pcm, project, chat = _opencode_chat(tmp_path)
     calls = _announce_spy(pcm)
@@ -402,17 +325,6 @@ async def test_opencode_interim_turn_then_wake_announces_once(tmp_path, monkeypa
 
     assert len(calls) == 1
     assert calls[0][3] == "BGDONE"
-
-
-def test_background_count_now_reads_the_live_opencode_provider(tmp_path):
-    pcm, _project, chat = _opencode_chat(tmp_path)
-    provider = _live_provider(tmp_path, chat.session_id)
-    provider._background_shells = {"a"}
-    provider._background_children = {"b", "c"}
-    pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)  # type: ignore[assignment]
-    pcm._subagents._background_agents_last[chat.chat_id] = 0  # stale published count
-
-    assert pcm._background_count_now(chat.chat_id) == 3
 
 
 @pytest.mark.asyncio
@@ -450,68 +362,38 @@ async def test_reaper_keeps_a_server_with_outstanding_work_until_the_horizon(tmp
     assert disconnected == [True]
 
 
-@pytest.mark.asyncio
-async def test_a_follow_up_that_leaves_background_work_restarts_the_watcher(tmp_path):
-    host = _RecordingDriveHost([], tmp_path)
-    started: list[tuple[str, str]] = []
-    host._start_subagent_watcher = lambda c, p: started.append((c, p))  # type: ignore[method-assign]
-    host._providers = {"chat-1": _FakeDrainService(outstanding=True)}  # type: ignore[assignment]
-    host._background_count_now = lambda _c: 1  # type: ignore[attr-defined]
-    host._last_drain = None
-    streaming = ChatStreaming(host)  # type: ignore[arg-type]
+class _ReportsWorkThenNone:
+    """Two follow-up results; background work is outstanding for the first only."""
 
-    await streaming.drain_between_turns("chat-1", "project-1")
-
-    assert started == [("chat-1", "project-1")]
-
-
-class _FakeDrainService:
-    def __init__(self, outstanding: bool) -> None:
-        self.background_work_outstanding = outstanding
+    def __init__(self) -> None:
+        self.background_work_outstanding = True
 
     async def drain_events(self):
-        yield ResultEvent(
-            type="result",
-            result="BGDONE",
-            session_id="s",
-            origin="task-notification",
-        )
+        yield ResultEvent(type="result", result="FIRST", session_id="s", origin="task-notification")
+        self.background_work_outstanding = False
+        yield ResultEvent(type="result", result="SECOND", session_id="s", origin="task-notification")
 
 
 @pytest.mark.asyncio
-async def test_opencode_watcher_publishes_children_not_shells(tmp_path, monkeypatch):
+async def test_drain_announces_once_when_the_provider_reports_no_background_work(tmp_path):
     pcm, project, chat = _opencode_chat(tmp_path)
-    provider = _live_provider(tmp_path, chat.session_id)
-    pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)  # type: ignore[assignment]
-    tree = [{"info": {"id": "ses_child"}, "active": True}]
-    monkeypatch.setattr(provider, "read_live_collab_tree", AsyncMock(return_value=tree))
-    # Two shells stay alive for two ticks, then exit; the child ends with them.
-    monkeypatch.setattr(provider, "refresh_background_shells", AsyncMock(side_effect=[2, 2, 0]))
-    ended: list = []
+    calls = _announce_spy(pcm)
+    pcm._providers[chat.chat_id] = _ReportsWorkThenNone()  # type: ignore[assignment]
+    pcm._park_result_announce(chat.chat_id, project.project_id, "T", "interim")
 
-    async def wait(_timeout):
-        if len(ended) == 1:
-            tree[0]["active"] = False
-        ended.append(True)
+    await asyncio.wait_for(pcm._drain_between_turns(chat.chat_id, project.project_id), 5)
 
-    monkeypatch.setattr(provider, "wait_background_change", wait)
-    published = _capture_publish(pcm)
-    work_seen: list[int] = []
-    original = pcm._subagents.publish_count
+    # The first result left work outstanding, so it only replaced the park; the
+    # second found none and announced once.
+    assert len(calls) == 1
+    assert calls[0][3] == "SECOND"
+    assert chat.chat_id not in pcm._parked_result_announce
 
-    def spy(chat_id, project_id, count, *, work=None):
-        work_seen.append(pcm._subagents.work_count(chat_id))
-        original(chat_id, project_id, count, work=work)
-        work_seen.append(pcm._subagents.work_count(chat_id))
 
-    monkeypatch.setattr(pcm._subagents, "publish_count", spy)
-
-    await asyncio.wait_for(
-        pcm._subagents._watch_opencode(chat.chat_id, project.project_id, []), 5
-    )
-
-    remaining = [e["remaining"] for e in published if e.get("type") == "chat_subagents_ready"]
-    assert remaining == [1, 0]
-    # The watcher kept going while the shells were alive (three polls, not one).
-    assert len(ended) == 2
-    assert work_seen[1] == 3
+def test_background_work_outstanding_reads_the_chats_provider(tmp_path):
+    pcm, _project, chat = _opencode_chat(tmp_path)
+    assert pcm._background_work_outstanding(chat.chat_id) is False
+    pcm._providers[chat.chat_id] = SimpleNamespace(background_work_outstanding=True)  # type: ignore[assignment]
+    assert pcm._background_work_outstanding(chat.chat_id) is True
+    pcm._providers[chat.chat_id] = SimpleNamespace(background_work_outstanding=False)  # type: ignore[assignment]
+    assert pcm._background_work_outstanding(chat.chat_id) is False

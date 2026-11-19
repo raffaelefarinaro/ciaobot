@@ -248,7 +248,6 @@ class ChatStreamingHost(Protocol):
         self, chat_id: str, user_text: str, assistant_text: str
     ) -> None: ...
 
-    def _start_subagent_watcher(self, chat_id: str, project_id: str) -> None: ...
 
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None: ...
 
@@ -283,7 +282,7 @@ class ChatStreamingHost(Protocol):
 
     def _flush_result_announce(self, chat_id: str) -> bool: ...
 
-    def _background_count_now(self, chat_id: str) -> int: ...
+    def _background_work_outstanding(self, chat_id: str) -> bool: ...
 
     def _spawn_detached(
         self, coro: Coroutine[object, object, object], name: str
@@ -1435,18 +1434,18 @@ class ChatStreaming:
             if repo_loc is not None:
                 done["repo_location"] = repo_loc
             self._host._events.publish(done)
-            chat_for_watcher = self._host._chats.get(chat_id)
+            chat_for_drain = self._host._chats.get(chat_id)
             follow_up_expected = False
             if (
-                chat_for_watcher is not None
-                and chat_for_watcher.session_id
-                and capabilities_for(chat_for_watcher.provider).background_subagents
+                chat_for_drain is not None
+                and chat_for_drain.session_id
+                and capabilities_for(chat_for_drain.provider).background_subagents
             ):
-                self._host._start_subagent_watcher(chat_id, project_id)
                 self._host._start_between_turns_drain(chat_id, project_id)
                 # A chat with a live drain gets a native follow-up turn when
                 # its background work finishes; an interim "I'll report back"
-                # announce is parked for it and released at count zero (see
+                # announce is parked for it and released when the provider
+                # reports no background work, or when the drain ends (see
                 # `drain_between_turns`).
                 follow_up_expected = True
             self._host._discard_result_announce(chat_id)
@@ -2261,7 +2260,7 @@ class ChatStreaming:
                     drain_segment = FinalAnswerTracker()
                     is_error = bool(event.is_error)
                     self._record_opencode_wake_turn(chat_id, event)
-                    settled = self._host._background_count_now(chat_id) == 0
+                    settled = not self._host._background_work_outstanding(chat_id)
                     chat_now = self._host._chats.get(chat_id)
                     last_error = (
                         annotate_reauth(
@@ -2273,10 +2272,6 @@ class ChatStreaming:
                         else ""
                     )
                     close_stream(is_error, last_error)
-                    if provider_service.background_work_outstanding:
-                        # The wake launched more background work; the watcher
-                        # that counted the first batch has already exited.
-                        self._host._start_subagent_watcher(chat_id, project_id)
                     if (
                         not is_error
                         and answer_text
@@ -2304,9 +2299,9 @@ class ChatStreaming:
                                 f"archive-proposal-helper-{chat_id}",
                             )
                         else:
-                            # Agents still running: this follow-up replaces the
-                            # parked announce; the one that lands at zero
-                            # announces once.
+                            # Background work still running: this follow-up
+                            # replaces the parked announce; the one that lands
+                            # once the provider reports none announces once.
                             self._host._park_result_announce(
                                 chat_id, project_id, title, snippet
                             )

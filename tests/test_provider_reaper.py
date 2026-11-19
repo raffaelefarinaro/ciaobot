@@ -470,7 +470,7 @@ async def test_live_background_child_survives_the_idle_threshold_until_completio
 
 @pytest.mark.asyncio
 async def test_ended_background_work_does_not_hold_its_provider(tmp_path: Path) -> None:
-    """No watcher and nothing outstanding: the idle timeout reclaims the server."""
+    """Nothing outstanding: the idle timeout reclaims the server."""
     manager = _make_manager(tmp_path)
     chat_id = _chat(manager)
     provider = _attach(manager, chat_id, idle_for=manager._provider_idle_timeout + 1)
@@ -608,7 +608,7 @@ async def test_claude_native_task_holds_provider_past_idle_and_warm_limit(
 async def test_silent_background_work_older_than_one_hour_still_holds_provider(
     tmp_path: Path,
 ) -> None:
-    from ciao.web.subagent_watchers import BACKGROUND_WORK_MAX_S
+    from ciao.providers.base import BACKGROUND_WORK_MAX_S
 
     manager = _make_manager(tmp_path)
     chat_id = _chat(manager)

@@ -10,7 +10,7 @@ from ciao.config import CiaoConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.chat_broker import ChatStream
-from ciao.web.project_chats import ProjectChatManager
+from ciao.web.project_chats import RESTART_BLOCKER_REASONS, ProjectChatManager
 
 
 class _StubProvider:
@@ -53,11 +53,16 @@ def test_streaming_chat_is_a_blocker(tmp_path: Path) -> None:
     assert manager.restart_blockers() == [{"chat_id": cid, "reasons": ["streaming"]}]
 
 
-def test_background_agents_are_blockers(tmp_path: Path, monkeypatch) -> None:
+def test_background_work_still_blocks_without_a_watcher(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     cid = _chat(manager)
-    monkeypatch.setattr(manager._subagents, "watching_chat_ids", lambda: {cid})
-    assert manager.restart_blockers() == [{"chat_id": cid, "reasons": ["background_agents"]}]
+    provider = _attach(manager, cid)
+    provider.background_work_outstanding = True
+    provider.background_activity_age = 0.0
+    blockers = manager.restart_blockers()
+    assert blockers == [{"chat_id": cid, "reasons": ["background_work"]}]
+    assert "background_agents" not in RESTART_BLOCKER_REASONS
+    assert manager.active_chat_ids() == []
 
 
 def test_open_native_question_with_live_provider_blocks(tmp_path: Path) -> None:

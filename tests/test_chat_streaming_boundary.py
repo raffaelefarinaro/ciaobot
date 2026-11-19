@@ -318,9 +318,6 @@ class _DriveHost:
     ) -> None:
         del chat_id, user_text, assistant_text
 
-    def _start_subagent_watcher(self, chat_id: str, project_id: str) -> None:
-        del chat_id, project_id
-
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None:
         del chat, status
 
@@ -1746,7 +1743,6 @@ def _drain_case(manager, chat, monkeypatch, script):
     monkeypatch.setattr(manager._events, "publish", publish)
     monkeypatch.setattr(manager._broker, "register", register)
     monkeypatch.setattr(manager, "_memory_pass_turn_finished", memory)
-    monkeypatch.setattr(manager, "_start_subagent_watcher", lambda *a, **k: None)
     return service, release, seen
 
 
@@ -1972,7 +1968,6 @@ async def test_withdrawn_stop_leaves_a_replacement_drain_for_background_wakes(
     chat.session_id = "sess-drain"
     service = _StubProviderService(can_drain=True)
     manager._providers[chat.chat_id] = service
-    monkeypatch.setattr(manager, "_start_subagent_watcher", lambda *a, **k: None)
     hold = _hold_background_drain(manager, chat)
     await _ticks(2)
     replacement = None
@@ -2014,7 +2009,6 @@ async def test_send_after_a_withdrawn_stop_still_waits_for_the_old_drain(
     chat.session_id = "sess-drain"
     service = _StubProviderService(can_drain=True)
     manager._providers[chat.chat_id] = service
-    monkeypatch.setattr(manager, "_start_subagent_watcher", lambda *a, **k: None)
     hold = _hold_background_drain(manager, chat)
     await _ticks(2)
     try:
@@ -2052,7 +2046,6 @@ async def test_replacement_drain_exits_without_draining_after_teardown(
     chat.session_id = "sess-drain"
     service = _StubProviderService(can_drain=True)
     manager._providers[chat.chat_id] = service
-    monkeypatch.setattr(manager, "_start_subagent_watcher", lambda *a, **k: None)
     hold = _hold_background_drain(manager, chat)
     await _ticks(2)
     try:
@@ -2209,7 +2202,6 @@ def _through_provider_service(manager, chat, monkeypatch):
     service = ProviderService(manager._config)
     service._provider = provider  # type: ignore[assignment]
     manager._providers[chat.chat_id] = service
-    monkeypatch.setattr(manager, "_start_subagent_watcher", lambda *a, **k: None)
     return provider
 
 

@@ -444,7 +444,6 @@ export function snapshotFrame(activeStreams) {
   return {
     type: 'snapshot',
     active_streams: activeStreams.map((chat_id) => ({ chat_id, project_id: '' })),
-    background_agents: {},
     restarting: false,
     // Authoritative server pin map, mirroring the pin on beta-chat-1 above.
     chat_pins: {

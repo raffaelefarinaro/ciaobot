@@ -596,7 +596,6 @@ async def ws_events(websocket: WebSocket) -> None:
     - `chat_streaming_started`  {chat_id, project_id, background?}  (background: a wake)
     - `chat_streaming_done`     {chat_id, project_id, is_error, last_error}
     - `chat_result_ready`       {chat_id, project_id, title, snippet}
-    - `chat_subagents_ready`    {chat_id, project_id, remaining}
     - `chat_read`               {chat_id, last_read_at}
     - `chat_unread`             {chat_id, last_read_at}  (marked unread on purpose)
     - `chat_pin_changed`        {chat_id, path, dismissed_paths, revision}
@@ -635,10 +634,6 @@ async def ws_events(websocket: WebSocket) -> None:
         await websocket.send_json({
             "type": "snapshot",
             "active_streams": snapshot,
-            # Chats with background subagents still running, so a fresh
-            # client can paint the "N agents running" indicator immediately
-            # (and clear a count left stale by a missed event during a gap).
-            "background_agents": pcm.background_agent_counts,
             # Late connectors that missed `server_restarting` still get the
             # overlay instead of a chat-level turn rejection.
             "restarting": bool(getattr(pcm, "_restart_draining", False)),

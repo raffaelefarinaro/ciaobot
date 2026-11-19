@@ -88,71 +88,21 @@ def _subagent_bullet() -> str:
     )
 
 
-def test_capabilities_description_and_index_cover_locating_running_agents() -> None:
-    index = (STOCK_SKILLS / "ciao-capabilities" / "SKILL.md").read_text(encoding="utf-8")
-    parts = split_frontmatter(index)
-    assert parts is not None
-    description = yaml.safe_load(parts[0])["description"]
-    for phrase in ("running agents", "transcripts"):
-        assert phrase in description.lower(), f"description is missing {phrase!r}"
-    row = next(line for line in index.splitlines() if "`references/workspaces-and-chats.md`" in line)
-    for phrase in ("running agents", "transcripts"):
-        assert phrase in row.lower(), f"capabilities index row is missing {phrase!r}"
-
-
-def test_subagent_reference_points_at_composer_activity_and_chat_details_running() -> None:
-    bullet = _subagent_bullet()
-    assert "composer" in bullet.lower()
-    assert "**1 agent**" in bullet and "**N agents**" in bullet
-    assert "count alone" in bullet.lower()
-    assert "Chat details → **Running**" in bullet
-    assert "**Processes**" in bullet
-
-
-def test_subagent_reference_distinguishes_read_only_views_from_completed_activity() -> None:
-    bullet = _subagent_bullet()
-    assert "read-only" in bullet.lower()
-    assert "Activity" in bullet
-
-
-def test_subagent_reference_treats_activity_trace_as_insufficient_proof_of_a_stop() -> None:
+def test_subagent_reference_describes_the_dispatch_row_with_nested_calls() -> None:
     bullet = _subagent_bullet()
     assert "Activity" in bullet
-    assert "trace alone" in bullet.lower()
-    assert "not proof" in bullet
-    assert "possibly active" in bullet.lower()
-    assert "same worktree" in bullet.lower()
+    assert "dispatch row" in bullet.lower()
+    assert "nested" in bullet.lower()
+    # Ciaobot no longer keeps a running list, a count or a read-only view.
+    for retired in ("**Running**", "**1 agent**", "read-only", "composer"):
+        assert retired not in bullet, retired
 
 
-def test_subagent_reference_does_not_treat_displayed_state_as_definitive() -> None:
-    bullet = _subagent_bullet()
-    assert "display, not proof" in bullet.lower()
-    assert "earlier execution" in bullet.lower()
-    assert "authoritative completion result" in bullet.lower()
-    assert "current execution" in bullet.lower()
-    assert "verified lifecycle" in bullet.lower()
-
-
-def test_subagent_reference_marks_sidebar_status_as_conditional() -> None:
-    bullet = _subagent_bullet()
-    assert "tooltip" in bullet.lower()
-    assert "**Working**" in bullet
-    assert "rather than a count" in bullet.lower()
-    assert "higher-priority" in bullet.lower()
-    assert "replaces" in bullet.lower()
-
-
-def test_subagent_reference_keeps_visibility_limits_and_drops_the_sidebar_row_claim() -> None:
-    bullet = _subagent_bullet()
-    assert "row under its chat in the sidebar" not in bullet.lower()
-    assert "sidebar" in bullet.lower()
-    assert "chat-level status" in bullet.lower()
-    assert "Transcript not on this machine" in bullet
-    assert "not every dispatch" in bullet.lower()
-    assert "absent row" in bullet.lower()
+def test_subagent_reference_keeps_the_stop_caution() -> None:
+    bullet = _subagent_bullet().lower()
+    assert "keeps no running list" in bullet
     assert "is not proof" in bullet
-    assert "clean worktree" in bullet.lower()
-    assert "same worktree" in bullet.lower()
+    assert "same worktree" in bullet
 
 
 def test_capabilities_index_is_small_and_every_named_reference_ships() -> None:

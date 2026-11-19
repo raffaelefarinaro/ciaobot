@@ -10860,7 +10860,6 @@ describe('chatIsWorking', () => {
       data: JSON.stringify({
         type: 'snapshot',
         active_streams: [],
-        background_agents: { c1: 4 },
         chat_pins: {},
       }),
     })

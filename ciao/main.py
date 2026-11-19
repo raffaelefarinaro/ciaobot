@@ -453,7 +453,7 @@ async def _wait_for_chat_drain(
     """Wait until chat work stays idle across consecutive observations.
 
     The stable-idle window closes the handoff race between a parent stream
-    ending and its background-subagent watcher or its follow-up turn starting.
+    ending and its between-turns drain or follow-up turn starting.
     ``begin_restart_drain`` prevents unrelated new turns from extending the
     wait after a restart has already been requested.
     """
@@ -1484,19 +1484,6 @@ async def _run_server_locked(
         if pruned_imports:
             logger.info("Pruned %d expired import batch(es)", pruned_imports)
 
-        # Wake chats whose CLI-owned tasks (Monitor / background Bash) were
-        # still running when the old server died: no completion watcher
-        # survives a restart, so the wake must be armed here.
-        swept = pcm.sweep_orphaned_cli_tasks()
-        if swept:
-            logger.warning("Woke %d chat(s) with CLI tasks orphaned by the restart", swept)
-        interrupted = pcm.sweep_interrupted_background_work()
-        if interrupted:
-            logger.warning(
-                "Woke %d chat(s) with OpenCode background work interrupted by the restart",
-                interrupted,
-            )
-
         # Resume chats whose turn the previous process never finished (#2128).
         try:
             resumed = pcm.resume_interrupted_turns(
@@ -1811,8 +1798,6 @@ async def _run_server_locked(
         # own, and a sweep racing this teardown would disconnect a service
         # already being torn down here.
         await pcm.stop_provider_reaper()
-        # The providers still hold their background sets here, and disconnect clears them.
-        pcm.record_interrupted_background_work()
         services = list(pcm._providers.values())
         pcm._providers.clear()
         pcm._provider_last_used.clear()
