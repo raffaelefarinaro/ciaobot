@@ -2268,48 +2268,92 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/MemoryMapView.vue"
     ],
     "variants": [],
-    "variantNotes": "Initial loading/failure/stale/empty/editor/validation/action error. Detailed variants are unassessed.",
+    "variantNotes": "Initial loading/failure/stale/empty editor/validation/action error. Detailed variants are unassessed.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in MemoryCategoriesPanel.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--default"
+        ],
+        "note": "The loaded registry: the not-loading, not-failed branch at MemoryCategoriesPanel.vue:362. Play blocks the core switch (disabled, aria-disabled), toggles the custom switch to an Unsaved draft and saves, asserting the aria-checked flip and the server-adopted Saved state."
       },
       {
         "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "MemoryCategoriesPanel.vue implements the loading branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--loading"
+        ],
+        "note": "Held first read: catLoading renders the SkeletonLoader rows variant (count 6) with its Loading categories status and no table."
       },
       {
         "name": "initial-error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "MemoryCategoriesPanel.vue implements the initial-error branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--initial-error"
+        ],
+        "note": "catFailed: the role=alert failure card with Retry; play retries and the fixture refuses again, so the alert persists over two reads."
       },
       {
         "name": "stale",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "MemoryCategoriesPanel.vue implements the stale branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--stale"
+        ],
+        "note": "The refresh branch: loadError over rows already on screen keeps the table with the role=status stale banner and Retry; play switches workspaces through the fixture and retries while the banner persists."
       },
       {
         "name": "empty",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "MemoryCategoriesPanel.vue implements the empty branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--empty"
+        ],
+        "note": "catEmpty: the This vault has no categories yet hint with Add category available and Save blocked at Saved."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "saving",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--saving"
+        ],
+        "note": "A held PATCH: Save reads Saving… and is genuinely disabled, not styled; the draft keeps the user's toggles."
+      },
+      {
+        "name": "save-error",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--save-error"
+        ],
+        "note": "A refused PATCH: the role=alert action error in MemoryCategoriesPanel.vue:382 leaves the draft exactly as built (Unsaved, Save changes enabled) for a corrected retry."
+      },
+      {
+        "name": "drawer-edit",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--drawer-edit"
+        ],
+        "note": "The row-name button opens the drawer on a custom row: focus lands on Label, the id is readonly with its fixed-once note, Delete category is offered, Escape closes."
+      },
+      {
+        "name": "drawer-add",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--drawer-add"
+        ],
+        "note": "Add category opens the empty drawer: focus on the writable id, Start from presets, a non-preset id shows the inline role=alert and blocks Save, a valid id plus label unblocks it."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-categories-panel--narrow"
+        ],
+        "note": "Loaded in a maximum 390px container: the table keeps its columns and scrolls sideways in the Categories region with the switches reachable."
       }
     ],
     "loading": {
       "status": "known",
-      "detail": "MemoryCategoriesPanel.vue distinguishes first loading, initial failure and stale refresh retaining rows."
+      "detail": "Initial load is the SkeletonLoader rows variant (count 6) whose bar-shaped boxes do not match the loaded actions row plus six-column table geometry (recorded for a loading follow-up; not fixed here). A workspace switch re-reads in place, a failed refresh keeps the rows with the stale banner, a failed first read shows the alert with Retry, and a held write blocks Save as Saving…. Covered: loading, initial-error, stale, saving."
     },
     "migration": {
       "status": "unassessed",
@@ -2396,7 +2440,7 @@ export const inventory: InventoryEntry[] = [
     "id": "components-memory-map-view",
     "name": "MemoryMapView",
     "family": "Memory and usage",
-    "kind": "composition",
+    "kind": "component",
     "owner": {
       "path": "web/src/components/MemoryMapView.vue",
       "anchor": "<template>"
@@ -2410,26 +2454,128 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in MemoryMapView.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "memory-map-view--default"
+        ],
+        "note": "The store's default section (To decide): the review wrap's filter chips over the two queues, with zero chips dropped and All pressed, plus the never-claims static lines of the section. Queue bodies belong to their own component rows."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "graph",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-graph--graph"
+        ],
+        "note": "The map section's drawing: the graph story mounts the production owner, asserts the toolbar segment, the vault stats with the unchecked link and the zoom-controls group, and plays through the label-gate hint flip."
+      },
+      {
+        "name": "list",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-list-selection--list"
+        ],
+        "note": "The list rendering of the same map section: sortable headers with aria-sort, the dash placeholder for an undated note and the stale row's Needs review flag; play sorts by Checked."
+      },
+      {
+        "name": "selection",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-map-view--selection-detail",
+          "memory-graph--selection",
+          "memory-list-selection--selection"
+        ],
+        "note": "A selected note opens the docked tile (role=dialog naming the note, linked-note controls, the resize gutter is a viewport drag and has no story markup): covered opening from the graph path (production requestFocus), from the list's title buttons, and swapping to a neighbour inside the tile."
+      },
+      {
+        "name": "filter",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-list-selection--filter"
+        ],
+        "note": "The map section's orphan filter: Orphans only narrows the list to the unlinked note and re-frames the drawing."
+      },
+      {
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-map-view--loading"
+        ],
+        "note": "Held vault graph read: the toolbar and canvas unmount and the map body is the SkeletonLoader graph variant with its Loading vault graph status."
+      },
+      {
+        "name": "error",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-map-view--error"
+        ],
+        "note": "A failed first graph read: the mm-empty line names the failure with neither skeleton nor drawing."
+      },
+      {
+        "name": "detail-stale",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-map-view--detail-stale"
+        ],
+        "note": "The tile's stale callout: Unchecked for… with the type's horizon rule and the Review in To decide link to /memory/review?show=revisit."
+      },
+      {
+        "name": "detail-pending",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-map-view--detail-pending"
+        ],
+        "note": "The tile's pending-check callout: Being checked. with the Open the proposal link to /memory/review?show=suggested; the stale callout is suppressed while the question is in flight."
+      },
+      {
+        "name": "detail-conflicted",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-map-view--detail-conflicted"
+        ],
+        "note": "The tile's conflicted callout: A verification is out of date for this note. with the Review in To decide link; the dead verdict is never applied."
+      },
+      {
+        "name": "detail-facts",
+        "coverage": "covered",
+        "storyIds": [
+          "memory-map-view--detail-facts"
+        ],
+        "note": "The tile's entry-coverage block: Facts inside this note with the overdue bullet's Never checked reason and excerpt."
+      },
+      {
+        "name": "categories-section",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "The categories render is the page grid around MemoryCategoriesPanel alone; the component row components-memory-categories-panel carries its rendered-state coverage."
+      },
+      {
+        "name": "import-section",
+        "coverage": "not-applicable",
+        "storyIds": [],
+        "note": "The import render is the page grid around ImportSources alone; the component row components-import-sources carries its rendered-state coverage."
+      },
+      {
+        "name": "history-section",
+        "coverage": "not-applicable",
+        "storyIds": [],
+        "note": "The history render shows ProposalReviewPanel in its history section; that panel's component row owns the rendered states."
+      },
+      {
+        "name": "retired-section",
+        "coverage": "not-applicable",
+        "storyIds": [],
+        "note": "The retired render shows VaultReviewPanel in its trash section; that panel's component row owns the rendered states."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in MemoryMapView.vue has not yet been audited."
+      "status": "known",
+      "detail": "The first vault read holds the map body behind the SkeletonLoader graph variant whose doodle geometry does not match the real canvas drawing (recorded for a loading follow-up; not fixed here). A workspace already in the store's snapshot cache paints without a skeleton and revalidates in the background, a background failure keeps the graph (no stale branch), and a foreground failure is the error line. Covered: loading, error."
     },
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
     },
-    "rationale": "Connected route or host composition; isolate its seam before rendering it in the workshop."
+    "rationale": "Connected route composition mounted isolated through the fail-closed fixture boundary; its story coverage is claimed on this row because only component rows may claim story coverage (#3263), and its section routes are covered by their child component rows."
   },
   {
     "id": "components-model-selector",
@@ -9035,32 +9181,38 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": ".mm-canvas-wrap in MemoryMapView.vue implements this family; no rendered-state story exists."
+        "note": "The wrap at rest is the baseline of the drawn-graph state: its rendered story memory-graph--graph is claimed on the owner row components-memory-map-view (story coverage lives on component rows only)."
       },
       {
         "name": "graph",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": ".mm-canvas-wrap in MemoryMapView.vue includes graph; no rendered-state story exists."
+        "note": "The drawn canvas with toolbar stats, zoom controls and hint: memory-graph--graph mounts the production owner and is claimed on components-memory-map-view; its play flips the label-gate hint by zooming in."
+      },
+      {
+        "name": "zoomed-out",
+        "coverage": "not-applicable",
+        "storyIds": [],
+        "note": "The labels-hidden fit scale (more than 40 visible notes): the initial render of memory-graph--graph's dense synthetic vault, claimed on components-memory-map-view."
       },
       {
         "name": "selection",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": ".mm-canvas-wrap in MemoryMapView.vue includes selection; no rendered-state story exists."
+        "note": "Selecting a note flies the camera in and opens its tile: memory-graph--selection drives the production requestFocus and is claimed on components-memory-map-view."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "hover-tip",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "note": "The v-if hoveredNode tooltip needs a pointer over a node's settled canvas position; the simulation's coordinates are not deterministic in the workshop, so no story asserts it."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in MemoryMapView.vue has not yet been audited."
+      "status": "none",
+      "detail": "The wrap renders only after the owner's graph load settles; the loading branch and its skeleton belong to the map-view row, which documents them."
     },
     "migration": {
       "status": "unassessed",
@@ -9087,38 +9239,32 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": ".mm-list-wrap in MemoryMapView.vue implements this family; no rendered-state story exists."
+        "note": "The wrap at rest is the baseline of the list state: its rendered story memory-list-selection--list is claimed on the owner row components-memory-map-view (story coverage lives on component rows only)."
       },
       {
         "name": "list",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": ".mm-list-wrap in MemoryMapView.vue includes list; no rendered-state story exists."
+        "note": "The sortable table with aria-sort headers, the dash placeholder for an undated note and the stale row's Needs review flag: memory-list-selection--list is claimed on components-memory-map-view and its play sorts by Checked."
       },
       {
         "name": "selection",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": ".mm-list-wrap in MemoryMapView.vue includes selection; no rendered-state story exists."
+        "note": "A row's title button selects the row (aria-pressed, the current class) and opens the tile: memory-list-selection--selection is claimed on components-memory-map-view."
       },
       {
         "name": "filter",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": ".mm-list-wrap in MemoryMapView.vue includes filter; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "note": "The orphans filter narrows the table to unlinked notes: memory-list-selection--filter is claimed on components-memory-map-view."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in MemoryMapView.vue has not yet been audited."
+      "status": "none",
+      "detail": "The wrap renders only after the owner's graph load settles; there is no loading branch inside the list. The owner's loading states are on the map-view row."
     },
     "migration": {
       "status": "unassessed",
