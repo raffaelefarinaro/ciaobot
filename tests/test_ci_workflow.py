@@ -355,10 +355,12 @@ def test_release_workflows_do_not_publish_removed_install_channels() -> None:
 def _release_smoke() -> dict:
     import yaml
 
-    return yaml.safe_load(
-        (Path(__file__).parents[1] / ".github" / "workflows" / "release-smoke.yml").read_text(
-            encoding="utf-8"
-        )
+    return yaml.safe_load(_smoke_text())
+
+
+def _smoke_text() -> str:
+    return (Path(__file__).parents[1] / ".github" / "workflows" / "release-smoke.yml").read_text(
+        encoding="utf-8"
     )
 
 
@@ -366,10 +368,36 @@ def _smoke_runs(job: dict) -> str:
     return "\n".join(step["run"] for step in job["steps"] if "run" in step)
 
 
+def _smoke_step(job: dict, name: str) -> dict:
+    return next(step for step in job["steps"] if step.get("name") == name)
+
+
+def _shell_function(run: str, name: str) -> str:
+    # The text of one bash function inside a run: block, from its opening line
+    # to the closing brace, so a test can execute the real redaction.
+    lines = run.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip() == f"{name}() {{")
+    end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "}")
+    return "\n".join(lines[start : end + 1])
+
+
+# Every `|| true` line in a run: block of release-smoke.yml. The port lookup
+# tolerates a missing .env under pipefail; the diagnostics commands keep
+# collecting after one of them fails. Any other `|| true` fails the test.
+_BENIGN_OR_TRUE = {
+    "port=$(awk -F= '/^PWA_PORT=/{print $2}' \"$SMOKE_WORKSPACE/.env\" 2>/dev/null | tr -d '\"' | tail -1 || true)",
+    'redact < "$RUNNER_TEMP/linux-install.log" 2>/dev/null | tail -200 || true',
+    'redact < "$RUNNER_TEMP/linux-update.log" 2>/dev/null | tail -200 || true',
+    "systemctl status ciaobot --no-pager 2>&1 | head -60 | redact || true",
+    "sudo -n journalctl -u ciaobot -n 200 --no-pager 2>&1 | redact || true",
+    'tail -80 "$debug_log" | redact || true',
+}
+
+
 def test_release_smoke_installs_linux_with_the_service_and_reruns() -> None:
     # #3131 L6: the smoke test runs the public Linux one-liner on an Ubuntu VM,
     # checks the systemd service and the startup API, then runs the same
-    # one-liner again as the update path and checks the service comes back.
+    # one-liner again as a same-version reinstall and checks the service comes back.
     smoke = _release_smoke()
     linux = smoke["jobs"]["linux-install"]
     assert linux["runs-on"] == "ubuntu-24.04"
@@ -385,11 +413,12 @@ def test_release_smoke_installs_linux_with_the_service_and_reruns() -> None:
     ):
         assert fragment in runs, f"release-smoke.yml linux-install lost {fragment!r}"
 
-    # The update path is the same one-liner, run again, with the service up after.
+    # The re-run is the same one-liner with no flags, after the first install.
     names = [step.get("name", "") for step in linux["steps"]]
-    rerun = names.index("Re-run the one-liner as the update path")
+    rerun = names.index("Re-run the one-liner (same-version reinstall)")
     update = linux["steps"][rerun]["run"]
     assert "install.sh" in update and "| sh;" in update
+    assert "sh -s" not in update
     assert names.index("Install with the one-line installer") < rerun
     assert "systemctl is-active --quiet ciaobot" in update
 
@@ -408,6 +437,23 @@ def test_release_smoke_installs_linux_with_the_service_and_reruns() -> None:
         assert gone not in runs, f"release-smoke.yml still expects the app release: {gone!r}"
 
 
+def test_release_smoke_same_version_rerun_must_restart_the_service() -> None:
+    # The re-run is a reinstall, and `ciao service install` restarts the unit, so
+    # the main PID has to change across it. Without this check a re-run that
+    # left the old process running would pass.
+    update = _smoke_step(
+        _release_smoke()["jobs"]["linux-install"],
+        "Re-run the one-liner (same-version reinstall)",
+    )["run"]
+    before = update.index('pid_before=$(systemctl show -p MainPID --value ciaobot.service)')
+    download = update.index("install.sh")
+    after = update.index('pid_after=$(systemctl show -p MainPID --value ciaobot.service)')
+    assert before < download < after
+    assert '[ "$pid_before" -gt 0 ]' in update
+    assert '[ "$pid_after" -gt 0 ]' in update
+    assert '[ "$pid_after" != "$pid_before" ]' in update
+
+
 def test_release_smoke_waits_are_bounded() -> None:
     # A smoke run must fail instead of hang: every job and every step that
     # waits or downloads has a timeout, and every wait is a counted loop with
@@ -424,24 +470,117 @@ def test_release_smoke_waits_are_bounded() -> None:
             assert "while " not in run and "until " not in run, (
                 f"job {name} step {step.get('name')!r} has an unbounded loop"
             )
-    text = (Path(__file__).parents[1] / ".github" / "workflows" / "release-smoke.yml").read_text(
-        encoding="utf-8"
-    )
+    text = _smoke_text()
     assert "seq 1 90" in text
     assert text.count("curl -fsS --max-time 5") >= 4
     assert text.count("curl -fsSL --max-time 600") == 2  # the install and the update download
 
 
+def test_release_smoke_run_blocks_fail_closed() -> None:
+    # Every run: block except Diagnostics starts with set -euo pipefail, and
+    # `|| true` appears only on the explicit benign allowlist above. Mutation:
+    # appending `|| true` to any assertion line adds a line outside the list.
+    smoke = _release_smoke()
+    found: set[str] = set()
+    for name, job in smoke["jobs"].items():
+        for step in job["steps"]:
+            run = step.get("run")
+            if run is None:
+                continue
+            label = f"job {name} step {step.get('name')!r}"
+            if step.get("name") != "Diagnostics":
+                assert run.lstrip().startswith("set -euo pipefail"), f"{label} is not fail-closed"
+            for line in run.splitlines():
+                if "|| true" in line:
+                    found.add(line.strip())
+    assert found == _BENIGN_OR_TRUE
+
+
 def test_release_smoke_redacts_the_login_url_in_every_log_it_prints() -> None:
-    # ciao setup prints the one-time login URL. Each log the job prints goes
-    # through the same redaction, so the credential never reaches the job log.
-    text = (Path(__file__).parents[1] / ".github" / "workflows" / "release-smoke.yml").read_text(
-        encoding="utf-8"
-    )
-    assert "Open Ciaobot: ).*#\\1[redacted]" in text
-    assert "https?://[^[:space:]]*(token|setup)[^[:space:]]*#[redacted]" in text
-    assert text.count("Open Ciaobot: ).*#\\1[redacted]") >= 4
+    # ciao setup prints the one-time login URL, and a bare login token line is
+    # a credential too. Each log the job prints goes through the same rules.
+    text = _smoke_text()
+    assert text.count("Open Ciaobot: ).*#\\1[redacted]") == 3  # install, update failure, diagnostics
+    assert text.count("^[A-Za-z0-9_-]{32,}$#[redacted]") == 3
     assert "journalctl -u ciaobot -n 200" in text
+
+    # The journal and the service status both go through redact.
+    diagnostics = _smoke_runs(_release_smoke()["jobs"]["linux-install"])
+    status = next(line for line in diagnostics.splitlines() if "systemctl status ciaobot" in line)
+    journal = next(line for line in diagnostics.splitlines() if "journalctl -u ciaobot" in line)
+    assert "| redact" in status
+    assert "| redact" in journal
+
+
+_REDACTION_SAMPLE = "\n".join(
+    [
+        "Open Ciaobot: http://127.0.0.1:8443/?setup=abc",
+        "login https://example.test/x?token=SECRET123 done",
+        "aB3_dE5-fG7hI9jK1lM3nO5pQ7rS9tU1v",
+        "ciao 2.0.0",
+    ]
+) + "\n"
+_REDACTION_EXPECTED = "Open Ciaobot: [redacted]\nlogin [redacted] done\n[redacted]\nciao 2.0.0\n"
+
+
+def test_release_smoke_redaction_acts_on_the_install_log(tmp_path: Path) -> None:
+    if sys.platform == "win32":
+        pytest.skip("runs the workflow's bash")
+    install = _smoke_step(_release_smoke()["jobs"]["linux-install"], "Install with the one-line installer")
+    log = tmp_path / "install.log"
+    log.write_text(_REDACTION_SAMPLE, encoding="utf-8")
+
+    result = _run_bash_step(
+        f'install_log="{log}"\n{_shell_function(install["run"], "show_log")}\nshow_log', {}
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == _REDACTION_EXPECTED
+
+
+def test_release_smoke_diagnostics_never_reads_the_setup_token(tmp_path: Path) -> None:
+    # Runs the real Diagnostics step against a workspace that holds the login
+    # token file. The token must not reach the output, the journal and status
+    # lines are redacted, and the allowlisted server_debug.log is still printed.
+    if sys.platform == "win32":
+        pytest.skip("runs the workflow's bash")
+    diagnostics = _smoke_step(_release_smoke()["jobs"]["linux-install"], "Diagnostics")["run"]
+    assert "setup-token" not in diagnostics
+    assert "find " not in diagnostics
+
+    workspace = tmp_path / "ws"
+    runtime = workspace / ".runtime"
+    runtime.mkdir(parents=True)
+    token = "BARE-LOGIN-TOKEN-do-not-print-0123456789"
+    (runtime / "setup-token").write_text(token + "\n", encoding="utf-8")
+    (runtime / "server_debug.log").write_text("debug line\n" + "A" * 40 + "\n", encoding="utf-8")
+
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    (stubs / "systemctl").write_text(
+        "#!/bin/sh\necho 'STATUS Open Ciaobot: https://h/?token=JOURNALSECRET'\n", encoding="utf-8"
+    )
+    (stubs / "sudo").write_text("#!/bin/sh\necho 'JOURNAL https://h/?setup=JOURNALSECRET2'\n", encoding="utf-8")
+    for stub in stubs.iterdir():
+        stub.chmod(0o755)
+
+    result = _run_bash_step(
+        diagnostics,
+        {
+            "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}",
+            "RUNNER_TEMP": str(tmp_path),
+            "SMOKE_WORKSPACE": str(workspace),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert token not in result.stdout
+    assert "JOURNALSECRET" not in result.stdout
+    assert "A" * 40 not in result.stdout
+    assert "== server_debug.log" in result.stdout
+    assert "debug line" in result.stdout
+    assert "STATUS Open Ciaobot: [redacted]" in result.stdout
+    assert "JOURNAL [redacted]" in result.stdout
 
 
 def test_release_smoke_runs_the_legacy_update_gate_against_published_assets() -> None:
@@ -457,7 +596,7 @@ def test_release_smoke_runs_the_legacy_update_gate_against_published_assets() ->
     assert legacy["if"] == "needs.resolve.outputs.legacy == 'true'"
     assert legacy["runs-on"] == "macos-latest"
 
-    resolve = "\n".join(step["run"] for step in smoke["jobs"]["resolve"]["steps"] if "run" in step)
+    resolve = _smoke_runs(smoke["jobs"]["resolve"])
     assert 'if [ "$version" = "$LEGACY_MANIFEST_VERSION" ]; then' in resolve
 
     checkout = next(step for step in legacy["steps"] if step.get("uses", "").startswith("actions/checkout@"))
@@ -470,13 +609,83 @@ def test_release_smoke_runs_the_legacy_update_gate_against_published_assets() ->
     assert "--uv \"$(command -v uv)\"" in gate["run"]
 
 
+def test_release_smoke_gate_step_pins_its_token_and_timeout() -> None:
+    gate = next(
+        step
+        for step in _release_smoke()["jobs"]["legacy-update"]["steps"]
+        if "legacy-update-gate.py" in step.get("run", "")
+    )
+    assert gate["env"] == {"GH_TOKEN": "${{ github.token }}"}
+    assert isinstance(gate.get("timeout-minutes"), int)
+
+
+def test_release_smoke_and_publish_name_the_same_legacy_manifest_version() -> None:
+    assert (
+        _release_smoke()["env"]["LEGACY_MANIFEST_VERSION"]
+        == _publish_workflow()["env"]["LEGACY_MANIFEST_VERSION"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("requested", "accepted"),
+    [
+        ("2.0.0", True),
+        ("v2.0.0", True),
+        ("1.10.0", True),
+        ("10.0.12", True),
+        ("2.0", False),
+        ("2.0.0.0", False),
+        ("02.0.0", False),
+        ("2.00.0", False),
+        ("2.0.0-rc1", False),
+        ("2.0.0+build", False),
+        ("2..0", False),
+        ("2.0.x", False),
+        ("v", False),
+        ("", False),
+        ("2.0.0\n", False),
+    ],
+)
+def test_release_smoke_resolve_accepts_only_strict_semver(
+    tmp_path: Path, requested: str, accepted: bool
+) -> None:
+    # Runs the real resolve step: a looser pattern, or a dropped check, fails here.
+    if sys.platform == "win32":
+        pytest.skip("runs the workflow's bash")
+    smoke = _release_smoke()
+    resolve = _smoke_step(smoke["jobs"]["resolve"], "Normalize version")["run"]
+    output = tmp_path / "github-output"
+    output.touch()
+
+    result = _run_bash_step(
+        resolve,
+        {
+            "REQUESTED": requested,
+            "GITHUB_OUTPUT": str(output),
+            "LEGACY_MANIFEST_VERSION": smoke["env"]["LEGACY_MANIFEST_VERSION"],
+        },
+    )
+
+    assert (result.returncode == 0) is accepted, result.stderr
+    if accepted:
+        assert output.read_text(encoding="utf-8").startswith("version=")
+
+
+def test_release_smoke_runs_only_when_called_by_publish_or_started_by_hand() -> None:
+    smoke = _release_smoke()
+    triggers = smoke.get("on", smoke.get(True))  # YAML 1.1 reads a bare `on` key as True
+    assert set(triggers) == {"workflow_call", "workflow_dispatch"}
+
+    call = _publish_workflow()["jobs"]["release-smoke"]
+    assert call["uses"] == "./.github/workflows/release-smoke.yml"
+    assert call["if"] == "github.event_name == 'release'"
+
+
 def test_release_smoke_keeps_expressions_out_of_run_blocks_and_secrets_out() -> None:
     # Security-sensitive workflow: no expression is interpolated into a shell
     # script (values come in through env:), no repository secret is read, and
     # every action is pinned to a version, not a branch.
-    text = (Path(__file__).parents[1] / ".github" / "workflows" / "release-smoke.yml").read_text(
-        encoding="utf-8"
-    )
+    text = _smoke_text()
     smoke = _release_smoke()
     for name, job in smoke["jobs"].items():
         for step in job["steps"]:
@@ -489,15 +698,15 @@ def test_release_smoke_keeps_expressions_out_of_run_blocks_and_secrets_out() -> 
     assert smoke["permissions"] == {"contents": "read"}
 
 
-def test_release_smoke_only_runs_with_a_published_version() -> None:
-    workflow = (
-        Path(__file__).parents[1] / ".github" / "workflows" / "release-smoke.yml"
-    ).read_text(encoding="utf-8")
-
-    assert "workflow_call:" in workflow
-    assert "workflow_dispatch:" in workflow
-    assert "pull_request:" not in workflow
-    assert 'LaunchAgents/com.ciao.server.plist")' not in workflow
+def test_ciao_release_skill_describes_the_linux_smoke_and_the_2_0_0_legacy_job() -> None:
+    skill = (Path(__file__).parents[1] / "skills" / "ciao-release" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "`release-smoke` (Linux" in skill
+    assert "`legacy-update`" in skill
+    assert "`release-smoke` (macos)" not in skill
+    for gone in ("LaunchAgent", "--load-launchd", "install receipt"):
+        assert gone not in skill, gone
 
 
 def test_first_party_install_command_stays_install_sh() -> None:

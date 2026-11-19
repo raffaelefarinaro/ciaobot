@@ -37,12 +37,12 @@ jobs:
         run: |
           set -euo pipefail
           version="${REQUESTED#v}"
-          case "$version" in
-            ''|*[!0-9.]*)
-              echo "not a release version: '$REQUESTED'" >&2
-              exit 1
-              ;;
-          esac
+          # The same strict semver scripts/legacy-update-gate.py accepts.
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if ! [[ $version =~ $semver ]]; then
+            echo "not a release version: '$REQUESTED'" >&2
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           legacy=false
           if [ "$version" = "$LEGACY_MANIFEST_VERSION" ]; then
@@ -67,11 +67,12 @@ jobs:
           workspace="$RUNNER_TEMP/ciaobot-smoke-ws"
           echo "SMOKE_WORKSPACE=$workspace" >> "$GITHUB_ENV"
           install_log="$RUNNER_TEMP/linux-install.log"
-          # The login URL ciao setup prints is a credential: it is redacted
-          # before anything reaches the job log.
+          # The login URL ciao setup prints is a credential, and so is a bare
+          # login token line: both are redacted before anything reaches the job log.
           show_log() {
             sed -E -e 's#(Open Ciaobot: ).*#\1[redacted]#' \
-              -e 's#https?://[^[:space:]]*(token|setup)[^[:space:]]*#[redacted]#g' "$install_log" || true
+              -e 's#https?://[^[:space:]]*(token|setup)[^[:space:]]*#[redacted]#g' \
+              -e 's#^[A-Za-z0-9_-]{32,}$#[redacted]#' "$install_log"
           }
           if ! { curl -fsSL --max-time 600 "https://github.com/raffaelefarinaro/ciaobot/releases/download/v${VERSION}/install.sh" \
             | sh -s -- --workspace "$workspace"; } > "$install_log" 2>&1; then
@@ -100,17 +101,22 @@ jobs:
             sleep 1
           done
           curl -fsS --max-time 5 "http://127.0.0.1:$port/api/startup-status" | jq -e '.desktop_api_version == 1'
-      - name: Re-run the one-liner as the update path
+      - name: Re-run the one-liner (same-version reinstall)
         timeout-minutes: 15
         run: |
           set -euo pipefail
-          # No flags, as a user pasting the one-liner again would run it. The
-          # installed unit keeps the workspace it records.
+          # Same version, no flags: this is a same-version reinstall of the
+          # pasted one-liner, not an upgrade. The installed unit keeps the
+          # workspace it records. The service step restarts the unit, so the
+          # main PID must change.
+          pid_before=$(systemctl show -p MainPID --value ciaobot.service)
+          [ "$pid_before" -gt 0 ]
           update_log="$RUNNER_TEMP/linux-update.log"
           if ! { curl -fsSL --max-time 600 "https://github.com/raffaelefarinaro/ciaobot/releases/download/v${VERSION}/install.sh" \
             | sh; } > "$update_log" 2>&1; then
             sed -E -e 's#(Open Ciaobot: ).*#\1[redacted]#' \
-              -e 's#https?://[^[:space:]]*(token|setup)[^[:space:]]*#[redacted]#g' "$update_log" || true
+              -e 's#https?://[^[:space:]]*(token|setup)[^[:space:]]*#[redacted]#g' \
+              -e 's#^[A-Za-z0-9_-]{32,}$#[redacted]#' "$update_log"
             echo "the update run of the one-line installer failed" >&2
             exit 1
           fi
@@ -128,24 +134,33 @@ jobs:
             sleep 1
           done
           curl -fsS --max-time 5 "http://127.0.0.1:$port/api/startup-status" | jq -e '.desktop_api_version == 1'
+          pid_after=$(systemctl show -p MainPID --value ciaobot.service)
+          [ "$pid_after" -gt 0 ]
+          [ "$pid_after" != "$pid_before" ]
       - name: Diagnostics
         if: failure()
         run: |
           redact() {
             sed -E -e 's#(Open Ciaobot: ).*#\1[redacted]#' \
-              -e 's#https?://[^[:space:]]*(token|setup)[^[:space:]]*#[redacted]#g'
+              -e 's#https?://[^[:space:]]*(token|setup)[^[:space:]]*#[redacted]#g' \
+              -e 's#^[A-Za-z0-9_-]{32,}$#[redacted]#'
           }
           echo "--- install log ---"
           redact < "$RUNNER_TEMP/linux-install.log" 2>/dev/null | tail -200 || true
           echo "--- update log ---"
           redact < "$RUNNER_TEMP/linux-update.log" 2>/dev/null | tail -200 || true
           echo "--- service ---"
-          systemctl status ciaobot --no-pager 2>&1 | head -60 || true
+          systemctl status ciaobot --no-pager 2>&1 | head -60 | redact || true
           echo "--- journal ---"
           sudo -n journalctl -u ciaobot -n 200 --no-pager 2>&1 | redact || true
           echo "--- runtime logs ---"
-          find "${SMOKE_WORKSPACE:-$HOME/Ciaobot}/.runtime" -maxdepth 1 -type f \
-            -exec sh -c 'echo "== $1"; tail -80 "$1" | sed -E -e "s#(Open Ciaobot: ).*#\1[redacted]#"' _ {} \; 2>/dev/null || true
+          # Allowlist only: the workspace .runtime directory holds the login
+          # token file, so no other file in it is opened.
+          debug_log="${SMOKE_WORKSPACE:-$HOME/Ciaobot}/.runtime/server_debug.log"
+          if [ -f "$debug_log" ]; then
+            echo "== server_debug.log"
+            tail -80 "$debug_log" | redact || true
+          fi
 
   legacy-update:
     needs: resolve
@@ -163,6 +178,7 @@ jobs:
         with:
           version: "0.13.8"
       - name: Stage the release from the 1.x updater
+        timeout-minutes: 15
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

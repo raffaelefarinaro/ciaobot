@@ -317,10 +317,15 @@ findings land as inline comments.
      manifest and its signature.
      Since #653 there is no app archive, no updater feed, no native verifier and
      no bundled runtime.
-   - `release-smoke` (macos) — installs the engine from the release's one-line
-     installer with a restricted PATH, verifies the `ciao` entry point, the
-     install receipt and the LaunchAgent, checks the startup API, then reruns
-     the installer as an update/recovery test.
+   - `release-smoke` (Linux, `ubuntu-24.04`) — runs the published `install.sh`
+     one-liner with a workspace, checks `ciao --version`, the `ciaobot` systemd
+     unit and `/api/startup-status`, then re-runs the same one-liner with no
+     flags as a same-version reinstall (not an upgrade) and checks that the
+     unit restarted under a new main PID. `legacy-update` (`macos-latest`) runs
+     only for 2.0.0, where `LEGACY_MANIFEST_VERSION` is set: it runs
+     `scripts/legacy-update-gate.py` from the tagged checkout against the
+     published assets with the pinned 1.x wheel. It stages the release and
+     never applies it.
 4. A follow-up job merges `main` back into `develop`.
 
 No manual tag, no `gh release create`, no tap push, no separate desktop release —
@@ -471,9 +476,10 @@ Release-cutting traps. Bugs in the code are not here — file them.
 - **The installer must fail closed.** The engine manifest signature and the
   wheel's digest are both verified before extraction. Never turn a verification
   error into a warning or add an unsigned fallback.
-- **Engine cold start is the installer's job** — do not "fix" `release-smoke` by
-  adding `--load-launchd` to the workflow. That would hide a genuine cold-start
-  defect.
+- **Engine cold start is the installer's job** — if the Linux `release-smoke`
+  fails on the service or startup check, fix the installer or the unit, not the
+  workflow. Do not skip the installer's `ciao service install` step or add flags
+  the one-liner does not take. That would hide a genuine cold-start defect.
 - **Release propagation lag.** Verify the GitHub release contains the wheel, its
   signed manifest and both installer names before diagnosing an
   installer failure.
