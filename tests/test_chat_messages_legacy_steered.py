@@ -21,7 +21,7 @@ async def test_legacy_steered_indexes_number_rows_without_a_steered_flag(
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Steer history", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="steer-history")
-    chat.session_id = "sess-steer"
+    chat.session_id = "463dd295-e092-5933-a73d-3352e1ab3c6d"
     chat.user_turn_steered = {"1": True}
 
     fake_sdk = SimpleNamespace(
@@ -32,7 +32,7 @@ async def test_legacy_steered_indexes_number_rows_without_a_steered_flag(
             _Msg("assistant", "done"),
         ]
     )
-    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", fake_sdk.get_session_messages)
 
     response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
     rows = json.loads(response.body)

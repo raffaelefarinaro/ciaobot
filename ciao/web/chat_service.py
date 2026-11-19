@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -600,6 +601,31 @@ def _clean_llm_title(text: str | None) -> str | None:
     if len(title) > _TITLE_MAX_CHARS:
         title = title[: _TITLE_MAX_CHARS - 3].rstrip() + "..."
     return title or None
+
+
+def _clean_adapter_title(text: str | None) -> str | None:
+    """Reduce an agent-supplied session title to one short, printable line, or None.
+
+    The agent's title is untrusted text. Claude's fallback can be the raw first prompt, with
+    several paragraphs, terminal escapes or bidi overrides, and it must not reach the store or
+    the broadcast as it is. The first line that survives cleaning wins. Whitespace becomes a
+    space and runs collapse. Characters in the Unicode C categories (control, format including
+    bidi overrides, unassigned, surrogate, private use) are dropped. The result takes the same
+    cap as `_clean_llm_title`.
+    """
+    for line in (text or "").splitlines():
+        kept: list[str] = []
+        for ch in line:
+            if ch.isspace():
+                kept.append(" ")
+            elif not unicodedata.category(ch).startswith("C"):
+                kept.append(ch)
+        cleaned = " ".join("".join(kept).split())
+        if cleaned:
+            if len(cleaned) > _TITLE_MAX_CHARS:
+                cleaned = cleaned[: _TITLE_MAX_CHARS - 3].rstrip() + "..."
+            return cleaned
+    return None
 
 
 _FRONTMATTER_DELIM = "---"

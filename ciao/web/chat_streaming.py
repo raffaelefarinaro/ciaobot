@@ -36,6 +36,7 @@ from ciao.models import (
     PermissionRequestEvent,
     PromptCancelledEvent,
     ResultEvent,
+    SessionTitleEvent,
     StreamEvent,
     SystemStatusEvent,
     ThinkingEvent,
@@ -248,6 +249,8 @@ class ChatStreamingHost(Protocol):
     async def _auto_title_and_publish(
         self, chat_id: str, user_text: str, assistant_text: str
     ) -> None: ...
+
+    def apply_adapter_title(self, chat_id: str, title: str) -> bool: ...
 
 
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None: ...
@@ -1557,6 +1560,10 @@ class ChatStreaming:
 
         async for event in provider.execute_streaming(request):
             streamed_steps.feed(event)
+            if isinstance(event, SessionTitleEvent):
+                # The agent's own title goes to the chat, not to the PWA stream.
+                self._host.apply_adapter_title(chat_id, event.title)
+                continue
             if (
                 isinstance(event, ResultEvent)
                 and stream is not None
@@ -2196,6 +2203,9 @@ class ChatStreaming:
                 if isinstance(event, ContextCompactedEvent):
                     self._clear_stable_context(chat_id)
                 drain_segment.feed(event)
+                if isinstance(event, SessionTitleEvent):
+                    self._host.apply_adapter_title(chat_id, event.title)
+                    continue
                 if (
                     isinstance(event, ResultEvent)
                     and event.origin

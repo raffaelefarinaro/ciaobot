@@ -807,6 +807,14 @@ def _prune_send_id_history(send_ids: dict) -> None:
             del send_ids[key]
 
 
+# Origins of a chat title (ChatInfo.title_origin). "default" and "fallback" are Ciaobot's
+# own auto-title; the agent's title replaces only those, and an "adapter" title only
+# when a later one differs.
+TITLE_ORIGINS = ("default", "fallback", "adapter", "user")
+CIAOBOT_AUTO_TITLE_ORIGINS = ("default", "fallback")
+ADAPTER_REPLACEABLE_TITLE_ORIGINS = ("default", "fallback", "adapter")
+
+
 @dataclass(slots=True)
 class ChatInfo:
     chat_id: str
@@ -900,6 +908,15 @@ class ChatInfo:
     # Transient UI flag: "pending" while an auto-title generation is in
     # flight, "ready" otherwise. Not persisted — reset to "ready" on load.
     title_status: str = "ready"
+    # Who wrote the current title, which decides whether a later write may replace it:
+    #   "default"  the New Chat placeholder
+    #   "fallback" Ciaobot's own auto-title (deterministic or LLM); the agent's title replaces it
+    #   "adapter"  the agent's session title (ACP session_info_update, or a native
+    #              provider title); provisional, so a later adapter title replaces it
+    #   "user"     a rename, or any title set on purpose (fork, schedule, recovered chat)
+    # Persisted. A record with no origin, or an unknown one, reads as "default" when its
+    # title is New Chat and as "user" otherwise, so an existing title is never replaced.
+    title_origin: str = ""
     # Needs-you action cards. Transient and memory only:
     # an action can name a sign-in URL or a helper session, so it never reaches
     # the chat registry. It ends with the conversation it was raised in (archive,
@@ -1036,6 +1053,10 @@ class ChatInfo:
     # `{path, branch, is_worktree, exists}`. Kept only for chats in a linked
     # project (see `repo_location.py`).
     repo_location: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.title_origin not in TITLE_ORIGINS:
+            self.title_origin = "default" if self.title == DEFAULT_CHAT_TITLE else "user"
 
     def to_dict(self, *, local: bool | None = None) -> dict:
         self.taken_edits = [entry for entry in self.taken_edits
@@ -1468,6 +1489,9 @@ class ProjectChatManager:
                 chat_id=cid,
                 project_id=cd["project_id"],
                 title=cd.get("title", "New Chat"),
+                # Migration: records written before title_origin read it as "" and
+                # __post_init__ infers it, so an existing non-default title is user-owned.
+                title_origin=str(cd.get("title_origin", "") or ""),
                 model=chat_model,
                 # Migration: legacy chats without a `provider` key default to "claude".
                 provider=cd.get("provider") or "claude",
@@ -1613,6 +1637,7 @@ class ProjectChatManager:
                 cid: {
                     "project_id": c.project_id,
                     "title": c.title,
+                    "title_origin": c.title_origin,
                     "model": c.model,
                     "provider": c.provider,
                     "mode": c.mode,
@@ -4300,6 +4325,7 @@ class ProjectChatManager:
             chat.repo_location = {}
         if title is not None:
             chat.title = title
+            chat.title_origin = "user"
         if changes_model:
             new_provider = provider if provider is not None else chat.provider
             # Cross-provider switches mid-chat would silently break: the
@@ -8934,6 +8960,38 @@ class ProjectChatManager:
             sent_at = str(timing.get("sent_at") or "")
         return {"turn_index": found_index, "sent_at": sent_at}
 
+    def apply_adapter_title(self, chat_id: str, title: str) -> bool:
+        """Apply the agent's own session title, provisionally. True when the chat changed.
+
+        Replaces a title Ciaobot wrote (the New Chat placeholder or its own auto-title) and an
+        earlier adapter title, but never a user-owned title. The origin becomes "adapter" even
+        when the text is unchanged, so Ciaobot's fallback stops being written. Titles that fail
+        the provider-title check are dropped, as the native reads drop them. The agent's text is
+        untrusted: it is reduced to one short printable line before the check.
+        """
+        chat = self._chats.get(chat_id)
+        clean = chat_service._real_title(chat_service._clean_adapter_title(title) or "")
+        if chat is None or clean is None:
+            return False
+        if chat.title_origin not in ADAPTER_REPLACEABLE_TITLE_ORIGINS:
+            return False
+        if chat.title_origin == "adapter" and clean == chat.title:
+            return False
+        same_text = clean == chat.title
+        chat.title = clean
+        chat.title_origin = "adapter"
+        chat.title_status = "ready"
+        self._save()
+        if same_text:
+            return False
+        self._events.publish({
+            "type": "chat_title",
+            "chat_id": chat_id,
+            "title": clean,
+            "status": "ready",
+        })
+        return True
+
     async def _auto_title_and_publish(
         self, chat_id: str, user_text: str, assistant_text: str
     ) -> None:
@@ -10073,13 +10131,14 @@ class ProjectChatManager:
 
         Three tiers, in order:
 
-        1. The provider's native session title (opencode's ``title`` agent or
-           Claude Code's ``aiTitle``). OpenCode is polled through
-           ``_TITLE_POLL_DELAYS`` before the lower tiers run. Claude (ACP) is
-           read once, with no wait. Context-prefixed Ciaobot prompts commonly
-           suppress Claude's native titler, and nothing polls after the fallback
-           is written. Every wait re-checks the chat, so a manual rename or a
-           delete stops titling.
+        1. The provider's native session title, read through
+           ``BaseProvider.native_title_candidates`` (OpenCode's ``title`` agent).
+           OpenCode is polled through ``_TITLE_POLL_DELAYS`` before the lower
+           tiers run, and every wait re-checks the chat, so a manual rename or a
+           delete stops titling. Claude (ACP) has no native read: its title
+           arrives as a ``session_info_update`` event, applied by
+           ``apply_adapter_title`` while the turn streams, so its poll is
+           skipped and the lower tiers run without a wait.
         2. A one-shot model call (``_llm_chat_title``) when the native title
            is absent, run straight after the inline native read.
         3. The deterministic ``chat_service._fallback_title`` (first 6 words of the
@@ -10087,17 +10146,17 @@ class ProjectChatManager:
         """
         fallback = chat_service._fallback_title(user_text)
 
-        def _is_titling_target(title: str) -> bool:
-            # "New Chat" is always a target; the deterministic fallback is also
-            # a target so the end-of-turn pass in `_drive()` can replace it with
-            # a title that reads the assistant's reply.
-            return title == "New Chat" or (fallback is not None and title == fallback)
+        def _is_titling_target(chat: ChatInfo) -> bool:
+            # The New Chat placeholder and Ciaobot's own auto-title are targets, so the
+            # end-of-turn pass in `_drive()` can replace the fallback with a title that
+            # reads the assistant's reply. An agent's title or a user rename is not.
+            return chat.title_origin in CIAOBOT_AUTO_TITLE_ORIGINS
 
         chat = self._chats.get(chat_id)
         provider = getattr(chat, "provider", "claude") if chat else "claude"
-        delays: tuple[float, ...] = self._TITLE_POLL_DELAYS
-        if provider == "claude":
-            delays = (0.0,)
+        # Claude has no native read (see tier 1), so it takes no poll. Polling the full schedule
+        # here would hold the LLM title back by the schedule's two-minute tail.
+        delays: tuple[float, ...] = () if provider == "claude" else self._TITLE_POLL_DELAYS
         stopped, native = await self._poll_native_title(chat_id, delays, _is_titling_target)
         if stopped:
             return None
@@ -10106,26 +10165,29 @@ class ProjectChatManager:
         # Native title was absent. A model-generated label beats the raw
         # prompt snippet; the end-of-turn pass can retry a failed early call.
         chat = self._chats.get(chat_id)
-        if chat is not None and _is_titling_target(chat.title):
+        if chat is not None and _is_titling_target(chat):
             llm_title = await self._llm_chat_title(chat, user_text, assistant_text)
             if llm_title:
-                # Re-check: user may have renamed while the model ran.
+                # Re-check: user may have renamed while the model ran, or the agent
+                # may have sent its own title.
                 chat = self._chats.get(chat_id)
-                if chat is not None and _is_titling_target(chat.title):
+                if chat is not None and _is_titling_target(chat):
                     chat.title = llm_title
+                    chat.title_origin = "fallback"
                     self._save()
                     return llm_title
         if fallback is None:
             return None
         chat = self._chats.get(chat_id)
-        if chat is None or not _is_titling_target(chat.title):
+        if chat is None or not _is_titling_target(chat):
             return None
         chat.title = fallback
+        chat.title_origin = "fallback"
         self._save()
         return fallback
 
     async def _poll_native_title(
-        self, chat_id: str, delays: Sequence[float], is_target: Callable[[str], bool]
+        self, chat_id: str, delays: Sequence[float], is_target: Callable[[ChatInfo], bool]
     ) -> tuple[bool, str | None]:
         """Wait through ``delays`` for the provider's native title and write it when it lands.
 
@@ -10141,7 +10203,7 @@ class ProjectChatManager:
             # may still be creating it, and a later poll will find it.
             # The fallback title is still considered title-able so the late
             # poll (fired after the turn) can upgrade it to the native title.
-            if chat is None or not is_target(chat.title):
+            if chat is None or not is_target(chat):
                 return True, None
             if not chat.session_id:
                 continue
@@ -10152,9 +10214,10 @@ class ProjectChatManager:
 
             # Re-check: user may have renamed while we were reading.
             chat = self._chats.get(chat_id)
-            if chat is None or not is_target(chat.title):
+            if chat is None or not is_target(chat):
                 return True, None
             chat.title = title
+            chat.title_origin = "adapter"
             self._save()
             return False, title
         return False, None

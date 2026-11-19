@@ -61,7 +61,7 @@ async def test_interrupted_marker_is_hidden_and_does_not_steal_queued_turn_image
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Queue interrupt", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="interrupt-test")
-    chat.session_id = "sess-interrupt"
+    chat.session_id = "752f951e-184a-55a1-b693-b4c32f14741c"
     chat.user_turn_images = {"1": ["queued.png"]}
 
     fake_sdk = SimpleNamespace(
@@ -72,7 +72,7 @@ async def test_interrupted_marker_is_hidden_and_does_not_steal_queued_turn_image
             _Msg("user", "queued follow-up"),
         ]
     )
-    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", fake_sdk.get_session_messages)
 
     response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
     payload = response.body.decode()
@@ -95,7 +95,7 @@ async def test_interrupted_marker_for_tool_use_is_hidden(
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Tool interrupt", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="tool-interrupt-test")
-    chat.session_id = "sess-tool-interrupt"
+    chat.session_id = "fd120aba-f3aa-5880-a93e-fb3c62aaa0b9"
 
     fake_sdk = SimpleNamespace(
         get_session_messages=lambda session_id, directory: [
@@ -104,7 +104,7 @@ async def test_interrupted_marker_for_tool_use_is_hidden(
             _Msg("user", "queued follow-up"),
         ]
     )
-    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", fake_sdk.get_session_messages)
 
     response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
     payload = response.body.decode()
