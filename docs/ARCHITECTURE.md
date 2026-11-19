@@ -1087,7 +1087,7 @@ Settings → MCP and in Chat details (`ChatPanel.vue`). Chat details reads
 provider row; the button types that row's `mcp_command` into the chat's
 terminal (`composables/useRunInTerminal.ts`) and copies it when the terminal is
 not ready. The page keeps no MCP health or sign-in state and shows no
-`mcp_auth` card. Generic reviewed command cards and Settings terminal actions
+MCP card. Generic reviewed command cards and Settings terminal actions
 remain separate.
 The standalone composer `/mcp` opens Chat details on the MCP section; it is not the provider CLI command. Shared settings styling lives
 in `components/settings/settingsPanels.css`, pulled into both `SettingsView`
