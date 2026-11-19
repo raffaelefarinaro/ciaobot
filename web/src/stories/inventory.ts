@@ -4489,7 +4489,7 @@ export const inventory: InventoryEntry[] = [
     "id": "components-task-board-view",
     "name": "TaskBoardView",
     "family": "Tasks, projects and automations",
-    "kind": "composition",
+    "kind": "component",
     "owner": {
       "path": "web/src/components/TaskBoardView.vue",
       "anchor": "<template>"
@@ -4503,9 +4503,9 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in TaskBoardView.vue implements this render; no rendered-state story exists. The wrapper has no further template branches or props of its own."
+        "coverage": "covered",
+        "storyIds": ["task-board-view--default"],
+        "note": "The route wrapper mounts the production TaskWorkspaceSurface as the board: the New task action and both cards draw through the #3267 boundary with declared routes only. Its own template adds no branches."
       }
     ],
     "loading": {
@@ -4515,8 +4515,7 @@ export const inventory: InventoryEntry[] = [
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
-    },
-    "rationale": "Connected route or host composition; isolate its seam before rendering it in the workshop."
+    }
   },
   {
     "id": "components-task-glyph",
@@ -4669,7 +4668,7 @@ export const inventory: InventoryEntry[] = [
     "id": "components-task-workspace-surface",
     "name": "TaskWorkspaceSurface",
     "family": "Tasks, projects and automations",
-    "kind": "composition",
+    "kind": "component",
     "owner": {
       "path": "web/src/components/TaskWorkspaceSurface.vue",
       "anchor": "<template>"
@@ -4685,7 +4684,7 @@ export const inventory: InventoryEntry[] = [
       "board",
       "editor"
     ],
-    "variantNotes": "Actual inline board/lanes/card, editor, completion, delegation and move/ordering owner. Audited branches: firstLoad/loadFailed/loadStale/filteredEmpty/boardEmpty load notices, missingTaskId, orderNotice, unreadable rows, refused-write action error, the collapsed Done tab and the overlay mode's status sheet. Page vs overlay is the mode prop; board vs editor is board chrome vs the detail page. The inline families are audited at their own rows (task-board-cards, task-editor, task-completion, task-delegation, task-ordering); these surface states stay uncovered because the workshop coverage guard admits story coverage only on component-kind rows.",
+    "variantNotes": "Actual inline board/lanes/card, editor, completion, delegation and move/ordering owner. Audited branches: firstLoad/loadFailed/loadStale/filteredEmpty/boardEmpty load notices, missingTaskId, orderNotice, unreadable rows, refused-write action error, the collapsed Done tab and the overlay mode's status sheet. Page vs overlay is the mode prop; board vs editor is board chrome vs the detail page. The inline families are audited at their own rows (task-board-cards, task-editor, task-completion, task-delegation, task-ordering); the board load states (firstLoad, loadFailed, loadStale), filteredEmpty, boardEmpty and ordering are covered by the TaskWorkspaceSurface stories; the rest of these surface states stay uncovered, and the inline families are claimed at their own rows.",
     "states": [
       {
         "name": "default",
@@ -4701,33 +4700,33 @@ export const inventory: InventoryEntry[] = [
       },
       {
         "name": "firstLoad",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TaskWorkspaceSurface.vue implements the firstLoad branch: .task-loading role=status placeholder lanes, a count bar in each lane head and two loading bars per lane, while the first board read is in flight; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-workspace-surface--first-load"],
+        "note": "FirstLoad renders the .task-loading role=status placeholder: three lanes, two placeholder cards each, a count bar per head and the Done toggle label, at a 390px width with equal lane widths; no real card or title."
       },
       {
         "name": "loadFailed",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TaskWorkspaceSurface.vue implements the loadFailed branch: .task-failed role=alert with the server's sentence and a Retry, never reading as an empty board; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-workspace-surface--load-failed"],
+        "note": "LoadFailed renders .task-failed role=alert with the server sentence and Retry, and no lane or empty-board hint."
       },
       {
         "name": "loadStale",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TaskWorkspaceSurface.vue implements the loadStale branch: .task-stale role=status over retained rows after a failed refresh, with the same Retry; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-workspace-surface--load-stale"],
+        "note": "LoadStale: a refused order write re-reads and the re-read fails; .task-stale role=status with Retry sits over the retained cards."
       },
       {
         "name": "filteredEmpty",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TaskWorkspaceSurface.vue implements the filteredEmpty branch: .task-filtered-empty hint when a filter hides a non-empty set, with Clear filters also offered from the chip row; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-workspace-surface--filtered-empty"],
+        "note": "FilteredEmpty: a due filter hides both tasks; .task-filtered-empty names the count with Clear filters, and Clear filters brings the cards back."
       },
       {
         "name": "boardEmpty",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TaskWorkspaceSurface.vue implements the boardEmpty branch: .task-empty hint for a genuinely empty board, naming New task and ciao task; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-workspace-surface--board-empty"],
+        "note": "BoardEmpty: an empty list read draws the .task-empty hint naming New task and ciao task, with no lanes and no filter hint."
       },
       {
         "name": "missingTaskId",
@@ -4755,9 +4754,9 @@ export const inventory: InventoryEntry[] = [
       },
       {
         "name": "ordering",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "Card reorder paths: Move up / Move down in the card menu (disabled with stepDisabled and the orderNotice title), the Move… sheet, drag commits and Shift+Arrow from the card's open button, one write at the card's revision; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-workspace-surface--ordering"],
+        "note": "Ordering: Move down on a card in a shared lane writes one placement, and the answered order draws the moved card below its neighbour."
       },
       {
         "name": "editing",
@@ -4785,8 +4784,7 @@ export const inventory: InventoryEntry[] = [
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
-    },
-    "rationale": "Connected route or host composition; isolate its seam before rendering it in the workshop. The workshop coverage guard (#3263) admits story coverage only on component-kind rows, so this composition row cannot carry covered states or story IDs; the sheets' families are audited at the task-editor, task-completion, task-delegation, task-ordering and task-board-cards rows, and the board's own states are enumerated uncovered here."
+    }
   },
   {
     "id": "components-terminal-key-row",
@@ -9433,55 +9431,55 @@ export const inventory: InventoryEntry[] = [
       "filters",
       "Done"
     ],
-    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are indirect composition hosts, not direct inline consumers. Audited card-region branches and classes: lane arrangement and heads, card content variants, filter-drawn groups, the Done lane/tab, the first-load placeholder cards, drag-sort classes and the busy write state. These family states stay uncovered because the workshop coverage guard admits story coverage only on component-kind rows.",
+    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are indirect composition hosts, not direct inline consumers. Audited card-region branches and classes: lane arrangement and heads, card content variants, filter-drawn groups, the Done lane/tab, the first-load placeholder cards, drag-sort classes and the busy write state. Covered by the Task board cards stories, which mount the production surface. Dragging stays uncovered: it needs a live pointer drag the workshop runner does not drive, and the keyboard and menu moves are claimed under the ordering state of the surface row.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-cards in TaskWorkspaceSurface.vue renders each card's check, title, open button, menu and content from the loaded board; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-board-cards--default"],
+        "note": "Default: the loaded board draws each card with its check, title, open button, menu and project and due meta; asserts the check label and the lede count."
       },
       {
         "name": "lanes",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-cards in TaskWorkspaceSurface.vue includes lanes: four fixed task-lanes--columns side by side or one .task-lanes--list group while a status filter is active, lane heads with label, count and Hide, and empty-lane text per case; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-board-cards--lanes"],
+        "note": "Lanes: four status lanes side by side with heads and counts, the empty lane says Nothing here, and Done sits behind its tab."
       },
       {
         "name": "cards",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-cards in TaskWorkspaceSurface.vue includes cards: project and due meta line, overdue said in words as well as colour, the agent note and band, the chat-archived note and reconcile notes; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-board-cards--cards"],
+        "note": "Cards: an overdue due date is red with a hidden Overdue prefix, the agent note and band show, and a needs-you band offers Open chat."
       },
       {
         "name": "filters",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-cards in TaskWorkspaceSurface.vue includes the filter-drawn board: the chips and selects live outside the load branches in .task-filters, a status filter draws its one group at full width, with Clear filters offered while filters are active; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-board-cards--filters"],
+        "note": "Filters: a status chip draws its one group at full width with aria-pressed set, and Clear filters is offered."
       },
       {
         "name": "Done",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".task-cards in TaskWorkspaceSurface.vue includes Done: task-card--done placement, the collapsed Done tab (aria-expanded=false) that opens the lane, Hide returning to the tab, earlier done offering Show all, and cards dropped onto the tab opening the completion gesture; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-board-cards--done"],
+        "note": "Done: the drawn Done lane holds two .task-card--done cards with Hide; Hide returns it to a collapsed aria-expanded=false tab."
       },
       {
         "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "During first load .task-cards in TaskWorkspaceSurface.vue renders placeholder cards of two .task-loading-bar spans under a count-bar lane head (#2961 geometry), Done collapsed to its toggle label; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-board-cards--loading"],
+        "note": "Loading: two placeholder cards per lane with two loading bars each and a count bar per head, at 390px; no real title."
       },
       {
         "name": "dragging",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": ".task-cards in TaskWorkspaceSurface.vue carries the drag-sort visuals: task-lanes--dragging, drag-source, drag-placeholder and drag-settling, with the hovered lane highlighted and Drop here hints on empties; no rendered-state story exists."
+        "note": "Drag-sort visuals (task-lanes--dragging, drag-source, drag-placeholder, drag-settling) need a live pointer drag, which the workshop runner does not drive; stays uncovered by design."
       },
       {
         "name": "busy",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "While a write is in flight busyTaskId disables the card's check and menu buttons without changing their place; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-board-cards--busy"],
+        "note": "Busy: a Resume on a settled card holds its write; the card check and the band action become disabled while it is in flight."
       }
     ],
     "loading": {
