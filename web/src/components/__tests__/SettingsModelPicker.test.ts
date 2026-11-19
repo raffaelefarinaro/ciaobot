@@ -72,7 +72,7 @@ const MODELS: ModelsResponse = {
   // The registry rows /api/models serves, in its order.
   providers: [
     { id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude', capabilities: {} },
-    { id: 'opencode', label: 'opencode', short_label: 'opencode', capabilities: {} },
+    { id: 'opencode', label: 'OpenCode', short_label: 'OpenCode', capabilities: {} },
   ] as ProviderDescriptor[],
   provider_models: { claude: ['haiku', 'sonnet', 'opus'], opencode: [NAMESPACED] },
   provider_defaults: { claude: 'sonnet', opencode: NAMESPACED },

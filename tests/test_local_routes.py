@@ -222,7 +222,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
         "primary": "personal",
         "provider_options": [
             {"value": "claude", "label": "Anthropic (via Claude Code)"},
-            {"value": "opencode", "label": "opencode"},
+            {"value": "opencode", "label": "OpenCode"},
             {"value": "codex", "label": "OpenAI (via Codex)"},
         ],
         "claude_trim_options": catalog_payload(),

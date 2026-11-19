@@ -467,7 +467,7 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
     assert pcm.refresh_count == 1
     assert data["provider_options"] == [
         {"value": "claude", "label": "Anthropic (via Claude Code)"},
-        {"value": "opencode", "label": "opencode"},
+        {"value": "opencode", "label": "OpenCode"},
         {"value": "codex", "label": "OpenAI (via Codex)"},
     ]
 
@@ -666,7 +666,7 @@ def test_workspace_provider_options_are_the_runtime_providers(tmp_path):
     data = client.get("/api/workspaces").json()
     assert data["provider_options"] == [
         {"value": "claude", "label": "Anthropic (via Claude Code)"},
-        {"value": "opencode", "label": "opencode"},
+        {"value": "opencode", "label": "OpenCode"},
         {"value": "codex", "label": "OpenAI (via Codex)"},
     ]
 

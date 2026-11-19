@@ -135,7 +135,7 @@ vi.mock('../../lib/api', () => {
       provider_defaults: { claude: 'sonnet', opencode: 'opus' },
       providers: [
         { id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude', capabilities: {} },
-        { id: 'opencode', label: 'opencode', short_label: 'opencode', capabilities: {} },
+        { id: 'opencode', label: 'OpenCode', short_label: 'OpenCode', capabilities: {} },
       ],
       opencode_models: ['openai/gpt-5.6-luna', 'anthropic/claude-sonnet-4-6'],
       backends: { opencode: true },
@@ -153,7 +153,7 @@ vi.mock('../../lib/api', () => {
       active: null,
       provider_options: [
         { value: 'claude', label: 'Anthropic (via Claude Code)' },
-        { value: 'opencode', label: 'opencode' },
+        { value: 'opencode', label: 'OpenCode' },
       ],
     },
     '/api/local/backup': {
@@ -638,7 +638,7 @@ describe('component mount smoke', () => {
 
     const providerOptions = wrapper.findAll('select.routine-input option').map((option) => option.text())
     expect(providerOptions).toContain('Anthropic (via Claude Code)')
-    expect(providerOptions).toContain('opencode')
+    expect(providerOptions).toContain('OpenCode')
     // Provider is a native select (Google is set on Overview);
     // Default model uses the custom ModelSelector component, not a second <select>.
     expect(wrapper.findAll('select.workspace-select')).toHaveLength(1)
@@ -667,7 +667,7 @@ describe('component mount smoke', () => {
       active: 'legacy',
       provider_options: [
         { value: 'claude', label: 'Anthropic (via Claude Code)' },
-        { value: 'opencode', label: 'opencode' },
+        { value: 'opencode', label: 'OpenCode' },
       ],
     })
 
@@ -688,7 +688,7 @@ describe('component mount smoke', () => {
       const card = wrapper.findAll('.card').find((c) => c.find('.section-title').text() === 'Chats and models')
       expect(card).toBeTruthy()
       const radios = card!.findAll('[role="radiogroup"] button[role="radio"]')
-      expect(radios.map((r) => r.text())).toEqual(['Anthropic (via Claude Code)', 'opencode'])
+      expect(radios.map((r) => r.text())).toEqual(['Anthropic (via Claude Code)', 'OpenCode'])
       expect(radios.map((r) => r.attributes('aria-checked'))).toEqual(['true', 'false'])
     } finally {
       wrapper.unmount()
@@ -712,7 +712,7 @@ describe('component mount smoke', () => {
       active: 'personal',
       provider_options: [
         { value: 'claude', label: 'Anthropic (via Claude Code)' },
-        { value: 'opencode', label: 'opencode' },
+        { value: 'opencode', label: 'OpenCode' },
       ],
     })
 
