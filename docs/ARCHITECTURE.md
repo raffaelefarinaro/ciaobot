@@ -974,7 +974,7 @@ Anything the two supported providers do not serve directly is reached through Op
 Known gaps:
 
 - Stdio JSON-RPC lines are not capped. `_STDIO_LIMIT` only sizes the stream buffer: the SDK's reader catches `LimitOverrunError` and keeps appending, so a longer line is assembled in memory. The SDK offers no hook to refuse it, and no custom transport is built for this.
-- Deleting a chat does not delete its opencode session, which stays in opencode's own history (accepted until slice D2). The probe and one-shot sessions are removed with `session/delete` when the agent advertises it.
+- Deleting a chat removes its opencode session from opencode's own store with `session/delete` when the agent advertises it (`OpencodeAcpProvider.delete_session`). The agent is started only when the chat's journal exists, and a cleanup that runs past its timeout leaves the session in opencode's store. The probe and one-shot sessions are removed with `session/delete` when the agent advertises it.
 - The OpenCode transcript renderer `_render_opencode_thread` in `ciao/web/transcript_service.py`, and its branch, are kept for the legacy HTTP driver and are to delete in D2/E.
 - The title poll `_TITLE_POLL_DELAYS` and `_poll_native_title` in `ciao/web/project_chats.py` are kept only for the legacy OpenCode path and are to delete in D2/E.
 

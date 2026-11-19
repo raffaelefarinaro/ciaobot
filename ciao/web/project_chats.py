@@ -1300,7 +1300,7 @@ class ProjectChatManager:
         # process with no running loop) never creates one it does not need.
         self._provider_last_used: dict[str, float] = {}
         # Provider id per chat, recorded when the provider is built. The reaper
-        # needs it to tell a cheap-to-rebuild opencode server from a Claude CLI
+        # needs it to tell a cheap-to-rebuild opencode agent process from a Claude CLI
         # worth keeping warm (see `_CLAUDE_WARM_PROVIDER_LIMIT`).
         self._provider_kind: dict[str, str] = {}
         # Consecutive failed disconnect attempts per chat, kept only while a
@@ -1424,9 +1424,8 @@ class ProjectChatManager:
         self._repo_location_locks: dict[str, asyncio.Lock] = {}
         # Chats with a native-title poll in flight. Both the first-message and
         # the end-of-turn trigger want to title the same chat, and each poll
-        # costs real provider reads (an opencode read spawns a throwaway
-        # `opencode serve`), so the second trigger joins the first instead of
-        # racing it.
+        # costs a real provider read (an opencode read starts an agent process),
+        # so the second trigger joins the first instead of racing it.
         self._titling: set[str] = set()
         self._runtime_root = Path(config.state_path).parent
         # The loop the manager was constructed on, so job-run events arriving
@@ -5054,7 +5053,7 @@ class ProjectChatManager:
         swallowed — cleanup must not block the lifecycle write that scheduled
         it — but it is no longer invisible: the idle sweep drops its only
         reference to the provider the moment it pops it from
-        ``self._providers``, and an opencode server that refused to terminate
+        ``self._providers``, and an opencode agent process that refused to terminate
         would then stay alive with nothing left to retry the teardown, exactly
         the process leak the sweep exists to prevent. Callers on the
         lifecycle paths are free to ignore the answer; the sweep is not (see
@@ -5765,8 +5764,8 @@ class ProjectChatManager:
                 raise
             if not disconnected:
                 # `disconnect()` raised. The provider is out of the map, so
-                # dropping it here would leave (for opencode) a serve process
-                # holding a port, an SSE stream and a stderr reader with no
+                # dropping it here would leave (for opencode) an agent process
+                # holding its stdio pipes and a stderr reader with no
                 # reference left for the shutdown hook to retry — and the
                 # sweep would report it as reclaimed on top of that.
                 failures += 1

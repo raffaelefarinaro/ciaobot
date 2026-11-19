@@ -62,7 +62,7 @@ from ciao.import_sources.contract import (
 
 #: The version the enforced V2 floor accepts, and one that does not. Neither is
 #: run: the adapter's own version check is replaced.
-SUPPORTED_VERSION = "opencode v2.0.22"
+SUPPORTED_VERSION = "opencode v2.3.2"
 UNSUPPORTED_VERSION = "opencode v1.9.4"
 
 #: A binary that does not exist. Which path the adapter resolved is the

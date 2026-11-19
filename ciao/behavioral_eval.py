@@ -2614,10 +2614,11 @@ def _check_approval(scenario_set: ScenarioSet, tmp_root: Path) -> list[ContractC
     Since S6 every Ciaobot operation runs as ``ciao <noun> <verb>`` and no
     ``ciao …`` prefix is pre-approved on the harness: auto mode keeps a card on
     every shell command (an allow prefix is a shell-suffix bypass risk), and
-    users who want no cards switch to ``bypass``. This contract inspects the
-    providers' effective permission policies — not a hardcoded ``True`` — so a
-    reintroduced ``Bash(ciao …)`` allow entry
-    fails the deterministic security gate.
+    users who want no cards switch to ``bypass``. OpenCode has no bypass mode,
+    so its approval seam is checked separately (see
+    ``_check_opencode_approval_seam``). This contract inspects the providers'
+    effective permission policies — not a hardcoded ``True`` — so a
+    reintroduced ``Bash(ciao …)`` allow entry fails the deterministic security gate.
     """
     checks: list[ContractCheck] = []
     claude_allowed = _claude_allowed_tools()
@@ -2660,7 +2661,65 @@ def _check_approval(scenario_set: ScenarioSet, tmp_root: Path) -> list[ContractC
         )
     )
     checks.append(_check_unattended_forbidden(tmp_root, scenario_set))
+    checks.extend(_check_opencode_approval_seam())
     return checks
+
+
+def _check_opencode_approval_seam() -> list[ContractCheck]:
+    """OpenCode's approval seam: auto is the normal mode, and a request waits for an answer.
+
+    OpenCode's permission cards come from its own config, so this checks the two
+    facts the engine controls: the mode table maps ``auto`` to the same config as
+    ``normal`` (no silent escalation), and ``PermissionBroker.request`` with
+    ``unattended=False`` emits a card and stays pending until something answers it.
+    """
+    import asyncio
+
+    from ciao.models import PermissionRequestEvent
+    from ciao.providers.acp.agents import OPENCODE
+    from ciao.providers.acp.permissions import PermissionBroker, mode_choices
+
+    same_modes = mode_choices(OPENCODE, "auto") == mode_choices(OPENCODE, "normal")
+    emitted: list[object] = []
+    broker = PermissionBroker(emitted.append)
+    broker.unattended = False
+
+    async def probe() -> tuple[bool, bool]:
+        task = asyncio.ensure_future(broker.request(
+            "probe-session", {"toolCallId": "probe-call"},
+            [{"optionId": "allow", "kind": "allow_once", "name": "Allow"}],
+        ))
+        await asyncio.sleep(0.05)
+        resolved_alone = task.done()
+        broker.cancel_all()
+        await task
+        card = any(isinstance(event, PermissionRequestEvent) for event in emitted)
+        return card, resolved_alone
+
+    card_shown, resolved_alone = asyncio.run(probe())
+    return [
+        ContractCheck(
+            id="approval-opencode-auto-is-normal",
+            category="approval_deferral",
+            passed=same_modes,
+            detail=(
+                "opencode auto maps to the normal mode's config"
+                if same_modes else "opencode auto differs from normal"
+            ),
+            zero_tolerance=True,
+        ),
+        ContractCheck(
+            id="approval-opencode-request-waits",
+            category="approval_deferral",
+            passed=card_shown and not resolved_alone,
+            detail=(
+                "an attended permission request emits a card and waits for a reply"
+                if card_shown and not resolved_alone
+                else f"card_shown={card_shown} resolved_alone={resolved_alone}"
+            ),
+            zero_tolerance=True,
+        ),
+    ]
 
 
 def _claude_allowed_tools() -> set[str]:

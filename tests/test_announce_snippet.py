@@ -279,3 +279,5 @@ def test_final_answer_text_falls_back_to_the_terminal_result() -> None:
 
 # ── OpenCode: the provider names the part after the last tool call ─────────
 
+SESSION = "ses_2139"
+

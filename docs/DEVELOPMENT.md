@@ -1796,7 +1796,7 @@ Edit canonical sources, not the generated `.claude/` or `.agents/` dirs. Do not 
 
 OpenCode runs as `opencode acp` (`ciao/providers/acp/agents.py`), and its start gate refuses
 any version below 2.3.2. Provider changes replay the ACP fixtures under `tests/fixtures/acp/`
-and run one tiny real turn (`pytest tests/live --live-acp=opencode`). Keep V2 internal
+and run one tiny real turn against the installed `opencode acp`. Keep V2 internal
 credential resources covered in both absolute and workspace-relative spellings
 when a custom runtime root is configured. Keep form constraints and explicit
 empty-versus-cancel semantics in the provider/PWA contract. Native form and

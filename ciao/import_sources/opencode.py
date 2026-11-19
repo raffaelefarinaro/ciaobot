@@ -128,8 +128,8 @@ from ciao.import_sources.contract import (
 )
 
 # The floor, the binary resolution and the V2 version check are the provider's
-# own, imported rather than restated: a second copy of "2.0.16" in an importer
-# is a rule that can drift from the one the engine enforces.
+# own, imported rather than restated: a second copy of the minimum version in an
+# importer is a rule that can drift from the one the engine enforces.
 from ciao.opencode_cli import (
     cli_version_error,
     resolve_opencode_binary,

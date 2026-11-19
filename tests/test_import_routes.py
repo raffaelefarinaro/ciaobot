@@ -34,7 +34,7 @@ from ciao.web.routes_import import import_preview, import_sources
 
 #: The version the enforced V2 floor accepts. Never run: the adapter's own
 #: version check and JSON command are replaced below.
-SUPPORTED_VERSION = "opencode v2.0.22"
+SUPPORTED_VERSION = "opencode v2.3.2"
 
 SYNTHETIC_BINARY = "/nonexistent/opencode"
 

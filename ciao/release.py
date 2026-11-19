@@ -1006,7 +1006,7 @@ def _probe_claude() -> ProviderProbe:
 
 def _opencode_untested_reason(probe: ProviderProbe) -> tuple[str, str] | None:
     """``(reason, why)`` when OpenCode cannot be recorded as tested."""
-    from ciao.opencode_cli import cli_version_error
+    from ciao.opencode_cli import OPENCODE_MIN_TEXT, cli_version_error
 
     version = probe.installed
     if version is None:
@@ -1016,7 +1016,7 @@ def _opencode_untested_reason(probe: ProviderProbe) -> tuple[str, str] | None:
     if "-" in version or not STABLE_VERSION_RE.fullmatch(version):
         return "unpublished", f"{version} is not a stable version"
     if cli_version_error({"version": version}) is not None:
-        return "unreadable", f"{version} is outside the supported 2.3.2+ / 2.x contract"
+        return "unreadable", f"{version} is outside the supported {OPENCODE_MIN_TEXT}+ / 2.x contract"
     if probe.published is False:
         return "unpublished", f"{version} is not published on npm"
     if probe.published is None:

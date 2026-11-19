@@ -31,9 +31,14 @@ if TYPE_CHECKING:
     import subprocess
 
 
+# The lowest OpenCode CLI version Ciaobot will run. Every message below and the
+# importer's refusal are derived from it, so the floor is stated once.
+OPENCODE_MIN_VERSION = (2, 3, 2)
+OPENCODE_MIN_TEXT = ".".join(str(part) for part in OPENCODE_MIN_VERSION)
+
 OPENCODE_V2_REQUIRED = (
-    "Ciaobot requires OpenCode 2.3.2 or newer. OpenCode 1 cannot be "
-    "upgraded in place: install OpenCode 2.3.2 or newer (npm install -g @opencode/cli, "
+    f"Ciaobot requires OpenCode {OPENCODE_MIN_TEXT} or newer. OpenCode 1 cannot be "
+    f"upgraded in place: install OpenCode {OPENCODE_MIN_TEXT} or newer (npm install -g @opencode/cli, "
     "brew install anomalyco/tap/opencode-v2, or "
     "curl -fsSL https://opencode.ai/v2/install | bash), then retry this chat."
 )
@@ -180,23 +185,23 @@ def version_number(value: object) -> tuple[int, ...] | None:
 
 
 def cli_version_error(payload: object) -> str | None:
-    """Return the user-facing error when ``/api/info`` is too old or not V2.
+    """Return the user-facing error when the installed OpenCode CLI is too old or not V2.
 
-    Version-only judgment: a Mapping payload whose ``version`` strings to the
-    installed release is supported when its parsed version is in ``2.x`` at
-    or above ``(2, 3, 2)`` — anything unparseable, below the floor, outside
-    major 2, blank, or a payload that is not a Mapping at all is refused with
-    ``OPENCODE_V2_REQUIRED``, plus ``Installed server version: <version>.``
-    when a non-blank version was readable. ``None`` means the version is in
-    the supported range and nothing more: it does not promise server health,
-    authentication, or OpenAPI compatibility.
+    Version-only judgment on the ``version`` reported by ``opencode --version``: a
+    Mapping whose version parses to major 2 at or above ``OPENCODE_MIN_VERSION``
+    is supported. Anything unparseable, below the floor, outside major 2, blank,
+    or a payload that is not a Mapping at all is refused with
+    ``OPENCODE_V2_REQUIRED``, plus ``Installed CLI version: <version>.`` when a
+    non-blank version was readable. ``None`` means the version is in the
+    supported range and nothing more: it does not promise that the CLI can
+    start, is authenticated, or serves a compatible API.
     """
     if not isinstance(payload, Mapping):
         return OPENCODE_V2_REQUIRED
     version = str(payload.get("version") or "").strip()
     parsed = version_number(version)
-    if parsed is None or parsed < (2, 3, 2) or parsed[0] != 2:
-        detail = f" Installed server version: {version}." if version else ""
+    if parsed is None or parsed < OPENCODE_MIN_VERSION or parsed[0] != 2:
+        detail = f" Installed CLI version: {version}." if version else ""
         return f"{OPENCODE_V2_REQUIRED}{detail}"
     return None
 
@@ -481,7 +486,7 @@ def _fetch_inventory_rows(binary: str, *, timeout: float = _INVENTORY_TIMEOUT) -
         process = subprocess.Popen(
             [binary, "serve", "--port", str(port), "--hostname", "127.0.0.1"],
             cwd=str(home),
-            env={**os.environ, "OPENCODE_SERVER_PASSWORD": password},
+            env={**agent_base_env(()), "OPENCODE_SERVER_PASSWORD": password},
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
