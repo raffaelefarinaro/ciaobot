@@ -1,9 +1,8 @@
-"""Claude-native background task-type classification shared by the adapter and host.
+"""Claude-native background task-type classification for the host Processes projection.
 
-``is_process_task`` is the single rule both consumers apply to a tracked
+``is_process_task`` is the single rule the host applies to a tracked
 Claude-native task record: a shell or Monitor row is a process task, while a
-background agent row is excluded because it already has its own row on the
-host side.
+background agent row is excluded because it already has its own row.
 """
 
 from collections.abc import Mapping
