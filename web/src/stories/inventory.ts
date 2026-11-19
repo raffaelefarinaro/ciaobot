@@ -8121,20 +8121,64 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsDevices.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "settings-devices--default"
+        ],
+        "note": "Default renders the loaded list: a Tailscale-served trusted row, a LAN row and a loopback row. The QR control is absent on the loopback row, the Tailscale tag shows and the plain-HTTP hint is hidden."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "no-tailscale",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-devices--no-tailscale"
+        ],
+        "note": "NoTailscale renders only the LAN and loopback rows, so no Tailscale address is found and the Tailscale serve hint shows."
+      },
+      {
+        "name": "qr-open",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-devices--qr-open"
+        ],
+        "note": "QrOpen clicks the trusted row's QR control: aria-expanded becomes true, the label reads Hide QR and the generated SVG renders."
+      },
+      {
+        "name": "copied",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-devices--copied"
+        ],
+        "note": "Copied clicks Copy on the LAN row through a stubbed clipboard; the button reads Copied."
+      },
+      {
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-devices--loading"
+        ],
+        "note": "Loading holds the one /api/addresses read: the Looking up addresses line shows and no list renders."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-devices--failed"
+        ],
+        "note": "Failed answers the read with a 500: the role=alert line names the lookup failure and no list renders."
+      },
+      {
+        "name": "empty",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-devices--empty"
+        ],
+        "note": "Empty answers an empty address list: no rows render and the Tailscale serve hint shows."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsDevices.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load: one GET /api/addresses on mount (loading state, held). Failure: the failed state. There is no refresh and no stale state; the lookup runs once per mount. The placeholder is a one-line hint and the loaded list is a multi-row block, so the two heights differ; not measured in this slice."
     },
     "migration": {
       "status": "unassessed",
@@ -8257,60 +8301,156 @@ export const inventory: InventoryEntry[] = [
       "ready",
       "paused"
     ],
-    "variantNotes": "Observed branches in SettingsMemoryBackup.vue; remaining variants have not been audited.",
+    "variantNotes": "Each observed branch of SettingsMemoryBackup.vue is a state below; the states are the audit of these variants.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsMemoryBackup.vue implements this render; no rendered-state story exists."
-      },
-      {
         "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMemoryBackup.vue implements the loading branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--loading"
+        ],
+        "note": "Loading: the first status read is held; the checking line shows and no status or setup actions render."
       },
       {
         "name": "failed",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMemoryBackup.vue implements the failed branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--failed"
+        ],
+        "note": "Failed: a first-load failure shows the role=alert read error with Check again; no setup actions or status render."
       },
       {
-        "name": "stale",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMemoryBackup.vue implements the stale branch; no rendered-state story exists."
+        "name": "not-configured",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--not-configured"
+        ],
+        "note": "NotConfigured: a not_configured status shows the saved-on-this-device lede with Set up in Ciaobot and Copy setup prompt enabled."
       },
       {
-        "name": "scope-gap",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMemoryBackup.vue implements the scope-gap branch; no rendered-state story exists."
+        "name": "setup-started",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--setup-started"
+        ],
+        "note": "SetupStarted: a started setup chat shows its confirmation and Open the setup chat; that button emits open-chat with the chat id."
+      },
+      {
+        "name": "setup-failed",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--setup-failed"
+        ],
+        "note": "SetupFailed: a refused setup request shows the server message and no started-chat confirmation."
+      },
+      {
+        "name": "setup-prompt-copied",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--setup-prompt-copied"
+        ],
+        "note": "SetupPromptCopied: Copy setup prompt fetches the prompt and writes it to a stubbed clipboard; the confirmation shows."
       },
       {
         "name": "ready",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMemoryBackup.vue implements the ready branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--ready"
+        ],
+        "note": "Ready: the Backed up label with Pause and Back up now."
       },
       {
         "name": "paused",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsMemoryBackup.vue implements the paused branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--paused"
+        ],
+        "note": "Paused: the paused label with Resume; Resume patches the setting and shows the running-again result."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "running",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--running"
+        ],
+        "note": "Running: the Backing up now label with its running detail line."
+      },
+      {
+        "name": "offline",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--offline"
+        ],
+        "note": "Offline: the Offline label, its detail line and the server reason inside Backup details."
+      },
+      {
+        "name": "needs-attention",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--needs-attention"
+        ],
+        "note": "NeedsAttention: the Needs attention label; Review details opens the disclosure that holds the server reason."
+      },
+      {
+        "name": "deferred",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--deferred"
+        ],
+        "note": "Deferred: the Backup deferred label and the update-in-progress detail."
+      },
+      {
+        "name": "pending",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--pending"
+        ],
+        "note": "Pending: pending commits show the Waiting to upload label."
+      },
+      {
+        "name": "scope-gap",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--scope-gap"
+        ],
+        "note": "ScopeGap: a non-zero coverage_gap shows the count warning under the Backed up state."
+      },
+      {
+        "name": "stale",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--stale"
+        ],
+        "note": "Stale: a failed refresh over a paused status keeps the status and shows Could not refresh with the last known status line."
+      },
+      {
+        "name": "run-pending",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--run-pending"
+        ],
+        "note": "RunPending: a held backup run disables Back up now and reads Backing up."
+      },
+      {
+        "name": "run-failed",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--run-failed"
+        ],
+        "note": "RunFailed: a refused run answers with the status object; the error says the local copy is safe and the state line moves to Offline."
+      },
+      {
+        "name": "flag-pending",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-backup--flag-pending"
+        ],
+        "note": "FlagPending: a held Pause patch shows Working on the flag button, which is disabled."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsMemoryBackup.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load: one status read on mount (loading state). Refresh: Check again, and while not set up a bounded re-read every 10 seconds (at most 36 times); a failed refresh keeps the last status (stale state). The placeholder is a one-line checking hint and the loaded status is a multi-row block, so the heights differ; not measured in this slice."
     },
     "migration": {
       "status": "unassessed",
@@ -8334,21 +8474,87 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Detailed configurable variants have not yet been audited.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsMemoryHandover.vue implements this render; no rendered-state story exists."
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-handover--loading"
+        ],
+        "note": "Loading holds the first handover read: the reading line shows and the radio group does not render."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-handover--failed"
+        ],
+        "note": "Failed answers the first read with an error: the role=alert message and a Try again control show; no radio group renders."
+      },
+      {
+        "name": "no-decisions",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-handover--no-decisions"
+        ],
+        "note": "NoDecisions renders the no-prediction line. The keyboard path (ArrowRight on Off) saves Dismiss and moves focus to it."
+      },
+      {
+        "name": "evidence",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-handover--evidence"
+        ],
+        "note": "Evidence renders the agreement sentence with the percent and the per-direction counts; Refresh re-reads the same answer."
+      },
+      {
+        "name": "suggest-handover",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-handover--suggest-handover"
+        ],
+        "note": "SuggestHandover shows the status line saying the operator could let dismiss suggestions be handed over."
+      },
+      {
+        "name": "cannot-act",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-handover--cannot-act"
+        ],
+        "note": "CannotAct: acting_available false shows the cannot-act note and disables the Dismiss and Dismiss-and-accept radios; Off stays enabled."
+      },
+      {
+        "name": "stale",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-handover--stale"
+        ],
+        "note": "Stale keeps the last known rate on screen when a refresh fails and shows the Could not refresh alert."
+      },
+      {
+        "name": "saving",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-handover--saving"
+        ],
+        "note": "Saving: a held save keeps the chosen radio checked and every option aria-disabled, while none is disabled."
+      },
+      {
+        "name": "save-failed",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-memory-handover--save-failed"
+        ],
+        "note": "SaveFailed: a refused save shows the server message and hands the choice back to the saved value."
+      },
+      {
+        "name": "confirm-all",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "Not isolable: choosing Dismiss and accept opens the app-level askConfirm prompt, which is drawn by the global confirm host, not by this card. The host is not mounted in the workshop, so this state cannot render in isolation and is not played."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsMemoryHandover.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load: one read on mount (loading state). Failure: the failed state with Try again. Refresh: the Refresh control re-reads (evidence state) and a failed refresh keeps the last rate (stale state). A workspace switch re-reads and clears the previous rate. Not measured in this slice."
     },
     "migration": {
       "status": "unassessed",
@@ -8526,21 +8732,73 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Detailed configurable variants have not yet been audited.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsServer.vue implements this render; no rendered-state story exists."
+        "name": "network-default",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-server--network-default"
+        ],
+        "note": "NetworkDefault renders the Listen on select with the default host (empty value) and no restart hint. Choosing This computer only calls the save callback with pwa_host 127.0.0.1."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "network-restart-pending",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-server--network-restart-pending"
+        ],
+        "note": "NetworkRestartPending: the stored host differs from the running host, so the Saved, restart to listen hint shows and the select reads the stored host."
+      },
+      {
+        "name": "network-custom-host",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-server--network-custom-host"
+        ],
+        "note": "NetworkCustomHost: a stored host that is neither the default nor loopback adds a Custom address option; the running host matches, so no hint shows."
+      },
+      {
+        "name": "network-unloaded",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-server--network-unloaded"
+        ],
+        "note": "NetworkUnloaded: routines are not loaded yet (null), so the Listen on select is disabled."
+      },
+      {
+        "name": "developer-closed",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-server--developer-closed"
+        ],
+        "note": "DeveloperClosed: the disclosure is collapsed (aria-expanded false) and its panel is not in the page; the toggle opens it."
+      },
+      {
+        "name": "developer-open",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-server--developer-open"
+        ],
+        "note": "DeveloperOpen: the opened disclosure shows the native Developer mode switch (aria-checked false) and a disabled Save while the checkout path is unchanged. Clicking the switch calls the save callback with dev_mode true."
+      },
+      {
+        "name": "developer-log-level-pending",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-server--developer-log-level-pending"
+        ],
+        "note": "DeveloperLogLevelPending: the stored log level differs from the running one, so the Saved, restart to log at debug hint shows."
+      },
+      {
+        "name": "developer-saving",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-server--developer-saving"
+        ],
+        "note": "DeveloperSaving: while routinesSaving is true the Developer switch, the checkout Save and the log level select are disabled, and a click does not save."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsServer.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch: routines arrive as a prop from SettingsView. Routines null (not loaded yet) is the network-unloaded state. There is no refresh or stale state in this component."
     },
     "migration": {
       "status": "unassessed",
@@ -8564,21 +8822,79 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Detailed configurable variants have not yet been audited.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsUpdateTasks.vue implements this render; no rendered-state story exists."
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-update-tasks--loading"
+        ],
+        "note": "Loading: the first read is held; the checking line shows and no rows render."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "load-failed",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "OWNER BUG, not fixed here: on a first-load failure loaded stays false, so the Checking the update task history line stays on screen beside the role=alert read error. The panel says it is still checking while the check has failed. Recorded for a follow-up; no story."
+      },
+      {
+        "name": "empty",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-update-tasks--empty"
+        ],
+        "note": "Empty: a loaded list with no finished, failed or hidden rows shows Nothing to show here yet."
+      },
+      {
+        "name": "default",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-update-tasks--default"
+        ],
+        "note": "Default: the install and workspace groups, the hidden task's Reopen and the failed task's Recheck. Finished work stays collapsed behind Show N done."
+      },
+      {
+        "name": "done-shown",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-update-tasks--done-shown"
+        ],
+        "note": "DoneShown: Show done expands the finished rows and the toggle reads Hide done."
+      },
+      {
+        "name": "live-chat",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-update-tasks--live-chat"
+        ],
+        "note": "LiveChat: a row whose chat is still open shows Open its chat. Play asserts the control and does not click it, since following it would push a route into the workshop page."
+      },
+      {
+        "name": "reopen-pending",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-update-tasks--reopen-pending"
+        ],
+        "note": "ReopenPending: a held reopen disables the row's button and reads Reopening."
+      },
+      {
+        "name": "reopen-refused",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-update-tasks--reopen-refused"
+        ],
+        "note": "ReopenRefused: a 409 refusal shows the in-place Could not reopen it message and the row stays listed."
+      },
+      {
+        "name": "refresh-failed",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-update-tasks--refresh-failed"
+        ],
+        "note": "RefreshFailed: a failed Check again shows the role=alert read error and keeps the last rows on screen."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsUpdateTasks.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load: one read on mount (loading state, held). Refresh: Check again and the per-row Recheck re-read; a failed refresh keeps the last rows (refresh-failed state). A workspace switch clears the rows and re-reads. The first-load failure path shows the checking line beside the error (load-failed, uncovered). Not measured in this slice."
     },
     "migration": {
       "status": "unassessed",
