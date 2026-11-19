@@ -50,7 +50,9 @@ def _setup(
 
 def test_actions_map_to_the_commands_ciaobot_already_shows(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(host_terminal, "host_platform", lambda: host_terminal.PLATFORM_MACOS)
-    assert host_terminal.action_command("claude-install") == setup_status.claude_install_command()
+    assert host_terminal.action_command("claude-install") == (
+        f"{setup_status.claude_install_command()} && {setup_status.claude_adapter_install_command()}"
+    )
     assert host_terminal.action_command("claude-login") == setup_status.claude_auth_command(
         setup_status.claude_cli_path()
     )

@@ -110,62 +110,53 @@ def _route_config(tmp_path: Path):
     return config
 
 
-def test_models_route_reports_evidence_without_constructing_a_claude_client(tmp_path: Path, monkeypatch) -> None:
-    """The route may only read what an authorized turn already observed."""
+def test_models_route_reports_claude_evidence_from_the_acp_catalog(tmp_path: Path, monkeypatch) -> None:
+    """Claude's evidence is the adapter's own catalog: empty when the probe finds no models."""
     import asyncio
     import json
-    from unittest.mock import AsyncMock
 
-    from ciao.providers import claude as claude_module
+    from ciao.providers.acp.agents import ClaudeAcpProvider
     from ciao.providers.opencode import OpencodeProvider
     from ciao.web.routes_api import list_models
 
-    def _explode(*_args, **_kwargs):
-        raise AssertionError("the models route must not construct a Claude client")
-
-    import claude_agent_sdk
-
-    monkeypatch.setattr(claude_module, "ClaudeSDKClient", _explode, raising=False)
-    monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", _explode, raising=False)
+    monkeypatch.setattr(ClaudeAcpProvider, "model_catalog", AsyncMock(return_value=[]))
     monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[]))
     config = _route_config(tmp_path)
-    invalidate_claude_catalog()
 
     body = json.loads(asyncio.run(list_models(_models_request(config))).body)
 
     evidence = body["provider_catalog_evidence"]
     assert evidence["claude"] == {
-        "status": "unknown", "source": None, "models": [], "reason": "not_observed",
+        "status": "unknown", "source": None, "models": [], "reason": "no_models_reported",
     }
     # An empty opencode catalog is "not reported", never "signed out".
     assert evidence["opencode"]["status"] == "unknown"
-    assert evidence["opencode"]["reason"] == "no_models_reported"
-    # Configured aliases stay available as choices, labelled as unverified.
-    from ciao.config import CLAUDE_MODELS
-
-    assert body["provider_models"]["claude"] == list(CLAUDE_MODELS)
 
 
-def test_models_route_reports_observed_evidence_and_configured_aliases(tmp_path: Path, monkeypatch) -> None:
+def test_models_route_reports_observed_claude_models_and_configured_aliases(tmp_path: Path, monkeypatch) -> None:
     import asyncio
     import json
-    from unittest.mock import AsyncMock
 
+    from ciao.providers.acp.agents import ClaudeAcpProvider
     from ciao.providers.opencode import OpencodeProvider
     from ciao.web.routes_api import list_models
 
+    monkeypatch.setattr(ClaudeAcpProvider, "model_catalog", AsyncMock(return_value=[
+        {"model": "claude-x", "label": "Claude X", "variants": ["low", "high"]},
+    ]))
     monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[
         {"model": "provider/model", "label": "Provider Model"},
     ]))
     config = _route_config(tmp_path)
-    root = config.agent_root("work")
-    record_claude_models(root, {"models": [{"value": "claude-x", "displayName": "Claude X"}]})
 
     body = json.loads(asyncio.run(list_models(_models_request(config, b"workspace=work"))).body)
     evidence = body["provider_catalog_evidence"]
 
     assert evidence["claude"]["status"] == "observed"
+    assert evidence["claude"]["source"] == "acp_config_options"
     assert evidence["claude"]["models"] == [{"id": "claude-x", "label": "Claude X"}]
+    assert body["provider_models"]["claude"] == ["claude-x"]
+    assert body["model_reasoning_levels"]["claude-x"] == ["low", "high"]
     assert evidence["opencode"]["status"] == "observed"
     assert evidence["opencode"]["models"] == [{"id": "provider/model", "label": "Provider Model"}]
     assert "provider/model" in body["provider_models"]["opencode"]
@@ -191,23 +182,21 @@ def test_models_route_rejects_an_unknown_workspace_name_and_ignores_paths(tmp_pa
     assert OpencodeProvider.model_catalog.await_args.args[0] == config.agent_root("work")
 
 
-def test_refresh_invalidates_claude_evidence_without_losing_other_roots(tmp_path: Path, monkeypatch) -> None:
+def test_refresh_probes_the_claude_catalog_again(tmp_path: Path, monkeypatch) -> None:
     import asyncio
-    from unittest.mock import AsyncMock
 
+    from ciao.providers.acp.agents import ClaudeAcpProvider
     from ciao.providers.opencode import OpencodeProvider
     from ciao.web.routes_api import list_models
 
+    claude_probe = AsyncMock(return_value=[])
+    monkeypatch.setattr(ClaudeAcpProvider, "model_catalog", claude_probe)
     monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[]))
     config = _route_config(tmp_path)
-    root = config.agent_root("work")
-    record_claude_models(root, {"models": [{"value": "m", "displayName": "M"}]})
-    record_claude_models(tmp_path / "elsewhere", {"models": [{"value": "o", "displayName": "O"}]})
 
     asyncio.run(list_models(_models_request(config, b"workspace=work&refresh=1")))
 
-    assert claude_catalog_evidence(root).status == "unknown"
-    assert claude_catalog_evidence(tmp_path / "elsewhere").status == "observed"
+    assert claude_probe.call_args.kwargs["force"] is True
 
 
 def test_capture_failure_and_cancellation_keep_the_turn_behaviour(tmp_path: Path) -> None:

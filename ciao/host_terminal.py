@@ -195,7 +195,11 @@ def action_command(action: str) -> str:
     from ciao.providers import opencode
 
     if action == "claude-install":
-        return setup_status.claude_install_command()
+        # The CLI and the ACP adapter Ciaobot runs chats through, both needed for a Claude chat.
+        return (
+            f"{setup_status.claude_install_command()} && "
+            f"{setup_status.claude_adapter_install_command()}"
+        )
     if action == "claude-login":
         return setup_status.claude_auth_command(setup_status.claude_cli_path())
     if action == "opencode-install":

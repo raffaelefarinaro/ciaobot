@@ -94,6 +94,8 @@ def test_non_acp_chat_capsule_has_no_core(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     project = manager.create_project("Ciaobot", workspace="work")
     chat = manager.create_chat(project.project_id)
+    # Claude is ACP from #3138; opencode is the provider still outside the ACP layer.
+    chat.provider = "opencode"
 
     prefix = manager._build_prompt_prefix(chat)
 

@@ -377,7 +377,7 @@ async def test_claude_chat_preflight_does_no_catalog_work(
     tmp_path: Path, monkeypatch
 ) -> None:
     """A Claude image turn asks Claude's catalog (empty) and is never questioned."""
-    from ciao.providers.claude import ClaudeProvider
+    from ciao.providers.acp.agents import ClaudeAcpProvider
     from ciao.providers.opencode import OpencodeProvider
 
     claude_calls: list[Path] = []
@@ -391,7 +391,7 @@ async def test_claude_chat_preflight_does_no_catalog_work(
         opencode_calls.append(workspace_root)
         return [dict(row) for row in _CATALOG]
 
-    monkeypatch.setattr(ClaudeProvider, "model_catalog", classmethod(claude_catalog))
+    monkeypatch.setattr(ClaudeAcpProvider, "model_catalog", classmethod(claude_catalog))
     monkeypatch.setattr(
         OpencodeProvider, "model_catalog", classmethod(opencode_catalog)
     )

@@ -201,6 +201,13 @@ Write two things:
    needs `_meta` on `session/new`, `session/load` and `session/resume`; both
    default to `{}`.
 
+Put only the agent's own disable options in `session_meta`. Claude is the
+example: `ClaudeAcpProvider` sends its trim denies, its settings object and the
+connectors env as `_meta.claudeCode.options`, and its one-shot calls send the
+no-tools options through `oneshot_meta`. A spec whose command parser takes only
+the first text block sets `slash_capsule_as_block`, so the context capsule goes
+in a second block.
+
 Then add a descriptor to `ciao/provider_registry.py` with
 `factory_path="ciao.providers.acp.provider:<Subclass>"` and
 `acp_spec_path="<module>:<attr>"` naming the `AgentSpec`. `acp_spec()` resolves

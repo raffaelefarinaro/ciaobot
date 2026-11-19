@@ -2074,7 +2074,7 @@ def test_patch_rename_without_the_key_keeps_provider_overrides(tmp_path):
         {"default_provider": "invalid"},
         {"color": "chartreuse"},
         {"disallowed_tools": 123},
-        {"provider_overrides": {"claude": {"model": "gpt-9"}}},
+        {"provider_overrides": {"opencode": {"model": 7}}},
     ],
 )
 def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
@@ -2254,8 +2254,6 @@ def test_workspace_provider_overrides_persist_validate_and_clear(tmp_path):
         {"claude": {"default_model": "sonnet"}},
         {"claude": {"permission_mode": "plan"}},
         {"claude": {"thinking": "extreme"}},
-        {"claude": {"model": "gpt-9"}},
-        {"claude": {"insights_model": "gpt-9"}},
         [],
     ):
         refused = client.patch("/api/workspaces/personal", json={"provider_overrides": bad})

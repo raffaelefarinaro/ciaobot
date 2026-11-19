@@ -497,15 +497,23 @@ _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # takes (ciao/providers/opencode.py::_ensure_server,
 # ciao/providers/claude.py::_ensure_connected).
 _PROVIDER_IDLE_TIMEOUT_SECONDS = 900.0
-# Claude is the exception to the timeout above. Its provider is one CLI
-# process whose next turn resumes the same session, but rebuilding it pays a
+# ACP agents (Claude today) are the exception to the timeout above. Each is one
+# agent process whose next turn resumes the same session, but rebuilding it pays a
 # cold start that measured 13-53 s on a loaded 10-core Mac — which is what the
 # SDK's initialize deadline times out on. The most recently used few are
 # therefore kept warm past the idle timeout. Both bounds matter: the count
 # stops a day of touching chats from pinning one CLI per chat, and the idle
 # age stops a chat left open for days from doing the same.
 _CLAUDE_WARM_PROVIDER_LIMIT = 4
-_CLAUDE_WARM_IDLE_TIMEOUT_SECONDS = 3600.0
+_ACP_WARM_IDLE_TIMEOUT_SECONDS = 3600.0
+
+
+def _runs_over_acp(provider: str) -> bool:
+    """Whether a provider id runs as an ACP agent process, which the warm pool keeps."""
+    descriptor = provider_registry.get(provider)
+    return descriptor is not None and bool(descriptor.acp_spec_path)
+
+
 RESTART_BLOCKER_REASONS = (
     "streaming",
     "background_work",
@@ -5652,11 +5660,11 @@ class ProjectChatManager:
         candidates = [
             (self._provider_last_used[chat_id], chat_id)
             for chat_id, kind in self._provider_kind.items()
-            if kind == "claude"
+            if _runs_over_acp(kind)
             and chat_id in self._providers
             and chat_id in self._provider_last_used
             and now - self._provider_last_used[chat_id]
-            < _CLAUDE_WARM_IDLE_TIMEOUT_SECONDS
+            < _ACP_WARM_IDLE_TIMEOUT_SECONDS
         ]
         candidates.sort(reverse=True)
         return {chat_id for _, chat_id in candidates[:_CLAUDE_WARM_PROVIDER_LIMIT]}
@@ -5677,7 +5685,7 @@ class ProjectChatManager:
 
         The most recently used Claude providers are exempt while they are
         within ``_CLAUDE_WARM_PROVIDER_LIMIT`` and
-        ``_CLAUDE_WARM_IDLE_TIMEOUT_SECONDS``; rebuilding one costs a cold
+        ``_ACP_WARM_IDLE_TIMEOUT_SECONDS``; rebuilding one costs a cold
         start (``_warm_claude_ids``). ``force`` ignores that exemption too.
         """
         if not self._providers:
@@ -10026,14 +10034,11 @@ class ProjectChatManager:
                     chat_id,
                     exc_info=True,
                 )
-            # Claude escalation: a wedged CLI means generation may never
-            # have stopped, and the interrupted turn can leave a stale
-            # terminal message in the SDK transport buffer that would
-            # truncate the next turn's receive_response(). Dropping the
-            # client solves both; the next turn reconnects and resumes the
-            # session (ProviderService._provider is rebuilt on demand).
-            chat_meta = self._chats.get(chat_id)
-            if chat_meta is not None and chat_meta.provider == "claude":
+            # Escalation: a wedged agent may never have stopped generating.
+            # Dropping its connection ends the process; the next turn
+            # reconnects and resumes the session (ProviderService._provider is
+            # rebuilt on demand).
+            if self._chats.get(chat_id) is not None:
                 try:
                     await asyncio.wait_for(provider.disconnect(), timeout=5.0)
                 except Exception:  # noqa: BLE001 — teardown is best-effort

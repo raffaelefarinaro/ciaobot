@@ -36,5 +36,9 @@ class AgentSpec:
     modes: Mapping[BridgeMode, tuple[ModeChoice, ...]] = field(default_factory=dict)
     model_config_id: str = "model"
     thought_config_id: str = ""  # "" = no thinking control
+    # A native slash command is sent as its own text block, with the context capsule
+    # as a second block. For an agent whose command parser keeps only the first text
+    # block (claude-agent-acp), a capsule in front of the command stops it being a command.
+    slash_capsule_as_block: bool = False
     quiet_period_s: float = 5.0  # late-turn close after this much silence
     initialize_timeout_s: float = 30.0

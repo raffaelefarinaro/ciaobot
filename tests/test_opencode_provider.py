@@ -6243,8 +6243,8 @@ def test_dynamic_catalog_providers_skip_the_configured_model_check():
     from ciao.provider_service import capabilities_for
 
     assert capabilities_for("opencode").dynamic_models is True
-    # Claude's catalog is configured, so it must stay validated.
-    assert capabilities_for("claude").dynamic_models is False
+    # Claude's model list is the adapter's own catalog too (#3138), so it is exempt as well.
+    assert capabilities_for("claude").dynamic_models is True
     # An unknown provider must not be waved through.
     assert capabilities_for("nope").dynamic_models is False
 
@@ -6275,15 +6275,6 @@ def test_an_opencode_model_id_is_accepted(tmp_path):
     """`opencode/hy3-free` must not be rejected against the Claude model list."""
     manager = _chat_manager(tmp_path)
     manager._validate_configured_model("opencode/hy3-free", "opencode")
-
-
-def test_an_unconfigured_claude_model_is_still_rejected(tmp_path):
-    """The exemption must not disable validation for configured-catalog providers."""
-    from ciao.web.project_chats import UnknownModelError
-
-    manager = _chat_manager(tmp_path)
-    with pytest.raises(UnknownModelError):
-        manager._validate_configured_model("totally-made-up-model", "claude")
 
 
 # ── catalog caching ─────────────────────────────────────────────────────

@@ -16,7 +16,7 @@ import math
 import time
 from collections.abc import AsyncGenerator, Callable, Mapping
 from contextlib import aclosing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -43,6 +43,7 @@ from ciao.providers.base import (
     ProviderCapabilities,
     QuestionResponseResult,
     build_prompt,
+    native_slash_prompt,
     prepend_stable_context,
 )
 
@@ -155,6 +156,19 @@ def _runtime_dir(config: object | None) -> Path:
     return Path(state_path).parent
 
 
+_CAPSULE_URI = "ciaobot://context"
+
+
+def _capsule_block(capsule: str, *, embedded: bool) -> dict[str, Any]:
+    """The context capsule as an embedded resource when the agent takes them, else plain text."""
+    if embedded:
+        return {
+            "type": "resource",
+            "resource": {"uri": _CAPSULE_URI, "mimeType": "text/plain", "text": capsule},
+        }
+    return {"type": "text", "text": capsule}
+
+
 class AcpProvider(BaseProvider):
     spec: ClassVar[AgentSpec]  # set by each subclass
     capabilities = ProviderCapabilities(
@@ -188,6 +202,11 @@ class AcpProvider(BaseProvider):
     @classmethod
     def oneshot_meta(cls) -> dict[str, Any]:
         """``_meta`` for a one-shot call of this agent."""
+        return {}
+
+    @classmethod
+    def spawn_env(cls) -> dict[str, str]:
+        """Env added to the agent process at spawn, under the request's own env."""
         return {}
 
     # -- turn ------------------------------------------------------------------
@@ -253,7 +272,7 @@ class AcpProvider(BaseProvider):
         self._connection = await AcpConnection.open(
             self.spec,
             cwd=self.workspace_root,
-            env=request.extra_env,
+            env={**type(self).spawn_env(), **request.extra_env},
             client=self._client,
         )
         self._client.connection = self._connection
@@ -268,8 +287,11 @@ class AcpProvider(BaseProvider):
         if session is not None and resume and session.session_id == resume:
             # A changed ``_meta`` takes effect by reloading the same session, but
             # never under an open late turn: that waits for the next turn.
-            if session.meta_key == json.dumps(meta, sort_keys=True) or session.late_turn_open:
+            if session.meta_key == json.dumps(meta, sort_keys=True):
                 return session, False
+            if session.late_turn_open:
+                return session, False
+            logger.info("Reloading %s session %s: options changed", self.spec.id, resume)
         await self._close_session()
         broker = PermissionBroker(lambda _event: None)
         self._client.broker = broker
@@ -297,9 +319,17 @@ class AcpProvider(BaseProvider):
         return opened, replaced
 
     def _blocks(self, connection: AcpConnection, request: AgentRequest) -> list[dict[str, Any]]:
-        text = COMPACT_COMMAND if request.compact else build_prompt(request)
-        blocks: list[dict[str, Any]] = [{"type": "text", "text": text}]
         prompt_caps = connection.agent_capabilities.get("promptCapabilities")
+        slash = native_slash_prompt(request) if self.spec.slash_capsule_as_block and not request.compact else None
+        if slash is not None:
+            command, capsule = slash
+            blocks: list[dict[str, Any]] = [
+                {"type": "text", "text": build_prompt(replace(request, prompt=command))},
+                _capsule_block(capsule, embedded=isinstance(prompt_caps, dict) and prompt_caps.get("embeddedContext") is True),
+            ]
+        else:
+            text = COMPACT_COMMAND if request.compact else build_prompt(request)
+            blocks = [{"type": "text", "text": text}]
         accepts_images = isinstance(prompt_caps, dict) and prompt_caps.get("image") is True
         if request.images and accepts_images and not request.compact:
             for image in request.images:
@@ -461,7 +491,7 @@ class AcpProvider(BaseProvider):
     @classmethod
     async def _probe_catalog(cls, workspace_root: Path) -> list[dict[str, Any]]:
         connection = await AcpConnection.open(
-            cls.spec, cwd=workspace_root, env={}, client=AgentClient()  # type: ignore[abstract]
+            cls.spec, cwd=workspace_root, env=cls.spawn_env(), client=AgentClient()  # type: ignore[abstract]
         )
         try:
             # No prompt is sent, so the session's journal file is never written; the

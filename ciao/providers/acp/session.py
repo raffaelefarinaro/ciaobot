@@ -28,6 +28,7 @@ from acp.schema import (
 )
 from pydantic import TypeAdapter
 
+from ciao.model_tiers import resolve_tier
 from ciao.models import (
     BridgeMode,
     ContextCompactedEvent,
@@ -427,9 +428,19 @@ class AcpSession:
                 continue
             events.extend(await self._set_option(choice.config_id, picked))
         if model:
+            # A tier alias (opus) names the offered model it stands for; a value the agent
+            # does not offer and that names no tier is left alone.
             offered = self._offered(self.spec.model_config_id)
-            if model in offered:
-                events.extend(await self._set_option(self.spec.model_config_id, model))
+            target = model if model in offered else resolve_tier(model, offered)
+            if target is not None:
+                events.extend(await self._set_option(self.spec.model_config_id, target))
+            elif offered:
+                # Model ids are not checked before a turn for this agent, so say what was not applied.
+                current = self._normalizer.current_values.get(self.spec.model_config_id, "")
+                events.append(SystemStatusEvent(
+                    type="system",
+                    status=f"{self.spec.id} does not offer the model '{model}'; keeping {current}.",
+                ))
         if thinking and self.spec.thought_config_id:
             offered = self._offered(self.spec.thought_config_id)
             if not offered or thinking in offered:
