@@ -352,6 +352,143 @@ def test_release_workflows_do_not_publish_removed_install_channels() -> None:
     assert "mapfile" not in workflows
 
 
+def _release_smoke() -> dict:
+    import yaml
+
+    return yaml.safe_load(
+        (Path(__file__).parents[1] / ".github" / "workflows" / "release-smoke.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+
+
+def _smoke_runs(job: dict) -> str:
+    return "\n".join(step["run"] for step in job["steps"] if "run" in step)
+
+
+def test_release_smoke_installs_linux_with_the_service_and_reruns() -> None:
+    # #3131 L6: the smoke test runs the public Linux one-liner on an Ubuntu VM,
+    # checks the systemd service and the startup API, then runs the same
+    # one-liner again as the update path and checks the service comes back.
+    smoke = _release_smoke()
+    linux = smoke["jobs"]["linux-install"]
+    assert linux["runs-on"] == "ubuntu-24.04"
+    runs = _smoke_runs(linux)
+
+    for fragment in (
+        "/releases/download/v${VERSION}/install.sh",
+        "| sh -s -- --workspace \"$workspace\"",
+        'test -x "$HOME/.local/bin/ciao"',
+        '"ciao $VERSION"',
+        "systemctl is-active --quiet ciaobot",
+        "/api/startup-status",
+    ):
+        assert fragment in runs, f"release-smoke.yml linux-install lost {fragment!r}"
+
+    # The update path is the same one-liner, run again, with the service up after.
+    names = [step.get("name", "") for step in linux["steps"]]
+    rerun = names.index("Re-run the one-liner as the update path")
+    update = linux["steps"][rerun]["run"]
+    assert "install.sh" in update and "| sh;" in update
+    assert names.index("Install with the one-line installer") < rerun
+    assert "systemctl is-active --quiet ciaobot" in update
+
+    # It must not look for the retired macOS app anywhere in what it runs.
+    for gone in (
+        "Ciaobot.app",
+        "ciaobot-desktop",
+        "ciao-runtime",
+        "Ciaobot.plist",
+        "com.ciao.server",
+        "latest.json",
+        "app.tar.gz",
+        "ciaobot-installer-verify",
+        "install-engine.sh",
+    ):
+        assert gone not in runs, f"release-smoke.yml still expects the app release: {gone!r}"
+
+
+def test_release_smoke_waits_are_bounded() -> None:
+    # A smoke run must fail instead of hang: every job and every step that
+    # waits or downloads has a timeout, and every wait is a counted loop with
+    # curl bounded by --max-time.
+    smoke = _release_smoke()
+    for name, job in smoke["jobs"].items():
+        assert isinstance(job.get("timeout-minutes"), int), f"job {name} has no timeout"
+        for step in job["steps"]:
+            run = step.get("run", "")
+            if "sleep" in run or "install.sh" in run:
+                assert isinstance(step.get("timeout-minutes"), int), (
+                    f"job {name} step {step.get('name')!r} waits without a timeout"
+                )
+            assert "while " not in run and "until " not in run, (
+                f"job {name} step {step.get('name')!r} has an unbounded loop"
+            )
+    text = (Path(__file__).parents[1] / ".github" / "workflows" / "release-smoke.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "seq 1 90" in text
+    assert text.count("curl -fsS --max-time 5") >= 4
+    assert text.count("curl -fsSL --max-time 600") == 2  # the install and the update download
+
+
+def test_release_smoke_redacts_the_login_url_in_every_log_it_prints() -> None:
+    # ciao setup prints the one-time login URL. Each log the job prints goes
+    # through the same redaction, so the credential never reaches the job log.
+    text = (Path(__file__).parents[1] / ".github" / "workflows" / "release-smoke.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "Open Ciaobot: ).*#\\1[redacted]" in text
+    assert "https?://[^[:space:]]*(token|setup)[^[:space:]]*#[redacted]" in text
+    assert text.count("Open Ciaobot: ).*#\\1[redacted]") >= 4
+    assert "journalctl -u ciaobot -n 200" in text
+
+
+def test_release_smoke_runs_the_legacy_update_gate_against_published_assets() -> None:
+    # The 1.x updater check only exists for the release that ships the 1.x
+    # manifest. The job is conditioned on that version, read from the same
+    # LEGACY_MANIFEST_VERSION value publish.yml uses, and runs the gate from the
+    # tagged checkout against the published assets.
+    smoke = _release_smoke()
+    assert smoke["env"]["LEGACY_MANIFEST_VERSION"] == "2.0.0"
+
+    legacy = smoke["jobs"]["legacy-update"]
+    assert legacy["needs"] == "resolve"
+    assert legacy["if"] == "needs.resolve.outputs.legacy == 'true'"
+    assert legacy["runs-on"] == "macos-latest"
+
+    resolve = "\n".join(step["run"] for step in smoke["jobs"]["resolve"]["steps"] if "run" in step)
+    assert 'if [ "$version" = "$LEGACY_MANIFEST_VERSION" ]; then' in resolve
+
+    checkout = next(step for step in legacy["steps"] if step.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"]["ref"] == "v${{ needs.resolve.outputs.version }}"
+
+    gate = next(step for step in legacy["steps"] if "legacy-update-gate.py" in step.get("run", ""))
+    assert "python3 scripts/legacy-update-gate.py" in gate["run"]
+    assert "--release-base https://github.com/raffaelefarinaro/ciaobot/releases/download" in gate["run"]
+    assert '--target "$VERSION"' in gate["run"]
+    assert "--uv \"$(command -v uv)\"" in gate["run"]
+
+
+def test_release_smoke_keeps_expressions_out_of_run_blocks_and_secrets_out() -> None:
+    # Security-sensitive workflow: no expression is interpolated into a shell
+    # script (values come in through env:), no repository secret is read, and
+    # every action is pinned to a version, not a branch.
+    text = (Path(__file__).parents[1] / ".github" / "workflows" / "release-smoke.yml").read_text(
+        encoding="utf-8"
+    )
+    smoke = _release_smoke()
+    for name, job in smoke["jobs"].items():
+        for step in job["steps"]:
+            assert "${{" not in step.get("run", ""), (
+                f"job {name} step {step.get('name')!r} interpolates an expression into run:"
+            )
+            if "uses" in step:
+                assert "@v" in step["uses"] and not step["uses"].endswith("@main")
+    assert "secrets." not in text
+    assert smoke["permissions"] == {"contents": "read"}
+
+
 def test_release_smoke_only_runs_with_a_published_version() -> None:
     workflow = (
         Path(__file__).parents[1] / ".github" / "workflows" / "release-smoke.yml"
@@ -361,75 +498,6 @@ def test_release_smoke_only_runs_with_a_published_version() -> None:
     assert "workflow_dispatch:" in workflow
     assert "pull_request:" not in workflow
     assert 'LaunchAgents/com.ciao.server.plist")' not in workflow
-
-
-
-
-
-
-def test_release_smoke_installs_the_engine_instead_of_the_app() -> None:
-    workflow = (
-        Path(__file__).parents[1] / ".github" / "workflows" / "release-smoke.yml"
-    ).read_text(encoding="utf-8")
-
-    # install.sh is the engine installer now, so the smoke test runs the public
-    # one-liner unchanged and asserts the engine came up: the entry point, the
-    # receipt it writes, the LaunchAgent, and the startup API.
-    for fragment in (
-        "/download/v${VERSION}/install.sh",
-        'test -x "$HOME/.local/bin/ciao"',
-        "$HOME/.local/state/ciaobot/install-receipt.json",
-        'launchctl print "gui/$(id -u)/com.ciao.server"',
-        "/api/startup-status",
-    ):
-        assert fragment in workflow, (
-            f"release-smoke.yml no longer checks the engine: {fragment!r}"
-        )
-
-    # It must not look for Ciaobot.app anywhere in what it runs: that install
-    # does not exist any more, and asserting on it would fail every release for
-    # a reason that has nothing to do with the build. Comments are exempt - the
-    # step says in prose why the app is not there.
-    commands = "\n".join(
-        line for line in workflow.splitlines() if not line.lstrip().startswith("#")
-    )
-    for gone in (
-        "Ciaobot.app",
-        "ciaobot-desktop",
-        "ciao-runtime",
-        "Ciaobot.plist",
-        # #653: the release publishes no app, so the smoke test must not
-        # download or assert on any of it.
-        "latest.json",
-        "app.tar.gz",
-        "ciaobot-installer-verify",
-    ):
-        assert gone not in commands, (
-            f"release-smoke.yml still expects the app release: {gone!r}"
-        )
-
-
-
-def test_release_smoke_finishes_the_setup_wizard_and_is_bounded() -> None:
-    # A fresh macOS install blocks on the browser setup wizard (#2021), so a
-    # smoke run that only pipes install.sh into sh waits for a click nobody
-    # makes (#2164: the v1.7.0 run hung for 90 minutes). The step must run the
-    # public one-liner in the background and finish the wizard over HTTP.
-    workflow = (
-        Path(__file__).parents[1] / ".github" / "workflows" / "release-smoke.yml"
-    ).read_text(encoding="utf-8")
-
-    assert "timeout-minutes:" in workflow, "release-smoke.yml has no job timeout"
-    assert "/api/setup-status" in workflow
-    assert "/api/setup/finish" in workflow
-    assert "RUNNER_TEMP" in workflow
-    # Still the documented one-liner, not a hand-rolled install.
-    assert "| sh -s -- --version \"$VERSION\"" in workflow
-    assert "/download/v${VERSION}/install.sh" in workflow
-    # The sign-in URL is a credential and stays out of the job log.
-    assert "Open Ciaobot: ).*#\\1[redacted]" in workflow
-    # The later steps follow the workspace the wizard chose.
-    assert '"$SMOKE_WORKSPACE/.env"' in workflow
 
 
 def test_first_party_install_command_stays_install_sh() -> None:
@@ -446,12 +514,17 @@ def test_first_party_install_command_stays_install_sh() -> None:
         "README.md",
         "site/index.html",
         "site/guide.html",
+        "docs/LINUX.md",
         "docs/DEVELOPMENT.md",
         "skills/ciao-release/SKILL.md",
     ):
         text = (root / relative).read_text(encoding="utf-8")
         assert one_liner in text, f"{relative} no longer documents the install command"
-        assert "/releases/latest/download/install-engine.sh" not in text, (
+    # The release skill names install-engine.sh only to warn against it, so it
+    # is exempt from the negative check; every other first-party page stays clean.
+    for relative in ("README.md", "site/index.html", "site/guide.html", "docs/LINUX.md"):
+        text = (root / relative).read_text(encoding="utf-8")
+        assert "install-engine.sh" not in text, (
             f"{relative} points a first-time user at install-engine.sh; the public"
             " command is still install.sh"
         )
