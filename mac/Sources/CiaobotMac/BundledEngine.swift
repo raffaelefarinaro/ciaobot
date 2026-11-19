@@ -18,6 +18,9 @@ struct BundledEngine: Equatable {
     enum Command: Equatable {
         case version
         case run([String])
+        /// `ciao mac-takeover <args>`: the 1.x takeover (#3129 S4b/S7). Never
+        /// takes a `--port`; the takeover command reads its own plist and pointer.
+        case takeover([String])
     }
 
     static let directoryName = "engine"
@@ -102,6 +105,7 @@ struct BundledEngine: Equatable {
         switch command {
         case .version: arguments = ["--version"]
         case .run(let extra): arguments = ["run"] + extra + (port.map { ["--port", String($0)] } ?? [])
+        case .takeover(let extra): arguments = ["mac-takeover"] + extra
         }
         return BundledEngineLaunch(
             executable: launcher,
