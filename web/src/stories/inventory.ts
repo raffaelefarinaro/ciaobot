@@ -4209,24 +4209,18 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ChatLayout.vue"
     ],
     "variants": [],
-    "variantNotes": "Explicit wrapper composition over TaskWorkspaceSurface; does not own cards/editor. Detailed variants are unassessed.",
+    "variantNotes": "No configurable variants: the wrapper renders the shared TaskWorkspaceSurface alone and forwards open-sidebar, pull and pull-end to the host; board, editor, loading and card variants are TaskWorkspaceSurface's.",
     "states": [
       {
         "name": "default",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "<template> in TaskBoardView.vue implements this render; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "<template> in TaskBoardView.vue implements this render; no rendered-state story exists. The wrapper has no further template branches or props of its own."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TaskBoardView.vue has not yet been audited."
+      "status": "known",
+      "detail": "No loading of its own: renders TaskWorkspaceSurface's loading, which the surface enumerates as initial loading (firstLoad placeholder lanes), refresh (a re-read on mount, workspace switch and tasks_changed), failure (loadFailed with the server's sentence and Retry), stale refresh (loadStale over retained rows with Retry) and refused writes (board.error with Reload)."
     },
     "migration": {
       "status": "unassessed",
@@ -4401,96 +4395,108 @@ export const inventory: InventoryEntry[] = [
       "board",
       "editor"
     ],
-    "variantNotes": "Actual inline board/lanes/card, editor, completion, delegation and move/ordering owner. Known firstLoad/loadFailed/loadStale/filteredEmpty/boardEmpty/missingTaskId/orderNotice, page vs overlay, done lane and editor status branches. These are uncovered, not represented by InventoryBrowser cards.",
+    "variantNotes": "Actual inline board/lanes/card, editor, completion, delegation and move/ordering owner. Audited branches: firstLoad/loadFailed/loadStale/filteredEmpty/boardEmpty load notices, missingTaskId, orderNotice, unreadable rows, refused-write action error, the collapsed Done tab and the overlay mode's status sheet. Page vs overlay is the mode prop; board vs editor is board chrome vs the detail page. The inline families are audited at their own rows (task-board-cards, task-editor, task-completion, task-delegation, task-ordering); these surface states stay uncovered because the workshop coverage guard admits story coverage only on component-kind rows.",
     "states": [
       {
         "name": "default",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "<template> in TaskWorkspaceSurface.vue implements this render; no rendered-state story exists."
+        "note": "The board-mode <template> with the loaded workspace's four lanes and cards; no rendered-state story exists."
+      },
+      {
+        "name": "overlay",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "mode=\"overlay\" (taskId prop): no board chrome, only the editor sheet, an overlay status sheet while it locates its task (loading, failed, missing sub-states) or the delegation preview over the host screen; ItemPeekHost is the first caller; no rendered-state story exists."
       },
       {
         "name": "firstLoad",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "TaskWorkspaceSurface.vue implements the firstLoad branch; no rendered-state story exists."
+        "note": "TaskWorkspaceSurface.vue implements the firstLoad branch: .task-loading role=status placeholder lanes, a count bar in each lane head and two loading bars per lane, while the first board read is in flight; no rendered-state story exists."
       },
       {
         "name": "loadFailed",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "TaskWorkspaceSurface.vue implements the loadFailed branch; no rendered-state story exists."
+        "note": "TaskWorkspaceSurface.vue implements the loadFailed branch: .task-failed role=alert with the server's sentence and a Retry, never reading as an empty board; no rendered-state story exists."
       },
       {
         "name": "loadStale",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "TaskWorkspaceSurface.vue implements the loadStale branch; no rendered-state story exists."
+        "note": "TaskWorkspaceSurface.vue implements the loadStale branch: .task-stale role=status over retained rows after a failed refresh, with the same Retry; no rendered-state story exists."
       },
       {
         "name": "filteredEmpty",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "TaskWorkspaceSurface.vue implements the filteredEmpty branch; no rendered-state story exists."
+        "note": "TaskWorkspaceSurface.vue implements the filteredEmpty branch: .task-filtered-empty hint when a filter hides a non-empty set, with Clear filters also offered from the chip row; no rendered-state story exists."
       },
       {
         "name": "boardEmpty",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "TaskWorkspaceSurface.vue implements the boardEmpty branch; no rendered-state story exists."
+        "note": "TaskWorkspaceSurface.vue implements the boardEmpty branch: .task-empty hint for a genuinely empty board, naming New task and ciao task; no rendered-state story exists."
       },
       {
         "name": "missingTaskId",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "TaskWorkspaceSurface.vue implements the missingTaskId branch; no rendered-state story exists."
+        "note": "TaskWorkspaceSurface.vue implements the missingTaskId branch: .task-stale role=status when the linked task is not on this board, with Dismiss; no rendered-state story exists."
       },
       {
         "name": "orderNotice",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "TaskWorkspaceSurface.vue implements the orderNotice branch; no rendered-state story exists."
+        "note": "TaskWorkspaceSurface.vue implements the orderNotice branch: .task-order-notice role=status when the order file could not be read, so cards keep status moves but cannot be placed and the menu Move actions say why; no rendered-state story exists."
       },
       {
-        "name": "editing",
+        "name": "unreadable",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "TaskWorkspaceSurface.vue implements the editing branch; no rendered-state story exists."
+        "note": "v-if=\"unreadable.length\": .task-unreadable keeps rows the engine could not read as tasks visible with path, code badge and message instead of dropping them; no rendered-state story exists."
       },
       {
-        "name": "completion",
+        "name": "action-error",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "TaskWorkspaceSurface.vue implements the completion branch; no rendered-state story exists."
-      },
-      {
-        "name": "delegation",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "TaskWorkspaceSurface.vue implements the delegation branch; no rendered-state story exists."
+        "note": "v-if=\"board.error\": .task-action-error role=alert keeps the refused write's rows and shows the server's sentence with Reload, a separate slot from the load notices so a later list read cannot clear it; no rendered-state story exists."
       },
       {
         "name": "ordering",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "TaskWorkspaceSurface.vue implements the ordering branch; no rendered-state story exists."
+        "note": "Card reorder paths: Move up / Move down in the card menu (disabled with stepDisabled and the orderNotice title), the Move… sheet, drag commits and Shift+Arrow from the card's open button, one write at the card's revision; no rendered-state story exists."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "editing",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "v-if=\"detailOpen\" without overlay draws the full editor as a page over the board with the title rail, save line and Delete; the editor sheet itself is audited at the task-editor row; no rendered-state story exists."
+      },
+      {
+        "name": "completion",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "The resolution sheet (.task-resolution-sheet) and the editor's Resolution section open from the board; audited at the task-completion row; no rendered-state story exists."
+      },
+      {
+        "name": "delegation",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "The delegation preview sheet and the editor's Agent block open from the board; audited at the task-delegation row; no rendered-state story exists."
       }
     ],
     "loading": {
       "status": "known",
-      "detail": "TaskWorkspaceSurface.vue firstLoad/loadFailed/loadStale distinguish initial loading, failure and stale refresh; stale rows are retained."
+      "detail": "TaskWorkspaceSurface.vue firstLoad/loadFailed/loadStale distinguish initial loading, failure and stale refresh; stale rows are retained. Initial loading is the firstLoad placeholder; refresh re-reads on mount, workspace switch and tasks_changed while keeping rows; a refused write keeps rows and shows board.error with Reload. The first-load placeholder mirrors the loaded lane geometry (#2961): column heads with a count bar and two loading bars per lane, Done reduced to its toggle label while collapsed."
     },
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
     },
-    "rationale": "Connected route or host composition; isolate its seam before rendering it in the workshop."
+    "rationale": "Connected route or host composition; isolate its seam before rendering it in the workshop. The workshop coverage guard (#3263) admits story coverage only on component-kind rows, so this composition row cannot carry covered states or story IDs; the sheets' families are audited at the task-editor, task-completion, task-delegation, task-ordering and task-board-cards rows, and the board's own states are enumerated uncovered here."
   },
   {
     "id": "components-terminal-key-row",
@@ -8953,48 +8959,60 @@ export const inventory: InventoryEntry[] = [
       "filters",
       "Done"
     ],
-    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are indirect composition hosts, not direct inline consumers.",
+    "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. These are indirect composition hosts, not direct inline consumers. Audited card-region branches and classes: lane arrangement and heads, card content variants, filter-drawn groups, the Done lane/tab, the first-load placeholder cards, drag-sort classes and the busy write state. These family states stay uncovered because the workshop coverage guard admits story coverage only on component-kind rows.",
     "states": [
       {
         "name": "default",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": ".task-cards in TaskWorkspaceSurface.vue implements this family; no rendered-state story exists."
+        "note": ".task-cards in TaskWorkspaceSurface.vue renders each card's check, title, open button, menu and content from the loaded board; no rendered-state story exists."
       },
       {
         "name": "lanes",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": ".task-cards in TaskWorkspaceSurface.vue includes lanes; no rendered-state story exists."
+        "note": ".task-cards in TaskWorkspaceSurface.vue includes lanes: four fixed task-lanes--columns side by side or one .task-lanes--list group while a status filter is active, lane heads with label, count and Hide, and empty-lane text per case; no rendered-state story exists."
       },
       {
         "name": "cards",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": ".task-cards in TaskWorkspaceSurface.vue includes cards; no rendered-state story exists."
+        "note": ".task-cards in TaskWorkspaceSurface.vue includes cards: project and due meta line, overdue said in words as well as colour, the agent note and band, the chat-archived note and reconcile notes; no rendered-state story exists."
       },
       {
         "name": "filters",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": ".task-cards in TaskWorkspaceSurface.vue includes filters; no rendered-state story exists."
+        "note": ".task-cards in TaskWorkspaceSurface.vue includes the filter-drawn board: the chips and selects live outside the load branches in .task-filters, a status filter draws its one group at full width, with Clear filters offered while filters are active; no rendered-state story exists."
       },
       {
         "name": "Done",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": ".task-cards in TaskWorkspaceSurface.vue includes Done; no rendered-state story exists."
+        "note": ".task-cards in TaskWorkspaceSurface.vue includes Done: task-card--done placement, the collapsed Done tab (aria-expanded=false) that opens the lane, Hide returning to the tab, earlier done offering Show all, and cards dropped onto the tab opening the completion gesture; no rendered-state story exists."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "loading",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "note": "During first load .task-cards in TaskWorkspaceSurface.vue renders placeholder cards of two .task-loading-bar spans under a count-bar lane head (#2961 geometry), Done collapsed to its toggle label; no rendered-state story exists."
+      },
+      {
+        "name": "dragging",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": ".task-cards in TaskWorkspaceSurface.vue carries the drag-sort visuals: task-lanes--dragging, drag-source, drag-placeholder and drag-settling, with the hovered lane highlighted and Drop here hints on empties; no rendered-state story exists."
+      },
+      {
+        "name": "busy",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "While a write is in flight busyTaskId disables the card's check and menu buttons without changing their place; no rendered-state story exists."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TaskWorkspaceSurface.vue has not yet been audited."
+      "status": "known",
+      "detail": "The card-region loading UI is the first-load placeholder owned at this anchor: two .task-loading-bar spans per placeholder card and a count bar in each lane head (fixed in #2961), reduced to the Done toggle label while Done is collapsed. After an answer, refreshes keep the cards and mark them stale in the surface's loadStale notice; refused writes surface through the surface's board.error alert."
     },
     "migration": {
       "status": "unassessed",
