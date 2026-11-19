@@ -8,7 +8,6 @@ rejected, and the session runs in a directory that holds nothing the agent could
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import tempfile
 from collections.abc import Mapping
@@ -100,6 +99,5 @@ async def run_acp_oneshot(
             client.session = None
             client.broker = None
             if session is not None:
-                with contextlib.suppress(Exception):
-                    await session.close()
+                await session.discard()
             await connection.close()

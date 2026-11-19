@@ -92,7 +92,8 @@ from ciao.providers.base import (
 )
 from ciao.os_support.processes import ProcessTree, bounded_output, tree_spawn_options
 from ciao.providers._sse import SSEDecoder
-from ciao.tool_path import resolve_tool
+from ciao.providers.acp.connection import agent_base_env
+from ciao.tool_path import prepend_engine_path, resolve_tool
 
 logger = logging.getLogger(__name__)
 
@@ -124,8 +125,8 @@ REQUIRED_PATHS: frozenset[str] = frozenset({
 })
 
 OPENCODE_V2_REQUIRED = (
-    "Ciaobot requires OpenCode 2.0.16 or newer 2.x. OpenCode 1 cannot be "
-    "upgraded in place: install OpenCode 2 (npm install -g @opencode/cli, "
+    "Ciaobot requires OpenCode 2.3.2 or newer. OpenCode 1 cannot be "
+    "upgraded in place: install OpenCode 2.3.2 or newer (npm install -g @opencode/cli, "
     "brew install anomalyco/tap/opencode-v2, or "
     "curl -fsSL https://opencode.ai/v2/install | bash), then retry this chat."
 )
@@ -325,7 +326,7 @@ _STARTUP_CLASSIFICATIONS = frozenset({
     "incompatible_version", "missing_operations", "unauthorized",
 })
 _STARTUP_MESSAGES = {
-    "incompatible_version": "OpenCode 2.0.16 or later is required (2.x only)",
+    "incompatible_version": "OpenCode 2.3.2 or newer is required",
     "missing_operations": "OpenCode API is missing required operations",
     "unauthorized": "OpenCode server authentication failed",
 }
@@ -717,7 +718,7 @@ def server_version_error(payload: object) -> str | None:
 
     Version-only judgment: a Mapping payload whose ``version`` strings to the
     installed release is supported when its parsed version is in ``2.x`` at
-    or above ``(2, 0, 16)`` — anything unparseable, below the floor, outside
+    or above ``(2, 3, 2)`` — anything unparseable, below the floor, outside
     major 2, blank, or a payload that is not a Mapping at all is refused with
     ``OPENCODE_V2_REQUIRED``, plus ``Installed server version: <version>.``
     when a non-blank version was readable. ``None`` means the version is in
@@ -728,10 +729,71 @@ def server_version_error(payload: object) -> str | None:
         return OPENCODE_V2_REQUIRED
     version = str(payload.get("version") or "").strip()
     parsed = version_number(version)
-    if parsed is None or parsed < (2, 0, 16) or parsed[0] != 2:
+    if parsed is None or parsed < (2, 3, 2) or parsed[0] != 2:
         detail = f" Installed server version: {version}." if version else ""
         return f"{OPENCODE_V2_REQUIRED}{detail}"
     return None
+
+
+def opencode_version_line(binary: str, *, timeout: float = 5.0) -> str:
+    """The first line of ``<binary> --version``, or ``""`` when it cannot be read.
+
+    The one version probe: the Settings status row and the ACP start gate both use it. It runs
+    with the agent's environment policy (no ``CIAO_*`` or PWA token, the engine's bin dir first on
+    PATH), so a ``#!/usr/bin/env node`` shim finds node under a minimal launchd PATH.
+    """
+    import subprocess
+
+    env = agent_base_env(())
+    env["PATH"] = prepend_engine_path(env.get("PATH"))
+    try:
+        result = subprocess.run(
+            [binary, "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+
+
+# A failed probe of a present binary is remembered this long, so a broken install does not cost
+# a timeout on every chat start. A readable version is kept until the binary's mtime changes.
+_VERSION_FAILURE_TTL = 20.0
+# (monotonic time the probe finished, version or "" for a failed probe)
+_VERSION_CACHE: dict[tuple[str, int], tuple[float, str]] = {}
+_VERSION_CACHE_GUARD = threading.Lock()
+
+
+def cached_opencode_version(binary: str) -> str:
+    """``opencode_version_line`` cached per binary path and mtime, so an upgrade is seen.
+
+    A readable version is kept for that mtime. A failed probe is kept for
+    ``_VERSION_FAILURE_TTL`` seconds, then retried. A missing binary is not cached at all.
+    """
+    try:
+        key = (binary, os.stat(binary).st_mtime_ns)
+    except OSError:
+        return opencode_version_line(binary)
+    with _VERSION_CACHE_GUARD:
+        cached = _VERSION_CACHE.get(key)
+    if cached is not None:
+        probed_at, version = cached
+        if version or time.monotonic() - probed_at < _VERSION_FAILURE_TTL:
+            return version
+    version = opencode_version_line(binary)
+    with _VERSION_CACHE_GUARD:
+        _VERSION_CACHE[key] = (time.monotonic(), version)
+    return version
+
+
+def opencode_start_supported(version: str) -> bool:
+    """True when ``version`` is in the OpenCode floor: the ACP start gate's ``supported``."""
+    return server_version_error({"version": version}) is None
 
 
 def _health_failure_reason(
@@ -4806,8 +4868,6 @@ def _opencode_inventory(binary: str) -> _Inventory:
 
 def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> dict[str, Any]:
     """Bounded, credential-free opencode install/auth status for Settings."""
-    import subprocess
-
     from ciao.provider_versions import release_check
     from ciao.setup_status import _provider
 
@@ -4844,15 +4904,8 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
             # the provider. Empty when the installer used needs none.
             path_command=opencode_path_hint(),
         )
-    version = ""
-    try:
-        # Unlike auth-list, this version probe still captures unbounded output.
-        result = subprocess.run(
-            [binary, "--version"], capture_output=True, text=True, encoding="utf-8", timeout=timeout
-        )
-        version = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
-    except (OSError, subprocess.SubprocessError):
-        version = ""
+    # Unlike auth-list, this version probe still captures unbounded output.
+    version = opencode_version_line(binary, timeout=timeout)
     if server_version_error({"version": version}) is not None:
         return _provider(
             name="opencode",

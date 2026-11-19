@@ -713,8 +713,8 @@ def test_release_commit_guard_is_skipped_under_allow_dirty(
 def _oc(**kw) -> release_mod.ProviderProbe:
     base = dict(
         provider="opencode",
-        installed="2.1.0",
-        latest="2.1.0",
+        installed="2.4.0",
+        latest="2.4.0",
         published=True,
         note="",
     )
@@ -748,7 +748,7 @@ def _build(opencode, claude, untested=()) -> dict:
 def test_build_provider_record_tested() -> None:
     record = _build(_oc(), _claude())
     assert record["providers"]["opencode"]["status"] == "tested"
-    assert record["providers"]["opencode"]["version"] == "2.1.0"
+    assert record["providers"]["opencode"]["version"] == "2.4.0"
     assert record["providers"]["claude"]["status"] == "tested"
     assert record["providers"]["claude"]["version"] == "2.1.301"
     assert record["ciaobot"] == "1.6.1"
@@ -772,6 +772,8 @@ def test_build_provider_record_refuses_missing_opencode() -> None:
     [
         _oc(installed="0.0.0-dev-1"),
         _oc(installed="2.1.0-beta.1"),
+        _oc(installed="2.1.0"),
+        _oc(installed="2.3.1"),
         _oc(published=False),
         _oc(published=None),
         _oc(installed="1.14.0"),
@@ -801,7 +803,7 @@ def test_pr_body_lists_provider_versions() -> None:
     body = release_mod._pr_body("1.6.1", "notes", ["pytest"], provider_record=record)
     assert "## Provider versions tested" in body
     assert "OpenCode" in body
-    assert "2.1.0" in body
+    assert "2.4.0" in body
     skipped = release_mod._pr_body("1.6.1", "notes", [], provider_record=None)
     assert "Not re-recorded" in skipped
 
@@ -865,7 +867,7 @@ def test_main_apply_writes_and_stages_provider_record(
         )
     )
     assert record["ciaobot"] == "0.3.0"
-    assert record["providers"]["opencode"]["version"] == "2.1.0"
+    assert record["providers"]["opencode"]["version"] == "2.4.0"
 
 
 def test_probe_claude_reads_the_cli_and_the_pinned_adapter(
@@ -1010,4 +1012,4 @@ def test_repo_pins_uv_and_ci_workflows_use_the_same_version() -> None:
             m = re.search(r"version:\s*[\"']?([^\s\"']+)", window)
             assert m, f"{wf.name}:{i + 1} setup-uv has no version input"
             assert m.group(1) == pinned, f"{wf.name}:{i + 1} pins {m.group(1)}, pyproject pins {pinned}"
-    assert seen >= 3
+    assert seen >= 2  # publish.yml and release-smoke.yml; R1 removed the server-host rehearsal workflow that was the third

@@ -1016,7 +1016,7 @@ def _opencode_untested_reason(probe: ProviderProbe) -> tuple[str, str] | None:
     if "-" in version or not STABLE_VERSION_RE.fullmatch(version):
         return "unpublished", f"{version} is not a stable version"
     if server_version_error({"version": version}) is not None:
-        return "unreadable", f"{version} is outside the supported 2.0.16+ / 2.x contract"
+        return "unreadable", f"{version} is outside the supported 2.3.2+ / 2.x contract"
     if probe.published is False:
         return "unpublished", f"{version} is not published on npm"
     if probe.published is None:

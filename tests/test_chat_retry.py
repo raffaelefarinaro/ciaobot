@@ -1810,10 +1810,10 @@ async def test_capability_error_triggers_tier_fallback(tmp_path: Path) -> None:
     pcm._save()
     # This test exercises the dispatch path, not the pre-flight, so let the
     # turn through as if the pre-flight approved the model.
-    async def _always_capable(model, chat):
+    def _always_capable(chat):
         return True
 
-    pcm._model_capable = _always_capable  # type: ignore[assignment]
+    pcm._agent_accepts_images = _always_capable  # type: ignore[assignment]
 
     seen_models: list[str] = []
 

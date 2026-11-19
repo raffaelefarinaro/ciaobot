@@ -484,7 +484,7 @@ async def test_ended_background_work_does_not_hold_its_provider(tmp_path: Path) 
 # A Claude provider is one CLI process whose rebuild costs a cold start that
 # measured 13-53 s under load, which is what the SDK's initialize deadline
 # times out on. The most recently used few therefore outlive the idle timeout.
-# opencode is a whole `opencode serve` per chat and is never kept warm.
+# opencode is an ACP agent process too (`opencode acp`), so it shares that pool.
 
 
 def _attach_claude(
@@ -526,12 +526,17 @@ async def test_claude_provider_past_the_warm_window_is_reaped(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_opencode_provider_is_never_kept_warm(tmp_path: Path) -> None:
+async def test_opencode_agent_is_kept_warm_like_any_acp_agent(tmp_path: Path) -> None:
+    """opencode runs as one ``opencode acp`` agent process, so the ACP warm pool applies to it."""
     manager = _make_manager(tmp_path)
     chat_id = _chat(manager)
     provider = _attach(manager, chat_id, idle_for=manager._provider_idle_timeout + 1)
     manager._provider_kind[chat_id] = "opencode"
 
+    assert await manager.reap_idle_providers() == []
+    assert not provider.disconnected
+
+    manager._provider_last_used[chat_id] -= _ACP_WARM_IDLE_TIMEOUT_SECONDS
     assert await manager.reap_idle_providers() == [chat_id]
     assert provider.disconnected
 

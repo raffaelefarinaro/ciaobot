@@ -6542,29 +6542,71 @@ export const inventory: InventoryEntry[] = [
     },
     "sources": [],
     "consumers": [
-      "web/src/components/needs-you/GwsAuthBody.vue",
+      "web/src/components/needs-you/GwsAuthBody.vue"
     ],
     "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variantNotes": "Props are the chat action and its params; no configurable variants beyond the states listed.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in CallbackPasteField.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "callback-paste-field--default"
+        ],
+        "note": "Empty input: the submit is disabled and the value is empty."
       },
-      { "name": "pending", "coverage": "uncovered", "storyIds": [], "note": "CallbackPasteField.vue busy makes the input readonly and disables the submit button; no rendered-state story exists." },
-      { "name": "action-error", "coverage": "uncovered", "storyIds": [], "note": "CallbackPasteField.vue v-if=\"error\" renders a role=alert callback error; no rendered-state story exists." },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "ready",
+        "coverage": "covered",
+        "storyIds": [
+          "callback-paste-field--ready"
+        ],
+        "note": "A loopback callback address enables the submit; no alert shows."
+      },
+      {
+        "name": "pending",
+        "coverage": "covered",
+        "storyIds": [
+          "callback-paste-field--pending"
+        ],
+        "note": "The callback write is held: input is readonly and the submit reads Sending… and is disabled."
+      },
+      {
+        "name": "action-error",
+        "coverage": "covered",
+        "storyIds": [
+          "callback-paste-field--refused"
+        ],
+        "note": "The engine refusal shows the role=alert copy, linked by aria-describedby, and clears the value."
+      },
+      {
+        "name": "sent",
+        "coverage": "covered",
+        "storyIds": [
+          "callback-paste-field--sent"
+        ],
+        "note": "An accepted callback clears the value and shows no alert; the card owns what follows."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "callback-paste-field--keyboard-focus"
+        ],
+        "note": "Tab lands on the input with a visible focus outline."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "callback-paste-field--narrow"
+        ],
+        "note": "Narrow renders the input inside a maximum 390px container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in CallbackPasteField.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch of its own: the field posts the typed address only on submit. Pending and refused outcomes are covered; there is no initial or refresh loading state."
     },
     "migration": {
       "status": "unassessed",
@@ -6584,29 +6626,93 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/needs-you/registry.ts"
     ],
-    "variants": ["open", "working", "done", "copiedOnce"],
-    "variantNotes": "CommandBody.vue renders a command, terminal typing, manual completion and copy fallback; remaining variants are unassessed.",
+    "variants": [],
+    "variantNotes": "Props are the chat action and its params; no configurable variants beyond the states listed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in CommandBody.vue implements this render; no rendered-state story exists."
+        "name": "open",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--open"
+        ],
+        "note": "Open shows the hint, Type it in a terminal and Copy; no I ran it control."
       },
-      { "name": "open", "coverage": "uncovered", "storyIds": [], "note": "CommandBody.vue action.state === 'open' renders the terminal instruction; no rendered-state story exists." },
-      { "name": "working", "coverage": "uncovered", "storyIds": [], "note": "CommandBody.vue action.state === 'working' switches to I ran it; no rendered-state story exists." },
-      { "name": "done", "coverage": "uncovered", "storyIds": [], "note": "CommandBody.vue action.state === 'done' hides command actions; no rendered-state story exists." },
-      { "name": "action-error", "coverage": "uncovered", "storyIds": [], "note": "CommandBody.vue v-if=\"error\" renders the error alert; no rendered-state story exists." },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "working",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--working"
+        ],
+        "note": "Working swaps Type it for I ran it; a click holds the marking request and blocks the control."
+      },
+      {
+        "name": "done",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--done"
+        ],
+        "note": "Done shows the command only; no controls and no hint."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--failed"
+        ],
+        "note": "Failed keeps Type it and Copy without the hint."
+      },
+      {
+        "name": "copied",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--copied"
+        ],
+        "note": "Copy with a resolving clipboard shows Copied. and offers I ran it."
+      },
+      {
+        "name": "action-error",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--copy-failed"
+        ],
+        "note": "A refused clipboard shows the role=alert copy failure and offers no I ran it."
+      },
+      {
+        "name": "type-fallback",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--type-fallback"
+        ],
+        "note": "Type it with an unavailable terminal falls back to copy and shows the not-ready message."
+      },
+      {
+        "name": "typing",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--typing"
+        ],
+        "note": "The held terminal read keeps Type it disabled while the command is being typed."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--keyboard-focus"
+        ],
+        "note": "Tab lands on the command region, which has a visible focus outline."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--narrow"
+        ],
+        "note": "Narrow keeps the command region within a maximum 390px container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in CommandBody.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch of its own: the card passes the action in, and every request runs only from a click, so there is no initial, refresh or stale loading state."
     },
     "migration": {
       "status": "unassessed",
@@ -6626,27 +6732,101 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/needs-you/registry.ts"
     ],
-    "variants": ["open", "failed", "waiting", "working", "code", "url"],
-    "variantNotes": "DeviceCodeBody.vue branches on action.state, code and URL; terminal support is conditional. Remaining variants are unassessed.",
+    "variants": [],
+    "variantNotes": "Props are the chat action and its params; no configurable variants beyond the states listed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in DeviceCodeBody.vue implements this render; no rendered-state story exists."
+        "name": "open",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--open"
+        ],
+        "note": "Open shows Start sign-in only: no code, no Copy."
       },
-      { "name": "open / failed", "coverage": "uncovered", "storyIds": [], "note": "DeviceCodeBody.vue open/failed action states render the start button; starting disables it. No rendered-state story exists." },
-      { "name": "waiting", "coverage": "uncovered", "storyIds": [], "note": "DeviceCodeBody.vue waiting renders code/copy and a URL when available; working/waiting can show HelperTerminalButton. No rendered-state story exists." },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "starting",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--starting"
+        ],
+        "note": "A held start request shows Starting… and blocks the control."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--failed"
+        ],
+        "note": "Failed offers Try again."
+      },
+      {
+        "name": "waiting",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--waiting"
+        ],
+        "note": "Waiting shows the one-time code group, Copy, the verification link and the helper terminal button."
+      },
+      {
+        "name": "copied",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--copied"
+        ],
+        "note": "Copy with a resolving clipboard relabels the control Copied."
+      },
+      {
+        "name": "copy-failed",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--copy-failed"
+        ],
+        "note": "A refused clipboard keeps the Copy label and reports the failure to the card through its error emit."
+      },
+      {
+        "name": "waiting-without-code",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--waiting-without-code"
+        ],
+        "note": "A code outside the engine pattern is never shown or copied; the link still shows."
+      },
+      {
+        "name": "working",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--working"
+        ],
+        "note": "Working shows the helper terminal button and no start control."
+      },
+      {
+        "name": "done",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--done"
+        ],
+        "note": "Done renders no control; the card owns Continue."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--keyboard-focus"
+        ],
+        "note": "Tab lands on Start sign-in with a visible focus outline."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--narrow"
+        ],
+        "note": "Narrow keeps the code group within a maximum 390px container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in DeviceCodeBody.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch of its own: the card passes the action in, and every request runs only from a click, so there is no initial, refresh or stale loading state."
     },
     "migration": {
       "status": "unassessed",
@@ -6666,27 +6846,99 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/needs-you/registry.ts"
     ],
-    "variants": ["open", "failed", "waiting", "onHost"],
-    "variantNotes": "GwsAuthBody.vue branches on action.state and onHost for callback paste; remaining variants are unassessed.",
+    "variants": [],
+    "variantNotes": "Props are the chat action and its params; no configurable variants beyond the states listed.",
     "states": [
       {
-        "name": "default",
+        "name": "open",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--open"
+        ],
+        "note": "Open shows Sign in with Google only, with no link."
+      },
+      {
+        "name": "starting",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--starting"
+        ],
+        "note": "A held start request shows Starting… and blocks the control; the placeholder tab is stubbed."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--failed"
+        ],
+        "note": "Failed offers Try again and no manual-connect link for an ordinary refusal."
+      },
+      {
+        "name": "failed-manual-connect",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--failed-manual-connect"
+        ],
+        "note": "A failure that names the web app adds the link to Settings, which navigates to the workspace page."
+      },
+      {
+        "name": "waiting",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--waiting"
+        ],
+        "note": "Waiting shows the Google consent link with noopener; no button and no paste field."
+      },
+      {
+        "name": "waiting-without-consent",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--waiting-without-consent"
+        ],
+        "note": "A waiting URL that is not a Google consent page shows no link and no control."
+      },
+      {
+        "name": "waiting-off-engine-host",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "<template> in GwsAuthBody.vue implements this render; no rendered-state story exists."
+        "note": "The paste-back branch renders only when isLoopbackPage() is false. The workshop runs on loopback, so this branch cannot render here without mocking the module; CallbackPasteField has its own stories."
       },
-      { "name": "open / failed", "coverage": "uncovered", "storyIds": [], "note": "GwsAuthBody.vue open/failed renders start; a failed web-app error links to manual connect. No rendered-state story exists." },
-      { "name": "waiting", "coverage": "uncovered", "storyIds": [], "note": "GwsAuthBody.vue waiting renders the URL and, when !onHost, CallbackPasteField; no rendered-state story exists." },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "working",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--working"
+        ],
+        "note": "Working renders no control while the sign-in starts."
+      },
+      {
+        "name": "done",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--done"
+        ],
+        "note": "Done renders no control; the card owns Continue."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--keyboard-focus"
+        ],
+        "note": "Tab lands on Sign in with Google with a visible focus outline."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--narrow"
+        ],
+        "note": "Narrow keeps the primary control within a maximum 390px container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in GwsAuthBody.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch of its own: the card passes the action in, and every request runs only from a click, so there is no initial, refresh or stale loading state. The start request runs from the primary control."
     },
     "migration": {
       "status": "unassessed",
@@ -6704,28 +6956,55 @@ export const inventory: InventoryEntry[] = [
     },
     "sources": [],
     "consumers": [
-      "web/src/components/needs-you/DeviceCodeBody.vue",
+      "web/src/components/needs-you/DeviceCodeBody.vue"
     ],
     "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variantNotes": "Props are the chat action and its params; no configurable variants beyond the states listed.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HelperTerminalButton.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "helper-terminal-button--default"
+        ],
+        "note": "With a helper session the control reads Show sign-in terminal."
       },
-      { "name": "hidden", "coverage": "uncovered", "storyIds": [], "note": "HelperTerminalButton.vue v-if=\"sessionId\" hides the terminal action without a session; no rendered-state story exists." },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "hidden",
+        "coverage": "covered",
+        "storyIds": [
+          "helper-terminal-button--hidden"
+        ],
+        "note": "Without a helper session the body renders nothing."
+      },
+      {
+        "name": "show",
+        "coverage": "covered",
+        "storyIds": [
+          "helper-terminal-button--show"
+        ],
+        "note": "Show reads the terminal status once (declared, unavailable); the control stays and no alert shows."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "helper-terminal-button--keyboard-focus"
+        ],
+        "note": "Tab lands on the control with a visible focus outline."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "helper-terminal-button--narrow"
+        ],
+        "note": "Narrow keeps the control within a maximum 390px container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HelperTerminalButton.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch on render. Show opens the terminal store, which reads the engine status once when it opens; that read is the only request this owner makes."
     },
     "migration": {
       "status": "unassessed",
@@ -6785,26 +7064,61 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/needs-you/registry.ts"
     ],
-    "variants": ["note"],
-    "variantNotes": "RestartBody.vue owns the optional agent reason and Settings action; remaining variants are unassessed.",
+    "variants": [],
+    "variantNotes": "Props are the chat action and its params; no configurable variants beyond the states listed.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in RestartBody.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "restart-body--default"
+        ],
+        "note": "Config reason with a note: shows Agent's reason and Open Settings."
       },
-      { "name": "reason", "coverage": "uncovered", "storyIds": [], "note": "RestartBody.vue v-if=\"note\" renders the agent reason alongside the Settings action; no rendered-state story exists." },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "update",
+        "coverage": "covered",
+        "storyIds": [
+          "restart-body--update"
+        ],
+        "note": "Update reason shows Open Updates and navigates to the Settings updates place."
+      },
+      {
+        "name": "unknown-reason",
+        "coverage": "covered",
+        "storyIds": [
+          "restart-body--unknown-reason"
+        ],
+        "note": "A reason the PWA does not know gets the generic Open Settings copy and the advanced restart place."
+      },
+      {
+        "name": "no-note",
+        "coverage": "covered",
+        "storyIds": [
+          "restart-body--no-note"
+        ],
+        "note": "Without a note the reason line is absent and the control remains."
+      },
+      {
+        "name": "keyboard-activate",
+        "coverage": "covered",
+        "storyIds": [
+          "restart-body--keyboard-activate"
+        ],
+        "note": "Tab reaches Open Settings with a visible outline; Enter navigates."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "restart-body--narrow"
+        ],
+        "note": "Narrow keeps the control within a maximum 390px container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in RestartBody.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch: the body reads the action's reason and note only, so there is no loading state."
     },
     "migration": {
       "status": "unassessed",
@@ -6983,36 +7297,100 @@ export const inventory: InventoryEntry[] = [
       "routine",
       "error"
     ],
-    "variantNotes": "Observed branches in OnboardingCareStage.vue; remaining variants have not been audited.",
+    "variantNotes": "A routine installed (enabled or paused) or none, the read error, the availability answers with their proposed slot, and the write errors through the exposed save/refresh. busy only feeds the emitted StageState; the stage renders no Save control and no disabled visual state while a write is pending.",
     "states": [
       {
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--loading"
+        ],
+        "note": "Loading: the held GET /api/schedules read — the stage shows the No care routine is installed sentence while loading. The placeholder borrows the loaded empty copy instead of drawing a row shape; recorded for the loading follow-up, not fixed here."
+      },
+      {
+        "name": "no-routine",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--no-routine"
+        ],
+        "note": "Empty: a loaded list with no system-memory-curation routine shows the role=status No care routine is installed… sentence and no availability group; canContinue stays true because an unedited Continue writes nothing."
+      },
+      {
+        "name": "load-failure",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--load-failure"
+        ],
+        "note": "Failure: a failed schedule read shows the role=alert with the engine's message; with error set the no-routine sentence hides. The error rides the emitted state while canContinue stays bound to a pending save only (the owner never dead-ends Continue)."
+      },
+      {
+        "name": "refresh-failure",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--refresh-failure"
+        ],
+        "note": "Refresh: the exposed refresh re-reads /api/schedules after a loaded routine; a refused re-read shows the role=alert beside the still-installed routine and the emitted state carries the error. The shell never calls refresh today; the story drives the exposed method directly."
+      },
+      {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingCareStage.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--default"
+        ],
+        "note": "A routine installed and enabled: Workspace care is on., the segmented availability group (always on / daytime / varies), the proposed local time and the browser timezone, and the untouched hint The packaged default stays…."
       },
       {
-        "name": "routine",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingCareStage.vue has a routine branch; no rendered-state story exists."
+        "name": "paused",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--paused"
+        ],
+        "note": "routine.enabled false: the head reads Workspace care is paused. and the proposal fields stay editable."
       },
       {
-        "name": "error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingCareStage.vue has a error branch; no rendered-state story exists."
+        "name": "availability-edit",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--availability-edit"
+        ],
+        "note": "Choosing an availability answer proposes its local slot (suggestedTime) until the time is edited: the play clicks varies, asserting the checked segment, the proposed 09:00 and the Saved when you continue hint."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "timezone-edit",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--timezone-edit"
+        ],
+        "note": "Typing a timezone marks the proposal edited for the shell's Continue; the local time field edit rides the same saved-when-you-continue branch."
+      },
+      {
+        "name": "save-applied",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--save-applied"
+        ],
+        "note": "The shell's Continue calls the exposed save: the play proposes a slot, then invokes save through the host control; the PATCH /api/schedules/system-memory-curation@<workspace> write answers and the hint returns to the packaged default."
+      },
+      {
+        "name": "save-refused",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--save-refused"
+        ],
+        "note": "A refused PATCH through the exposed save: the role=alert shows the engine's message, the proposal stays edited for a retry and canContinue stays true (OnboardingCareStage.vue save())."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-care-stage--narrow"
+        ],
+        "note": "Narrow: the routine stage in a maximum 390px container; the time and timezone fields stack into one column."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingCareStage.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load: one GET /api/schedules on mount (loading, held) — while it is held the stage renders the No care routine sentence, the placeholder borrowing the loaded empty copy rather than a row shape (noted for the loading follow-up; not fixed in this slice). Loaded, empty and failure follow it (default, no-routine, load-failure). Refresh: the exposed refresh re-runs the same read; a refused re-read keeps the routine and shows the alert (refresh-failure). The shell does not call refresh today. Writes: the exposed save PATCHes the routine row (save-applied, save-refused); while a write is pending only the emitted state changes. Stale: none observed."
     },
     "migration": {
       "status": "unassessed",
@@ -7347,42 +7725,90 @@ export const inventory: InventoryEntry[] = [
       "host",
       "provisioned"
     ],
-    "variantNotes": "Observed branches in OnboardingLocationStage.vue; remaining variants have not been audited.",
+    "variantNotes": "Provisioned set-rows (Ciaobot folder and Workspace, each with a Change control) against the fresh folder/name fields; the onHost help note; folder inspection (existing notes, engine refusal, request failure) and the name validation. busy only feeds the emitted StageState; the provisioned Change controls are links that stories assert but never click.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingLocationStage.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-location-stage--default"
+        ],
+        "note": "Fresh install (context.provisioned false): the Main Ciaobot folder input#onboarding-folder and Workspace name input#onboarding-name, both empty, no set-rows and no errors; mounting reads nothing (the play asserts an empty request ledger)."
       },
       {
-        "name": "folder",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingLocationStage.vue has a folder branch; no rendered-state story exists."
+        "name": "folder-inspected",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-location-stage--folder-inspected"
+        ],
+        "note": "After the folder input's change event, /api/setup/inspect-folder answers ok: inspected=true and the Existing notes found help renders for mode \"existing\" (or \"notes\"). Play types a synthetic path and blurs."
       },
       {
-        "name": "host",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingLocationStage.vue has a host branch; no rendered-state story exists."
+        "name": "folder-error",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-location-stage--folder-error"
+        ],
+        "note": "The inspection refuses ({ok:false,error}) or fails: the folder error paragraph (role=alert) renders, the emitted state carries the error and canContinue stays false (OnboardingLocationStage.vue inspect())."
+      },
+      {
+        "name": "name-invalid",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-location-stage--name-invalid"
+        ],
+        "note": "An invalid workspace name committed on blur (NAME_PATTERN): the name error renders in the field's role=alert with aria-invalid on the input and canContinue false (nameError)."
       },
       {
         "name": "provisioned",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingLocationStage.vue has a provisioned branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-location-stage--provisioned"
+        ],
+        "note": "context.provisioned: the Ciaobot folder set-row (a.change to /settings/advanced#workspace-move, asserted not clicked) and the Workspace set-row with the Change link button; /api/setup-status supplies workspace_root on mount and marks the path inspected."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "provisioned-loading",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-location-stage--provisioned-loading"
+        ],
+        "note": "The held /api/setup-status read: the set-value reads Loading… with no skeleton; the row already has its loaded geometry (see loading)."
+      },
+      {
+        "name": "provisioned-load-error",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-location-stage--provisioned-load-error"
+        ],
+        "note": "A failed /api/setup-status read: the role=alert Could not load the current Ciaobot folder. renders beside the still-Loading set-value (provisionedPath stays empty)."
+      },
+      {
+        "name": "provisioned-edit-name",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-location-stage--provisioned-edit-name"
+        ],
+        "note": "The Workspace row's Change button opens the name field pre-filled with the stored name while the folder set-row stays (OnboardingLocationStage.vue editingName)."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-location-stage--narrow"
+        ],
+        "note": "Narrow: the fresh stage in a maximum 390px container, one column of fields."
+      },
+      {
+        "name": "host-note",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "The v-if=\"!onHost\" help paragraph renders only when the page hostname is not a loopback name (isHostOrigin, lib/hostOrigin.ts); the workshop and its browser runner always serve on localhost, so this branch cannot render in isolation and has no story."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingLocationStage.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load: only the provisioned variant reads on mount (/api/setup-status; provisioned-loading held — the set-row keeps the loaded geometry and the value reads Loading…, no skeleton anywhere). Failure keeps the alert beside the Loading… value (provisioned-load-error). The fresh stage reads nothing on mount; folder inspection is user-triggered on change and guarded against late answers by an inspector id, so refresh and stale states do not apply."
     },
     "migration": {
       "status": "unassessed",
@@ -7406,36 +7832,76 @@ export const inventory: InventoryEntry[] = [
       "pending",
       "error"
     ],
-    "variantNotes": "Observed branches in OnboardingMemoryStage.vue; remaining variants have not been audited.",
+    "variantNotes": "The handover group's three answers (off/dismiss/all), the eligibility-driven suggestion, the acting_available notice and the read/write errors. busy only feeds the emitted StageState; while a write is pending further taps are ignored and the native radios re-sync to the model.",
     "states": [
       {
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-memory-stage--loading"
+        ],
+        "note": "Loading: both mount reads (handover and onboarding receipt) held — the group renders the stored Ask me first with no suggestion line and no alert; the placeholder matches the loaded geometry (no skeleton)."
+      },
+      {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in OnboardingMemoryStage.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-memory-stage--default"
+        ],
+        "note": "handover loaded (off) with no eligible journey: Ask me first checked, no Suggested hint, no service notice and no error."
       },
       {
-        "name": "pending",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingMemoryStage.vue has a pending branch; no rendered-state story exists."
+        "name": "suggested",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-memory-stage--suggested"
+        ],
+        "note": "An in-progress installation with a stored off may be offered the draft: File what's clear, ask about the rest is proposed and the Suggested. Saved when you continue. hint shows until the choice is tapped."
       },
       {
-        "name": "error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingMemoryStage.vue has a error branch; no rendered-state story exists."
+        "name": "service-unavailable",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-memory-stage--service-unavailable"
+        ],
+        "note": "acting_available false with a non-off draft: the role=status The trusted service is unavailable… paragraph renders alongside the proposal; the choice still writes on selection."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "load-failure",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-memory-stage--load-failure"
+        ],
+        "note": "A failed handover read: the role=alert shows the engine's message, the group stays on the stored answer, no suggestion shows and canContinue stays false until a successful load."
+      },
+      {
+        "name": "choice-saved",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-memory-stage--choice-saved"
+        ],
+        "note": "Choosing an answer writes it at once (select → saveMemoryHandover → PATCH memory_handover): the play skips duplicates, asserting the checked radio and the four recorded requests (handover, receipt, write, registry re-read)."
+      },
+      {
+        "name": "save-refused",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-memory-stage--save-refused"
+        ],
+        "note": "A refused write rolls the group back to the stored answer and shows the role=alert error (OnboardingMemoryStage.vue commit); tapping the option again is the retry."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "onboarding-memory-stage--narrow"
+        ],
+        "note": "Narrow: the suggested render in a maximum 390px container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in OnboardingMemoryStage.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load: two reads on mount, /api/proposals/handover?workspace=… and /api/onboarding (loading, held) — while held the group shows the stored Ask me first with no suggestion, matching the loaded geometry with no skeleton. Failure renders the role=alert and canContinue false (load-failure). Writes: every choice writes at once and the registry re-reads (choice-saved); a refused write rolls the draft back (save-refused). Refresh: none beyond the mount read. Stale: none observed."
     },
     "migration": {
       "status": "unassessed",
@@ -9429,7 +9895,7 @@ export const inventory: InventoryEntry[] = [
         "name": "load-failed",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "OWNER BUG, not fixed here: on a first-load failure loaded stays false, so the Checking the update task history line stays on screen beside the role=alert read error. The panel says it is still checking while the check has failed. Recorded for a follow-up; no story."
+        "note": "Fixed: a first-load failure now settles the panel, so the Checking the update task history line is gone and the role=alert read error shows alone; a later successful refresh clears the error. Covered by a component test, not a story; no story exists for this state."
       },
       {
         "name": "empty",

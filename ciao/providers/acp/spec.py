@@ -7,7 +7,7 @@ opt-ins, how Ciaobot's modes map onto the agent's config options) is data on an
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,6 +20,20 @@ class ModeChoice:
 
     config_id: str  # e.g. "mode", "collaboration_mode"
     values: tuple[str, ...]  # first value the agent currently offers wins
+
+
+@dataclass(frozen=True, slots=True)
+class VersionGate:
+    """Refuses an agent whose version is below the floor, before any session opens.
+
+    ``supported`` judges the version text the agent reports (in ``agentInfo``, or from
+    ``probe`` when it reports none). ``refusal`` is the whole user-facing text of a refusal:
+    the adapter's own version text never reaches the PWA.
+    """
+
+    supported: Callable[[str], bool]
+    refusal: str
+    probe: Callable[[str], str]  # binary path -> version text, "" when unreadable
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,3 +58,5 @@ class AgentSpec:
     slash_capsule_as_block: bool = False
     quiet_period_s: float = 5.0  # late-turn close after this much silence
     initialize_timeout_s: float = 30.0
+    # None: any version starts. Otherwise the start is refused before a session opens.
+    version_gate: VersionGate | None = None

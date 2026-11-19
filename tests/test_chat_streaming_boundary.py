@@ -2302,3 +2302,47 @@ async def test_a_drive_with_no_predecessor_does_not_suspend_before_the_turn(
     with pytest.raises(StopIteration) as done:
         coro.send(None)  # a suspension would yield a future instead
     assert done.value.value is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_id", "is_acp", "chat_model", "expected_model"),
+    [
+        # An ACP agent that picked its own model: the chat keeps it when it had none.
+        ("opencode", True, "", "vendor/picked"),
+        ("codex", True, "", "vendor/picked"),
+        # A chat that already names its model keeps it, whatever the agent reports.
+        ("opencode", True, "opus", "opus"),
+        # A non-ACP provider is never written back.
+        ("claude", False, "", ""),
+    ],
+)
+async def test_empty_model_is_written_back_for_any_acp_agent_only(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_id: str,
+    is_acp: bool,
+    chat_model: str,
+    expected_model: str,
+) -> None:
+    from ciao import provider_registry
+
+    descriptor = SimpleNamespace(id=provider_id, acp_spec_path="pkg.mod:SPEC" if is_acp else "")
+    monkeypatch.setattr(provider_registry, "get", lambda pid: descriptor if pid == provider_id else None)
+    events: list[StreamEvent] = [
+        AssistantTextDelta(type="text", text="hi"),
+        ResultEvent(type="result", result="hi", session_id="s1", effective_model="vendor/picked"),
+    ]
+    host = _PassHost(_Provider(events))
+    host.chat.provider = provider_id
+    host.chat.model = chat_model
+    streaming = ChatStreaming(cast(ChatStreamingHost, host))
+    outcome = StreamOutcome()
+
+    [_ async for _ in streaming.drive_stream(
+        chat_id="chat-1",
+        request=AgentRequest(prompt="hello", model=chat_model, mode="auto"),
+        outcome=outcome,
+    )]
+
+    assert host.chat.model == expected_model
+    assert outcome.effective_model == "vendor/picked"
