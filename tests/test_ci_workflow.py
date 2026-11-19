@@ -250,6 +250,23 @@ def test_legacy_decision_step_outputs(tmp_path: Path, tag: str, published: str) 
         assert "::notice::" not in result.stdout
 
 
+def test_publish_workflow_skips_the_updates_feed_release() -> None:
+    # The Mac update feed is a pre-release named `updates` in this repository.
+    # Publishing it fires the same `release: published` event as a version
+    # release, so the build job must refuse that tag or it would build and
+    # publish an engine manifest for the feed. Pinned on the parsed job `if:`.
+    import yaml
+
+    workflow = yaml.safe_load(
+        (Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    condition = workflow["jobs"]["build-engine"]["if"]
+    assert "github.event_name == 'release'" in condition, condition
+    assert "github.event.release.tag_name != 'updates'" in condition, condition
+
+
 def test_publish_workflow_ships_signed_engine_manifest() -> None:
     workflow = (
         Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"

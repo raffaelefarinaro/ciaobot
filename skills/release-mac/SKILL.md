@@ -5,7 +5,7 @@ description: Release the Ciaobot for Mac app (the Swift package in mac/) — bui
 
 # Releasing Ciaobot for Mac
 
-> **Release freeze.** The app moved from `raffaelefarinaro/ciaobot-mac` into this repository's `mac/` directory. Publishing has not moved yet: releases, the `updates` appcast and the feed URL in `mac/release/update-config.env` still live on `raffaelefarinaro/ciaobot-mac`, and moving them is part of the Ciaobot 2.0 release pipeline. Until that lands, do not publish a Mac release from this repository: `scripts/publish-release.sh` without `--repo` now targets `raffaelefarinaro/ciaobot`, whose `publish.yml` runs on every published release, and the app reads that repository's latest release as the engine manifest. An urgent 1.x client fix is cut in `raffaelefarinaro/ciaobot-mac` with that repository's copy of this skill, then brought here with `git subtree pull --prefix=mac https://github.com/raffaelefarinaro/ciaobot-mac.git main`.
+> **Version releases are still held.** The app's source and its update feed now both live in this repository. The `updates` appcast is published here (see [Feed](#feed)). Version releases are not yet: `publish.yml` runs on every published release in this repository, and the app reads the latest release as the engine manifest, so a Mac version release cut here would reach the engine path. The release pipeline that moves Mac publishing here safely is part of #3131 (the Ciaobot 2.0 release pipeline). Until it lands, do not publish a Mac version release from this repository. Without `--repo`, `scripts/publish-release.sh` targets `raffaelefarinaro/ciaobot`. An urgent 1.x client fix is cut in `raffaelefarinaro/ciaobot-mac` with that repository's copy of this skill, then brought here with `git subtree pull --prefix=mac https://github.com/raffaelefarinaro/ciaobot-mac.git main`.
 
 This repository is public. Treat every committed file as publishable: no
 private keys, app-specific passwords, keychain profile names, Apple Account
@@ -236,6 +236,17 @@ Unit tests cannot prove an update installs. On a disposable Mac or VM:
 
 Also try one negative case — a tampered DMG or a wrong-key signature — and
 confirm the client refuses it and keeps running.
+
+## Feed
+
+`UPDATE_FEED_URL` in `release/update-config.env` is `https://github.com/raffaelefarinaro/ciaobot/releases/download/updates/appcast.xml`: the asset `appcast.xml` on the release tagged `updates` in this repository.
+
+- The `updates` release is a **pre-release**. `releases/latest` never resolves to a pre-release, so the feed release cannot become the latest release, replace the download page, or be read as the engine manifest source.
+- `publish.yml`'s `build-engine` job skips that release. Publishing the feed fires the same `release: published` event as a version release, so the job's `if:` also requires `github.event.release.tag_name != 'updates'`. `tests/test_ci_workflow.py::test_publish_workflow_skips_the_updates_feed_release` pins the guard.
+
+### Bridging 0.5.x
+
+Installed 0.5.x clients still poll `https://github.com/raffaelefarinaro/ciaobot-mac/releases/download/updates/appcast.xml`. Upload the 2.0.0 `appcast.xml`, unchanged, as `appcast.xml` on the `updates` release of `raffaelefarinaro/ciaobot-mac`, once, and never again. Its `CFBundleVersion` must be greater than 14 (the build 0.5.0 shipped), or Sparkle will not offer it. Upload it only after the 2.0.0 DMG it points at is downloadable.
 
 ## Recovery
 
