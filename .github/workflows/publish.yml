@@ -49,10 +49,10 @@ jobs:
           # The release lists the wheel only. The 1.x updater reads this manifest
           # through releases/latest, so it must stay a signed schema-1 manifest.
           (cd "$RUNNER_TEMP" && "$py" -m ciao.release_manifest build --version "$version" --out "$ws/ciaobot-engine-manifest.json" "$ws"/dist/ciaobot-*.whl)
-          # The manifest is signed by the same minisign key the installer
-          # embeds, but the signer must not live under desktop/ any more or
-          # #579b would break the release. `signer sign <path>` needs no Tauri
-          # project, so @tauri-apps/cli runs standalone at the version
+          # The manifest is signed with the release minisign key. The signer must
+          # not live under desktop/ or #579b would break the release.
+          # `signer sign <path>` needs no Tauri project, so @tauri-apps/cli runs
+          # standalone at the version
           # desktop/package.json pinned, and writes the same base64 minisign .sig
           # ciao.release_manifest already verifies - the step below is the gate.
           (cd "$ws" && npx --yes @tauri-apps/cli@2.11.4 signer sign ciaobot-engine-manifest.json)

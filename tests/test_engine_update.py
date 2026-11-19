@@ -56,7 +56,6 @@ from ciao.install_receipt import InstallReceipt, read_receipt, write_receipt
 from ciao.release_manifest import (
     artifact_entry,
     build_manifest,
-    installer_artifact_entry,
     verify_manifest,
 )
 from ciao.os_support.private import is_private
@@ -3595,7 +3594,7 @@ def test_pick_wheel_ignores_installer_artifacts(tmp_path: Path) -> None:
     raw = json.dumps(
         build_manifest(
             "1.2.3",
-            [installer_artifact_entry(installer), wheel],
+            [artifact_entry(installer, kind="installer", platform="macos"), wheel],
             created="2026-09-25T10:00:00+00:00",
         )
     ).encode()
