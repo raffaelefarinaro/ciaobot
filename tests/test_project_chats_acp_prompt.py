@@ -17,7 +17,7 @@ from ciao import provider_registry
 from ciao.core_prompt import unified_core
 from ciao.models import ContextCompactedEvent, ResultEvent
 from ciao.web.chat_broker import ChatStream
-from ciao.web.chat_streaming import ChatStreaming, ChatStreamingHost
+from ciao.web.chat_streaming import ChatStreaming, ChatStreamingHost, StreamOutcome
 from tests.test_chat_streaming_boundary import _DriveHost
 from tests.test_context_capsule import _make_manager
 
@@ -157,5 +157,44 @@ async def test_compaction_between_turns_resets_marker(tmp_path: Path) -> None:
     manager._providers[chat.chat_id] = _Service()  # type: ignore[assignment]
     await manager._streaming.drain_between_turns(chat.chat_id, project.project_id)
 
+    assert chat.context_digest == ""
+    assert chat.context_session_id == ""
+
+
+@pytest.mark.asyncio
+async def test_context_compacted_event_survives_the_turns_result(tmp_path: Path) -> None:
+    """Through the real drive_stream: a compaction event alone keeps the marker cleared.
+
+    No status line precedes the event, so only the ContextCompactedEvent branch
+    can mark the turn compacted. Without it the ResultEvent re-commits the
+    marker for a session whose stable context was just compacted away.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Ciaobot", workspace="work")
+    chat = manager.create_chat(project.project_id)
+    chat.context_digest = "digest"
+    chat.context_session_id = "ses_1"
+    request = SimpleNamespace(context_digest="digest", compact=False)
+
+    class _Service:
+        """Provider service: the session id and the real streaming generator."""
+
+        provider = SimpleNamespace(current_session_id="ses_1")
+        current_session_id = "ses_1"
+        background_work_outstanding = False
+
+        async def execute_streaming(self, request):  # type: ignore[no-untyped-def]
+            del request
+            yield ContextCompactedEvent(type="context_compacted")
+            yield ResultEvent(type="result", result="done", is_error=False)
+
+    manager._providers[chat.chat_id] = _Service()  # type: ignore[assignment]
+    outcome = StreamOutcome()
+    async for _event in manager._streaming.drive_stream(
+        chat_id=chat.chat_id, request=request, outcome=outcome  # type: ignore[arg-type]
+    ):
+        pass
+
+    assert outcome.response_text == "done"
     assert chat.context_digest == ""
     assert chat.context_session_id == ""

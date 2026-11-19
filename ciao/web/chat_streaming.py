@@ -1672,8 +1672,12 @@ class ChatStreaming:
                     changed = True
                 if changed:
                     self._host._save()
-            if isinstance(event, SystemStatusEvent) and (event.status or "").startswith(
-                "Compacted context"
+            # A compaction marks the turn on its own event, so the marker is not
+            # re-committed even when no status line precedes it. The status
+            # line is still honoured for providers that report only that.
+            if isinstance(event, ContextCompactedEvent) or (
+                isinstance(event, SystemStatusEvent)
+                and (event.status or "").startswith("Compacted context")
             ):
                 compacted_this_turn = True
                 if chat.context_digest or chat.context_session_id:

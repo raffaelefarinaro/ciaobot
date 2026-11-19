@@ -254,6 +254,15 @@ def test_core_routes_write_procedures_out_of_the_always_loaded_prompt() -> None:
     assert "A note without frontmatter cannot be indexed" not in text
     assert "Every Ciaobot operation is a `ciao <noun> <verb>" not in text
     assert "`Agent`/`Task`" not in text
+    # The only sanctioned mention of run_in_background is the required rule
+    # sentence; with that sentence removed, no occurrence may remain.
+    rule = (
+        "Do not start background shells (`run_in_background`, a trailing `&`, "
+        "`nohup`, `setsid`, `disown`): Ciaobot cannot track them."
+    )
+    assert text.count(rule) == 1
+    assert "run_in_background" in rule
+    assert "run_in_background" not in text.replace(rule, "")
 
 
 def test_core_synopsis_only_offers_agent_allowed_task_move_columns() -> None:

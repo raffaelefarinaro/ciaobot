@@ -224,15 +224,14 @@ def test_merge_prompt_names_no_provider_tool_and_has_no_caps_shouting() -> None:
 
 
 def test_dev_server_guidance_keeps_one_auto_reload_run() -> None:
-    """A dev server is one auto-reloading background run, not one per edit (#2760).
+    """A dev server is one auto-reloading subagent run, not one per edit (#2760).
 
-    Stopping a background run wakes the chat with a cancelled notice, so an
-    agent that restarts its preview server after every code change floods the
-    chat with notices that carry no information.
+    Restarting the server after every code change floods the chat with
+    notices that carry no information.
     """
     assert "A dev server runs inside a subagent as one auto-reload run." in _system_instructions()
     skill = agent_cli._help_text()
-    assert "A dev or preview server is one background run for the whole session." in skill
+    assert "A dev or preview server runs inside a subagent as one auto-reload run" in skill
     assert "auto-reload" in skill and "`uvicorn --reload`" in skill
     assert "Restart it only when the server itself has to change" in skill
-    assert "cancelled notice" in skill
+    assert "Restarting after every edit floods the chat" in skill
