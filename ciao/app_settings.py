@@ -455,25 +455,10 @@ class AppSettingsStore:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._explicit_fields: set[str] = set()
-        # Why the last load fell back to defaults, "" when it read cleanly.
-        # Set before `_load`, which is what fills it in.
-        self._load_error = ""
         self.settings = self._load()
         # Per-provider default models captured on the first apply_to_config()
         # call, so clearing an override restores the original value.
         self._defaults: dict[str, str] | None = None
-
-    @property
-    def load_error(self) -> str:
-        """Why the settings could not be read, "" when they could.
-
-        A caller that is about to act on the file rather than in response to a
-        person — the automatic updater — has to tell "there is no file, so the
-        defaults are the decision" from "there is a file and it is unreadable,
-        so nobody knows what the decision was". The second reads as an error
-        here, and it fails closed on the caller's side.
-        """
-        return self._load_error
 
     def _load(self) -> AppSettings:
         try:
@@ -481,16 +466,10 @@ class AppSettingsStore:
         except FileNotFoundError:
             # Absent is healthy: a new install has no choices yet, and the
             # documented defaults are the answer.
-            self._load_error = ""
             return AppSettings()
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError):
             logger.warning("Unreadable app settings at %s; using defaults", self._path)
-            self._load_error = (
-                f"app settings at {self._path} could not be read ({exc}); "
-                "automatic updates wait until Settings saves again"
-            )
             return AppSettings()
-        self._load_error = ""
         if isinstance(raw, dict):
             self._explicit_fields.update(
                 key for key in _BOOLEAN_FIELDS if isinstance(raw.get(key), bool)
@@ -515,10 +494,6 @@ class AppSettingsStore:
         self._path.write_text(
             json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline=""
         )
-        # The file on disk is this store's own settings now, whatever was there
-        # before: an unreadable document is repaired by the first write that
-        # replaces it, and the caller may act on what it just saved.
-        self._load_error = ""
 
     def update(self, changes: dict[str, object]) -> AppSettings:
         """Validate and persist a partial update; returns the new settings.

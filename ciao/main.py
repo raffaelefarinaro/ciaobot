@@ -893,7 +893,7 @@ async def _run_server_locked(
     # leaves its record in a post-move phase with the env moved aside and
     # nothing resuming it: the `ciao` shim and the LaunchAgent can point into a
     # half-installed env, and launchd's `KeepAlive` on `com.ciao.server` will
-    # start it anyway. the 1.x apply installs a durable `com.ciao.recover`
+    # start it anyway. The 1.x apply installs a durable `com.ciao.recover`
     # LaunchAgent for exactly that reason, which is the half that works when
     # this step cannot run at all — the crash window where the live env is
     # renamed aside leaves the engine's own program missing, so launchd cannot

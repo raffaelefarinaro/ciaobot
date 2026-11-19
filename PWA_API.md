@@ -168,7 +168,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/setup-status` | Read first-run setup checks and provider readiness |
 | GET | `/api/package/status` | Read installed package version and best-effort latest GitHub release version |
 | GET | `/api/package/changelog` | List commits between the installed and latest release for the update prompt |
-| POST | `/api/package/update` | Return update guidance for the installed package; production engine updates go through the signed one-line installer or Settings → General |
+| POST | `/api/package/update` | Return update guidance for the installed package; an installer-managed engine is not updated by the engine: on macOS Ciaobot for Mac updates it (Sparkle), on Linux the administrator reinstalls per [docs/LINUX.md](docs/LINUX.md) |
 | POST | `/api/setup/finish` | Finish first-run setup from bootstrap mode |
 | GET | `/api/setup/list-dirs` | List local subdirectories for the setup wizard folder picker (bootstrap mode, localhost only) |
 | GET | `/api/setup/inspect-folder` | Probe a candidate workspace folder for vault mode and any nested workspaces (bootstrap mode, localhost only) |

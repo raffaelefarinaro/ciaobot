@@ -277,6 +277,7 @@ def test_update_package_installer_mode_points_at_installer(monkeypatch) -> None:
     assert result["command"] == ""
     assert "no longer updates itself" in result["error"]
     assert "Ciaobot for Mac updates it" in result["error"]
+    assert "docs/LINUX.md" not in result["error"]
     assert "ciao update" not in result["error"] + result["command"]
     assert "install-engine" not in result["command"] + result["error"]
 
@@ -300,6 +301,7 @@ def test_update_package_installer_checked_before_linux(monkeypatch) -> None:
     assert result["mode"] == "installer"
     assert "no longer updates itself" in result["error"]
     assert "docs/LINUX.md" in result["error"]
+    assert "Ciaobot for Mac" not in result["error"]
     assert result["command"] == ""
 
 

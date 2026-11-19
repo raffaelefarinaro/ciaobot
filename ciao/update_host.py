@@ -772,7 +772,7 @@ class MacUpdateHost:
         Which is why ``python`` is an explicit argument and not read off ``op``: the
         net is only worth anything if its program is a file that exists, so every
         caller has to place it in an env the swap does not *consume*.
-        :the 1.x apply installs it while the live env is
+        The 1.x apply installs it while the live env is
         still intact, from the staged interpreter; ``run_apply`` re-points it at
         the previous env the moment the live one is renamed aside, because the swap
         then moves the staged env into the live env's place and the agent's program

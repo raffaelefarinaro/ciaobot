@@ -229,6 +229,28 @@ def test_a_persisted_insights_enabled_key_is_ignored_and_dropped_on_next_save(tm
     assert "insights_enabled" not in json.loads(path.read_text())
 
 
+def test_legacy_auto_update_keys_load_and_are_dropped_on_next_save(tmp_path):
+    path = tmp_path / "app_settings.json"
+    legacy = {
+        "auto_update_enabled": True,
+        "auto_update_attempt_at": "2026-10-01T00:00:00Z",
+        "auto_update_attempt_id": "abc",
+        "auto_update_error": "",
+        "auto_update_next_check_at": "2026-10-02T00:00:00Z",
+        "auto_update_outcome": "applied",
+        "auto_update_snooze_until": "",
+    }
+    path.write_text(json.dumps({**legacy, "dev_mode": True}))
+
+    store = AppSettingsStore(path)
+
+    assert store.settings.dev_mode is True
+    assert not any(hasattr(store.settings, key) for key in legacy)
+    store.update({"dev_mode": False})
+    saved = json.loads(path.read_text())
+    assert not any(key.startswith("auto_update") for key in saved)
+
+
 def test_update_ignores_insights_enabled(tmp_path):
     path = tmp_path / "app_settings.json"
 
