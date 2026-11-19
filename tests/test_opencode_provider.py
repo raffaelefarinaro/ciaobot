@@ -2167,7 +2167,6 @@ def test_quota_is_unsupported():
 def test_background_subagents_are_supported():
     """Child sessions carry parentID, so background agents are inspectable."""
     assert OpencodeProvider.capabilities.background_subagents is True
-    assert OpencodeProvider.capabilities.subagent_messages is True
 
 
 # ── contract verification ───────────────────────────────────────────────

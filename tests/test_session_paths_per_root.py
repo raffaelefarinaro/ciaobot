@@ -28,7 +28,6 @@ from ciao.providers.base import BaseProvider, ProviderCapabilities
 from ciao.providers.claude import ClaudeProvider
 from ciao.providers.opencode import OpencodeProvider
 from ciao.transcripts import _claude_projects_dir
-from ciao.web import transcript_service
 from ciao.web.project_chats import ProjectChatManager, ChatInfo
 
 
@@ -59,40 +58,6 @@ def _write_session(projects_dir: Path, session_id: str) -> Path:
     }
     path.write_text(json.dumps(record) + "\n", encoding="utf-8")
     return path
-
-
-def _write_nested_subagent(projects_dir: Path, session_id: str, agent: str, text: str) -> Path:
-    """Write one nested subagent JSONL (the ``<sid>/subagents/*.jsonl`` layout)."""
-    path = projects_dir / session_id / "subagents" / f"{agent}.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    record = {
-        "type": "user",
-        "message": {
-            "role": "user",
-            "content": [{"type": "text", "text": text}],
-        },
-    }
-    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
-    return path
-
-
-def test_local_subagent_transcripts_stay_inside_their_agent_root(fake_home: Path) -> None:
-    """A session id resumed or copied under another cwd must not mix that
-    root's subagent transcripts into this chat's panel: the nested-subagent
-    slug scan used to ignore `agent_root` while the parent-session lookup
-    beside it already scoped to it."""
-    root_a = fake_home / "a"
-    root_b = fake_home / "b"
-    session = "cccccccc-cccc-cccc-cccc-cccccccccccc"
-    _write_nested_subagent(_projects_dir_for(root_a), session, "agent-x", "from a")
-    _write_nested_subagent(_projects_dir_for(root_b), session, "agent-y", "from b")
-
-    scoped = transcript_service._local_subagent_transcripts(session, root_a, agent_root=root_a)
-    assert [entry["agent_id"] for entry in scoped] == ["agent-x"]
-
-    # Without a root the global net still reads every slug, as today.
-    unscoped = transcript_service._local_subagent_transcripts(session, root_a)
-    assert sorted(entry["agent_id"] for entry in unscoped) == ["agent-x", "agent-y"]
 
 
 @pytest.fixture
@@ -142,59 +107,6 @@ def test_find_parent_session_file_defaults_to_workspace_root(fake_home: Path) ->
     path = _write_session(_projects_dir_for(root), session)
 
     assert subagent_tracking.find_parent_session_file(session, root) == path
-
-
-def test_local_session_jsonl_paths_reads_own_root(fake_home: Path) -> None:
-    root_a = fake_home / "a"
-    root_b = fake_home / "b"
-    session = "55555555-5555-5555-5555-555555555555"
-    path = _write_session(_projects_dir_for(root_a), session)
-
-    assert transcript_service._local_session_jsonl_paths(session, root_a) == [path]
-    assert (
-        transcript_service._local_session_jsonl_paths(session, root_b, agent_root=root_b) == []
-    )
-
-
-def test_local_session_jsonl_paths_defaults_to_workspace_root(fake_home: Path) -> None:
-    root = fake_home / "a"
-    session = "66666666-6666-6666-6666-666666666666"
-    path = _write_session(_projects_dir_for(root), session)
-
-    assert transcript_service._local_session_jsonl_paths(session, root) == [path]
-
-
-def test_local_session_jsonl_paths_keeps_every_cross_cwd_match(
-    fake_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Codex P2: a session present under several cwd slugs returns them all.
-
-    The interim implementation returned after the first match, so subagent
-    progress records stored in the other file were dropped by
-    _local_subagent_transcripts.
-    """
-    from ciao import transcripts
-
-    session = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-    root = fake_home / "a"
-    preferred = _write_session(_projects_dir_for(root), session)
-    elsewhere_dir = fake_home / ".claude" / "projects" / "-elsewhere"
-    elsewhere = _write_session(elsewhere_dir, session)
-    third_dir = fake_home / ".claude" / "projects" / "-third"
-    third = _write_session(third_dir, session)
-
-    # A stale cache from a prior lookup must not hide the other matches:
-    # _global_session_matches stats each slug live. Seed the cache to prove
-    # freshness comes from the per-slug stat, not the cache age.
-    transcripts._global_session_scan_cache = None
-    paths = transcript_service._local_session_jsonl_paths(session, root)
-
-    # Order: preferred (workspace root) first, then cross-cwd matches. The
-    # tail order is readdir order, which differs per filesystem (APFS vs
-    # ext4/tmpfs), so only the head is pinned — pinning the tail flaked on
-    # Linux CI while passing on every Mac.
-    assert paths[0] == preferred
-    assert set(paths[1:]) == {elsewhere, third}
 
 
 def test_claude_session_exists_reads_own_root(

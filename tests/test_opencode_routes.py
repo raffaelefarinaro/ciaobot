@@ -16,7 +16,7 @@ from ciao.providers.opencode import OpencodeProvider
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
-from ciao.web.routes_api import chat_messages, chat_subagents
+from ciao.web.routes_api import chat_messages
 
 _ENVELOPE = "[CIAO_CONTEXT_BEGIN]\nproject=x\n[CIAO_CONTEXT_END]\n\n"
 
@@ -374,101 +374,6 @@ def test_sessionless_opencode_chat_messages_show_durable_startup_error(
     assert "database is locked" in rows[-1]["content"]
 
 
-def test_opencode_subagents_read_child_sessions(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    pcm = _manager(tmp_path)
-    chat = _opencode_chat(pcm, "ses_parent")
-    monkeypatch.setattr(
-        OpencodeProvider,
-        "read_collab_tree",
-        AsyncMock(return_value=[{
-            "info": {
-                "id": "ses_child",
-                "parentID": "ses_parent",
-                "title": "Research it",
-                "time": {"created": 1_797_800_000_000},
-            },
-            "messages": [{
-                "info": {"role": "assistant"},
-                "parts": [{"type": "text", "text": "Findings"}],
-            }],
-        }]),
-    )
-
-    response = asyncio.run(chat_subagents(_request(
-        f"/api/chats/{chat.chat_id}/subagents",
-        _app(pcm),
-        chat_id=chat.chat_id,
-    )))
-    rows = json.loads(response.body)
-
-    assert rows == [{
-        "agent_id": "ses_child",
-        "parent_agent_id": "ses_parent",
-        "messages": [{"role": "assistant", "content": "Findings"}],
-        "tool_use_id": "",
-        "description": "Research it",
-        "subagent_type": "opencode",
-        "is_async": True,
-        # The fake read has no live-process activity metadata; unknown must
-        # remain conservative rather than settling a possibly-running child.
-        "status": "running",
-        "turn_index": 0,
-        # The child session carries no timestamps here, so there is no length
-        # to report.
-        "duration_ms": None,
-        "started_at": 1_797_800_000_000,
-    }]
-
-
-def test_opencode_subagents_prefer_live_server_over_ephemeral_spawn(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    """A chat with a running provider must not pay for `_EphemeralServer`.
-
-    The subagents poll fires every 4s while a turn streams. If the read cache
-    (`_READ_CACHE_TTL`) has already expired, falling through to the
-    classmethod spawns a whole new `opencode serve` process just to answer
-    this poll -- expensive enough, repeated often enough across concurrent
-    chats, to starve the event loop and destabilize the browser's per-chat
-    websocket. When the chat's own server is already live, its connection
-    must be reused instead.
-    """
-    pcm = _manager(tmp_path)
-    chat = _opencode_chat(pcm, "ses_parent")
-
-    live_provider = OpencodeProvider(tmp_path, config=pcm._config)
-    live_provider._client = object()
-    live_provider._process = SimpleNamespace(returncode=None)
-    live_provider._session_id = "ses_parent"
-    monkeypatch.setattr(
-        live_provider,
-        "read_live_collab_tree",
-        AsyncMock(return_value=[{
-            "info": {"id": "ses_child", "parentID": "ses_parent", "title": "Live"},
-            "messages": [],
-        }]),
-    )
-    service = SimpleNamespace(provider=live_provider)
-    pcm._providers[chat.chat_id] = service
-
-    ephemeral_spawn = AsyncMock(side_effect=AssertionError(
-        "must not spawn an ephemeral server while a live one is attached"
-    ))
-    monkeypatch.setattr(OpencodeProvider, "read_collab_tree", ephemeral_spawn)
-
-    response = asyncio.run(chat_subagents(_request(
-        f"/api/chats/{chat.chat_id}/subagents",
-        _app(pcm),
-        chat_id=chat.chat_id,
-    )))
-    rows = json.loads(response.body)
-
-    assert [row["agent_id"] for row in rows] == ["ses_child"]
-    ephemeral_spawn.assert_not_called()
-
-
 def test_opencode_failed_write_renders_as_activity_not_filecard(
     tmp_path: Path, monkeypatch,
 ) -> None:
@@ -516,63 +421,6 @@ def test_opencode_failed_write_renders_as_activity_not_filecard(
         row.get("tool_name") == "_activity" and "write" in row["content"]
         for row in rows
     )
-
-
-def test_opencode_subagents_derive_status_and_turn_index(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    """A child mid-turn shows as running, anchored to the parent turn that
-    was sent before the child session was created."""
-    pcm = _manager(tmp_path)
-    chat = _opencode_chat(pcm, "ses_parent")
-    chat.user_turn_timings["0"] = {"sent_at": "2026-08-15T10:00:00Z"}
-    chat.user_turn_timings["1"] = {"sent_at": "2026-08-15T10:05:00Z"}
-    pcm._save()
-    created_ms = 1786788330000  # 2026-08-15T10:05:30Z, after turn 1
-    monkeypatch.setattr(
-        OpencodeProvider,
-        "read_collab_tree",
-        AsyncMock(return_value=[{
-            "info": {
-                "id": "ses_running_child",
-                "parentID": "ses_parent",
-                "title": "Long task",
-                "time": {"created": created_ms},
-            },
-            "messages": [{
-                "info": {
-                    "role": "assistant",
-                    "time": {"created": created_ms + 1000},
-                },
-                "parts": [],
-            }],
-        }, {
-            "info": {
-                "id": "ses_failed_child",
-                "parentID": "ses_parent",
-                "title": "Broken task",
-            },
-            "messages": [{
-                "info": {
-                    "role": "assistant",
-                    "error": {"name": "UnknownError"},
-                },
-                "parts": [],
-            }],
-        }]),
-    )
-
-    response = asyncio.run(chat_subagents(_request(
-        f"/api/chats/{chat.chat_id}/subagents",
-        _app(pcm),
-        chat_id=chat.chat_id,
-    )))
-    rows = json.loads(response.body)
-
-    assert rows[0]["status"] == "running"
-    assert rows[0]["turn_index"] == 1
-    assert rows[1]["status"] == "failed"
-    assert rows[1]["turn_index"] == 0
 
 
 def test_opencode_chat_messages_read_each_lineage_session_through_the_registry(

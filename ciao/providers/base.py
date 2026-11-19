@@ -55,9 +55,7 @@ class ProviderCapabilities:
     thinking_levels: bool = False
     usage: bool = False
     quota: bool = False
-    subagents: bool = False
     background_subagents: bool = False
-    subagent_messages: bool = False
     session_history: bool = False
     schedule_unattended: bool = False
 
@@ -419,14 +417,6 @@ class BaseProvider(ABC):
     def background_count(self) -> int:
         """Background shells plus subagents tracked for this provider's session."""
         return 0
-
-    def background_shell_rows(self) -> list[dict[str, Any]]:
-        """Tracked background shell rows; adapter-shaped, not normalised."""
-        return []
-
-    def background_child_ids(self) -> list[str]:
-        """Session ids of the tracked background subagents."""
-        return []
 
     async def abort_session(self, session_id: str) -> None:
         """Abort a provider-side session; a no-op for adapters without one."""

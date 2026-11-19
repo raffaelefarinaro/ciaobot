@@ -57,8 +57,6 @@ async def test_base_defaults_are_inert(tmp_path: Path) -> None:
     assert await p.read_live_collab_tree(include_messages=True, only_child_id="c") == []
     assert await p.refresh_background_shells() == 0
     assert p.background_count == 0
-    assert p.background_shell_rows() == []
-    assert p.background_child_ids() == []
     assert await p.abort_session("s") is None
     assert p.interrupted_background_work() is None
 
@@ -68,12 +66,6 @@ async def test_base_containers_are_fresh_per_call(tmp_path: Path) -> None:
     first = await _Minimal.read_thread(tmp_path, "s")
     first["x"] = 1
     assert await _Minimal.read_thread(tmp_path, "s") == {}
-    rows = p.background_shell_rows()
-    rows.append({"id": "a"})
-    assert p.background_shell_rows() == []
-    ids = p.background_child_ids()
-    ids.append("a")
-    assert p.background_child_ids() == []
     tree = await _Minimal.read_collab_tree(tmp_path, "s")
     tree.append({})
     assert await _Minimal.read_collab_tree(tmp_path, "s") == []
