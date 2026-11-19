@@ -13,23 +13,6 @@ export interface InventoryFilters { query: string; family: string; coverage: 'al
 // Ownership is deliberately explicit: adding a production SFC requires its own row.
 export const inventory: InventoryEntry[] = [
   {
-    id: 'components-chat-mcp-terminal-recovery',
-    name: 'ChatMcpTerminalRecovery',
-    family: 'Chat, messages, composer, activity and context',
-    kind: 'component',
-    owner: { path: 'web/src/components/ChatMcpTerminalRecovery.vue', anchor: '<template>' },
-    sources: ['web/src/lib/shellQuote.ts', 'web/src/lib/codeCopy.ts'],
-    consumers: ['web/src/components/ChatMcpConnections.vue'],
-    variants: ['list', 'manual sign-in'],
-    variantNotes: 'Copy-only recovery in ChatMcpConnections; no terminal operation is initiated.',
-    states: [
-      { name: 'closed', coverage: 'uncovered', storyIds: [], note: 'Eligible recovery starts closed; no story exists.' },
-      { name: 'commands and copy result', coverage: 'uncovered', storyIds: [], note: 'Command previews and clipboard outcomes have no stories.' },
-    ],
-    loading: { status: 'none', detail: 'No fetch; clipboard writes have a local busy state.' },
-    migration: { status: 'unassessed', note: 'Inventory admission does not approve a design migration.' },
-  },
-  {
     id: 'components-settings-settings-switch',
     name: 'SettingsSwitch',
     family: 'Settings',
@@ -647,75 +630,6 @@ export const inventory: InventoryEntry[] = [
       "note": "Inventory admission does not approve a design migration."
     },
     "rationale": "Connected route or host composition; isolate its seam before rendering it in the workshop."
-  },
-  {
-    "id": "components-chat-mcp-connections",
-    "name": "ChatMcpConnections",
-    "family": "Chat, messages, composer, activity and context",
-    "kind": "composition",
-    "owner": {
-      "path": "web/src/components/ChatMcpConnections.vue",
-      "anchor": "<template>"
-    },
-    "sources": [
-      "web/src/components/NeedsYouCard.vue",
-      "web/src/components/chatDetails.css",
-      "web/src/composables/useChatMcpConnections.ts",
-      "web/src/composables/useMcpAuthStart.ts",
-      "web/src/lib/chatActions.ts",
-      "web/src/stores/projects.ts"
-    ],
-    "consumers": [
-      "web/src/components/ChatPanel.vue"
-    ],
-    "variants": [
-      "claude",
-      "opencode",
-      "connection-rows",
-      "managed-sign-in"
-    ],
-    "variantNotes": "Provider-specific chat inventory and action cards; rows can be connected, need sign-in, failed, disabled, blocked or unchecked.",
-    "states": [
-      {
-        "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "Initial inventory loading is rendered in ChatMcpConnections.vue; no rendered-state story exists."
-      },
-      {
-        "name": "inventory",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "Loaded, empty, unavailable and unchecked inventories have no rendered-state story."
-      },
-      {
-        "name": "connection",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "Connection rows and their permission and configuration notes have no rendered-state story."
-      },
-      {
-        "name": "managed-sign-in",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "Eligible sign-in and NeedsYouCard action states have no rendered-state story."
-      },
-      {
-        "name": "error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "Inventory and sign-in error or notice feedback has no rendered-state story."
-      }
-    ],
-    "loading": {
-      "status": "known",
-      "detail": "Initial inventory loading shows a message; refresh retains existing status and rows while the observer fetches."
-    },
-    "migration": {
-      "status": "unassessed",
-      "note": "Inventory admission does not approve a design migration."
-    },
-    "rationale": "Connected chat-details host composes observer state, project-store actions and NeedsYouCard; isolate those seams before rendering it in the workshop."
   },
   {
     "id": "components-chat-pane-skeleton",
@@ -2617,7 +2531,6 @@ export const inventory: InventoryEntry[] = [
     },
     "sources": [],
     "consumers": [
-      "web/src/components/ChatMcpConnections.vue",
       "web/src/components/NeedsYouStack.vue"
     ],
     "variants": [],
@@ -4908,7 +4821,6 @@ export const inventory: InventoryEntry[] = [
     "sources": [],
     "consumers": [
       "web/src/components/needs-you/GwsAuthBody.vue",
-      "web/src/components/needs-you/McpAuthBody.vue"
     ],
     "variants": [],
     "variantNotes": "Detailed configurable variants have not yet been audited.",
@@ -5071,7 +4983,6 @@ export const inventory: InventoryEntry[] = [
     "sources": [],
     "consumers": [
       "web/src/components/needs-you/DeviceCodeBody.vue",
-      "web/src/components/needs-you/McpAuthBody.vue"
     ],
     "variants": [],
     "variantNotes": "Detailed configurable variants have not yet been audited.",
@@ -5093,47 +5004,6 @@ export const inventory: InventoryEntry[] = [
     "loading": {
       "status": "unknown",
       "detail": "Initial and refresh loading fidelity in HelperTerminalButton.vue has not yet been audited."
-    },
-    "migration": {
-      "status": "unassessed",
-      "note": "Inventory admission does not approve a design migration."
-    }
-  },
-  {
-    "id": "components-needs-you-mcp-auth-body",
-    "name": "McpAuthBody",
-    "family": "Needs-you bodies",
-    "kind": "component",
-    "owner": {
-      "path": "web/src/components/needs-you/McpAuthBody.vue",
-      "anchor": "<template>"
-    },
-    "sources": [],
-    "consumers": [
-      "web/src/components/needs-you/registry.ts"
-    ],
-    "variants": ["open", "failed", "waiting", "done", "isClaude", "showPaste"],
-    "variantNotes": "McpAuthBody.vue owns sign-in steps, turn-off, provider terminal and callback controls; remaining variants are unassessed.",
-    "states": [
-      {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in McpAuthBody.vue implements this render; no rendered-state story exists."
-      },
-      { "name": "open / failed", "coverage": "uncovered", "storyIds": [], "note": "McpAuthBody.vue open/failed renders start; starting disables it. No rendered-state story exists." },
-      { "name": "waiting", "coverage": "uncovered", "storyIds": [], "note": "McpAuthBody.vue waiting renders steps, opened/current-step classes and the URL; showPaste controls callbacks and isClaude gates helper terminal. No rendered-state story exists." },
-      { "name": "done", "coverage": "uncovered", "storyIds": [], "note": "McpAuthBody.vue action.state !== 'done' gates Turn off and its scope note; no rendered-state story exists." },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
-      }
-    ],
-    "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in McpAuthBody.vue has not yet been audited."
     },
     "migration": {
       "status": "unassessed",
@@ -6455,7 +6325,7 @@ export const inventory: InventoryEntry[] = [
     kind: 'component',
     owner: { path: 'web/src/components/ProviderMcpButton.vue', anchor: '<template>' },
     sources: ['web/src/composables/useRunInTerminal.ts'],
-    consumers: ['web/src/components/SettingsView.vue'],
+    consumers: ['web/src/components/ChatPanel.vue', 'web/src/components/SettingsView.vue'],
     variants: [],
     variantNotes: 'Open, copy and terminal outcomes have not yet been audited.',
     states: [
@@ -7646,7 +7516,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/needs-you/DeviceCodeBody.vue",
       "web/src/components/needs-you/GwsAuthBody.vue",
       "web/src/components/needs-you/HelperTerminalButton.vue",
-      "web/src/components/needs-you/McpAuthBody.vue",
       "web/src/components/needs-you/PermissionModeBody.vue",
       "web/src/components/needs-you/RestartBody.vue",
       "web/src/components/needs-you/SystemSettingBody.vue",
@@ -8290,7 +8159,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/needs-you/DeviceCodeBody.vue",
       "web/src/components/needs-you/GwsAuthBody.vue",
       "web/src/components/needs-you/HelperTerminalButton.vue",
-      "web/src/components/needs-you/McpAuthBody.vue",
       "web/src/components/needs-you/PermissionModeBody.vue",
       "web/src/components/needs-you/RestartBody.vue",
       "web/src/components/needs-you/SystemSettingBody.vue",
