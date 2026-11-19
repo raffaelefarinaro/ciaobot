@@ -60,8 +60,8 @@ operator's approval, report it under "Action needed:" and leave the action to th
 Steps:
 1. Group the log lines and failed job runs into distinct issues.
 2. Diagnose each one from local evidence first: the injected report above is engine-wide, while \
-`ciao context logs` is workspace-scoped and omits engine logs, showing only this workspace's failed runs \
-(it works under workspace-only file access). Use both, plus workspace config, and stay with what the evidence shows.
+`ciao context logs` is workspace-scoped and omits engine logs, showing only this workspace's failed runs. \
+Use both, plus workspace config, and stay with what the evidence shows.
 3. Check if the errors are typical environment or installation issues:
    - Python version mismatch (Ciaobot requires Python 3.12+).
    - Port conflicts (port 8543 already in use).

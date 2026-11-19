@@ -9,25 +9,15 @@ Use this skill when the user reports that Ciaobot itself is failing or asks to
 prepare a public issue. Keep excerpts focused and redact secrets, private
 paths, provider keys, and transcript content.
 
-## Know what this chat can reach first
-
-With `file_access=workspace only` in the Ciaobot context, `.runtime/`, app
-folders, `journalctl` and other checkouts are unreadable, `gh` is not signed in
-(so `gh issue list` and `gh issue create` fail), and git outside the roots is
-refused. Do not probe or retry. Tell the user at once that they can switch the
-workspace to Whole machine (Settings → Overview → File access) or run
-the command themselves. Without `file_access=`, the chat has whole-machine
-access.
-
 ## Local evidence
 
 - Run `ciao context logs` first (`--lines N`, default 200, max 1000; retained
-  for compatibility). It works under workspace-only file access.
+  for compatibility).
 - It returns `version`; `failed_jobs` (only runs whose recorded workspace is
   this one, redacted, capped and fenced as untrusted data); `scope`/`omitted`;
   and the three log fields, which stay empty. Engine-wide error, debug and
   service logs are omitted because they carry no immutable workspace
-  provenance. With whole-machine access the files can also be read directly.
+  provenance. The files themselves can also be read directly.
 
 State clearly when evidence is missing or empty. Do not claim the problem is
 fixed from the scoped evidence alone.

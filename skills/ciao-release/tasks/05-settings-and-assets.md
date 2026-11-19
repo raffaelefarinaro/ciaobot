@@ -51,14 +51,14 @@ release blocker: report it, do not fix it here.
 **Every section must load without hanging.** A section that never resolves is a
 finding; do not wait on it more than once.
 
-## Step 1b — File access per workspace
+## Step 1b — Permission mode note
 
-Open `/settings/workspace` and scroll to All workspaces. Each workspace row's summary line
-(`provider · file access · Google email or no Google`) must show the effective
-File access (*Workspace only* or *Whole machine*). Follow
-**Settings ↑** on a row that is not Current: it makes that workspace active
-at the top of this page, where the **File access** select must offer *Default*,
-*Workspace only* and *Whole machine*. Do not change the value.
+Open `/settings/providers`. Under each available provider, the Permission mode
+select is followed by a note that bypass gives the agent full access to
+everything this user account can reach, and a link to that CLI's own permission
+docs. The note must render and the link must open the CLI's docs. Each
+workspace row's summary line (`provider · Google email or no Google`) must not
+mention file access. Do not change the mode.
 
 ## Step 2 — the four asset lists are scoped to one workspace
 

@@ -1081,8 +1081,7 @@ per agent whose provider row carries `mcp_command`. The button types that
 command into the in-app terminal (`composables/useRunInTerminal.ts`) for the
 active workspace's project, and copies it when the terminal is not ready. It
 does not edit provider files or start an MCP process. *Ask Ciao to add one*
-still opens a chat titled "Add an MCP server". `SettingsView` serializes guarded
-workspace switches for File access links.
+still opens a chat titled "Add an MCP server".
 
 The frontend MCP surface is owned by `web/src/components/ChatMcpConnections.vue`
 (health and managed controls), `web/src/components/ChatMcpTerminalRecovery.vue`
