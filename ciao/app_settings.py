@@ -24,11 +24,6 @@ only knowable at runtime. They are read on every gate check rather than
 cached, which is what lets a pause survive a restart and a resume take
 effect on the next tick.
 
-The automatic-update fields (:mod:`ciao.auto_update`) follow the same rule:
-the policy, the 24-hour hold and the last attempt are read on every gate, so
-turning the updater off is honoured immediately rather than at the next start.
-`load_error` is the one thing the store reports about itself, because an
-unattended writer may not treat an unreadable file as consent.
 """
 
 from __future__ import annotations
@@ -40,7 +35,6 @@ import math
 import logging
 import re
 from dataclasses import asdict, dataclass, fields, replace
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, TypeGuard
 
@@ -98,7 +92,6 @@ _NESTED_CLEANERS: dict[str, Callable[[object], dict[str, str]]] = {
     "provider_default_modes": _clean_default_modes,
 }
 _BOOLEAN_FIELDS = {
-    "auto_update_enabled",
     "backup_enabled",
     "backup_paused",
     "dev_mode",
@@ -112,15 +105,6 @@ _INTERNAL_FIELDS = {"font_scale_migrated", "legacy_env_imported"}
 # Booleans whose default is False and that are only written once true, so a
 # file never grows keys that say nothing.
 _SPARSE_BOOLEANS = {"dev_mode", "font_scale_migrated", "legacy_env_imported"}
-# The automatic-update clock fields (ciao/auto_update.py). Validated on read and
-# on write, because a hand-edited or truncated value must read as "no stamp" —
-# comparing a junk string against the wall clock is how an unattended updater
-# either retries in a tight loop or waits forever.
-_TIMESTAMP_FIELDS = {
-    "auto_update_snooze_until",
-    "auto_update_attempt_at",
-    "auto_update_next_check_at",
-}
 
 # The server's bind address when none is set: every interface, so the PWA is
 # reachable over LAN and Tailscale. The password and the login rate limit are
@@ -221,23 +205,6 @@ class AppSettings:
     backup_last_success_at: str = ""
     backup_last_success_commit: str = ""
     backup_remote: str = ""
-
-    # The automatic engine updater (ciao/auto_update.py). `auto_update_enabled`
-    # is the owner's standing decision and defaults on for every install; the
-    # coordinator refuses to act on a settings file it could not read, so a
-    # corrupt file never reads as consent. `auto_update_snooze_until` is a
-    # "Not now (24 hours)" hold, an ISO-8601 UTC stamp that expires at
-    # `now >= until`. The five fields under it are the coordinator's own record
-    # of its latest attempt: the operation id it claimed under, when it did,
-    # what came of it, why, and when it will look again. Only the coordinator
-    # writes them; a manual update never overwrites the last automatic outcome.
-    auto_update_enabled: bool = True
-    auto_update_snooze_until: str = ""
-    auto_update_attempt_id: str = ""
-    auto_update_attempt_at: str = ""
-    auto_update_outcome: str = ""
-    auto_update_error: str = ""
-    auto_update_next_check_at: str = ""
 
     # Per-runtime-provider default model for new chats, keyed by provider id.
     # There is no env-backed default: a missing entry means the provider's own
@@ -357,26 +324,6 @@ def _clean_custom_colors(value: object) -> dict[str, dict[str, str]] | None:
     return cleaned or None
 
 
-def _clean_timestamp(value: object) -> str:
-    """``value`` as a canonical UTC ISO-8601 stamp, or "" when it is not one.
-
-    A naive stamp is read as UTC, because the file only ever holds UTC and a
-    value typed by hand without an offset means the same thing. Everything
-    unparseable, and everything that is not a string, reads as "no stamp":
-    an automatic updater that cannot read its own clock fields must look like
-    it has never run, not crash the engine on the way to failing open.
-    """
-    if not isinstance(value, str) or not value.strip():
-        return ""
-    try:
-        stamp = datetime.fromisoformat(value.strip())
-    except ValueError:
-        return ""
-    if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=UTC)
-    return stamp.astimezone(UTC).isoformat(timespec="seconds")
-
-
 def _parse_settings(raw: object) -> AppSettings:
     """``raw`` (the decoded JSON file) as validated settings. No side effects."""
     settings = AppSettings()
@@ -426,10 +373,6 @@ def _parse_settings(raw: object) -> AppSettings:
         logger.warning("Ignoring invalid pwa_host %r in app settings", settings.pwa_host)
         settings.pwa_host = ""
     settings.log_level = _normalize_log_level(settings.log_level)
-    # Read from the raw document, not from whatever the generic string pass
-    # stored, so a non-string value never reaches the clock comparisons.
-    for key in _TIMESTAMP_FIELDS:
-        setattr(settings, key, _clean_timestamp(raw.get(key)))
     _drop_retired_models(settings)
     return settings
 
@@ -673,14 +616,6 @@ class AppSettingsStore:
                     )
                 updated.font_scale = round(float(value), 2)
                 updated.font_scale_migrated = True
-                continue
-            if key in _TIMESTAMP_FIELDS:
-                if not isinstance(value, str):
-                    raise ValueError(f"{key} must be a string")
-                cleaned_stamp = _clean_timestamp(value)
-                if value.strip() and not cleaned_stamp:
-                    raise ValueError(f"{key} must be an ISO-8601 timestamp")
-                setattr(updated, key, cleaned_stamp)
                 continue
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")

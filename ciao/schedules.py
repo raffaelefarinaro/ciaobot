@@ -2380,7 +2380,7 @@ class ScheduleManager:
         # scheduler asks before it dispatches: a run that never happens must
         # not consume a one-shot entry or run a command.
         self._target_refusal = target_refusal
-        # True while an update claim holds admission closed. A deferred entry is
+        # True while a restart drain holds admission closed. A deferred entry is
         # left exactly as it was: not stamped, not consumed, still eligible when
         # admission reopens, and never left in `_inflight`/`_claimed_chats`.
         self._admission_closed = admission_closed
@@ -2630,7 +2630,7 @@ class ScheduleManager:
         return self._target_refusal(entry)
 
     def _admission_refuses(self) -> bool:
-        """True while an update claim holds admission closed.
+        """True while a restart drain holds admission closed.
 
         Asked at the top of every path that can start work, before the chat is
         prepared, the dispatch is stamped, a task is created or a one-shot is
@@ -2660,26 +2660,6 @@ class ScheduleManager:
         """
         live_tasks = sum(1 for task in self._run_tasks if not task.done())
         return len(self._inflight) + len(self._claimed_chats) + live_tasks
-
-    def update_idle_reasons(self) -> list[str]:
-        """What a restart would interrupt here, empty when nothing is running.
-
-        Read by an unattended update's idle snapshot before it claims admission.
-        A run is tracked in ``_inflight`` from the moment the dispatch is
-        committed, and a chat is claimed slightly earlier, before the stream
-        exists; both mean a turn is under way or about to start, so either one
-        defers the claim. Public so the engine (and the wiring in
-        ``ciao.auto_update``) asks rather than reaching into the sets.
-        """
-        reasons = [
-            f"scheduled run {schedule_id} in flight"
-            for schedule_id in sorted(self._inflight)
-        ]
-        reasons.extend(
-            f"scheduled dispatch claimed chat {chat_id}"
-            for chat_id in sorted(self._claimed_chats)
-        )
-        return reasons
 
     def _begin_dispatch(
         self,

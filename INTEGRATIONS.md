@@ -20,10 +20,8 @@ To remove the old bundle, quit Ciaobot.app and drag it to the Trash (it lives in
 `~/Library/LaunchAgents/com.ciao.menubar.plist` is still there, unload it with
 `launchctl bootout gui/$(id -u)/com.ciao.menubar` and delete the file. If
 `~/.local/bin/ciao` points inside the bundle, re-run the installer to replace
-it. Updates after that go through **Settings → General** in the
-PWA, which stages and applies the engine package update in the background, or
-`ciao update stage` then `ciao update apply` from a terminal. There is no
-in-app app updater.
+it. Updates after that come from Ciaobot for Mac, which updates itself
+(Sparkle) and the engine with it.
 
 ## CLI Tools
 
@@ -468,7 +466,7 @@ Ciaobot runs on macOS under launchd.
 - `ciao setup --workspace <path> --load-launchd` renders and loads the LaunchAgent.
 - The packaged launchd template is `ciao/stock/deploy/com.ciao.server.plist.tmpl`.
 - Start and stop: `ciao service start` / `ciao service stop` (or `launchctl unload ~/Library/LaunchAgents/com.ciao.server.plist`). Both refuse while chats are actively running unless `--force` is passed.
-- Updates: re-run the one-line installer, or use **Settings → General** in the PWA, which stages and applies the engine package update in the background. There is no in-app app updater.
+- Updates: macOS: the app updates itself (Sparkle). Linux: see docs/LINUX.md.
 - Remote access is not configured by the public app. Use localhost by default, or put Tailscale or another user-owned network layer in front of the local server.
 - A dropped non-image chat file is converted locally: supported documents are
   converted from the drop's own source and only Markdown is kept in the active

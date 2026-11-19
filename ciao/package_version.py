@@ -544,16 +544,19 @@ def update_package(
         # Before the Linux branch on purpose. Ownership, not platform, decides
         # the answer: a Linux `systemd-user` engine installed by the shell
         # installer is a managed install, and answering with the generic
-        # administrator workflow (no `ciao update stage`) was the #567 review
-        # finding — the platform check ran first and swallowed this branch.
-        #
-        # The engine-only installer script is gone, so the answer is the
-        # engine's own verbs, the same on every platform.
+        # administrator workflow was the #567 review finding — the platform
+        # check ran first and swallowed this branch. The engine no longer
+        # updates itself: on macOS the app does, and on Linux the administrator
+        # reinstalls from docs/LINUX.md.
         return {
             "ok": False,
             "mode": mode,
-            "error": "This engine was installed by the Ciaobot installer. Run `ciao update stage`, then `ciao update apply`.",
-            "command": "ciao update stage",
+            "error": (
+                "This engine was installed by the Ciaobot installer and no longer "
+                "updates itself. On macOS, Ciaobot for Mac updates it; on Linux, "
+                "see docs/LINUX.md."
+            ),
+            "command": "",
         }
     if sys.platform.startswith("linux"):
         # The documented Linux install is `pip install -e`, which

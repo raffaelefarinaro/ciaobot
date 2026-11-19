@@ -54,7 +54,7 @@ _PUBLIC_API = {
 # Endpoints usable without a session, but only from a process on this machine.
 # `/api/menubar-chats` is how the tray reads chat titles (it holds no cookie).
 # `/api/admin/drain` and `/api/admin/drain/cancel` are the update coordinator's own drain handshake,
-# driven by `ciao update apply` before it bootstraps the detached updater job.
+# driven by the update coordinator (`ciao.engine_update`) before it bootstraps the detached updater job.
 # `/api/admin/restart-blockers` is the `ciao service` restart/stop gate (reason-tagged).
 # `/api/auth/host-sign-in` mints a one-time setup token and opens it in the host's own browser; it returns no credential.
 # All are gated on the peer address plus a loopback `Host` and, when present, a same-origin `Origin`/`Referer`: the peer makes a caller local, and the Host check refuses a DNS-rebound page, whose Host is the attacker's name. A request that fails takes the normal session path.

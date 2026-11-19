@@ -127,7 +127,7 @@ def test_drain_without_manager_is_a_clear_failure() -> None:
     assert resp.status_code == 503
 
 
-# The updater runs `ciao update apply` from a terminal, before any PWA session
+# The updater drains from its own process, before any PWA session
 # exists, and it has to be refused from anywhere but this machine. Both facts
 # live in `_LOOPBACK_ONLY_API`: in that set, a request is let through only when
 # the peer is loopback, and the session check below is never reached.
@@ -185,12 +185,11 @@ def test_drain_cancel_leaves_a_settings_restart_alone() -> None:
     assert pcm.restart_draining is True
 
 
-# ── The engine-owned claim ──────────────────────────────────────────────
+# ── Owned drains ────────────────────────────────────────────────────────
 #
-# An automatic update closes admission with `claim_for_update`, which takes the
-# idle snapshot and the close as one synchronous step. These tests run the real
-# manager, because the claim's idle proof and the refusal the route answers for
-# a competing caller are the behaviour under test.
+# An update's drain names the operation that owns it. These tests run the real
+# manager, because the ownership rules and the refusals the route answers with
+# are the behaviour under test.
 
 
 def _real_manager(tmp_path: Path) -> ProjectChatManager:
@@ -210,24 +209,22 @@ def _real_manager(tmp_path: Path) -> ProjectChatManager:
     )
 
 
-def test_auto_claim_is_atomic_against_new_turn(tmp_path: Path) -> None:
+def test_owned_drain_refuses_a_manual_drain(tmp_path: Path) -> None:
     pcm = _real_manager(tmp_path)
     client = _client(pcm)
 
-    # An idle engine is claimed in one synchronous call: the close *is* the
-    # claim, so no coroutine can see an open gate after the snapshot.
-    assert pcm.claim_for_update("auto-1") is True
+    pcm.begin_restart_drain("auto-1")
     assert pcm.restart_draining is True
 
-    # A manual drain cannot take the claim. It gets the same 409 a Settings
-    # restart gets, and admission stays exactly as the claim left it.
+    # A manual drain cannot take the owned drain. It gets the same 409 a Settings
+    # restart gets, and admission stays exactly as the owner left it.
     resp = client.post("/api/admin/drain", json={"owner": "manual-1"})
     assert resp.status_code == 409
     assert resp.json() == {"error": "a restart is already draining"}
     assert pcm.restart_draining is True
 
-    # Released by its owner, admission reopens and a drain succeeds: the claim
-    # never leaked past the operation that made it.
+    # Released by its owner, admission reopens and a drain succeeds: the owned
+    # drain never leaked past the operation that made it.
     assert pcm.cancel_restart_drain("auto-1") is True
     assert pcm.restart_draining is False
     resp = client.post("/api/admin/drain", json={"owner": "manual-1"})
@@ -237,7 +234,7 @@ def test_auto_claim_is_atomic_against_new_turn(tmp_path: Path) -> None:
     assert client.post("/api/admin/drain", content=b"{oops").status_code == 400
 
 
-def test_auto_claim_owner_cannot_be_stolen_or_cancelled(tmp_path: Path) -> None:
+def test_owned_drain_owner_cannot_be_stolen_or_cancelled(tmp_path: Path) -> None:
     pcm = _real_manager(tmp_path)
     client = _client(pcm)
 
@@ -248,7 +245,7 @@ def test_auto_claim_owner_cannot_be_stolen_or_cancelled(tmp_path: Path) -> None:
     assert pcm._drain_owner == "auto-7"
 
     # Another caller's cancel is refused and changes nothing: reopening here
-    # would drop a claim newer work is waiting on.
+    # would drop a drain newer work is waiting on.
     resp = client.post("/api/admin/drain/cancel", json={"owner": "someone-else"})
     assert resp.status_code == 409
     assert resp.json() == {"error": "drain owned by another operation"}
@@ -264,7 +261,7 @@ def test_auto_claim_owner_cannot_be_stolen_or_cancelled(tmp_path: Path) -> None:
 
 
 def test_ownerless_cancel_cannot_reopen_an_owned_claim(tmp_path: Path) -> None:
-    """A cancel naming no owner is refused outright, and cannot steal a claim."""
+    """A cancel naming no owner is refused outright, and cannot steal a drain."""
     pcm = _real_manager(tmp_path)
     client = _client(pcm)
 

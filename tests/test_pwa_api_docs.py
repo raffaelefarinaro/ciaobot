@@ -76,7 +76,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/admin/drain": "update coordinator drain (loopback-only CLI)",
     "/api/admin/drain/cancel": "update coordinator drain (loopback-only CLI)",
     "/api/package/update": "browser update action; production engine updates through the signed one-line installer",
-    "/api/update/start": "browser Settings update card; stages then applies a release for an installer-managed engine in one background job",
     "/api/workspace-health/fix": "browser Settings health Fix button; creates missing scaffold files and re-links skills",
     "/api/workspace-open": "browser file-viewer Open-in-default-app button; hidden and refused unless the PWA runs on the engine's own machine",
     "/api/workspaces": "browser workspaces list config",
@@ -90,10 +89,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/integrations/gws/profiles/add": "browser Settings action; registers a Google account for linking",
     "/api/integrations/gws/profiles/remove": "browser Settings action; deletes a Google account and its local credentials",
     "/api/import/preview": "browser Memory import selection; reads the chosen conversations on the engine host to state what would be processed",
-    "/api/update/settings": (
-        "browser Settings switch/Not now for the automatic updater; signed session, "
-        "writes only the policy or the hold, never starts an update"
-    ),
 }
 
 
