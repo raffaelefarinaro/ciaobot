@@ -36,8 +36,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TRANSCRIPT_ROUTES = [
     ("/api/chats/{chat_id}/messages", "GET", "chat_messages"),
     ("/api/chats/{chat_id}/messages/part", "GET", "chat_message_part"),
-    ("/api/chats/{chat_id}/subagents", "GET", "chat_subagents"),
-    ("/api/subagents/running", "GET", "running_subagents"),
 ]
 
 
@@ -118,8 +116,9 @@ def test_nothing_was_left_behind_or_duplicated() -> None:
     assert service & routes == set()
     # Floor on what #498 actually moved out of routes_api. It dropped from 40
     # when #500 lifted the six CLI-envelope constants one level up into
-    # ciao/cli_envelopes.py, which subagent_tracking shares.
-    assert len(service) >= 34
+    # ciao/cli_envelopes.py, and by seven more when the subagent transcript
+    # renderers went with their routes.
+    assert len(service) >= 35
 
 
 # ------------------------------------------------------------------- fixtures
@@ -1080,28 +1079,6 @@ async def test_a_recorded_turn_that_is_still_streaming_is_not_dropped(
     )
     assert rows[2]["sent_at"] == "2026-10-22T11:52:58Z"
     assert rows[4]["sent_at"] == "2026-10-22T12:10:00Z"
-
-
-def test_subagent_rows_match_the_wire_contract() -> None:
-    rendered = transcript_service._render_subagent_messages(
-        [SDK_USER, SDK_ASSISTANT, SDK_RESULT]
-    )
-
-    assert rendered == [
-        {"role": "user", "content": "hello there"},
-        {"role": "assistant", "content": "The answer"},
-        {"role": "system", "content": ACTIVITY_LINE, "tool_name": "_activity"},
-    ]
-
-
-def test_subagent_rows_are_identical_for_sdk_objects_and_jsonl_dicts() -> None:
-    """Both shapes reach this renderer; they must render the same."""
-    objects = [SDK_USER, SDK_ASSISTANT, SDK_RESULT]
-    dicts = [{"type": m.type, "message": m.message} for m in objects]
-
-    assert transcript_service._render_subagent_messages(
-        objects
-    ) == transcript_service._render_subagent_messages(dicts)
 
 
 OPENCODE_THREAD = {

@@ -163,16 +163,14 @@ _SYSTEM_SKILLS_TTL_SECONDS = 300.0
 # `opencode serve`. A chat with a live provider attached reuses that server
 # instead (see `is_connected` / `read_live_collab_tree`), so this classmethod
 # path and its cache now mainly cover reads with nothing attached (an archived
-# chat, or a chat viewed from another device). The PWA still polls the routes
-# they back on short intervals (15s status sync, 4s for /subagents while a
-# turn streams), so the TTL stays above that cadence to collapse bursts to
-# roughly one spawn per tick rather than one per poll.
+# chat, or a chat viewed from another device). The TTL collapses bursts of
+# reads to roughly one spawn per interval rather than one per call.
 _READ_CACHE_TTL = 6.0
 # A spawn that could not start at all (binary missing, process died, health
 # never answered) is cached longer than a read: while opencode is in this
 # state, every uncached read path spawns another doomed `opencode serve` and
 # holds it for up to `_SERVER_START_TIMEOUT`, so an un-negative-cached
-# `/subagents` poll stacks dying servers on every tick. The TTL stays well
+# read stacks dying servers on every call. The TTL stays well
 # under a minute so reads recover promptly once opencode starts working.
 _READ_FAILURE_CACHE_TTL = 20.0
 # Cache entries carry their own TTL as ``(stamp, ttl, value)``: a failed
@@ -1631,9 +1629,7 @@ class OpencodeProvider(BaseSDKProvider):
         # opencode is bring-your-own-provider: there is no unified quota or
         # reset-time snapshot to report.
         quota=False,
-        subagents=True,
         background_subagents=True,
-        subagent_messages=True,
         session_history=True,
         schedule_unattended=True,
     )

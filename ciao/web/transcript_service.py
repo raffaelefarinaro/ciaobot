@@ -11,8 +11,8 @@ It covers the whole read path:
   which tool calls earn a file card, which user turns are the CLI talking to
   itself rather than the human, and which injected context is stripped back
   off a prompt before it is shown;
-* the per-session renderers - the Claude session JSONL, an opencode thread,
-  and the nested subagent transcripts;
+* the per-session renderers - the Claude session JSONL and an opencode
+  thread;
 * the assembly that stitches a chat's sessions, handover messages and durable
   transcript metadata into one chronological list
   (:func:`_assemble_chat_messages`);
@@ -36,9 +36,8 @@ import json
 import logging
 import re
 from collections import Counter
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ciao import cli_envelopes, provider_registry, subagent_tracking
 from ciao.tool_summary import (
@@ -383,8 +382,7 @@ def _summarize_task_notification(content: str) -> str | None:
     first_line = summary.splitlines()[0].strip() if summary else ""
     icon = "\U0001F916"  # 🤖
     if first_line:
-        # Trim aggressively so the bubble stays one line; full output lives in
-        # the subagent transcript fetchable via /api/chats/{id}/subagents.
+        # Trim aggressively so the bubble stays one line.
         snippet = first_line if len(first_line) <= 120 else first_line[:117] + "..."
         return f"{icon} Subagent {status}: {snippet}"
     return f"{icon} Subagent {status}"
@@ -422,252 +420,6 @@ def _native_task_notice(content: str) -> str | None:
         for run in runs
     ]
     return format_finished_runs(entries, tail_lines=50)[0]
-
-
-def _render_subagent_messages(msgs: Iterable[object]) -> list[dict]:
-    """Render SDK or JSONL message objects for the subagent transcript UI."""
-    rendered: list[dict] = []
-    # Materialised because the failed-tool pre-pass has to see the results,
-    # which arrive after the calls they belong to.
-    msgs = list(msgs)
-    failed_tool_ids = _failed_tool_use_ids(msgs)
-    for m in msgs:
-        mtype = getattr(m, "type", None)
-        message = getattr(m, "message", None)
-        if isinstance(m, dict):
-            mtype = m.get("type", mtype)
-            message = m.get("message", message)
-        if mtype == "assistant":
-            blocks = _extract_assistant_blocks(message)
-            blocks = [
-                b for b in blocks
-                if not (b["kind"] == "text" and _is_no_response_sentinel(b["text"]))
-            ]
-            if not blocks:
-                continue
-            pending_tools: list[str] = []
-
-            def flush_tools() -> None:
-                if pending_tools:
-                    rendered.append({
-                        "role": "system",
-                        "content": "\n".join(pending_tools),
-                        "tool_name": "_activity",
-                    })
-                    pending_tools.clear()
-
-            for blk in blocks:
-                if blk["kind"] == "tool_use":
-                    name = blk["name"] or "tool"
-                    summary = blk.get("summary") or ""
-                    touches = blk.get("file_touches")
-                    if not isinstance(touches, list) or not touches:
-                        touch = blk.get("file_touch")
-                        touches = [touch] if touch else []
-                    if (
-                        touches
-                        and blk.get("id") in failed_tool_ids
-                        and not _touches_survive_failure(name)
-                    ):
-                        # Denied or errored write: nothing reached disk, so
-                        # render a plain activity row instead of a file card
-                        # that implies the write happened.
-                        touches = []
-                    if touches:
-                        flush_tools()
-                        for touch in touches:
-                            if not isinstance(touch, dict) or not touch.get("file_path"):
-                                continue
-                            rendered.append({
-                                "role": "system",
-                                "tool_name": "_filecard",
-                                "content": touch["file_path"],
-                                "file_path": touch["file_path"],
-                                "action": touch.get("action") or "touched",
-                                "tool": name,
-                            })
-                        continue
-                    line = f"{_tool_icon(name)} {name}"
-                    if summary:
-                        line += f" {summary}"
-                    pending_tools.append(line)
-                elif blk["kind"] == "thinking":
-                    # Subagent reasoning is not surfaced in the transcript
-                    # panel (it was dropped before thinking blocks were
-                    # extracted; skip to keep that behavior).
-                    continue
-                else:
-                    flush_tools()
-                    text = blk["text"].strip()
-                    if text:
-                        rendered.append({"role": "assistant", "content": text})
-            flush_tools()
-            continue
-
-        content = _extract_text_content(message).strip()
-        if not content:
-            continue
-        if _is_no_response_sentinel(content):
-            continue
-        rendered.append({"role": str(mtype or "system"), "content": content})
-    return rendered
-
-
-def _local_session_jsonl_paths(
-    session_id: str, workspace_root: Path, *, agent_root: Path | None = None
-) -> list[Path]:
-    """Find local Claude Code JSONL files for ``session_id``."""
-    try:
-        from ciao.transcripts import (
-            _claude_projects_dir,
-            _global_session_matches,
-        )
-    except ImportError:
-        return []
-    paths: list[Path] = []
-    root = agent_root if agent_root is not None else workspace_root
-    preferred = _claude_projects_dir(root) / f"{session_id}.jsonl"
-    if preferred.exists():
-        paths.append(preferred)
-    # When an agent root is supplied, the preferred path already scopes to
-    # that root's own projects dir, so a session under another root stays
-    # invisible (the re-rooting isolation). Without a root, keep the global
-    # scan so callers that supply nothing behave exactly as today.
-    if agent_root is not None:
-        return paths
-    # Sweep every cross-cwd match, not just the first: a session resumed or
-    # copied under another cwd can have subagent progress records spread
-    # across the files, and _local_subagent_transcripts reads them all. The
-    # listing is cached (transcripts._global_session_matches) so this costs
-    # one walk per TTL window, not one per poll — and a miss re-scans
-    # (rate-limited) so a session created mid-window is not missed.
-    try:
-        for path in _global_session_matches(session_id):
-            if path not in paths:
-                paths.append(path)
-    except OSError:
-        pass
-    return paths
-
-
-def _jsonl_message_from_entry(entry: dict) -> dict | None:
-    etype = entry.get("type")
-    message = entry.get("message")
-    if etype in {"assistant", "user"} and isinstance(message, dict):
-        return {"type": etype, "message": message}
-    if etype == "progress":
-        nested = entry.get("data", {}).get("message")
-        if isinstance(nested, dict):
-            ntype = nested.get("type")
-            nmessage = nested.get("message")
-            if ntype in {"assistant", "user"} and isinstance(nmessage, dict):
-                return {"type": ntype, "message": nmessage}
-    return None
-
-
-def _read_jsonl_messages(path: Path) -> list[dict]:
-    messages: list[dict] = []
-    try:
-        with path.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(entry, dict):
-                    continue
-                msg = _jsonl_message_from_entry(entry)
-                if msg is not None:
-                    messages.append(msg)
-    except OSError:
-        return []
-    return messages
-
-
-def _local_subagent_transcripts(
-    session_id: str, workspace_root: Path, *, agent_root: Path | None = None
-) -> list[dict]:
-    """Fallback parser for nested subagent JSONL files and progress entries."""
-    projects_root = Path.home() / ".claude" / "projects"
-    grouped: dict[str, list[dict]] = {}
-
-    try:
-        # The projects dir holds one slug folder per cwd; a bare glob over
-        # "*/<sid>/subagents/*.jsonl" descends every slug. Restrict to the
-        # dirs the cached listing already knows, so a stale-slug pileup
-        # cannot turn this fallback into a multi-second scandir storm.
-        if agent_root is not None:
-            # Same isolation as `_local_session_jsonl_paths` above: the
-            # preferred slug already scopes to this root's own projects dir,
-            # so a session id resumed or copied under another cwd cannot mix
-            # another root's subagent transcripts into this chat's panel.
-            try:
-                from ciao.transcripts import _claude_projects_dir
-            except ImportError:
-                candidate_dirs = []
-            else:
-                preferred_slug = _claude_projects_dir(agent_root)
-                candidate_dirs = (
-                    [preferred_slug]
-                    if preferred_slug.is_dir() and (preferred_slug / session_id / "subagents").is_dir()
-                    else []
-                )
-        else:
-            candidate_dirs = [
-                entry
-                for entry in projects_root.iterdir()
-                if entry.is_dir() and (entry / session_id / "subagents").is_dir()
-            ]
-    except OSError:
-        candidate_dirs = []
-    nested_paths: list[Path] = []
-    for entry in candidate_dirs:
-        subagents_dir = entry / session_id / "subagents"
-        try:
-            nested_paths.extend(sorted(subagents_dir.glob("*.jsonl")))
-        except OSError:
-            continue
-    for path in nested_paths:
-        msgs = _read_jsonl_messages(path)
-        if msgs:
-            grouped.setdefault(path.stem, []).extend(msgs)
-
-    for path in _local_session_jsonl_paths(session_id, workspace_root, agent_root=agent_root):
-        try:
-            with path.open(encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(entry, dict) or entry.get("type") != "progress":
-                        continue
-                    msg = _jsonl_message_from_entry(entry)
-                    if msg is None:
-                        continue
-                    data = entry.get("data", {})
-                    agent_id = (
-                        data.get("agent_id")
-                        or data.get("subagent_id")
-                        or data.get("task_id")
-                        or data.get("parent_tool_use_id")
-                        or "progress"
-                    )
-                    grouped.setdefault(str(agent_id), []).append(msg)
-        except OSError:
-            continue
-
-    return [
-        {"agent_id": agent_id, "messages": _render_subagent_messages(messages)}
-        for agent_id, messages in sorted(grouped.items())
-        if messages
-    ]
 
 
 def _overlay_assistant_timings(
@@ -923,55 +675,6 @@ def _render_opencode_thread(
             result, getattr(chat, "turn_verification", None) or {}
         )
     return result
-
-
-def _opencode_child_duration_ms(info: dict) -> int | None:
-    """Child run length from its session timestamps, or None.
-
-    The child session's own ``time.created`` / ``time.updated`` are the only
-    length available once the transcript is no longer read, so the in-chat
-    panel can still show how long a run took.
-    """
-    time_info = info.get("time") if isinstance(info, dict) else None
-    if not isinstance(time_info, dict):
-        return None
-    created = time_info.get("created")
-    updated = time_info.get("updated")
-    if (
-        not isinstance(created, (int, float))
-        or isinstance(created, bool)
-        or not isinstance(updated, (int, float))
-        or isinstance(updated, bool)
-    ):
-        return None
-    created_ms = int(created)
-    updated_ms = int(updated)
-    if updated_ms < created_ms:
-        return None
-    return updated_ms - created_ms
-
-
-def _opencode_child_turn_index(info: dict, chat) -> int:
-    """The parent turn a child belongs to: the last one sent before it began."""
-    time_info = info.get("time")
-    created_ms = time_info.get("created") if isinstance(time_info, dict) else None
-    if not isinstance(created_ms, (int, float)) or isinstance(created_ms, bool):
-        return 0
-    best = 0
-    for key, timing in (chat.user_turn_timings or {}).items():
-        sent_at = (timing or {}).get("sent_at")
-        if not sent_at:
-            continue
-        try:
-            idx = int(key)
-            sent_ms = datetime.fromisoformat(
-                str(sent_at).replace("Z", "+00:00")
-            ).timestamp() * 1000
-        except (TypeError, ValueError):
-            continue
-        if sent_ms <= created_ms and idx > best:
-            best = idx
-    return best
 
 
 def _stamp_user_turn(

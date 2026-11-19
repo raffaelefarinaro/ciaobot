@@ -78,8 +78,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/prompt` | Send a prompt to start a background turn in the chat. Returns 409 `{error:"chat is archived", archived:true}` if the chat was archived; start a new chat (or `continue`) instead of retrying |
 | GET | `/api/chats/{chat_id}/messages` | Load persisted chat messages |
 | GET | `/api/chats/{chat_id}/messages/part` | Fetch one full history row by absolute index (lazy expansion) |
-| GET | `/api/chats/{chat_id}/subagents` | Load subagent transcripts. `?agent_id=` narrows to one agent (bare or `agent-`-prefixed) and skips reading the siblings — what the read-only subagent view polls. OpenCode entries include `started_at` (Unix milliseconds) when the child session reports its creation time |
-| GET | `/api/subagents/running` | Live subagents per working chat (metadata only), for the sidebar's subagent rows. An opencode chat's live background shells are appended as rows with `subagent_type: "shell"`, `agent_id: "shell:<id>"`, the command as `description` (`Background command` when unknown) and `turn_index: null`; they are processes, not agents, and have no transcript. A Claude chat's running native tasks are appended the same way with `agent_id: "task:<id>"` and `subagent_type` `shell` (Bash) or `monitor`, taken from the loaded provider when there is one (`stoppable: true`) and from the session JSONL otherwise (`stoppable: false`). Every shell row carries `started_at` (ISO 8601, empty when unknown) and `stoppable` |
 | POST | `/api/chats/{chat_id}/images` | Upload chat images |
 | POST | `/api/chats/{chat_id}/attachments` | Upload chat files; supported documents become Markdown in the active project folder; the browser receives bounded `file_refs`, not server paths |
 | GET | `/api/images/{ref}` | Read uploaded image blob |
@@ -851,26 +849,6 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 # `postprocess` is the post-archive pipeline's opening state, returned in the
 # response as well as published, so the client that archived cannot miss it.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/archive"
-
-# Subagent transcripts — one entry per subagent this chat's session ever
-# spawned: {agent_id, messages, description, subagent_type, status, turn_index}.
-# `status` is running, completed, failed, or the neutral terminal stopped state.
-# `messages` shares the /messages shape; both provider renderers omit
-# `timestamp` on these, so a reader must tolerate it being absent. No PWA
-# surface reads this route any more.
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/subagents"
-
-# Subagents working right now, across every chat the server considers active:
-# {"chats": {chat_id: [{agent_id, description, subagent_type, is_async,
-# status, turn_index}]}}. Metadata only — no transcripts — so it is cheap
-# enough to poll for the sidebar. Chats with nothing running are omitted
-# entirely, which is how a finished agent's row disappears; poll it only while
-# something is working, and replace your whole map with each response rather
-# than merging. For Claude chats this is what the parent session can name:
-# background `Agent` dispatches. A foreground Task is recorded there by its
-# own completion, so it is never listed as running; that work is visible in
-# the chat's live trace while its turn streams.
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/subagents/running"
 
 # Mark read — returns {ok, last_read_at}.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/read"
@@ -1962,7 +1940,7 @@ Write/Edit/MultiEdit/NotebookEdit tool calls flow through both transports tagged
 
 - WS `/ws/chat/{chat_id}` `tool_use` event: adds optional `file_touch: {file_path, action}` when the tool mutates a file on disk. Detection lives in `extract_file_touch` (`ciao/web/chat_broker.py`); `action` is `written | edited`.
 - WS `/ws/chat/{chat_id}` `tool_result` event (OpenCode only): `{tool_name, tool_use_id?, is_error?, detail?, parent_tool_use_id?, session_id?}`. OpenCode emits one after every tool call, as its own frame rather than a second `tool_use` (#1416). The PWA marks the call's existing Activity line failed when `is_error` is set and never paints a second line. Claude emits none.
-- `GET /api/chats/{chat_id}/messages` and `GET /api/chats/{chat_id}/subagents`: file-mutating tool calls become standalone `{role: "system", tool_name: "_filecard", file_path, action, tool, content: file_path}` entries instead of folding into `_activity`. Both provider readers honour this.
+- `GET /api/chats/{chat_id}/messages`: file-mutating tool calls become standalone `{role: "system", tool_name: "_filecard", file_path, action, tool, content: file_path}` entries instead of folding into `_activity`. Both provider readers honour this.
 - Refused or failed calls get no card. `file_touch` is attached when a call is *requested*, so a denied `Write` used to paint an Outputs chip for a file that was never created. Live: the server publishes `tool_denied {tool_use_id}` on a deny and strips the touch from the replay buffer (the permission gate keys requests by `tool_use_id`, which is the same id the `tool_use` event carries). On reload: `/messages` and the subagent renderer skip the card when that call's `tool_result` came back `is_error`. The activity row stays either way, so the attempt is still visible.
 - Chat card/link clicks first resolve `/api/chats/{chat_id}/file-path?path=...`, then open the canonical absolute path through `/api/workspace-file` (text/code), `/api/workspace-image`, or the binary/HTML viewer. GET `/file-path` anchors relative paths to that chat's agent root and may fuzzy-match a name inside the chat's agent and vault roots. The batch `POST /api/chats/{chat_id}/file-paths/resolve` (below) is the exact one; it does not fuzzy-match. A missing chat/file returns 404; a disallowed extension returns 415. The signed-session API boundary is unchanged. Standalone viewer requests still anchor relative paths to `workspace_root`; absolute paths retain the intentional unrestricted host-path policy and extension/size guards. A failed manual or automatic pin leaves the viewer open.
 

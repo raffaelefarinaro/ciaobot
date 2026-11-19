@@ -1540,9 +1540,7 @@ async def test_claude_inherits_empty_model_catalog_default(
         thinking_levels=True,
         usage=True,
         quota=True,
-        subagents=True,
         background_subagents=True,
-        subagent_messages=True,
         session_history=True,
         schedule_unattended=True,
     )

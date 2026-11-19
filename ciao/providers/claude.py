@@ -544,9 +544,7 @@ class ClaudeProvider(BaseSDKProvider):
         thinking_levels=True,
         usage=True,
         quota=True,
-        subagents=True,
         background_subagents=True,
-        subagent_messages=True,
         session_history=True,
         schedule_unattended=True,
     )
@@ -676,17 +674,6 @@ class ClaudeProvider(BaseSDKProvider):
         if self._last_activity is None:
             return math.inf
         return time.monotonic() - self._last_activity
-
-    def background_shell_rows(self) -> list[dict[str, Any]]:
-        """``{id, command, task_type, started_at}`` per tracked task, in id order."""
-        self._prune_stale_tasks()
-        return [
-            {
-                "id": task_id,
-                **{k: v for k, v in self._native_tasks[task_id].items() if k != "started_mono"},
-            }
-            for task_id in sorted(self._native_tasks)
-        ]
 
     def _observe_message(self, msg: Any) -> None:
         """Record SDK activity and track background tasks from lifecycle messages.
