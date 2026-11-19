@@ -18,6 +18,7 @@ from typing import AsyncIterator, Callable
 
 from ciao.models import (
     AssistantTextDelta,
+    ContextCompactedEvent,
     ModelCapabilityQuestionEvent,
     ModelChangedEvent,
     PermissionRequestEvent,
@@ -541,6 +542,9 @@ def event_to_json(event: StreamEvent) -> dict | None:
     if isinstance(event, PromptCancelledEvent):
         # Host bookkeeping only: the drive loop parks the prompt in the
         # chat's waiting queue.
+        return None
+    if isinstance(event, ContextCompactedEvent):
+        # Host bookkeeping only: the drive loop clears the stable-context marker.
         return None
     if isinstance(event, AssistantTextDelta):
         payload: dict = {"type": "text_delta", "text": event.text}

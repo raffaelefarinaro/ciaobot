@@ -11,6 +11,16 @@ from __future__ import annotations
 from ciao import core_prompt as mi
 
 
+def test_core_carries_background_shell_rule() -> None:
+    core = mi.unified_core()
+    assert "Do not start background shells" in core
+    assert "subagent" in core
+
+
+def test_core_has_no_native_background_tool_advice() -> None:
+    assert "native subagent and background tools" not in mi.unified_core()
+
+
 def test_system_prompt_payload_returns_instructions_for_empty() -> None:
     payload = mi.system_prompt_payload("")
     assert payload is not None
@@ -243,7 +253,6 @@ def test_core_routes_write_procedures_out_of_the_always_loaded_prompt() -> None:
     assert "[expires:" not in text
     assert "A note without frontmatter cannot be indexed" not in text
     assert "Every Ciaobot operation is a `ciao <noun> <verb>" not in text
-    assert "run_in_background" not in text
     assert "`Agent`/`Task`" not in text
 
 

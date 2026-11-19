@@ -230,7 +230,7 @@ def test_dev_server_guidance_keeps_one_auto_reload_run() -> None:
     agent that restarts its preview server after every code change floods the
     chat with notices that carry no information.
     """
-    assert "dev server: one auto-reload run" in _system_instructions()
+    assert "A dev server runs inside a subagent as one auto-reload run." in _system_instructions()
     skill = agent_cli._help_text()
     assert "A dev or preview server is one background run for the whole session." in skill
     assert "auto-reload" in skill and "`uvicorn --reload`" in skill

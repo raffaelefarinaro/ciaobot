@@ -29,6 +29,7 @@ from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
     ChatContext,
+    ContextCompactedEvent,
     ImageAttachment,
     ModelCapabilityQuestionEvent,
     ModelChangedEvent,
@@ -557,6 +558,14 @@ class ChatStreaming:
             except Exception:
                 logger.exception("Turn-start notification failed for chat %s", chat_id)
 
+    def _clear_stable_context(self, chat_id: str) -> None:
+        """Forget the stable-context marker so the next user turn re-sends the stable facts."""
+        chat = self._host._chats.get(chat_id)
+        if chat is not None:
+            chat.context_digest = ""
+            chat.context_session_id = ""
+            self._host._save()
+
     def _save_at_turn_end(self, chat_id: str) -> None:
         """Persist the registry at turn end without letting a failed write skip teardown.
 
@@ -751,11 +760,10 @@ class ChatStreaming:
                         ):
                             # The compacted session no longer holds the stable
                             # context, so the next user turn must re-send it.
-                            compacted = self._host._chats.get(chat_id)
-                            if compacted is not None:
-                                compacted.context_digest = ""
-                                compacted.context_session_id = ""
-                                self._host._save()
+                            self._clear_stable_context(chat_id)
+                        if isinstance(event, ContextCompactedEvent):
+                            # The agent compacted its own session mid-turn.
+                            self._clear_stable_context(chat_id)
                         turn_steps.feed(event)
                         turn_segment.feed(event)
                         if isinstance(
@@ -2214,6 +2222,8 @@ class ChatStreaming:
                 ) or (owner is not None and not owner.background):
                     superseded = True
                     break
+                if isinstance(event, ContextCompactedEvent):
+                    self._clear_stable_context(chat_id)
                 drain_segment.feed(event)
                 if (
                     isinstance(event, ResultEvent)
