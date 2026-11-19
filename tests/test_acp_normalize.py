@@ -290,7 +290,7 @@ def test_stop_reason_mapping(stop: str, body: str, is_error: bool, stopped: bool
     assert event.final_text is None
 
 
-def test_unknown_stop_reason_is_logged_not_quoted(caplog: pytest.LogCaptureFixture) -> None:
+def test_unknown_stop_reason_is_neither_quoted_nor_logged(caplog: pytest.LogCaptureFixture) -> None:
     secret = "SECRET_STOP_REASON_42"
     caplog.set_level(logging.WARNING, logger="ciao.providers.acp.normalize")
     t = TurnText()
@@ -301,7 +301,9 @@ def test_unknown_stop_reason_is_logged_not_quoted(caplog: pytest.LogCaptureFixtu
     assert event.result == "The agent ended the turn for an unrecognised reason."
     assert secret not in repr(event)
     assert "/Users/alice" not in repr(event)
-    assert secret in caplog.text
+    assert "unrecognised stop reason" in caplog.text
+    assert secret not in caplog.text
+    assert "/Users/alice" not in caplog.text
 
 
 def test_result_event_carries_final_text_and_copies_usage() -> None:
