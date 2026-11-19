@@ -5,6 +5,11 @@ on:
     types: [published]
   workflow_dispatch:
 
+env:
+  # The one release whose wheel-only manifest 1.x engines read (#3131 Q3). The
+  # decision step, the notice and the 1.x gate all key off this value.
+  LEGACY_MANIFEST_VERSION: "2.0.0"
+
 jobs:
   build-engine:
     runs-on: macos-latest
@@ -12,7 +17,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Nothing after this step pushes with git: uploads go through GH_TOKEN.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
@@ -30,13 +38,48 @@ jobs:
       - name: Build engine wheel
         run: uv build --wheel --out-dir dist
       - name: Verify engine wheel in a clean environment
+        env:
+          VERSION: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
+          version="${VERSION#v}"
+          test -f "dist/ciaobot-${version}-py3-none-any.whl"
           uv venv --python 3.13 "$RUNNER_TEMP/engine-check"
           uv pip install --python "$RUNNER_TEMP/engine-check/bin/python" dist/ciaobot-*.whl
           cd "$RUNNER_TEMP"
           "$RUNNER_TEMP/engine-check/bin/python" -m ciao.release_manifest check-static
+      - name: Stamp the Linux installer
+        env:
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          ws="$GITHUB_WORKSPACE"
+          # Run from outside the checkout so the wheel's own ciao is the one that
+          # stamps: install.sh is pinned to exactly the bytes this release ships.
+          (cd "$RUNNER_TEMP" && "$RUNNER_TEMP/engine-check/bin/python" -m ciao.release_manifest stamp-installer \
+            --template "$ws/scripts/install.sh" \
+            --version "$version" \
+            --wheel "$ws/dist/ciaobot-$version-py3-none-any.whl" \
+            --out "$ws/install.sh")
+      - name: Decide whether the 1.x engine manifest ships
+        id: legacy
+        env:
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          # Maintainer decision (#3131 Q3, 2026-11-18): the wheel-only manifest that
+          # 1.x engines read is published for 2.0.0 only. Later releases attach the
+          # installer and the wheel alone; a 1.x engine that stays behind is told to
+          # reinstall by hand (#3130).
+          if [ "${VERSION#v}" = "$LEGACY_MANIFEST_VERSION" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::1.x engine manifest not published for $VERSION: only $LEGACY_MANIFEST_VERSION ships it, so the legacy steps are skipped"
+          fi
       - name: Write and sign engine manifest
+        if: steps.legacy.outputs.publish == 'true'
         env:
           VERSION: ${{ github.event.release.tag_name }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -46,8 +89,9 @@ jobs:
           version="${VERSION#v}"
           py="$RUNNER_TEMP/engine-check/bin/python"
           ws="$GITHUB_WORKSPACE"
-          # The release lists the wheel only. The 1.x updater reads this manifest
-          # through releases/latest, so it must stay a signed schema-1 manifest.
+          # The manifest lists the wheel only. It exists so 1.x engines can update
+          # to this release (#3131 D5); the 1.x updater reads it through
+          # releases/latest, so it must stay a signed schema-1 manifest.
           (cd "$RUNNER_TEMP" && "$py" -m ciao.release_manifest build --version "$version" --out "$ws/ciaobot-engine-manifest.json" "$ws"/dist/ciaobot-*.whl)
           # The manifest is signed with the release minisign key. The signer must
           # not live under desktop/ or #579b would break the release.
@@ -57,17 +101,42 @@ jobs:
           # ciao.release_manifest already verifies - the step below is the gate.
           (cd "$ws" && npx --yes @tauri-apps/cli@2.11.4 signer sign ciaobot-engine-manifest.json)
           (cd "$RUNNER_TEMP" && "$py" -m ciao.release_manifest verify "$ws/ciaobot-engine-manifest.json" "$ws/ciaobot-engine-manifest.json.sig")
+      - name: 1.x updater accepts this release
+        if: steps.legacy.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          ws="$GITHUB_WORKSPACE"
+          legacy="$RUNNER_TEMP/legacy/v$version"
+          mkdir -p "$legacy"
+          cp "$ws/dist/ciaobot-$version-py3-none-any.whl" "$ws/ciaobot-engine-manifest.json" "$ws/ciaobot-engine-manifest.json.sig" "$legacy/"
+          # Runs before any upload: a release a 1.x engine cannot stage is never
+          # attached. Stage only; the script never applies the update.
+          python3 "$ws/scripts/legacy-update-gate.py" \
+            --target "$version" \
+            --release-root "$RUNNER_TEMP/legacy" \
+            --uv "$(command -v uv)"
       - name: Attach release assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          # Exactly three engine assets: the wheel, the signed manifest beside
-          # it, and the manifest's signature. No installer script, no server
-          # host archive, no app archive, no latest.json feed (#653).
+          # The stamped Linux installer and the wheel it pins, on every release.
+          # install.sh is the public one-liner (releases/latest/download/install.sh).
+          # No other installer, no server host archive and no app archive.
+          gh release upload "$TAG" "$GITHUB_WORKSPACE/install.sh" dist/ciaobot-*.whl --clobber
+      - name: Attach the 1.x engine manifest
+        if: steps.legacy.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
           gh release upload "$TAG" \
-            dist/ciaobot-*.whl \
             ciaobot-engine-manifest.json \
             ciaobot-engine-manifest.json.sig \
             --clobber
@@ -87,6 +156,69 @@ jobs:
           (cd "$RUNNER_TEMP" && "$RUNNER_TEMP/engine-check/bin/python" -m ciao.release_manifest verify \
             "$uploaded/ciaobot-engine-manifest.json" "$uploaded/ciaobot-engine-manifest.json.sig" \
             "${asset_args[@]}")
+      - name: Check the published assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          VERSION: ${{ github.event.release.tag_name }}
+          LEGACY_PUBLISH: ${{ steps.legacy.outputs.publish }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          # Exactly the installer and the wheel, plus the 1.x manifest and its
+          # signature on the legacy release. Anything else fails the job.
+          expected="$RUNNER_TEMP/expected-assets.txt"
+          printf '%s\n' install.sh "ciaobot-$version-py3-none-any.whl" > "$expected"
+          case "$LEGACY_PUBLISH" in
+            true)
+              printf '%s\n' ciaobot-engine-manifest.json ciaobot-engine-manifest.json.sig >> "$expected"
+              ;;
+            false) ;;
+            *)
+              echo "unknown legacy decision: $LEGACY_PUBLISH" >&2
+              exit 1
+              ;;
+          esac
+          sort -o "$expected" "$expected"
+          listed="$RUNNER_TEMP/published-assets.txt"
+          gh release view "$TAG" --json assets --jq '.assets[].name' | sort > "$listed"
+          # The exact-set diff refuses retired installers and the server host
+          # archive too: any name not in $expected fails it.
+          if ! diff "$expected" "$listed"; then
+            echo "the release's assets are not the expected set for $TAG (diff above)" >&2
+            exit 1
+          fi
+          # The public installer must pin this release and the wheel that is
+          # attached beside it, byte for byte.
+          downloaded="$RUNNER_TEMP/published-assets"
+          mkdir -p "$downloaded"
+          gh release download "$TAG" --dir "$downloaded" \
+            --pattern install.sh \
+            --pattern 'ciaobot-*.whl'
+          wheels=("$downloaded"/ciaobot-*.whl)
+          if [ "${#wheels[@]}" -ne 1 ] || [ ! -f "${wheels[0]}" ]; then
+            echo "expected exactly one wheel attached, found ${#wheels[@]}" >&2
+            exit 1
+          fi
+          grep -Fx "CIAOBOT_VERSION=$version" "$downloaded/install.sh" || {
+            echo "install.sh does not pin version $version" >&2
+            exit 1
+          }
+          digest="$(shasum -a 256 "${wheels[0]}" | cut -d' ' -f1)"
+          grep -Fx "WHEEL_SHA256=$digest" "$downloaded/install.sh" || {
+            echo "install.sh does not pin the attached wheel's sha256 $digest" >&2
+            exit 1
+          }
+          # The published installer is the stamped one this job built, byte for
+          # byte, and the published wheel is the one it built.
+          cmp "$downloaded/install.sh" "$GITHUB_WORKSPACE/install.sh" || {
+            echo "the published install.sh is not the stamped installer built for $TAG" >&2
+            exit 1
+          }
+          cmp "${wheels[0]}" "$GITHUB_WORKSPACE/dist/ciaobot-$version-py3-none-any.whl" || {
+            echo "the published wheel is not the wheel built for $TAG" >&2
+            exit 1
+          }
 
   release-smoke:
     needs: build-engine
