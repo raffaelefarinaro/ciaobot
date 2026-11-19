@@ -4226,9 +4226,13 @@ class OpencodeProvider(BaseSDKProvider):
 
     @classmethod
     async def read_thread(
-        cls, workspace_root: Path, session_id: str
+        cls, workspace_root: Path, session_id: str, *, runtime_root: Path
     ) -> dict[str, Any]:
-        """Session metadata plus its message history, for transcript replay."""
+        """Session metadata plus its message history, for transcript replay.
+
+        The session lives in the OpenCode server under ``workspace_root``, so
+        ``runtime_root`` is unused here.
+        """
         if not session_id:
             return {}
         key = (str(workspace_root), session_id)
@@ -4258,16 +4262,19 @@ class OpencodeProvider(BaseSDKProvider):
 
     @classmethod
     async def native_title_candidates(
-        cls, workspace_root: Path, session_id: str
+        cls, workspace_root: Path, session_id: str, *, runtime_root: Path
     ) -> tuple[str, ...]:
         """The session's own title, the only candidate, exactly as read_thread exposes it."""
-        thread = await cls.read_thread(workspace_root, session_id)
+        thread = await cls.read_thread(workspace_root, session_id, runtime_root=runtime_root)
         info = thread.get("info") if isinstance(thread, dict) else None
         title = str(info.get("title") or "") if isinstance(info, dict) else ""
         return (title,)
 
     @classmethod
-    async def delete_session(cls, workspace_root: Path, session_id: str) -> bool:
+    async def delete_session(
+        cls, workspace_root: Path, session_id: str, *, runtime_root: Path
+    ) -> bool:
+        # The OpenCode server owns the session under ``workspace_root``; no runtime file.
         async with _EphemeralServer(workspace_root) as client:
             if client is None or not session_id:
                 return False

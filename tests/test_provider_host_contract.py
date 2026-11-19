@@ -34,15 +34,15 @@ class _Minimal(BaseProvider):
 async def test_base_defaults_are_inert(tmp_path: Path) -> None:
     p = _Minimal(tmp_path)
     assert p.is_connected is False
-    assert await _Minimal.read_thread(tmp_path, "s") == {}
+    assert await _Minimal.read_thread(tmp_path, "s", runtime_root=Path("/runtime")) == {}
     assert await p.abort_session("s") is None
 
 
 async def test_base_containers_are_fresh_per_call(tmp_path: Path) -> None:
     p = _Minimal(tmp_path)
-    first = await _Minimal.read_thread(tmp_path, "s")
+    first = await _Minimal.read_thread(tmp_path, "s", runtime_root=Path("/runtime"))
     first["x"] = 1
-    assert await _Minimal.read_thread(tmp_path, "s") == {}
+    assert await _Minimal.read_thread(tmp_path, "s", runtime_root=Path("/runtime")) == {}
 
 
 def test_is_connected_is_read_only(tmp_path: Path) -> None:

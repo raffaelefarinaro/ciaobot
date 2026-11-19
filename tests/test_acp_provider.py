@@ -29,7 +29,7 @@ from ciao.provider_registry import ProviderDescriptor
 from ciao.provider_service import ProviderService
 from ciao.providers.acp.connection import AgentStartError
 from ciao.providers.acp.provider import AcpProvider, start_failure_reason
-from ciao.providers.acp.session import SessionJournal, journal_file
+from ciao.providers.acp.session import AcpSession, SessionJournal, journal_file
 from ciao.providers.acp.spec import AgentSpec
 from tests.acp_helpers import read_calls, write_scenario
 
@@ -330,7 +330,8 @@ async def test_delete_session_removes_journal_without_spawning(
 ) -> None:
     config, _ = _install(monkeypatch, tmp_path)
     workspace: Path = config.workspace_root
-    path = journal_file(workspace / ".runtime", "fake", "sess-9")
+    runtime = workspace / ".runtime"
+    path = journal_file(runtime, "fake", "sess-9")
     SessionJournal(path).user("hi")
 
     async def no_spawn(*args: Any, **kwargs: Any) -> None:
@@ -338,23 +339,202 @@ async def test_delete_session_removes_journal_without_spawning(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", no_spawn)
 
-    assert await FakeAcpProvider.delete_session(workspace, "sess-9") is True
+    assert await FakeAcpProvider.delete_session(workspace, "sess-9", runtime_root=runtime) is True
     assert not path.exists()
-    assert await FakeAcpProvider.delete_session(workspace, "sess-9") is None
+    assert await FakeAcpProvider.delete_session(workspace, "sess-9", runtime_root=runtime) is None
 
 
 @pytest.mark.asyncio
 async def test_read_thread_returns_journal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config, _ = _install(monkeypatch, tmp_path)
     workspace: Path = config.workspace_root
-    assert await FakeAcpProvider.read_thread(workspace, "sess-9") == {}
+    runtime = workspace / ".runtime"
+    assert await FakeAcpProvider.read_thread(workspace, "sess-9", runtime_root=runtime) == {}
 
-    journal = SessionJournal(journal_file(workspace / ".runtime", "fake", "sess-9"))
+    journal = SessionJournal(journal_file(runtime, "fake", "sess-9"))
     journal.user("hi")
     journal.user("again")
 
-    thread = await FakeAcpProvider.read_thread(workspace, "sess-9")
+    thread = await FakeAcpProvider.read_thread(workspace, "sess-9", runtime_root=runtime)
     assert [row["text"] for row in thread["acp_journal"]] == ["hi", "again"]
+
+
+@pytest.mark.asyncio
+async def test_persisted_session_follows_configured_runtime_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Real macOS installs point CIAO_RUNTIME_ROOT outside <workspace>/.runtime; the
+    # journal the turn writes and the one delete/read address must be the same file.
+    config, _ = _install(monkeypatch, tmp_path, sessions=["sess-5"], prompts=[_text_turn("ok")])
+    workspace: Path = config.workspace_root
+    runtime = config.state_path.parent
+    assert runtime != workspace / ".runtime"
+    provider = FakeAcpProvider(workspace, config=config)
+    try:
+        await _run_turn(provider, _request())
+    finally:
+        await provider.disconnect()
+
+    journal = journal_file(runtime, "fake", "sess-5")
+    assert journal.exists()
+    assert not journal_file(workspace / ".runtime", "fake", "sess-5").exists()
+
+    thread = await FakeAcpProvider.read_thread(workspace, "sess-5", runtime_root=runtime)
+    assert [row["text"] for row in thread["acp_journal"]][0] == "hello"
+
+    assert await FakeAcpProvider.delete_session(workspace, "sess-5", runtime_root=runtime) is True
+    assert not journal.exists()
+
+
+async def _run_turn(provider: AcpProvider, request: AgentRequest) -> list[StreamEvent]:
+    """Drive the provider's own ``run_streaming``: the seam every yielded event crosses."""
+    return [event async for event in provider.run_streaming(request, lambda _handle: None)]
+
+
+@pytest.mark.asyncio
+async def test_crash_mid_turn_provider_yields_no_adapter_stderr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    secret = "SECRET_DIED_TOKEN_321"
+    caplog.set_level(logging.WARNING, logger="ciao.providers.acp.session")
+    config, _ = _install(
+        monkeypatch, tmp_path, sessions=["a"],
+        stderr=[f"fatal {secret} while reading /Users/alice/.ssh/id_ed25519"],
+        prompts=[{"steps": [{"update": _TEXT}, {"crash": True}]}],
+    )
+    provider = FakeAcpProvider(config.workspace_root, config=config)
+    try:
+        events = await asyncio.wait_for(_run_turn(provider, _request()), timeout=10)
+    finally:
+        await provider.disconnect()
+
+    result = events[-1]
+    assert isinstance(result, ResultEvent)
+    assert result.is_error is True
+    assert result.result == "fake stopped unexpectedly."
+    for event in events:
+        assert secret not in repr(event)
+        assert "/Users/alice" not in repr(event)
+    assert secret in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unexpected_turn_exception_yields_fixed_error_and_logs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    secret = "SECRET_PROMPT_FAIL_654"
+    config, _ = _install(monkeypatch, tmp_path, sessions=["a"])
+
+    async def broken_prompt(self: AcpSession, blocks: list[dict[str, Any]]) -> Any:
+        raise RuntimeError(f"prompt rejected {secret} at /Users/alice/work")
+
+    monkeypatch.setattr(AcpSession, "_run_prompt", broken_prompt)
+    provider = FakeAcpProvider(config.workspace_root, config=config)
+    try:
+        events = await asyncio.wait_for(_run_turn(provider, _request()), timeout=10)
+    finally:
+        await provider.disconnect()
+
+    assert len(events) == 1
+    assert isinstance(events[0], ResultEvent)
+    assert events[0].is_error is True
+    assert events[0].result == "fake could not complete the turn."
+    assert secret not in repr(events)
+    assert "/Users/alice" not in repr(events)
+    assert secret in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unreadable_image_yields_fixed_error_without_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    config, _ = _install(
+        monkeypatch, tmp_path, sessions=["a"], initialize={"promptCapabilities": {"image": True}},
+    )
+    missing = tmp_path / "vanished-picture.png"
+    image = ImageAttachment(path=missing, mime_type="image/png", original_filename="pic.png")
+    provider = FakeAcpProvider(config.workspace_root, config=config)
+    try:
+        events = await asyncio.wait_for(_run_turn(provider, _request(images=[image])), timeout=10)
+    finally:
+        await provider.disconnect()
+
+    assert len(events) == 1
+    assert isinstance(events[0], ResultEvent)
+    assert events[0].is_error is True
+    assert events[0].result == "fake could not complete the turn."
+    assert str(tmp_path) not in repr(events)
+    assert "vanished-picture" not in repr(events)
+
+
+@pytest.mark.asyncio
+async def test_session_open_failure_yields_fixed_error_and_leaves_no_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    secret = "SECRET_NEW_SESSION_987"
+    config, _ = _install(monkeypatch, tmp_path, new_error=f"cannot create {secret} in /Users/alice/x")
+    provider = FakeAcpProvider(config.workspace_root, config=config)
+    try:
+        events = await asyncio.wait_for(_run_turn(provider, _request()), timeout=10)
+        assert len(events) == 1
+        assert isinstance(events[0], ResultEvent)
+        assert events[0].is_error is True
+        assert events[0].result == "fake could not complete the turn."
+        assert secret not in repr(events)
+        assert "/Users/alice" not in repr(events)
+        assert secret in caplog.text
+        assert provider.current_session_id is None
+        assert provider._client.broker is None
+        assert provider._client.session is None
+        assert provider._connection is not None
+        assert getattr(provider._connection, "_pending_session", None) is None
+    finally:
+        await provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_meta_reload_open_failure_closes_cleanly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    secret = "SECRET_RELOAD_FAIL_111"
+    config, _ = _install(monkeypatch, tmp_path, sessions=["a", "b"], initialize={"loadSession": True})
+    provider = FakeAcpProvider(config.workspace_root, config=config)
+    real_open = AcpSession.open
+    attempts = 0
+
+    async def flaky_open(*args: Any, **kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            raise RuntimeError(f"reload failed {secret} at /Users/alice/x")
+        return await real_open(*args, **kwargs)
+
+    monkeypatch.setattr(AcpSession, "open", flaky_open)
+    try:
+        FakeAcpProvider.meta = {"claudeCode": {"options": {"first": True}}}
+        await _run_turn(provider, _request())
+        FakeAcpProvider.meta = {"claudeCode": {"options": {"second": True}}}
+        failed = await asyncio.wait_for(_run_turn(provider, _request(resume_session="a")), timeout=10)
+
+        assert len(failed) == 1
+        assert isinstance(failed[0], ResultEvent)
+        assert failed[0].is_error is True
+        assert failed[0].result == "fake could not complete the turn."
+        assert secret not in repr(failed)
+        assert "/Users/alice" not in repr(failed)
+        assert secret in caplog.text
+        # No half-closed provider: no live session, no broker still wired to the client.
+        assert provider.current_session_id is None
+        assert provider._client.broker is None
+        assert provider._client.session is None
+
+        recovered = await asyncio.wait_for(_run_turn(provider, _request()), timeout=10)
+        assert isinstance(recovered[-1], ResultEvent)
+        assert recovered[-1].is_error is False
+        assert recovered[-1].session_id == "b"
+    finally:
+        FakeAcpProvider.meta = {}
+        await provider.disconnect()
 
 
 @pytest.mark.asyncio

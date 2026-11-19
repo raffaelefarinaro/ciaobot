@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import os
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from pathlib import Path
@@ -32,6 +33,8 @@ from ciao.providers.acp.connection import AcpConnection
 from ciao.providers.acp.normalize import TurnText, UpdateNormalizer, canonical, result_event
 from ciao.providers.acp.permissions import PermissionBroker, mode_choices, pick_value
 from ciao.providers.acp.spec import AgentSpec
+
+logger = logging.getLogger(__name__)
 
 _LATE_QUIET = frozenset({"usage_update", "config_option_update", "current_mode_update"})
 _LATE_WAKE = "The agent continued after background work finished."
@@ -206,9 +209,14 @@ class AcpSession:
         )
         # The client forwards updates here while load replays, before ``open`` returns.
         setattr(connection, "_pending_session", session)
-        session_id, replaced, options, replay = await session._establish(
-            cwd, resume, additional_dirs, meta
-        )
+        try:
+            session_id, replaced, options, replay = await session._establish(
+                cwd, resume, additional_dirs, meta
+            )
+        except BaseException:
+            # A failed open leaves no session to route updates to.
+            setattr(connection, "_pending_session", None)
+            raise
         session.session_id = session_id
         session._normalizer.session_id = session_id
         session.config_options = options
@@ -424,9 +432,11 @@ class AcpSession:
         try:
             await self._connection.conn.set_config_option(config_id, self.session_id, value)
         except RequestError as exc:
+            # The adapter's error text can carry paths and settings; it stays in the log.
+            logger.warning("%s could not set %s: %s", self.spec.id, config_id, exc)
             return [SystemStatusEvent(
                 type="system",
-                status=f"{self.spec.id} could not set {config_id}: {exc}",
+                status=f"{self.spec.id} could not set {config_id}.",
             )]
         self._normalizer.current_values[config_id] = value
         return []
@@ -538,10 +548,16 @@ class AcpSession:
         return dict(fresh.usage)
 
     def _unexpected_stop(self) -> ResultEvent:
+        # Raw adapter stderr is logged for diagnosis and never placed in the event.
+        logger.warning(
+            "%s stopped unexpectedly; stderr tail:\n%s",
+            self.spec.id,
+            self._connection.stderr_tail(5),
+        )
         return ResultEvent(
             type="result",
             is_error=True,
-            result=f"{self.spec.id} stopped unexpectedly. {self._connection.stderr_tail(5)}",
+            result=f"{self.spec.id} stopped unexpectedly.",
             session_id=self.session_id,
         )
 

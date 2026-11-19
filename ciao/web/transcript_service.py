@@ -1294,7 +1294,7 @@ async def _assemble_chat_messages(
         for sid in session_ids:
             try:
                 opencode_thread = await provider_cls.read_thread(
-                    session_root, sid
+                    session_root, sid, runtime_root=config.state_path.parent
                 )
                 if not opencode_thread:
                     continue

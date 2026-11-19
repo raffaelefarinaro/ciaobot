@@ -789,7 +789,7 @@ async def test_delete_and_archive_reclaim_opencode_sessions(
     lifecycle: list[str] = []
     reclaim_seen = asyncio.Event()
 
-    async def _fake_opencode_delete(_workspace, session_id: str) -> bool:
+    async def _fake_opencode_delete(_workspace, session_id: str, **_kwargs) -> bool:
         lifecycle.append(f"delete:{session_id}")
         reclaim_seen.set()
         return True
@@ -874,7 +874,7 @@ async def test_reclaim_failure_leaves_deletes_and_archives_durable(
         pcm._transcripts, "archive_session", capturing_archive_session
     )
 
-    async def _failing_delete(_workspace, session_id: str) -> bool | None:
+    async def _failing_delete(_workspace, session_id: str, **_kwargs) -> bool | None:
         reclaim_seen.set()
         if failure_mode == "false":
             return False

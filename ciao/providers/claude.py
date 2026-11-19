@@ -549,11 +549,12 @@ class ClaudeProvider(BaseSDKProvider):
 
     @classmethod
     async def native_title_candidates(
-        cls, workspace_root: Path, session_id: str
+        cls, workspace_root: Path, session_id: str, *, runtime_root: Path
     ) -> tuple[str, ...]:
         """Claude Code title candidates: custom title first, then the AI summary.
 
-        SDK reader failures propagate to the caller's failure boundary.
+        SDK reader failures propagate to the caller's failure boundary. The SDK
+        keys its store by ``workspace_root``, so ``runtime_root`` is unused here.
         """
         info = get_session_info(session_id, directory=str(workspace_root))
         if info is None:
@@ -565,13 +566,14 @@ class ClaudeProvider(BaseSDKProvider):
 
     @classmethod
     async def delete_session(
-        cls, workspace_root: Path, session_id: str
+        cls, workspace_root: Path, session_id: str, *, runtime_root: Path
     ) -> bool | None:
         """Delete the SDK JSONL blob; no confirmation signal either way.
 
         The host treats None as adapter-owned diagnostics, so missing
         sessions and SDK-rejected ids stay quiet while I/O failures keep the
-        established error log.
+        established error log. The SDK keys its store by ``workspace_root``,
+        so ``runtime_root`` is unused here.
         """
         if not session_id:
             return None

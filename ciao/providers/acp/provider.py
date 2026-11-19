@@ -172,39 +172,47 @@ class AcpProvider(BaseProvider):
         register_handle: Callable[[ActiveHandle | None], None],
     ) -> AsyncGenerator[StreamEvent, None]:
         key = (provider_reuse_key(request), linked_repo_of(request), str(self.workspace_root))
-        if self._connection is not None and (self._key != key or not self._connection.alive):
-            await self.disconnect()
-        if self._connection is None:
-            try:
-                await self._start(request, key)
-            except AgentStartError as exc:
-                # Raw adapter output stays in the log; the PWA gets a short reason.
-                logger.warning(
-                    "%s agent did not start: %s\n%s", self.spec.id, exc, exc.stderr_tail
-                )
-                yield ResultEvent(type="result", is_error=True, result=start_failure_reason(exc))
-                return
-        connection = self._connection
-        assert connection is not None
-        session, replaced = await self._session_for(connection, request)
-        if replaced:
-            prepend_stable_context(request)
-        for event in await session.apply(
-            mode=request.mode, model=request.model, thinking=request.thinking_level
-        ):
-            yield self._seen(event)
-        blocks = self._blocks(connection, request)
-        register_handle(AcpHandle(session))
         try:
-            async with aclosing(session.prompt(
-                blocks,
-                display=request.display_prompt or request.prompt,
-                unattended=request.unattended,
-            )) as stream:
-                async for event in stream:
-                    yield self._seen(event)
-        finally:
-            register_handle(None)
+            if self._connection is not None and (self._key != key or not self._connection.alive):
+                await self.disconnect()
+            if self._connection is None:
+                try:
+                    await self._start(request, key)
+                except AgentStartError as exc:
+                    # Raw adapter output stays in the log; the PWA gets a short reason.
+                    logger.warning(
+                        "%s agent did not start: %s\n%s", self.spec.id, exc, exc.stderr_tail
+                    )
+                    yield ResultEvent(type="result", is_error=True, result=start_failure_reason(exc))
+                    return
+            connection = self._connection
+            assert connection is not None
+            session, replaced = await self._session_for(connection, request)
+            if replaced:
+                prepend_stable_context(request)
+            for event in await session.apply(
+                mode=request.mode, model=request.model, thinking=request.thinking_level
+            ):
+                yield self._seen(event)
+            blocks = self._blocks(connection, request)
+            register_handle(AcpHandle(session))
+            try:
+                async with aclosing(session.prompt(
+                    blocks,
+                    display=request.display_prompt or request.prompt,
+                    unattended=request.unattended,
+                )) as stream:
+                    async for event in stream:
+                        yield self._seen(event)
+            finally:
+                register_handle(None)
+        except Exception:
+            # Any failure the adapter did not classify (open, config, image read, prompt)
+            # is logged with its detail; the PWA gets a fixed sentence, never exception text.
+            logger.exception("%s turn failed", self.spec.id)
+            yield ResultEvent(
+                type="result", is_error=True, result=f"{self.spec.id} could not complete the turn."
+            )
 
     def _seen(self, event: StreamEvent) -> StreamEvent:
         self._last_activity = time.monotonic()
@@ -236,16 +244,23 @@ class AcpProvider(BaseProvider):
         broker = PermissionBroker(lambda _event: None)
         self._client.broker = broker
         linked = linked_repo_of(request)
-        opened, replaced = await AcpSession.open(
-            connection,
-            self.spec,
-            cwd=self.workspace_root,
-            resume=resume,
-            additional_dirs=[linked] if linked else [],
-            journal_dir=_runtime_dir(self.workspace_root, self.config),
-            broker=broker,
-            session_meta=meta,
-        )
+        try:
+            opened, replaced = await AcpSession.open(
+                connection,
+                self.spec,
+                cwd=self.workspace_root,
+                resume=resume,
+                additional_dirs=[linked] if linked else [],
+                journal_dir=_runtime_dir(self.workspace_root, self.config),
+                broker=broker,
+                session_meta=meta,
+            )
+        except BaseException:
+            # The old session is already closed; unwire the broker so the client does
+            # not route updates or permission requests to a session that never opened.
+            broker.cancel_all()
+            self._client.broker = None
+            raise
         self._session = opened
         self._broker = broker
         self._client.session = opened
@@ -356,9 +371,11 @@ class AcpProvider(BaseProvider):
     # -- persisted sessions ----------------------------------------------------
 
     @classmethod
-    async def delete_session(cls, workspace_root: Path, session_id: str) -> bool | None:
+    async def delete_session(
+        cls, workspace_root: Path, session_id: str, *, runtime_root: Path
+    ) -> bool | None:
         """Remove the session journal. The agent is never spawned on a cleanup path."""
-        path = journal_file(_runtime_dir(workspace_root, None), cls.spec.id, session_id)
+        path = journal_file(runtime_root, cls.spec.id, session_id)
         try:
             path.unlink()
         except FileNotFoundError:
@@ -366,8 +383,13 @@ class AcpProvider(BaseProvider):
         return True
 
     @classmethod
-    async def read_thread(cls, workspace_root: Path, session_id: str) -> dict[str, Any]:
-        path = journal_file(_runtime_dir(workspace_root, None), cls.spec.id, session_id)
+    async def read_thread(
+        cls, workspace_root: Path, session_id: str, *, runtime_root: Path
+    ) -> dict[str, Any]:
+        # Returned as {"acp_journal": rows}, a shape the transcript renderer does not read yet
+        # (it expects {"info", "messages"}; a missing "messages" renders as an empty segment).
+        # ACP history rendering is deferred to slice A5 ("journal history").
+        path = journal_file(runtime_root, cls.spec.id, session_id)
         if not path.exists():
             return {}
         return {"acp_journal": SessionJournal.read(path)}
