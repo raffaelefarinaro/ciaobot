@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import importlib.util
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -14,28 +16,20 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from ciao.release_manifest import (
     MANIFEST_NAME,
     RELEASE_PUBLIC_KEY,
-    SERVER_HOST_ARCH,
-    SERVER_HOST_BUNDLE_ID,
-    SERVER_HOST_FILENAME,
-    SERVER_HOST_KIND,
-    SERVER_HOST_PLATFORM,
-    SERVER_HOST_PROTOCOL,
-    SERVER_HOST_REVISION,
-    SERVER_HOST_SIGNING_KIND,
-    SIGNED_SERVER_HOST_REVISION,
     SignatureError,
     artifact_entry,
     build_manifest,
     main,
     missing_static_assets,
     parse_public_key,
-    select_server_host_artifact,
-    server_host_artifact_entry,
-    verify_assets,
+    stamp_installer,
     verify_manifest,
     verify_signature,
 )
-from ciao.server_host import DeveloperIDSigning, developer_id_requirement
+
+ROOT = Path(__file__).parents[1]
+WHEEL = "ciaobot-1.2.3-py3-none-any.whl"
+SHA_A = "ab" * 32
 
 TEST_TEAM = "TESTTEAM01"
 
@@ -55,32 +49,6 @@ def _entry(**overrides: Any) -> dict[str, Any]:
     entry.update(overrides)
     return entry
 
-
-def _host_entry(**overrides: Any) -> dict[str, Any]:
-    """A valid ``server-host`` entry, the shape `server_host_artifact_entry` makes."""
-    entry: dict[str, Any] = {
-        "filename": SERVER_HOST_FILENAME,
-        "kind": SERVER_HOST_KIND,
-        "platform": SERVER_HOST_PLATFORM,
-        "arch": SERVER_HOST_ARCH,
-        "sha256": "cd" * 32,
-        "size": 4096,
-        "bundle_id": SERVER_HOST_BUNDLE_ID,
-        "host_revision": SERVER_HOST_REVISION,
-        "host_protocol": SERVER_HOST_PROTOCOL,
-    }
-    entry.update(overrides)
-    return entry
-
-
-def _signed_host_entry(**overrides: Any) -> dict[str, Any]:
-    """A valid signed ``server-host`` entry: revision 5 plus its signing object."""
-    entry = _host_entry(
-        host_revision=SIGNED_SERVER_HOST_REVISION,
-        signing={"kind": SERVER_HOST_SIGNING_KIND, "team_id": TEST_TEAM},
-    )
-    entry.update(overrides)
-    return entry
 
 
 def _keypair() -> tuple[Ed25519PrivateKey, str, bytes]:
@@ -355,259 +323,6 @@ def test_verify_manifest_rejects_a_non_object_artifact() -> None:
         verify_manifest(raw, _sign(raw, priv, key_id), public_key)
 
 
-def test_server_host_artifact_entry(tmp_path: Path) -> None:
-    payload = b"universal host archive" * 128
-    archive = tmp_path / SERVER_HOST_FILENAME
-    archive.write_bytes(payload)
-
-    entry = server_host_artifact_entry(archive)
-
-    assert entry["filename"] == SERVER_HOST_FILENAME
-    assert entry["kind"] == SERVER_HOST_KIND
-    assert entry["platform"] == SERVER_HOST_PLATFORM
-    assert entry["arch"] == SERVER_HOST_ARCH
-    assert entry["bundle_id"] == SERVER_HOST_BUNDLE_ID
-    assert entry["host_revision"] == SERVER_HOST_REVISION
-    assert entry["host_protocol"] == SERVER_HOST_PROTOCOL
-    assert entry["sha256"] == hashlib.sha256(payload).hexdigest()
-    assert entry["size"] == len(payload)
-    # The revision is fixed, independent of any engine version, and never bool.
-    assert type(entry["host_revision"]) is int
-
-
-def test_server_host_artifact_entry_rejects_other_names(tmp_path: Path) -> None:
-    other = tmp_path / "ciaobot-server-host-macos-universal-v2.tar.gz"
-    other.write_bytes(b"host")
-
-    with pytest.raises(ValueError, match="must be named"):
-        server_host_artifact_entry(other)
-
-
-def test_manifest_with_host_signed_round_trip(tmp_path: Path) -> None:
-    priv, public_key, key_id = _keypair()
-    wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
-    wheel.write_bytes(b"wheel bytes")
-    archive = tmp_path / SERVER_HOST_FILENAME
-    archive.write_bytes(b"host archive bytes")
-    document = build_manifest(
-        "1.2.3",
-        [artifact_entry(wheel, kind="wheel"), server_host_artifact_entry(archive)],
-        created="2026-09-25T10:00:00+00:00",
-    )
-    raw = json.dumps(document).encode()
-
-    verified = verify_manifest(raw, _sign(raw, priv, key_id), public_key)
-    entry = select_server_host_artifact(verified)
-
-    assert entry["filename"] == SERVER_HOST_FILENAME
-    assert entry["host_revision"] == SERVER_HOST_REVISION
-    # The wheel-only generic path is untouched by the host being present.
-    wheels = [a for a in verified["artifacts"] if a["kind"] == "wheel"]
-    assert len(wheels) == 1
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("platform", "linux"),
-        ("platform", "any"),
-        ("arch", "arm64"),
-        ("arch", "any"),
-        ("filename", "ciaobot-server-host-macos-universal-v2.tar.gz"),
-        ("bundle_id", "local.ciaobot.other"),
-        # bool is an int subclass; a protocol of True must not pass as 1.
-        ("host_protocol", True),
-        ("host_protocol", 3),
-        ("host_protocol", None),
-        ("host_revision", True),
-        ("host_revision", 5),
-        ("host_revision", None),
-        ("size", 0),
-        ("size", -1),
-    ],
-)
-def test_server_host_metadata_rejected(field: str, value: object) -> None:
-    priv, public_key, key_id = _keypair()
-    entry = _host_entry()
-    if value is None:
-        entry.pop(field)
-    else:
-        entry[field] = value
-    document = build_manifest("1.2.3", [entry], created="2026-09-25T10:00:00+00:00")
-    raw = json.dumps(document).encode()
-
-    with pytest.raises(ValueError):
-        select_server_host_artifact(
-            verify_manifest(raw, _sign(raw, priv, key_id), public_key)
-        )
-
-
-def test_verify_manifest_accepts_an_unsupported_host_beside_the_wheel() -> None:
-    # The engine updater verifies every manifest with verify_manifest and only
-    # picks the wheel. A later host revision, or two hosts during a transition,
-    # must not refuse the wheel update on engines that predate them; only the
-    # selector, which a host consumer calls, pins the supported identity.
-    priv, public_key, key_id = _keypair()
-    future_host = _host_entry(
-        filename="ciaobot-server-host-macos-universal-v2.tar.gz",
-        # Revision 5 is the signed policy this engine knows; the fixture names
-        # the one after it, so "future" keeps meaning unsupported.
-        host_revision=SIGNED_SERVER_HOST_REVISION + 1,
-        host_protocol=3,
-    )
-    document = build_manifest(
-        "1.2.3",
-        [_entry(), _host_entry(), future_host],
-        created="2026-09-25T10:00:00+00:00",
-    )
-    raw = json.dumps(document).encode()
-
-    verified = verify_manifest(raw, _sign(raw, priv, key_id), public_key)
-
-    assert [a for a in verified["artifacts"] if a["kind"] == "wheel"] == [_entry()]
-    with pytest.raises(ValueError, match="more than one server host"):
-        select_server_host_artifact(verified)
-
-
-def test_server_host_selection_requires_unique_supported_asset() -> None:
-    priv, public_key, key_id = _keypair()
-
-    # Absence: the selector raises rather than falling back to the wheel.
-    wheel_only = build_manifest(
-        "1.2.3", [_entry()], created="2026-09-25T10:00:00+00:00"
-    )
-    raw = json.dumps(wheel_only).encode()
-    verified = verify_manifest(raw, _sign(raw, priv, key_id), public_key)
-    with pytest.raises(ValueError, match="no server host artifact"):
-        select_server_host_artifact(verified)
-
-    # Duplicate host entries (same bytes, listed twice) are ambiguous.
-    duplicate = build_manifest(
-        "1.2.3",
-        [_host_entry(), _host_entry()],
-        created="2026-09-25T10:00:00+00:00",
-    )
-    raw = json.dumps(duplicate).encode()
-    verified = verify_manifest(raw, _sign(raw, priv, key_id), public_key)
-    with pytest.raises(ValueError, match="more than one server host"):
-        select_server_host_artifact(verified)
-
-    # The host filename reused under another kind is ambiguous.
-    cross_kind = build_manifest(
-        "1.2.3",
-        [_host_entry(), _entry(filename=SERVER_HOST_FILENAME, kind="wheel")],
-        created="2026-09-25T10:00:00+00:00",
-    )
-    raw = json.dumps(cross_kind).encode()
-    verified = verify_manifest(raw, _sign(raw, priv, key_id), public_key)
-    with pytest.raises(ValueError, match="reuses the server host filename"):
-        select_server_host_artifact(verified)
-
-
-def test_server_host_selection_rejects_unsupported_entry() -> None:
-    # A selector caller that has verified the manifest still refuses an entry
-    # whose identity is not the supported one, so shape validation is not
-    # bypassed by calling the selector directly.
-    manifest = {
-        "schema": 1,
-        "version": "1.2.3",
-        "tag": "v1.2.3",
-        "artifacts": [_host_entry(host_protocol=3)],
-    }
-
-    with pytest.raises(ValueError):
-        select_server_host_artifact(manifest)
-
-
-def test_server_host_selection_refuses_malformed_or_ambiguous_entries() -> None:
-    # The selector is called on a dict, so it repeats the per-entry and
-    # ambiguity checks rather than calling .get on whatever the list holds.
-    def manifest(*artifacts: Any) -> dict[str, Any]:
-        return {"schema": 1, "version": "1.2.3", "tag": "v1.2.3", "artifacts": list(artifacts)}
-
-    with pytest.raises(ValueError, match="malformed"):
-        select_server_host_artifact(manifest(_host_entry(), "not an object"))
-    with pytest.raises(ValueError, match="no artifacts"):
-        select_server_host_artifact(manifest())
-    with pytest.raises(ValueError, match="more than one server host"):
-        select_server_host_artifact(manifest(_host_entry(), _host_entry()))
-    with pytest.raises(ValueError, match="reuses the server host filename"):
-        select_server_host_artifact(
-            manifest(_host_entry(), _entry(filename=SERVER_HOST_FILENAME, kind="wheel"))
-        )
-    # Order does not matter: the host filename listed first under another kind
-    # is just as ambiguous.
-    with pytest.raises(ValueError, match="reuses the server host filename"):
-        select_server_host_artifact(
-            manifest(_entry(filename=SERVER_HOST_FILENAME, kind="wheel"), _host_entry())
-        )
-
-
-def test_server_host_constants_match_the_builder() -> None:
-    # The manifest pins what scripts/build-server-host.py produces; if the two
-    # drift, the release would sign an entry the archive does not match.
-    script = Path(__file__).parents[1] / "scripts" / "build-server-host.py"
-    spec = importlib.util.spec_from_file_location("build_server_host_contract", script)
-    assert spec is not None and spec.loader is not None
-    builder = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(builder)
-
-    assert builder.ARCHIVE_NAME == SERVER_HOST_FILENAME
-    assert builder.BUNDLE_ID == SERVER_HOST_BUNDLE_ID
-    assert builder.HOST_REVISION == SERVER_HOST_REVISION == 4
-    assert builder.HOST_PROTOCOL_REVISION == SERVER_HOST_PROTOCOL
-    assert set(builder.ARCHITECTURES) == {"arm64", "x86_64"}
-    # The signed policy is the same revision and requirement in the builder and
-    # the runtime contract; the release would otherwise sign a host this engine
-    # cannot accept.
-    assert builder.SIGNED_HOST_REVISION == SIGNED_SERVER_HOST_REVISION
-    assert (
-        builder.designated_requirement(TEST_TEAM)
-        == developer_id_requirement(TEST_TEAM)
-    )
-
-
-
-
-
-
-def test_server_host_signature_tampering_fails_before_schema() -> None:
-    # The signed metadata is what authenticates the host; editing a fixed field
-    # without resigning must fail signature verification, not merely schema.
-    priv, public_key, key_id = _keypair()
-    document = build_manifest(
-        "1.2.3",
-        [_host_entry(host_protocol=3)],
-        created="2026-09-25T10:00:00+00:00",
-    )
-    raw = json.dumps(document).encode()
-    honest = json.dumps(
-        build_manifest(
-            "1.2.3",
-            [_host_entry()],
-            created="2026-09-25T10:00:00+00:00",
-        )
-    ).encode()
-
-    with pytest.raises(SignatureError):
-        verify_manifest(raw, _sign(honest, priv, key_id), public_key)
-
-
-def test_server_host_digest_tampering_fails_signature() -> None:
-    # Swapping the host bytes means swapping the signed digest; a manifest
-    # whose host sha256 was edited after signing never reaches the selector.
-    priv, public_key, key_id = _keypair()
-    honest = json.dumps(
-        build_manifest("1.2.3", [_entry(), _host_entry()], created="2026-09-25T10:00:00+00:00")
-    ).encode()
-    signature = _sign(honest, priv, key_id)
-    tampered = honest.replace(("cd" * 32).encode(), ("ef" * 32).encode())
-    assert tampered != honest
-
-    with pytest.raises(SignatureError):
-        verify_manifest(tampered, signature, public_key)
-
-
 def test_missing_static_assets(tmp_path: Path) -> None:
     static = tmp_path / "static"
 
@@ -687,227 +402,6 @@ def test_main_check_static_cli(tmp_path: Path) -> None:
     assert main(["check-static", "--static-dir", str(static)]) == 0
 
 
-# ── the explicitly signed host entry (#2329) ────────────────────────────────
-
-def test_legacy_host_entry_is_unchanged_without_signed_flag(tmp_path: Path) -> None:
-    # The production default is byte-for-byte what every release has published:
-    # revision 4, no signing key at all. Neither the entry nor the runtime or
-    # builder default moved.
-    payload = b"host archive bytes"
-    archive = tmp_path / SERVER_HOST_FILENAME
-    archive.write_bytes(payload)
-
-    entry = server_host_artifact_entry(archive)
-
-    assert entry == {
-        "filename": SERVER_HOST_FILENAME,
-        "kind": SERVER_HOST_KIND,
-        "platform": SERVER_HOST_PLATFORM,
-        "arch": SERVER_HOST_ARCH,
-        "sha256": hashlib.sha256(payload).hexdigest(),
-        "size": len(payload),
-        "bundle_id": SERVER_HOST_BUNDLE_ID,
-        "host_revision": SERVER_HOST_REVISION,
-        "host_protocol": SERVER_HOST_PROTOCOL,
-    }
-    assert "signing" not in entry
-    assert SERVER_HOST_REVISION == 4
-    from ciao import server_host
-
-    assert server_host.HOST_REVISION == 4
-    assert server_host.SCHEMA_VERSION == 1
-
-
-
-def test_signed_server_host_entry_round_trip(tmp_path: Path) -> None:
-    # The expected team is authenticated by the minisign signature before any
-    # consumer acts on it: the entry is selected only out of a verified manifest.
-    priv, public_key, key_id = _keypair()
-    wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
-    wheel.write_bytes(b"wheel bytes")
-    archive = tmp_path / SERVER_HOST_FILENAME
-    archive.write_bytes(b"signed host archive")
-
-    entry = server_host_artifact_entry(
-        archive, signing=DeveloperIDSigning(TEST_TEAM)
-    )
-    assert entry["host_revision"] == SIGNED_SERVER_HOST_REVISION
-    assert entry["host_protocol"] == SERVER_HOST_PROTOCOL
-    assert entry["signing"] == {"kind": SERVER_HOST_SIGNING_KIND, "team_id": TEST_TEAM}
-    assert entry["sha256"] == hashlib.sha256(b"signed host archive").hexdigest()
-
-    document = build_manifest(
-        "1.2.3",
-        [artifact_entry(wheel, kind="wheel"), entry],
-        created="2026-09-25T10:00:00+00:00",
-    )
-    raw = json.dumps(document).encode()
-    signature = _sign(raw, priv, key_id)
-
-    # The generic verifier stays host-policy-agnostic: the wheel updater reads
-    # the same manifest on every platform.
-    verified = verify_manifest(raw, signature, public_key)
-    assert [a for a in verified["artifacts"] if a["kind"] == "wheel"] == [
-        verified["artifacts"][0]
-    ]
-    selected = select_server_host_artifact(verified)
-    assert selected["host_revision"] == SIGNED_SERVER_HOST_REVISION
-    assert selected["signing"]["team_id"] == TEST_TEAM
-
-
-def test_host_entry_requires_matching_revision_and_signing_policy() -> None:
-    # Exactly two shapes exist: revision 4 with no signing object, revision 5
-    # with exactly one valid one. Every half-policy and every malformed identity
-    # is refused by the selector.
-    def manifest(*artifacts: Any) -> dict[str, Any]:
-        return {
-            "schema": 1,
-            "version": "1.2.3",
-            "tag": "v1.2.3",
-            "artifacts": list(artifacts),
-        }
-
-    assert select_server_host_artifact(manifest(_signed_host_entry())) == (
-        _signed_host_entry()
-    )
-    assert select_server_host_artifact(manifest(_host_entry())) == _host_entry()
-
-    bad_entries: list[dict[str, Any]] = [
-        # A revision without its policy and a policy under the wrong revision.
-        _host_entry(host_revision=SIGNED_SERVER_HOST_REVISION),
-        _signed_host_entry(host_revision=SERVER_HOST_REVISION),
-        _signed_host_entry(host_revision=SIGNED_SERVER_HOST_REVISION + 1),
-        _signed_host_entry(host_protocol=True),
-        _signed_host_entry(host_protocol=3),
-        _signed_host_entry(host_revision=True),
-        # The signing object is exactly `kind` and `team_id`; more, fewer or a
-        # different kind is not this policy.
-        _signed_host_entry(signing={"kind": SERVER_HOST_SIGNING_KIND}),
-        _signed_host_entry(
-            signing={
-                "kind": SERVER_HOST_SIGNING_KIND,
-                "team_id": TEST_TEAM,
-                "identity": "Developer ID Application: Test",
-            }
-        ),
-        _signed_host_entry(signing={"kind": "apple-development", "team_id": TEST_TEAM}),
-        _signed_host_entry(signing={"kind": SERVER_HOST_SIGNING_KIND, "team_id": ""}),
-        _signed_host_entry(
-            signing={"kind": SERVER_HOST_SIGNING_KIND, "team_id": "testteam01"}
-        ),
-        _signed_host_entry(
-            signing={"kind": SERVER_HOST_SIGNING_KIND, "team_id": "TESTTEAM0"}
-        ),
-        _signed_host_entry(
-            signing={"kind": SERVER_HOST_SIGNING_KIND, "team_id": "TESTTEAM012"}
-        ),
-        _signed_host_entry(
-            signing={"kind": SERVER_HOST_SIGNING_KIND, "team_id": 1234567890}
-        ),
-        _signed_host_entry(
-            signing={"kind": SERVER_HOST_SIGNING_KIND, "team_id": True}
-        ),
-        _signed_host_entry(signing=None),
-        _signed_host_entry(signing=[TEST_TEAM]),
-        # A signing identity that is not `developer-id`, and an unknown extra
-        # host field, are not part of either shape.
-        _signed_host_entry(kind="server-host-signed"),
-        _host_entry(authority="Developer ID Application: Test"),
-    ]
-    for bad in bad_entries:
-        with pytest.raises(ValueError):
-            select_server_host_artifact(manifest(bad))
-
-
-def test_signed_team_tampering_fails_manifest_signature() -> None:
-    # The team is only trustworthy because it is inside the signed bytes. Editing
-    # it after signing produces no trusted expected-team output at all.
-    priv, public_key, key_id = _keypair()
-    honest = json.dumps(
-        build_manifest(
-            "1.2.3",
-            [_host_entry(), _signed_host_entry()],
-            created="2026-09-25T10:00:00+00:00",
-        )
-    ).encode()
-    signature = _sign(honest, priv, key_id)
-    tampered = honest.replace(TEST_TEAM.encode(), b"TESTTEAM02")
-    assert tampered != honest
-
-    with pytest.raises(SignatureError):
-        verify_manifest(tampered, signature, public_key)
-
-    # And a manifest signed over the tampered bytes is not signed by the release
-    # key at all.
-    with pytest.raises(SignatureError):
-        verify_manifest(tampered, _sign(tampered, priv, b"\x02" * 8), public_key)
-
-
-
-
-
-
-# ── installer scripts as signed artifacts (#2483) ───────────────────────────
-
-
-
-
-
-
-def _installer_entry(path: Path) -> dict[str, Any]:
-    """A signed-manifest entry for a release installer script, as bytes on disk."""
-    return artifact_entry(path, kind="installer", platform="macos")
-
-
-def _write_installers(tmp_path: Path) -> tuple[Path, Path]:
-    """The two installer scripts a release uploads, as bytes on disk."""
-    sh = tmp_path / "install.sh"
-    sh.write_bytes(b"#!/bin/sh\necho sh\n")
-    engine_sh = tmp_path / "install-engine.sh"
-    engine_sh.write_bytes(b"#!/bin/sh\necho engine\n")
-    return sh, engine_sh
-
-
-
-
-
-
-
-
-def test_verify_assets_refuses_a_duplicated_filename(tmp_path: Path) -> None:
-    sh, _ = _write_installers(tmp_path)
-    manifest = build_manifest(
-        "1.2.3",
-        [_entry(), _installer_entry(sh), _installer_entry(sh)],
-        created="2026-09-25T10:00:00+00:00",
-    )
-
-    with pytest.raises(ValueError, match="2 artifacts named 'install.sh'"):
-        verify_assets(manifest, [sh])
-
-
-def test_verify_assets_refuses_a_swapped_installer(tmp_path: Path) -> None:
-    # Distinct bytes of the same length: only the sha256 can tell the two apart,
-    # so a digest-blind comparison cannot pass this test on a size mismatch.
-    sh = tmp_path / "install.sh"
-    sh.write_bytes(b"#!/bin/sh\necho aaaa\n")
-    engine_sh = tmp_path / "install-engine.sh"
-    engine_sh.write_bytes(b"#!/bin/sh\necho bbbb\n")
-    assert sh.stat().st_size == engine_sh.stat().st_size
-    manifest = build_manifest(
-        "1.2.3",
-        [_entry(), _installer_entry(sh), _installer_entry(engine_sh)],
-        created="2026-09-25T10:00:00+00:00",
-    )
-    swapped_dir = tmp_path / "swapped"
-    swapped_dir.mkdir()
-    swapped = swapped_dir / "install-engine.sh"
-    swapped.write_bytes(sh.read_bytes())
-
-    with pytest.raises(ValueError, match="does not match the manifest"):
-        verify_assets(manifest, [swapped])
-
-
 def test_main_verify_checks_assets(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     priv, public_key, key_id = _keypair()
     wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
@@ -939,9 +433,9 @@ def test_build_cli_refuses_server_host_option(tmp_path: Path) -> None:
     # are gone from the writer, so a publish step that still passes one fails
     # the job at argument parsing instead of writing a manifest the release
     # does not carry.
-    wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
+    wheel = tmp_path / WHEEL
     wheel.write_bytes(b"wheel bytes")
-    archive = tmp_path / SERVER_HOST_FILENAME
+    archive = tmp_path / "ciaobot-server-host-macos-universal-v1.tar.gz"
     archive.write_bytes(b"host archive bytes")
     out = tmp_path / MANIFEST_NAME
 
@@ -950,3 +444,163 @@ def test_build_cli_refuses_server_host_option(tmp_path: Path) -> None:
             main(["build", "--version", "1.2.3", "--out", str(out), *option, str(wheel)])
         assert refused.value.code == 2
         assert not out.exists(), "a refused build must not write a manifest"
+
+
+def test_build_lists_only_the_wheel(tmp_path: Path) -> None:
+    wheel = tmp_path / WHEEL
+    wheel.write_bytes(b"wheel bytes")
+    out = tmp_path / MANIFEST_NAME
+
+    assert main(["build", "--version", "1.2.3", "--out", str(out), str(wheel)]) == 0
+
+    artifacts = json.loads(out.read_text(encoding="utf-8"))["artifacts"]
+    assert artifacts == [
+        {
+            "filename": WHEEL,
+            "kind": "wheel",
+            "platform": "any",
+            "arch": "any",
+            "sha256": hashlib.sha256(b"wheel bytes").hexdigest(),
+            "size": len(b"wheel bytes"),
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "ciaobot-1.2.3-py3-none-any.tar.gz",
+        "ciaobot-1.2.3.tar.gz",
+        "other-1.2.3-py3-none-any.whl",
+        "ciaobot-1.2.4-py3-none-any.whl",
+    ],
+)
+def test_build_refuses_a_non_wheel_path(tmp_path: Path, name: str) -> None:
+    path = tmp_path / name
+    path.write_bytes(b"not the release wheel")
+    out = tmp_path / MANIFEST_NAME
+
+    assert main(["build", "--version", "1.2.3", "--out", str(out), str(path)]) == 1
+    assert not out.exists()
+
+
+TEMPLATE = (
+    "#!/bin/sh\n"
+    "CIAOBOT_VERSION=__CIAOBOT_VERSION__\n"
+    "WHEEL_SHA256=__WHEEL_SHA256__\n"
+)
+
+
+def test_stamp_installer_replaces_each_placeholder_once() -> None:
+    stamped = stamp_installer(TEMPLATE, version="1.2.3", wheel_sha256=SHA_A)
+
+    assert stamped == (
+        "#!/bin/sh\n"
+        "CIAOBOT_VERSION=1.2.3\n"
+        f"WHEEL_SHA256={SHA_A}\n"
+    )
+
+
+def test_stamp_installer_refuses_missing_or_duplicate_placeholder() -> None:
+    # A second copy would be stamped only at its first match, so the one that
+    # gets pinned would depend on where it sits. Refuse instead.
+    with pytest.raises(ValueError, match="0 __CIAOBOT_VERSION__"):
+        stamp_installer("WHEEL_SHA256=__WHEEL_SHA256__\n", version="1.2.3", wheel_sha256=SHA_A)
+    with pytest.raises(ValueError, match="2 __WHEEL_SHA256__"):
+        stamp_installer(
+            TEMPLATE + "# __WHEEL_SHA256__\n", version="1.2.3", wheel_sha256=SHA_A
+        )
+
+
+@pytest.mark.parametrize(
+    ("version", "digest"),
+    [
+        ("1.2", SHA_A),
+        ("v1.2.3", SHA_A),
+        ("1.2.3\nevil", SHA_A),
+        ("1.2.3", "AB" * 32),
+        ("1.2.3", "ab"),
+        ("1.2.3", SHA_A + "\n"),
+    ],
+)
+def test_stamp_installer_rejects_bad_version_or_digest(version: str, digest: str) -> None:
+    with pytest.raises(ValueError):
+        stamp_installer(TEMPLATE, version=version, wheel_sha256=digest)
+
+
+def test_stamp_cli_digest_is_the_wheels_and_mode_is_755(tmp_path: Path) -> None:
+    wheel = tmp_path / WHEEL
+    wheel.write_bytes(b"release wheel bytes")
+    template = tmp_path / "install.sh"
+    template.write_text(TEMPLATE, encoding="utf-8")
+    out = tmp_path / "install-out.sh"
+
+    assert main(
+        ["stamp-installer", "--template", str(template), "--version", "1.2.3",
+         "--wheel", str(wheel), "--out", str(out)]
+    ) == 0
+
+    digest = hashlib.sha256(b"release wheel bytes").hexdigest()
+    assert out.read_text(encoding="utf-8") == stamp_installer(
+        TEMPLATE, version="1.2.3", wheel_sha256=digest
+    )
+    assert out.stat().st_mode & 0o777 == 0o755
+
+    # The wheel name carries the version, so a wheel for another release cannot
+    # be pinned into this one.
+    other = tmp_path / "ciaobot-1.2.4-py3-none-any.whl"
+    other.write_bytes(b"release wheel bytes")
+    refused = tmp_path / "refused.sh"
+    assert main(
+        ["stamp-installer", "--template", str(template), "--version", "1.2.3",
+         "--wheel", str(other), "--out", str(refused)]
+    ) == 1
+    assert not refused.exists()
+
+
+def test_stamped_repo_installer_has_both_placeholders() -> None:
+    # The stamp step runs against this file. Exactly one of each placeholder, or
+    # the release step refuses to stamp.
+    installer = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+
+    assert installer.count("__CIAOBOT_VERSION__") == 1
+    assert installer.count("__WHEEL_SHA256__") == 1
+
+
+def _run_gate(*args: str) -> subprocess.CompletedProcess[str]:
+    # Stdlib only, so a fresh interpreter with -I is the honest way to run it.
+    return subprocess.run(
+        [sys.executable, "-I", str(ROOT / "scripts" / "legacy-update-gate.py"), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={k: v for k, v in os.environ.items() if not k.startswith("CIAO_")},
+    )
+
+
+def test_legacy_gate_refuses_a_non_release_target(tmp_path: Path) -> None:
+    result = _run_gate("--target", "1.2", "--release-root", str(tmp_path), "--uv", "/bin/true")
+
+    assert result.returncode == 2
+    assert "not a release version" in result.stderr
+
+
+def test_legacy_gate_needs_exactly_one_release_source(tmp_path: Path) -> None:
+    neither = _run_gate("--target", "2.0.0", "--uv", "/bin/true")
+    both = _run_gate(
+        "--target", "2.0.0", "--release-root", str(tmp_path),
+        "--release-base", "https://example.invalid/download", "--uv", "/bin/true",
+    )
+
+    assert neither.returncode == 2
+    assert both.returncode == 2
+
+
+def test_legacy_gate_refuses_a_release_root_without_the_manifest(tmp_path: Path) -> None:
+    # The gate must not stage anything from a release directory that is missing
+    # the signed manifest; it names the missing file and stops.
+    result = _run_gate("--target", "2.0.0", "--release-root", str(tmp_path), "--uv", "/bin/true")
+
+    assert result.returncode == 1
+    assert MANIFEST_NAME in result.stderr
+

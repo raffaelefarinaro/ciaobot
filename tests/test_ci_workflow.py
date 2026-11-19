@@ -75,14 +75,7 @@ def test_ci_builds_and_cold_starts_the_engine_not_the_app() -> None:
     assert "/api/startup-status" in workflow
 
 
-def test_publish_workflow_uploads_wheel_manifest_and_sig_only() -> None:
-    # #3130 R1: the 2.x release carries the engine wheel and the signed manifest
-    # that lists it. The installer scripts and the server host archive are no
-    # longer built, listed or attached, so the upload step's asset list is
-    # exactly those three names. Parsed from the YAML so a re-added line fails
-    # here, not in a release.
-    import shlex
-
+def _publish_steps() -> list[dict]:
     import yaml
 
     workflow = yaml.safe_load(
@@ -90,26 +83,111 @@ def test_publish_workflow_uploads_wheel_manifest_and_sig_only() -> None:
             encoding="utf-8"
         )
     )
-    steps = workflow["jobs"]["build-engine"]["steps"]
-    attach = next(step for step in steps if step.get("name") == "Attach release assets")
-    script = attach["run"].replace("\\\n", " ")
-    upload = next(
-        line for line in script.splitlines() if line.lstrip().startswith("gh release upload")
-    )
-    tokens = shlex.split(upload.split("#", 1)[0], posix=True)
-    assets = tokens[tokens.index('"$TAG"') + 1 :] if '"$TAG"' in tokens else tokens[4:]
-    assets = [token for token in assets if not token.startswith("--")]
-    assert assets == [
-        "dist/ciaobot-*.whl",
-        "ciaobot-engine-manifest.json",
-        "ciaobot-engine-manifest.json.sig",
-    ], assets
+    return workflow["jobs"]["build-engine"]["steps"]
 
+
+def _step(steps: list[dict], name: str) -> dict:
+    return next(step for step in steps if step.get("name") == name)
+
+
+def _index_containing(steps: list[dict], fragment: str) -> int:
+    return next(i for i, step in enumerate(steps) if fragment in step.get("run", ""))
+
+
+def _uploaded_assets(steps: list[dict]) -> list[str]:
+    # Every `gh release upload` line, with continuations joined, reduced to the
+    # file names it attaches. Parsed from the YAML so a re-added line fails here.
+    import shlex
+
+    names: list[str] = []
+    for step in steps:
+        script = step.get("run", "").replace("\\\n", " ")
+        for line in script.splitlines():
+            if not line.lstrip().startswith("gh release upload"):
+                continue
+            tokens = shlex.split(line.split("#", 1)[0], posix=True)
+            tag = tokens.index("$TAG")
+            names += [
+                Path(token).name for token in tokens[tag + 1 :] if not token.startswith("--")
+            ]
+    return names
+
+
+def test_publish_attaches_only_the_four_release_assets() -> None:
+    # #3131 L5: the release carries the stamped Linux installer, the wheel it
+    # pins, and (for 2.0.0 only, see the decision test below) the signed manifest
+    # and its signature. Nothing else: no server host archive, no other installer.
+    names = _uploaded_assets(_publish_steps())
+
+    assert sorted(names) == sorted(
+        [
+            "install.sh",
+            "ciaobot-*.whl",
+            "ciaobot-engine-manifest.json",
+            "ciaobot-engine-manifest.json.sig",
+        ]
+    ), names
+
+
+def test_publish_uploads_the_stamped_linux_installer() -> None:
+    steps = _publish_steps()
+    stamp = _step(steps, "Stamp the Linux installer")["run"]
+
+    # The installer is the template stamped against this release's own wheel,
+    # from the release's own ciao, and written where the upload picks it up.
+    assert "-m ciao.release_manifest stamp-installer" in stamp
+    assert '--template "$ws/scripts/install.sh"' in stamp
+    assert '--wheel "$ws/dist/ciaobot-$version-py3-none-any.whl"' in stamp
+    assert '--out "$ws/install.sh"' in stamp
+    assert (
+        _index_containing(steps, "stamp-installer")
+        < _index_containing(steps, "gh release upload")
+    )
+
+    # The published copy is read back and must pin this version and the
+    # attached wheel's digest, so a stale or swapped installer fails the job.
+    check = _step(steps, "Check the published assets")["run"]
+    assert 'grep -qx "CIAOBOT_VERSION=$version" "$downloaded/install.sh"' in check
+    assert 'grep -qx "WHEEL_SHA256=$digest" "$downloaded/install.sh"' in check
+
+
+def test_publish_runs_the_legacy_update_gate_before_upload() -> None:
+    # A 1.x engine must be able to stage the release before anything is attached.
+    steps = _publish_steps()
+
+    assert _index_containing(steps, "legacy-update-gate.py") < _index_containing(
+        steps, "gh release upload"
+    )
+
+
+def test_publish_never_uploads_retired_installers_or_host() -> None:
+    names = _uploaded_assets(_publish_steps())
+
+    assert "install-engine.sh" not in names
+    assert "install.ps1" not in names
+    assert not [name for name in names if name.startswith("ciaobot-server-host")]
     text = (Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml").read_text(
         encoding="utf-8"
     )
-    for gone in ("install.sh", "install-engine.sh", "server-host", "--server-host", "--installer"):
-        assert gone not in text, f"publish.yml still ships or lists {gone!r}"
+    assert "--server-host" not in text
+    assert "--installer" not in text
+
+
+def test_publish_ships_the_legacy_manifest_for_2_0_0_only() -> None:
+    # Maintainer decision (#3131 Q3, 2026-11-18): the wheel-only manifest that 1.x
+    # engines read is published for 2.0.0 only, so every step that makes or
+    # attaches it is gated on the decision step, and the unconditional upload
+    # never names it.
+    steps = _publish_steps()
+
+    assert '"${VERSION#v}" = "2.0.0"' in _step(steps, "Decide whether the 1.x engine manifest ships")["run"]
+    for name in (
+        "Write and sign engine manifest",
+        "1.x updater accepts this release",
+        "Attach the 1.x engine manifest",
+    ):
+        assert _step(steps, name)["if"] == "steps.legacy.outputs.publish == 'true'", name
+    assert "ciaobot-engine-manifest" not in _step(steps, "Attach release assets")["run"]
 
 
 def test_publish_workflow_ships_signed_engine_manifest() -> None:
@@ -851,14 +929,6 @@ def test_ci_runs_the_linux_install_smoke_in_a_clean_container() -> None:
         < workflow.index("  linux-e2e:")
     )
 
-
-def _rehearsal_workflow() -> str:
-    return (
-        Path(__file__).parents[1]
-        / ".github"
-        / "workflows"
-        / "server-host-signing-rehearsal.yml"
-    ).read_text(encoding="utf-8")
 
 
 
