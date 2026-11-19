@@ -142,7 +142,7 @@ function assertCoverage(entries: InventoryEntry[]) {
     for (const state of entry.states) {
       expect(state.name.trim()).not.toBe(''); expect(state.note.trim()).not.toBe('')
       if (state.coverage !== 'covered' && state.storyIds.length) throw new Error(`Noncovered state has story IDs: ${entry.id}/${state.name}`)
-      if (state.coverage === 'covered' && entry.kind !== 'component') throw new Error(`Invalid covered state (kind ${entry.kind}): ${entry.id}/${state.name} may not claim story coverage`)
+      if (state.coverage === 'covered' && entry.kind !== 'component' && entry.kind !== 'inline') throw new Error(`Invalid covered state (kind ${entry.kind}): ${entry.id}/${state.name} may not claim story coverage`)
     }
   }
 }
@@ -249,13 +249,17 @@ describe('production ownership', () => {
     assertCoverage(inventory)
   })
 
-  it('claims story coverage only from component rows', () => {
+  it('claims story coverage only from component and inline rows', () => {
     const row = inventory.find((entry) => entry.id === 'components-confirm-dialog')!
-    for (const kind of ['css', 'inline', 'composition'] as const) {
+    for (const kind of ['css', 'composition'] as const) {
       const entry = { ...structuredClone(row), id: `fake-${kind}`, kind, rationale: 'Not a component owner' }
       expect(() => assertCoverage([entry]), `Invalid covered state (kind ${kind})`).toThrow(`Invalid covered state (kind ${kind}): fake-${kind}/default`)
     }
     expect(() => assertCoverage([structuredClone(row)])).not.toThrow()
+    // An inline family renders through its owner SFC (task sheets, the B12
+    // slice): its row is the one that can claim those states.
+    const inlineRow = inventory.find((entry) => entry.id === 'task-completion')!
+    expect(() => assertCoverage([structuredClone(inlineRow)])).not.toThrow()
   })
 
   describe('the CSF-derived story coverage guard', () => {
@@ -444,8 +448,10 @@ describe('production ownership', () => {
     for (const [name, symbols] of Object.entries(branchNotes)) {
       const state = entry.states.find((state) => state.name === name)
       expect(state, name).toBeDefined()
-      expect(state?.coverage, name).toBe('uncovered')
-      expect(state?.storyIds, name).toEqual([])
+      // The B12 slice renders one story per documented state and claims it:
+      // the coverage pins track the row now instead of the pre-slice registry.
+      expect(state?.coverage, name).toBe('covered')
+      expect(state?.storyIds, name).toEqual([`task-completion--${name}`])
       for (const symbol of symbols) {
         expect(state?.note, `${name}: ${symbol}`).toContain(symbol)
         expect(source, symbol).toContain(symbol)
