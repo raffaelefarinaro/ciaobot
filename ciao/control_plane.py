@@ -3427,8 +3427,6 @@ class CiaoControlPlane:
         if not isinstance(params, Mapping):
             raise ControlPlaneError("invalid_action", "The request was refused (invalid_type).")
         raw: dict[str, Any] = dict(params)
-        if kind == "mcp_auth" and "provider" not in raw:
-            raw["provider"] = chat.provider
         try:
             check_agent_params(kind, raw)
             validated = validate_params(kind, raw)

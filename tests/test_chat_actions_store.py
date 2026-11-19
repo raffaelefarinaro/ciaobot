@@ -66,13 +66,8 @@ def _action_events(published: list[dict]) -> list[dict]:
     return [e for e in published if e["type"] == "chat_actions_changed"]
 
 
-def _sign_in(manager: ProjectChatManager, chat_id: str, server: str = "linear") -> dict:
-    payload = manager.raise_action(
-        chat_id,
-        "mcp_auth",
-        {"server": server, "provider": "opencode"},
-        origin="engine",
-    )
+def _sign_in(manager: ProjectChatManager, chat_id: str, tool: str = "gh") -> dict:
+    payload = manager.raise_action(chat_id, "device_code", {"tool": tool}, origin="agent")
     assert payload is not None
     return payload
 
@@ -85,7 +80,7 @@ def test_a_raised_action_is_published_once_and_lands_in_the_chat_payload(tmp_pat
         payload = _sign_in(manager, chat.chat_id)
 
     assert payload["state"] == "open"
-    assert payload["origin"] == "engine"
+    assert payload["origin"] == "agent"
     assert len(_action_events(published)) == 1
     assert _action_events(published)[0]["actions"] == [payload]
     assert chat.to_dict()["actions"] == [payload]
@@ -129,9 +124,9 @@ def test_changed_params_replace_the_action_with_a_new_id(tmp_path: Path) -> None
     with _record_events(manager) as published:
         replaced = manager.raise_action(
             chat.chat_id,
-            "mcp_auth",
-            {"server": "linear", "provider": "claude"},
-            origin="engine",
+            "device_code",
+            {"tool": "gh", "note": "again"},
+            origin="agent",
         )
 
     assert replaced is not None
@@ -146,9 +141,9 @@ def test_an_unknown_chat_gets_no_action(tmp_path: Path) -> None:
     assert (
         manager.raise_action(
             "no-such-chat",
-            "mcp_auth",
-            {"server": "linear", "provider": "opencode"},
-            origin="engine",
+            "device_code",
+            {"tool": "gh"},
+            origin="agent",
         )
         is None
     )
@@ -171,9 +166,9 @@ def test_an_invalid_action_never_reaches_the_state(tmp_path: Path) -> None:
         with pytest.raises(ChatActionError):
             manager.raise_action(
                 chat.chat_id,
-                "mcp_auth",
-                {"server": "linear", "provider": "codex"},
-                origin="engine",
+                "device_code",
+                {"tool": "codex"},
+                origin="agent",
             )
 
     assert published == []
@@ -241,14 +236,14 @@ def test_an_update_normalizes_the_error(tmp_path: Path) -> None:
 def test_an_agent_raise_with_an_engine_only_param_is_refused(tmp_path: Path) -> None:
     manager = make_manager(tmp_path)
     chat = _one_chat(manager)
-    params = {"server": "x", "provider": "opencode", "url": "https://a.example/"}
+    params = {"tool": "gh", "session_id": "sess_1"}
 
     with pytest.raises(ChatActionError) as info:
-        manager.raise_action(chat.chat_id, "mcp_auth", params, origin="agent")
+        manager.raise_action(chat.chat_id, "device_code", params, origin="agent")
 
     assert info.value.reason == "unknown_param"
     assert chat.actions == []
-    assert manager.raise_action(chat.chat_id, "mcp_auth", params, origin="engine") is not None
+    assert manager.raise_action(chat.chat_id, "device_code", params, origin="engine") is not None
 
 
 def test_a_dismissal_removes_the_action_and_remembers_its_key(tmp_path: Path) -> None:
@@ -261,7 +256,7 @@ def test_a_dismissal_removes_the_action_and_remembers_its_key(tmp_path: Path) ->
     assert removed is not None
     assert removed["id"] == first["id"]
     assert chat.actions == []
-    assert "mcp_auth:linear" in chat.dismissed_action_keys
+    assert "device_code:gh" in chat.dismissed_action_keys
 
 
 def test_a_stale_dismissal_conflicts_with_the_current_list(tmp_path: Path) -> None:
@@ -306,7 +301,7 @@ def test_actions_never_reach_the_registry(tmp_path: Path) -> None:
     manager = make_manager(tmp_path)
     chat = _one_chat(manager)
     _sign_in(manager, chat.chat_id)
-    chat.dismissed_action_keys.add("mcp_auth:notion")
+    chat.dismissed_action_keys.add("device_code:az")
     manager._save()
 
     record = _registry(tmp_path)["chats"][chat.chat_id]
@@ -418,9 +413,9 @@ def test_replacing_an_action_cancels_the_old_one(
 
     manager.raise_action(
         chat.chat_id,
-        "mcp_auth",
-        {"server": "linear", "provider": "claude"},
-        origin="engine",
+        "device_code",
+        {"tool": "gh", "note": "again"},
+        origin="agent",
     )
 
     assert calls == [(chat.chat_id, [old])]

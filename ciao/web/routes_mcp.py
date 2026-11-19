@@ -79,8 +79,6 @@ async def mcp_server_enabled_endpoint(request: Request) -> JSONResponse:
     manager = getattr(request.app.state, "project_chat_manager", None)
     reload: dict[str, list[str]] = {"reloaded": [], "pending": []}
     if manager is not None:
-        if result.enabled:
-            manager.forget_mcp_auth_decline(workspace, provider, server)
         if result.changed:
             reload = await manager.reload_workspace_providers(workspace, provider)
     return JSONResponse({"workspace": workspace, **result.to_dict(), "reload": reload})

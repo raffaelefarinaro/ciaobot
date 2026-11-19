@@ -22,7 +22,6 @@ from ciao.terminal_scrape import last_error_line, strip_terminal_controls
 from ciao.terminal_sessions import TerminalSessionError
 from ciao.tool_path import resolve_command
 from ciao.web.chat_actions_base import ActionContext, ActionHandler
-from ciao.web.mcp_auth_claude import CAPACITY, CLOSED, NO_TERMINAL
 
 __all__ = [
     "CAPACITY",
@@ -36,6 +35,9 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 # Error copy. The engine composes these; no model text and no terminal output.
+CAPACITY = "Too many terminal sessions are open. Close one in the terminal pane and try again."
+NO_TERMINAL = "The sign-in terminal could not be started."
+CLOSED = "The sign-in terminal was closed before sign-in finished."
 UNKNOWN_TOOL = "That tool has no sign-in card."
 NOT_INSTALLED = "{tool} is not installed on this computer. Ask the agent for the install command."
 CANNOT_RUN = "{tool} cannot be started from the sign-in terminal on this computer. Ask the agent for the command instead."

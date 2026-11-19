@@ -28,58 +28,16 @@ def _refusal(kind: str, raw: dict[str, object]) -> str:
     return info.value.reason
 
 
-def test_mcp_auth_params_are_validated_and_stripped() -> None:
-    assert validate_params("mcp_auth", {"server": " linear ", "provider": "opencode"}) == {
-        "server": "linear",
-        "provider": "opencode",
-    }
+def test_mcp_auth_is_no_longer_a_kind() -> None:
+    from ciao.chat_actions import ACTION_KINDS, AGENT_ACTION_KINDS
 
-
-def test_mcp_auth_requires_server_and_provider() -> None:
-    assert _refusal("mcp_auth", {"provider": "opencode"}) == "missing_param"
-    assert _refusal("mcp_auth", {"server": "linear"}) == "missing_param"
-
-
-def test_mcp_auth_refuses_an_unknown_param() -> None:
-    raw = {"server": "linear", "provider": "opencode", "note": "x"}
-    assert _refusal("mcp_auth", raw) == "unknown_param"
-
-
-def test_mcp_auth_refuses_an_unknown_provider() -> None:
-    assert _refusal("mcp_auth", {"server": "linear", "provider": "codex"}) == "invalid_param"
-
-
-def test_mcp_auth_server_bound() -> None:
-    accepted = validate_params("mcp_auth", {"server": "a" * 128, "provider": "opencode"})
-    assert accepted["server"] == "a" * 128
-    assert _refusal("mcp_auth", {"server": "a" * 129, "provider": "opencode"}) == "too_long"
-
-
-@pytest.mark.parametrize("bad", ["\x1b", "‮", "​", "\n"])
-def test_mcp_auth_server_refuses_invisible_characters(bad: str) -> None:
-    raw = {"server": f"lin{bad}ear", "provider": "opencode"}
-    assert _refusal("mcp_auth", raw) == "invalid_characters"
-
-
-def test_mcp_auth_url_must_be_http_or_https() -> None:
-    for url in ("javascript:alert(1)", "file:///etc/passwd", "https://"):
-        raw = {"server": "linear", "provider": "opencode", "url": url}
-        assert _refusal("mcp_auth", raw) == "invalid_url", url
-    ok = {"server": "linear", "provider": "opencode", "url": "https://mcp.linear.app/authorize?x=1"}
-    assert validate_params("mcp_auth", ok)["url"] == "https://mcp.linear.app/authorize?x=1"
-
-
-def test_mcp_auth_url_bound() -> None:
-    at_limit = "https://e.com/" + "a" * (4096 - len("https://e.com/"))
-    assert len(at_limit) == 4096
-    ok = {"server": "linear", "provider": "opencode", "url": at_limit}
-    assert validate_params("mcp_auth", ok)["url"] == at_limit
-    over = {"server": "linear", "provider": "opencode", "url": at_limit + "a"}
-    assert _refusal("mcp_auth", over) == "too_long"
+    assert _refusal("mcp_auth", {"server": "linear", "provider": "opencode"}) == "invalid_kind"
+    assert "mcp_auth" not in AGENT_ACTION_KINDS
+    assert "mcp_auth" not in ACTION_KINDS
 
 
 def test_a_value_that_is_not_text_is_refused() -> None:
-    assert _refusal("mcp_auth", {"server": 3, "provider": "opencode"}) == "invalid_type"
+    assert _refusal("device_code", {"tool": 3}) == "invalid_type"
 
 
 def test_an_unknown_kind_is_refused() -> None:
@@ -90,29 +48,29 @@ def test_a_kind_without_a_validator_is_refused(monkeypatch: pytest.MonkeyPatch) 
     # Each child of the needs-you run registers its own kind; take one out to see the refusal.
     from ciao import chat_actions
 
-    monkeypatch.delitem(chat_actions._VALIDATORS, "mcp_auth")
-    assert _refusal("mcp_auth", {"server": "linear", "provider": "opencode"}) == "unsupported_kind"
+    monkeypatch.delitem(chat_actions._VALIDATORS, "device_code")
+    assert _refusal("device_code", {"tool": "gh"}) == "unsupported_kind"
 
 
 def test_action_key() -> None:
-    assert action_key("mcp_auth", {"server": "linear", "provider": "opencode"}) == "mcp_auth:linear"
+    assert action_key("device_code", {"tool": "gh", "session_id": "s1"}) == "device_code:gh"
     assert action_key("restart", {}) == "restart"
 
 
 def test_action_payload_is_a_fresh_copy_with_the_contract_keys() -> None:
     action = ChatAction(
         id="a1",
-        kind="mcp_auth",
-        origin="engine",
+        kind="device_code",
+        origin="agent",
         state="open",
-        params=MappingProxyType({"server": "linear", "provider": "opencode"}),
+        params=MappingProxyType({"tool": "gh"}),
         error="",
         created_at=1.0,
     )
     payload = action_payload(action)
     assert set(payload) == {"id", "kind", "origin", "state", "params", "error", "created_at"}
-    payload["params"]["server"] = "changed"  # type: ignore[index]
-    assert action.params["server"] == "linear"
+    payload["params"]["tool"] = "changed"  # type: ignore[index]
+    assert action.params["tool"] == "gh"
 
 
 def test_new_action_ids_are_random_hex() -> None:
@@ -144,16 +102,16 @@ def test_normalize_error_keeps_one_short_printable_line() -> None:
 
 def test_refusals_never_echo_the_value() -> None:
     with pytest.raises(ChatActionError) as info:
-        validate_params("mcp_auth", {"server": "SECRET\x1b", "provider": "opencode"})
+        validate_params("device_code", {"tool": "SECRET\x1b"})
     assert "SECRET" not in str(info.value)
 
 
 def test_check_agent_params_refuses_engine_only_keys() -> None:
-    raw = {"server": "x", "provider": "opencode", "url": "https://a.example/"}
+    raw = {"tool": "gh", "url": "https://a.example/"}
     with pytest.raises(ChatActionError) as info:
-        check_agent_params("mcp_auth", raw)
+        check_agent_params("device_code", raw)
     assert info.value.reason == "unknown_param"
-    assert check_agent_params("mcp_auth", {"server": "x", "provider": "opencode"}) is None
+    assert check_agent_params("device_code", {"tool": "gh"}) is None
     assert check_agent_params("nope", raw) is None
 
 
@@ -173,7 +131,6 @@ def test_the_reason_set_is_the_whole_run() -> None:
         "invalid_body",
         "invalid_state",
         "not_local",
-        "already_used",
         "no_pending_sign_in",
         "bad_callback_url",
         "state_mismatch",
