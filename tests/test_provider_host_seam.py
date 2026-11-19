@@ -23,8 +23,6 @@ _HOST_SEAMS = (
     "wait_background_change",
     "refresh_background_shells",
     "background_count",
-    "background_shell_rows",
-    "background_child_ids",
     "abort_session",
     "interrupted_background_work",
     "model_catalog",

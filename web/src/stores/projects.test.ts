@@ -6357,7 +6357,6 @@ describe('latest status sync', () => {
           { role: 'assistant', content: 'done', sent_at: '2026-07-06T10:00:00Z' },
         ])
       }
-      if (path === `/api/chats/${chatId}/subagents`) return Promise.resolve([])
       return Promise.resolve([])
     })
 
@@ -6399,7 +6398,6 @@ describe('latest status sync', () => {
           { role: 'assistant', content: 'I\'m in the ciao repo, not ciaobot. Let me cd:' },
         ])
       }
-      if (path === `/api/chats/${chatId}/subagents`) return Promise.resolve([])
       return Promise.resolve([])
     })
 
@@ -8906,7 +8904,6 @@ describe('switchChat workspace alignment', () => {
   test('automatically switches activeWorkspace to match target chat workspace', async () => {
     apiGet.mockImplementation((url: string) => {
       if (url.includes('/messages')) return Promise.resolve([])
-      if (url.includes('/subagents')) return Promise.resolve([])
       return Promise.resolve([])
     })
     const store = useProjectStore()

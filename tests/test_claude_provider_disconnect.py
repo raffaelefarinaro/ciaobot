@@ -172,15 +172,14 @@ def test_native_task_started_and_notification_toggle_background_work(
     provider._observe_message(_task_started("t2", "tail -f log"))
     assert provider.background_work_outstanding is True
     assert provider.seconds_since_activity < 5
-    rows = provider.background_shell_rows()
-    assert [r["id"] for r in rows] == ["t1", "t2"]
-    assert rows[1]["command"] == "tail -f log"
+    assert sorted(provider._native_tasks) == ["t1", "t2"]
+    assert provider._native_tasks["t2"]["command"] == "tail -f log"
 
     # A non-terminal update keeps the task; a terminal one clears it.
     provider._observe_message(_task_updated("t1", "running"))
     assert provider.background_work_outstanding is True
     provider._observe_message(_task_notification("t1", "completed"))
-    assert [r["id"] for r in provider.background_shell_rows()] == ["t2"]
+    assert sorted(provider._native_tasks) == ["t2"]
     provider._observe_message(_task_updated("t2", "killed"))
     assert provider.background_work_outstanding is False
 
@@ -297,8 +296,8 @@ def test_a_task_older_than_the_cap_is_pruned(tmp_path: Path) -> None:
     provider._observe_message(_task_started("new"))
     _age_task(provider, "old", BACKGROUND_WORK_MAX_S + 1)
 
-    assert [r["id"] for r in provider.background_shell_rows()] == ["new"]
-    assert "started_mono" not in provider.background_shell_rows()[0]
+    assert provider.background_work_outstanding is True
+    assert sorted(provider._native_tasks) == ["new"]
     _age_task(provider, "new", BACKGROUND_WORK_MAX_S + 1)
     assert provider.background_work_outstanding is False
 

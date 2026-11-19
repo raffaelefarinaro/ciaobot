@@ -26,9 +26,7 @@ export interface ProviderCapabilities {
   thinking_levels: boolean
   usage: boolean
   quota: boolean
-  subagents: boolean
   background_subagents: boolean
-  subagent_messages: boolean
   session_history: boolean
   schedule_unattended: boolean
 }
