@@ -291,9 +291,7 @@ Durable writes must load `ciao-memory` for destinations, frontmatter,
 verification stamps and consolidation. Integration and provider mechanics stay
 in their relevant skills or CLI help. The core requires the managed interface
 and forbids routing around its checks or refusals; it does not blacklist HTTP
-clients or forbid ordinary authorized note-content edits. Workspace-only file
-access does not imply that GitHub is signed out: the engine can grant its
-existing login to a sandboxed chat.
+clients or forbid ordinary authorized note-content edits.
 
 ## Validation status
 

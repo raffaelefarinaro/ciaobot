@@ -94,21 +94,15 @@ reply.
 dead is a different bug from one that ignores the click, and the report should
 not collapse them.
 
-## Step 4 — file access and network (Workspace only)
+## Step 4 — network and the CLI
 
-Regression check for #1234. In Settings → Overview → All workspaces, confirm this chat's
-workspace row summary shows *Workspace only*. Start a Claude chat in
-that workspace and ask the agent, in one message, to run:
+Regression check for #1234. Start a Claude chat and ask the agent, in one message, to run:
 
 - `ciao vault search test --limit 1`
 - `curl -sI https://example.com | head -1`
 
 Both must succeed: the vault search returns (even with no hits) and the curl
 prints an HTTP status line. A failure in either is a finding.
-
-Then ask the agent to read a file outside this workspace's folder (for example
-a file in another workspace's folder). The read must be **refused**. A read that
-returns the contents is a finding.
 
 ## Checkpoints
 
