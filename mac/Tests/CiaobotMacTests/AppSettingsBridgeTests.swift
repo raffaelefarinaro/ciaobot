@@ -26,6 +26,31 @@ final class AppSettingsFakeNotifications: NotificationMenuProviding {
     func stop() {}
 }
 
+/// Records what the bridge asked of the updater. Sparkle is never reached.
+@MainActor
+final class AppSettingsFakeUpdates: ClientUpdateControlling {
+    var canCheckForUpdates: Bool
+    var unavailableReason: String?
+    var automaticallyInstallsUpdates: Bool
+    private(set) var checkCount = 0
+    private(set) var automaticSets: [Bool] = []
+    let changeSubject = PassthroughSubject<Void, Never>()
+
+    init(canCheck: Bool = true, reason: String? = nil, automatic: Bool = false) {
+        canCheckForUpdates = canCheck
+        unavailableReason = reason
+        automaticallyInstallsUpdates = automatic
+    }
+
+    var changes: AnyPublisher<Void, Never> { changeSubject.eraseToAnyPublisher() }
+    func setAutomaticallyInstallsUpdates(_ on: Bool) {
+        automaticSets.append(on)
+        automaticallyInstallsUpdates = on
+    }
+    func start() {}
+    func checkForUpdates() { checkCount += 1 }
+}
+
 @MainActor
 final class AppSettingsFakeSystemSettings: SystemSettingsOpening {
     private(set) var notificationSettingsCount = 0
@@ -45,6 +70,83 @@ final class AppSettingsBridgeTests: XCTestCase {
         let snapshot = AppSettingsBridge().snapshot()
         XCTAssertEqual(snapshot["v"] as? Int, 1)
         XCTAssertTrue(snapshot["notifications"] is NSNull)
+        XCTAssertTrue(snapshot["updates"] is NSNull)
+    }
+
+    func testSnapshotUpdatesIsNullWithoutAnUpdater() {
+        let bridge = AppSettingsBridge()
+        bridge.bind(notifications: AppSettingsFakeNotifications(), systemSettings: nil)
+        XCTAssertTrue(bridge.snapshot()["updates"] is NSNull)
+    }
+
+    func testSnapshotMapsUpdates() throws {
+        let cases: [(AppSettingsFakeUpdates, [String: Any])] = [
+            (AppSettingsFakeUpdates(canCheck: true, automatic: false),
+             ["available": true, "automatic": false, "canCheck": true, "reason": ""]),
+            (AppSettingsFakeUpdates(canCheck: false, automatic: true),
+             ["available": true, "automatic": true, "canCheck": false, "reason": ""]),
+            (AppSettingsFakeUpdates(canCheck: false, reason: "Updates are unavailable in a debug build."),
+             ["available": false, "automatic": false, "canCheck": false, "reason": "Updates are unavailable in a debug build."]),
+        ]
+        for (updates, expected) in cases {
+            let bridge = AppSettingsBridge()
+            bridge.bind(notifications: AppSettingsFakeNotifications(), systemSettings: nil, updates: updates)
+            let value = try XCTUnwrap(bridge.snapshot()["updates"] as? [String: Any])
+            XCTAssertEqual(Set(value.keys), ["available", "automatic", "canCheck", "reason"])
+            XCTAssertEqual(value["available"] as? Bool, expected["available"] as? Bool)
+            XCTAssertEqual(value["automatic"] as? Bool, expected["automatic"] as? Bool)
+            XCTAssertEqual(value["canCheck"] as? Bool, expected["canCheck"] as? Bool)
+            XCTAssertEqual(value["reason"] as? String, expected["reason"] as? String)
+        }
+    }
+
+    func testCheckForUpdatesRunsOnlyWhenAvailableAndIdle() {
+        let cases: [(AppSettingsFakeUpdates, Bool)] = [
+            (AppSettingsFakeUpdates(canCheck: true), true),
+            (AppSettingsFakeUpdates(canCheck: false), false),
+            (AppSettingsFakeUpdates(canCheck: true, reason: "No feed."), false),
+        ]
+        for (updates, expected) in cases {
+            let bridge = AppSettingsBridge()
+            bridge.bind(notifications: AppSettingsFakeNotifications(), systemSettings: nil, updates: updates)
+            XCTAssertEqual(bridge.checkForUpdates(), expected)
+            XCTAssertEqual(updates.checkCount, expected ? 1 : 0)
+        }
+        XCTAssertFalse(AppSettingsBridge().checkForUpdates(), "An unbound bridge has no updater to check.")
+    }
+
+    func testSetAutomaticUpdatesRunsOnlyWhenAvailable() {
+        let available = AppSettingsFakeUpdates(automatic: false)
+        let bridge = AppSettingsBridge()
+        bridge.bind(notifications: AppSettingsFakeNotifications(), systemSettings: nil, updates: available)
+        XCTAssertTrue(bridge.setAutomaticUpdates(true))
+        XCTAssertEqual(available.automaticSets, [true])
+
+        let unavailable = AppSettingsFakeUpdates(reason: "No key.")
+        let refused = AppSettingsBridge()
+        refused.bind(notifications: AppSettingsFakeNotifications(), systemSettings: nil, updates: unavailable)
+        XCTAssertFalse(refused.setAutomaticUpdates(true))
+        XCTAssertTrue(unavailable.automaticSets.isEmpty, "An unavailable updater must not be changed.")
+        XCTAssertFalse(AppSettingsBridge().setAutomaticUpdates(true))
+    }
+
+    func testPerformStillRefusesUpdateOps() {
+        let updates = AppSettingsFakeUpdates()
+        let bridge = AppSettingsBridge()
+        bridge.bind(notifications: AppSettingsFakeNotifications(), systemSettings: nil, updates: updates)
+        XCTAssertFalse(bridge.perform("checkForUpdates"), "Update ops take their own entry points.")
+        XCTAssertEqual(updates.checkCount, 0)
+    }
+
+    func testChangesFireOnUpdaterChanges() {
+        let updates = AppSettingsFakeUpdates()
+        let bridge = AppSettingsBridge()
+        bridge.bind(notifications: AppSettingsFakeNotifications(), systemSettings: nil, updates: updates)
+        var count = 0
+        let token = bridge.changes.sink { count += 1 }
+        updates.changeSubject.send()
+        XCTAssertEqual(count, 1)
+        token.cancel()
     }
 
     func testSnapshotMapsEveryState() throws {

@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import Sparkle
 
@@ -11,6 +12,9 @@ protocol ClientUpdateControlling: AnyObject {
     /// Reads false, and the setter does nothing, until the updater has started.
     var automaticallyInstallsUpdates: Bool { get }
     func setAutomaticallyInstallsUpdates(_ on: Bool)
+    /// Fires when availability, the check state or the automatic setting may
+    /// have changed. It carries no data: readers re-read the properties above.
+    var changes: AnyPublisher<Void, Never> { get }
     func start()
     func checkForUpdates()
 }
@@ -25,6 +29,8 @@ protocol ClientUpdaterEngine: AnyObject {
     /// Sparkle's `automaticallyDownloadsUpdates`: a verified update is
     /// downloaded in the background and installed through the drain gate.
     var automaticallyDownloadsUpdates: Bool { get set }
+    /// Sparkle's KVO on `canCheckForUpdates` and `automaticallyDownloadsUpdates`.
+    var stateChanges: AnyPublisher<Void, Never> { get }
     func start()
     func checkForUpdates()
     func checkForUpdatesInBackground()
@@ -181,6 +187,13 @@ final class SparkleUpdaterEngine: ClientUpdaterEngine {
         get { controller.updater.automaticallyDownloadsUpdates }
         set { controller.updater.automaticallyDownloadsUpdates = newValue }
     }
+    var stateChanges: AnyPublisher<Void, Never> {
+        Publishers.Merge(
+            controller.updater.publisher(for: \.canCheckForUpdates).map { _ in () },
+            controller.updater.publisher(for: \.automaticallyDownloadsUpdates).map { _ in () }
+        )
+        .eraseToAnyPublisher()
+    }
 
     func start() { controller.startUpdater() }
     func checkForUpdates() { controller.updater.checkForUpdates() }
@@ -244,6 +257,8 @@ final class ClientUpdater: ClientUpdateControlling {
 
     private let makeEngine: EngineFactory
     private var engine: ClientUpdaterEngine?
+    private var engineChanges: AnyCancellable?
+    private let changeSubject = PassthroughSubject<Void, Never>()
     private var started = false
     private(set) var unavailableReason: String?
     /// The install delegate the shipped initializer wired to the engine. Nil
@@ -296,8 +311,12 @@ final class ClientUpdater: ClientUpdateControlling {
     }
 
     func setAutomaticallyInstallsUpdates(_ on: Bool) {
-        engine?.automaticallyDownloadsUpdates = on
+        guard let engine else { return }
+        engine.automaticallyDownloadsUpdates = on
+        changeSubject.send()
     }
+
+    var changes: AnyPublisher<Void, Never> { changeSubject.eraseToAnyPublisher() }
 
     /// Starts the retained updater exactly once. A second call is a no-op, so a
     /// launch path that runs twice cannot schedule two check cycles.
@@ -308,6 +327,7 @@ final class ClientUpdater: ClientUpdateControlling {
 
         let engine = makeEngine()
         self.engine = engine
+        engineChanges = engine.stateChanges.sink { [changeSubject] _ in changeSubject.send() }
         engine.start()
         // Sparkle's own guidance for a launch check: only immediately after
         // starting, and only while automatic checks are on. Turning the option

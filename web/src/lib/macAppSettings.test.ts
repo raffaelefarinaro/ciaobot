@@ -3,6 +3,8 @@ import {
   MAC_APP_SETTINGS_CHANGED,
   hasMacAppSettings,
   readMacAppSettings,
+  requestMacAutomaticUpdates,
+  requestMacCheckForUpdates,
   requestMacNotificationAction,
 } from './macAppSettings'
 
@@ -15,6 +17,7 @@ function install(postMessage: (req: unknown) => unknown) {
 }
 
 const note = { state: 'on', ready: true, action: 'toggle', title: 'Chat Notifications: On', detail: 'd' }
+const upd = { available: true, automatic: true, canCheck: true, reason: '' }
 
 afterEach(() => {
   delete g.webkit
@@ -34,13 +37,13 @@ describe('macAppSettings', () => {
   it('parses a valid snapshot and sends op get', async () => {
     const post = install(async () => ({ v: 1, notifications: note }))
     expect(hasMacAppSettings()).toBe(true)
-    expect(await readMacAppSettings()).toEqual({ v: 1, notifications: note })
+    expect(await readMacAppSettings()).toEqual({ v: 1, notifications: note, updates: null })
     expect(post).toHaveBeenCalledWith({ op: 'get' })
   })
 
   it('accepts a null notifications block', async () => {
     install(async () => ({ v: 1, notifications: null }))
-    expect(await readMacAppSettings()).toEqual({ v: 1, notifications: null })
+    expect(await readMacAppSettings()).toEqual({ v: 1, notifications: null, updates: null })
   })
 
   it.each([
@@ -119,5 +122,73 @@ describe('macAppSettings', () => {
     await requestMacNotificationAction()
     expect(post).toHaveBeenCalledTimes(1)
     expect(post.mock.calls[0]![0]).toEqual({ op: 'notifications' })
+  })
+})
+
+describe('macAppSettings updates block', () => {
+  it('parses a valid updates block', async () => {
+    install(async () => ({ v: 1, notifications: null, updates: upd }))
+    expect((await readMacAppSettings())?.updates).toEqual(upd)
+  })
+
+  it('parses an unavailable block with its native reason', async () => {
+    const reason = 'Updates are unavailable in a debug build.'
+    install(async () => ({ v: 1, notifications: null, updates: { available: false, automatic: false, canCheck: false, reason } }))
+    expect((await readMacAppSettings())?.updates).toEqual({ available: false, automatic: false, canCheck: false, reason })
+  })
+
+  it('reads an absent updates key as null and keeps the notifications block', async () => {
+    install(async () => ({ v: 1, notifications: note }))
+    const out = await readMacAppSettings()
+    expect(out?.notifications).toEqual(note)
+    expect(out?.updates).toBeNull()
+  })
+
+  it.each([
+    ['not an object', 'yes'],
+    ['null', null],
+    ['non-boolean available', { ...upd, available: 1 }],
+    ['non-boolean automatic', { ...upd, automatic: 'true' }],
+    ['non-boolean canCheck', { ...upd, canCheck: null }],
+    ['non-string reason', { ...upd, reason: 3 }],
+    ['available with a reason', { ...upd, reason: 'x' }],
+    ['unavailable without a reason', { ...upd, available: false, canCheck: false, reason: '' }],
+    ['unavailable with a check possible', { ...upd, available: false, canCheck: true, reason: 'x' }],
+    ['unavailable with only control characters', { ...upd, available: false, canCheck: false, reason: '\u0001' }],
+  ])('reads a %s updates block as null and keeps the snapshot', async (_label, updates) => {
+    install(async () => ({ v: 1, notifications: note, updates }))
+    const out = await readMacAppSettings()
+    expect(out?.notifications).toEqual(note)
+    expect(out?.updates).toBeNull()
+  })
+
+  it('strips control characters from the reason and caps it', async () => {
+    install(async () => ({
+      v: 1,
+      notifications: null,
+      updates: { available: false, automatic: false, canCheck: false, reason: 'No\u202E key.' + 'x'.repeat(400) },
+    }))
+    const reason = (await readMacAppSettings())?.updates?.reason ?? ''
+    expect(reason.startsWith('No key.')).toBe(true)
+    expect(reason).toHaveLength(300)
+  })
+
+  it('posts exactly { op: checkForUpdates } for the check', async () => {
+    const post = install(async () => ({ v: 1, notifications: null, updates: upd }))
+    await requestMacCheckForUpdates()
+    expect(post).toHaveBeenCalledTimes(1)
+    expect(post.mock.calls[0]![0]).toEqual({ op: 'checkForUpdates' })
+  })
+
+  it('posts { op: setAutomaticUpdates, on } with a strict boolean', async () => {
+    const post = install(async () => ({ v: 1, notifications: null, updates: { ...upd, automatic: false } }))
+    await requestMacAutomaticUpdates(false)
+    expect(post.mock.calls[0]![0]).toEqual({ op: 'setAutomaticUpdates', on: false })
+  })
+
+  it('reads a refused update request as null', async () => {
+    install(async () => { throw 'refused' })
+    expect(await requestMacCheckForUpdates()).toBeNull()
+    expect(await requestMacAutomaticUpdates(true)).toBeNull()
   })
 })

@@ -94,6 +94,8 @@ private final class FakeClientUpdater: ClientUpdateControlling {
     private(set) var startCount = 0
     private(set) var checkCount = 0
 
+    var changes: AnyPublisher<Void, Never> { Empty<Void, Never>().eraseToAnyPublisher() }
+
     func setAutomaticallyInstallsUpdates(_ on: Bool) {
         automaticSets.append(on)
         automaticallyInstallsUpdates = on
