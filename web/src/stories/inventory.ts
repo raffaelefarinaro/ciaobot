@@ -5142,8 +5142,6 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/onboarding/OnboardingView.vue"
     ],
     "variants": [
-      "scope",
-      "platform",
       "provider"
     ],
     "variantNotes": "Observed branches in OnboardingAccessStage.vue; remaining variants have not been audited.",
@@ -5155,22 +5153,16 @@ export const inventory: InventoryEntry[] = [
         "note": "<template> in OnboardingAccessStage.vue implements this render; no rendered-state story exists."
       },
       {
-        "name": "scope",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingAccessStage.vue has a scope branch; no rendered-state story exists."
-      },
-      {
-        "name": "platform",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "OnboardingAccessStage.vue has a platform branch; no rendered-state story exists."
-      },
-      {
         "name": "provider",
         "coverage": "uncovered",
         "storyIds": [],
         "note": "OnboardingAccessStage.vue has a provider branch; no rendered-state story exists."
+      },
+      {
+        "name": "bypass-note",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "approval group renders BYPASS_NOTE and the provider docs link"
       },
       {
         "name": "other states",
@@ -5199,7 +5191,6 @@ export const inventory: InventoryEntry[] = [
     },
     "sources": [],
     "consumers": [
-      "web/src/components/onboarding/OnboardingAccessStage.vue",
       "web/src/components/onboarding/OnboardingFinishStage.vue",
       "web/src/components/onboarding/OnboardingLocationStage.vue",
       "web/src/components/onboarding/OnboardingRuntimeStage.vue",

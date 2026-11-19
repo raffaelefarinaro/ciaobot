@@ -95,7 +95,7 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   Lint is still worth running; it just will not fail the build for you.
 - Run one full backend suite and one frontend run at a time, here and in any
   gate script. Two concurrent suites starve the machine and time out the 20 s
-  component tests (`SettingsFsScope`), which reads as a red gate. A single
+  component tests (`mountSmoke`), which reads as a red gate. A single
   failure is re-run (`--lf`) before it is called red. Timing tests assert
   relative behaviour with a small absolute allowance, not a fixed millisecond
   budget a loaded machine can miss.

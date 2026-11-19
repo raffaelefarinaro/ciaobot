@@ -85,6 +85,10 @@
           <option v-for="mode in modeOptions" :key="mode.value" :value="mode.value">{{ mode.label }}</option>
         </select>
       </label>
+      <p class="hint hint--compact set-subrow-hint" data-testid="permission-note">
+        {{ BYPASS_NOTE }}
+        <a v-if="permissionDocs" :href="permissionDocs.href" target="_blank" rel="noopener">{{ permissionDocs.label }}</a>
+      </p>
 
       <div class="set-subrow">
         <span
@@ -136,6 +140,7 @@ import ModelSelector from '../ModelSelector.vue'
 import { api } from '../../lib/api'
 import { modelDisplayName } from '../../lib/modelLabels'
 import { setOverride } from '../../lib/workspaceOverrides'
+import { BYPASS_NOTE, permissionDocsFor } from '../../lib/permissionDocs'
 import { DEFAULT_MODE_SELECTION, PROVIDER_MODE_OPTIONS, useProviderChoices } from '../../composables/useProviderChoices'
 import { WORKSPACE_ADMIN_KEY } from '../../composables/useWorkspaceAdmin'
 import type { ModelsResponse, ProviderOverrideField, RoutineSettings, WorkspaceProvider } from '../../lib/types'
@@ -174,6 +179,7 @@ const providerEls = ref<HTMLButtonElement[]>([])
 const choices = useProviderChoices({ routines, workspaceModels: models })
 
 const provider = computed<WorkspaceProvider>(() => form.value?.default_provider ?? 'claude')
+const permissionDocs = computed(() => permissionDocsFor(provider.value))
 const providerGeneration = ref(0)
 watch(provider, () => { providerGeneration.value++ }, { flush: 'sync' })
 const saving = computed(() => !!form.value && workspacesSaving.value === form.value.name)

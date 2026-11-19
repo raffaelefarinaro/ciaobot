@@ -57,7 +57,7 @@ async function loadSummary(): Promise<void> {
   // Each read is independent: an unavailable one becomes `unknown`, not a
   // guessed value, and never a "ready".
   const [workspaces, setup, backup, providers, handover, schedules] = await Promise.allSettled([
-    api.get<{ workspaces?: Array<{ name: string; agent_fs_scope?: string | null; provider_overrides?: Record<string, Record<string, string>> }> }>('/api/workspaces'),
+    api.get<{ workspaces?: Array<{ name: string; provider_overrides?: Record<string, Record<string, string>> }> }>('/api/workspaces'),
     api.get<{ workspace_root?: string; ready?: boolean }>('/api/setup-status'),
     api.get<{ context?: Record<string, unknown> }>('/api/local/backup/setup-prompt'),
     api.get<{ connections?: Record<string, { ok?: boolean; auth?: string }> }>('/api/settings/providers'),
@@ -123,17 +123,6 @@ async function loadSummary(): Promise<void> {
       chosenModel
         ? row('model', 'Model', `${chosenModel} selected; a successful reply is not yet verified`, 'attention', SETTINGS_HREF)
         : row('model', 'Model', 'No model chosen yet', 'deferred', SETTINGS_HREF),
-    )
-  }
-
-  const scope = wsRow?.agent_fs_scope
-  if (!wsRow) {
-    rows.push(row('file_access', 'File access', 'Could not read the workspace settings', 'unknown', SETTINGS_HREF))
-  } else {
-    rows.push(
-      scope === 'workspace' || scope === 'machine'
-        ? row('file_access', 'File access', scope === 'machine' ? 'Whole machine' : 'Workspace only', 'ready', SETTINGS_HREF)
-        : row('file_access', 'File access', 'Scope was not saved', 'deferred', SETTINGS_HREF),
     )
   }
 

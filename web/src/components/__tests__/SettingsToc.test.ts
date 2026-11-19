@@ -34,7 +34,6 @@ async function mountSettings(routines?: unknown, tab = '') {
         })),
         active: 'work',
         primary: 'personal',
-        default_agent_fs_scope: 'workspace',
         provider_options: [{ value: 'claude', label: 'Claude' }],
       } as never
     }

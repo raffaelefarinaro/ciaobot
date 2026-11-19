@@ -824,6 +824,15 @@
                       </option>
                     </select>
                   </label>
+                  <p class="hint hint--compact set-subrow-hint" data-testid="permission-note">
+                    {{ BYPASS_NOTE }}
+                    <a
+                      v-if="permissionDocsFor(String(connKey))"
+                      :href="permissionDocsFor(String(connKey))!.href"
+                      target="_blank"
+                      rel="noopener"
+                    >{{ permissionDocsFor(String(connKey))!.label }}</a>
+                  </p>
                   <div class="set-subrow">
                     <span :id="`thinking-label-${connKey}`" class="ws-label set-subrow-label">Default thinking</span>
                     <div class="set-subrow-control">
@@ -1485,7 +1494,7 @@ import type { ModelSection } from '../lib/modelSections'
 import { modelDisplayName } from '../lib/modelLabels'
 import { settingsTabLabel } from '../lib/settingsNav'
 import { workspaceLabel } from '../lib/workspaceLabel'
-import { parseWorkspaceFileAccessHref } from '../lib/appLinks'
+import { BYPASS_NOTE, permissionDocsFor } from '../lib/permissionDocs'
 import { assetOriginClass, assetOriginLabel, commandOrigin, subagentOrigin } from '../lib/assetOrigin'
 
 
@@ -2624,11 +2633,8 @@ const workspaceAdmin = useWorkspaceAdmin({
 })
 const {
   workspacesLoaded,
-  workspacesError,
   showNewWorkspace,
-  workspaceForms,
   workspaceLinkStatus,
-  workspaceLinkTarget,
   fetchWorkspacesList,
   fetchArchivedWorkspaces,
 } = workspaceAdmin
@@ -2667,100 +2673,14 @@ function closeSettingsMenuOnEscape(event: KeyboardEvent): void {
 }
 provide(WORKSPACE_ADMIN_KEY, { ...workspaceAdmin, settingsMenu, setSettingsMenu, closeSettingsMenuOnEscape })
 
-// Bumped on every route resolution so a delayed list load from a superseded
-// link cannot open, scroll to or focus the wrong row.
-let workspaceLinkRequest = 0
-const WORKSPACE_LINK_OFFSET = 16
-
-function scrollToWorkspaceFileAccess(name: string): void {
-  const body = bodyEl.value
-  if (!body) return
-  // Scope both lookups to the owning pane, and measure the field row itself:
-  // the card header can be in view while the File access control is still
-  // below the fold.
-  const row = body.querySelector<HTMLElement>(`#workspace-file-access-row-${name}`)
-  const control = body.querySelector<HTMLElement>(`#workspace-file-access-${name}`)
-  if (!row || !control) return
-  // Only the settings pane scrolls. Its scrollTop is the truth; a measured
-  // offset keeps this correct whatever else has rendered above the row.
-  // scrollIntoView is deliberately not used: on a nested pane iOS Safari can
-  // scroll the wrong ancestor.
-  const offset = row.getBoundingClientRect().top - body.getBoundingClientRect().top
-  const top = Math.max(0, body.scrollTop + offset - WORKSPACE_LINK_OFFSET)
-  const reduce = typeof window.matchMedia === 'function'
-    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  body.scrollTo({ top, behavior: reduce ? 'auto' : 'smooth' })
-  control.focus({ preventScroll: true })
-  workspaceLinkTarget.value = name
-}
-
-type WorkspaceLink = { request: number; fullPath: string; name: string; kind: 'file' }
-let desiredWorkspaceLink: WorkspaceLink | null = null
-let workspaceLinkDraining = false
-let workspaceLinkDisposed = false
-
-function queueWorkspaceLink(fullPath: string): void {
-  const request = ++workspaceLinkRequest
-  workspaceLinkStatus.value = ''
-  workspaceLinkTarget.value = null
-  const name = currentTab.value === 'workspace' ? parseWorkspaceFileAccessHref(fullPath) : null
-  desiredWorkspaceLink = name ? { request, fullPath, name, kind: 'file' } : null
-  if (!workspaceLinkDraining && desiredWorkspaceLink) void drainWorkspaceLinks()
-}
-
-async function drainWorkspaceLinks(): Promise<void> {
-  workspaceLinkDraining = true
-  let handled = 0
-  while (!workspaceLinkDisposed && desiredWorkspaceLink && desiredWorkspaceLink.request !== handled) {
-    const link = desiredWorkspaceLink
-    handled = link.request
-    const current = () => !workspaceLinkDisposed && link.request === workspaceLinkRequest && route.fullPath === link.fullPath
-    try {
-      await loadSettingsTab('workspace')
-    } catch {
-      if (current()) workspaceLinkStatus.value = 'Could not load workspaces. No settings changed.'
-      continue
-    }
-    if (!current()) continue
-    if (workspacesError.value) continue
-    if (!workspaceForms.value.some(form => form.name === link.name)) {
-      workspaceLinkStatus.value = `No workspace named "${link.name}" exists. No settings changed.`
-      continue
-    }
-    let switched: boolean
-    try {
-      switched = await projectStore.switchWorkspace(link.name, { transition: false, isCurrent: current })
-    } catch {
-      if (current()) workspaceLinkStatus.value = `Settings for "${link.name}" could not be opened. No settings changed.`
-      continue
-    }
-    if (!current()) continue
-    if (!switched || projectStore.activeWorkspace !== link.name) {
-      workspaceLinkStatus.value = `File access for "${link.name}" was not opened: your unsaved changes to "${projectStore.activeWorkspace}" were kept.`
-      continue
-    }
-    try {
-      const failure = await router.replace({ path: '/settings/workspace', hash: '#file-access' })
-      if (failure && current()) workspaceLinkStatus.value = 'File access could not be opened.'
-    } catch {
-      if (current()) workspaceLinkStatus.value = 'File access could not be opened.'
-    }
-  }
-  workspaceLinkDraining = false
-}
-
-// The Overview page is the active workspace's editor. A File access link lands
-// here with #file-access: scroll to and focus the selector once the list is in.
-// While the link still carries ?workspace=NAME, the workspace link drain
-// owns it: it switches to NAME and then drops the query, which re-runs this
-// watcher on the right workspace (scrolling now would hit the previous one).
+// The Overview page is the active workspace's editor. A #workspace-name link
+// (Rename) focuses the Name field once the list is in.
 watch(
-  [() => route.hash, currentTab, workspacesLoaded, () => route.query.workspace],
-  async ([hash, tab, loaded, linked]) => {
-    if (tab !== 'workspace' || !loaded || linked) return
+  [() => route.hash, currentTab, workspacesLoaded],
+  async ([hash, tab, loaded]) => {
+    if (tab !== 'workspace' || !loaded) return
     await nextTick()
-    if (hash === '#file-access') scrollToWorkspaceFileAccess(projectStore.activeWorkspace)
-    else if (hash === '#workspace-name') document.getElementById('workspace-name-input')?.focus()
+    if (hash === '#workspace-name') document.getElementById('workspace-name-input')?.focus()
   },
   { immediate: true },
 )
@@ -2862,16 +2782,9 @@ function loadSettingsTab(tab: string): Promise<void> {
   return request
 }
 
-// File access links are checked on every navigation, including the direct load
-// of one. `loadSettingsTab` is cached, so a link that arrives with the tab
-// costs no second fetch, and a link that arrives before the first list does
-// waits for that same load instead of opening a row that is not there yet.
-watch(
-  () => route.fullPath,
-  path => { queueWorkspaceLink(path) },
-  { immediate: true, flush: 'sync' },
-)
-onUnmounted(() => { workspaceLinkDisposed = true; ++workspaceLinkRequest })
+// The workspace notice (a created workspace that could not be opened) is
+// stale as soon as the user navigates.
+watch(() => route.fullPath, () => { workspaceLinkStatus.value = '' })
 
 onMounted(() => {
   loadAppearanceSettings()
@@ -2902,9 +2815,8 @@ watch(() => projectStore.activeWorkspace, () => {
 }, { flush: 'sync' })
 
 watch(() => projectStore.activeWorkspace, () => {
-  // "Settings ↑" and Create and open land at the top. Only a File access deep
-  // link keeps its own scroll target; every other switch returns to the top.
-  if (currentTab.value === 'workspace' && route.hash !== '#file-access') bodyEl.value?.scrollTo({ top: 0, behavior: 'auto' })
+  // "Settings ↑" and Create and open land at the top.
+  if (currentTab.value === 'workspace') bodyEl.value?.scrollTo({ top: 0, behavior: 'auto' })
   // Asset refs hold one workspace's data, so invalidate cached scope keys:
   // returning to an earlier root must never show a different root's rows.
   for (const key of tabLoads.keys()) {

@@ -12,7 +12,7 @@ const context = { target: { kind: 'workspace' as const, name: 'personal' }, work
 
 function payloads() {
   vi.mocked(api.get).mockImplementation((url: string) => {
-    if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal', agent_fs_scope: 'workspace', provider_overrides: { claude: { model: 'opus' } } }] }) as never
+    if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal', provider_overrides: { claude: { model: 'opus' } } }] }) as never
     if (url === '/api/setup-status') return Promise.resolve({ workspace_root: '/srv/ciaobot', ready: true }) as never
     if (url === '/api/local/backup/setup-prompt') return Promise.resolve({ context: { has_repo: true, has_commits: true, has_remote: true } }) as never
     if (url === '/api/settings/providers') return Promise.resolve({ connections: { claude: { ok: true, auth: 'signed in' } } }) as never
@@ -89,7 +89,7 @@ describe('OnboardingFinishStage focus on what needs attention', () => {
 
   it('says nothing needs attention and counts what was left for later', async () => {
     vi.mocked(api.get).mockImplementation((url: string) => {
-      if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal', agent_fs_scope: 'workspace' }] }) as never
+      if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal' }] }) as never
       if (url === '/api/setup-status') return Promise.resolve({ workspace_root: '/srv/ciaobot', ready: true }) as never
       if (url === '/api/local/backup/setup-prompt') return Promise.resolve({ context: {} }) as never
       if (url === '/api/settings/providers') return Promise.resolve({ connections: {} }) as never
@@ -148,9 +148,9 @@ describe('OnboardingFinishStage refusals and unknowns', () => {
     const wrapper = mount(OnboardingFinishStage, { props: { context, busy: false } })
     await flushPromises()
     const text = wrapper.text()
-    expect(text.match(/unknown/g)?.length ?? 0).toBeGreaterThanOrEqual(3)
+    expect(text.match(/unknown/g)?.length ?? 0).toBeGreaterThanOrEqual(2)
     expect(text).not.toContain('No model chosen yet')
-    expect(text).not.toContain('Scope was not saved')
+    expect(text).not.toContain('File access')
   })
 
   it('tells the shell when the draft changes', async () => {
@@ -170,7 +170,7 @@ describe('OnboardingFinishStage refusals and unknowns', () => {
 describe('OnboardingFinishStage location check', () => {
   it('reports the folder as unknown when the setup read fails but the registry answers', async () => {
     vi.mocked(api.get).mockImplementation((url: string) => {
-      if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal', agent_fs_scope: 'workspace' }] }) as never
+      if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal' }] }) as never
       if (url === '/api/setup-status') return Promise.reject(new Error('offline')) as never
       if (url === '/api/local/backup/setup-prompt') return Promise.resolve({ context: {} }) as never
       if (url === '/api/settings/providers') return Promise.resolve({ connections: {} }) as never

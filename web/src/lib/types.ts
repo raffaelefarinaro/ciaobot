@@ -77,9 +77,6 @@ export interface WorkspaceInfo {
   gws_profile: string
   // PWA accent preset: amber | pink | cyan | emerald | violet | blue | teal | lime | fuchsia. Missing → amber (Ciao orange).
   color?: string
-  // Filesystem scope for the agent and its shell. Absent or null: the workspace
-  // never chose one and runs under the engine's default_agent_fs_scope.
-  agent_fs_scope?: 'workspace' | 'machine' | null
   // Operator-only; sparse: {provider: {field: value}}. Missing = engine default.
   provider_overrides?: ProviderOverrides
   // Sparse Claude context-trim overrides: option key -> trimmed. Missing = catalog defaults.
@@ -92,8 +89,6 @@ export interface WorkspacesResponse {
   // The workspace that cannot be archived (the server refuses it).
   primary?: WorkspaceName | null
   provider_options?: WorkspaceProviderOption[]
-  // The scope a workspace with no File access choice runs under on this engine.
-  default_agent_fs_scope: 'workspace' | 'machine'
   // Catalog the Settings "Claude context trimming" card renders, in engine order.
   claude_trim_options?: ClaudeTrimOption[]
 }
