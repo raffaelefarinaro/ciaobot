@@ -47,7 +47,7 @@
       <ol class="steps">
         <li id="ai-tool">
           <h2>Connect an agent</h2>
-          <p>Ciaobot uses an AI tool you already have. Install and sign in to <strong>Claude Code</strong> or <strong>OpenCode</strong> on the computer that will run Ciaobot.</p>
+          <p>Ciaobot uses an AI tool you already have. Install and sign in to <strong>Claude Code</strong>, <strong>Codex</strong> or <strong>OpenCode</strong> on the computer that will run Ciaobot.</p>
           <details class="guide-details">
             <summary>Claude Code setup</summary>
             <div class="details-body">
@@ -64,6 +64,15 @@ claude auth login</code></pre>
               <pre><code>curl -fsSL https://opencode.ai/v2/install | bash
 opencode auth login</code></pre>
               <p><a href="https://opencode.ai/docs/providers/">OpenCode providers →</a></p>
+            </div>
+          </details>
+          <details class="guide-details">
+            <summary>Codex setup</summary>
+            <div class="details-body">
+              <p>Install the pinned Codex CLI and its ACP adapter, then sign in. Settings → Providers runs the same steps for you.</p>
+              <pre><code>npm install -g @openai/codex@0.166.0 @agentclientprotocol/codex-acp@2.7.0
+codex login</code></pre>
+              <p>Sign-in stays in the Codex CLI. Ciaobot stores no Codex credential.</p>
             </div>
           </details>
         </li>

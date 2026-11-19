@@ -1387,8 +1387,8 @@ class ChatStreaming:
                     else ""
                 )
                 chat_meta.failure_id = uuid.uuid4().hex if had_error else ""
-                # A terminal SSE frame is not proof that a native V2 permission
-                # was delivered. Keep the persisted card until the response
+                # A terminal result event is not proof that a pending permission
+                # request was delivered. Keep the persisted card until the response
                 # endpoint returns success or an authoritative stale result.
                 self._save_at_turn_end(chat_id)
             repo_loc: dict[str, Any] | None = None

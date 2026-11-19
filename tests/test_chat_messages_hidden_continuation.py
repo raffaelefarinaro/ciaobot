@@ -7,7 +7,6 @@ before code mode became automatic still hold it.
 from __future__ import annotations
 
 import json
-import sys
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,7 +21,6 @@ from ciao.transcripts import TranscriptStore
 from ciao.web import transcript_service
 from ciao.web.project_chats import ProjectChatManager
 from ciao.web.routes_api import chat_messages
-from ciao.web.transcript_service import _render_opencode_thread
 
 CAPSULE = "[CIAO_CONTEXT_BEGIN]\nctx\n[CIAO_CONTEXT_END]\n\n"
 
@@ -102,24 +100,6 @@ async def test_a_legacy_code_mode_continuation_keeps_turn_markers_aligned(
     assert LEGACY_CODE_MODE_CONTINUE_PROMPT not in response.body.decode()
     users = [(m["content"], m["turn_index"]) for m in messages if m["role"] == "user"]
     assert users == [("initial", 0), ("second", 1)]
-
-
-def test_opencode_render_skips_the_continuation_without_shifting_turn_index(
-    tmp_path: Path,
-) -> None:
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("OC", workspace="work")
-    chat = pcm.create_chat(project.project_id, title="oc-continue")
-
-    def user(text: str) -> dict:
-        return {"info": {"role": "user"}, "parts": [{"type": "text", "text": text}]}
-
-    rows = _render_opencode_thread(
-        {"info": {}, "messages": [user("a"), user(CAPSULE + LEGACY_CODE_MODE_CONTINUE_PROMPT), user("b")]},
-        chat,
-    )
-    users = [(r["content"], r["turn_index"]) for r in rows if r["role"] == "user"]
-    assert users == [("a", 0), ("b", 1)]
 
 
 def test_archived_transcript_drops_the_continuation_user_row(tmp_path: Path) -> None:
@@ -247,75 +227,6 @@ async def _claude_rows(
     return json.loads(response.body)
 
 
-def _oc_user(text: str) -> dict:
-    return {"info": {"role": "user"}, "parts": [{"type": "text", "text": text}]}
-
-
-def _oc_text(text: str) -> dict:
-    return {"type": "text", "text": text}
-
-
-def _oc_tool(tool: str, path: Path) -> dict:
-    return {
-        "type": "tool",
-        "tool": tool,
-        "state": {"status": "completed", "input": {"filePath": str(path)}},
-    }
-
-
-def _oc_assistant(*parts: dict) -> dict:
-    return {"info": {"role": "assistant"}, "parts": list(parts)}
-
-
-def _oc_continuation(
-    tmp_path: Path, prompt: str, *, capsule: bool
-) -> dict:
-    hidden = (CAPSULE + prompt) if capsule else prompt
-    return {
-        "info": {},
-        "messages": [
-            _oc_user("Build the invented preview."),
-            _oc_assistant(_oc_text(ANSWER_ONE)),
-            _oc_user(hidden),
-            _oc_assistant(
-                _oc_text(NARRATION),
-                _oc_tool("read", tmp_path / "notes.md"),
-                _oc_tool("write", tmp_path / "preview.html"),
-            ),
-            _oc_assistant(_oc_text(ANSWER_TWO)),
-            _oc_user("Thanks, next."),
-        ],
-    }
-
-
-def _oc_expected(tmp_path: Path) -> list[dict]:
-    return [
-        {"role": "user", "content": "Build the invented preview.", "turn_index": 0},
-        {"role": "assistant", "content": ANSWER_ONE, "phase": "final_answer"},
-        {"role": "assistant", "content": NARRATION},
-        {
-            "role": "system",
-            "content": f"\u2699\uFE0F read {tmp_path / 'notes.md'}",
-            "tool_name": "_activity",
-        },
-        {
-            "role": "system",
-            "tool_name": "_filecard",
-            "content": "preview.html",
-            "file_path": "preview.html",
-            "action": "write",
-            "tool": "write",
-        },
-        {
-            "role": "assistant",
-            "content": ANSWER_TWO,
-            "sent_at": COMPLETED_AT,
-            "duration_ms": 23000,
-        },
-        {"role": "user", "content": "Thanks, next.", "turn_index": 1},
-    ]
-
-
 @pytest.mark.parametrize("prompt", [LEGACY_CODE_MODE_CONTINUE_PROMPT, RELOAD_CONTINUE_PROMPT])
 @pytest.mark.parametrize("capsule", [False, True])
 @pytest.mark.asyncio
@@ -348,53 +259,6 @@ async def test_claude_hidden_continuation_marks_completed_answer_without_adding_
     )
     assert envelope["total"] == 7
     assert [item["i"] for item in envelope["items"]] == list(range(7))
-
-
-@pytest.mark.parametrize("prompt", [LEGACY_CODE_MODE_CONTINUE_PROMPT, RELOAD_CONTINUE_PROMPT])
-@pytest.mark.parametrize("capsule", [False, True])
-def test_opencode_hidden_continuation_marks_completed_answer_without_adding_rows(
-    tmp_path: Path,
-    prompt: str,
-    capsule: bool,
-) -> None:
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("OC", workspace="work")
-    chat = pcm.create_chat(project.project_id, title="oc-continue")
-    chat.user_turn_count = 2
-    chat.user_turn_timings = _completion_timings()
-
-    rows = _render_opencode_thread(
-        _oc_continuation(tmp_path, prompt, capsule=capsule),
-        chat,
-        workspace_root=tmp_path,
-    )
-
-    assert rows == _oc_expected(tmp_path)
-    assert len(rows) == 7
-    assert prompt not in json.dumps(rows)
-
-
-def test_opencode_child_transcript_does_not_inherit_completion_phase(
-    tmp_path: Path,
-) -> None:
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("OC", workspace="work")
-    chat = pcm.create_chat(project.project_id, title="oc-child")
-    chat.user_turn_timings = _completion_timings()
-    thread = {
-        "info": {},
-        "messages": [
-            _oc_assistant(_oc_text(ANSWER_ONE)),
-            _oc_user(CAPSULE + LEGACY_CODE_MODE_CONTINUE_PROMPT),
-            _oc_assistant(_oc_text(ANSWER_TWO)),
-        ],
-    }
-
-    rows = _render_opencode_thread(thread, chat, metadata=False)
-
-    assert [r["content"] for r in rows] == [ANSWER_ONE, ANSWER_TWO]
-    assert all("phase" not in r for r in rows)
-    assert LEGACY_CODE_MODE_CONTINUE_PROMPT not in json.dumps(rows)
 
 
 def test_mark_preceding_answer_respects_user_and_commentary_boundaries() -> None:
@@ -477,20 +341,11 @@ def test_mark_preceding_answer_respects_user_and_commentary_boundaries() -> None
     assert rows[1]["phase"] == "final_answer"
 
 
-@pytest.mark.parametrize(
-    "reader,separate_answers",
-    [
-        ("claude", False),
-        ("claude", True),
-        ("opencode", False),
-        ("opencode", True),
-    ],
-)
+@pytest.mark.parametrize("separate_answers", [False, True])
 @pytest.mark.asyncio
 async def test_consecutive_hidden_continuations_mark_answers_idempotently(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    reader: str,
     separate_answers: bool,
 ) -> None:
     pcm = _make_manager(tmp_path)
@@ -513,22 +368,6 @@ async def test_consecutive_hidden_continuations_mark_answers_idempotently(
             _Msg("assistant", ANSWER_TWO),
             _Msg("user", "Next question."),
         ]
-        oc_thread = {
-            "info": {},
-            "messages": [
-                _oc_user("First question."),
-                _oc_assistant(_oc_text(ANSWER_ONE)),
-                _oc_user(LEGACY_CODE_MODE_CONTINUE_PROMPT),
-                _oc_assistant(_oc_text(second_answer)),
-                _oc_user(RELOAD_CONTINUE_PROMPT),
-                _oc_assistant(
-                    _oc_text(NARRATION),
-                    _oc_tool("read", tmp_path / "notes.md"),
-                ),
-                _oc_assistant(_oc_text(ANSWER_TWO)),
-                _oc_user("Next question."),
-            ],
-        }
         expected_shape = [
             ("user", None, None, 0, "First question."),
             ("assistant", None, "final_answer", None, ANSWER_ONE),
@@ -552,21 +391,6 @@ async def test_consecutive_hidden_continuations_mark_answers_idempotently(
             _Msg("assistant", ANSWER_TWO),
             _Msg("user", "Next question."),
         ]
-        oc_thread = {
-            "info": {},
-            "messages": [
-                _oc_user("First question."),
-                _oc_assistant(_oc_text(ANSWER_ONE)),
-                _oc_user(LEGACY_CODE_MODE_CONTINUE_PROMPT),
-                _oc_user(RELOAD_CONTINUE_PROMPT),
-                _oc_assistant(
-                    _oc_text(NARRATION),
-                    _oc_tool("read", tmp_path / "notes.md"),
-                ),
-                _oc_assistant(_oc_text(ANSWER_TWO)),
-                _oc_user("Next question."),
-            ],
-        }
         expected_shape = [
             ("user", None, None, 0, "First question."),
             ("assistant", None, "final_answer", None, ANSWER_ONE),
@@ -577,11 +401,8 @@ async def test_consecutive_hidden_continuations_mark_answers_idempotently(
         ]
         expected_assistant_content = [ANSWER_ONE, NARRATION, ANSWER_TWO]
 
-    if reader == "claude":
-        chat.session_id = "43af4230-3a25-5e66-a7af-5a6934cfe641"
-        rows = await _claude_rows(pcm, chat.chat_id, monkeypatch, claude_messages)
-    else:
-        rows = _render_opencode_thread(oc_thread, chat, workspace_root=tmp_path)
+    chat.session_id = "43af4230-3a25-5e66-a7af-5a6934cfe641"
+    rows = await _claude_rows(pcm, chat.chat_id, monkeypatch, claude_messages)
 
     def shape(r: dict) -> tuple[object, ...]:
         # Tool-row content differs by provider ("Read ..." vs "read ..."), so
@@ -607,40 +428,23 @@ async def test_consecutive_hidden_continuations_mark_answers_idempotently(
     assert next(r for r in rows if r["content"] == ANSWER_TWO)["sent_at"] == COMPLETED_AT
 
 
-@pytest.mark.parametrize("reader", ["claude", "opencode"])
 @pytest.mark.asyncio
 async def test_hidden_continuation_without_preceding_answer_adds_no_row(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    reader: str,
 ) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("NoAnswer", workspace="work")
     chat = pcm.create_chat(project.project_id, title="no-answer")
     chat.user_turn_count = 2
-    if reader == "claude":
-        chat.session_id = "4e2e8992-2b0b-5768-a5a6-b020917e8689"
-        messages = [
-            _Msg("user", "First question."),
-            _Msg("user", LEGACY_CODE_MODE_CONTINUE_PROMPT),
-            _Msg("assistant", ANSWER_TWO),
-            _Msg("user", "Next question."),
-        ]
-        rows = await _claude_rows(pcm, chat.chat_id, monkeypatch, messages)
-    else:
-        rows = _render_opencode_thread(
-            {
-                "info": {},
-                "messages": [
-                    _oc_user("First question."),
-                    _oc_user(LEGACY_CODE_MODE_CONTINUE_PROMPT),
-                    _oc_assistant(_oc_text(ANSWER_TWO)),
-                    _oc_user("Next question."),
-                ],
-            },
-            chat,
-            workspace_root=tmp_path,
-        )
+    chat.session_id = "4e2e8992-2b0b-5768-a5a6-b020917e8689"
+    messages = [
+        _Msg("user", "First question."),
+        _Msg("user", LEGACY_CODE_MODE_CONTINUE_PROMPT),
+        _Msg("assistant", ANSWER_TWO),
+        _Msg("user", "Next question."),
+    ]
+    rows = await _claude_rows(pcm, chat.chat_id, monkeypatch, messages)
 
     assert rows == [
         {"role": "user", "content": "First question.", "turn_index": 0},

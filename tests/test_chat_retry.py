@@ -3461,3 +3461,30 @@ def test_legacy_quota_terminal_retry_kind_loads_as_quota(tmp_path: Path) -> None
     due = chat_service._parse_iso(restored.retry_next_at)
     assert due is not None and due <= chat_service._parse_iso(chat_service._iso_after(3600 + 5))
     json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_legacy_startup_retry_kind_loads_and_the_retry_is_dropped(tmp_path: Path) -> None:
+    """A pending retry persisted under the retired "startup" kind loads without crashing and is dropped."""
+    import json
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="legacy-startup")
+    pcm.set_chat_retry(chat.chat_id, "job", reason="runtime failed to start")
+    pcm._save()
+    path = tmp_path / ".runtime" / "web_projects.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    row = data["chats"][chat.chat_id]
+    row["retry_kind"] = "startup"
+    row["retry_status"] = "pending"
+    row["retry_prompt"] = "job"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    reloaded = _make_manager(tmp_path)
+    restored = reloaded.get_chat(chat.chat_id)
+    assert restored is not None
+    assert restored.retry_status == ""
+    assert restored.retry_kind == ""
+    assert restored.retry_prompt == ""
+    assert restored.retry_attempts == 0
+    assert reloaded.try_chat_retry_now(chat.chat_id) is None

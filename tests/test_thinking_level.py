@@ -123,7 +123,7 @@ def _models_body(monkeypatch, claude_catalog: list[dict]) -> dict:
     from ciao.providers.acp.agents import ClaudeAcpProvider, CodexAcpProvider, OpencodeAcpProvider
     from ciao.web.routes_api import list_models
 
-    # A unit test must never start a real `opencode serve` (#803) or an ACP adapter:
+    # A unit test must never start a real ACP adapter (#803):
     # the catalogs are stubbed, so the assertions are about what /api/models builds
     # from them, not about what the installed CLIs happen to report.
     monkeypatch.setattr(OpencodeAcpProvider, "model_catalog", AsyncMock(return_value=[]))

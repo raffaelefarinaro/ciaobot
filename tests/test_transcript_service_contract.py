@@ -1080,64 +1080,23 @@ async def test_a_recorded_turn_that_is_still_streaming_is_not_dropped(
     assert rows[4]["sent_at"] == "2026-10-22T12:10:00Z"
 
 
-OPENCODE_THREAD = {
-    "info": {"id": "s1"},
-    "messages": [
-        {
-            "info": {"role": "user", "time": {"created": 1000}},
-            "parts": [{"type": "text", "text": "do it"}],
-        },
-        {
-            "info": {"role": "assistant", "time": {"created": 1100, "completed": 1200}},
-            "parts": [
-                {"type": "text", "text": "working"},
-                {
-                    "type": "tool",
-                    "tool": "read",
-                    "state": {"status": "completed", "input": {"filePath": "/tmp/x"}},
-                },
-            ],
-        },
-        {
-            "info": {"role": "assistant", "error": {"name": "boom"}, "time": {"created": 1300}},
-            "parts": [],
-        },
-    ],
-}
+ACP_JOURNAL = [
+    {"type": "user", "text": "do it"},
+    {"type": "text_delta", "text": "working"},
+    {"type": "tool_use", "tool_name": "read", "tool_input": "/tmp/x"},
+]
 
 
-def test_opencode_thread_rows_match_the_wire_contract() -> None:
-    rendered = transcript_service._render_opencode_thread(OPENCODE_THREAD, _chat())
-
-    assert rendered == [
-        {
-            "role": "user",
-            "content": "do it",
-            "turn_index": 0,
-            "sent_at": "2026-08-31T11:11:39Z",
-        },
-        {
-            "role": "assistant",
-            "content": "working",
-            "sent_at": "2026-08-31T11:13:15Z",
-            "duration_ms": 96000,
-        },
-        {
-            "role": "system",
-            "content": "⚙️ read /tmp/x",
-            "tool_name": "_activity",
-        },
-    ]
-
-
-def test_a_child_thread_keeps_its_own_turn_numbering() -> None:
-    """A child session restarts at turn 0, so the parent's metadata is off."""
-    rendered = transcript_service._render_opencode_thread(
-        OPENCODE_THREAD, _chat(), metadata=False, start_user_idx=3
+def test_acp_journal_rows_match_the_wire_contract() -> None:
+    rendered = transcript_service._render_acp_journal(
+        ACP_JOURNAL, _chat(), start_user_idx=0, workspace_root=None, agent_root=None
     )
 
-    assert rendered[0]["turn_index"] == 3
-    assert "sent_at" not in rendered[0]
+    assert rendered == [
+        {"role": "user", "content": "do it", "turn_index": 0, "sent_at": "2026-08-31T11:11:39Z"},
+        {"role": "assistant", "content": "working"},
+        {"role": "system", "content": "\u2699\ufe0f read /tmp/x", "tool_name": "_activity"},
+    ]
 
 
 def test_prune_rows_for_wire_only_truncates_oversized_thinking() -> None:
