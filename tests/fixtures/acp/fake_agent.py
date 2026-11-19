@@ -12,6 +12,7 @@ Scenario JSON (every key optional):
 - ``prompts``: one entry per ``session/prompt`` call, in order. Each entry is
   ``{"steps": [...]}``; a step is one of
   ``{"update": <sessionUpdate dict>}``,
+  ``{"update_detached": <sessionUpdate dict>}`` (sent without waiting),
   ``{"permission": {"toolCall": {...}, "options": [...]}}``,
   ``{"sleep_ms": N}``,
   ``{"stop": "<stopReason>", "usage": {...}?}``,
@@ -19,6 +20,9 @@ Scenario JSON (every key optional):
   ``{"await_cancel": true}`` (block until ``session/cancel``, stop ``cancelled``).
   A prompt with no ``stop`` step stops with ``end_turn``.
 - ``after_prompt``: steps sent after the prompt response (late updates).
+  ``after_prompt_delay_ms`` waits that long before sending them (default 50).
+- ``load_error`` / ``resume_error``: fail ``session/load`` or ``session/resume``
+  with that message.
 - ``stderr``: lines written to stderr at startup.
 - ``initialize_delay_ms``: sleep before answering ``initialize``.
 - ``exit_during_initialize``: exit 1 when ``initialize`` arrives.
@@ -115,10 +119,20 @@ class FakeAgent:
         self.session_count += 1
         return ids[index] if index < len(ids) else f"fake-{index + 1}"
 
+    def _logged_meta(self, kwargs: dict[str, Any]) -> Any:
+        if kwargs.get("field_meta"):
+            return kwargs["field_meta"]
+        meta = {key: value for key, value in kwargs.items() if key != "field_meta"}
+        return meta or None
+
     async def new_session(self, cwd: str, additional_directories: Any = None,
                           mcp_servers: Any = None, **kwargs: Any) -> Any:
-        self.log("session/new", {"cwd": cwd, "mcpServers": [_dump(m) for m in mcp_servers or []],
-                                 "_meta": kwargs.get("field_meta") or kwargs or None})
+        self.log("session/new", {
+            "cwd": cwd,
+            "mcpServers": [_dump(server) for server in mcp_servers or []],
+            "additionalDirectories": additional_directories,
+            "_meta": self._logged_meta(kwargs),
+        })
         return NewSessionResponse.model_validate({
             "sessionId": self._next_session_id(),
             "configOptions": self.scenario.get("config_options", []),
@@ -126,10 +140,31 @@ class FakeAgent:
 
     async def load_session(self, cwd: str, session_id: str, mcp_servers: Any = None,
                            additional_directories: Any = None, **kwargs: Any) -> Any:
-        self.log("session/load", {"cwd": cwd, "sessionId": session_id})
+        self.log("session/load", {
+            "cwd": cwd,
+            "sessionId": session_id,
+            "additionalDirectories": additional_directories,
+            "_meta": self._logged_meta(kwargs),
+        })
+        if self.scenario.get("load_error"):
+            raise acp.RequestError(-32002, str(self.scenario["load_error"]))
         for update in self.scenario.get("load_replay", []):
             await self._send_update(session_id, update)
         return LoadSessionResponse.model_validate({"configOptions": self.scenario.get("config_options", [])})
+
+    async def resume_session(self, session_id: str, cwd: str, additional_directories: Any = None,
+                             mcp_servers: Any = None, **kwargs: Any) -> Any:
+        self.log("session/resume", {
+            "cwd": cwd,
+            "sessionId": session_id,
+            "additionalDirectories": additional_directories,
+            "_meta": self._logged_meta(kwargs),
+        })
+        if self.scenario.get("resume_error"):
+            raise acp.RequestError(-32002, str(self.scenario["resume_error"]))
+        from acp.schema import ResumeSessionResponse
+        return ResumeSessionResponse.model_validate(
+            {"configOptions": self.scenario.get("config_options", [])})
 
     async def set_session_mode(self, session_id: str, mode_id: str, **kwargs: Any) -> Any:
         self.log("session/set_mode", {"sessionId": session_id, "modeId": mode_id})
@@ -161,6 +196,10 @@ class FakeAgent:
         for step in steps:
             if "update" in step:
                 await self._send_update(session_id, step["update"])
+            elif "update_detached" in step:
+                # Not awaited: the prompt response can be sent first, so the
+                # client still has to drain updates that land after it.
+                asyncio.create_task(self._send_update(session_id, step["update_detached"]))
             elif "permission" in step:
                 request = RequestPermissionRequest.model_validate({
                     "sessionId": session_id,
@@ -199,8 +238,9 @@ class FakeAgent:
         response = await self._run_steps(session_id, entry.get("steps", []))
         after = self.scenario.get("after_prompt")
         if after:
+            delay = self.scenario.get("after_prompt_delay_ms", 50) / 1000
             asyncio.get_running_loop().call_later(
-                0.05, lambda: asyncio.ensure_future(self._run_steps(session_id, after)))
+                delay, lambda: asyncio.ensure_future(self._run_steps(session_id, after)))
         return response or PromptResponse(stop_reason="end_turn")
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
