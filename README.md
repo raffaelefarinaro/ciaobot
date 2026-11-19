@@ -4,11 +4,11 @@
   <img src="site/assets/img/hero.png" alt="Ciaobot" width="100%">
 </p>
 
-Ciaobot is your **second brain and personal assistant**: a persistent personal workspace for the agents you already use, [Claude Code](https://github.com/anthropics/claude-code) and [OpenCode](https://opencode.ai).
+Ciaobot is your **second brain and personal assistant**: a persistent personal workspace for the agents you already use, [Claude Code](https://github.com/anthropics/claude-code), [Codex](https://github.com/openai/codex) and [OpenCode](https://opencode.ai).
 
-**Your agents do the work. Ciaobot remembers.** Claude Code and OpenCode handle models and tools; Ciaobot adds projects, durable memory, files, and recurring tasks so each conversation can build on what came before.
+**Your agents do the work. Ciaobot remembers.** Claude Code, Codex and OpenCode handle models and tools; Ciaobot adds projects, durable memory, files, and recurring tasks so each conversation can build on what came before.
 
-**Change your AI, not your second brain.** Use Claude or OpenCode with a cloud or local model. Your notes, project context, and remembered preferences stay in a folder you own. Durable Markdown knowledge remains useful outside Ciaobot; provider sessions, tools, and permissions are not interchangeable.
+**Change your AI, not your second brain.** Use Claude, Codex or OpenCode with a cloud or local model. Your notes, project context, and remembered preferences stay in a folder you own. Durable Markdown knowledge remains useful outside Ciaobot; provider sessions, tools, and permissions are not interchangeable.
 
 ## Install
 
@@ -35,6 +35,7 @@ The first time you open Ciaobot, Home shows your workspace folder and the passwo
 Ciaobot has no model account of its own. It drives a CLI you have already signed in to:
 
 - **Claude:** install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) (`curl -fsSL https://claude.ai/install.sh | bash`) and run `claude auth login`. If its installer says `~/.local/bin` is not in your `PATH`, Ciaobot still finds Claude Code; for the login, run the command it prints or use `~/.local/bin/claude auth login`.
+- **Codex:** install the Codex CLI (`npm install -g @openai/codex`) and run `codex login`. Ciaobot's Settings terminal can run both steps for you.
 - **OpenAI, OpenRouter, Ollama and others:** install [OpenCode 2.3.2+](https://opencode.ai/v2/docs/) (`npm install -g @opencode/cli`; see [INTEGRATIONS.md](INTEGRATIONS.md#opencode) for other routes) and authenticate the provider there. Its models appear in Ciaobot's model picker.
 
 See [INTEGRATIONS.md](INTEGRATIONS.md) for current commands. Contributors running from a git checkout: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
