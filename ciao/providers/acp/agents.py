@@ -13,12 +13,14 @@ runs, and Ciaobot never reads or stores the credentials it writes.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
 from ciao.claude_trim import claude_settings_layer
-from ciao.models import AgentRequest
+from ciao.models import AgentRequest, AssistantTextDelta, StreamEvent, ThinkingEvent, ToolUseEvent
+from ciao.providers.acp.normalize import UpdateNormalizer
 from ciao.providers.acp.provider import AcpProvider
 from ciao.providers.acp.spec import AgentSpec, ModeChoice
 from ciao.tool_path import resolve_tool
@@ -183,6 +185,105 @@ CODEX = AgentSpec(
 
 class CodexAcpProvider(AcpProvider):
     spec = CODEX
+
+
+OPENCODE = AgentSpec(
+    id="opencode",
+    binary="opencode",
+    args=("acp",),
+    # Child sessions arrive as ``opencode/session/child_update`` instead of folded into the parent.
+    client_meta={"opencode/child-session-updates": True},
+    # opencode has no bypass mode: its permission cards follow the user's opencode config (plan Q7).
+    modes={
+        "plan": (ModeChoice("mode", ("plan",)),),
+        "normal": (ModeChoice("mode", ("build",)),),
+        "auto": (ModeChoice("mode", ("build",)),),
+        "bypass": (ModeChoice("mode", ("build",)),),
+    },
+    model_config_id="model",
+    thought_config_id="effort",
+)
+
+_OPENCODE_CHILD_UPDATE = "opencode/session/child_update"
+# Terminal child statuses, and whether each one failed.
+_OPENCODE_CHILD_END = {"completed": False, "failed": True, "interrupted": True}
+
+
+class OpencodeAcpProvider(AcpProvider):
+    """``opencode acp``, with each child session nested under a ``Subagent`` tool call.
+
+    The notification is ``opencode/session/child_update`` (sent on the wire as ``_opencode/...``),
+    from ``packages/cli/src/acp/child.ts`` in opencode v2.3.2. Its payload is
+    ``{rootSessionId, childSessionId, parentSessionId, depth, title?, type}``, where:
+
+    - ``type: "update"`` carries ``update``, a session/update body. Its tool ids are prefixed
+      ``<childSessionId>:<id>`` and its ``_meta["opencode/child-session"]`` names the child.
+    - ``type: "status"`` carries ``status`` (``created``, ``running``, ``completed``, ``failed``,
+      ``interrupted``) and an optional ``error``.
+
+    The child becomes ``ToolUseEvent(tool_use_id="child:<childSessionId>")``, and everything
+    from the child carries that id as ``parent_tool_use_id``. A child whose parent is another
+    child nests under that child's id. A terminal status ends the child with a ``tool_result``.
+    """
+
+    spec = OPENCODE
+
+    def __init__(self, workspace_root: Path, *, config: object | None = None) -> None:
+        super().__init__(workspace_root, config=config)
+        self._children: set[str] = set()
+        self._children_root = ""
+
+    def ext_update(
+        self, normalizer: UpdateNormalizer, method: str, payload: Mapping[str, Any]
+    ) -> list[StreamEvent]:
+        if method != _OPENCODE_CHILD_UPDATE:
+            return []
+        root = payload.get("rootSessionId")
+        child = payload.get("childSessionId")
+        # A child of another session is not this chat's: its events are dropped.
+        if root != normalizer.session_id or not isinstance(child, str) or not child:
+            return []
+        if root != self._children_root:
+            self._children_root, self._children = root, set()
+        tool_id = f"child:{child}"
+        parent_session = payload.get("parentSessionId")
+        parent = (
+            f"child:{parent_session}"
+            if isinstance(parent_session, str) and parent_session and parent_session != root
+            else None
+        )
+        events: list[StreamEvent] = []
+        if child not in self._children:
+            # The first event for a child opens its node, whether a status or an update came first.
+            self._children.add(child)
+            title = payload.get("title")
+            events.append(ToolUseEvent(
+                type="tool_use",
+                tool_name="Subagent",
+                tool_input=title if isinstance(title, str) else "",
+                tool_use_id=tool_id,
+                parent_tool_use_id=parent,
+            ))
+        kind = payload.get("type")
+        if kind == "update":
+            body = payload.get("update")
+            if isinstance(body, Mapping):
+                for event in normalizer.feed(dict(body)):
+                    if isinstance(event, (AssistantTextDelta, ThinkingEvent, ToolUseEvent)):
+                        event = replace(event, parent_tool_use_id=tool_id)
+                    events.append(event)
+                # A child's compaction is not the chat's, so the session must not report it.
+                normalizer.compacted = False
+        elif kind == "status":
+            status = payload.get("status")
+            if isinstance(status, str) and status in _OPENCODE_CHILD_END:
+                events.append(ToolUseEvent(
+                    type="tool_result",
+                    tool_use_id=tool_id,
+                    parent_tool_use_id=parent,
+                    is_error=_OPENCODE_CHILD_END[status],
+                ))
+        return events
 
 
 def codex_binary() -> str | None:

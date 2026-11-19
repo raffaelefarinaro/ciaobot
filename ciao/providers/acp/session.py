@@ -14,7 +14,7 @@ import hashlib
 import json
 import logging
 import os
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -357,6 +357,17 @@ class AcpSession:
             events.append(ContextCompactedEvent(type="context_compacted"))
         kind = canonical(body).get("sessionUpdate")
         self._note_update(events, kind=kind if isinstance(kind, str) else "")
+
+    def on_ext(
+        self,
+        method: str,
+        payload: Any,
+        hook: Callable[[UpdateNormalizer, str, Mapping[str, Any]], list[StreamEvent]],
+    ) -> None:
+        """Enqueue the events of one extension notification. Synchronous, like :meth:`on_update`."""
+        if self._replaying or not isinstance(payload, Mapping):
+            return
+        self._note_update(hook(self._normalizer, method, payload), kind="ext")
 
     def _note_update(self, events: list[StreamEvent], *, kind: str) -> None:
         if self._prompt_active:

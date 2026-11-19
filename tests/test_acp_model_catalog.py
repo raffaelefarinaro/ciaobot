@@ -211,31 +211,6 @@ def test_list_models_includes_acp_provider_catalog(monkeypatch, tmp_path: Path) 
     assert {item["id"] for item in body["providers"]} >= {"fake"}
 
 
-def test_list_models_acp_descriptor_cannot_override_a_legacy_provider(
-    monkeypatch, tmp_path: Path
-) -> None:
-    _install(monkeypatch, tmp_path, config_options=_OPTIONS)
-    # An ACP descriptor reusing the opencode id must not replace the opencode entries.
-    shadow = ProviderDescriptor(
-        id="opencode",
-        label="Shadow",
-        short_label="Shadow",
-        cli_label="Shadow",
-        factory_path="tests.test_acp_model_catalog:FakeCatalogProvider",
-        acp_spec_path="tests.test_acp_model_catalog:SPEC",
-    )
-    monkeypatch.setattr(
-        provider_registry, "_DESCRIPTORS", (*provider_registry.descriptors(), shadow)
-    )
-    monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[]))
-    config = _route_config(tmp_path)
-
-    body = json.loads(asyncio.run(list_models(_models_request(config))).body)
-
-    assert body["provider_models"]["opencode"] == []
-    assert body["provider_catalog_evidence"]["opencode"]["source"] != "acp_config_options"
-
-
 def test_list_models_keeps_an_acp_provider_empty_when_its_probe_fails(
     monkeypatch, tmp_path: Path
 ) -> None:

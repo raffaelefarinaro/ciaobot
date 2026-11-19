@@ -62,7 +62,7 @@ from ciao.web.chat_broker import (
     public_queue,
 )
 from ciao.web.file_snapshots import SnapshotStore
-from ciao import repo_location, vault_verification
+from ciao import provider_registry, repo_location, vault_verification
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ciao.web.project_chats import ChatInfo
@@ -1584,8 +1584,11 @@ class ChatStreaming:
                 outcome.had_error = bool(event.is_error)
                 outcome.stopped = bool(event.stopped)
                 outcome.effective_model = event.effective_model or chat.model
+                # An ACP agent picks its own model when the chat has none; the chat keeps what it resolved.
+                descriptor = provider_registry.get(chat.provider)
                 if (
-                    chat.provider == "opencode"
+                    descriptor is not None
+                    and descriptor.acp_spec_path
                     and not chat.model
                     and outcome.effective_model
                 ):

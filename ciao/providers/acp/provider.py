@@ -33,6 +33,7 @@ from ciao.models import (
     provider_reuse_key,
 )
 from ciao.providers.acp.connection import AcpConnection, AgentStartError
+from ciao.providers.acp.normalize import UpdateNormalizer
 from ciao.providers.acp.permissions import PermissionBroker
 from ciao.providers.acp.session import AcpSession, ModeNotApplied, SessionJournal, journal_file
 from ciao.providers.acp.spec import AgentSpec
@@ -104,10 +105,20 @@ class AcpHandle(ActiveHandle):
 class AgentClient(acp.Client):
     """The SDK client: routes agent calls to the live session and broker."""
 
-    def __init__(self) -> None:
+    def __init__(self, ext_hook: ExtHook | None = None) -> None:
         self.connection: AcpConnection | None = None
         self.session: AcpSession | None = None
         self.broker: PermissionBroker | None = None
+        self.ext_hook = ext_hook
+
+    def _target_session(self) -> AcpSession | None:
+        session = self.session
+        if session is None and self.connection is not None:
+            # ``session/load`` replays updates before ``AcpSession.open`` returns.
+            pending = getattr(self.connection, "_pending_session", None)
+            if isinstance(pending, AcpSession):
+                session = pending
+        return session
 
     async def request_permission(
         self, session_id: str, tool_call: Any, options: Any, **kwargs: Any
@@ -128,14 +139,16 @@ class AgentClient(acp.Client):
         # Synchronous up to ``on_update``: no await before the enqueue.
         payload = update.model_dump(by_alias=True, exclude_none=True)
         payload["sessionId"] = session_id
-        session = self.session
-        if session is None and self.connection is not None:
-            # ``session/load`` replays updates before ``AcpSession.open`` returns.
-            pending = getattr(self.connection, "_pending_session", None)
-            if isinstance(pending, AcpSession):
-                session = pending
+        session = self._target_session()
         if session is not None:
             session.on_update(payload)
+
+    async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
+        # Synchronous up to ``on_ext``: no await before the enqueue, as in session_update.
+        hook = self.ext_hook
+        session = self._target_session()
+        if hook is not None and session is not None:
+            session.on_ext(method, params, hook)
 
     async def read_text_file(
         self, session_id: str, path: str, line: int | None = None,
@@ -155,6 +168,8 @@ def _runtime_dir(config: object | None) -> Path:
         raise RuntimeError("AcpProvider needs config.state_path to place its session journals.")
     return Path(state_path).parent
 
+
+ExtHook = Callable[[UpdateNormalizer, str, Mapping[str, Any]], list[StreamEvent]]
 
 _CAPSULE_URI = "ciaobot://context"
 
@@ -186,7 +201,7 @@ class AcpProvider(BaseProvider):
 
     def __init__(self, workspace_root: Path, *, config: object | None = None) -> None:
         super().__init__(workspace_root, config=config)
-        self._client = AgentClient()  # type: ignore[abstract]
+        self._client = AgentClient(ext_hook=self.ext_update)  # type: ignore[abstract]
         self._connection: AcpConnection | None = None
         self._session: AcpSession | None = None
         self._broker: PermissionBroker | None = None
@@ -203,6 +218,16 @@ class AcpProvider(BaseProvider):
     def oneshot_meta(cls) -> dict[str, Any]:
         """``_meta`` for a one-shot call of this agent."""
         return {}
+
+    def ext_update(
+        self, normalizer: UpdateNormalizer, method: str, payload: Mapping[str, Any]
+    ) -> list[StreamEvent]:
+        """Events for one extension notification the agent sends (``_<method>`` on the wire).
+
+        ``normalizer`` is the live session's, so tool facts carry over from ``session/update``.
+        The default ignores every notification.
+        """
+        return []
 
     @classmethod
     def spawn_env(cls) -> dict[str, str]:

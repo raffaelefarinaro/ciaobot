@@ -68,10 +68,9 @@ Sign-in is handled entirely by the Codex CLI. Ciaobot does not implement, prompt
 
 ## OpenCode
 
-Ciaobot requires **OpenCode 2.0.16 or newer in the 2.x line**. OpenCode 1 is
-not supported because its server API was replaced in V2. Settings reports older
-or unidentifiable installs with an explicit upgrade message, and chat startup
-fails closed rather than probing retired V1 routes.
+Ciaobot requires **OpenCode 2.3.2 or newer in the 2.x line**. OpenCode 1 is
+not supported. The 2.3.2 floor is the release that ships `opencode acp` child
+session updates and the background-shell fix.
 
 ```bash
 npm install -g @opencode/cli
@@ -83,13 +82,10 @@ ciao auth opencode                  # opens `opencode auth login`
 The npm package `opencode-ai` and the `sst/tap` Homebrew tap are OpenCode 1 and do not work with Ciaobot, and `opencode upgrade` does not move a 1.x install to 2.x. If you installed OpenCode 1 that way, run `npm uninstall -g opencode-ai` first, because it also provides an `opencode` command.
 
 OpenCode is bring-your-own-provider: it authenticates against whichever model
-backends you connect, and Ciaobot lists enabled models from active providers
-via the V2 `/api/provider` and `/api/model` endpoints. Ciaobot runs one
-`opencode serve` process per active chat on an ephemeral loopback port
-protected by a per-process `OPENCODE_SERVER_PASSWORD`. Startup reads the server
-identity from `/api/info`, requires the tested 2.0.16+ API, and verifies the
-operations Ciaobot uses against `/openapi.json`. Chat output arrives on the
-`/api/event` SSE stream.
+backends you connect, and Ciaobot lists the models its ACP session reports.
+Ciaobot runs one `opencode acp` process per active chat over stdio, the Agent
+Client Protocol. Chat output, permission cards and subagent activity arrive as
+ACP session updates.
 
 Workspace assets need almost no projection: OpenCode discovers
 `.claude/skills/`, `.agents/skills/`, and `AGENTS.md` natively, so

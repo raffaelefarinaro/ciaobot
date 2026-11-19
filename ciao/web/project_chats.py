@@ -10073,13 +10073,14 @@ class ProjectChatManager:
 
         Three tiers, in order:
 
-        1. The provider's native session title (opencode's ``title`` agent or
-           Claude Code's ``aiTitle``). OpenCode is polled through
-           ``_TITLE_POLL_DELAYS`` before the lower tiers run. Claude (ACP) is
-           read once, with no wait. Context-prefixed Ciaobot prompts commonly
-           suppress Claude's native titler, and nothing polls after the fallback
-           is written. Every wait re-checks the chat, so a manual rename or a
-           delete stops titling.
+        1. The provider's native session title (Claude Code's ``aiTitle``, or
+           the title an ACP agent reports). Every ACP agent is read once, with
+           no wait. opencode's own title is not forwarded over ACP
+           (anomalyco/opencode#56894), so its ``New session - <timestamp>``
+           placeholder is refused by ``_real_title`` and nothing polls for it.
+           Context-prefixed Ciaobot prompts commonly suppress Claude's native
+           titler, and nothing polls after the fallback is written. Every wait
+           re-checks the chat, so a manual rename or a delete stops titling.
         2. A one-shot model call (``_llm_chat_title``) when the native title
            is absent, run straight after the inline native read.
         3. The deterministic ``chat_service._fallback_title`` (first 6 words of the
@@ -10096,7 +10097,8 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         provider = getattr(chat, "provider", "claude") if chat else "claude"
         delays: tuple[float, ...] = self._TITLE_POLL_DELAYS
-        if provider == "claude":
+        descriptor = provider_registry.get(provider)
+        if descriptor is not None and descriptor.acp_spec_path:
             delays = (0.0,)
         stopped, native = await self._poll_native_title(chat_id, delays, _is_titling_target)
         if stopped:

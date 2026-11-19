@@ -248,8 +248,8 @@ Two more branches are harmless for a new id and should stay that way.
 Claude tier aliases (`haiku` / `sonnet` / `opus` / `fable`) are rewritten
 to the provider's own default on every non-Claude id
 (`_model_for_provider`). An empty model on a `ResultEvent` is written
-back onto the chat only for OpenCode; other providers keep the model the
-chat already stored.
+back onto the chat only for an ACP provider (its descriptor sets
+`acp_spec_path`); other providers keep the model the chat already stored.
 
 ## Assets
 

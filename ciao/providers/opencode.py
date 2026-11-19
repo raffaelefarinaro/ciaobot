@@ -124,7 +124,7 @@ REQUIRED_PATHS: frozenset[str] = frozenset({
 })
 
 OPENCODE_V2_REQUIRED = (
-    "Ciaobot requires OpenCode 2.0.16 or newer 2.x. OpenCode 1 cannot be "
+    "Ciaobot requires OpenCode 2.3.2 or newer 2.x. OpenCode 1 cannot be "
     "upgraded in place: install OpenCode 2 (npm install -g @opencode/cli, "
     "brew install anomalyco/tap/opencode-v2, or "
     "curl -fsSL https://opencode.ai/v2/install | bash), then retry this chat."
@@ -325,7 +325,7 @@ _STARTUP_CLASSIFICATIONS = frozenset({
     "incompatible_version", "missing_operations", "unauthorized",
 })
 _STARTUP_MESSAGES = {
-    "incompatible_version": "OpenCode 2.0.16 or later is required (2.x only)",
+    "incompatible_version": "OpenCode 2.3.2 or later is required (2.x only)",
     "missing_operations": "OpenCode API is missing required operations",
     "unauthorized": "OpenCode server authentication failed",
 }
@@ -717,7 +717,7 @@ def server_version_error(payload: object) -> str | None:
 
     Version-only judgment: a Mapping payload whose ``version`` strings to the
     installed release is supported when its parsed version is in ``2.x`` at
-    or above ``(2, 0, 16)`` — anything unparseable, below the floor, outside
+    or above ``(2, 3, 2)`` — anything unparseable, below the floor, outside
     major 2, blank, or a payload that is not a Mapping at all is refused with
     ``OPENCODE_V2_REQUIRED``, plus ``Installed server version: <version>.``
     when a non-blank version was readable. ``None`` means the version is in
@@ -728,7 +728,7 @@ def server_version_error(payload: object) -> str | None:
         return OPENCODE_V2_REQUIRED
     version = str(payload.get("version") or "").strip()
     parsed = version_number(version)
-    if parsed is None or parsed < (2, 0, 16) or parsed[0] != 2:
+    if parsed is None or parsed < (2, 3, 2) or parsed[0] != 2:
         detail = f" Installed server version: {version}." if version else ""
         return f"{OPENCODE_V2_REQUIRED}{detail}"
     return None

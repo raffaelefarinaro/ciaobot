@@ -27,6 +27,7 @@ from ciao.models import (
     ToolUseEvent,
 )
 from ciao.background_notice import native_shell_run, native_subagent_run, native_wake_run
+from ciao.providers.acp.agents import OpencodeAcpProvider
 from ciao.providers.opencode import (
     OPENCODE_V2_REQUIRED,
     OpencodeProvider,
@@ -281,7 +282,7 @@ async def test_ephemeral_none_cleanup_failure_keeps_safe_classification(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome,message", [
-    ("version", "OpenCode 2.0.16 or later is required"),
+    ("version", "OpenCode 2.3.2 or later is required"),
     ("operations", "OpenCode API is missing required operations"),
     ("unauthorized", "OpenCode server authentication failed"),
 ])
@@ -315,7 +316,7 @@ async def test_chat_real_startup_contract_failure_has_safe_actionable_message(
 
         async def get(self, path, **kwargs):
             payload = {"version": "private-version-sentinel"} if outcome == "version" else (
-                {"version": "2.0.16"} if path == "/api/info" else {"paths": {"private-path-sentinel": {}}}
+                {"version": "2.3.2"} if path == "/api/info" else {"paths": {"private-path-sentinel": {}}}
             )
             return SimpleNamespace(status_code=401 if outcome == "unauthorized" else 200,
                                    text="authentication-response-sentinel",
@@ -1157,7 +1158,7 @@ def test_cross_loop_startup_serializes_chat_and_ephemeral(monkeypatch, tmp_path,
             nonlocal active
             with guard:
                 active -= 1
-            return SimpleNamespace(status_code=200, json=lambda: {"version": "2.0.16"})
+            return SimpleNamespace(status_code=200, json=lambda: {"version": "2.3.2"})
 
         async def aclose(self):
             pass
@@ -2191,7 +2192,7 @@ def test_v1_and_unknown_server_versions_fail_with_the_upgrade_message():
     assert server_version_error({"version": "2.0.0"}) is not None
     assert server_version_error({"version": "3.0.0"}) is not None
     assert server_version_error({"version": "unknown"}) is not None
-    assert server_version_error({"version": "2.0.16"}) is None
+    assert server_version_error({"version": "2.3.2"}) is None
 
 
 @pytest.mark.parametrize(
@@ -2202,13 +2203,13 @@ def test_v1_and_unknown_server_versions_fail_with_the_upgrade_message():
         ("", None),
         ("unknown", None),
         # The two documented CLI forms.
-        ("2.0.16", (2, 0, 16)),
-        ("opencode v2.0.16", (2, 0, 16)),
+        ("2.3.2", (2, 3, 2)),
+        ("opencode v2.3.2", (2, 3, 2)),
         # A build suffix is not part of the number.
-        ("2.0.16-beta.3", (2, 0, 16)),
+        ("2.3.2-beta.3", (2, 3, 2)),
         # Two parts, and more than three.
         ("2.0", (2, 0)),
-        ("2.0.16.1", (2, 0, 16, 1)),
+        ("2.3.2.1", (2, 3, 2, 1)),
     ],
 )
 def test_version_number_parses_a_dotted_integer_prefix(
@@ -2222,8 +2223,8 @@ def test_version_number_parses_a_dotted_integer_prefix(
     ("payload", "expected"),
     [
         # Not a Mapping: nothing version-shaped is read from any other shape.
-        ("2.0.16", OPENCODE_V2_REQUIRED),
-        (["version", "2.0.16"], OPENCODE_V2_REQUIRED),
+        ("2.3.2", OPENCODE_V2_REQUIRED),
+        (["version", "2.3.2"], OPENCODE_V2_REQUIRED),
         # Missing or blank: refused, with no installed-version detail.
         ({}, OPENCODE_V2_REQUIRED),
         ({"version": "   "}, OPENCODE_V2_REQUIRED),
@@ -2244,7 +2245,7 @@ def test_server_version_error_refuses_beyond_the_v2_floor(
 
 @pytest.mark.parametrize(
     "reported",
-    ["2.0.16", "opencode v2.0.16", "2.3.0", "2.0.16-beta.3"],
+    ["2.3.2", "opencode v2.3.2", "2.4.0", "2.3.2-beta.3"],
 )
 def test_server_version_error_accepts_supported_v2(reported: str) -> None:
     """``None`` still means version-supported, not healthy or authenticated."""
@@ -2255,8 +2256,8 @@ def test_server_version_error_accepts_mapping_subclasses_and_strips() -> None:
     """Mapping acceptance is structural, and a padded version is stripped first."""
     from collections import UserDict
 
-    assert server_version_error(UserDict(version="2.0.16")) is None
-    assert server_version_error({"version": "  2.0.16  "}) is None
+    assert server_version_error(UserDict(version="2.3.2")) is None
+    assert server_version_error({"version": "  2.3.2  "}) is None
 
 
 def test_public_version_helpers_are_defined_exactly_once_and_not_aliased() -> None:
@@ -2337,9 +2338,9 @@ def test_public_version_helpers_touch_no_provider_resources(monkeypatch) -> None
         calls[seam] = 0
 
     # ...so a zero count over the helper calls means none of them fired.
-    assert mod.version_number("2.0.16") == (2, 0, 16)
+    assert mod.version_number("2.3.2") == (2, 3, 2)
     assert mod.version_number(None) is None
-    assert mod.server_version_error({"version": "2.0.16"}) is None
+    assert mod.server_version_error({"version": "2.3.2"}) is None
     assert mod.server_version_error({"version": "1.18.18"}) == (
         f"{OPENCODE_V2_REQUIRED} Installed server version: 1.18.18."
     )
@@ -5363,7 +5364,7 @@ def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
         state_path=tmp_path / ".runtime" / "state.json",
         media_root=tmp_path / ".runtime" / "media",
     )
-    monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[
+    monkeypatch.setattr(OpencodeAcpProvider, "model_catalog", AsyncMock(return_value=[
         {"model": "opencode/big-pickle", "label": "Big Pickle (opencode)"},
     ]))
     def _request(query: bytes = b"") -> Request:
@@ -5383,9 +5384,9 @@ def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
 
     # `?refresh=1` bypasses the provider catalog caches, so a provider connected
     # in another window shows up without waiting out the 5-minute TTL.
-    assert OpencodeProvider.model_catalog.await_args.kwargs["force"] is False
+    assert OpencodeAcpProvider.model_catalog.await_args.kwargs["force"] is False
     asyncio.run(list_models(_request(b"refresh=1")))
-    assert OpencodeProvider.model_catalog.await_args.kwargs["force"] is True
+    assert OpencodeAcpProvider.model_catalog.await_args.kwargs["force"] is True
 
 
 # ── credential reporting ────────────────────────────────────────────────
@@ -5928,7 +5929,7 @@ def test_status_reports_skills_and_plugins_from_the_server(monkeypatch):
     def fake_run(cmd, *a, **k):
         run_calls.append(cmd)
         if cmd[1] == "--version":
-            return SimpleNamespace(stdout="opencode v2.0.16\n", returncode=0)
+            return SimpleNamespace(stdout="opencode v2.3.2\n", returncode=0)
         return SimpleNamespace(stdout="[]", returncode=0)
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
@@ -5956,7 +5957,7 @@ def test_status_leaves_out_lists_the_server_could_not_report(monkeypatch):
 
     def fake_run(cmd, *a, **k):
         if cmd[1] == "--version":
-            return SimpleNamespace(stdout="opencode v2.0.16\n", returncode=0)
+            return SimpleNamespace(stdout="opencode v2.3.2\n", returncode=0)
         return SimpleNamespace(stdout="[]", returncode=0)
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
@@ -6101,7 +6102,7 @@ def test_login_status_without_inventory_starts_no_server(monkeypatch):
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
     monkeypatch.setattr(
-        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout="opencode v2.0.27\n", returncode=0)
+        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout="opencode v2.3.2\n", returncode=0)
     )
     monkeypatch.setattr(mod, "_credential_count", lambda *a, **k: 1)
     monkeypatch.setattr(mod, "_fetch_inventory_rows", no_server)
@@ -6203,7 +6204,7 @@ def test_status_does_not_claim_authentication_without_credentials(monkeypatch):
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
     monkeypatch.setattr(mod, "_credential_count", lambda *_a, **_k: 0)
-    monkeypatch.setattr("subprocess.run", lambda *a, **k: __import__("types").SimpleNamespace(stdout="opencode v2.0.16\n"))
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: __import__("types").SimpleNamespace(stdout="opencode v2.3.2\n"))
 
     status = mod.opencode_login_status()
 
@@ -7239,7 +7240,7 @@ def test_installed_status_row_carries_mcp_command(monkeypatch):
     import ciao.providers.opencode as mod
 
     def fake_run(cmd, *a, **k):
-        return SimpleNamespace(stdout="opencode v2.0.16\n", returncode=0)
+        return SimpleNamespace(stdout="opencode v2.3.2\n", returncode=0)
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
     monkeypatch.setattr("subprocess.run", fake_run)

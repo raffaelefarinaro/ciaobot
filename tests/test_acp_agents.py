@@ -21,7 +21,14 @@ from acp.exceptions import RequestError
 from ciao import provider_registry, setup_status
 from ciao.claude_trim import claude_settings_layer, trim_tool_denies
 from ciao.config import CiaoConfig, WorkspaceConfig
-from ciao.models import AgentRequest, BridgeMode, ResultEvent, SystemStatusEvent
+from ciao.models import (
+    AgentRequest,
+    AssistantTextDelta,
+    BridgeMode,
+    ResultEvent,
+    SystemStatusEvent,
+    ToolUseEvent,
+)
 from ciao.provider_registry import ProviderDescriptor
 from ciao.provider_service import ProviderService
 from ciao.providers import oneshot
@@ -31,15 +38,18 @@ from ciao.providers.acp.agents import (
     CLAUDE,
     CLAUDE_ONESHOT_OPTIONS,
     CODEX,
+    OPENCODE,
     ClaudeAcpProvider,
     CodexAcpProvider,
+    OpencodeAcpProvider,
     claude_session_options,
 )
 from ciao.providers.acp.connection import AcpConnection
-from ciao.providers.acp.permissions import mode_choices, pick_value
-from ciao.providers.acp.provider import AcpProvider
-from ciao.providers.acp.spec import AgentSpec
-from ciao.providers.base import native_slash_prompt
+from ciao.providers.acp.normalize import UpdateNormalizer
+from ciao.providers.acp.permissions import PermissionBroker, mode_choices, pick_value
+from ciao.providers.acp.provider import AcpProvider, AgentClient
+from ciao.providers.acp.spec import AgentSpec, ModeChoice
+from ciao.providers.base import QuestionResponseResult, native_slash_prompt
 from tests.acp_helpers import read_calls, write_scenario
 
 # The scripted agent that stands in for claude-agent-acp; installed per test.
@@ -713,3 +723,147 @@ def test_codex_auth_command_raises_when_codex_is_missing(monkeypatch: pytest.Mon
     monkeypatch.setattr(agents, "codex_binary", lambda: None)
     with pytest.raises(FileNotFoundError):
         agents.codex_auth_command()
+
+
+# -- opencode over `opencode acp` (#3140, D1) ------------------------------------------
+
+_CHILD = "opencode/session/child_update"
+
+
+def test_opencode_spec_spawns_opencode_acp() -> None:
+    assert (OPENCODE.binary, OPENCODE.args) == ("opencode", ("acp",))
+    assert dict(OPENCODE.client_meta) == {"opencode/child-session-updates": True}
+    descriptor = provider_registry.get("opencode")
+    assert descriptor is not None
+    assert descriptor.acp_spec() is OPENCODE
+    assert descriptor.factory() is OpencodeAcpProvider
+
+
+def test_opencode_mode_table() -> None:
+    assert set(OPENCODE.modes) == {"normal", "plan", "auto", "bypass"}
+    assert mode_choices(OPENCODE, "plan") == (ModeChoice("mode", ("plan",)),)
+    for mode in ("normal", "auto", "bypass"):
+        assert mode_choices(OPENCODE, mode) == (ModeChoice("mode", ("build",)),)
+    assert (OPENCODE.model_config_id, OPENCODE.thought_config_id) == ("model", "effort")
+
+
+def _child_status(child: str, status: Any, *, parent: str = "ses_root", title: str = "Explore") -> dict[str, Any]:
+    return {
+        "rootSessionId": "ses_root", "childSessionId": child, "parentSessionId": parent,
+        "depth": 1, "title": title, "type": "status", "status": status,
+    }
+
+
+def _child_update(child: str, body: dict[str, Any], *, parent: str = "ses_root") -> dict[str, Any]:
+    return {
+        "rootSessionId": "ses_root", "childSessionId": child, "parentSessionId": parent,
+        "depth": 1, "type": "update", "update": body,
+    }
+
+
+def test_opencode_child_update_nests_under_child_tool(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    opened = provider.ext_update(normalizer, _CHILD, _child_status("ses_child", "running"))
+    assert len(opened) == 1
+    node = opened[0]
+    assert isinstance(node, ToolUseEvent)
+    assert (node.type, node.tool_name, node.tool_input) == ("tool_use", "Subagent", "Explore")
+    assert (node.tool_use_id, node.parent_tool_use_id) == ("child:ses_child", None)
+
+    text = provider.ext_update(normalizer, _CHILD, _child_update("ses_child", {
+        "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "NESTED"},
+        "_meta": {"opencode/child-session": {"id": "ses_child", "parentID": "ses_root", "depth": 1}},
+    }))
+    assert len(text) == 1
+    assert isinstance(text[0], AssistantTextDelta)
+    assert (text[0].text, text[0].parent_tool_use_id) == ("NESTED", "child:ses_child")
+
+    call = provider.ext_update(normalizer, _CHILD, _child_update("ses_child", {
+        "sessionUpdate": "tool_call", "toolCallId": "ses_child:call_1", "title": "bash",
+        "kind": "execute", "rawInput": {"command": "ls"}, "status": "pending",
+    }))
+    assert [event.parent_tool_use_id for event in call] == ["child:ses_child"]
+    assert call[0].tool_use_id == "ses_child:call_1"
+
+    # A grandchild names its parent child, so it nests under that child's node.
+    grand = provider.ext_update(normalizer, _CHILD, {
+        **_child_status("ses_grand", "running", parent="ses_child"), "depth": 2,
+    })
+    assert grand[0].tool_use_id == "child:ses_grand"
+    assert grand[0].parent_tool_use_id == "child:ses_child"
+
+    done = provider.ext_update(normalizer, _CHILD, _child_status("ses_child", "completed"))
+    assert len(done) == 1
+    assert (done[0].type, done[0].tool_use_id, done[0].parent_tool_use_id) == (
+        "tool_result", "child:ses_child", None,
+    )
+    assert done[0].is_error is False
+
+
+def test_opencode_child_failure_is_an_error_result(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    provider.ext_update(normalizer, _CHILD, _child_status("ses_child", "running"))
+    failed = provider.ext_update(normalizer, _CHILD, _child_status("ses_child", "failed"))
+    assert [(event.type, event.is_error) for event in failed] == [("tool_result", True)]
+
+
+def test_opencode_child_guards_drop_foreign_unknown_and_malformed(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    # A child of another session never reaches this chat.
+    foreign = {**_child_status("ses_child", "running"), "rootSessionId": "ses_other"}
+    assert provider.ext_update(normalizer, _CHILD, foreign) == []
+    # Any other extension notification is ignored.
+    assert provider.ext_update(normalizer, "opencode/other", _child_status("ses_child", "running")) == []
+    # A non-string status is not a terminal status: the child opens and nothing ends it.
+    events = provider.ext_update(normalizer, _CHILD, _child_status("ses_child", ["completed"]))
+    assert [event.type for event in events] == ["tool_use"]
+    # A child's compaction is not the chat's: the session must not report it.
+    provider.ext_update(normalizer, _CHILD, _child_update("ses_child", {
+        "sessionUpdate": "compaction_update", "compactionId": "c1", "status": "completed",
+    }))
+    assert normalizer.compacted is False
+
+
+@pytest.mark.asyncio
+async def test_opencode_permission_option_ids_once_always_reject() -> None:
+    options = [
+        {"optionId": "once", "kind": "allow_once", "name": "Once"},
+        {"optionId": "always", "kind": "allow_always", "name": "Always"},
+        {"optionId": "reject", "kind": "reject_once", "name": "Reject"},
+    ]
+    for approved, expected in ((True, "once"), (False, "reject")):
+        broker = PermissionBroker(lambda _event: None)
+        task = asyncio.create_task(broker.request(
+            "ses_root", {"toolCallId": "call-1", "title": "bash"}, options,
+        ))
+        for _ in range(20):
+            if broker.has("call-1"):
+                break
+            await asyncio.sleep(0)
+        assert broker.respond("call-1", approved, session_id="ses_root") == QuestionResponseResult(ok=True)
+        assert await task == {"outcome": "selected", "optionId": expected}
+
+
+class _RecordingSession:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Any]] = []
+
+    def on_ext(self, method: str, payload: Any, hook: Any) -> None:
+        self.calls.append((method, payload))
+
+
+@pytest.mark.asyncio
+async def test_ext_notification_reaches_the_live_session() -> None:
+    client = AgentClient(ext_hook=lambda _n, _m, _p: [])
+    session = _RecordingSession()
+    client.session = session  # type: ignore[assignment]
+    await client.ext_notification(_CHILD, {"rootSessionId": "ses_root"})
+    assert session.calls == [(_CHILD, {"rootSessionId": "ses_root"})]
+    # No hook, no delivery: a client without an extension hook drops the notification.
+    unhooked = AgentClient()
+    unhooked.session = session  # type: ignore[assignment]
+    await unhooked.ext_notification(_CHILD, {"rootSessionId": "ses_root"})
+    assert len(session.calls) == 1

@@ -40,7 +40,7 @@ from ciao.redact import redact_text
 from ciao.tool_path import prepend_engine_path, resolve_tool, terminal_path
 
 _SHUTDOWN_TIMEOUT = 5.0
-_STDIO_LIMIT = 8 * 1024 * 1024
+_STDIO_LIMIT = 31 * 1024 * 1024  # one JSON-RPC line; larger frames fail the read
 _WATCH_FAST_POLLS = 40
 _WATCH_FAST_INTERVAL = 0.25
 _WATCH_SLOW_INTERVAL = 3.0

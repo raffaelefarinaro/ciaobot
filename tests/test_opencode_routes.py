@@ -12,6 +12,7 @@ from starlette.requests import Request
 
 from ciao.config import CiaoConfig
 from ciao.models import AgentRequest, ChatContext
+from ciao.providers.acp.agents import OpencodeAcpProvider
 from ciao.providers.opencode import OpencodeProvider
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
@@ -120,7 +121,7 @@ def test_opencode_chat_messages_render_session_history(
         ],
     }
     read_thread = AsyncMock(return_value=thread)
-    monkeypatch.setattr(OpencodeProvider, "read_thread", read_thread)
+    monkeypatch.setattr(OpencodeAcpProvider, "read_thread", read_thread)
 
     response = asyncio.run(chat_messages(_request(
         f"/api/chats/{chat.chat_id}/messages",
@@ -192,7 +193,7 @@ def test_opencode_chat_messages_render_shell_wakes_as_a_notice_before_the_reply(
         ],
     }
     monkeypatch.setattr(
-        OpencodeProvider, "read_thread", AsyncMock(return_value=thread)
+        OpencodeAcpProvider, "read_thread", AsyncMock(return_value=thread)
     )
 
     response = asyncio.run(chat_messages(_request(
@@ -244,7 +245,7 @@ def test_opencode_chat_messages_split_a_subagent_wake_from_the_turn_before(
         ],
     }
     monkeypatch.setattr(
-        OpencodeProvider, "read_thread", AsyncMock(return_value=thread)
+        OpencodeAcpProvider, "read_thread", AsyncMock(return_value=thread)
     )
 
     response = asyncio.run(chat_messages(_request(
@@ -280,7 +281,7 @@ def test_opencode_chat_messages_skip_synthetic_user_parts(
         ],
     }
     monkeypatch.setattr(
-        OpencodeProvider, "read_thread", AsyncMock(return_value=thread)
+        OpencodeAcpProvider, "read_thread", AsyncMock(return_value=thread)
     )
 
     response = asyncio.run(chat_messages(_request(
@@ -322,7 +323,7 @@ def test_opencode_chat_messages_fall_back_to_the_durable_transcript(
         provider="opencode",
     )
     monkeypatch.setattr(
-        OpencodeProvider, "read_thread", AsyncMock(return_value={})
+        OpencodeAcpProvider, "read_thread", AsyncMock(return_value={})
     )
 
     response = asyncio.run(chat_messages(_request(
@@ -407,7 +408,7 @@ def test_opencode_failed_write_renders_as_activity_not_filecard(
         ],
     }
     monkeypatch.setattr(
-        OpencodeProvider, "read_thread", AsyncMock(return_value=thread)
+        OpencodeAcpProvider, "read_thread", AsyncMock(return_value=thread)
     )
 
     response = asyncio.run(chat_messages(_request(
@@ -470,7 +471,9 @@ def test_opencode_chat_messages_read_each_lineage_session_through_the_registry(
     rows = json.loads(response.body)
 
     root = pcm._agent_root_for_chat(chat.chat_id)
-    assert calls == [(root, "ses_old"), (root, "ses_mid"), (root, "ses_new")]
+    # The ACP journal read runs first and also walks the lineage; the legacy branch
+    # reads each session in order last.
+    assert calls[-3:] == [(root, "ses_old"), (root, "ses_mid"), (root, "ses_new")]
     assert [r["content"] for r in rows if r["role"] == "assistant"] == [
         "a ses_old", "a ses_mid", "a ses_new",
     ]
