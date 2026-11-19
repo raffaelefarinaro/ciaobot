@@ -111,6 +111,12 @@ class PermissionBroker:
             return _outcome(stored, approved=False)
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
+        # A second in-flight prompt with the same toolCallId replaces the
+        # pending entry. Cancel the one it replaces so that future cannot
+        # stay unanswered, including for cancel_all().
+        previous = self._pending.pop(request_id, None)
+        if previous is not None and not previous.future.done():
+            previous.future.set_result({"outcome": "cancelled"})
         self._pending[request_id] = PendingPermission(request_id, session_id, stored, future)
         self.emit(PermissionRequestEvent(
             type="permission_request",

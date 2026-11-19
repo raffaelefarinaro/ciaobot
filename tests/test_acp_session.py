@@ -317,6 +317,76 @@ async def test_late_turn_with_only_usage_closes_silently(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_update_while_result_is_consumed_opens_late_turn(tmp_path: Path) -> None:
+    """An update or permission that lands while the result is consumed must not sit unread."""
+    async with _started(tmp_path, spec_quiet_period_s=0.2) as harness:
+        permission: asyncio.Task[dict[str, Any]] | None = None
+        async for event in harness.session.prompt(
+            [{"type": "text", "text": "hello"}],
+            display="hello",
+            unattended=False,
+        ):
+            if isinstance(event, ResultEvent):
+                harness.session.on_update({
+                    "sessionId": harness.session.session_id,
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "after"},
+                })
+                permission = asyncio.create_task(harness.broker.request(
+                    harness.session.session_id,
+                    {"toolCallId": "late-call", "title": "Bash"},
+                    [{"optionId": "once", "kind": "allow_once", "name": "Once"}],
+                ))
+                # Run the permission emit while the prompt generator is still
+                # suspended on the result, which is the stranded-queue window.
+                await asyncio.sleep(0)
+        assert permission is not None
+        assert harness.session._queue.empty()
+        assert harness.session.late_turn_open
+
+        async def watch() -> ResultEvent:
+            async for event in harness.session.late_events():
+                if isinstance(event, PermissionRequestEvent):
+                    harness.broker.respond(event.request_id, True, session_id=event.session_id)
+                if isinstance(event, ResultEvent):
+                    return event
+            raise AssertionError("late stream ended")
+
+        event = await asyncio.wait_for(watch(), timeout=1.5)
+        assert event.origin == "task-notification"
+        assert event.wake_notice == _WAKE
+        assert event.result == "after"
+        assert await permission == {"outcome": "selected", "optionId": "once"}
+        assert harness.session.late_turn_open is False
+
+
+@pytest.mark.asyncio
+async def test_close_finishes_open_late_turn(tmp_path: Path) -> None:
+    async with _started(tmp_path, spec_quiet_period_s=30) as harness:
+        harness.session.on_update({
+            "sessionId": harness.session.session_id,
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "background"},
+        })
+        assert harness.session.late_turn_open
+
+        async def watch() -> ResultEvent:
+            async for event in harness.session.late_events():
+                if isinstance(event, ResultEvent):
+                    return event
+            raise AssertionError("late stream ended")
+
+        watcher = asyncio.create_task(watch())
+        await asyncio.sleep(0)
+        await harness.session.close()
+        event = await asyncio.wait_for(watcher, timeout=1)
+        assert event.origin == "task-notification"
+        assert event.wake_notice == _WAKE
+        assert event.result == "background"
+        assert harness.session.late_turn_open is False
+
+
+@pytest.mark.asyncio
 async def test_foreground_prompt_closes_open_late_turn_first(tmp_path: Path) -> None:
     async with _started(tmp_path, spec_quiet_period_s=5) as harness:
         harness.session.on_update({

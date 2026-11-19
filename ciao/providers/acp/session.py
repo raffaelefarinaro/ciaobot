@@ -472,6 +472,12 @@ class AcpSession:
                         if task.done():
                             await asyncio.sleep(0)
                             if self._queue.empty():
+                                # The result yield suspends this generator. Clear
+                                # the flag first, with no await after the empty
+                                # check, so an update that arrives while the
+                                # caller consumes the result opens a late turn
+                                # instead of remaining unread on this queue.
+                                self._prompt_active = False
                                 break
                             continue
                         incoming = asyncio.create_task(self._queue.get())
@@ -566,9 +572,6 @@ class AcpSession:
 
     async def close(self) -> None:
         """``session/close`` when the agent advertises it, then nothing else."""
-        task = self._quiet_task
-        self._quiet_task = None
-        if task is not None and task is not asyncio.current_task():
-            task.cancel()
+        self._close_late()
         if self._cap_object("sessionCapabilities", "close") and self.session_id:
             await self._connection.conn.close_session(session_id=self.session_id)

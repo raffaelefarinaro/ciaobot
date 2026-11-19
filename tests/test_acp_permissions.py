@@ -141,6 +141,26 @@ async def test_respond_wrong_session_is_expired() -> None:
 
 
 @pytest.mark.asyncio
+async def test_duplicate_request_id_cancels_the_older_future() -> None:
+    broker = PermissionBroker(lambda _event: None)
+    options = [_option("once", "allow_once")]
+    first = asyncio.create_task(broker.request(
+        "sess", {"toolCallId": "call-1", "title": "Bash"}, options,
+    ))
+    await _settle(broker, "call-1")
+    second = asyncio.create_task(broker.request(
+        "sess", {"toolCallId": "call-1", "title": "Read"}, options,
+    ))
+    await asyncio.sleep(0)
+    assert await asyncio.wait_for(first, timeout=1) == {"outcome": "cancelled"}
+    assert broker.has("call-1")
+    assert not second.done()
+    broker.cancel_all()
+    assert await second == {"outcome": "cancelled"}
+    assert not broker.has("call-1")
+
+
+@pytest.mark.asyncio
 async def test_cancel_all_answers_every_pending_with_cancelled() -> None:
     broker = PermissionBroker(lambda _event: None)
     first = asyncio.create_task(broker.request("sess", {"toolCallId": "a", "title": "Read"}, [
