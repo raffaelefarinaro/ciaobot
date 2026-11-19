@@ -11,11 +11,11 @@ from __future__ import annotations
 import argparse
 import json
 from types import SimpleNamespace
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from ciao import agent_cli, cli
 from ciao import curation_run
-from ciao.execution_modes import CREDENTIAL_DENY_PATTERNS
+from ciao.execution_modes import is_credential_adjacent
 
 _CIAO = Path(__file__).resolve().parents[1] / "ciao"
 
@@ -42,9 +42,9 @@ def test_no_operator_cli_sets_the_handover() -> None:
         assert "memory_handover" not in source, relative
 
 
-def test_workspace_registry_is_under_the_runtime_deny_pattern() -> None:
-    registry = PurePosixPath("/home/user/workspace/.runtime/workspaces.json")
-    assert any(registry.match(pattern) for pattern in CREDENTIAL_DENY_PATTERNS)
+def test_workspace_registry_is_credential_adjacent() -> None:
+    registry = Path("/home/user/workspace/.runtime/workspaces.json")
+    assert is_credential_adjacent(registry)
 
 
 def test_corrupt_state_blocks_handover_accept_and_dismiss_before_queue_mutation(

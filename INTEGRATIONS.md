@@ -105,21 +105,16 @@ is fail-open if the provider is unavailable.
 ### Auto mode approvals
 
 OpenCode chats follow the chat's permission mode (the per-provider default
-from Settings → Providers, Auto unless changed). In Auto the V2
-session permission ruleset allows routine tools while routing every `shell`
-action to `ask`; Manual routes every tool to `ask` and Bypass suppresses
-routine cards. V2 `glob` and `grep` resources are search patterns/regexes
-rather than file paths, so those search actions require an explicit approval
-card in every mode (including `bypass`) to prevent silent enumeration of
-credential-bearing paths. In every mode, including Bypass, credential-path
-denies (`**/.env`, `**/.runtime/**`, `**/secrets/**`, plus the resolved
-`CIAO_RUNTIME_ROOT`) are appended last for OpenCode's V2 native file/search
-actions. When the runtime root is inside the session location, the rules also
-include its workspace-relative spelling because V2 internal resources are
-relative. They do not cover `shell`, because a shell command cannot be
-path-scoped by a glob. In Manual and Auto a shell command such as `cat .env`
-still raises an approval card; in Bypass it runs without one, so Bypass does
-not protect those files from shell access. Each `ask` surfaces an approval card
+from Settings → Providers, Auto unless changed). The V2 session permission
+ruleset is a mode wildcard, last-match-wins. Plan asks for every action and
+then allows `read`, `glob` and `grep`. Normal (Manual) asks for every action.
+Auto allows routine tools and routes every `shell` action to `ask`. Bypass
+allows every action. `glob` and `grep` follow those wildcards: allowed in
+plan and auto, ask in normal. There are no credential-path denies. File tools
+can read the workspace `.env` and `.runtime`. Bypass and shell were never
+covered by a path rule: a shell command such as `cat .env` still raises an
+approval card in normal and auto, and in bypass it runs without one. Each
+`ask` surfaces an approval card
 in the chat that the operator approves or denies. Native form cards validate
 required, scalar, length, item-count, format, and pattern constraints before
 submission; cards remain mounted until the server acknowledges delivery and

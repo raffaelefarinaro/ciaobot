@@ -2,8 +2,7 @@
 
 Every server declared for a workspace (its own agent-root ``.mcp.json``, or the
 shared one) loads in its chats; only an ``mcp__<server>`` entry in the
-workspace's ``disallowed_tools`` blocks one. The end-of-conversation memory
-pass is the exception: it denies every declared server.
+workspace's ``disallowed_tools`` blocks one.
 """
 
 from __future__ import annotations
@@ -97,32 +96,3 @@ def test_a_stale_allowlist_key_is_ignored_and_dropped(tmp_path: Path) -> None:
         (tmp_path / ".runtime" / "workspaces.json").read_text(encoding="utf-8")
     )
     assert "allowed_mcp_servers" not in entries[0]
-
-
-def test_memory_pass_denies_every_server_declared_for_its_root(tmp_path: Path) -> None:
-    _write_mcp_json(tmp_path / "personal")
-    _write_mcp_json(
-        tmp_path / "work",
-        {"mcpServers": {"gamma": {"command": "npx", "args": ["gamma"]}}},
-    )
-    _write_registry(tmp_path, [{"name": "personal"}, {"name": "work"}])
-    _mark_rerooted(tmp_path)
-    config = _config(tmp_path)
-
-    personal = _mcp_denials(config.memory_pass_denied_tools("personal"))
-    work = _mcp_denials(config.memory_pass_denied_tools("work"))
-    assert personal == ["mcp__alpha", "mcp__beta"]
-    assert work == ["mcp__gamma"]
-
-
-def test_memory_pass_skips_an_unparseable_file(tmp_path: Path) -> None:
-    (tmp_path / ".mcp.json").write_text("{not json", encoding="utf-8")
-    _write_mcp_json(
-        tmp_path / "personal",
-        {"mcpServers": {"gamma": {"command": "npx", "args": ["gamma"]}}},
-    )
-    _write_registry(tmp_path, [{"name": "personal"}])
-    _mark_rerooted(tmp_path)
-    config = _config(tmp_path)
-
-    assert _mcp_denials(config.memory_pass_denied_tools("personal")) == ["mcp__gamma"]

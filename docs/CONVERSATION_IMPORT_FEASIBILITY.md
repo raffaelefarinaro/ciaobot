@@ -1,5 +1,7 @@
 # Conversation-history import: source-format and proposals-only extraction feasibility (issue #980)
 
+Historical: written before #3135; names symbols that no longer exist.
+
 ## Status
 
 Evidence/design report for #980, a child of #975. **No runtime code was
