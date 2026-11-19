@@ -23,34 +23,9 @@ protocol ClientUpdaterEngine: AnyObject {
     func checkForUpdatesInBackground()
 }
 
-/// Runs Sparkle's immediate install handler on the next main-queue turn and
-/// reports that this client took control of it.
-///
-/// Sparkle calls its delegate while the update session is still unwinding. The
-/// handler terminates the running client and lets Sparkle's installer replace
-/// the bundle, so it must not run inside that call. Returning `true` first is
-/// what tells Sparkle not to wait for a quit.
-@MainActor
-struct ImmediateInstallScheduler {
-    typealias Deferral = (@escaping () -> Void) -> Void
-
-    private let deferral: Deferral
-
-    init(deferral: Deferral? = nil) {
-        self.deferral = deferral ?? { handler in
-            DispatchQueue.main.async { handler() }
-        }
-    }
-
-    func takeControl(_ immediateInstallHandler: @escaping () -> Void) -> Bool {
-        deferral(immediateInstallHandler)
-        return true
-    }
-}
-
-/// Sparkle's updater delegate for this client. It implements exactly one
-/// contract: taking an already verified, downloaded update and installing it
-/// immediately instead of waiting for the user to quit.
+/// Sparkle's updater delegate for this client. It implements one contract:
+/// taking an already verified, downloaded update and installing it, with the
+/// bundled engine drained first (`UpdateInstallGate`).
 @MainActor
 final class ClientUpdateInstallDelegate: NSObject, SPUUpdaterDelegate {
     /// The Sparkle 2.10.1 selector from `SPUUpdaterDelegate.h`. It is spelled
@@ -59,38 +34,63 @@ final class ClientUpdateInstallDelegate: NSObject, SPUUpdaterDelegate {
         "updater:willInstallUpdateOnQuit:immediateInstallationBlock:"
     )
 
-    private let immediateInstall: ImmediateInstallScheduler
-    private let updateQuit: UpdateQuitIntent
+    typealias GateFactory = @MainActor (_ owner: String) -> UpdateInstallGate
 
-    init(immediateInstall: ImmediateInstallScheduler? = nil, updateQuit: UpdateQuitIntent? = nil) {
-        self.immediateInstall = immediateInstall ?? ImmediateInstallScheduler()
-        self.updateQuit = updateQuit ?? UpdateQuitIntent()
+    private let makeGate: GateFactory
+    private let updateQuit: UpdateQuitIntent
+    /// The gate for the update Sparkle is installing now.
+    private var gate: UpdateInstallGate?
+
+    init(makeGate: GateFactory? = nil, updateQuit: UpdateQuitIntent? = nil) {
+        let quit = updateQuit ?? UpdateQuitIntent()
+        self.updateQuit = quit
+        self.makeGate = makeGate ?? { owner in
+            UpdateInstallGate(
+                localPort: { nil },
+                drainer: EngineDrainClient(),
+                owner: owner,
+                willInstall: { quit.beginInstall() },
+                schedule: UpdateInstallGate.mainQueueSchedule
+            )
+        }
         super.init()
     }
 
-    /// Returns `true` so Sparkle hands installation to this client; the handler
-    /// is deferred by `ImmediateInstallScheduler`. The appcast item is unused:
-    /// Sparkle has already verified the archive signature and notarization
-    /// before this point, and this client never inspects or rewrites it.
+    /// Hands the install to this client's gate. The appcast item is unused
+    /// beyond naming the drain owner: Sparkle has already verified the archive
+    /// signature and notarization before this point.
     @objc(updater:willInstallUpdateOnQuit:immediateInstallationBlock:)
     func updater(
         _ updater: SPUUpdater,
         willInstallUpdateOnQuit item: SUAppcastItem,
         immediateInstallationBlock immediateInstallHandler: @escaping () -> Void
     ) -> Bool {
-        takeControl(of: immediateInstallHandler)
+        takeControl(owner: "sparkle-\(item.versionString)", of: immediateInstallHandler)
     }
 
-    /// Sparkle's handler terminates the app. Mark that terminate as an update
-    /// install first, so the quit path treats it as a system quit (no
-    /// confirmation dialog, bounded engine drain) instead of asking. The
-    /// update is the user's own choice already, and a dialog could leave
-    /// Sparkle's installer waiting behind it.
-    func takeControl(of immediateInstallHandler: @escaping () -> Void) -> Bool {
-        immediateInstall.takeControl { [updateQuit] in
-            updateQuit.beginInstall()
-            immediateInstallHandler()
+    /// Sparkle's own "Install and Relaunch" (automatic install off) has already
+    /// shown its alert, which is the user's consent, so there is no drain. The
+    /// terminate that follows is still an update quit: no dialog.
+    @objc func updaterWillRelaunchApplication(_ updater: SPUUpdater) {
+        relaunchWillStart()
+    }
+
+    func relaunchWillStart() {
+        updateQuit.beginInstall()
+    }
+
+    /// Sparkle gave up on the install: release the drain this client holds.
+    @objc func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+        gate?.installAborted()
+    }
+
+    /// The gate for `owner` takes the handler. A second call for the same
+    /// owner replaces the stored handler and keeps the gate.
+    func takeControl(owner: String, of immediateInstallHandler: @escaping () -> Void) -> Bool {
+        if gate?.owner != owner {
+            gate = makeGate(owner)
         }
+        return gate?.takeControl(immediateInstallHandler) ?? false
     }
 }
 
@@ -189,15 +189,30 @@ final class ClientUpdater: ClientUpdateControlling {
     convenience init(
         bundle: Bundle = .main,
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        updateQuit: UpdateQuitIntent? = nil
+        updateQuit: UpdateQuitIntent? = nil,
+        localPort: @escaping () -> Int? = { nil }
     ) {
+        let quit = updateQuit ?? UpdateQuitIntent()
         self.init(
             configuration: Configuration(
                 bundle: bundle,
                 allowsUpdates: Self.isReleaseBuild,
                 isTestProcess: Self.isTestProcess(environment: environment)
             ),
-            makeEngine: { SparkleUpdaterEngine(installDelegate: ClientUpdateInstallDelegate(updateQuit: updateQuit)) }
+            makeEngine: {
+                SparkleUpdaterEngine(installDelegate: ClientUpdateInstallDelegate(
+                    makeGate: { owner in
+                        UpdateInstallGate(
+                            localPort: localPort,
+                            drainer: EngineDrainClient(),
+                            owner: owner,
+                            willInstall: { quit.beginInstall() },
+                            schedule: UpdateInstallGate.mainQueueSchedule
+                        )
+                    },
+                    updateQuit: quit
+                ))
+            }
         )
     }
 

@@ -9,6 +9,9 @@ import CoreServices
 enum QuitReason {
     case user
     case system
+    /// Sparkle's install is replacing the bundle: the user already chose to
+    /// install, so there is no dialog, and the engine gets the full quit grace.
+    case update
 }
 
 /// The quit confirmation as presented: fixed copy, fixed buttons.
@@ -30,11 +33,10 @@ enum EngineLifecycle {
     /// a user quit, a quit event without a reason, or no Apple event at all
     /// (the tray does not send one) — reads as `.user`.
     ///
-    /// `updateInstall` is true while Sparkle's immediate install is taking the
-    /// app down to replace the bundle: the user already chose to install, so
-    /// that terminate is a system quit too (no dialog, bounded drain).
+    /// `updateInstall` is true while Sparkle's install is taking the app down to
+    /// replace the bundle: that terminate is `.update`, never a user quit.
     static func quitReason(_ event: NSAppleEventDescriptor?, updateInstall: Bool = false) -> QuitReason {
-        if updateInstall { return .system }
+        if updateInstall { return .update }
         guard let event, event.eventClass == kCoreEventClass, event.eventID == kAEQuitApplication,
               let reason = event.attributeDescriptor(forKeyword: kAEQuitReason) else { return .user }
         switch reason.enumCodeValue {
@@ -113,7 +115,11 @@ enum EngineLifecycle {
         case .stopping:
             return .stopThenTerminate(grace: quitGrace)
         case .starting, .running:
-            return quitReason == .system ? .stopThenTerminate(grace: systemQuitGrace) : .confirm
+            switch quitReason {
+            case .user: return .confirm
+            case .system: return .stopThenTerminate(grace: systemQuitGrace)
+            case .update: return .stopThenTerminate(grace: quitGrace)
+            }
         }
     }
 

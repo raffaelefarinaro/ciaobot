@@ -200,7 +200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // The updater lives for the app's lifetime. Creating it is inert in
             // a debug build, a test process, or a build without the release
             // updater keys; `start()` decides and records why.
-            updater: ClientUpdater(updateQuit: updateQuit),
+            updater: ClientUpdater(updateQuit: updateQuit, localPort: { engineParts.supervisor.runningPort }),
             // The signing probe is the real one here. The row explains an
             // ad-hoc or unsigned build instead of offering a registration macOS
             // would refuse.
@@ -562,8 +562,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // every reply requested while it is on the stack waits one turn.
         insideShouldTerminate = true
         defer { insideShouldTerminate = false }
-        // Sparkle's immediate install terminates the app to swap the bundle:
-        // it is a system quit, so no dialog stands in front of it.
+        // Sparkle's install terminates the app to swap the bundle, after the
+        // update gate has drained the engine: it is an update quit, so no
+        // dialog stands in front of it.
         let reason = EngineLifecycle.quitReason(launchEvent(), updateInstall: updateQuit.installing)
         switch EngineLifecycle.terminationPlan(mode: mode, engineState: supervisor?.state, quitReason: reason) {
         case .terminateNow:

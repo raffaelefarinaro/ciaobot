@@ -187,46 +187,6 @@ final class ClientUpdaterTests: XCTestCase {
 
     // MARK: - Immediate install
 
-    func testImmediateInstallTakesControlBeforeTheHandlerRuns() {
-        let scheduler = ImmediateInstallScheduler()
-        let ran = expectation(description: "install handler ran")
-        var didRunInsideTheDelegateCall = false
-
-        let tookControl = scheduler.takeControl {
-            didRunInsideTheDelegateCall = true
-            ran.fulfill()
-        }
-
-        XCTAssertTrue(tookControl, "Returning true is what stops Sparkle waiting for a quit.")
-        XCTAssertFalse(didRunInsideTheDelegateCall, "The handler must not run before Sparkle's delegate call returns.")
-        wait(for: [ran], timeout: 1)
-    }
-
-    func testImmediateInstallHandlerRunsOnTheMainQueue() {
-        let scheduler = ImmediateInstallScheduler()
-        let ran = expectation(description: "install handler ran")
-        var wasMainThread: Bool?
-
-        _ = scheduler.takeControl {
-            wasMainThread = Thread.isMainThread
-            ran.fulfill()
-        }
-
-        wait(for: [ran], timeout: 1)
-        XCTAssertEqual(wasMainThread, true, "Installing must happen where AppKit and Sparkle expect it.")
-    }
-
-    func testImmediateInstallUsesTheInjectedDeferral() {
-        var deferred: (() -> Void)?
-        let scheduler = ImmediateInstallScheduler { handler in deferred = handler }
-        var runs = 0
-
-        XCTAssertTrue(scheduler.takeControl { runs += 1 })
-        XCTAssertEqual(runs, 0, "Nothing runs until the deferred turn.")
-        deferred?()
-        XCTAssertEqual(runs, 1)
-    }
-
     func testInstallDelegateImplementsTheSparkleImmediateInstallContract() {
         let delegate = ClientUpdateInstallDelegate()
         XCTAssertTrue(
@@ -234,6 +194,19 @@ final class ClientUpdaterTests: XCTestCase {
             "The Swift signature must map to Sparkle 2.10.1's updater:willInstallUpdateOnQuit:immediateInstallationBlock:, or Sparkle will silently wait for quit."
         )
         XCTAssertTrue(delegate.conforms(to: SPUUpdaterDelegate.self))
+        XCTAssertTrue(delegate.responds(to: NSSelectorFromString("updaterWillRelaunchApplication:")))
+        XCTAssertTrue(delegate.responds(to: NSSelectorFromString("updater:didAbortWithError:")))
+    }
+
+    /// Sparkle's own "Install and Relaunch" has already shown its alert, so the
+    /// relaunch raises the update reason and needs no drain.
+    func testSparkleRelaunchRaisesTheUpdateReason() {
+        let updateQuit = UpdateQuitIntent()
+        let delegate = ClientUpdateInstallDelegate(updateQuit: updateQuit)
+
+        XCTAssertFalse(updateQuit.installing)
+        delegate.relaunchWillStart()
+        XCTAssertTrue(updateQuit.installing)
     }
 
     // MARK: - Configuration

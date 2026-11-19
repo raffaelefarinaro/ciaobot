@@ -265,9 +265,9 @@ final class EngineLifecycleTests: XCTestCase {
         XCTAssertEqual(EngineLifecycle.quitMessage(blockers: 1).body, base + suffix)
     }
 
-    func testAnUpdateInstallIsASystemQuit() {
-        XCTAssertEqual(EngineLifecycle.quitReason(nil, updateInstall: true), .system)
-        XCTAssertEqual(EngineLifecycle.quitReason(quitEvent(reason: nil), updateInstall: true), .system)
+    func testAnUpdateInstallIsItsOwnQuitReason() {
+        XCTAssertEqual(EngineLifecycle.quitReason(nil, updateInstall: true), .update)
+        XCTAssertEqual(EngineLifecycle.quitReason(quitEvent(reason: nil), updateInstall: true), .update)
         XCTAssertEqual(EngineLifecycle.quitReason(nil, updateInstall: false), .user)
     }
 
@@ -291,6 +291,14 @@ final class EngineLifecycleTests: XCTestCase {
         // A user quit of a starting or running engine asks first.
         XCTAssertEqual(EngineLifecycle.terminationPlan(mode: .local, engineState: .starting, quitReason: .user), .confirm)
         XCTAssertEqual(EngineLifecycle.terminationPlan(mode: .local, engineState: running, quitReason: .user), .confirm)
+        // An update install stops a starting or running engine with the full
+        // quit grace, and never asks.
+        XCTAssertEqual(EngineLifecycle.terminationPlan(mode: .local, engineState: .starting, quitReason: .update),
+                       .stopThenTerminate(grace: 35))
+        XCTAssertEqual(EngineLifecycle.terminationPlan(mode: .local, engineState: running, quitReason: .update),
+                       .stopThenTerminate(grace: 35))
+        XCTAssertEqual(EngineLifecycle.terminationPlan(mode: .local, engineState: .stopped, quitReason: .update), .terminateNow)
+        XCTAssertEqual(EngineLifecycle.terminationPlan(mode: .external, engineState: running, quitReason: .update), .terminateNow)
     }
 
     func testBlockersParseCountsAndRefusesEverythingElse() {
@@ -916,16 +924,25 @@ final class EngineLifecycleTests: XCTestCase {
         XCTAssertEqual(dialogs.titles.count, 1)
     }
 
-    /// The install handler raises the flag before it runs Sparkle's handler.
+    /// The gate raises the flag before it runs Sparkle's handler, and only on
+    /// the deferred turn. With no engine running the install needs no drain.
     func testTheInstallDelegateRaisesTheFlagBeforeSparkleTerminates() {
         let updateQuit = UpdateQuitIntent()
         var deferred: (() -> Void)?
         let delegate = ClientUpdateInstallDelegate(
-            immediateInstall: ImmediateInstallScheduler { handler in deferred = handler },
+            makeGate: { owner in
+                UpdateInstallGate(
+                    localPort: { nil },
+                    drainer: ScriptedEngineDrainer(),
+                    owner: owner,
+                    willInstall: { updateQuit.beginInstall() },
+                    schedule: { _, work in deferred = work }
+                )
+            },
             updateQuit: updateQuit
         )
         var flagWhenSparkleTerminated: Bool?
-        XCTAssertTrue(delegate.takeControl { flagWhenSparkleTerminated = updateQuit.installing })
+        XCTAssertTrue(delegate.takeControl(owner: "sparkle-1.2.3") { flagWhenSparkleTerminated = updateQuit.installing })
         XCTAssertFalse(updateQuit.installing, "nothing is raised before the deferred turn")
         deferred?()
         XCTAssertEqual(flagWhenSparkleTerminated, true)

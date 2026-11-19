@@ -171,6 +171,25 @@ def test_drain_refuses_while_a_settings_restart_is_draining() -> None:
     assert pcm.restart_draining is True
 
 
+def test_drain_accepts_sparkle_owner_and_cancel_reopens() -> None:
+    # The Mac client's update gate names its drain `sparkle-<version>` and
+    # cancels with that same owner. Pin that contract here, so the app and the
+    # engine cannot drift apart on the owner shape or the cancel.
+    pcm = _manager()
+    client = _client(pcm)
+
+    drained = client.post("/api/admin/drain", json={"owner": "sparkle-1.10.0"})
+    assert drained.status_code == 200
+    assert drained.json() == {"draining": True, "active_chat_ids": ["c-1", "c-2"]}
+    assert pcm.restart_draining is True
+    assert pcm.owner == "sparkle-1.10.0"
+
+    cancelled = client.post("/api/admin/drain/cancel", json={"owner": "sparkle-1.10.0"})
+    assert cancelled.status_code == 200
+    assert cancelled.json() == {"draining": False}
+    assert pcm.restart_draining is False
+
+
 def test_drain_cancel_leaves_a_settings_restart_alone() -> None:
     pcm = _restarting()
     client = _client(pcm)
