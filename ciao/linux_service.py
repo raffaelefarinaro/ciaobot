@@ -8,6 +8,10 @@ from importlib import resources
 from pathlib import Path
 import os
 import re
+import subprocess
+import sys
+import tempfile
+import urllib.request
 
 from ciao.os_support.limits import SERVER_NOFILE_TARGET
 from ciao.os_support.tool_path import dedupe_path
@@ -16,6 +20,8 @@ from ciao.os_support.tool_path import dedupe_path
 # Where docs/LINUX.md installs the unit, and the only owner whose copy is trusted.
 UNIT_PATH = Path("/etc/systemd/system/ciaobot.service")
 TRUSTED_UNIT_UID = 0
+# The stamped installer of the newest stable release (scripts/install.sh).
+LATEST_INSTALLER_URL = "https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh"
 
 
 def _unquote(value: str) -> str:
@@ -254,3 +260,38 @@ def run_plan(plan: ServicePlan, *, run: Callable[[Sequence[str], str | None], No
     """Run the plan's commands in order; ``run`` receives ``(argv, stdin)``."""
     for argv, stdin in plan.commands:
         run(argv, stdin)
+
+
+def _download(url: str, dest: Path) -> None:
+    """Fetch ``url`` into ``dest``. Only https is accepted, as in the installer itself."""
+    if not url.startswith("https://"):
+        raise ValueError(f"refusing to fetch a non-https installer: {url}")
+    with urllib.request.urlopen(url, timeout=60) as response:
+        dest.write_bytes(response.read())
+
+
+def _run(argv: Sequence[str]) -> int:
+    return subprocess.call(list(argv))
+
+
+def run_update(
+    argv: Sequence[str],
+    *,
+    fetch: Callable[[str, Path], None] = _download,
+    run: Callable[[Sequence[str]], int] = _run,
+) -> int:
+    """Update a Linux install by re-running the latest stamped installer as this account.
+
+    The installer is the update: it re-downloads the release wheel, checks it
+    against the digest stamped into the script, refreshes the uv tool env and
+    re-installs the unit. ``argv`` (for example ``--no-service``) is passed
+    through to it. The child's exit status is the answer.
+    """
+    with tempfile.TemporaryDirectory(prefix="ciaobot-update-") as tmp:
+        script = Path(tmp) / "install.sh"
+        try:
+            fetch(LATEST_INSTALLER_URL, script)
+        except (OSError, ValueError) as exc:
+            print(f"ciao update: could not download the installer: {exc}", file=sys.stderr)
+            return 1
+        return run(["sh", str(script), *argv])

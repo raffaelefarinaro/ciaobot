@@ -400,6 +400,14 @@ def detect_install_mode() -> str:
     except Exception:
         pass
 
+    # The Linux one-line installer runs `uv tool install`, which writes
+    # uv-receipt.toml into the tool env root, the interpreter's prefix. Checked
+    # after the editable test, so a source checkout on Linux stays `editable`.
+    from pathlib import Path
+
+    if sys.platform.startswith("linux") and (Path(sys.prefix) / "uv-receipt.toml").is_file():
+        return "uv_tool"
+
     return "unknown"
 
 
@@ -553,12 +561,26 @@ def update_package(
                 "This engine was installed by the Ciaobot installer and no longer "
                 "updates itself. Ciaobot for Mac updates it."
             )
-        else:
-            installer_error = (
+            return {"ok": False, "mode": mode, "error": installer_error, "command": ""}
+        return {
+            "ok": False,
+            "mode": mode,
+            "error": (
                 "This engine was installed by the Ciaobot installer and no longer "
-                "updates itself. The administrator reinstalls it; see docs/LINUX.md."
-            )
-        return {"ok": False, "mode": mode, "error": installer_error, "command": ""}
+                "updates itself. Run `ciao update` as the account that owns it; "
+                "see docs/LINUX.md."
+            ),
+            "command": "ciao update",
+        }
+    if mode == "uv_tool":
+        # The Linux one-line install. `ciao update` re-runs the latest installer,
+        # so the answer names the command rather than a manual reinstall.
+        return {
+            "ok": False,
+            "mode": mode,
+            "error": "Update by running `ciao update` as this account; it re-runs the latest installer.",
+            "command": "ciao update",
+        }
     if sys.platform.startswith("linux"):
         # The documented Linux install is `pip install -e`, which
         # detect_install_mode() classifies as `editable`. A generic

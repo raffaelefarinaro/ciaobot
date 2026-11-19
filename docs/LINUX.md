@@ -252,13 +252,13 @@ directly at the HTTPS hostname with its dashboard password.
 
 ## Updates and backups
 
-A one-line install updates by re-running the installer — the same one line.
-`ciao update` no longer updates an engine; `ciao update status` only prints the
-last update record.
-The install re-downloads the release wheel, checks it against the stamped
-digest, refreshes the engine with `uv tool install --force`, and re-installs
-and restarts the service unit; the workspace, its `.env` and its configuration
-are kept. Never update as root: run it as the account that owns the install.
+Run `ciao update` as the account that owns the install to update a one-line
+install. It downloads the latest installer and runs it with the flags you pass
+(for example `ciao update --no-service`). The installer re-downloads the release
+wheel, checks it against the stamped digest, refreshes the engine with
+`uv tool install --force`, and re-installs and restarts the service unit; the
+workspace, its `.env` and its configuration are kept. `ciao update status`
+prints the last update record. Never update as root.
 
 Source installs are updated by the administrator — never as the ciaobot
 account, which owns neither the source checkout nor the virtualenv. Pin the
