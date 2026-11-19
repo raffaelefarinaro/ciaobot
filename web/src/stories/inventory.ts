@@ -3199,7 +3199,7 @@ export const inventory: InventoryEntry[] = [
     "id": "components-memory-map-view",
     "name": "MemoryMapView",
     "family": "Memory and usage",
-    "kind": "component",
+    "kind": "composition",
     "owner": {
       "path": "web/src/components/MemoryMapView.vue",
       "anchor": "<template>"
@@ -3334,7 +3334,7 @@ export const inventory: InventoryEntry[] = [
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
     },
-    "rationale": "Connected route composition mounted isolated through the fail-closed fixture boundary; its story coverage is claimed on this row because only component rows may claim story coverage (#3263), and its section routes are covered by their child component rows."
+    "rationale": "Connected route composition mounted isolated through the fail-closed fixture boundary; its rendered states claim its own stories on this row (composition rows may claim story coverage), and its section routes are covered by their child component rows."
   },
   {
     "id": "components-model-selector",

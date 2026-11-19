@@ -125,6 +125,10 @@ function statesOf(claims: ReadonlyMap<string, StoryClaim>, entryId: string): Sto
   return states
 }
 
+/** Row kinds whose covered states may claim stories. A composition row is a view
+ * composed of several components; its stories render the real composition. */
+const storyClaimingKinds: InventoryEntry['kind'][] = ['component', 'composition', 'inline']
+
 function assertCoverage(entries: InventoryEntry[]) {
   const ids = new Set<string>()
   for (const entry of entries) {
@@ -142,7 +146,7 @@ function assertCoverage(entries: InventoryEntry[]) {
     for (const state of entry.states) {
       expect(state.name.trim()).not.toBe(''); expect(state.note.trim()).not.toBe('')
       if (state.coverage !== 'covered' && state.storyIds.length) throw new Error(`Noncovered state has story IDs: ${entry.id}/${state.name}`)
-      if (state.coverage === 'covered' && entry.kind !== 'component' && entry.kind !== 'inline') throw new Error(`Invalid covered state (kind ${entry.kind}): ${entry.id}/${state.name} may not claim story coverage`)
+      if (state.coverage === 'covered' && !storyClaimingKinds.includes(entry.kind)) throw new Error(`Invalid covered state (kind ${entry.kind}): ${entry.id}/${state.name} may not claim story coverage`)
     }
   }
 }
@@ -249,13 +253,18 @@ describe('production ownership', () => {
     assertCoverage(inventory)
   })
 
-  it('claims story coverage only from component and inline rows', () => {
+  it('claims story coverage only from component, inline and composition rows', () => {
     const row = inventory.find((entry) => entry.id === 'components-confirm-dialog')!
-    for (const kind of ['css', 'composition'] as const) {
-      const entry = { ...structuredClone(row), id: `fake-${kind}`, kind, rationale: 'Not a component owner' }
-      expect(() => assertCoverage([entry]), `Invalid covered state (kind ${kind})`).toThrow(`Invalid covered state (kind ${kind}): fake-${kind}/default`)
-    }
+    const css = { ...structuredClone(row), id: 'fake-css', kind: 'css' as const, rationale: 'Not a component owner' }
+    expect(() => assertCoverage([css]), 'Invalid covered state (kind css)').toThrow('Invalid covered state (kind css): fake-css/default')
     expect(() => assertCoverage([structuredClone(row)])).not.toThrow()
+    // A composition row may claim its own rendered stories, like a component row.
+    const composition = { ...structuredClone(row), id: 'fake-composition', kind: 'composition' as const, rationale: 'A view composed of several components' }
+    expect(() => assertCoverage([composition])).not.toThrow()
+    // The real composition row that claims its own rendered stories (MemoryMapView).
+    const memoryMap = inventory.find((entry) => entry.id === 'components-memory-map-view')!
+    expect(memoryMap.kind).toBe('composition')
+    expect(memoryMap.states.some((state) => state.coverage === 'covered' && state.storyIds.length > 0)).toBe(true)
     // An inline family renders through its owner SFC (task sheets, the B12
     // slice): its row is the one that can claim those states.
     const inlineRow = inventory.find((entry) => entry.id === 'task-completion')!
