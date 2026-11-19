@@ -107,6 +107,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The app-owned engine and everything needed to run it. Never started in
     /// external mode. The test initializer leaves it out unless injected.
     let supervisor: EngineSupervisor?
+    /// The 1.x takeover for this launch (#3129 S7): run before the local engine
+    /// starts, so an old install is moved into the app first. Nil when there is
+    /// no bundled engine, or in the test initializer unless injected.
+    let takeover: EngineTakeover?
     /// The launch's last-server and saved-host stores, handed to the
     /// connection view so one defaults domain (or one DEBUG test suite) holds
     /// all three stored decisions.
@@ -195,6 +199,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #else
         addressedTestLaunch = false
         #endif
+        let engineParts = Self.makeEngineParts()
         self.init(
             session: session,
             presenter: presenter,
@@ -220,7 +225,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 lastOrigin: lastServerStore.savedOrigin,
                 addressedTestLaunch: addressedTestLaunch
             ),
-            supervisor: Self.makeSupervisor(),
+            supervisor: engineParts.supervisor,
+            takeover: engineParts.takeover,
             lastServer: lastServerStore,
             hostStore: UserDefaultsHostListStore(defaults: launchDefaults, lastServer: lastServerStore),
             updateQuit: updateQuit
@@ -250,6 +256,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // external: an ordinary test launch runs no engine.
         mode: EngineMode? = nil,
         supervisor: EngineSupervisor? = nil,
+        takeover: EngineTakeover? = nil,
         lastServer: LastServerStoring? = nil,
         hostStore: HostListStoring? = nil,
         // The lifecycle surfaces (S6). Defaults are the real behaviour; the
@@ -279,6 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.engineMode = engineMode ?? TransientEngineModeStore()
         self.mode = mode ?? self.engineMode.mode ?? .external
         self.supervisor = supervisor
+        self.takeover = takeover
         let lastServer = lastServer ?? UserDefaultsLastServerStore()
         self.lastServer = lastServer
         self.hostStore = hostStore ?? UserDefaultsHostListStore(lastServer: lastServer)
@@ -312,11 +320,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return EngineMode.initial(saved: saved, lastOrigin: lastOrigin, hostIsArm64: BundledEngine.hostIsArm64)
     }
 
-    /// The bundled engine with the app's own supervisor surfaces, or a
-    /// supervisor that reports the fixed unavailable copy when this launch
-    /// has no usable `Contents/Resources/engine`. A DEBUG test launch can
-    /// point both the home and the engine resources somewhere isolated.
-    private static func makeSupervisor() -> EngineSupervisor {
+    /// The bundled engine's supervisor and the 1.x takeover that runs before
+    /// it starts, from one locate. The takeover is nil without a usable engine
+    /// (the supervisor then reports the fixed unavailable copy). A DEBUG test
+    /// launch can point the home and the engine resources somewhere isolated.
+    private static func makeEngineParts() -> (supervisor: EngineSupervisor, takeover: EngineTakeover?) {
         let resourceDirectory: URL?
         let home: URL
         let enginePort: Int?
@@ -330,13 +338,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         home = FileManager.default.homeDirectoryForCurrentUser
         #endif
         let engine = try? BundledEngine.locate(resourceDirectory: resourceDirectory)
-        return EngineSupervisor(
+        let engineHome = EngineHome(home: home)
+        let supervisor = EngineSupervisor(
             engine: engine,
-            home: EngineHome(home: home),
+            home: engineHome,
             processes: FoundationEngineProcesses(),
             identity: EngineIdentityProbe(),
             enginePort: enginePort
         )
+        guard let engine else { return (supervisor, nil) }
+        // The takeover command runs the same launcher as the engine, with HOME
+        // pinned to the engine's home so a test launch stays inside its folder.
+        let commandLine: ([String]) -> TakeoverCommandLine = { arguments in
+            var parent = ProcessInfo.processInfo.environment
+            parent["HOME"] = home.path
+            let launch = engine.launch(.takeover(arguments), parentEnvironment: parent, workingDirectory: home)
+            return TakeoverCommandLine(
+                executable: launch.executable,
+                arguments: launch.arguments,
+                environment: launch.environment,
+                workingDirectory: launch.workingDirectory
+            )
+        }
+        #if DEBUG
+        let labelOverride = EngineTakeover.testLabel(environment: ProcessInfo.processInfo.environment)
+        #else
+        let labelOverride: String? = nil
+        #endif
+        let takeover = EngineTakeover(
+            runner: FoundationTakeoverRunner(commandLine: commandLine),
+            supervisor: supervisor,
+            trash: FileManagerTrashing(),
+            home: engineHome,
+            labelOverride: labelOverride,
+            windowVisible: { MainWindowPresenter.mainWindow(in: NSApp.windows)?.isVisible ?? false }
+        )
+        return (supervisor, takeover)
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -380,7 +417,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // engine. External mode runs nothing (S6 adds the closed-window and
         // quit handling).
         if mode == .local {
-            supervisor?.start()
+            // The 1.x takeover (S7) runs first and starts the engine itself
+            // when it settles on "no takeover" or "done".
+            if let takeover {
+                Task { await takeover.runIfNeeded() }
+            } else {
+                supervisor?.start()
+            }
         }
 
         // A login launch opens no main window: the engine starts as usual and

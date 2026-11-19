@@ -24,6 +24,7 @@ struct CiaobotMacApp: App {
                 engineUpdater: appDelegate.engineUpdater,
                 appSettings: appDelegate.appSettings,
                 supervisor: appDelegate.supervisor,
+                takeover: appDelegate.takeover,
                 engineMode: appDelegate.mode,
                 modeStore: appDelegate.engineMode,
                 onModeChange: { appDelegate.modeDidChange($0) }
@@ -467,6 +468,13 @@ struct ConnectionView: View {
     /// the connection from its published running origin; external mode never
     /// starts or observes it.
     private let supervisor: EngineSupervisor?
+    /// The 1.x takeover (#3129 S7) that runs before the local engine starts.
+    /// Nil in tests and when the app carries no usable engine.
+    private let takeover: EngineTakeover?
+    /// Settled takeovers. A published value replays to a screen built later.
+    private let settledEvents: AnyPublisher<EngineTakeover.Settled, Never>
+    /// The fixed notice for the last takeover outcome, shown on this screen.
+    @State private var takeoverNotice: String?
     /// Writes a mid-session engine-mode switch so the next launch starts in it.
     private let modeStore: EngineModeStoring?
     /// Internal so a test can prove local mode has no saved-origin auto
@@ -527,6 +535,7 @@ struct ConnectionView: View {
         engineUpdater: EngineUpdater? = nil,
         appSettings: AppSettingsBridge? = nil,
         supervisor: EngineSupervisor? = nil,
+        takeover: EngineTakeover? = nil,
         engineMode: EngineMode = .external,
         modeStore: EngineModeStoring? = nil,
         modeSwitchDialog: (@MainActor (EngineLifecycle.ModeSwitchDialog) -> Bool)? = nil,
@@ -590,6 +599,9 @@ struct ConnectionView: View {
         #endif
         self.autoConnectTarget = engineMode == .local ? nil : autoConnectTarget
         self.supervisor = supervisor
+        self.takeover = takeover
+        self.settledEvents = takeover?.$settled.compactMap { $0 }.eraseToAnyPublisher()
+            ?? Empty<EngineTakeover.Settled, Never>(completeImmediately: false).eraseToAnyPublisher()
         self.modeStore = modeStore
         self.launchAddress = initialAddress
         _engineMode = State(initialValue: engineMode)
@@ -600,17 +612,29 @@ struct ConnectionView: View {
     var body: some View {
         Group {
             if let local = localEngineScreen {
-                LocalEngineView(
-                    supervisor: local,
-                    connection: localPhase,
-                    canRetry: localModel.canRetry,
-                    onTryAgain: { self.tryAgainLocal() },
-                    onConnectExternal: { self.confirmAndConnectToAnotherServer() }
-                )
+                VStack(alignment: .leading, spacing: 0) {
+                    if let takeoverNotice {
+                        takeoverNoticeText(takeoverNotice)
+                            .padding(.horizontal, 32)
+                            .padding(.top, 16)
+                    }
+                    LocalEngineView(
+                        supervisor: local,
+                        connection: localPhase,
+                        canRetry: localModel.canRetry,
+                        onTryAgain: { self.tryAgainLocal() },
+                        onConnectExternal: { self.confirmAndConnectToAnotherServer() }
+                    )
+                }
             } else if let origin {
                 // A fallback is reported where the session actually lives: the
                 // connection screen is already gone once the probe succeeds.
                 VStack(spacing: 0) {
+                    if let takeoverNotice {
+                        takeoverNoticeText(takeoverNotice)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                    }
                     if let storageNotice {
                         Text(storageNotice)
                             .font(.caption)
@@ -656,6 +680,9 @@ struct ConnectionView: View {
                 wizardView(wizard)
             } else {
                 VStack(alignment: .leading, spacing: 16) {
+                    if let takeoverNotice {
+                        takeoverNoticeText(takeoverNotice)
+                    }
                     // The supplied full wordmark, not the mark beside typed
                     // text. Its two ink variants follow the window appearance.
                     if let wordmark = colorScheme == .dark
@@ -863,6 +890,16 @@ struct ConnectionView: View {
         .onChange(of: installer.state) { handleInstallState($0) }
         .onChange(of: engineUpdater.state) { handleEngineUpdateState($0) }
         .onChange(of: discovery.status) { handleDiscoveryStatus($0) }
+        .onReceive(settledEvents) { applyTakeover($0.outcome) }
+    }
+
+    private func takeoverNoticeText(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityLabel(text)
     }
 
     /// What the connection view does when it appears. Internal so a test can
@@ -1147,7 +1184,42 @@ struct ConnectionView: View {
         localPhase = .idle
         engineDown = false
         onModeChange?(.local)
-        supervisor.start()
+        takeoverNotice = nil
+        // The 1.x takeover check (S7) runs first and starts the engine itself
+        // once it settles on "no takeover" or "moved". Without it, start now.
+        if let takeover {
+            Task { await takeover.runIfNeeded() }
+        } else {
+            supervisor.start()
+        }
+    }
+
+    /// Applies a settled takeover to this screen. Only the outcomes that leave
+    /// the engine off switch it to external; a replay after the user already
+    /// moved to external is ignored.
+    func applyTakeover(_ outcome: EngineTakeover.Outcome) {
+        guard engineMode == .local else { return }
+        takeoverNotice = TakeoverCopy.notice(for: outcome)
+        switch outcome {
+        case .notNeeded, .done:
+            return
+        case .deferred(let origin):
+            // Later keeps the saved choice, so the next launch asks again.
+            switchToExternal(connectTo: origin, saveChoice: false)
+        case .refused(_, let origin), .rolledBack(_, let origin):
+            switchToExternal(connectTo: origin, saveChoice: true)
+        }
+    }
+
+    private func switchToExternal(connectTo origin: Origin?, saveChoice: Bool) {
+        if saveChoice { modeStore?.mode = .external }
+        engineMode = .external
+        onModeChange?(.external)
+        localModel.reset()
+        localPhase = .idle
+        engineDown = false
+        dropSession()
+        if let origin { connect(to: origin) }
     }
 
     private func dropSession() {
