@@ -1,46 +1,25 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
-import { canOfferMoveToBackground, nextBackgroundableCalls, shouldRestoreFocus } from './moveToBackground'
+import { shouldRestoreFocus } from './focusRestore'
 
-describe('move to background helpers', () => {
-  it('adds a backgroundable call once and keeps its first-seen time', () => {
-    const first = nextBackgroundableCalls(undefined, { type: 'tool_use', tool_use_id: 'c1', backgroundable: true }, 10)
-    expect(nextBackgroundableCalls(first, { type: 'tool_use', tool_use_id: 'c1', backgroundable: true }, 20)).toEqual({ c1: 10 })
-  })
-
-  it('removes a call when its tool_result frame arrives', () => {
-    expect(nextBackgroundableCalls({ c1: 10 }, { type: 'tool_result', tool_use_id: 'c1' }, 20)).toEqual({})
-  })
-
-  it('ignores unmarked, id-less and subagent-internal frames', () => {
-    const calls = { c1: 10 }
-    expect(nextBackgroundableCalls(calls, { type: 'tool_use', tool_use_id: 'c2' }, 20)).toBe(calls)
-    expect(nextBackgroundableCalls(calls, { type: 'tool_use', backgroundable: true }, 20)).toBe(calls)
-    expect(nextBackgroundableCalls(calls, { type: 'tool_use', tool_use_id: 'c2', backgroundable: true, parent_tool_use_id: 'p1' }, 20)).toBe(calls)
-  })
-
-  it('offers the action only after the delay', () => {
-    expect(canOfferMoveToBackground({ a: 0 }, 2999)).toBe(false)
-    expect(canOfferMoveToBackground({ a: 0 }, 3000)).toBe(true)
-    expect(canOfferMoveToBackground({}, 1e9)).toBe(false)
-  })
-
-  it('restores focus only while the chip or the body has it', () => {
-    const chip = document.createElement('button')
+describe('shouldRestoreFocus', () => {
+  it('restores focus only while the held element or the body has it', () => {
+    const held = document.createElement('button')
     const inside = document.createElement('span')
-    chip.append(inside)
+    held.append(inside)
 
-    expect(shouldRestoreFocus(chip, chip)).toBe(true)
-    expect(shouldRestoreFocus(chip, document.body)).toBe(true)
+    expect(shouldRestoreFocus(held, held)).toBe(true)
+    expect(shouldRestoreFocus(held, document.body)).toBe(true)
     expect(shouldRestoreFocus(null, document.body)).toBe(true)
 
-    expect(shouldRestoreFocus(chip, inside)).toBe(false)
-    expect(shouldRestoreFocus(chip, document.createElement('textarea'))).toBe(false)
-    expect(shouldRestoreFocus(chip, document.documentElement)).toBe(false)
-    expect(shouldRestoreFocus(chip, null)).toBe(false)
-    // No chip and nothing focused at all: nothing in particular owns focus, so
-    // the restore still runs — the shipped rule compares identity, and null
-    // matches null.
+    expect(shouldRestoreFocus(held, inside)).toBe(false)
+    // The user moved focus into the draft: do not take it back.
+    expect(shouldRestoreFocus(held, document.createElement('textarea'))).toBe(false)
+    expect(shouldRestoreFocus(held, document.documentElement)).toBe(false)
+    expect(shouldRestoreFocus(held, null)).toBe(false)
+    // Nothing held and nothing focused at all: nothing in particular owns
+    // focus, so the restore still runs — the shipped rule compares identity,
+    // and null matches null.
     expect(shouldRestoreFocus(null, null)).toBe(true)
   })
 
@@ -63,10 +42,10 @@ describe('move to background helpers', () => {
     surface.className = 'composer-surface'
     const bar = document.createElement('div')
     bar.className = 'composer-bar'
-    const chip = document.createElement('button')
+    const held = document.createElement('button')
     const draft = document.createElement('textarea')
     draft.className = 'chat-input'
-    bar.append(draft, chip)
+    bar.append(draft, held)
     surface.append(bar)
     chatLayout.append(surface)
     const toastStack = document.createElement('div')
@@ -89,6 +68,6 @@ describe('move to background helpers', () => {
     const elsewhere = [
       draft, bar, surface, chatLayout, app, toastStack, toast, dismiss, compose, composeInput,
     ]
-    for (const el of elsewhere) expect(shouldRestoreFocus(chip, el)).toBe(false)
+    for (const el of elsewhere) expect(shouldRestoreFocus(held, el)).toBe(false)
   })
 })
