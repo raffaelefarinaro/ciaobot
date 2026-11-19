@@ -133,6 +133,10 @@ vi.mock('../../lib/api', () => {
         opencode: ['openai/gpt-5.6-luna', 'anthropic/claude-sonnet-4-6'],
       },
       provider_defaults: { claude: 'sonnet', opencode: 'opus' },
+      providers: [
+        { id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude', capabilities: {} },
+        { id: 'opencode', label: 'opencode', short_label: 'opencode', capabilities: {} },
+      ],
       opencode_models: ['openai/gpt-5.6-luna', 'anthropic/claude-sonnet-4-6'],
       backends: { opencode: true },
       thinking_levels: { claude: ['low', 'medium', 'high', 'xhigh', 'max'], opencode: ['low', 'medium', 'high', 'max'] },
@@ -1079,6 +1083,30 @@ describe('component mount smoke', () => {
     }
   })
 
+  it('shows Codex sign-in guidance with the command its own row reports', async () => {
+    const testApi = api as typeof api & { setResponse: (path: string, value: unknown) => void, getResponse: (path: string) => unknown }
+    const original = testApi.getResponse('/api/settings/providers') as { connections: Record<string, Record<string, unknown>> }
+    testApi.setResponse('/api/settings/providers', { connections: { ...original.connections, codex: {
+      name: 'codex', label: 'Codex', short_label: 'Codex', ok: false, auth: 'logged_out', command: 'codex login',
+      detail: 'Codex is installed but not signed in.',
+    } } })
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    try {
+      await flushPromises()
+      const row = wrapper.findAll('.provider-connections .credential-row').find(el => el.text().includes('Codex'))!
+      expect(row.find('details.provider-sign-in summary').text()).toBe('Connect Codex')
+      expect(row.find('details code').text()).toBe('codex login')
+      expect(row.text()).not.toContain('opencode auth login')
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/settings/providers', original)
+    }
+  })
+
   it.each([
     ['oauth', 'person@example.com', true],
     ['oauth', 'Claude OAuth', true],
@@ -1088,7 +1116,9 @@ describe('component mount smoke', () => {
     const testApi = api as typeof api & { setResponse: (path: string, value: unknown) => void, getResponse: (path: string) => unknown }
     const original = testApi.getResponse('/api/settings/providers') as { connections: Record<string, Record<string, unknown>> }
     testApi.setResponse('/api/settings/providers', { connections: { ...original.connections, claude: {
-      ...original.connections.claude, auth, account, ok: showAccount, command: 'install-command-not-login',
+      ...original.connections.claude, auth, account, ok: showAccount,
+      // The sign-in command comes from the payload; a missing CLI's payload command is its install line.
+      command: auth === 'not_installed' ? 'install-command-not-login' : 'claude auth login',
     } } })
     const router = makeRouter()
     await router.push('/settings/providers')
@@ -1101,7 +1131,12 @@ describe('component mount smoke', () => {
       const details = row.find('.provider-connection-detail').text()
       expect(details.includes(account)).toBe(showAccount)
       expect(details.includes('OAuth')).toBe(showAccount)
-      expect(row.find('details code').text()).toBe('claude auth login')
+      if (auth === 'not_installed') {
+        // The install line is never offered as a sign-in command.
+        expect(row.find('details.provider-sign-in').exists()).toBe(false)
+      } else {
+        expect(row.find('details code').text()).toBe('claude auth login')
+      }
       expect(runInTerminal).not.toHaveBeenCalled()
       expect(vi.mocked(api.post).mock.calls.some(([path]) => String(path).endsWith('/connect'))).toBe(false)
     } finally {

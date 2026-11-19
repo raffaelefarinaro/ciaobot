@@ -13,6 +13,7 @@ beforeEach(() => { state.open.mockReset(); state.copy.mockReset() })
 describe('provider inventory preparation', () => {
   it('renders only reported metadata as text and generic manual guidance', async () => {
     const view = mount(ProviderInventory, { props: {
+      command: 'opencode auth login',
       workspace: 'work',
       inventory: { status: 'partial', providers: [
         { id: 'one', name: '<img src=x>', auth_types: ['oauth', 'api_key'], configured: true, verified: null, ...{ secret: 'hidden' } },
@@ -41,7 +42,7 @@ describe('provider inventory preparation', () => {
 
   it('distinguishes empty and unavailable, and never takes over a busy terminal', async () => {
     state.open.mockResolvedValue('busy')
-    const view = mount(ProviderInventory, { props: { workspace: 'work', inventory: { status: 'complete', providers: [] } } })
+    const view = mount(ProviderInventory, { props: { command: 'opencode auth login', workspace: 'work', inventory: { status: 'complete', providers: [] } } })
     expect(view.text()).toContain('No configured providers reported')
     await view.findAll('button')[1]!.trigger('click')
     await flushPromises()
@@ -59,7 +60,7 @@ describe('provider inventory preparation', () => {
   it('does not publish terminal results after a workspace round trip', async () => {
     let finish!: (result: string) => void
     state.open.mockReturnValue(new Promise(resolve => { finish = resolve }))
-    const view = mount(ProviderInventory, { props: { workspace: 'A' } })
+    const view = mount(ProviderInventory, { props: { command: 'opencode auth login', workspace: 'A' } })
     await view.findAll('button')[1]!.trigger('click')
     await view.setProps({ workspace: 'B' })
     await view.setProps({ workspace: 'A' })
@@ -72,7 +73,7 @@ describe('provider inventory preparation', () => {
   it('reports clipboard and terminal failures without exposing raw errors', async () => {
     state.copy.mockRejectedValue(new Error('sensitive clipboard error'))
     state.open.mockRejectedValue(new Error('sensitive terminal error'))
-    const view = mount(ProviderInventory, { props: { workspace: 'work' } })
+    const view = mount(ProviderInventory, { props: { command: 'opencode auth login', workspace: 'work' } })
     await view.findAll('button')[0]!.trigger('click')
     expect(view.text()).toContain('Could not copy')
     await view.findAll('button')[1]!.trigger('click')
@@ -85,7 +86,7 @@ describe('provider inventory preparation', () => {
     ['partial', 'Some providers may be missing'],
     ['unknown', 'OpenCode could not report its configured providers'],
   ] as const)('reports %s rather than an empty inventory', (status, message) => {
-    const view = mount(ProviderInventory, { props: { workspace: 'work', inventory: { status, providers: [] } } })
+    const view = mount(ProviderInventory, { props: { command: 'opencode auth login', workspace: 'work', inventory: { status, providers: [] } } })
     expect(view.text()).toContain(message)
     expect(view.text()).not.toContain('No configured providers reported')
     expect(view.find('summary').text()).toBe('Connect provider')
@@ -95,7 +96,7 @@ describe('provider inventory preparation', () => {
   it('reports an invalid workspace and a refused clipboard without displaying raw errors', async () => {
     state.open.mockResolvedValue('invalid')
     state.copy.mockResolvedValue(false)
-    const view = mount(ProviderInventory, { props: { workspace: 'invalid' } })
+    const view = mount(ProviderInventory, { props: { command: 'opencode auth login', workspace: 'invalid' } })
     await view.findAll('button')[0]!.trigger('click')
     expect(view.text()).toContain('Could not copy. Select the command')
     await view.findAll('button')[1]!.trigger('click')
@@ -109,7 +110,7 @@ describe('provider inventory preparation', () => {
     // The terminal store reports an opening attempt; policy/capacity errors
     // belong to the pane, not a rejected promise or a successful shell.
     state.open.mockResolvedValue('opened')
-    const view = mount(ProviderInventory, { props: { workspace: 'work' } })
+    const view = mount(ProviderInventory, { props: { command: 'opencode auth login', workspace: 'work' } })
     await view.findAll('button')[1]!.trigger('click')
     expect(view.text()).toContain('Terminal opening requested. Check the terminal pane for availability.')
     expect(view.text()).not.toContain(paneFailure)
@@ -120,7 +121,7 @@ describe('provider inventory preparation', () => {
   it('keeps provider metadata out of copied commands and terminal arguments', async () => {
     state.copy.mockResolvedValue(true)
     state.open.mockResolvedValue('opened')
-    const view = mount(ProviderInventory, { props: { workspace: 'workspace', inventory: {
+    const view = mount(ProviderInventory, { props: { command: 'opencode auth login', workspace: 'workspace', inventory: {
       status: 'complete', providers: [{ id: 'x; secret', name: 'Provider $(danger)', auth_types: ['unknown'], configured: true, verified: null }],
     } } })
     expect(view.text()).toContain('Unknown · Configured · verification unknown')
@@ -133,14 +134,31 @@ describe('provider inventory preparation', () => {
     view.unmount()
   })
 
-  it('uses only the generic Claude login command, never an install or provider command', async () => {
+  it('shows the command it is given and never another provider\'s', async () => {
     state.copy.mockResolvedValue(true)
-    const view = mount(ProviderSignInGuidance, { props: { workspace: 'work', context: 'Claude Code', cli: 'claude' } })
+    const view = mount(ProviderSignInGuidance, { props: { workspace: 'work', context: 'Claude Code', command: 'claude auth login' } })
     expect(view.get('code').text()).toBe('claude auth login')
     expect(view.text()).toContain('available on your PATH')
     await view.get('button').trigger('click')
     expect(state.copy).toHaveBeenCalledExactlyOnceWith('claude auth login')
     expect(state.open).not.toHaveBeenCalled()
+    view.unmount()
+  })
+
+  it('offers no sign-in guidance when the OpenCode row reported no command', async () => {
+    const view = mount(ProviderInventory, { props: { workspace: 'work', inventory: { status: 'complete', providers: [] } } })
+    expect(view.text()).not.toContain('Connect provider')
+    expect(view.find('code').exists()).toBe(false)
+    view.unmount()
+  })
+
+  it('shows the Codex sign-in command for Codex, not the OpenCode one', async () => {
+    state.copy.mockResolvedValue(true)
+    const view = mount(ProviderSignInGuidance, { props: { workspace: 'work', context: 'Codex', command: 'codex login' } })
+    expect(view.get('code').text()).toBe('codex login')
+    expect(view.text()).not.toContain('opencode auth login')
+    await view.get('button').trigger('click')
+    expect(state.copy).toHaveBeenCalledExactlyOnceWith('codex login')
     view.unmount()
   })
 })

@@ -28,6 +28,34 @@ describe('useProviderChoices', () => {
     expect(providerThinkingOptions('claude')[0].value).toBe(DEFAULT_THINKING_SELECTION)
   })
 
+  it('lists every provider from /api/models including codex', () => {
+    const routines = ref({
+      model_options: { anthropic: ['opus'] },
+      provider_default_models: {},
+    } as unknown as RoutineSettings)
+    const descriptor = (id: string, label: string) => ({ id, label, short_label: label, capabilities: {} })
+    const workspaceModels = ref({
+      models: ['opus'],
+      default: 'opus',
+      provider_models: {
+        claude: ['opus'],
+        opencode: [],
+        codex: ['gpt-5.5', 'gpt-5.4-mini'],
+      },
+      provider_defaults: {},
+      providers: [
+        descriptor('claude', 'Anthropic (via Claude Code)'),
+        descriptor('opencode', 'opencode'),
+        descriptor('codex', 'OpenAI (via Codex)'),
+      ],
+    } as unknown as ModelsResponse)
+    const { aliasProviderSections, getProviderSection } = useProviderChoices({ routines, workspaceModels })
+    expect(aliasProviderSections.value.map((section) => section.key)).toEqual(['claude', 'codex'])
+    expect(getProviderSection('codex')?.label).toBe('OpenAI (via Codex)')
+    expect(getProviderSection('codex')?.options).toEqual(['gpt-5.5', 'gpt-5.4-mini'])
+    expect(getProviderSection('opencode')).toBeUndefined()
+  })
+
   it('follows changes to the refs it was given, not copies of them', () => {
     const routines = ref({
       model_options: { anthropic: ['opus'] },

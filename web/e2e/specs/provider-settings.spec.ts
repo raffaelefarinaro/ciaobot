@@ -72,8 +72,8 @@ for (const mobile of [false, true]) {
     })
     await isolate(page, `provider-manual-${testInfo.workerIndex}-${mobile}`)
     await page.route('**/api/settings/providers', route => route.fulfill({ json: { connections: {
-      claude: { name: 'claude', label: 'Claude Code', ok: true, auth: 'oauth', command: 'ignored', account: 'Claude OAuth' },
-      opencode: { name: 'opencode', label: 'OpenCode', ok: true, auth: 'oauth', command: 'ignored', credential_inventory: {
+      claude: { name: 'claude', label: 'Claude Code', ok: true, auth: 'oauth', command: 'claude auth login', account: 'Claude OAuth' },
+      opencode: { name: 'opencode', label: 'OpenCode', ok: true, auth: 'oauth', command: 'opencode auth login', credential_inventory: {
         status: 'complete', providers: [{ id: 'custom', name: 'Example', auth_types: ['oauth'], configured: true, verified: null }],
       } },
     } } }))

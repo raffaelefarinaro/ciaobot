@@ -7269,8 +7269,8 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/SettingsView.vue",
       "web/src/components/settings/ProviderInventory.vue"
     ],
-    "variants": ["Claude", "OpenCode"],
-    "variantNotes": "Sign-in command and guidance depend on the CLI.",
+    "variants": ["Claude Code", "OpenCode", "Codex"],
+    "variantNotes": "The sign-in command is the connection payload's command for each provider; the OpenCode variant also carries its own note.",
     "states": [
       {
         "name": "default",

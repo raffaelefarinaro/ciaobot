@@ -70,7 +70,16 @@ const ModelSelectorStub = defineComponent({
 const MODELS_RESPONSE = {
   models: ['haiku', 'sonnet', 'opus', 'fable'],
   default: 'sonnet',
-  provider_models: { claude: ['haiku', 'sonnet', 'opus', 'fable'] },
+  providers: [
+    { id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude', capabilities: {} },
+    { id: 'opencode', label: 'opencode', short_label: 'opencode', capabilities: {} },
+    { id: 'codex', label: 'OpenAI (via Codex)', short_label: 'Codex', capabilities: {} },
+  ],
+  provider_models: {
+    claude: ['haiku', 'sonnet', 'opus', 'fable'],
+    opencode: ['openai/gpt-5.6'],
+    codex: ['gpt-5.5'],
+  },
   provider_defaults: { claude: 'sonnet' },
   thinking_levels: { claude: ['low', 'medium', 'high'] },
   // opus cannot do 'high', fable can: the recovery validates a staged
@@ -1845,6 +1854,20 @@ describe('ChatPanel recovery model picker', () => {
       mode: 'auto',
     })
     wrapper.unmount()
+  })
+
+  it('hands a registry provider\'s pick over to that provider, by its section or by its catalog', async () => {
+    const { wrapper, store } = await mountPanel({ chat: { session_id: 'sess-1' } })
+    const handover = vi.spyOn(store, 'handoverChat').mockResolvedValue(undefined as never)
+    // The section names the provider even for a model no catalog lists.
+    await openComposerPicker(wrapper)
+    await pickModel(wrapper, 'codex-preview', 'codex')
+    expect(handover).toHaveBeenLastCalledWith('chat-1', expect.objectContaining({ provider: 'codex', model: 'codex-preview' }))
+    // With no section named, the model's own provider catalog decides the route.
+    await openComposerPicker(wrapper)
+    await pickModel(wrapper, 'gpt-5.5', '')
+    expect(handover).toHaveBeenLastCalledWith('chat-1', expect.objectContaining({ provider: 'codex', model: 'gpt-5.5' }))
+    expect(handover).toHaveBeenCalledTimes(2)
   })
 
   it('handover completion cannot close a reopened picker', async () => {
