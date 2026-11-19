@@ -664,10 +664,11 @@ final class TraySettingsTests: XCTestCase {
         XCTAssertEqual(item.action, #selector(MenuBarController.checkForUpdates(_:)))
         let tip = try XCTUnwrap(item.toolTip)
         XCTAssertTrue(tip.contains("verified"))
-        XCTAssertTrue(tip.contains("Installing quits this Mac client"))
-        XCTAssertTrue(tip.contains("A bundled engine is stopped first, which interrupts running chats"),
-                      "A bundled engine stops during an install, so the tip must not say it keeps running.")
-        XCTAssertTrue(tip.contains("an external server keeps running"))
+        XCTAssertTrue(tip.contains("Ciaobot waits until no chat is working"),
+                      "The install waits for the drain, so the tip must say so.")
+        XCTAssertTrue(tip.contains("restarts the app and its engine together"))
+        XCTAssertFalse(tip.contains("interrupts running chats"),
+                       "The gate drains first, so the tip must not warn that chats are interrupted.")
         XCTAssertFalse(tip.contains("engine and the web app keep running"))
         XCTAssertEqual(updater.startCount, 0, "Rendering the menu must not start the updater.")
 

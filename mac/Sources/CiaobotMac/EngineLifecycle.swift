@@ -9,6 +9,9 @@ import CoreServices
 enum QuitReason {
     case user
     case system
+    /// Sparkle's install is replacing the bundle: the user already chose to
+    /// install, so there is no dialog, and the engine gets the full quit grace.
+    case update
 }
 
 /// The quit confirmation as presented: fixed copy, fixed buttons.
@@ -30,11 +33,10 @@ enum EngineLifecycle {
     /// a user quit, a quit event without a reason, or no Apple event at all
     /// (the tray does not send one) — reads as `.user`.
     ///
-    /// `updateInstall` is true while Sparkle's immediate install is taking the
-    /// app down to replace the bundle: the user already chose to install, so
-    /// that terminate is a system quit too (no dialog, bounded drain).
+    /// `updateInstall` is true while Sparkle's install is taking the app down to
+    /// replace the bundle: that terminate is `.update`, never a user quit.
     static func quitReason(_ event: NSAppleEventDescriptor?, updateInstall: Bool = false) -> QuitReason {
-        if updateInstall { return .system }
+        if updateInstall { return .update }
         guard let event, event.eventClass == kCoreEventClass, event.eventID == kAEQuitApplication,
               let reason = event.attributeDescriptor(forKeyword: kAEQuitReason) else { return .user }
         switch reason.enumCodeValue {
@@ -113,7 +115,11 @@ enum EngineLifecycle {
         case .stopping:
             return .stopThenTerminate(grace: quitGrace)
         case .starting, .running:
-            return quitReason == .system ? .stopThenTerminate(grace: systemQuitGrace) : .confirm
+            switch quitReason {
+            case .user: return .confirm
+            case .system: return .stopThenTerminate(grace: systemQuitGrace)
+            case .update: return .stopThenTerminate(grace: quitGrace)
+            }
         }
     }
 
@@ -225,14 +231,39 @@ final class RestartBlockersProbe: NSObject, URLSessionDataDelegate, RestartBlock
 
 /// Set while Sparkle's immediate install is terminating the app to replace
 /// the bundle. The install handler raises it just before it runs, so the
-/// terminate that follows reads as a system quit: no dialog stands in front of
-/// an update the user already chose, and the engine still drains with the
-/// system grace. One instance is shared by the updater and the app delegate.
+/// terminate that follows reads as an update quit (`QuitReason.update`): no
+/// dialog stands in front of an update the user already chose, and the engine
+/// still drains with the full quit grace. It is cleared when Sparkle abandons
+/// the install, so a later quit is a user quit again. One instance is shared by
+/// the updater and the app delegate.
 @MainActor
 final class UpdateQuitIntent {
     private(set) var installing = false
+    /// True when the raised install drained the bundled engine first. Sparkle's
+    /// own "Install and Relaunch" raises an install with no drain, so its
+    /// terminate still asks about running chats.
+    private(set) var drained = false
+    /// Runs when a raised install is abandoned by a cancelled quit. The updater
+    /// sets it to cancel the gate's held drain.
+    var onAbandon: (@MainActor () -> Void)?
 
-    func beginInstall() { installing = true }
+    func beginInstall(drained: Bool) {
+        installing = true
+        self.drained = drained
+    }
+
+    func endInstall() {
+        installing = false
+        drained = false
+    }
+
+    /// Ends a raised install that will not happen, and lets the updater release
+    /// what it holds for it.
+    func abandonInstall() {
+        let hook = onAbandon
+        endInstall()
+        hook?()
+    }
 }
 
 /// Closes the main window of a login launch once SwiftUI has created it.

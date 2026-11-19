@@ -140,6 +140,25 @@ final class EngineSupervisor: ObservableObject {
 
     @Published private(set) var state: EngineState = .stopped
 
+    /// The loopback port of the engine while it is running, else nil. The update
+    /// gate drains only what this reports: no running engine means nothing to drain.
+    var runningPort: Int? {
+        if case .running(let origin, _, _) = state { return origin.portNumber }
+        return nil
+    }
+
+    /// The bundled engine as the update gate reads it. Only a running engine
+    /// has a port to drain. A starting or stopping engine is transitioning and
+    /// never idle. Stopped, failed, and port-in-use leave nothing this app owns
+    /// running, so there is nothing to drain.
+    var updateLocalState: LocalEngineState {
+        switch state {
+        case .running(let origin, _, _): return .running(port: origin.portNumber)
+        case .starting, .stopping: return .transitioning
+        case .stopped, .failed, .portInUse: return .external
+        }
+    }
+
     private let engine: BundledEngine?
     /// Read by the local engine screen for **Show Log** (`home.logFile`).
     let home: EngineHome

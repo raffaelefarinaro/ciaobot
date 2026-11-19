@@ -7406,8 +7406,14 @@ class ProjectChatManager:
         overlay instead of treating later turn rejections as chat errors.
         ``owner`` names the operation a claimed drain belongs to; a manual
         drain clears it, which keeps the cancel semantics it always had.
+
+        An ownerless caller (a Settings restart) that finds a drain already held
+        takes the claim: the restart now owns admission, so an owned drain's
+        cancel must be refused rather than reopen it under the pending restart.
         """
         if self._restart_draining:
+            if not owner:
+                self._drain_owner = ""
             return
         self._restart_draining = True
         self._drain_owner = owner
