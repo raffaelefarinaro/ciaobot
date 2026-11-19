@@ -139,33 +139,8 @@ async def test_claude_live_mcp_status_is_normalized_and_excludes_secrets(
     claude_provider._client = FakeClient()
     claude_provider._connected = True
 
-    assert await claude_provider.read_mcp_status() == {
+    assert await claude_provider._read_mcp_status() == {
         "notion": "connected", "private": "needs_auth"
-    }
-
-
-@pytest.mark.asyncio
-async def test_claude_mcp_status_timeout_becomes_unknown_in_runtime_status():
-    class Claude:
-        is_connected = True
-
-        async def read_mcp_status(self):
-            raise TimeoutError("sensitive timeout detail")
-
-    manager = ProjectChatManager.__new__(ProjectChatManager)
-    manager._chats = {"chat": SimpleNamespace(provider="claude")}
-    manager._providers = {"chat": SimpleNamespace(_provider=Claude())}
-    manager._workspace_for_chat = lambda _chat_id: "work"
-
-    rows = await manager.provider_mcp_runtime_connections("work", {"claude": ["notion"]})
-
-    assert rows == {
-        "claude": {
-            "notion": [{
-                "state": "unknown", "provider": "claude", "chat_id": "chat",
-                "error": "Could not read provider MCP status.",
-            }]
-        }
     }
 
 

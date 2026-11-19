@@ -25,7 +25,6 @@ _HOST_SEAMS = (
     "background_count",
     "abort_session",
     "interrupted_background_work",
-    "read_mcp_status",
     "model_catalog",
     "native_title_candidates",
     "delete_session",

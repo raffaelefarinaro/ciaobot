@@ -8,7 +8,7 @@ parsed, so ``"claude.ai "`` itself is a connector and a URL or ``mcp__``-prefixe
 tool name never is.
 
 The definition lives once, in the neutral ``ciao.mcp_names`` — not the concrete
-Claude adapter — and the adapter's catalog watcher plus every web host import
+Claude adapter — and the adapter's catalog watcher imports
 it from there. The ownership scan keeps it that way.
 """
 
@@ -24,12 +24,9 @@ from ciao.mcp_names import is_claudeai_connector
 _REPO = Path(__file__).resolve().parents[1]
 _NAMES = _REPO / "ciao" / "mcp_names.py"
 
-# The adapter (its catalog watcher) and the web host that classifies server
-# names for the inventory scope.
-_CONSUMERS = (
-    "ciao/providers/claude.py",
-    "ciao/web/mcp_inventory.py",
-)
+# The adapter's catalog watcher is the only consumer; #3138 deletes it with
+# claude.py.
+_CONSUMERS = ("ciao/providers/claude.py",)
 
 
 @pytest.mark.parametrize(

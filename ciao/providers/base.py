@@ -353,10 +353,6 @@ class BaseProvider(ABC):
         """
         return True
 
-    async def read_mcp_status(self) -> dict[str, str]:
-        """Per-server MCP state (``connected``, ``needs_auth``, ...) from a live connection; ``{}`` when none."""
-        return {}
-
     async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
         """Yield between-turn provider events until cancelled.
 

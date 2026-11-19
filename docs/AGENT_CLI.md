@@ -108,16 +108,11 @@ there is no Ciaobot MCP server to attach. Every chat is on the CLI surface, so
 restarted when the token changes (`provider_reuse_key`).
 
 Separately, Claude Code and OpenCode own their external MCP server configuration
-and authentication. Settings → MCP is a native-config inventory plus live status from already running
-chats in the selected workspace; it writes configuration only to turn one server
-off or on (`POST /api/mcp/servers/enabled`), and never writes credentials or probes
-a server. For a server an open chat reports as needing a sign-in, that
-chat's sign-in card is the live path (Settings' **Sign in** raises and starts it,
-and may start the chat's OpenCode server); a CLI sign-in only reaches sessions
-started afterwards. Add servers, and authenticate them for new sessions, through
-the provider CLI from the workspace directory (`claude mcp add` / `claude mcp login`, or OpenCode V2's
-`opencode mcp add` / `opencode mcp auth`). Every server declared for the
-workspace loads; `mcp__<name>` in its `disallowed_tools` blocks one.
+and authentication. Ciaobot keeps no MCP inventory or status and does not read or write that
+configuration or any credential; Settings → MCP only opens the CLI's own MCP command. Add servers,
+and authenticate them for new sessions, through the provider CLI from the workspace directory
+(`claude mcp add` / `claude mcp login`, or OpenCode V2's `opencode mcp add` / `opencode mcp auth`).
+Every server declared for the workspace loads; `mcp__<name>` in its `disallowed_tools` blocks one.
 
 Static configuration in an unrelated terminal is intentionally unsupported: the
 token is a live chat capability, not an operator credential. Use Ciaobot's
