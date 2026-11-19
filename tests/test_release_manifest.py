@@ -4,7 +4,6 @@ import base64
 import hashlib
 import importlib.util
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,10 +11,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from ciao import release_manifest
 from ciao.release_manifest import (
-    INSTALLER_KIND,
-    INSTALLER_PLATFORMS,
     MANIFEST_NAME,
     RELEASE_PUBLIC_KEY,
     SERVER_HOST_ARCH,
@@ -30,7 +26,6 @@ from ciao.release_manifest import (
     SignatureError,
     artifact_entry,
     build_manifest,
-    installer_artifact_entry,
     main,
     missing_static_assets,
     parse_public_key,
@@ -572,67 +567,8 @@ def test_server_host_constants_match_the_builder() -> None:
     )
 
 
-def test_main_build_with_server_host(tmp_path: Path) -> None:
-    wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
-    wheel.write_bytes(b"wheel bytes")
-    archive = tmp_path / SERVER_HOST_FILENAME
-    archive.write_bytes(b"host archive bytes")
-    out = tmp_path / "ciaobot-engine-manifest.json"
-
-    assert main(
-        [
-            "build",
-            "--version",
-            "1.2.3",
-            "--out",
-            str(out),
-            "--server-host",
-            str(archive),
-            str(wheel),
-        ]
-    ) == 0
-
-    written = json.loads(out.read_text(encoding="utf-8"))
-    kinds = {a["kind"] for a in written["artifacts"]}
-    assert kinds == {"wheel", SERVER_HOST_KIND}
-    host = next(a for a in written["artifacts"] if a["kind"] == SERVER_HOST_KIND)
-    assert host["filename"] == SERVER_HOST_FILENAME
-    assert host["bundle_id"] == SERVER_HOST_BUNDLE_ID
 
 
-def test_main_build_rejects_bad_server_host_without_partial_output(tmp_path: Path) -> None:
-    wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
-    wheel.write_bytes(b"wheel bytes")
-    out = tmp_path / "ciaobot-engine-manifest.json"
-
-    missing = tmp_path / "missing.tar.gz"
-    assert main(
-        [
-            "build", "--version", "1.2.3", "--out", str(out),
-            "--server-host", str(missing), str(wheel),
-        ]
-    ) == 1
-    assert not out.exists(), "a refused build must not write a partial manifest"
-
-    empty = tmp_path / SERVER_HOST_FILENAME
-    empty.write_bytes(b"")
-    assert main(
-        [
-            "build", "--version", "1.2.3", "--out", str(out),
-            "--server-host", str(empty), str(wheel),
-        ]
-    ) == 1
-    assert not out.exists()
-
-    misnamed = tmp_path / "ciaobot-server-host-macos-universal-v2.tar.gz"
-    misnamed.write_bytes(b"host")
-    assert main(
-        [
-            "build", "--version", "1.2.3", "--out", str(out),
-            "--server-host", str(misnamed), str(wheel),
-        ]
-    ) == 1
-    assert not out.exists()
 
 
 def test_server_host_signature_tampering_fails_before_schema() -> None:
@@ -753,60 +689,13 @@ def test_main_check_static_cli(tmp_path: Path) -> None:
 
 # ── the explicitly signed host entry (#2329) ────────────────────────────────
 
-# The exact bytes a release manifest had before a signed host entry existed:
-# one wheel and the published revision-4 host, serialized by the writer's own
-# `json.dumps(..., indent=2, sort_keys=True)` plus a trailing newline. Compared
-# as bytes so a changed field, value, type or serialization is caught, not just
-# a changed dictionary.
-_LEGACY_MANIFEST_BYTES = b"""{
-  "artifacts": [
-    {
-      "arch": "any",
-      "filename": "ciaobot-1.2.3-py3-none-any.whl",
-      "kind": "wheel",
-      "platform": "any",
-      "sha256": "67c0d8f7de19e30c2d5891030a0b37cbfcdd240852b53055c0b28290ad52290b",
-      "size": 11
-    },
-    {
-      "arch": "universal",
-      "bundle_id": "local.ciaobot.server",
-      "filename": "ciaobot-server-host-macos-universal-v1.tar.gz",
-      "host_protocol": 2,
-      "host_revision": 4,
-      "kind": "server-host",
-      "platform": "macos",
-      "sha256": "0dd7ce86fee4d42d5eff60ddf955828474d3f914858b5cfefdc5141d002b3ea3",
-      "size": 18
-    }
-  ],
-  "created": "2026-09-25T10:00:00+00:00",
-  "schema": 1,
-  "tag": "v1.2.3",
-  "version": "1.2.3"
-}
-"""
-
-
-class _FixedClock:
-    """A fixed ``datetime`` stand-in, so an emitted manifest is byte-stable."""
-
-    @staticmethod
-    def now(_tz: object) -> datetime:
-        return datetime(2026, 9, 25, 10, 0, 0, tzinfo=UTC)
-
-
-def test_legacy_host_entry_is_unchanged_without_signed_flag(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_legacy_host_entry_is_unchanged_without_signed_flag(tmp_path: Path) -> None:
     # The production default is byte-for-byte what every release has published:
     # revision 4, no signing key at all. Neither the entry nor the runtime or
     # builder default moved.
     payload = b"host archive bytes"
     archive = tmp_path / SERVER_HOST_FILENAME
     archive.write_bytes(payload)
-    wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
-    wheel.write_bytes(b"wheel bytes")
 
     entry = server_host_artifact_entry(archive)
 
@@ -828,26 +717,6 @@ def test_legacy_host_entry_is_unchanged_without_signed_flag(
     assert server_host.HOST_REVISION == 4
     assert server_host.SCHEMA_VERSION == 1
 
-    # The manifest the build actually writes, as bytes: the serialization, the
-    # field order, the values and their types are all part of the fixture.
-    monkeypatch.setattr(release_manifest, "datetime", _FixedClock)
-    out = tmp_path / MANIFEST_NAME
-    assert (
-        main(
-            [
-                "build",
-                "--version",
-                "1.2.3",
-                "--out",
-                str(out),
-                "--server-host",
-                str(archive),
-                str(wheel),
-            ]
-        )
-        == 0
-    )
-    assert out.read_bytes() == _LEGACY_MANIFEST_BYTES
 
 
 def test_signed_server_host_entry_round_trip(tmp_path: Path) -> None:
@@ -974,119 +843,20 @@ def test_signed_team_tampering_fails_manifest_signature() -> None:
         verify_manifest(tampered, _sign(tampered, priv, b"\x02" * 8), public_key)
 
 
-def test_main_build_with_signed_server_host(tmp_path: Path) -> None:
-    wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
-    wheel.write_bytes(b"wheel bytes")
-    archive = tmp_path / SERVER_HOST_FILENAME
-    archive.write_bytes(b"signed host archive")
-    out = tmp_path / "ciaobot-engine-manifest.json"
-
-    assert main(
-        [
-            "build",
-            "--version",
-            "1.2.3",
-            "--out",
-            str(out),
-            "--server-host",
-            str(archive),
-            "--server-host-team-id",
-            TEST_TEAM,
-            str(wheel),
-        ]
-    ) == 0
-
-    written = json.loads(out.read_text(encoding="utf-8"))
-    host = next(a for a in written["artifacts"] if a["kind"] == SERVER_HOST_KIND)
-    assert host["host_revision"] == SIGNED_SERVER_HOST_REVISION
-    assert host["host_protocol"] == SERVER_HOST_PROTOCOL
-    assert host["signing"] == {"kind": SERVER_HOST_SIGNING_KIND, "team_id": TEST_TEAM}
 
 
-def test_main_build_refuses_a_signing_team_without_the_host(tmp_path: Path) -> None:
-    # A team alone describes no artifact: the flag is a host policy, so it is
-    # refused before anything is written.
-    wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
-    wheel.write_bytes(b"wheel bytes")
-    out = tmp_path / "ciaobot-engine-manifest.json"
-
-    assert main(
-        [
-            "build",
-            "--version",
-            "1.2.3",
-            "--out",
-            str(out),
-            "--server-host-team-id",
-            TEST_TEAM,
-            str(wheel),
-        ]
-    ) == 1
-    assert not out.exists()
-
-    archive = tmp_path / SERVER_HOST_FILENAME
-    archive.write_bytes(b"signed host archive")
-    assert main(
-        [
-            "build",
-            "--version",
-            "1.2.3",
-            "--out",
-            str(out),
-            "--server-host",
-            str(archive),
-            "--server-host-team-id",
-            "testteam01",
-            str(wheel),
-        ]
-    ) == 1
-    assert not out.exists()
 
 
 # ── installer scripts as signed artifacts (#2483) ───────────────────────────
 
 
-def test_installer_artifact_entry_names_platform(tmp_path: Path) -> None:
-    # The client authenticates install.sh by its entry, so the kind, platform and
-    # digest of each installer are pinned here, not just that an entry exists.
-    assert INSTALLER_KIND == "installer"
-    assert set(INSTALLER_PLATFORMS) == {"install.sh", "install-engine.sh"}
-
-    sh_bytes = b"#!/bin/sh\necho sh\n"
-    sh = tmp_path / "install.sh"
-    sh.write_bytes(sh_bytes)
-    engine_bytes = b"#!/bin/sh\necho engine\n"
-    engine_sh = tmp_path / "install-engine.sh"
-    engine_sh.write_bytes(engine_bytes)
-
-    assert installer_artifact_entry(sh) == {
-        "filename": "install.sh",
-        "kind": "installer",
-        "platform": "macos",
-        "arch": "any",
-        "sha256": hashlib.sha256(sh_bytes).hexdigest(),
-        "size": len(sh_bytes),
-    }
-    assert installer_artifact_entry(engine_sh) == {
-        "filename": "install-engine.sh",
-        "kind": "installer",
-        "platform": "macos",
-        "arch": "any",
-        "sha256": hashlib.sha256(engine_bytes).hexdigest(),
-        "size": len(engine_bytes),
-    }
-    ps1 = tmp_path / "install.ps1"
-    ps1.write_bytes(b"x")
-    with pytest.raises(ValueError, match="not a release installer"):
-        installer_artifact_entry(ps1)
 
 
-def test_installer_artifact_entry_rejects_other_names(tmp_path: Path) -> None:
-    bash = tmp_path / "install.bash"
-    bash.write_bytes(b"x")
 
-    with pytest.raises(ValueError, match="not a release installer"):
-        installer_artifact_entry(bash)
+
+def _installer_entry(path: Path) -> dict[str, Any]:
+    """A signed-manifest entry for a release installer script, as bytes on disk."""
+    return artifact_entry(path, kind="installer", platform="macos")
 
 
 def _write_installers(tmp_path: Path) -> tuple[Path, Path]:
@@ -1098,108 +868,17 @@ def _write_installers(tmp_path: Path) -> tuple[Path, Path]:
     return sh, engine_sh
 
 
-def test_main_build_with_installers(tmp_path: Path) -> None:
-    priv, public_key, key_id = _keypair()
-    wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
-    wheel.write_bytes(b"wheel bytes")
-    archive = tmp_path / SERVER_HOST_FILENAME
-    archive.write_bytes(b"host archive bytes")
-    sh, engine_sh = _write_installers(tmp_path)
-    out = tmp_path / MANIFEST_NAME
-
-    assert main(
-        [
-            "build", "--version", "1.2.3", "--out", str(out),
-            "--server-host", str(archive),
-            "--installer", str(sh),
-            "--installer", str(engine_sh),
-            str(wheel),
-        ]
-    ) == 0
-
-    written = json.loads(out.read_text(encoding="utf-8"))
-    assert [a["kind"] for a in written["artifacts"]] == [
-        "wheel", SERVER_HOST_KIND, "installer", "installer",
-    ]
-    assert [a for a in written["artifacts"] if a["kind"] == "installer"] == [
-        installer_artifact_entry(sh),
-        installer_artifact_entry(engine_sh),
-    ]
-    # The host selector still picks the host out of a manifest with installers.
-    raw = out.read_bytes()
-    verified = verify_manifest(raw, _sign(raw, priv, key_id), public_key)
-    assert select_server_host_artifact(verified)["filename"] == SERVER_HOST_FILENAME
 
 
-def test_main_build_rejects_bad_installers_without_partial_output(tmp_path: Path) -> None:
-    wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
-    wheel.write_bytes(b"wheel bytes")
-    out = tmp_path / MANIFEST_NAME
-    sh, _ = _write_installers(tmp_path)
-
-    wrong_name = tmp_path / "install.bash"
-    wrong_name.write_bytes(b"x")
-    duplicate = sh
-    empty_dir = tmp_path / "empty"
-    empty_dir.mkdir()
-    empty = empty_dir / "install.sh"
-    empty.write_bytes(b"")
-    missing = tmp_path / "missing" / "install-engine.sh"
-
-    refused = [wrong_name, sh, empty, missing]
-    for bad in refused:
-        argv = ["build", "--version", "1.2.3", "--out", str(out)]
-        if bad is duplicate:
-            argv += ["--installer", str(sh), "--installer", str(sh)]
-        else:
-            argv += ["--installer", str(bad)]
-        argv.append(str(wheel))
-        assert main(argv) == 1, bad
-        assert not out.exists(), f"a refused build wrote a manifest for {bad}"
 
 
-def test_main_verify_checks_assets(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    priv, public_key, key_id = _keypair()
-    sh = tmp_path / "install.sh"
-    sh.write_bytes(b"#!/bin/sh\n")
-    document = build_manifest(
-        "1.2.3", [_entry(), installer_artifact_entry(sh)], created="2026-09-25T10:00:00+00:00"
-    )
-    manifest = tmp_path / MANIFEST_NAME
-    raw = json.dumps(document).encode()
-    manifest.write_bytes(raw)
-    signature = tmp_path / (MANIFEST_NAME + ".sig")
-    signature.write_text(_sign(raw, priv, key_id), encoding="utf-8")
-    base = ["verify", str(manifest), str(signature), "--public-key", public_key]
-
-    assert main([*base, "--asset", str(sh)]) == 0
-    assert "asset matches: install.sh" in capsys.readouterr().out
-
-    # Same length, one byte changed: only the sha256 comparison can refuse it.
-    sh.write_bytes(b"#!/bin/sx\n")
-    assert len(b"#!/bin/sx\n") == len(b"#!/bin/sh\n")
-    assert main([*base, "--asset", str(sh)]) == 1
-    assert "does not match the manifest" in capsys.readouterr().err
-
-    sh.write_bytes(b"#!/bin/sh\nevil\n")
-    assert main([*base, "--asset", str(sh)]) == 1
-    assert "does not match the manifest" in capsys.readouterr().err
-
-    other = tmp_path / "other" / "install-engine.sh"
-    other.parent.mkdir()
-    other.write_bytes(b"x")
-    assert main([*base, "--asset", str(other)]) == 1
-    assert "0 artifacts named 'install-engine.sh'" in capsys.readouterr().err
-
-    # Without --asset the signature-and-schema verification is unchanged.
-    assert main(base) == 0
 
 
 def test_verify_assets_refuses_a_duplicated_filename(tmp_path: Path) -> None:
     sh, _ = _write_installers(tmp_path)
     manifest = build_manifest(
         "1.2.3",
-        [_entry(), installer_artifact_entry(sh), installer_artifact_entry(sh)],
+        [_entry(), _installer_entry(sh), _installer_entry(sh)],
         created="2026-09-25T10:00:00+00:00",
     )
 
@@ -1217,7 +896,7 @@ def test_verify_assets_refuses_a_swapped_installer(tmp_path: Path) -> None:
     assert sh.stat().st_size == engine_sh.stat().st_size
     manifest = build_manifest(
         "1.2.3",
-        [_entry(), installer_artifact_entry(sh), installer_artifact_entry(engine_sh)],
+        [_entry(), _installer_entry(sh), _installer_entry(engine_sh)],
         created="2026-09-25T10:00:00+00:00",
     )
     swapped_dir = tmp_path / "swapped"
@@ -1227,3 +906,47 @@ def test_verify_assets_refuses_a_swapped_installer(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="does not match the manifest"):
         verify_assets(manifest, [swapped])
+
+
+def test_main_verify_checks_assets(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    priv, public_key, key_id = _keypair()
+    wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel bytes")
+    document = build_manifest(
+        "1.2.3", [artifact_entry(wheel, kind="wheel")], created="2026-09-25T10:00:00+00:00"
+    )
+    manifest = tmp_path / MANIFEST_NAME
+    raw = json.dumps(document).encode()
+    manifest.write_bytes(raw)
+    signature = tmp_path / (MANIFEST_NAME + ".sig")
+    signature.write_text(_sign(raw, priv, key_id), encoding="utf-8")
+    base = ["verify", str(manifest), str(signature), "--public-key", public_key]
+
+    assert main([*base, "--asset", str(wheel)]) == 0
+    assert "asset matches: ciaobot-1.2.3-py3-none-any.whl" in capsys.readouterr().out
+
+    # Same length, one byte changed: only the sha256 comparison can refuse it.
+    wheel.write_bytes(b"wheel bytez")
+    assert main([*base, "--asset", str(wheel)]) == 1
+    assert "does not match the manifest" in capsys.readouterr().err
+
+    # Without --asset the signature-and-schema verification is unchanged.
+    assert main(base) == 0
+
+
+def test_build_cli_refuses_server_host_option(tmp_path: Path) -> None:
+    # The release lists the wheel only (#3130 R1). The host and installer options
+    # are gone from the writer, so a publish step that still passes one fails
+    # the job at argument parsing instead of writing a manifest the release
+    # does not carry.
+    wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel bytes")
+    archive = tmp_path / SERVER_HOST_FILENAME
+    archive.write_bytes(b"host archive bytes")
+    out = tmp_path / MANIFEST_NAME
+
+    for option in (["--server-host", str(archive)], ["--installer", str(archive)]):
+        with pytest.raises(SystemExit) as refused:
+            main(["build", "--version", "1.2.3", "--out", str(out), *option, str(wheel)])
+        assert refused.value.code == 2
+        assert not out.exists(), "a refused build must not write a manifest"

@@ -68,15 +68,6 @@ _VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ASSET_REF_RE = re.compile(r'(?:src|href)="(/assets/[^"]+)"')
 _CHUNK = 1 << 20
-# The installer scripts publish.yml uploads (#2483). Listing them lets a client
-# authenticate install.sh from the signed manifest instead of pinning one
-# release's digest. install.sh and install-engine.sh are the same bytes under two names.
-INSTALLER_KIND = "installer"
-#: Each installer script a release uploads, by asset name, and the platform it runs on.
-INSTALLER_PLATFORMS: dict[str, str] = {
-    "install.sh": "macos",
-    "install-engine.sh": "macos",
-}
 
 
 class SignatureError(ValueError):
@@ -140,17 +131,6 @@ def server_host_artifact_entry(
     entry["host_protocol"] = SERVER_HOST_PROTOCOL
     entry["signing"] = {"kind": SERVER_HOST_SIGNING_KIND, "team_id": signing.team_id}
     return entry
-
-
-def installer_artifact_entry(path: Path) -> dict[str, Any]:
-    """Describe one installer script a release uploads, by its fixed asset name."""
-    platform = INSTALLER_PLATFORMS.get(path.name)
-    if platform is None:
-        raise ValueError(
-            f"not a release installer: {path.name!r}; expected one of "
-            f"{', '.join(sorted(INSTALLER_PLATFORMS))}"
-        )
-    return artifact_entry(path, kind=INSTALLER_KIND, platform=platform)
 
 
 def build_manifest(
@@ -494,27 +474,6 @@ def main(argv: list[str] | None = None) -> int:
     build = sub.add_parser("build", help="Write the engine release manifest")
     build.add_argument("--version", required=True, help="release version, no leading v")
     build.add_argument("--out", required=True, type=Path, help="manifest path to write")
-    build.add_argument(
-        "--server-host",
-        type=Path,
-        default=None,
-        help=f"optional {SERVER_HOST_FILENAME} to authenticate",
-    )
-    build.add_argument(
-        "--server-host-team-id",
-        default=None,
-        help=(
-            "the Developer ID team the named server host was signed by; emits the "
-            "signed host entry instead of the production one"
-        ),
-    )
-    build.add_argument(
-        "--installer",
-        type=Path,
-        action="append",
-        default=[],
-        help="installer script to list (install.sh, install-engine.sh); repeatable",
-    )
     build.add_argument("wheels", nargs="+", type=Path, help="wheels to list")
 
     verify = sub.add_parser("verify", help="Verify a signed engine manifest")
@@ -544,42 +503,13 @@ def main(argv: list[str] | None = None) -> int:
         version: str = args.version
         out: Path = args.out
         wheels: list[Path] = args.wheels
-        server_host: Path | None = args.server_host
-        team_id: str | None = args.server_host_team_id
-        installers: list[Path] = args.installer
         try:
-            if team_id is not None and server_host is None:
-                raise ValueError(
-                    "--server-host-team-id needs --server-host: a signing team "
-                    "describes the signed host archive, not the wheels"
-                )
             for wheel in wheels:
                 if f"-{version}-" not in wheel.name:
                     raise ValueError(f"{wheel.name} is not version {version}")
                 if not wheel.is_file():
                     raise ValueError(f"wheel is not a regular file: {wheel}")
             artifacts = [artifact_entry(wheel, kind="wheel") for wheel in wheels]
-            if server_host is not None:
-                if not server_host.is_file():
-                    raise ValueError(
-                        f"server host archive is not a regular file: {server_host}"
-                    )
-                if server_host.stat().st_size == 0:
-                    raise ValueError(f"server host archive is empty: {server_host}")
-                signing = DeveloperIDSigning(team_id) if team_id is not None else None
-                artifacts.append(
-                    server_host_artifact_entry(server_host, signing=signing)
-                )
-            seen: set[str] = set()
-            for installer in installers:
-                if installer.name in seen:
-                    raise ValueError(f"installer listed twice: {installer.name}")
-                seen.add(installer.name)
-                if not installer.is_file():
-                    raise ValueError(f"installer is not a regular file: {installer}")
-                if installer.stat().st_size == 0:
-                    raise ValueError(f"installer is empty: {installer}")
-                artifacts.append(installer_artifact_entry(installer))
             manifest = build_manifest(
                 version,
                 artifacts,
@@ -588,8 +518,8 @@ def main(argv: list[str] | None = None) -> int:
             serialized = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
             out.write_text(serialized, encoding="utf-8", newline="")
         except (OSError, ValueError) as exc:
-            # Every wheel and the host are validated before the manifest is
-            # built, so a refusal writes nothing: an existing manifest is left
+            # Every wheel is validated before the manifest is built, so a
+            # refusal writes nothing: an existing manifest is left
             # untouched rather than replaced by a partial or inconsistent one.
             print(f"Error: {exc}", file=sys.stderr)
             return 1

@@ -34,7 +34,7 @@ from ciao.release_manifest import (
     RELEASE_PUBLIC_KEY,
     SERVER_HOST_FILENAME,
     build_manifest,
-    installer_artifact_entry,
+    artifact_entry,
 )
 from tests.test_release_manifest import _keypair, _sign
 
@@ -164,8 +164,8 @@ def _installer_manifest_bytes(tmp_path: Path) -> bytes:
             VERSION,
             [
                 # The installers come first, so the wheel is found by kind, not position.
-                installer_artifact_entry(sh),
-                installer_artifact_entry(engine_sh),
+                artifact_entry(sh, kind="installer", platform="macos"),
+                artifact_entry(engine_sh, kind="installer", platform="macos"),
                 {
                     "filename": WHEEL_NAME,
                     "kind": "wheel",
