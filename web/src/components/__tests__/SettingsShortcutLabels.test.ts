@@ -21,7 +21,7 @@ async function shortcutLabels(platform: string): Promise<string[]> {
   await router.push('/settings')
   await router.isReady()
   vi.spyOn(api, 'get').mockRejectedValue(new Error('Unrelated settings data unavailable in this test'))
-  const wrapper = mount(SettingsView, { global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: stub } } })
+  const wrapper = mount(SettingsView, { global: { plugins: [router], stubs: { Teleport: true } } })
   try {
     await flushPromises()
     // The less common shortcuts sit behind "Show all"; open it to read them.
@@ -51,7 +51,7 @@ it('shows the common shortcuts and discloses the rest', async () => {
   await router.push('/settings')
   await router.isReady()
   vi.spyOn(api, 'get').mockRejectedValue(new Error('Unrelated settings data unavailable in this test'))
-  const wrapper = mount(SettingsView, { global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: stub } } })
+  const wrapper = mount(SettingsView, { global: { plugins: [router], stubs: { Teleport: true } } })
   try {
     await flushPromises()
     expect(wrapper.findAll('.shortcut-setting-row')).toHaveLength(21)

@@ -21,7 +21,7 @@ async function mountSettings(onHost?: boolean) {
   })
   const wrapper = mount(SettingsView, {
     attachTo: document.body,
-    global: { plugins: [router], stubs: { UpdateProgressView: stub } },
+    global: { plugins: [router] },
   })
   await flushPromises()
   return wrapper
