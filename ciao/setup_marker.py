@@ -53,8 +53,7 @@ def _has_legacy_workspaces_env(root: Path) -> bool:
 
     Such an install has no registry until its first start on a release that
     imports the variable, so an upgrade must still recognise it. Delete
-    together with the other pre-1.0 imports (``import_legacy_workspaces_env``
-    and the installer's matching check in `scripts/install-engine.sh`).
+    together with the other pre-1.0 imports (``import_legacy_workspaces_env``).
     """
     from ciao.macos_service import read_dotenv
 
