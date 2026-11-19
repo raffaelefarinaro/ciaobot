@@ -54,13 +54,11 @@ export function clipboardStub(): () => void {
 /** The answer the mount probe and the wizard poll read for. */
 export function setupStatus(overrides: Partial<SetupStatus> = {}): SetupStatus {
   return {
-    native_bootstrap: false,
     configured: true,
     bootstrap: false,
     mode: 'vault',
     workspace_root: '~/storybook-workspace',
     vault_root: '~/storybook-workspace/memory-vault',
-    suggested_workspace: null,
     checks: [],
     provider_ready: true,
     providers: providersReady(),
@@ -134,7 +132,7 @@ export function inspectAnswer(extra: { existing_workspaces?: string[]; cloud_syn
   })
 }
 
-/** The non-native wizard's two fixed reads: the probe route and its poll, plus the folder inspection answer. */
+/** The wizard's two fixed reads: the probe route and its poll, plus the folder inspection answer. */
 export function wizardRoutes(workspace: string, respond: () => Response | Promise<never>): FixtureRoute[] {
   return [
     statusRoute(() => json(bootstrapStatus())),

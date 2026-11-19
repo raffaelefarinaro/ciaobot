@@ -64,7 +64,7 @@ pointer and its private-record writes), ``ciao.macos_service``,
 ``ciao.package_version``. The old-install
 paths, the shim marker, the receipt and the hosted ``Ciaobot Server serve
 --python <abs>`` argv are literal constants parsed locally, so it never imports
-``server_host``, ``install_receipt``, ``install_discovery`` or friends itself.
+``server_host``, ``install_receipt`` or friends itself.
 That is a statement about this file only: ``ciao.macos_service`` still imports
 ``ciao.server_host`` (``parse_service_command``), so deleting ``server_host``
 also needs that import cut from ``macos_service`` first. The test checks the

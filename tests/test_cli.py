@@ -109,6 +109,21 @@ def test_run_parser_accepts_supervised_flag() -> None:
     assert cli.build_parser().parse_args(["run", "--supervised"]).supervised is True
 
 
+def test_run_has_no_installer_flags() -> None:
+    """The installer bootstrap is gone: each removed flag, and the `installer`
+    command, is an unknown argument to argparse (exit 2)."""
+    parser = cli.build_parser()
+    for argv in (
+        ["run", "--installer-bootstrap"],
+        ["run", "--installer-run-id", "run-1"],
+        ["run", "--installer-suggest-workspace", "/tmp/elsewhere"],
+        ["installer", "activate", "--run-id", "run-1"],
+    ):
+        with pytest.raises(SystemExit) as caught:
+            parser.parse_args(argv)
+        assert caught.value.code == 2, argv
+
+
 def test_run_server_passes_supervised_to_the_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """The engine's restart watchdog has to know it is supervised too, or a
     wedged cleanup re-execs and bypasses the supervisor's relaunch."""

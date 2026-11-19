@@ -54,13 +54,6 @@ if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
-def _absolute_installer_path(value: str) -> str:
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        raise argparse.ArgumentTypeError("installer workspace suggestion must be an absolute path")
-    return str(path)
-
-
 def _workspace_name_arg(value: str) -> str:
     name = value.strip()
     if not _WORKSPACE_NAME_RE.fullmatch(name):
@@ -76,42 +69,13 @@ def _relaunch_argv() -> list[str]:
     return [sys.executable, *python_isolation_flags(), "-m", "ciao.cli", *sys.argv[1:]]
 
 
-def _app_engine_refuses_installer_flags(args: argparse.Namespace) -> bool:
-    """Whether ``--app-engine`` arrives with any installer flag provided.
-
-    The optional installer values are compared with ``is not None``, not
-    truthiness: an empty run id is a provided value, not an absent one. Its own
-    function so the check is testable without the pre-block guards that normally
-    refuse most of these combinations first.
-    """
-    return bool(
-        args.installer_bootstrap
-        or args.installer_suggest_workspace is not None
-        or args.installer_run_id is not None
-    )
-
-
 def _run_command(args: argparse.Namespace) -> int:
-    if args.installer_suggest_workspace is not None and not args.installer_bootstrap:
-        print("--installer-suggest-workspace requires --installer-bootstrap", file=sys.stderr)
-        return 2
-    if args.installer_run_id and not args.installer_bootstrap:
-        print("--installer-run-id requires --installer-bootstrap", file=sys.stderr)
-        return 2
-    if args.installer_bootstrap and args.supervised:
-        print("--installer-bootstrap cannot be combined with --supervised", file=sys.stderr)
-        return 2
     if args.port is not None and not args.app_engine:
         print("--port requires --app-engine", file=sys.stderr)
         return 2
     if args.app_engine:
-        # App-mode: the Mac app owns this engine. The installer handshake has no
-        # parent to hand off to here, and the bundle check keeps the flag out of
-        # reach everywhere else; the refusal helper treats every provided value
-        # as one.
-        if _app_engine_refuses_installer_flags(args):
-            print("--app-engine cannot be combined with installer options", file=sys.stderr)
-            return 2
+        # App-mode: the Mac app owns this engine. The bundle check keeps the
+        # flag out of reach everywhere else.
         if not package_version.running_from_app_bundle():
             print("--app-engine runs only from the engine inside Ciaobot.app", file=sys.stderr)
             return 2
@@ -123,91 +87,13 @@ def _run_command(args: argparse.Namespace) -> int:
                 supervised=args.supervised, app_engine=True, app_engine_port=args.port
             )
         return _run_server(supervised=args.supervised, app_engine=True)
-    if not args.installer_bootstrap:
-        # Ordinary `ciao run` keeps its exact call shape.
-        return _run_server(supervised=args.supervised)
-    if not args.installer_run_id:
-        # A person resumed setup by hand (the installers print this command for
-        # a cancelled run), so there is no installer parent to activate the
-        # service: this process becomes one.
-        return _resume_installer_bootstrap(args.installer_suggest_workspace)
-    # The legacy call shape, unchanged; the exact-kwargs tests pin it.
-    return _run_server(
-        supervised=args.supervised,
-        installer_bootstrap=True,
-        installer_run_id=args.installer_run_id,
-        installer_suggest_workspace=args.installer_suggest_workspace,
-    )
-
-
-def _resume_installer_bootstrap(suggestion: str | None) -> int:
-    """Run the bootstrap as a child and activate the service once it succeeds.
-
-    A child, not this process: the bootstrap ends its own process the moment
-    setup completes (the restart watchdog exits it directly), so nothing after
-    it here would ever run. The same parent/child split the installers use.
-    """
-    import uuid
-
-    run_id = str(uuid.uuid4())
-    argv = [
-        sys.executable,
-        *python_isolation_flags(),
-        "-m",
-        "ciao.cli",
-        "run",
-        "--installer-bootstrap",
-        "--installer-run-id",
-        run_id,
-    ]
-    if suggestion is not None:
-        # `--flag=value`, so a suggestion that begins with a dash stays a path.
-        argv.append(f"--installer-suggest-workspace={suggestion}")
-    try:
-        code = subprocess.call(argv)
-    except KeyboardInterrupt:
-        return 130
-    if code != 0:
-        return code
-    return _installer_command(argparse.Namespace(run_id=run_id, as_json=False))
-
-
-def _installer_command(args: argparse.Namespace) -> int:
-    """Verify an installer bootstrap result and start the service."""
-    from ciao.installer_handoff import HandoffError, activate
-
-    as_json = bool(args.as_json)
-    try:
-        result = activate(run_id=args.run_id)
-    except HandoffError as exc:
-        if as_json:
-            print(json.dumps({"ok": False, "error": str(exc)}))
-        else:
-            print(
-                "Ciaobot was installed, but the service was not started: "
-                f"{exc}",
-                file=sys.stderr,
-            )
-        return 1
-    if as_json:
-        print(json.dumps({
-            "ok": True,
-            "workspace": str(result.workspace),
-            "service_backend": result.service_backend,
-            "definition": str(result.definition_path),
-            "port": result.port,
-        }))
-    else:
-        print(f"Ciaobot is starting from {result.workspace}.")
-    return 0
+    # Ordinary `ciao run` keeps its exact call shape.
+    return _run_server(supervised=args.supervised)
 
 
 def _run_server(
     *,
     supervised: bool = False,
-    installer_bootstrap: bool = False,
-    installer_run_id: str | None = None,
-    installer_suggest_workspace: str | None = None,
     app_engine: bool = False,
     app_engine_port: int | None = None,
 ) -> int:
@@ -215,15 +101,7 @@ def _run_server(
     from ciao.main import main as server_main
 
     try:
-        if installer_bootstrap:
-            # The legacy bootstrap keeps its exact call shape.
-            server_main(
-                supervised=supervised,
-                installer_bootstrap=True,
-                installer_run_id=installer_run_id,
-                installer_suggest_workspace=installer_suggest_workspace,
-            )
-        elif app_engine and app_engine_port is not None:
+        if app_engine and app_engine_port is not None:
             server_main(supervised=supervised, app_engine=True, app_engine_port=app_engine_port)
         elif app_engine:
             # Before any configuration is loaded, no server, threads or locks
@@ -240,10 +118,6 @@ def _run_server(
         code = exc.code if isinstance(exc.code, int) else 0
     else:
         code = 0
-    if installer_bootstrap:
-        # The installer parent owns this child's lifetime; a relaunch here would
-        # detach from it and make the outcome unobservable.
-        return code
     if code == RESTART_EXIT_CODE:
         # The setup wizard and package updates request a restart by exiting
         # with this code. Under launchd KeepAlive relaunches us anyway, but a
@@ -8032,20 +7906,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Exit with the restart code instead of re-execing; for `ciao supervise`.",
     )
-    run_parser.add_argument(
-        "--installer-bootstrap",
-        action="store_true",
-        help=(
-            "Installer-only: start a scratch first-run bootstrap for a fresh machine. "
-            "Refused when a Ciaobot install already exists."
-        ),
-    )
-    run_parser.add_argument(
-        "--installer-run-id",
-        default=None,
-        help="Installer-only correlation id for the handoff result (requires --installer-bootstrap).",
-    )
-    run_parser.add_argument("--installer-suggest-workspace", type=_absolute_installer_path, default=None)
     # App-owned engine mode (#3129): the Mac app launches this exact flag and
     # supervises the process itself. Not operator surface: hidden from --help,
     # and refused outside the bundle at dispatch.
@@ -8241,25 +8101,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--id", required=True, dest="takeover_id", help="The takeover id that apply returned."
     )
     takeover_rollback_parser.set_defaults(func=_mac_takeover_command)
-
-    installer_parser = subparsers.add_parser(
-        "installer",
-        help="Installer-only: verify a bootstrap result and start the service.",
-    )
-    installer_sub = installer_parser.add_subparsers(
-        dest="installer_action", required=True
-    )
-    installer_activate_parser = installer_sub.add_parser(
-        "activate",
-        help="Activate the service for a completed installer bootstrap run.",
-    )
-    installer_activate_parser.add_argument(
-        "--run-id",
-        required=True,
-        help="The run id the installer passed to `ciao run --installer-bootstrap`.",
-    )
-    installer_activate_parser.add_argument("--json", action="store_true", dest="as_json")
-    installer_activate_parser.set_defaults(func=_installer_command)
 
     linux_service_parser = subparsers.add_parser(
         "linux-service",

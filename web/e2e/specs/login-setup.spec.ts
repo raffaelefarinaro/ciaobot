@@ -7,10 +7,10 @@ async function setup(page: Page) {
   await isolate(page, 'native-login-setup')
   await page.route('**/api/setup-status', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
     configured: false, bootstrap: true, mode: 'bootstrap', workspace_root: '/fixture/workspace',
-    vault_root: '/fixture/workspace/memory-vault', suggested_workspace: null, checks: [],
+    vault_root: '/fixture/workspace/memory-vault', checks: [],
     providers: { claude: { name: 'claude', ok: false, auth: 'not_installed', command,
       path_command: 'echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.zshrc && source ~/.zshrc', detail: 'Claude Code not installed' } },
-    provider_ready: false, native_bootstrap: true,
+    provider_ready: false,
   }) }))
   await page.route('**/api/setup/inspect-folder?*', route => route.fulfill({ json: { mode: 'scratch', existing_workspaces: [] } }))
   await boot(page, '/login', '#setup-password')

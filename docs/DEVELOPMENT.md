@@ -148,20 +148,7 @@ No manual step is needed; `ensure-deps.sh` handles both. If you set up the venv 
 
 ### End-user distribution
 
-Installer bootstrap is guarded by a read-only freshness check before setup:
-it refuses when an existing workspace, live service definition, or registered
-macOS LaunchAgent is found, and also refuses if the
-service query cannot verify absence. Export-directory overrides do not affect
-the live service paths checked by this guard.
 
-#2339 adds a native classifier (`install_discovery.classify_native_install`)
-beside that guard. The native coordinator (`ciao.native_installer`, #2340) calls it twice, before its first mutation. It
-separates `fresh` from `configured` (a live definition or job, a completed
-workspace, or an explicit disabled launchd override), `partial` (a receipt, uv
-tool directory, `ciao` shim, setup marker, server host, the migration transaction
-or its `before/` images, the host-upgrade journal `server-host-upgrade.json`, or
-an interrupted handoff result) and `unknown` (a failed query, unreadable marker,
-dangling-symlink ancestor or inherited redirect).
 
 The permanent sibling lock `server-host-upgrade.lock` is deliberately not
 partial evidence. Every mutating host command creates it and never removes it,
@@ -252,19 +239,7 @@ run `ciao`. The zsh/bash block checks membership when each shell starts. Use
 the installer prints a quoted command for the current terminal either way. The
 installer process cannot change the PATH of the terminal that launched it. The
 managed block can be removed from the named startup file to undo the change.
-`ciao run --installer-bootstrap [--installer-run-id <uuid>]` is the installer's
-foreground browser bootstrap and is not an operator command: it refuses to start
-when it cannot prove the machine is fresh (an installed service definition or
-job, an inherited workspace redirect, or an existing workspace), runs from
-`~/.ciao/installer-bootstrap/launcher` with a scratch configuration that ignores
-`.env` and discovery, and never re-execs. When the wizard completes it writes one
-owner-only handoff result (run id, startup id, destination, service backend and
-definition, port) and exits 0 instead of handing the server to the service
-manager. The installer parent then runs `ciao installer activate --run-id
-<uuid>`, which starts the service only when the result belongs to that run, the
-recorded definition is the live one, that definition names the same destination,
-and the destination is a completed workspace; otherwise it reports what is
-uncertain and starts nothing.
+The legacy installer bootstrap (`ciao run --installer-bootstrap`, its handoff result and `ciao installer activate`) was deleted in #3130 P4. `ciao run` takes no installer flags.
 
 That legacy schema-1 path is unchanged. #2339 isolates a native handoff in
 `ciao/native_handoff.py`, using the same `~/.ciao/installer-bootstrap/handoff.json`
@@ -312,7 +287,7 @@ is judged and never chmod'ed, so an unsafe one is refused.
 That chain must already be private before the bootstrap child starts, because
 the child itself cannot create it that way: its launcher
 `mkdir(parents=True, exist_ok=True)` and
-`CiaoConfig.from_env(installer_bootstrap=True)` create a missing
+create a missing
 `~/.ciao/installer-bootstrap` at the process umask (normally `0755`), which the
 native recorder then refuses. #2339 therefore exposes
 `native_handoff.prepare_bootstrap_scratch()`, the parent's narrow preparation
@@ -343,10 +318,8 @@ close it. Tests: `tests/test_native_handoff.py`, `tests/test_definition_read.py`
 
 A fresh macOS install classifies the machine before creating anything: with no
 engine definition and no configured workspace it skips folder creation,
-`ciao setup` and service registration, runs `ciao run --installer-bootstrap` in
-the foreground (a `--workspace` is passed only as
-`--installer-suggest-workspace`), and activates the service from the matching
-handoff result with `ciao installer activate --json`. The Mac activation
+`ciao setup` and service registration, runs the bootstrap in the foreground and
+activates the service from the matching handoff result (both removed in #3130 P4). The Mac activation
 response uses the service backend name `macos`, not the install
 receipt's separate `launchd` name. The printed and opened
 browser URL uses the port in that verified activation response, including a
@@ -366,7 +339,7 @@ discards its partial response. Established-install and migration checks retain
 their existing behavior. If the fresh engine cannot bind
 or answer, setup remains saved, recovery guidance is printed, and the fresh
 install exits unsuccessfully. A cancel or guard refusal leaves
-a complete binary install that resumes with `ciao run --installer-bootstrap`,
+a complete binary install that resumes setup later,
 and `--no-start` provisions nothing. Migration and existing-workspace installs
 keep the `ciao setup` + `ciao service start` path; this installer runs on
 macOS only.
@@ -848,16 +821,13 @@ A healthy install is idempotent: nothing but the persisted uv and the service re
 Tests: `tests/test_native_repair_sh.py` (shell) and `tests/test_native_repair.py` (coordinator).
 
 The native bootstrap child side is now explicit but internal. When the native
-coordinator starts it with the private `--installer-native-fd` (hidden, and
-refused without `--installer-bootstrap`/`--installer-run-id`),
+coordinator starts it with the private `--installer-native-fd` (hidden),
 `_run_server_locked` builds a `NativeBootstrapContext` in a worker thread and
 threads it through `create_app` to `app.state.native_bootstrap`. `capture`
 requires macOS, the `macos` backend, the already-private scratch chain, an
 absent live definition and handoff result, a launchd-proven absent server job,
 the device/inode/mode identity of the bootstrap root and runtime, and a
-`verify_owned_host` snapshot. The legacy bootstrap passes no descriptor and
-keeps its exact schema-1 path, call shapes and browser auto-open. A native child
-opens no browser. `_mark_bound_when_serving` calls the context only after
+`verify_owned_host` snapshot. A native child opens no browser. `_mark_bound_when_serving` calls the context only after
 `uvicorn.Server.started` and `tracker.done(BIND_PHASE)`, writes exactly one
 bounded `{"schema":1,"port":N}` line, makes the private descriptor
 non-inheritable and closes it; a refused or failed write stops the child instead
