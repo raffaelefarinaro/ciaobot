@@ -28,6 +28,8 @@ test.describe('Chat details MCP button', () => {
 
     await section.getByRole('button', { name: 'Open MCP settings in Claude Code', exact: true }).click()
     await expect(page.locator('.terminal-pane')).toBeVisible()
-    await expect(section.getByRole('status')).toHaveText("Running in this chat's terminal. Finish signing in there.")
+    // The terminal takes the right-hand space at this width, so the rail
+    // closes: assert the typed command in the terminal itself, not the note.
+    await expect(page.locator('.terminal-pane')).toContainText('claude mcp')
   })
 })
