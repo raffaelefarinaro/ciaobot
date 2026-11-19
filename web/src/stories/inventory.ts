@@ -6284,24 +6284,84 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsAppearance.vue"
     ],
     "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variantNotes": "No configurable variants: one open prop plus its draft state; the audited render variants are the row states below.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in CustomColorsDialog.vue implements this render; no rendered-state story exists."
+        "name": "closed",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--closed"],
+        "note": "Props open=false, the production closed state: the portalled dialog renders nothing."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "default",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--default"],
+        "note": "Open with the shipped defaults: both theme sections show a readable ratio, Apply is blocked until something is edited and Reset is enabled."
+      },
+      {
+        "name": "seeded-custom-colours",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--seeded-custom-colours"],
+        "note": "Open with a saved pair per mode: the hex fields and swatches show the saved pair, not the theme's own colours (seedFor prefers the saved pair)."
+      },
+      {
+        "name": "edited-readable",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--edited-readable"],
+        "note": "A typed valid hex updates the draft, the ratio line and enables Apply."
+      },
+      {
+        "name": "unreadable",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--unreadable"],
+        "note": "A valid hex with too little contrast renders the refusal reason in hint--warn on the section status and keeps Apply blocked."
+      },
+      {
+        "name": "invalid-hex",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--invalid-hex"],
+        "note": "Typed text that is not a colour stays as typed, the swatch falls back to the seed and Apply stays blocked."
+      },
+      {
+        "name": "saving",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--saving"],
+        "note": "Apply while the write is held: Apply and Reset are actually disabled and Escape cannot close the dialog while a save is in flight (onOpenChange refuses)."
+      },
+      {
+        "name": "save-failure",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--save-failure"],
+        "note": "A failing Apply (PATCH 500) renders the role=alert error, the dialog stays open and Apply recovers."
+      },
+      {
+        "name": "apply",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--apply"],
+        "note": "Apply normalizes the edited pair, PATCHes the production save path (declared) and closes the dialog through update:open."
+      },
+      {
+        "name": "reset",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--reset"],
+        "note": "Reset saves custom_colors {} for both modes through the declared PATCH and closes the dialog."
+      },
+      {
+        "name": "cancel",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--cancel"],
+        "note": "Escape closes the portalled dialog through reka's DialogRoot and the singleton settings are left untouched."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["custom-colors-dialog--narrow"],
+        "note": "The card in a maximum 390px container: both theme section headings keep their layout at the card's mobile width."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in CustomColorsDialog.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch or loading branch on open: the dialog reads the shared appearance singleton and only Apply and Reset write (declared PATCH routes)."
     },
     "migration": {
       "status": "unassessed",
@@ -6321,25 +6381,88 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/settings/WorkspaceGoogleAccount.vue"
     ],
-    "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variants": [
+      "connect",
+      "reauth"
+    ],
+    "variantNotes": "The open prop and the connect/reauth mode change the title, display-name field, setup steps, checklist, sign-in controls and footer; every audited branch is a row state below.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in GoogleConnectDialog.vue implements this render; no rendered-state story exists."
+        "name": "closed",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--closed"],
+        "note": "Props open=false: the modal backdrop (v-if=\"open\") renders nothing."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "default",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--default"],
+        "note": "Connect mode with gws not installed and no profile: focused editable display name, install step, upload client panel, a disabled Sign-in control with its reason and a disabled Done with its reason; Escape closes."
+      },
+      {
+        "name": "install-problem",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--install-problem"],
+        "note": "The install_problem branch (gwsIntegration.install_problem) renders a role=alert inside the install step."
+      },
+      {
+        "name": "install-done",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--install-done"],
+        "note": "installed=true replaces the install step with its checklist entry and keeps the OAuth client step pending."
+      },
+      {
+        "name": "client-done-ready",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--client-done-ready"],
+        "note": "Client secret present but the profile not configured: both checklist entries with the Replace file action, the ready Sign-in and Paste-a-code controls and the profile's storage hint."
+      },
+      {
+        "name": "client-gcloud",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--client-gcloud"],
+        "note": "The gcloud radio shows the derived setup command, and Check again (declared POST profiles/add then GET) registers the profile and swaps in its stored name."
+      },
+      {
+        "name": "connected",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--connected"],
+        "note": "A configured profile linked to this workspace: the connected line with the workspace link, Done enabled, no sign-in controls; Done closes the dialog."
+      },
+      {
+        "name": "expired-reauth",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--expired-reauth"],
+        "note": "Reauth mode over a profile that needs re-login: the title, the expired warning with the cached token error, sign-in controls offered and Done still blocked."
+      },
+      {
+        "name": "relogin-pending",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--relogin-pending"],
+        "note": "The loopback wait status with Stop sign-in; the declared relogin/cancel write ends the wait and restores the sign-in buttons. Google OAuth start actions (Sign in, Paste a code) deliberately fail closed: their POSTs are undeclared, so the plays assert the controls instead of running them."
+      },
+      {
+        "name": "relogin-pending-blocked",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--relogin-pending-blocked"],
+        "note": "The blocked-tab variant of the wait: the Open authorization page link points at the fixture URL."
+      },
+      {
+        "name": "paste-code-flow",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--paste-code-flow"],
+        "note": "The paste flow: Complete Sign-In is blocked while the field is empty and the declared exchange write replaces the box with the connected line."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["google-connect-dialog--narrow"],
+        "note": "Reauth state in a maximum 390px container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in GoogleConnectDialog.vue has not yet been audited."
+      "status": "none",
+      "detail": "No read or loading branch at open: everything arrives through the injected Google accounts state. Reads happen only on explicit actions (Check again), which the covered states declare; OAuth writes stay undeclared and fail closed."
     },
     "migration": {
       "status": "unassessed",
@@ -6543,38 +6666,74 @@ export const inventory: InventoryEntry[] = [
     ],
     "variants": [
       "custom colours",
-      "error"
+      "soft-ignored"
     ],
-    "variantNotes": "Observed branches in SettingsAppearance.vue; remaining variants have not been audited.",
+    "variantNotes": "No props: the render comes from the appearance settings (custom colours on both themes or one theme), from Soft with a painted pair and from load and save failures; all audited in the states below.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsAppearance.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--default"],
+        "note": "Loaded defaults: Normal and System chosen, the Customise… control, the generic detail line, no Reset and no alert; the initial read is a declared fixture GET."
       },
       {
-        "name": "custom colours",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsAppearance.vue has a custom colours branch; no rendered-state story exists."
+        "name": "custom-colours-both",
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--custom-colours-both"],
+        "note": "Custom colours on for both themes: the detail line names both and the Reset control renders (v-if=\"hasCustomColors\")."
       },
       {
-        "name": "error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "SettingsAppearance.vue has a error branch; no rendered-state story exists."
+        "name": "custom-colours-one-theme",
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--custom-colours-one-theme"],
+        "note": "Custom colours on for the dark theme only: the detail line names the one theme and Reset renders."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "soft-ignored",
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--soft-ignored"],
+        "note": "Soft chosen while the active theme has a painted pair (v-if=\"softIgnored\"): the hint explains why Soft has no effect."
+      },
+      {
+        "name": "customise",
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--customise"],
+        "note": "The Customise… control opens the production CustomColorsDialog through v-model:open and Cancel closes it; the dialog makes no read of its own."
+      },
+      {
+        "name": "custom-colours-reset",
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--reset-custom-colours"],
+        "note": "Reset saves custom_colors {} through the production save path (declared PATCH); the control disappears and the detail line reverts."
+      },
+      {
+        "name": "text-contrast-soft",
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--text-contrast-soft"],
+        "note": "Choosing Soft saves through the production save path (declared PATCH), the radio moves selection and focus stays on the picked option."
+      },
+      {
+        "name": "save-failure",
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--save-failure"],
+        "note": "A failing write (PATCH 500) renders the role=alert action-result and leaves the radios on the engine's value; the save loop stops with the error."
+      },
+      {
+        "name": "load-failure",
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--load-failure"],
+        "note": "A failing initial read (GET 500) renders 'Could not load appearance settings.' as the role=alert action-result; the shipped defaults stay the model values."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["settings-appearance--narrow"],
+        "note": "Custom colours, both radio groups and Reset inside a maximum 390px container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsAppearance.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load is a silent GET with no placeholder: until the first response the groups show the shipped defaults, so the pre-response render equals the default render and is not a separate story. A failed initial load is the covered load-failure alert. No refresh, empty, filtered-empty or stale state exists: the owner reads once on mount and writes only on a choice."
     },
     "migration": {
       "status": "unassessed",
@@ -7292,53 +7451,78 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/settings/SettingsWorkspaceOverview.vue"
     ],
     "variants": [
-      "none",
       "connected",
       "expired",
-      "connecting"
+      "none",
+      "actions menu",
+      "advanced panel"
     ],
-    "variantNotes": "Observed branches in WorkspaceGoogleAccount.vue; remaining variants have not been audited.",
+    "variantNotes": "Observed branches audited: loading skeleton, load error with retry, none, connected, expired, actions menu (stop-using confirm and busy menu), advanced panel and narrow wrap. The old 'connecting' variant does not exist in the template: gwsAccountState renders connected, expired or none.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in WorkspaceGoogleAccount.vue implements this render; no rendered-state story exists."
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--loading"],
+        "note": "Initial: the generic SkeletonLoader placeholder (rows, one count, announced as Loading Google account) while the integration read has not settled."
+      },
+      {
+        "name": "load-error",
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--load-error", "workspace-google-account--refresh-failure"],
+        "note": "Initial failure: the warn hint and Retry (v-else-if=\"gwsIntegrationError\"). The retry's declared read replaces the error with the row (load-error) or answers another failure the hint re-renders (refresh-failure)."
       },
       {
         "name": "none",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "WorkspaceGoogleAccount.vue has a none branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--none"],
+        "note": "No linked profile (v-else): the hint, the Connect Google account control, and the Connect dialog with focus returned to the row's opener after it closes."
       },
       {
         "name": "connected",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "WorkspaceGoogleAccount.vue has a connected branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--connected"],
+        "note": "A linked configured profile: the Connected badge, label and email line, and the actions menu with Re-authenticate offered; Escape closes the menu. The profile's workspace list carries a second workspace so Stop using is offered."
       },
       {
         "name": "expired",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "WorkspaceGoogleAccount.vue has a expired branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--expired"],
+        "note": "A linked profile that needs re-login: the Sign-in expired badge, the cached token error hint, the Sign in again control and the reauth dialog with focus returned to it."
       },
       {
-        "name": "connecting",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "WorkspaceGoogleAccount.vue has a connecting branch; no rendered-state story exists."
+        "name": "advanced-panel",
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--advanced-panel"],
+        "note": "The Advanced / headless setup menu item opens the command panel (v-if=\"advancedOpen && profile\"); without a stored client the Create client command shows; Hide closes it."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "advanced-panel-secret",
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--advanced-panel-secret"],
+        "note": "The same panel with a stored client secret: the Create client block is absent and the Login, Headless and Stored commands remain."
+      },
+      {
+        "name": "stop-using-confirm",
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--stop-using-confirm"],
+        "note": "The menu's Stop using in this workspace item opens the production confirm; cancelling writes nothing and leaves the link. Confirmed destructive actions are the Overview host's composition, not this row's isolated render."
+      },
+      {
+        "name": "busy",
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--busy"],
+        "note": "Disconnect and remove while the removal write is held: the actions menu is actually disabled through the owner's busy flag, not just styled."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["workspace-google-account--narrow"],
+        "note": "The connected row in a maximum 390px container: the actions wrap onto their own line under the name and email."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in WorkspaceGoogleAccount.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial loading is the generic SkeletonLoader (rows): its two-line geometry does not match the loaded row's set-row badge and menu geometry, which a later loading slice should replace. A failed read renders the hint and Retry; the declared reads cover both a recoving retry and a refresh failure. No stale or refresh-keep state exists: the owner renders only the injected fetch result and never fetches on mount."
     },
     "migration": {
       "status": "unassessed",
