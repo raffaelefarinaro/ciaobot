@@ -57,20 +57,6 @@ def _engine_starts(monkeypatch, startup_id: str = "run-1") -> None:
     )
 
 
-def _write_bundle(path: Path, executable: str) -> None:
-    macos = path / "Contents" / "MacOS"
-    macos.mkdir(parents=True)
-    (macos / executable).write_text("binary", encoding="utf-8")
-    (path / "Contents" / "Info.plist").write_bytes(
-        plistlib.dumps(
-            {
-                "CFBundleIdentifier": "local.ciaobot.app",
-                "CFBundleExecutable": executable,
-            }
-        )
-    )
-
-
 def test_discover_runtime_prefers_workspace_dotenv(tmp_path: Path) -> None:
     workspace = tmp_path / "Ciao Workspace"
     workspace.mkdir()
@@ -107,8 +93,7 @@ def test_discover_runtime_reports_the_served_interpreter_for_a_hosted_definition
 ) -> None:
     # A hosted definition runs Ciaobot Server, which is not a Python
     # interpreter: reporting argv[0] as python_path would hand every consumer
-    # (and update_engine's bundled-engine check) the host binary. The served
-    # interpreter is the answer.
+    # the host binary. The served interpreter is the answer.
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     agents = tmp_path / "LaunchAgents"
@@ -284,137 +269,44 @@ def test_force_stop_boots_out_server(tmp_path: Path, monkeypatch) -> None:
     assert calls == [["launchctl", "bootout", "gui/777/com.ciao.server"]]
 
 
-def test_migrate_and_rollback_preserve_recoverable_assets(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    runtime = _runtime(tmp_path)
-    agents = Path(runtime.server_plist).parent
-    legacy_plist = agents / "com.ciao.menubar.plist"
-    legacy_plist.write_text("legacy plist", encoding="utf-8")
-    applications = tmp_path / "Applications"
-    desktop = applications / "Ciaobot.app"
-    legacy_app = applications / "Ciaobot Server.app"
-    _write_bundle(desktop, "ciaobot-desktop")
-    _write_bundle(legacy_app, "CiaobotServer")
-    (legacy_app / "marker").write_text("legacy app", encoding="utf-8")
-    trash = tmp_path / "Trash"
-    calls: list[list[str]] = []
-    monkeypatch.setattr(macos_service, "server_reachable", lambda _port: True)
-
-    migrated = macos_service.migrate_legacy_companion(
-        runtime=runtime,
-        launch_agents_dir=agents,
-        applications_dirs=[applications],
-        trash_dir=trash,
-        uid=501,
-        runner=_runner(calls),
-    )
-
-    assert migrated.ok is True
-    assert not legacy_plist.exists()
-    assert (Path(runtime.runtime_root) / "migration/com.ciao.menubar.plist").exists()
-    assert not legacy_app.exists()
-    assert (trash / "Ciaobot Server.app/marker").read_text() == "legacy app"
-    receipt = json.loads(
-        (Path(runtime.runtime_root) / "migration/desktop-migration.json").read_text()
-    )
-    assert "desktop-token" not in json.dumps(receipt)
-
-    rolled_back = macos_service.rollback_legacy_companion(
-        runtime=runtime,
-        launch_agents_dir=agents,
-        uid=501,
-        runner=_runner(calls),
-    )
-
-    assert rolled_back.ok is True
-    assert legacy_plist.read_text() == "legacy plist"
-    assert (legacy_app / "marker").read_text() == "legacy app"
-
-
-def test_migrate_is_idempotent_and_ignores_unrecognized_apps(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    runtime = _runtime(tmp_path)
-    agents = Path(runtime.server_plist).parent
-    legacy_plist = agents / "com.ciao.menubar.plist"
-    legacy_plist.write_text("legacy plist", encoding="utf-8")
-    applications = tmp_path / "Applications"
-    _write_bundle(applications / "Ciaobot.app", "ciaobot-desktop")
-    unrecognized = applications / "Ciaobot Server.app"
-    _write_bundle(unrecognized, "UnexpectedExecutable")
-    trash = tmp_path / "Trash"
-    monkeypatch.setattr(macos_service, "server_reachable", lambda _port: True)
-
-    first = macos_service.migrate_legacy_companion(
-        runtime=runtime,
-        launch_agents_dir=agents,
-        applications_dirs=[applications],
-        trash_dir=trash,
-        runner=_runner([]),
-    )
-    second = macos_service.migrate_legacy_companion(
-        runtime=runtime,
-        launch_agents_dir=agents,
-        applications_dirs=[applications],
-        trash_dir=trash,
-        runner=_runner([]),
-    )
-
-    assert first.ok is True
-    assert second.ok is True
-    assert second.details["already_migrated"] is True
-    assert unrecognized.is_dir()
-    assert not trash.exists()
-
-
-def test_migrate_rejects_an_uninstalled_calling_bundle(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path)
-    applications = tmp_path / "Applications"
-    development_bundle = tmp_path / "target" / "Ciaobot.app"
-    _write_bundle(development_bundle, "ciaobot-desktop")
-
-    result = macos_service.migrate_legacy_companion(
-        runtime=runtime,
-        running_app=development_bundle,
-        applications_dirs=[applications],
-        runner=_runner([]),
-    )
-
-    assert result.ok is False
-    assert "installed Ciaobot.app" in result.message
-
-
 def test_desktop_service_parser_contract() -> None:
     from ciao.cli import build_parser
 
     parser = build_parser()
 
     restart = parser.parse_args(["desktop-service", "restart", "--force", "--json"])
-    update = parser.parse_args(
-        ["desktop-service", "update-engine", "--force", "--json"]
-    )
     login = parser.parse_args(["desktop-service", "login", "disable", "--json"])
-    migrate = parser.parse_args(
-        [
-            "desktop-service",
-            "migrate",
-            "--app-bundle",
-            "/Applications/Ciaobot.app",
-            "--json",
-        ]
-    )
 
     assert restart.service_action == "restart"
     assert restart.deprecated_alias is True
     assert restart.force is True
     assert restart.as_json is True
-    assert update.service_action == "update-engine"
-    assert update.force is True
     assert login.login_action == "disable"
-    assert migrate.app_bundle == Path("/Applications/Ciaobot.app")
+
+
+RETIRED_SERVICE_ACTIONS = (
+    ["update-engine"],
+    ["migrate", "--app-bundle", "/Applications/Ciaobot.app"],
+    ["migration-classify"],
+    ["rollback"],
+)
+
+
+@pytest.mark.parametrize("prefix", ["service", "desktop-service"])
+@pytest.mark.parametrize("retired", RETIRED_SERVICE_ACTIONS, ids=lambda a: a[0])
+def test_service_rejects_retired_actions(
+    prefix: str, retired: list[str], capsys
+) -> None:
+    from ciao.cli import build_parser
+
+    # The legacy desktop-companion actions are gone from both spellings of the
+    # group. argparse refuses them as invalid choices, exit 2, before any
+    # handler runs.
+    with pytest.raises(SystemExit) as refused:
+        build_parser().parse_args([prefix, *retired, "--json"])
+
+    assert refused.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
 
 
 def test_service_parser_contract() -> None:
@@ -767,166 +659,6 @@ def test_desktop_service_alias_warns_only_without_json(monkeypatch, capsys) -> N
     second = capsys.readouterr()
     assert second.err == ""
     assert json.loads(second.out)["ok"] is True
-
-
-def test_update_engine_requires_confirmation_before_upgrading_active_chats(
-    tmp_path: Path, monkeypatch
-) -> None:
-    runtime = _runtime(tmp_path)
-    monkeypatch.setattr(macos_service, "restart_blockers", lambda _port: [{"chat_id": "chat-1", "reasons": ["streaming"]}])
-    monkeypatch.setattr(
-        "ciao.package_version.update_package",
-        lambda: (_ for _ in ()).throw(AssertionError("upgrade must not start")),
-    )
-
-    result = macos_service.update_engine(runtime=runtime, runner=_runner([]))
-
-    assert result.ok is False
-    assert result.details["requires_confirmation"] is True
-    assert result.details["restart_blockers"] == [{"chat_id": "chat-1", "reasons": ["streaming"]}]
-
-
-def test_update_engine_surfaces_already_current_for_a_noop_upgrade(
-    tmp_path: Path, monkeypatch
-) -> None:
-    # The desktop's single "Update…" runs the engine first and then the app. A
-    # no-op engine upgrade reports ok=False (so the PWA banner stays honest),
-    # so the desktop needs a structured flag to know it should still go on and
-    # update the app instead of aborting with an error dialog.
-    runtime = _runtime(tmp_path)
-    monkeypatch.setattr(
-        "ciao.package_version.update_package",
-        lambda: {
-            "ok": False,
-            "already_current": True,
-            "version": "0.5.3",
-            "error": "Still on 0.5.3 after running the upgrade",
-        },
-    )
-
-    result = macos_service.update_engine(runtime=runtime, runner=_runner([]))
-
-    assert result.ok is False
-    assert result.details["already_current"] is True
-
-
-def test_update_engine_does_not_flag_already_current_on_real_failure(
-    tmp_path: Path, monkeypatch
-) -> None:
-    runtime = _runtime(tmp_path)
-    monkeypatch.setattr(
-        "ciao.package_version.update_package",
-        lambda: {"ok": False, "error": "Homebrew 'brew' command not found in PATH."},
-    )
-
-    result = macos_service.update_engine(runtime=runtime, runner=_runner([]))
-
-    assert result.ok is False
-    assert result.details["already_current"] is False
-
-
-def _desktop_host_agents(
-    tmp_path: Path, *, node_state: object | None = None
-) -> Path:
-    """A LaunchAgents dir whose `com.ciao.server` runs a live Ciaobot.app."""
-    agents = tmp_path / "home" / "Library" / "LaunchAgents"
-    agents.mkdir(parents=True)
-    workspace = tmp_path / "workspace"
-    (workspace / ".runtime").mkdir(parents=True)
-    (workspace / ".env").write_text("PWA_PORT=9555\n", encoding="utf-8")
-    (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
-    (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
-    program = tmp_path / "Ciaobot.app" / "Contents" / "Resources" / "bin" / "ciao"
-    program.parent.mkdir(parents=True)
-    program.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    (agents / "com.ciao.server.plist").write_bytes(
-        plistlib.dumps(
-            {
-                "Label": "com.ciao.server",
-                "ProgramArguments": [str(program), "run"],
-                "EnvironmentVariables": {"CIAO_WORKSPACE": str(workspace)},
-                "WorkingDirectory": str(workspace),
-            }
-        )
-    )
-    if node_state is not None:
-        text = node_state if isinstance(node_state, str) else json.dumps(node_state)
-        (workspace / ".runtime" / "node_state.json").write_text(text, encoding="utf-8")
-    return agents
-
-
-def test_migration_classify_parser_contract() -> None:
-    from ciao.cli import build_parser
-
-    args = build_parser().parse_args(
-        ["desktop-service", "migration-classify", "--json"]
-    )
-
-    assert args.service_action == "migration-classify"
-    assert args.deprecated_alias is True
-    assert args.as_json is True
-
-
-def test_migration_classify_reports_a_live_desktop_host(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
-    # The app asks this before offering the hand-over, so a live host has to
-    # come back as `desktop_host` with the workspace the installer will keep.
-    from ciao import cli
-
-    agents = _desktop_host_agents(tmp_path)
-    monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(agents))
-    monkeypatch.setattr(sys, "platform", "darwin")
-
-    rc = cli.main(["desktop-service", "migration-classify", "--json"])
-
-    payload = json.loads(capsys.readouterr().out)
-    assert rc == 0
-    assert payload["ok"] is True
-    assert payload["action"] == "migration-classify"
-    assert payload["details"]["kind"] == "desktop_host"
-    assert payload["details"]["workspace"] == str(tmp_path / "workspace")
-    assert payload["details"]["port"] == 9555
-
-
-def test_migration_classify_refuses_to_guess_an_unreadable_state(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
-    # A node_state.json that is not a dict is the case the app must ask about:
-    # the two guesses are both expensive, so the bridge reports `desktop_invalid`
-    # rather than letting the app infer a role.
-    from ciao import cli
-
-    agents = _desktop_host_agents(tmp_path, node_state={"role": "replica"})
-    monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(agents))
-    monkeypatch.setattr(sys, "platform", "darwin")
-
-    rc = cli.main(["desktop-service", "migration-classify", "--json"])
-
-    payload = json.loads(capsys.readouterr().out)
-    assert rc == 0
-    assert payload["details"]["kind"] == "desktop_invalid"
-    assert payload["details"]["node_role"] == "invalid"
-    assert payload["details"]["host_url"] == ""
-
-
-def test_migration_classify_names_a_mac_with_nothing_to_migrate(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
-    # No plist at all: the app must show no offer, and the classifier is the
-    # only thing that can say so.
-    from ciao import cli
-
-    agents = tmp_path / "home" / "Library" / "LaunchAgents"
-    agents.mkdir(parents=True)
-    monkeypatch.setenv("CIAO_LAUNCH_AGENTS_DIR", str(agents))
-    monkeypatch.setattr(sys, "platform", "darwin")
-
-    rc = cli.main(["desktop-service", "migration-classify", "--json"])
-
-    payload = json.loads(capsys.readouterr().out)
-    assert rc == 0
-    assert payload["details"]["kind"] == "none"
 
 
 HOSTED_HOST = "/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server"

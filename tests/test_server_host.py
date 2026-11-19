@@ -246,9 +246,9 @@ def test_identity_is_distinct_from_pwa_retired_and_experiment() -> None:
     assert info["CFBundleExecutable"] == "Ciaobot Server"
     assert info["LSUIElement"] is True
 
-    from ciao import cli, macos_service
+    from ciao import cli
 
-    reserved = {macos_service.DESKTOP_BUNDLE_ID, "local.ciaobot.menubar", *cli._OUR_BUNDLE_IDS}
+    reserved = {"local.ciaobot.app", "local.ciaobot.menubar", *cli._OUR_BUNDLE_IDS}
     assert BUILD.BUNDLE_ID not in reserved
     # Not the experiment identity either.
     assert BUILD.BUNDLE_ID != "local.ciaobot.server-host-experiment"
