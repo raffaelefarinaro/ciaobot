@@ -1239,11 +1239,13 @@ struct WebWindow: NSViewRepresentable {
         /// Validates one `ciaobotAppSettings` request. Every field is untrusted:
         /// the sending view must be the coordinator's current view, the frame
         /// the main frame of the exact selected origin, the document the
-        /// committed one, and the body exactly `{op: <string>}`. `get` reads the
-        /// snapshot; `notifications` additionally spends a trusted click made in
-        /// this committed document and
-        /// performs exactly the tray row's action. Anything else is refused with
-        /// no side effect.
+        /// committed one, and the body a dictionary with a string `op`. `get`
+        /// reads the snapshot and takes no other key. The actions
+        /// (`notifications`, `checkForUpdates`, and `setAutomaticUpdates` with a
+        /// strict boolean `on`) each take exactly their keys, spend a trusted
+        /// click made in this committed document, and perform exactly the tray
+        /// row's action. The click is spent only once the action ran. Anything
+        /// else is refused with no side effect.
         @MainActor
         func handleAppSettingsMessage(
             isMainFrame: Bool,
@@ -1262,21 +1264,41 @@ struct WebWindow: NSViewRepresentable {
                   committedDocumentGeneration == documentGeneration,
                   origin.matches(scheme: scheme, host: host, port: port),
                   let payload = body as? [String: Any],
-                  payload.count == 1,
                   let op = payload["op"] as? String else { return .failure(RefusedError()) }
-            switch op {
-            case "get":
-                return .success(appSettings.snapshot())
-            case "notifications":
-                // A refusal leaves the click unspent; it is spent only once the
-                // action actually ran.
+            // A refusal leaves the click unspent; it is spent only once the
+            // action actually ran.
+            func spendingClick(_ action: () -> Bool) -> Result<[String: Any], RefusedError> {
                 guard clickGesture.isPending(generation: committedDocumentGeneration, now: now),
-                      appSettings.perform(op) else { return .failure(RefusedError()) }
+                      action() else { return .failure(RefusedError()) }
                 clickGesture.clear()
                 return .success(appSettings.snapshot())
+            }
+            switch op {
+            case "get":
+                guard payload.count == 1 else { return .failure(RefusedError()) }
+                return .success(appSettings.snapshot())
+            case "notifications":
+                guard payload.count == 1 else { return .failure(RefusedError()) }
+                return spendingClick { appSettings.perform(op) }
+            case "checkForUpdates":
+                guard payload.count == 1 else { return .failure(RefusedError()) }
+                return spendingClick { appSettings.checkForUpdates() }
+            case "setAutomaticUpdates":
+                guard payload.count == 2, let on = Self.strictBool(payload["on"]) else {
+                    return .failure(RefusedError())
+                }
+                return spendingClick { appSettings.setAutomaticUpdates(on) }
             default:
                 return .failure(RefusedError())
             }
+        }
+
+        /// A JavaScript boolean and nothing else. WebKit delivers a JavaScript
+        /// `1` or `0` as a number, which is refused here.
+        static func strictBool(_ value: Any?) -> Bool? {
+            guard let number = value as? NSNumber,
+                  CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+            return number.boolValue
         }
 
         /// Validates one workspace-colour message. `WKScriptMessage` cannot be
