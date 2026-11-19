@@ -836,7 +836,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   `composables/useRunInTerminal.ts`, falling back to a copy when the terminal is
   not ready. *Ask Ciao to add one* still starts a chat titled "Add an MCP server".
   Changes apply to new chats; a running chat loads them after `ciao chat reload`.
-  The page does not read `/api/mcp/status` or turn servers on or off. The Providers tab instead shows generic sign-in commands for the user to copy or type manually, and opens the selected workspace's browser terminal without sending input. Verify rereads provider and model information; OpenCode configuration is not credential verification and completed model reads do not prove catalog availability.
+  The page does not read MCP servers or turn them on or off. The Providers tab instead shows generic sign-in commands for the user to copy or type manually, and opens the selected workspace's browser terminal without sending input. Verify rereads provider and model information; OpenCode configuration is not credential verification and completed model reads do not prove catalog availability.
   Chat details has an MCP section that holds the same `ProviderMcpButton.vue`
   for the chat's own agent. ChatPanel reads `/api/settings/providers` once, the
   first time the details rail or drawer opens, and keeps the row for that pane;

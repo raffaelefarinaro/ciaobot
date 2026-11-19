@@ -413,13 +413,7 @@ async def test_a_hanging_cancel_is_bounded(tmp_path: Path, monkeypatch: pytest.M
 
 @pytest.mark.asyncio
 async def test_a_finished_turn_starts_no_mcp_detection(tmp_path: Path) -> None:
-    """A turn ends without asking the provider for MCP status or raising any card."""
-    reads: list[str] = []
-
-    async def read_mcp_status() -> dict[str, str]:
-        reads.append("read")
-        raise AssertionError("a finished turn must not read MCP status")
-
+    """A turn ends without starting MCP detection or raising any card."""
     host = _DriveHost(
         [
             AssistantTextDelta(type="text", text="hello"),
@@ -435,7 +429,7 @@ async def test_a_finished_turn_starts_no_mcp_detection(tmp_path: Path) -> None:
         tmp_path,
     )
     host._providers["chat-1"] = SimpleNamespace(
-        provider=SimpleNamespace(is_connected=True, read_mcp_status=read_mcp_status)
+        provider=SimpleNamespace(is_connected=True)
     )
     streaming = ChatStreaming(cast(ChatStreamingHost, host))
     stream = ChatStream(prompt_text="hello")
@@ -453,6 +447,5 @@ async def test_a_finished_turn_starts_no_mcp_detection(tmp_path: Path) -> None:
         unattended=False,
     )
 
-    assert reads == []
     assert host.chat.actions == []
     assert not [name for name in host.detached_names if name.startswith("chat-actions-detect-")]

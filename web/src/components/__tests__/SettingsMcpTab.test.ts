@@ -27,7 +27,7 @@ describe('Settings MCP tab', () => {
 
   it('shows one button per installed agent, in registry order, and does not read MCP status', async () => {
     setActivePinia(createPinia())
-    const get = vi.spyOn(api, 'get').mockImplementation(async (raw: string) => {
+    vi.spyOn(api, 'get').mockImplementation(async (raw: string) => {
       if (raw.split('?')[0] === '/api/settings/providers') return providers as never
       if (raw.split('?')[0] === '/api/workspaces') {
         return { workspaces: [{ name: 'personal', vault_root: 'memory-vault', default_provider: 'claude' }], active: 'personal', provider_options: [] } as never
@@ -66,7 +66,6 @@ describe('Settings MCP tab', () => {
         'Open MCP settings in OpenCode',
       ])
       expect(host.textContent).toContain('Each agent manages its own MCP servers and sign-ins.')
-      expect(get.mock.calls.some(([path]) => String(path).includes('/api/mcp/status'))).toBe(false)
     } finally {
       app.unmount()
       host.remove()

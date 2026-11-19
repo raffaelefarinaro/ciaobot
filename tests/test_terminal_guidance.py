@@ -116,7 +116,7 @@ def _terminal_button_label() -> str:
     return str(labels[0]).strip()
 
 
-def _inventory_command_names() -> set[str]:
+def _inventory_command_names(monkeypatch: pytest.MonkeyPatch) -> set[str]:
     """The MCP command names the Settings MCP buttons type for the user.
 
     Taken from the backend constants the buttons use, so a command the
@@ -124,17 +124,20 @@ def _inventory_command_names() -> set[str]:
     """
     # Settings -> MCP servers and Chat details render one button per agent that
     # types the agent's own MCP command (`mcp_command` in /api/settings/providers).
-    from ciao.providers.opencode import OPENCODE_MCP_COMMAND
-    from ciao.setup_status import claude_mcp_command
+    from ciao import setup_status
+    from ciao.providers import opencode
 
-    assert claude_mcp_command().endswith(" mcp"), "the Claude MCP command changed shape"
-    names = {"claude mcp", OPENCODE_MCP_COMMAND}
-    return names
+    # The bare form, as the server hands it out when the user's terminal
+    # resolves the binary.
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: f"/usr/bin/{cmd}")
+    return {setup_status.claude_mcp_command(""), opencode.OPENCODE_MCP_COMMAND}
 
 
-def test_settings_inventory_commands_are_the_ones_the_guidance_names() -> None:
+def test_settings_inventory_commands_are_the_ones_the_guidance_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The guidance must name the commands the Settings panel hands out."""
-    emitted = _inventory_command_names()
+    emitted = _inventory_command_names(monkeypatch)
     assert emitted, "the inventory hands out no MCP command"
     guidance = _reference("install-and-settings.md")
     missing = sorted(command for command in emitted if command not in guidance)
@@ -309,10 +312,6 @@ def test_chat_mcp_setup_runs_in_the_workspace_folder() -> None:
     guidance = _reference("install-and-settings.md")
     assert "cd -- '<workspace folder>' && " in guidance
     assert "never the linked repository" in guidance
-
-    # The prefix form the server builds (ciao/web/mcp_inventory.py `_shell_prefix`).
-    server = (REPO / "ciao" / "web" / "mcp_inventory.py").read_text(encoding="utf-8")
-    assert 'f"cd -- {shlex.quote(root)} && "' in server
 
 
 def _assert_mcp_recovery_location(index: str, settings: str, cli: str) -> None:

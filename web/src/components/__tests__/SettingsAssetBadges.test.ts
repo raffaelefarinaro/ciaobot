@@ -41,7 +41,6 @@ const responses: Record<string, unknown> = {
     }],
     health: { status: 'ok', checks: [] },
   },
-  '/api/mcp/status': { workspace: 'personal', agent_root: '/workspace/personal', providers: [] },
   '/api/mcp/usage': {},
   '/api/settings/providers': { connections: {} },
 }

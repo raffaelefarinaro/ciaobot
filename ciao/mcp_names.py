@@ -1,4 +1,4 @@
-"""Pure claude.ai connector-name classification shared by the Claude adapter and its web hosts."""
+"""Pure claude.ai connector-name classification used by the Claude adapter's claude.ai catalog watcher."""
 
 _CLAUDEAI_PREFIX = "claude.ai "
 

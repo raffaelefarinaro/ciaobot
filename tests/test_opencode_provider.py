@@ -5907,7 +5907,7 @@ def test_credential_count_reads_the_v2_json_listing(monkeypatch):
     assert mod._credential_count("/bin/opencode", timeout=1.0) == 0
 
 
-def test_status_reports_skills_plugins_and_mcps_from_the_server(monkeypatch):
+def test_status_reports_skills_and_plugins_from_the_server(monkeypatch):
     """Settings lists what the opencode CLI brings; the V2 server's list routes
     are the source, minus built-in and failed plugins."""
     from types import SimpleNamespace
@@ -5921,7 +5921,6 @@ def test_status_reports_skills_plugins_and_mcps_from_the_server(monkeypatch):
             {"id": "review", "source": {"type": "local"}, "state": {"status": "active"}},
             {"id": "dupe", "source": {"type": "local"}, "state": {"status": "failed"}},
         ],
-        "/api/mcp": [{"name": "github"}],
     }
 
     run_calls = []
@@ -5938,14 +5937,14 @@ def test_status_reports_skills_plugins_and_mcps_from_the_server(monkeypatch):
     monkeypatch.setattr(
         mod,
         "_fetch_inventory_rows",
-        lambda binary, **_k: (routes["/api/skill"], routes["/api/plugin"], routes["/api/mcp"]),
+        lambda binary, **_k: (routes["/api/skill"], routes["/api/plugin"]),
     )
 
     status = mod.opencode_login_status()
 
     assert status["skills"] == ["pdf", "review"]
     assert status["bundled_skills"] == ["opencode"]
-    assert status["mcps"] == ["github"]
+    assert "mcps" not in status
     assert not any(len(cmd) > 1 and cmd[1] == "api" for cmd in run_calls)
 
 
@@ -5963,14 +5962,14 @@ def test_status_leaves_out_lists_the_server_could_not_report(monkeypatch):
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
     monkeypatch.setattr("subprocess.run", fake_run)
     monkeypatch.setattr(mod, "_credential_count", lambda *a, **k: 0)
-    monkeypatch.setattr(mod, "_fetch_inventory_rows", lambda binary, **_k: (None, [], []))
+    monkeypatch.setattr(mod, "_fetch_inventory_rows", lambda binary, **_k: (None, []))
 
     status = mod.opencode_login_status()
 
     assert status["ok"] is True
     assert "skills" not in status
     assert "bundled_skills" not in status
-    assert status["mcps"] == []
+    assert "mcps" not in status
 
 
 def _inventory_client(handler):
@@ -6006,17 +6005,17 @@ def test_inventory_waits_until_plugins_load(monkeypatch):
             if plugin_calls <= 2:
                 return httpx.Response(200, json={"data": [builtin, {"id": "opencode2"}]})
             return httpx.Response(200, json={"data": [builtin, {"id": "pdf"}]})
-        return httpx.Response(200, json={"data": [{"name": "github"}]})
+        return httpx.Response(404)
 
     with _inventory_client(handler) as client:
-        skills, plugins, mcps = mod._read_loaded_inventory(
+        skills, plugins = mod._read_loaded_inventory(
             client, SimpleNamespace(poll=lambda: None),
             deadline=time.monotonic() + 5, location="/home/x",
         )
 
     assert any(row["id"] == "pdf" for row in skills)
     assert len(plugins) == 1
-    assert mcps == [{"name": "github"}]
+    assert not any(r.url.path == "/api/mcp" for r in seen)
     assert all(r.url.params["location[directory]"] == "/home/x" for r in seen)
     assert sum(1 for r in seen if r.url.path == "/api/plugin") == 3
 
@@ -6040,7 +6039,7 @@ def test_inventory_is_unknown_when_the_server_never_loads(monkeypatch):
             deadline=time.monotonic() + 0.05, location="/home/x",
         )
 
-    assert rows == (None, None, None)
+    assert rows == (None, None)
 
 
 def test_inventory_is_unknown_when_the_server_exits():
@@ -6063,7 +6062,7 @@ def test_inventory_is_unknown_when_the_server_exits():
             deadline=time.monotonic() + 5, location="/home/x",
         )
 
-    assert rows == (None, None, None)
+    assert rows == (None, None)
     assert called == []
 
 
@@ -6080,7 +6079,7 @@ def test_inventory_spawns_a_private_server_in_home_not_the_service(monkeypatch):
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
 
-    assert mod._fetch_inventory_rows("/bin/opencode") == (None, None, None)
+    assert mod._fetch_inventory_rows("/bin/opencode") == (None, None)
 
     argv, kwargs = recorded[0]
     assert argv[:2] == ["/bin/opencode", "serve"]
@@ -6125,7 +6124,7 @@ def test_system_skills_lists_every_skill_row(monkeypatch):
     monkeypatch.setattr(
         mod,
         "_fetch_inventory_rows",
-        lambda binary, **_k: (skills, [{"id": "review"}], [{"name": "github"}]),
+        lambda binary, **_k: (skills, [{"id": "review"}]),
     )
 
     assert mod.opencode_system_skills() == ["loop-engineering", "opencode"]
@@ -6140,7 +6139,7 @@ def test_system_skills_cached_within_ttl(monkeypatch):
 
     def fetch(binary, **_k):
         calls.append(binary)
-        return ([{"name": "pdf"}], [], [])
+        return ([{"name": "pdf"}], [])
 
     monkeypatch.setattr(mod, "_fetch_inventory_rows", fetch)
     start = 1000.0
@@ -6162,7 +6161,7 @@ def test_system_skills_empty_without_binary_or_server(monkeypatch):
 
     def fetch(binary, **_k):
         calls.append(binary)
-        return (None, None, None)
+        return (None, None)
 
     monkeypatch.setattr(mod, "_fetch_inventory_rows", fetch)
 
@@ -6898,46 +6897,6 @@ async def test_the_ephemeral_server_degrades_when_the_wrapper_is_broken(
 
     async with mod._EphemeralServer(tmp_path) as client:
         assert client is None
-
-
-@pytest.mark.parametrize("failure", [False, True])
-async def test_live_mcp_status_uses_v2_contract_and_is_bounded(tmp_path, failure):
-    from types import SimpleNamespace
-
-    provider = OpencodeProvider(tmp_path)
-    calls = []
-
-    class Response:
-        def raise_for_status(self):
-            if failure:
-                raise TimeoutError("private upstream detail")
-
-        def json(self):
-            return {
-                "data": [
-                    {"name": "notion", "status": {"status": "failed", "error": "secret"}},
-                    {"name": "linear", "status": {"status": "connected"}},
-                    {"name": "disabled", "status": {"status": "disabled"}},
-                ]
-            }
-
-    class Client:
-        async def get(self, path, *, timeout):
-            calls.append((path, timeout))
-            if failure:
-                raise TimeoutError("private upstream detail")
-            return Response()
-
-    provider._client = Client()
-    provider._process = SimpleNamespace(returncode=None)
-    if failure:
-        with pytest.raises(TimeoutError):
-            await provider.read_mcp_status()
-    else:
-        assert await provider.read_mcp_status() == {
-            "notion": "failed", "linear": "connected", "disabled": "disabled"
-        }
-    assert calls == [("/api/mcp", 2.0)]
 
 
 @pytest.mark.asyncio

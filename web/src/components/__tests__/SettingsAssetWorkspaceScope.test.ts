@@ -213,7 +213,6 @@ describe('Settings asset tabs are scoped to the active workspace', () => {
       }
       await router.push('/settings/mcp')
       await nextTick()
-      expect(paths.some(path => path.startsWith('/api/mcp/status'))).toBe(false)
       expect(host.textContent).toContain('MCP servers')
     } finally {
       app.unmount()
@@ -241,7 +240,6 @@ describe('Settings asset tabs are scoped to the active workspace', () => {
       expect(paths).toContain('/api/admin/skills?workspace=work')
       expect(paths).not.toContain('/api/agent-assets?workspace=work')
       expect(paths).not.toContain('/api/commands?workspace=work')
-      expect(paths.some(path => path.startsWith('/api/mcp/status'))).toBe(false)
       for (const [tab, path] of [['commands', '/api/commands'], ['subagents', '/api/agent-assets']]) {
         await router.push(`/settings/${tab}`)
         await nextTick()

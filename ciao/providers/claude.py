@@ -722,7 +722,7 @@ class ClaudeProvider(BaseSDKProvider):
         """Session id as currently known to the provider (may be set mid-stream)."""
         return self._session_id
 
-    async def read_mcp_status(self) -> dict[str, str]:
+    async def _read_mcp_status(self) -> dict[str, str]:
         """Read MCP status from this already-connected Claude SDK client."""
         client = self._client
         if client is None or not self._connected:
@@ -750,7 +750,7 @@ class ClaudeProvider(BaseSDKProvider):
                 if self._client is not client:
                     return
                 try:
-                    states = await self.read_mcp_status()
+                    states = await self._read_mcp_status()
                 except (asyncio.TimeoutError, ValueError, *_CLAUDE_OP_ERRORS):
                     states = {}
                 if any(is_claudeai_connector(name) for name in states):

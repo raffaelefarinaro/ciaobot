@@ -19,7 +19,6 @@ _HOST_SEAMS = (
     "current_session_id",
     "read_thread",
     "abort_session",
-    "read_mcp_status",
     "model_catalog",
     "native_title_candidates",
     "delete_session",

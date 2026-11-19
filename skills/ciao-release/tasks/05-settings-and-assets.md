@@ -1,6 +1,6 @@
 # 05 — Settings, and the asset lists
 
-**Goal:** Settings is where four lists were recently re-scoped to the selected
+**Goal:** Settings is where three lists were recently re-scoped to the selected
 workspace. The reads and the writes were changed together on purpose, so this
 is where a partial change shows up.
 
@@ -60,10 +60,11 @@ docs. The note must render and the link must open the CLI's docs. Each
 workspace row's summary line (`provider · Google email or no Google`) must not
 mention file access. Do not change the mode.
 
-## Step 2 — the four asset lists are scoped to one workspace
+## Step 2 — the three asset lists are scoped to one workspace
 
-This is the point of the task. **Skills, Subagents, Commands and MCP servers
+This is the point of the task. **Skills, Subagents and Commands
 belong to the selected workspace, but each list loads on its own Settings tab.**
+The MCP servers tab holds no list: one button per installed agent.
 For each list, open its tab in the first workspace and record the visible rows;
 switch workspaces, return to that tab, and record its rows again. Only the
 currently visible scoped tab refetches immediately on a workspace switch; the
@@ -71,7 +72,7 @@ others reload when opened. On a single-workspace install there is nothing to
 switch to: report the before/after checkpoint **BLOCKED** rather than inventing
 a second workspace.
 
-Record the names visible in the four lists (for example by reading the text of
+Record the names visible in the three lists (for example by reading the text of
 the skill-name and row elements in the page).
 
 **Watch for, precisely:**
@@ -92,12 +93,11 @@ the skill-name and row elements in the page).
 
 Compare each workspace-specific list to the scoped API **in the same browser
 session** (same origin, same session cookie), and name the endpoints the app
-actually calls (`web/src/components/SettingsView.vue`, `useMcpServers.ts`):
+actually calls (`web/src/components/SettingsView.vue`):
 
 - Skills — `/api/admin/skills?workspace=<name>`
 - Subagents — `/api/agent-assets?workspace=<name>` (`subagents`)
 - Commands — `/api/commands?workspace=<name>`
-- MCP servers — `/api/mcp/status?workspace=<name>`
 
 Run the fetch inside the authenticated browser tab, where the session cookie
 lives:
@@ -108,7 +108,6 @@ for (const path of [
   `/api/admin/skills?workspace=${encodeURIComponent(ws)}`,
   `/api/agent-assets?workspace=${encodeURIComponent(ws)}`,
   `/api/commands?workspace=${encodeURIComponent(ws)}`,
-  `/api/mcp/status?workspace=${encodeURIComponent(ws)}`,
 ]) {
   const res = await fetch(path, { credentials: 'same-origin' });
   console.log(path, res.status, await res.json());
@@ -132,7 +131,7 @@ Do not create, edit or delete anything in Settings.
   `/settings/skills`). Look for: only that route's cards, its own rail where the
   route has more than one section (`/settings/mcp` legitimately shows none),
   load state resolved, no other route's sections bleeding in.
-- `05-settings-03-assets-before.png` — the four asset lists on the first
+- `05-settings-03-assets-before.png` — the three asset lists on the first
   workspace. Look for: stock skills present, lists populated or a sensible
   empty state.
 - `05-settings-04-assets-after.png` — the same lists after the workspace switch.
