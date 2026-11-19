@@ -249,12 +249,14 @@ class AcpProvider(BaseProvider):
                     mode=request.mode, model=request.model, thinking=request.thinking_level
                 )
             except ModeNotApplied:
-                # The chat asked for a mode the agent would not hold, so nothing runs.
+                # The chat asked for a mode the agent would not hold, so nothing runs. The session
+                # id still goes out: the retry resumes this session rather than opening another.
                 logger.warning("%s did not start the turn: the requested mode was not applied.", self.spec.id)
                 yield ResultEvent(
                     type="result",
                     is_error=True,
                     result=f"{self.spec.id} could not set the requested mode; the turn did not run.",
+                    session_id=session.session_id,
                 )
                 return
             for event in applied:

@@ -28,7 +28,7 @@ from acp.schema import (
 )
 from pydantic import TypeAdapter
 
-from ciao.model_tiers import resolve_model
+from ciao.model_tiers import resolve_tier
 from ciao.models import (
     BridgeMode,
     ContextCompactedEvent,
@@ -198,8 +198,8 @@ class AcpSession:
         self._late_open = False
         self._late_substantive = False
         self._quiet_task: asyncio.Task[None] | None = None
-        # Requested models already reported as not offered: reported once per session.
-        self._unoffered_models: set[str] = set()
+        # The not-offered model status is reported once per session.
+        self._model_reported = False
         self._outer_emit = broker.emit
         broker.emit = self._emit
 
@@ -449,15 +449,16 @@ class AcpSession:
                 continue
             events.extend(await self._set_option(choice.config_id, picked, strict=strict))
         if model:
-            # A tier alias (opus), or a full id whose tier word is one (claude-opus-4-1), names
-            # the offered model of that tier. A value that names no offered model is reported
-            # once per session and not sent; it is not rejected at creation or PATCH.
+            # The model is set exactly when the agent offers it. A bare tier name (opus) is the
+            # one alias mapped: to the offered model that has that word. Anything else is not
+            # guessed at and not sent, so the agent keeps its default; one status line per
+            # session says so.
             offered = self._offered(self.spec.model_config_id)
-            target = resolve_model(model, offered)
+            target = model if model in offered else resolve_tier(model, offered)
             if target is not None:
                 events.extend(await self._set_option(self.spec.model_config_id, target))
-            elif offered and model not in self._unoffered_models:
-                self._unoffered_models.add(model)
+            elif offered and not self._model_reported:
+                self._model_reported = True
                 events.append(SystemStatusEvent(
                     type="system",
                     status=f"{self.spec.id} does not offer the model '{model}'.",

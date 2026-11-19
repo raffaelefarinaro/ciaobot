@@ -55,33 +55,3 @@ def test_resolve_tier_falls_back_to_a_variant_when_only_variants_are_offered() -
     from ciao.model_tiers import resolve_tier
 
     assert resolve_tier("sonnet", ["sonnet[1m]"]) == "sonnet[1m]"
-
-
-def test_tier_of_model_reads_the_tier_word_of_a_full_id() -> None:
-    from ciao.model_tiers import tier_of_model
-
-    assert tier_of_model("claude-haiku-4-5") == "haiku"
-    assert tier_of_model("claude-opus-4-8[1m]") == "opus"
-    assert tier_of_model("gpt-5.6-terra") is None
-    assert tier_of_model("claude-hiaku-4-5") is None
-
-
-def test_resolve_model_keeps_an_exact_offered_id() -> None:
-    from ciao.model_tiers import resolve_model
-
-    assert resolve_model("claude-opus-4-7", ["claude-opus-4-7", "claude-opus-4-8"]) == "claude-opus-4-7"
-
-
-def test_resolve_model_maps_a_legacy_full_id_to_its_offered_tier() -> None:
-    from ciao.model_tiers import resolve_model
-
-    offered = ["claude-sonnet-4-6", "claude-opus-4-8"]
-    assert resolve_model("claude-opus-4-1", offered) == "claude-opus-4-8"
-    assert resolve_model("opus", offered) == "claude-opus-4-8"
-
-
-def test_resolve_model_returns_none_when_the_tier_is_not_offered() -> None:
-    from ciao.model_tiers import resolve_model
-
-    assert resolve_model("claude-haiku-4-5", ["claude-sonnet-4-6"]) is None
-    assert resolve_model("claude-hiaku-4-5", ["claude-sonnet-4-6"]) is None

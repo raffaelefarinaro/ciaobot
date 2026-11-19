@@ -29,7 +29,7 @@ from ciao.provider_registry import ProviderDescriptor
 from ciao.provider_service import ProviderService
 from ciao.providers.acp.provider import AcpProvider
 from ciao.providers.acp.session import AcpSession, SessionJournal, journal_file
-from ciao.providers.acp.spec import AgentSpec
+from ciao.providers.acp.spec import AgentSpec, ModeChoice
 from tests.acp_helpers import read_calls, write_scenario
 
 # Target of the fake descriptor's ``acp_spec_path``; each test installs its own spec here.
@@ -126,6 +126,40 @@ async def test_provider_service_runs_fake_turn_to_result_with_session_id(
     assert result.result == "done"
     assert result.session_id == "sess-1"
     assert service.current_session_id == "sess-1"
+
+
+@pytest.mark.asyncio
+async def test_refused_mode_switch_keeps_the_session_for_the_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An aborted turn still reports its session id, so the retry resumes that session.
+
+    Without the id the host sends ``resume=None`` again, and each attempt would open
+    another adapter session and journal.
+    """
+    config, calls = _install(
+        monkeypatch, tmp_path,
+        spec_modes={"auto": (ModeChoice("mode", ("default",)),)},
+        sessions=["sess-1", "sess-2"],
+        config_options=[{
+            "id": "mode", "name": "mode", "type": "select", "currentValue": "bypassPermissions",
+            "options": [{"value": "default", "name": "default"}, {"value": "bypassPermissions", "name": "bypass"}],
+        }],
+        config_error="rejected",
+        prompts=[_text_turn("never sent")],
+    )
+    service = ProviderService(config)  # type: ignore[arg-type]
+
+    first = await _turn(service, _request())
+    assert isinstance(first[-1], ResultEvent)
+    assert first[-1].is_error is True
+    assert first[-1].session_id == "sess-1"
+
+    second = await _turn(service, _request(resume_session=first[-1].session_id))
+    assert second[-1].is_error is True
+    assert second[-1].session_id == "sess-1"
+    assert _count(calls, "session/new") == 1
+    assert _count(calls, "session/prompt") == 0
 
 
 @pytest.mark.asyncio

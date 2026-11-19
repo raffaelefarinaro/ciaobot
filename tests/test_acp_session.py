@@ -566,31 +566,53 @@ _LEGACY_MODELS = [
 ]
 
 
-@pytest.mark.asyncio
-async def test_legacy_full_model_id_resolves_to_its_offered_tier(tmp_path: Path) -> None:
-    config = [
-        _select("mode", "default", ["default", "bypassPermissions"]),
-        {
-            "id": "model", "name": "model", "type": "select", "currentValue": "claude-sonnet-4-6",
-            "options": _LEGACY_MODELS,
-        },
+def _model_select(options: list[dict[str, str]]) -> dict[str, Any]:
+    return {
+        "id": "model", "name": "model", "type": "select", "currentValue": "claude-sonnet-4-6",
+        "options": options,
+    }
+
+
+def _model_set_calls(calls: Path) -> list[tuple[str, str]]:
+    return [
+        (c["params"]["configId"], c["params"]["value"])
+        for c in read_calls(calls)
+        if c["method"] == "session/set_config_option" and c["params"]["configId"] == "model"
     ]
+
+
+@pytest.mark.asyncio
+async def test_bare_tier_name_maps_to_its_offered_model(tmp_path: Path) -> None:
+    config = [_select("mode", "default", ["default", "bypassPermissions"]), _model_select(_LEGACY_MODELS)]
     async with _started(tmp_path, config_options=config) as harness:
-        events = await harness.session.apply(mode="normal", model="claude-opus-4-1", thinking="")
-        sets = [c["params"] for c in read_calls(harness.calls) if c["method"] == "session/set_config_option"]
-        assert [(s["configId"], s["value"]) for s in sets] == [("model", "claude-opus-4-8")]
+        events = await harness.session.apply(mode="normal", model="opus", thinking="")
+        assert _model_set_calls(harness.calls) == [("model", "claude-opus-4-8")]
         assert events == []
 
 
 @pytest.mark.asyncio
+async def test_offered_full_id_is_set_exactly_even_with_a_bracket_variant(tmp_path: Path) -> None:
+    offered = [*_LEGACY_MODELS, {"value": "claude-opus-4-8[1m]", "name": "Opus 1M"}]
+    config = [_select("mode", "default", ["default", "bypassPermissions"]), _model_select(offered)]
+    async with _started(tmp_path, config_options=config) as harness:
+        events = await harness.session.apply(mode="normal", model="claude-opus-4-8[1m]", thinking="")
+        assert _model_set_calls(harness.calls) == [("model", "claude-opus-4-8[1m]")]
+        assert events == []
+
+
+@pytest.mark.asyncio
+async def test_unoffered_full_id_is_not_guessed_to_a_tier_variant(tmp_path: Path) -> None:
+    """A full id the agent does not offer is never mapped to a tier's model: nothing is set."""
+    config = [_select("mode", "default", ["default", "bypassPermissions"]), _model_select(_LEGACY_MODELS)]
+    async with _started(tmp_path, config_options=config) as harness:
+        events = await harness.session.apply(mode="normal", model="claude-opus-4-8[1m]", thinking="")
+        assert _model_set_calls(harness.calls) == []
+        assert [e.status for e in events] == ["fake does not offer the model 'claude-opus-4-8[1m]'."]
+
+
+@pytest.mark.asyncio
 async def test_unoffered_model_is_reported_once_per_session(tmp_path: Path) -> None:
-    config = [
-        _select("mode", "default", ["default", "bypassPermissions"]),
-        {
-            "id": "model", "name": "model", "type": "select", "currentValue": "claude-sonnet-4-6",
-            "options": _LEGACY_MODELS,
-        },
-    ]
+    config = [_select("mode", "default", ["default", "bypassPermissions"]), _model_select(_LEGACY_MODELS)]
     async with _started(tmp_path, config_options=config) as harness:
         first = await harness.session.apply(mode="normal", model="gpt-5.6", thinking="")
         second = await harness.session.apply(mode="normal", model="gpt-5.6", thinking="")
@@ -599,14 +621,21 @@ async def test_unoffered_model_is_reported_once_per_session(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_unoffered_models_share_one_status_line_per_session(tmp_path: Path) -> None:
+    config = [_select("mode", "default", ["default", "bypassPermissions"]), _model_select(_LEGACY_MODELS)]
+    async with _started(tmp_path, config_options=config) as harness:
+        first = await harness.session.apply(mode="normal", model="haiku", thinking="")
+        second = await harness.session.apply(mode="normal", model="gpt-5.6", thinking="")
+        third = await harness.session.apply(mode="normal", model="claude-opus-4-1", thinking="")
+        assert [e.status for e in first] == ["fake does not offer the model 'haiku'."]
+        assert second == []
+        assert third == []
+        assert _model_set_calls(harness.calls) == []
+
+
+@pytest.mark.asyncio
 async def test_tier_without_an_offered_match_is_reported_once_and_not_sent(tmp_path: Path) -> None:
-    config = [
-        _select("mode", "default", ["default", "bypassPermissions"]),
-        {
-            "id": "model", "name": "model", "type": "select", "currentValue": "claude-sonnet-4-6",
-            "options": _LEGACY_MODELS,
-        },
-    ]
+    config = [_select("mode", "default", ["default", "bypassPermissions"]), _model_select(_LEGACY_MODELS)]
     async with _started(tmp_path, config_options=config) as harness:
         first = await harness.session.apply(mode="normal", model="haiku", thinking="")
         second = await harness.session.apply(mode="normal", model="haiku", thinking="")
