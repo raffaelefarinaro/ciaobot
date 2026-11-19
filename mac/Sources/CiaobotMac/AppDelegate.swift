@@ -428,7 +428,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // The 1.x takeover (S7) runs first and starts the engine itself
             // when it settles on "no takeover" or "done".
             if let takeover {
-                Task { await takeover.runIfNeeded() }
+                takeover.startLocal()
             } else {
                 supervisor?.start()
             }

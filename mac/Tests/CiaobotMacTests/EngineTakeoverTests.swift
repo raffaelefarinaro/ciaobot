@@ -1,3 +1,4 @@
+import Combine
 import Darwin
 import XCTest
 @testable import CiaobotMac
@@ -20,6 +21,12 @@ private final class FakeRunner: TakeoverRunning {
     var answers: [String: String] = [:]
     var sequences: [String: [String]] = [:]
     var failing: Set<String> = []
+    /// The first N calls of a command are lost (the runner throws) before the rest answer.
+    var lostFirst: [String: Int] = [:]
+    /// Models the engine: a `finish` journals the Trash offer before its answer
+    /// leaves, and from then on a `rollback` is refused with `trash_offered`.
+    var engineJournalsTrash = false
+    private(set) var journalTrashOffered = false
     var onRun: (@Sendable (String) async -> Void)?
     var calls: [[String]] = []
     let log: EventLog
@@ -36,13 +43,43 @@ private final class FakeRunner: TakeoverRunning {
         let key = Self.key(for: arguments)
         log.add("cmd:" + key)
         if let onRun { await onRun(key) }
+        if key == "finish", engineJournalsTrash { journalTrashOffered = true }
+        if let lost = lostFirst[key], lost > 0 {
+            lostFirst[key] = lost - 1
+            throw CocoaError(.executableLoad)
+        }
         if failing.contains(key) { throw CocoaError(.executableLoad) }
         var answer = answers[key] ?? "{}"
         if var queue = sequences[key], !queue.isEmpty {
             answer = queue.removeFirst()
             sequences[key] = queue
         }
+        if key == "rollback", journalTrashOffered {
+            answer = #"{"ok": false, "reason": "trash_offered", "id": "T1", "state": "healthy"}"#
+        }
         return (0, Data(answer.utf8))
+    }
+}
+
+/// Records each settled publication with the generation the takeover was on at that moment.
+private final class SettledRecorder {
+    private(set) var values: [(settled: Int, current: Int)] = []
+    func add(settled: Int, current: Int) { values.append((settled, current)) }
+}
+
+/// Records every signal a watchdog sends, from whichever queue sends it.
+private final class SignalRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sent: [Int32] = []
+    func add(_ signal: Int32) {
+        lock.lock()
+        sent.append(signal)
+        lock.unlock()
+    }
+    var signals: [Int32] {
+        lock.lock()
+        defer { lock.unlock() }
+        return sent
     }
 }
 
@@ -477,7 +514,84 @@ final class EngineTakeoverTests: XCTestCase {
         XCTAssertEqual(TakeoverCopy.notice(for: .rolledBack(code: "not_healthy", oldOrigin: nil)),
                        TakeoverCopy.rolledBack)
         XCTAssertEqual(TakeoverCopy.rolledBack,
-                       "Ciaobot could not finish moving into the app, so your existing Ciaobot was restarted unchanged.")
+                       "Ciaobot could not finish moving into the app, so your existing Ciaobot was restarted unchanged. Use Ciaobot on This Mac to try again.")
+    }
+
+    func testEachNewOutcomeHasItsOwnCopy() {
+        XCTAssertEqual(TakeoverCopy.refused(code: "already_settled"), "The move into the app had already completed.")
+        XCTAssertEqual(TakeoverCopy.refused(code: "plist_changed_stopped"), TakeoverCopy.plistChangedWhileStopped)
+        XCTAssertEqual(TakeoverCopy.refused(code: "moved_not_ready"), TakeoverCopy.movedNotReady)
+        XCTAssertTrue(TakeoverCopy.plistChangedWhileStopped.contains("Use Ciaobot on This Mac"))
+        XCTAssertFalse(TakeoverCopy.movedNotReady.contains("not changed"))
+        XCTAssertFalse(TakeoverCopy.plistChangedWhileStopped.contains("not changed"))
+    }
+
+    /// The trimmed table: codes that can be transient races no longer persist the
+    /// external choice, and they get the retry copy.
+    func testTheRemovedRefusalCodesAreTransientAndUnknownCodesToo() {
+        for code in ["unknown_version", "foreign_listener", "no_registry", "invented_code"] {
+            XCTAssertFalse(EngineTakeover.isDeliberateRefusal(code), code)
+            XCTAssertEqual(TakeoverCopy.refused(code: code), TakeoverCopy.retry, code)
+        }
+        XCTAssertEqual(TakeoverRefusal.deliberate, [
+            "downgrade", "engine_too_old", "custom_data_location", "port_mismatch",
+            "legacy_desktop", "unknown_program", "no_workspace",
+        ])
+    }
+
+    /// Which outcomes persist the external choice. Only a deliberate verdict, or a
+    /// rollback that completed after the bundled engine failed, does.
+    func testOnlyDeliberateRefusalsAndBundledFailureRollbacksPersistExternal() {
+        let persisting: [EngineTakeover.Outcome] = [
+            .refused(code: "downgrade", oldOrigin: nil),
+            .refused(code: "no_workspace", oldOrigin: nil),
+            .rolledBack(code: "engine_not_ready", oldOrigin: nil),
+            .rolledBack(code: "not_healthy", oldOrigin: nil),
+        ]
+        for outcome in persisting {
+            XCTAssertTrue(EngineTakeover.savesExternalChoice(outcome), describe(outcome))
+        }
+        let keeping: [EngineTakeover.Outcome] = [
+            .notNeeded,
+            .done(left: []),
+            .deferred(origin: nil),
+            .refused(code: "cancelled", oldOrigin: nil),
+            .refused(code: "takeover_failed", oldOrigin: nil),
+            .refused(code: "rollback_failed", oldOrigin: nil),
+            .refused(code: "state_unknown", oldOrigin: nil),
+            .refused(code: "plan_failed", oldOrigin: nil),
+            .refused(code: "moved_not_ready", oldOrigin: nil),
+            .refused(code: "plist_changed_stopped", oldOrigin: nil),
+            .refused(code: "already_settled", oldOrigin: nil),
+            .rolledBack(code: "cancelled", oldOrigin: nil),
+            .rolledBack(code: "takeover_failed", oldOrigin: nil),
+            .rolledBack(code: "old_engine_did_not_start", oldOrigin: nil),
+        ]
+        for outcome in keeping {
+            XCTAssertFalse(EngineTakeover.savesExternalChoice(outcome), describe(outcome))
+        }
+    }
+
+    /// A bundled-engine failure whose rollback really completes is the outcome that
+    /// persists, from the flow itself, not from a constructed outcome.
+    func testAReadinessFailureThatRollsBackPersistsExternal() async {
+        engine.startsRunning = false
+        runner.answers["plan"] = planJSON(action: "takeover", oldRunning: true)
+        runner.answers["apply"] = json(["ok": true, "id": "T1", "state": "pointer_written"])
+        runner.answers["rollback"] = json(["ok": true, "id": "T1", "state": "rolled_back"])
+        let outcome = await makeTakeover(readyTimeout: 0.05).runIfNeeded()
+        XCTAssertTrue(EngineTakeover.savesExternalChoice(outcome))
+    }
+
+    /// A rollback that the engine refuses is not a completed rollback: nothing persists.
+    func testAFailedRollbackAfterABundledFailureDoesNotPersistExternal() async {
+        engine.startsRunning = false
+        runner.answers["plan"] = planJSON(action: "takeover", oldRunning: true)
+        runner.answers["apply"] = json(["ok": true, "id": "T1", "state": "pointer_written"])
+        runner.answers["rollback"] = json(["ok": false, "reason": "plist_conflict", "id": "T1"])
+        let outcome = await makeTakeover(readyTimeout: 0.05).runIfNeeded()
+        XCTAssertEqual(describe(outcome), "refused:rollback_failed:-")
+        XCTAssertFalse(EngineTakeover.savesExternalChoice(outcome))
     }
 
     func testSilentOutcomesShowNoNotice() {
@@ -579,13 +693,93 @@ final class EngineTakeoverTests: XCTestCase {
         XCTAssertEqual(log.count(prefix: "cmd:rollback"), 0)
     }
 
-    func testALostFinishAnswerRollsBackBeforeAnythingIsTrashed() async throws {
+    /// Both finish answers are lost and the engine never journalled a Trash offer:
+    /// the rollback is allowed, and nothing is trashed.
+    func testALostFinishTwiceWithoutATrashOfferRollsBack() async throws {
         try answerHappyPath(trash: [candidate(envRoot)])
-        runner.failing = ["finish"]
+        runner.lostFirst = ["finish": 2]
         runner.answers["rollback"] = json(["ok": true, "id": "T1", "state": "rolled_back"])
         let outcome = await makeTakeover().runIfNeeded()
         XCTAssertEqual(describe(outcome), "rolledBack:not_healthy:\(oldOriginText)")
+        XCTAssertEqual(log.count(prefix: "cmd:finish"), 2, "the finish is asked again once, then the move rolls back")
         XCTAssertTrue(trash.trashed.isEmpty)
+    }
+
+    /// A lost finish answer that is asked again and answered: the retry's answer is used.
+    func testALostFinishIsRetriedOnceAndTheRetryAnswerIsUsed() async throws {
+        try answerHappyPath(trash: [candidate(envRoot)])
+        runner.lostFirst = ["finish": 1]
+        let outcome = await makeTakeover().runIfNeeded()
+        XCTAssertEqual(describe(outcome), "done:0")
+        XCTAssertEqual(log.events, [
+            "cmd:plan", "cmd:apply", "start", "cmd:finish", "cmd:finish",
+            "trash:ciaobot", "cmd:finish --done",
+        ])
+        XCTAssertEqual(trash.trashed.map(\.path), [envRoot.path])
+    }
+
+    /// The engine journalled the Trash offer, and both finish answers were lost. The
+    /// rollback is refused with `trash_offered`, so the app does not report
+    /// rollback_failed: it starts the bundled engine again, finishes, and closes.
+    func testALostFinishAfterTheTrashWasOfferedFinishesWithTheBundledEngine() async throws {
+        try answerHappyPath(trash: [candidate(envRoot)])
+        runner.engineJournalsTrash = true
+        runner.lostFirst = ["finish": 2]
+        let outcome = await makeTakeover().runIfNeeded()
+        XCTAssertEqual(describe(outcome), "done:0")
+        XCTAssertEqual(log.count(prefix: "cmd:rollback"), 1, "the rollback was asked and refused")
+        XCTAssertEqual(log.events.filter { $0 == "start" }.count, 2, "the bundled engine is started again")
+        XCTAssertEqual(log.count(prefix: "cmd:finish"), 4, "two lost, one answered, then the close")
+        XCTAssertEqual(trash.trashed.map(\.path), [envRoot.path])
+    }
+
+    /// The same refusal when the bundled engine does not come back: the outcome is
+    /// neutral, the engine is stopped, and nothing was trashed.
+    func testTrashOfferedAndTheBundledEngineDoesNotComeUpIsNotRolledBackAsFailed() async throws {
+        try answerHappyPath(trash: [candidate(envRoot)])
+        runner.engineJournalsTrash = true
+        runner.lostFirst = ["finish": 2]
+        runner.onRun = { [weak self] key in
+            guard key == "rollback" else { return }
+            await MainActor.run { self?.engine.startsRunning = false }
+        }
+        let outcome = await makeTakeover().runIfNeeded()
+        XCTAssertEqual(describe(outcome), "refused:moved_not_ready:-")
+        XCTAssertEqual(log.count(prefix: "cmd:finish"), 2, "no finish is asked once the engine did not come up")
+        XCTAssertEqual(log.count(prefix: "cmd:rollback"), 1)
+        XCTAssertTrue(trash.trashed.isEmpty)
+        let stop = try XCTUnwrap(log.events.lastIndex(of: "stop"))
+        XCTAssertGreaterThan(stop, log.index(of: "cmd:rollback") ?? 0, "the engine that failed to start is stopped again")
+        XCTAssertEqual(TakeoverCopy.notice(for: outcome), TakeoverCopy.movedNotReady)
+    }
+
+    /// A user who left local mode after the Trash offer is not given a local
+    /// engine back: the start is skipped and the next launch's resume takes over.
+    func testTrashOfferedAfterACancelDoesNotStartTheBundledEngine() async throws {
+        try answerHappyPath(trash: [candidate(envRoot)])
+        runner.engineJournalsTrash = true
+        runner.lostFirst = ["finish": 2]
+        runner.onRun = { [weak self] key in
+            guard key == "rollback" else { return }
+            await MainActor.run { self?.current?.cancel() }
+        }
+        let outcome = await makeTakeover().runIfNeeded()
+        XCTAssertEqual(describe(outcome), "refused:moved_not_ready:-")
+        XCTAssertEqual(log.events.filter { $0 == "start" }.count, 1, "only the first start ran")
+        XCTAssertTrue(trash.trashed.isEmpty)
+    }
+
+    /// The engine's resume refusal for a journal whose hash differs carries an id
+    /// and no state: the app rolls back, which is safe.
+    func testAResumeShaMismatchWithOnlyAnIdRollsBack() async throws {
+        try writeJournal("T1")
+        runner.answers["plan"] = planJSON(action: "resume", oldRunning: true, resumeId: "T1")
+        runner.answers["apply"] = json(["ok": false, "reason": "sha_mismatch", "id": "T1"])
+        runner.answers["rollback"] = json(["ok": true, "id": "T1", "state": "rolled_back"])
+        let outcome = await makeTakeover().runIfNeeded()
+        XCTAssertEqual(describe(outcome), "rolledBack:sha_mismatch:\(oldOriginText)")
+        XCTAssertEqual(log.count(prefix: "cmd:rollback"), 1)
+        XCTAssertNil(log.index(of: "start"))
     }
 
     // MARK: Refusals before anything was stopped
@@ -631,6 +825,54 @@ final class EngineTakeoverTests: XCTestCase {
         let outcome = await makeTakeover().runIfNeeded()
         XCTAssertEqual(describe(outcome), "rolledBack:old_engine_not_restarted:\(oldOriginText)")
         XCTAssertEqual(log.count(prefix: "cmd:rollback"), 1)
+    }
+
+    /// A `started` refusal before the stop: with the old engine running it is left
+    /// as it was; with it down (a watchdog ended apply after the unload) it is rolled back.
+    func testAStartedRefusalBeforeTheStopDependsOnWhetherTheOldEngineRuns() async throws {
+        for code in ["backup_unusable", "plist_changed", "sha_mismatch"] {
+            for oldRunning in [true, false] {
+                log.events = []
+                runner.calls = []
+                runner.answers["plan"] = planJSON(action: "takeover", oldRunning: oldRunning)
+                runner.answers["apply"] = json(["ok": false, "reason": code, "id": "T1", "state": "started"])
+                runner.answers["rollback"] = json(["ok": true, "id": "T1", "state": "rolled_back"])
+                let outcome = await makeTakeover().runIfNeeded()
+                let context = "\(code) with oldRunning \(oldRunning)"
+                if oldRunning {
+                    XCTAssertEqual(describe(outcome), "refused:\(code):\(oldOriginText)", context)
+                    XCTAssertEqual(log.count(prefix: "cmd:rollback"), 0, context)
+                } else {
+                    XCTAssertEqual(describe(outcome), "rolledBack:\(code):\(oldOriginText)", context)
+                    XCTAssertEqual(log.count(prefix: "cmd:rollback"), 1, context)
+                }
+            }
+        }
+    }
+
+    /// The old service is down and its definition changed under it: the rollback
+    /// would refuse a changed definition, so none is attempted and the copy says why.
+    func testPlistChangedWhileTheOldEngineIsStoppedSaysSoAndNeverRollsBack() async {
+        runner.answers["plan"] = planJSON(action: "takeover", oldRunning: true)
+        runner.answers["apply"] = json(["ok": false, "reason": "plist_changed", "id": "T1", "state": "stopping"])
+        let outcome = await makeTakeover().runIfNeeded()
+        XCTAssertEqual(describe(outcome), "refused:plist_changed_stopped:-")
+        XCTAssertEqual(TakeoverCopy.notice(for: outcome), TakeoverCopy.plistChangedWhileStopped)
+        XCTAssertEqual(log.count(prefix: "cmd:rollback"), 0)
+        XCTAssertNil(log.index(of: "start"))
+    }
+
+    /// An apply refused because the move had already finished says so, and never
+    /// claims that nothing changed.
+    func testAnApplyRefusedBecauseTheMoveFinishedSaysItHadCompleted() async {
+        runner.answers["plan"] = planJSON(action: "takeover", oldRunning: true)
+        runner.answers["apply"] = json(["ok": false, "reason": "already_settled", "id": "T1", "state": "finished"])
+        let outcome = await makeTakeover().runIfNeeded()
+        XCTAssertEqual(describe(outcome), "refused:already_settled:-")
+        let text = TakeoverCopy.notice(for: outcome)
+        XCTAssertEqual(text, "The move into the app had already completed.")
+        XCTAssertFalse(text?.contains("not changed") ?? true)
+        XCTAssertEqual(log.count(prefix: "cmd:rollback"), 0)
     }
 
     // MARK: A failed rollback probes the old origin
@@ -769,6 +1011,90 @@ final class EngineTakeoverTests: XCTestCase {
         XCTAssertEqual(takeover.generation, 2)
     }
 
+    /// The generation race: a run cancelled on a mode switch settles after a new
+    /// start on the same turn. The new start takes its generation at once, so the
+    /// cancelled run's settle is never the current generation and cannot flip the
+    /// new attempt back to external.
+    func testACancelledRunSettlingAfterASameTurnStartIsNotTheCurrentGeneration() async {
+        runner.answers["plan"] = planJSON(action: "none")
+        let takeover = makeTakeover()
+        let seen = SettledRecorder()
+        let subscription = takeover.$settled.compactMap { $0 }.sink { settled in
+            seen.add(settled: settled.generation, current: takeover.generation)
+        }
+        takeover.startLocal()
+        takeover.cancel()
+        takeover.startLocal()
+        XCTAssertEqual(takeover.generation, 2, "the new start takes its generation on this turn")
+        for _ in 0..<500 where takeover.settled?.generation != 2 {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        subscription.cancel()
+        XCTAssertEqual(seen.values.map { $0.settled }, [1, 2])
+        XCTAssertEqual(seen.values.map { $0.settled == $0.current }, [false, true],
+                       "only the run that is current may settle as current")
+    }
+
+    func testStartLocalRunsTheCheckWithoutAnyoneAwaitingIt() async {
+        runner.answers["plan"] = planJSON(action: "none")
+        let takeover = makeTakeover()
+        takeover.startLocal()
+        XCTAssertTrue(takeover.isRunning)
+        for _ in 0..<500 where takeover.settled == nil {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(describe(takeover.settled?.outcome ?? .refused(code: "missing", oldOrigin: nil)), "notNeeded")
+        XCTAssertEqual(takeover.settled?.generation, 1)
+        XCTAssertEqual(log.events, ["cmd:plan", "start"])
+    }
+
+    /// The lexical path is the one trashed, and the check is made on it. A candidate
+    /// whose parent is one place lexically and another on disk (a `..` after a
+    /// symlink) is not trashed: the decoy at the lexical location stays where it is.
+    func testACandidateWhoseLexicalAndOnDiskParentsDisagreeStaysInPlace() async throws {
+        let other = home.home.appendingPathComponent("Projects/other", isDirectory: true)
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        let alias = home.home.appendingPathComponent("alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: other)
+        let decoy = home.home.appendingPathComponent("ws/data", isDirectory: true)
+        try FileManager.default.createDirectory(at: decoy, withIntermediateDirectories: true)
+        let raw = home.home.path + "/alias/../ws/data"
+        try answerHappyPath(trash: [["path": raw, "proof": "installer_env"]])
+        let outcome = await makeTakeover().runIfNeeded()
+        XCTAssertTrue(trash.trashed.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: decoy.path))
+        guard case .done(let left) = outcome else { return XCTFail("expected done, got \(describe(outcome))") }
+        XCTAssertEqual(left, [raw])
+    }
+
+    /// The on-disk location of `alias/../decoy` is Projects/decoy, which is not in
+    /// the guarded set. The lexical `home/decoy` is a real, unrelated item. The item
+    /// the candidate names on disk is not the one that would be trashed, so nothing is.
+    func testADotDotCandidateWhoseOnDiskTargetDiffersFromItsLexicalTargetIsNotTrashed() async throws {
+        let other = home.home.appendingPathComponent("Projects/other", isDirectory: true)
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: home.home.appendingPathComponent("alias"), withDestinationURL: other)
+        let decoy = home.home.appendingPathComponent("decoy", isDirectory: true)
+        try FileManager.default.createDirectory(at: decoy, withIntermediateDirectories: true)
+        let raw = home.home.path + "/alias/../decoy"
+        try answerHappyPath(trash: [["path": raw, "proof": "installer_env"]])
+        let outcome = await makeTakeover().runIfNeeded()
+        XCTAssertTrue(trash.trashed.isEmpty, "the lexical decoy is not what the candidate names")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: decoy.path))
+        guard case .done(let left) = outcome else { return XCTFail("expected done, got \(describe(outcome))") }
+        XCTAssertEqual(left, [raw])
+    }
+
+    /// A `..` whose two readings agree is trashed as its lexical path.
+    func testADotDotPathThatAgreesIsTrashedAsItsLexicalPath() async throws {
+        try FileManager.default.createDirectory(at: home.home.appendingPathComponent("Library"), withIntermediateDirectories: true)
+        let raw = home.home.path + "/Library/../.local/share/uv/tools/ciaobot"
+        try answerHappyPath(trash: [["path": raw, "proof": "installer_env"]])
+        let outcome = await makeTakeover().runIfNeeded()
+        XCTAssertEqual(describe(outcome), "done:0")
+        XCTAssertEqual(trash.trashed.map(\.path), [envRoot.path])
+    }
+
     // MARK: Symlinked workspace and dangling candidates
 
     func testASymlinkedWorkspaceMatchesTheResolvedPathTheEngineWrites() async throws {
@@ -862,10 +1188,80 @@ final class EngineTakeoverTests: XCTestCase {
     }
 
     func testTheCommandLimitsAreAboveTheEngineWorstCase() {
-        XCTAssertGreaterThanOrEqual(TakeoverTimeouts.forCommand(["apply", "--json"]), 150)
-        XCTAssertGreaterThanOrEqual(TakeoverTimeouts.forCommand(["rollback", "--json"]), 150)
+        XCTAssertEqual(TakeoverTimeouts.apply, 180)
+        XCTAssertEqual(TakeoverTimeouts.rollback, 180)
+        XCTAssertGreaterThanOrEqual(TakeoverTimeouts.forCommand(["apply", "--json"]), 180)
+        XCTAssertGreaterThanOrEqual(TakeoverTimeouts.forCommand(["rollback", "--json"]), 180)
         XCTAssertEqual(TakeoverTimeouts.forCommand(["plan", "--json"]), 30)
         XCTAssertEqual(TakeoverTimeouts.forCommand(["finish", "--json", "--id", "T1"]), 30)
+    }
+
+    /// A child that ignores SIGTERM (and passes its ignore on to its own children)
+    /// is ended by the SIGKILL that follows the grace, and reads as a lost answer.
+    func testAChildThatIgnoresTermIsKilledAfterTheGrace() async throws {
+        let runner = try scriptRunner("trap '' TERM\nwhile :; do /bin/sleep 0.1; done", timeout: 0.3)
+        let started = Date()
+        let result = try await runner.run(["apply", "--json"])
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertLessThan(elapsed, 0.3 + TakeoverTimeouts.reapGrace + 4, "SIGKILL follows SIGTERM after the grace")
+        XCTAssertEqual(result.status, 128 + SIGKILL, "the leader was ended by SIGKILL")
+        XCTAssertNil(TakeoverAnswer.decode(result.json))
+    }
+
+    /// Output far larger than a pipe buffer is read whole, so the command is not
+    /// blocked on a full pipe and its answer decodes.
+    func testLargeOutputIsReadWholeThroughTheRunner() async throws {
+        let runner = try scriptRunner(#"printf '{"ok":true,"pad":"'; head -c 300000 /dev/zero | tr '\0' a; printf '"}'"#, timeout: 20)
+        let result = try await runner.run(["plan", "--json"])
+        XCTAssertEqual(result.status, 0)
+        XCTAssertGreaterThanOrEqual(result.json.count, 300_000)
+        XCTAssertEqual(TakeoverAnswer.decode(result.json)?.ok, true)
+    }
+
+    /// A descriptor the app holds without close-on-exec (as a concurrent spawn
+    /// elsewhere would leave it) is not handed to the command.
+    func testAnInheritableDescriptorOfTheAppIsNotHandedToTheCommand() async throws {
+        let leaked = open("/dev/null", O_RDONLY)
+        XCTAssertGreaterThan(leaked, 2)
+        defer { close(leaked) }
+        let runner = try scriptRunner("if [ -e /dev/fd/\(leaked) ]; then printf leaked; else printf clean; fi", timeout: 10)
+        let result = try await runner.run(["plan", "--json"])
+        XCTAssertEqual(String(decoding: result.json, as: UTF8.self), "clean")
+    }
+
+    /// The watchdog's TERM fires at its deadline and the KILL one grace later.
+    func testTheWatchdogSendsTermThenKillWhileTheCommandRuns() async throws {
+        let sent = SignalRecorder()
+        let watchdog = ProcessGroupWatchdog(pid: 1234, grace: 0.05, send: { _, signal in sent.add(signal) })
+        watchdog.arm(after: 0.01)
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertEqual(sent.signals, [SIGTERM, SIGKILL])
+    }
+
+    /// A command that ends before its limit is never signalled, even when its
+    /// deadline passes afterwards: the reap cannot be followed by a group signal.
+    func testAFinishedCommandIsNeverSignalledByItsWatchdog() async throws {
+        let sent = SignalRecorder()
+        let watchdog = ProcessGroupWatchdog(pid: 1234, grace: 0.05, send: { _, signal in sent.add(signal) })
+        watchdog.arm(after: 0.05)
+        watchdog.finish()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(sent.signals, [])
+    }
+
+    /// The race the lock closes: the command ends after its TERM and before the
+    /// KILL is due. The KILL must not follow, and a KILL that is already due
+    /// after `finish()` sends nothing.
+    func testACommandThatEndsAfterTermNeverGetsTheKill() async throws {
+        let sent = SignalRecorder()
+        let watchdog = ProcessGroupWatchdog(pid: 1234, grace: 0.2, send: { _, signal in sent.add(signal) })
+        watchdog.arm(after: 0.01)
+        try await Task.sleep(nanoseconds: 80_000_000)
+        XCTAssertEqual(sent.signals, [SIGTERM])
+        watchdog.finish()
+        watchdog.forceKill()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(sent.signals, [SIGTERM], "no SIGKILL once the command has finished")
     }
 
     // MARK: Copy for each failure

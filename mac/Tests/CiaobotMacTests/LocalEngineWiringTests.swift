@@ -528,17 +528,31 @@ final class LocalEngineWiringTests: XCTestCase {
     }
 
     func testATransientOrUnknownFailureKeepsTheSavedLocalChoice() throws {
-        for code in ["plan_failed", "blockers_unavailable", "takeover_failed", "state_unknown", "rollback_failed", "sha_mismatch"] {
+        let codes = [
+            "plan_failed", "blockers_unavailable", "takeover_failed", "state_unknown", "rollback_failed", "sha_mismatch",
+            "foreign_listener", "no_registry", "unknown_version", "moved_not_ready", "plist_changed_stopped", "already_settled",
+        ]
+        for code in codes {
             let store = savedLocal()
             try localView(store: store).applyTakeover(.refused(code: code, oldOrigin: nil))
             XCTAssertEqual(store.mode, .local, "\(code) must not persist external")
         }
     }
 
-    func testARolledBackOutcomeKeepsTheSavedLocalChoice() throws {
-        let store = savedLocal()
-        try localView(store: store).applyTakeover(.rolledBack(code: "engine_not_ready", oldOrigin: nil))
-        XCTAssertEqual(store.mode, .local)
+    func testABundledFailureRollbackPersistsExternalSoTheUserRetriesFromThere() throws {
+        for code in ["engine_not_ready", "not_healthy"] {
+            let store = savedLocal()
+            try localView(store: store).applyTakeover(.rolledBack(code: code, oldOrigin: nil))
+            XCTAssertEqual(store.mode, .external, code)
+        }
+    }
+
+    func testARolledBackOutcomeThatIsNotABundledFailureKeepsTheSavedLocalChoice() throws {
+        for code in ["cancelled", "takeover_failed", "old_engine_did_not_start"] {
+            let store = savedLocal()
+            try localView(store: store).applyTakeover(.rolledBack(code: code, oldOrigin: nil))
+            XCTAssertEqual(store.mode, .local, code)
+        }
     }
 
     func testAReplayOfAnOlderRunIsIgnoredWhileTheScreenIsLocal() async throws {
