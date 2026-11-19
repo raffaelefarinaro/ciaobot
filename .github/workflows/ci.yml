@@ -17,7 +17,11 @@ concurrency:
 
 # Linux is the gate every PR waits on, split into two parallel jobs:
 # `linux-server` (mypy, pytest -n auto, package smoke) and `linux-web` (vitest
-# and the PWA build). A develop PR whose diff changes `web/` also waits on
+# and the PWA build). `linux-install-smoke` also runs on every PR: it builds
+# the PWA and the wheel this checkout would publish and installs that wheel
+# with `scripts/install.sh` inside a clean `ubuntu:24.04` container (#3131),
+# then re-checks the planned service unit with `systemd-analyze verify` on the
+# host. A develop PR whose diff changes `web/` also waits on
 # `linux-e2e`, which builds and tests this checkout in Chromium alongside the
 # unit/build job, after the fast `web-scope` detector. The detector
 # uses the PR's base/head commits and full history from the merge checkout.
@@ -135,6 +139,81 @@ jobs:
       run: python -m pip install -e .
     - name: Smoke-test installed package
       run: ciao package-smoke --skip-frontend
+
+  # The wheel is the release, so every PR proves the Linux one-line installer
+  # still installs it (#3131): the PWA and the wheel of this checkout are
+  # built up front, then a plain `ubuntu:24.04` container installs that wheel
+  # with `scripts/install.sh` as an unprivileged account (`--no-service`, so
+  # the container never asks for sudo). The service path is exercised as a
+  # dry run whose planned unit the host re-checks with `systemd-analyze
+  # verify`: the unit is what `sudo sh -c` feeds systemd on a real install,
+  # and the runner's systemd is the system that must accept it.
+  linux-install-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-node@v7
+      with:
+        node-version: '22'
+        cache: 'npm'
+        cache-dependency-path: web/package-lock.json
+    - name: Install frontend dependencies
+      working-directory: web
+      run: npm ci
+    - name: Build PWA
+      working-directory: web
+      run: npm run build
+    # The uv version the installer and the release pipeline pin (pyproject's
+    # `[tool.uv] required-version`).
+    - uses: astral-sh/setup-uv@v10.3.3
+      with:
+        version: "0.13.8"
+    - name: Build engine wheel
+      run: uv build --wheel --out-dir dist
+    - name: Install the wheel with scripts/install.sh in a clean container
+      run: |
+        ls dist/ciaobot-*.whl
+        mkdir -p "$RUNNER_TEMP/smoke-out"
+        docker run --rm -i \
+          -v "$PWD:/src:ro" \
+          -v "$RUNNER_TEMP/smoke-out:/src-out" \
+          ubuntu:24.04 sh -es <<'EOS'
+        set -eu
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y curl ca-certificates
+        useradd -m smoke
+        su smoke -c 'sh /src/scripts/install.sh --wheel /src/dist/ciaobot-*.whl --no-service --workspace /home/smoke/ws'
+        version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' /src/pyproject.toml)
+        case "$version" in
+          ''|*[!0-9.]*)
+            echo "pyproject does not carry a plain version: '$version'" >&2
+            exit 1
+            ;;
+        esac
+        [ "$(su smoke -c '"$HOME/.local/bin/ciao" --version')" = "ciao $version" ]
+        su smoke -c '"$HOME/.local/bin/ciao" service install --dry-run --workspace /home/smoke/ws' > /src-out/unit.txt
+        EOS
+    - name: Verify the planned unit with systemd-analyze
+      run: |
+        unit="$RUNNER_TEMP/smoke-out/unit.txt"
+        test -s "$unit"
+        [ "$(grep -c '^# would run:' "$unit")" -eq 4 ]
+        grep -q '^User=' "$unit"
+        grep -q '^ExecStart=' "$unit"
+        # The dry run names the container's account (smoke) and its
+        # interpreter, both absent on the host: rewrite them to what this host
+        # has before verifying, since systemd-analyze refuses an ExecStart
+        # whose interpreter it cannot find. The `# would run:` lines are the
+        # dry run's notes, not unit syntax.
+        sed -e '/^# would run:/d' \
+            -e 's/^User=.*/User=runner/' \
+            -e 's|^ExecStart=.* -m ciao\.cli run$|ExecStart=/usr/bin/python3 -m ciao.cli run|' \
+            "$unit" > "$RUNNER_TEMP/smoke-out/ciaobot.service"
+        checked="$RUNNER_TEMP/smoke-out/ciaobot.service"
+        [ "$(sed -n 's/^User=//p' "$checked")" = runner ]
+        grep -q '^ExecStart=/usr/bin/python3 -m ciao\.cli run$' "$checked"
+        systemd-analyze verify "$checked"
 
   linux-e2e:
     needs: web-scope

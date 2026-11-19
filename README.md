@@ -12,13 +12,13 @@ Ciaobot is your **second brain and personal assistant**: a persistent personal w
 
 ## Install
 
-**macOS 13+ on Apple Silicon (M1 or newer):**
+**macOS 13+ on Apple Silicon (M1 or newer):** download the [Ciaobot app](https://github.com/raffaelefarinaro/ciaobot/releases/latest) (DMG). The app includes the engine: open it and follow its first-use steps, and on a machine updating from an older install Home shows where to get it. Your workspace defaults to `~/Ciaobot`, and Ciaobot uses Claude Code as the AI tool unless you change it.
+
+**Linux (Ubuntu 24.04 or similar):** run this as the account that will own Ciaobot. It installs the engine in your account with uv and asks once for `sudo` to install and start the systemd service, then prints the one-time login link for opening Ciaobot in a browser.
 
 ```bash
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
 ```
-
-Installs the engine with uv, starts it as a LaunchAgent, and opens Ciaobot in your browser already signed in, through a one-time link it also prints. There is nothing to fill in: the installer puts your workspace in `~/Ciaobot`, generates a password and uses Claude Code as the AI tool. The first time you open Ciaobot, Home shows the folder and the password on the computer running it (the password is also `PWA_AUTH_TOKEN` in the folder's `.env`). Change the AI tool in **Settings → Overview** and the password in **Settings → General**.
 
 To use another folder, such as a notes folder you already have, pass `--workspace`:
 
@@ -27,6 +27,8 @@ curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/
 ```
 
 The folder stays yours, in plain Markdown, usable with any other tool. Keep it out of iCloud Drive, Dropbox, Google Drive and OneDrive; [Before you start](https://www.raffaelefarinaro.com/ciaobot/guide.html#before-you-start) explains why, and what Ciaobot does with Git in it.
+
+The first time you open Ciaobot, Home shows your workspace folder and the password on the computer running it (the password is also `PWA_AUTH_TOKEN` in the folder's `.env`). Change the AI tool in **Settings → Overview** and the password in **Settings → General**.
 
 ### Connect your agent
 
