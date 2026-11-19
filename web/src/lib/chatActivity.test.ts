@@ -570,15 +570,13 @@ describe('traceSummaryMeta', () => {
     expect(traceSummaryMeta([])).toBe('steps')
   })
 
-  it('correctly counts and pluralizes thoughts, notes, tool calls, files, and subagents', () => {
+  it('correctly counts and pluralizes thoughts, notes, tool calls, and files', () => {
     expect(traceSummaryMeta([
       { role: 'assistant', tool_name: '_thinking', content: 'Hmm', timestamp: '' },
       { role: 'assistant', content: 'Note 1', timestamp: '' },
       { role: 'assistant', tool_name: '_activity', content: 'Tool A\nTool B', timestamp: '' },
       { role: 'assistant', tool_name: '_filecard', file_path: 'a.md', content: '', timestamp: '' },
-    ], [
-      { agent_id: 'sub-1', messages: [] }
-    ])).toBe('1 thought · 1 note · 2 tool calls · 1 file · 1 subagent')
+    ])).toBe('1 thought · 1 note · 2 tool calls · 1 file')
   })
 
   it('pluralizes multiple items correctly', () => {
@@ -589,10 +587,7 @@ describe('traceSummaryMeta', () => {
       { role: 'assistant', content: 'Note 2', timestamp: '' },
       { role: 'assistant', tool_name: '_filecard', file_path: 'a.md', content: '', timestamp: '' },
       { role: 'assistant', tool_name: '_filecard', file_path: 'b.md', content: '', timestamp: '' },
-    ], [
-      { agent_id: 'sub-1', messages: [] },
-      { agent_id: 'sub-2', messages: [] }
-    ])).toBe('2 thoughts · 2 notes · 2 files · 2 subagents')
+    ])).toBe('2 thoughts · 2 notes · 2 files')
   })
 })
 

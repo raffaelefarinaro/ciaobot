@@ -9,7 +9,6 @@ import type { ChatInfo, ProjectInfo } from '../../lib/types'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import ChatPanel from '../ChatPanel.vue'
-import ChatTurnActivity from '../ChatTurnActivity.vue'
 
 const PaneHeaderStub = defineComponent({
   name: 'PaneHeaderStub',
@@ -25,14 +24,6 @@ const ChildStub = defineComponent({
   name: 'ChildStub',
   setup() {
     return () => h('div')
-  },
-})
-
-const SubagentPanelStub = defineComponent({
-  name: 'SubagentPanelStub',
-  props: { subagents: { type: Array, default: () => [] }, chatId: { type: String, default: '' } },
-  setup() {
-    return () => h('div', { class: 'subagent-panel-stub' })
   },
 })
 
@@ -126,7 +117,6 @@ async function mountPanel(): Promise<{
       stubs: {
         PaneHeader: PaneHeaderStub,
         ModelSelector: ChildStub,
-        SubagentPanel: SubagentPanelStub,
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,
         RouterLink: ChildStub,
@@ -198,90 +188,6 @@ describe('ChatPanel live trace', () => {
     expect(bubbles).toHaveLength(1)
     expect(bubbles[0].text()).toContain('All done, final reply.')
     expect(wrapper.find('.trace-block.live').exists()).toBe(true)
-  })
-
-  describe('subagents of turns older than the loaded history', () => {
-    // Only the latest messages are loaded; this chat's history starts at turn 5.
-    const loaded = () => [
-      { role: 'user' as const, content: 'earlier', timestamp: '2026-10-19T10:00:00Z', turn_index: 5 },
-      { role: 'assistant' as const, content: 'Earlier reply.', timestamp: '2026-10-19T10:00:05Z' },
-      { role: 'user' as const, content: 'now', timestamp: '2026-10-19T11:00:00Z', turn_index: 6 },
-    ]
-    const subs = () => [
-      { agent_id: 'old-done', messages: [], status: 'completed' as const, turn_index: 2 },
-      { agent_id: 'old-resumed', messages: [], status: 'running' as const, turn_index: 2 },
-      { agent_id: 'this-turn', messages: [], status: 'running' as const, turn_index: 6 },
-    ]
-    type Sub = { agent_id: string }
-    // The live trace hands its panel the subagents; a finished turn's trace
-    // takes them as `subs` (its panel only renders once the trace is opened).
-    const shownIds = (wrapper: VueWrapper) => [
-      ...wrapper.findAllComponents(SubagentPanelStub).flatMap(panel => panel.props('subagents') as Sub[]),
-      ...wrapper.findAllComponents(ChatTurnActivity).flatMap(trace => (trace.props('subs') ?? []) as Sub[]),
-    ].map(sub => sub.agent_id).sort()
-
-    it('keeps finished ones out of the live trace', async () => {
-      const { wrapper, store } = await mountPanel()
-      store.messages['chat-1'] = loaded()
-      store.subagents['chat-1'] = subs()
-      store.streaming['chat-1'] = true
-      await flushPromises()
-      await wrapper.get('.trace-block.live .trace-summary').trigger('click')
-
-      expect(shownIds(wrapper)).toEqual(['old-resumed', 'this-turn'])
-    })
-
-    it('keeps finished ones off the last turn once idle', async () => {
-      const { wrapper, store } = await mountPanel()
-      store.messages['chat-1'] = [
-        ...loaded(),
-        { role: 'assistant' as const, content: 'Now reply.', timestamp: '2026-10-19T11:00:05Z' },
-      ]
-      store.subagents['chat-1'] = subs().map(sub => ({ ...sub, status: 'completed' as const }))
-        .filter(sub => sub.agent_id !== 'old-resumed')
-      await flushPromises()
-
-      expect(shownIds(wrapper)).toEqual(['this-turn'])
-    })
-
-    it('keeps an idle running agent visible with an unmatched turn index', async () => {
-      const { wrapper, store } = await mountPanel()
-      store.messages['chat-1'] = [
-        ...loaded(),
-        { role: 'assistant' as const, content: 'Now reply.', timestamp: '2026-10-19T11:00:05Z' },
-      ]
-      store.subagents['chat-1'] = [
-        { agent_id: 'earlier', messages: [], status: 'running' as const, turn_index: 2 },
-        { agent_id: 'later', messages: [], status: 'running' as const, turn_index: 20 },
-        { agent_id: 'null-index', messages: [], status: 'running' as const, turn_index: null },
-        { agent_id: 'old-done', messages: [], status: 'completed' as const, turn_index: 2 },
-      ] as never
-      await flushPromises()
-
-      expect(shownIds(wrapper)).toEqual(['earlier', 'later', 'null-index'])
-    })
-  })
-
-  it('keeps completed same-turn subagents from earlier wakes out of the live trace', async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(1_797_800_000_500)
-    localStorage.setItem('ciao-stream-started-at', JSON.stringify({ 'chat-1': 1_797_800_000_500 }))
-    const { wrapper, store } = await mountPanel()
-    store.messages['chat-1'] = [
-      { role: 'user', content: 'long-running task', timestamp: '2026-10-19T10:00:00Z', turn_index: 5 },
-    ]
-    store.subagents['chat-1'] = [
-      { agent_id: 'prior-wake', messages: [], status: 'completed', turn_index: 5, started_at: 1_797_800_000_000 },
-      { agent_id: 'current-wake', messages: [], status: 'completed', turn_index: 5, started_at: 1_797_800_001_000 },
-      { agent_id: 'still-running', messages: [], status: 'running', turn_index: 5, started_at: 1_797_800_000_000 },
-    ] as never
-    store.streaming['chat-1'] = true
-    await flushPromises()
-    await wrapper.get('.trace-block.live .trace-summary').trigger('click')
-
-    expect(wrapper.findAllComponents(SubagentPanelStub)
-      .flatMap(panel => (panel.props('subagents') as { agent_id: string }[]).map(sub => sub.agent_id)))
-      .toEqual(['current-wake', 'still-running'])
   })
 
   it('keeps the live trace collapsed by default while streaming', async () => {
@@ -447,6 +353,23 @@ describe('ChatPanel live trace', () => {
     const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
     return { wrapper, store, send }
   }
+
+  it('draws a subagent tool line indented in the live trace', async () => {
+    try {
+      const { wrapper, send } = await mountWithSocket()
+      send({ type: 'tool_use', tool_name: 'Agent', tool_input: 'Explore the repo', tool_use_id: 'p1' })
+      send({ type: 'tool_use', tool_name: 'Read', tool_input: 'a.py', tool_use_id: 'c1', parent_tool_use_id: 'p1' })
+      await flushPromises()
+      await wrapper.get('.trace-block.live .trace-summary').trigger('click')
+      const lines = wrapper.findAll('.trace-step--tool .activity-line')
+      expect(lines).toHaveLength(2)
+      expect(lines[0].classes()).not.toContain('subagent')
+      expect(lines[1].classes()).toContain('subagent')
+      expect(lines[1].text().startsWith('↳')).toBe(true)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 
   it('stops naming a permission request once it is answered (#1618)', async () => {
     try {

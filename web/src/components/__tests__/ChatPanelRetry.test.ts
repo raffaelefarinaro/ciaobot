@@ -166,7 +166,6 @@ async function mountPanel(options: MountOptions = {}): Promise<{
       stubs: {
         PaneHeader: PaneHeaderStub,
         ModelSelector: ModelSelectorStub,
-        SubagentPanel: ChildStub,
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,
         RouterLink: ChildStub,
@@ -938,12 +937,9 @@ describe('ChatPanel retry from error bubble', () => {
     store.messages['chat-1'] = [
       { role: 'user', content: 'Hi', timestamp: '2026-10-11T18:01:00Z', turn_index: 0 },
       { role: 'assistant', content: 'Error: connection refused', timestamp: '2026-10-11T18:01:01Z', is_error: true },
+      // A tool activity row after the error renders as a trace item.
+      { role: 'system', content: '· read a.md', timestamp: '2026-10-11T18:01:02Z', tool_name: '_activity' },
     ]
-    // A background subagent transcript with no turn lands as a trace item
-    // after the error.
-    store.subagents['chat-1'] = [
-      { agent_id: 'bg', messages: [], status: 'completed', turn_index: null },
-    ] as never
     await flushPromises()
     expect(wrapper.findAll('.retry-btn').map(b => b.text())).toContain('Retry')
     wrapper.unmount()

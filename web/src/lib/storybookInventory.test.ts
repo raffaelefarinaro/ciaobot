@@ -456,7 +456,7 @@ describe('production ownership', () => {
   it('keeps mandatory inline ownership and important loading branches explicit', () => {
     const owners: Record<string, string> = {
       'global-buttons': 'styles/app.css', 'global-fields-forms': 'styles/app.css', 'global-badges': 'styles/app.css', 'global-surfaces': 'styles/app.css', 'global-page-layout': 'styles/app.css', 'global-typography': 'styles/app.css', 'global-focus': 'styles/app.css', 'global-modals': 'styles/app.css', 'global-terminal-branding': 'styles/app.css',
-      'chat-panel-messages': 'components/ChatPanel.vue', 'chat-panel-composer': 'components/ChatPanel.vue', 'chat-panel-question-capability': 'components/ChatPanel.vue', 'home-intake-composer': 'components/HomeIntake.vue', 'subagent-chat-messages': 'components/SubagentChatView.vue',
+      'chat-panel-messages': 'components/ChatPanel.vue', 'chat-panel-composer': 'components/ChatPanel.vue', 'chat-panel-question-capability': 'components/ChatPanel.vue', 'home-intake-composer': 'components/HomeIntake.vue',
       'task-board-cards': 'components/TaskWorkspaceSurface.vue', 'task-editor': 'components/TaskWorkspaceSurface.vue', 'task-completion': 'components/TaskWorkspaceSurface.vue', 'task-delegation': 'components/TaskWorkspaceSurface.vue', 'task-ordering': 'components/TaskWorkspaceSurface.vue', 'file-modal-preview-editor': 'components/FileViewerModal.vue', 'pinned-file-preview-editor': 'components/PinnedFilePanel.vue', 'memory-graph': 'components/MemoryMapView.vue', 'memory-list-selection': 'components/MemoryMapView.vue',
     }
     for (const [id, path] of Object.entries(owners)) expect(inventory.find((entry) => entry.id === id)?.owner.path).toBe(`web/src/${path}`)

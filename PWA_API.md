@@ -856,8 +856,8 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 # spawned: {agent_id, messages, description, subagent_type, status, turn_index}.
 # `status` is running, completed, failed, or the neutral terminal stopped state.
 # `messages` shares the /messages shape; both provider renderers omit
-# `timestamp` on these, so a reader must tolerate it being absent. The PWA's
-# read-only subagent view (/chat/{chat_id}/subagent/{agent_id}) reads this.
+# `timestamp` on these, so a reader must tolerate it being absent. No PWA
+# surface reads this route any more.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/subagents"
 
 # Subagents working right now, across every chat the server considers active:
