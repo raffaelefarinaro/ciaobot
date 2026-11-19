@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import math
 import os
@@ -11,7 +10,7 @@ from collections.abc import AsyncGenerator, AsyncIterable, Callable, Mapping, Se
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TypeGuard
+from typing import Any
 
 from ciao.models import (
     AgentRequest,
@@ -374,7 +373,7 @@ class BaseProvider(ABC):
     def is_connected(self) -> bool:
         """True while a live provider-side connection exists.
 
-        Read paths (MCP status, the live collab tree) may query it without
+        Read paths (MCP status) may query it without
         starting anything. Distinct from ``cli_connected``, which answers
         "does the CLI subprocess owner still live" and is True by default.
         """
@@ -385,60 +384,13 @@ class BaseProvider(ABC):
         """Session metadata plus message history for transcript replay; ``{}`` when none."""
         return {}
 
-    @classmethod
-    async def read_collab_tree(
-        cls, workspace_root: Path, session_id: str
-    ) -> list[dict[str, Any]]:
-        """Child sessions with their history, read without a live chat; ``[]`` when none."""
-        return []
-
-    async def read_live_collab_tree(
-        self,
-        *,
-        include_messages: bool = False,
-        only_child_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """``read_collab_tree`` over this provider's own live connection; ``[]`` when none."""
-        return []
-
-    async def refresh_background_shells(self) -> int:
-        """Reconcile tracked background shells with the provider; return the count."""
-        return 0
-
-    async def wait_background_change(self, timeout: float) -> None:
-        """Wait up to ``timeout`` seconds for tracked background work to change."""
-        await asyncio.sleep(timeout)
-
-    @property
-    def background_count(self) -> int:
-        """Background shells plus subagents tracked for this provider's session."""
-        return 0
-
     async def abort_session(self, session_id: str) -> None:
         """Abort a provider-side session; a no-op for adapters without one."""
-
-    def interrupted_background_work(self) -> dict[str, Any] | None:
-        """Background work a restart would lose, for the host to record at shutdown.
-
-        ``{"children": [...], "shells": [{"id", "command"}]}``, or None when the
-        adapter has nothing to record. The host checks
-        ``background_work_outstanding`` first.
-        """
-        return None
 
     @property
     def seconds_since_activity(self) -> float:
         """Seconds since the provider last heard from its server."""
         return math.inf
-
-
-def live_for_session(provider: object, session_id: str | None) -> TypeGuard[BaseProvider]:
-    """True when ``provider`` is a connected BaseProvider bound to ``session_id``."""
-    return (
-        isinstance(provider, BaseProvider)
-        and provider.is_connected
-        and provider.current_session_id == session_id
-    )
 
 
 class BaseSDKProvider(BaseProvider):

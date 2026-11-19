@@ -39,7 +39,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from ciao import cli_envelopes, provider_registry, subagent_tracking
+from ciao import cli_envelopes, provider_registry
 from ciao.tool_summary import (
     opencode_file_touches,
     summarize_claude_tool_input,
@@ -331,7 +331,7 @@ def _strip_injected_context(content: str) -> str:
 # The user-record skip rules (/model and /mode echoes, the interrupted-turn
 # sentinel, the interrupt marker, the CLI envelope tags) and the
 # task-notification grammar live in ciao/cli_envelopes.py. They are shared
-# with ciao/subagent_tracking.py, whose turn counter must skip exactly the
+# with any reader that counts user turns, which must skip exactly the
 # records this renderer hides or `turn_index` anchoring drifts. The assistant
 # acknowledgement of a control slash command ("Set model to ..." / "Set mode
 # to ...") is collapsed into a system bubble by _classify_control_ack below.
@@ -359,6 +359,38 @@ _is_cli_internal_envelope = cli_envelopes.is_cli_envelope
 _SYNTHESIS_NUDGE_LABEL = "\U0001F916 Background agents finished — asked for a consolidated report"
 
 
+# Prompt Ciaobot used to inject when background agents finished. It is no
+# longer sent (#1394: the CLI now runs a follow-up turn itself). It is kept
+# because session files recorded before then contain it, and the renderer
+# collapses it into the status line above.
+_SYNTHESIS_NUDGE = (
+    "The background agent(s) you dispatched have now finished. Review their "
+    "results (read their transcripts or output as needed) and post your "
+    "consolidated final report for this task now. Do not dispatch new "
+    "background agents to answer this. If you already posted the final "
+    "report, reply with a brief confirmation instead of repeating it."
+)
+
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _collapse_whitespace(text: str) -> str:
+    return _WHITESPACE_RE.sub(" ", text).strip()
+
+
+_SYNTHESIS_PROMPT_COLLAPSED = _collapse_whitespace(_SYNTHESIS_NUDGE)
+
+
+def _is_synthesis_nudge(text: str) -> bool:
+    """True when ``text`` is the legacy subagent-synthesis prompt (no longer sent).
+
+    Matches on the tail: the nudge is sent with the chat's context prefix
+    attached, and the /messages prefix stripper only removes the shapes it
+    recognizes.
+    """
+    return _collapse_whitespace(text).endswith(_SYNTHESIS_PROMPT_COLLAPSED)
+
+
 def _summarize_task_notification(content: str) -> str | None:
     """Render a <task-notification> envelope as a one-line system bubble.
 
@@ -371,8 +403,8 @@ def _summarize_task_notification(content: str) -> str | None:
     several into one record; the rest stay hidden with the envelope. A record
     that merely *carries* the grammar — the human's own prose quoting it, or
     shell output from a command that printed a session JSONL — is not a
-    completion and returns None, the same rule `ciao/subagent_tracking.py`
-    applies so the two readers stay aligned.
+    completion and returns None, the same rule the shared
+    envelope vocabulary applies.
     """
     fields = cli_envelopes.envelope_notification_fields(content)
     if fields is None:
@@ -1540,13 +1572,12 @@ async def _assemble_chat_messages(
                 if task_summary is not None:
                     result.append({"role": "system", "content": task_summary})
                 continue
-            # Our own subagent-synthesis nudge (ciao/subagent_tracking.py).
+            # Our own subagent-synthesis nudge (legacy, no longer sent).
             # It's a server-injected prompt, not something the user typed, so
             # showing the paragraph verbatim reads as words they never wrote.
             # Collapse it to a status line, and skip without incrementing
-            # user_idx — subagent_tracking._is_countable_user_turn applies the
-            # same rule, so the two turn counters stay aligned.
-            if subagent_tracking.is_synthesis_nudge(content):
+            # user_idx.
+            if _is_synthesis_nudge(content):
                 result.append({"role": "system", "content": _SYNTHESIS_NUDGE_LABEL})
                 continue
         entry: dict = {

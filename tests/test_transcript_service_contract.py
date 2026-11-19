@@ -24,7 +24,7 @@ from ciao import cli_envelopes
 from ciao.models import AgentRequest, ChatContext
 from ciao.transcripts import TranscriptStore
 from ciao.web import app as web_app
-from ciao.providers.opencode import _projected_message, opencode_child_status
+from ciao.providers.opencode import _projected_message
 from ciao.web import transcript_service
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1172,27 +1172,6 @@ def test_a_child_thread_keeps_its_own_turn_numbering() -> None:
 
     assert rendered[0]["turn_index"] == 3
     assert "sent_at" not in rendered[0]
-
-
-def test_opencode_child_status_reads_the_last_assistant_message() -> None:
-    messages = OPENCODE_THREAD["messages"]
-    assert opencode_child_status(messages) == "failed"
-    assert opencode_child_status(messages[:2]) == "completed"
-    assert (
-        opencode_child_status(
-            [{"info": {"role": "assistant", "time": {"created": 1}}}]
-        )
-        == "running"
-    )
-    assert opencode_child_status([]) == "completed"
-    # The active map describes the current execution, not Session.Info.outcome
-    # from the previous completed turn.
-    assert opencode_child_status(
-        [], {"outcome": "failed"}, active=True
-    ) == "running"
-    assert opencode_child_status(
-        [], {"outcome": "succeeded"}, active=False
-    ) == "completed"
 
 
 def test_prune_rows_for_wire_only_truncates_oversized_thinking() -> None:

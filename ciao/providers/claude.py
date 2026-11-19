@@ -1263,7 +1263,7 @@ class ClaudeProvider(BaseSDKProvider):
                 # await here would deadlock the drain. _ensure_connected
                 # rebuilds the client on the next turn, exactly as after a
                 # disconnect(); leaving _connected True would make
-                # cli_connected lie to the CLI-task watcher.
+                # cli_connected lie to its readers.
                 self._forget_dead_cli(client)
             except _CLAUDE_OP_ERRORS:
                 # Other typed SDK errors (e.g. MessageParseError) are not

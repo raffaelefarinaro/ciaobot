@@ -1444,6 +1444,16 @@ class CiaoControlPlane:
         self._subscribe_turn_watch()
         self._subscribe_chat_ended()
 
+    def _chat_is_working(self, chat_id: str) -> bool:
+        """A live stream, or background work a teardown would cut off."""
+        if chat_id in self.pcm.active_chat_ids():
+            return True
+        providers = getattr(self.pcm, "_providers", None)
+        busy = getattr(self.pcm, "_provider_background_busy", None)
+        if not isinstance(providers, dict) or not callable(busy):
+            return False
+        return bool(busy(chat_id, providers.get(chat_id)))
+
     def _defer_until_chat_idle(
         self,
         principal: AgentPrincipal,
@@ -1466,7 +1476,7 @@ class CiaoControlPlane:
 
         async def _run() -> None:
             try:
-                while principal.chat_id in self.pcm.active_chat_ids():
+                while self._chat_is_working(principal.chat_id):
                     await asyncio.sleep(0.25)
                 record["status"] = "running"
                 value = operation()

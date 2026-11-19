@@ -251,7 +251,7 @@ async def test_refresh_excludes_running_foreground_shell(tmp_path, monkeypatch):
     provider._foreground_shells = {"sh_fg"}
     _script(monkeypatch, provider, shells=[{"sh_fg", "sh_bg"}])
 
-    assert await provider.refresh_background_shells() == 1
+    assert await provider._refresh_background_shells() == 1
     assert provider._background_shells == {"sh_bg"}
 
 
@@ -662,7 +662,7 @@ async def test_drain_streams_a_background_subagent_wake(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_drain_counts_children_from_the_active_map(tmp_path, monkeypatch):
-    """A failed child listing reads as an empty tree; it must not end the drain.
+    """A child still on the active map keeps the drain alive.
 
     The idle reaper reads the set once the drain ends, so emptying it while the
     server still runs the child let the reaper stop that server mid-review.
@@ -673,10 +673,6 @@ async def test_drain_counts_children_from_the_active_map(tmp_path, monkeypatch):
     monkeypatch.setattr(opencode_module, "_OPENCODE_DRAIN_MAX_S", 0.2)
     _script(monkeypatch, provider, shells=[set()], active=[{"ses_bgsub_child"}])
 
-    async def empty_tree():
-        return []
-
-    monkeypatch.setattr(provider, "read_live_collab_tree", empty_tree)
     started = asyncio.get_running_loop().time()
 
     assert await _drain(provider) == []
@@ -969,18 +965,3 @@ async def test_disconnect_forgets_child_sessions(tmp_path):
     await provider.disconnect()
 
     assert provider._child_sessions == {}
-
-
-@pytest.mark.asyncio
-async def test_refresh_background_shells_drops_commands_of_vanished_shells(tmp_path, monkeypatch):
-    provider = OpencodeProvider(tmp_path)
-    _attach_live(provider, object(), "ses_a")
-    provider._background_shells = {"sh_gone", "sh_live"}
-    provider._shell_commands = {"sh_gone": "sleep 60", "sh_live": "npm run dev"}
-    _script(monkeypatch, provider, shells=[{"sh_live"}])
-
-    assert await provider.refresh_background_shells() == 1
-    rows = provider.background_shell_rows()
-    assert [(row["id"], row["command"]) for row in rows] == [("sh_live", "npm run dev")]
-    assert isinstance(rows[0]["started_at"], float)
-    assert provider._shell_commands == {"sh_live": "npm run dev"}

@@ -157,12 +157,9 @@ _INVENTORY_TIMEOUT = 15.0
 _INVENTORY_POLL = 0.1
 _SYSTEM_SKILLS_TTL_SECONDS = 300.0
 
-# Session reads (`read_thread` / `read_collab_tree`) also cost a throwaway
-# `opencode serve`. A chat with a live provider attached reuses that server
-# instead (see `is_connected` / `read_live_collab_tree`), so this classmethod
-# path and its cache now mainly cover reads with nothing attached (an archived
-# chat, or a chat viewed from another device). The TTL collapses bursts of
-# reads to roughly one spawn per interval rather than one per call.
+# Session reads (`read_thread`) cost a throwaway `opencode serve`. The TTL
+# collapses bursts of reads to roughly one spawn per interval rather than one
+# per call.
 _READ_CACHE_TTL = 6.0
 # A spawn that could not start at all (binary missing, process died, health
 # never answered) is cached longer than a read: while opencode is in this
@@ -174,7 +171,6 @@ _READ_FAILURE_CACHE_TTL = 20.0
 # Cache entries carry their own TTL as ``(stamp, ttl, value)``: a failed
 # spawn lives longer than a successful read (see `_READ_FAILURE_CACHE_TTL`).
 _THREAD_CACHE: dict[tuple[str, str], tuple[float, float, dict[str, Any]]] = {}
-_COLLAB_CACHE: dict[tuple[str, str], tuple[float, float, list[dict[str, Any]]]] = {}
 
 _SERVER_START_TIMEOUT = 30.0
 _SERVER_START_ATTEMPTS = 3
@@ -1202,46 +1198,6 @@ async def _read_v2_messages(
     return messages
 
 
-async def _read_v2_children(
-    client: httpx.AsyncClient, parent_id: str
-) -> list[dict[str, Any]]:
-    """Read every V2 child session for a parent, following cursors."""
-    children: list[dict[str, Any]] = []
-    cursor: str | None = None
-    seen_cursors: set[str] = set()
-    while True:
-        params: dict[str, str] = {
-            "parentID": parent_id,
-            "limit": "100",
-        }
-        if cursor:
-            params["cursor"] = cursor
-        response = await client.get("/api/session", params=params)
-        response.raise_for_status()
-        body = response.json()
-        page = _data(body)
-        if not isinstance(page, list):
-            break
-        children.extend(
-            dict(child)
-            for child in page
-            if isinstance(child, Mapping) and child.get("id")
-        )
-        cursor_body = body.get("cursor") if isinstance(body, Mapping) else None
-        next_cursor = (
-            str(cursor_body.get("next") or "")
-            if isinstance(cursor_body, Mapping)
-            else ""
-        )
-        if not next_cursor:
-            break
-        if next_cursor in seen_cursors:
-            raise RuntimeError("OpenCode pagination returned a repeated cursor")
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
-    return children
-
-
 async def _read_active_sessions(client: httpx.AsyncClient) -> set[str]:
     """Session IDs currently executing in this OpenCode server process."""
     response = await client.get("/api/session/active")
@@ -1690,18 +1646,11 @@ class OpencodeProvider(BaseSDKProvider):
         self._background_shells: set[str] = set()
         # Shells of foreground tool calls still running; OpenCode 2 runs every shell call as a Shell.
         self._foreground_shells: set[str] = set()
-        # Command of each shell seen in `shell.created`, for the composer's
-        # process list. A shell found only by `GET /api/shell` has no entry.
-        self._shell_commands: dict[str, str] = {}
-        # Epoch seconds at which each running shell was first seen here, for
-        # the composer's elapsed time; cleared with the shell.
-        self._shell_started: dict[str, float] = {}
         self._background_children: set[str] = set()
         # Task/subagent sessions spawned under a parent session (any depth),
         # child id -> parent session. Only their permission/form requests are
         # surfaced (#1617). Outlives a turn; cleared by `disconnect`.
         self._child_sessions: dict[str, str] = {}
-        self._background_changed = asyncio.Event()
         # Finished shells and subagents whose synthetic wake items arrived
         # since the last execution ended; `_wake_result` turns them into the
         # notice.
@@ -1793,9 +1742,8 @@ class OpencodeProvider(BaseSDKProvider):
     def is_connected(self) -> bool:
         """True while this chat's own opencode server is still running.
 
-        Lets read paths (the subagents poll) reuse this connection instead of
-        paying to spawn a throwaway server via ``_EphemeralServer`` every time
-        the 3-second read cache misses.
+        Lets read paths reuse this connection instead of paying to spawn a
+        throwaway server via ``_EphemeralServer``.
         """
         return (
             self._client is not None
@@ -1803,39 +1751,10 @@ class OpencodeProvider(BaseSDKProvider):
             and self._process.returncode is None
         )
 
-    def interrupted_background_work(self) -> dict[str, Any] | None:
-        return {
-            "children": self.background_child_ids(),
-            "shells": [
-                {"id": row["id"], "command": row["command"]}
-                for row in self.background_shell_rows()
-            ],
-        }
-
     @property
     def background_work_outstanding(self) -> bool:
         """True while this chat's session has background shells or subagents running."""
         return bool(self._background_shells or self._background_children)
-
-    @property
-    def background_count(self) -> int:
-        """Background shells plus subagents tracked for this chat's session."""
-        return len(self._background_shells) + len(self._background_children)
-
-    def background_shell_rows(self) -> list[dict[str, Any]]:
-        """``{id, command, started_at}`` for each live background shell, in id order."""
-        return [
-            {
-                "id": shell_id,
-                "command": self._shell_commands.get(shell_id, ""),
-                "started_at": self._shell_started.setdefault(shell_id, time.time()),
-            }
-            for shell_id in sorted(self._background_shells)
-        ]
-
-    def background_child_ids(self) -> list[str]:
-        """Session ids of the background subagents tracked for this chat, sorted."""
-        return sorted(self._background_children)
 
     @property
     def seconds_since_activity(self) -> float:
@@ -1856,7 +1775,6 @@ class OpencodeProvider(BaseSDKProvider):
         kind = str(event.get("type") or "")
         data = event.get("data")
         props: Mapping[str, Any] = data if isinstance(data, Mapping) else {}
-        changed = False
         if kind == "shell.created":
             info = props.get("info")
             metadata = info.get("metadata") if isinstance(info, Mapping) else None
@@ -1868,17 +1786,11 @@ class OpencodeProvider(BaseSDKProvider):
                 and str(info["id"]) not in self._background_shells
             ):
                 self._background_shells.add(str(info["id"]))
-                self._shell_commands[str(info["id"])] = str(info.get("command") or "")
-                self._shell_started[str(info["id"])] = time.time()
-                changed = True
         elif kind == "shell.exited":
             shell_id = str(props.get("id") or "")
-            self._shell_commands.pop(shell_id, None)
-            self._shell_started.pop(shell_id, None)
             self._foreground_shells.discard(shell_id)
             if shell_id in self._background_shells:
                 self._background_shells.discard(shell_id)
-                changed = True
         elif kind in {"session.tool.progress", "session.tool.success"}:
             metadata = props.get("metadata")
             shell_id = str(metadata.get("shellID") or "") if isinstance(metadata, Mapping) else ""
@@ -1887,7 +1799,6 @@ class OpencodeProvider(BaseSDKProvider):
                     self._foreground_shells.add(shell_id)
                     if shell_id in self._background_shells:
                         self._background_shells.discard(shell_id)
-                        changed = True
                 elif (
                     isinstance(metadata, Mapping)
                     and metadata.get("status") == "running"
@@ -1897,7 +1808,6 @@ class OpencodeProvider(BaseSDKProvider):
                     # already dropped an exited shell from the foreground set.
                     self._foreground_shells.discard(shell_id)
                     self._background_shells.add(shell_id)
-                    changed = True
         elif kind == "session.created":
             child_id = str(props.get("sessionID") or "")
             parent_id = str(props.get("parentID") or "")
@@ -1910,14 +1820,10 @@ class OpencodeProvider(BaseSDKProvider):
                 and child_id not in self._background_children
             ):
                 self._background_children.add(child_id)
-                changed = True
         elif kind in _EXECUTION_TERMINAL_EVENTS:
             child_id = str(props.get("sessionID") or "")
             if child_id in self._background_children:
                 self._background_children.discard(child_id)
-                changed = True
-        if changed:
-            self._background_changed.set()
 
     def _is_child_session(self, candidate: str, session_id: str) -> bool:
         """Whether ``candidate`` is a task/subagent session of ``session_id``'s chat."""
@@ -1940,7 +1846,7 @@ class OpencodeProvider(BaseSDKProvider):
             )
         return admitted
 
-    async def refresh_background_shells(self) -> int:
+    async def _refresh_background_shells(self) -> int:
         """Reconcile ``_background_shells`` with ``GET /api/shell``; return the count.
 
         Without a live server or session, or when the read fails, the set is
@@ -1954,17 +1860,8 @@ class OpencodeProvider(BaseSDKProvider):
         except (httpx.HTTPError, ValueError, TypeError, AttributeError):
             return len(self._background_shells)
         shells = shells - self._foreground_shells
-        if shells != self._background_shells:
-            self._replace_background_shells(shells)
-            self._background_changed.set()
-        return len(self._background_shells)
-
-    def _replace_background_shells(self, shells: set[str]) -> None:
-        """Take the server's running shells, dropping commands of shells that are gone."""
         self._background_shells = shells
-        self._shell_commands = {k: v for k, v in self._shell_commands.items() if k in shells}
-        now = time.time()
-        self._shell_started = {k: self._shell_started.get(k, now) for k in shells}
+        return len(self._background_shells)
 
     def _set_background_children(self, active: set[str], session_id: str) -> None:
         """Replace ``_background_children`` with what the server reports running.
@@ -1973,10 +1870,7 @@ class OpencodeProvider(BaseSDKProvider):
         it other than the parent is the parent's background work. That covers a
         child resumed by id, which emits no ``session.created``.
         """
-        children = active - {session_id}
-        if children != self._background_children:
-            self._background_children = children
-            self._background_changed.set()
+        self._background_children = active - {session_id}
 
     async def _reconcile_background(self) -> None:
         """Re-read background shells and subagents at the end of a turn.
@@ -1986,106 +1880,10 @@ class OpencodeProvider(BaseSDKProvider):
         client, session_id = self._client, self._session_id
         if client is None or not session_id or not self.is_connected:
             return
-        await self.refresh_background_shells()
+        await self._refresh_background_shells()
         active = await self._active_or_none(client)
         if active is not None:
             self._set_background_children(active, session_id)
-
-    async def wait_background_change(self, timeout: float) -> None:
-        """Wait up to ``timeout`` for a tracked change, then clear the flag."""
-        try:
-            await asyncio.wait_for(self._background_changed.wait(), timeout)
-        except asyncio.TimeoutError:
-            pass
-        self._background_changed.clear()
-
-    async def read_live_collab_tree(
-        self,
-        *,
-        include_messages: bool = False,
-        only_child_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """``read_collab_tree`` read over this chat's already-running server.
-
-        Same shape as the classmethod, but skips ``_EphemeralServer`` entirely:
-        while a chat is attached, its own server is already up, so spawning a
-        second one just to poll subagent transcripts every few seconds wastes
-        a process start each time. Callers should check ``is_connected``
-        first and fall back to the classmethod otherwise (e.g. a chat with no
-        attached provider, viewed from another device or after a restart).
-
-        ``include_messages`` is off by default because the callers that run on
-        a timer (the subagent watcher, the schedule waiter, the sidebar poll)
-        only need a count or a status, and both come from the session metadata
-        and the activity map. Reading every child's history on every tick was
-        what made a chat with many background agents re-read every transcript
-        every few seconds. Only the subagent detail view needs the
-        transcript, and it asks for it.
-
-        ``only_child_id`` narrows the tree to one child, so the detail view
-        reads one transcript instead of every sibling's.
-        """
-        client = self._client
-        if client is None or not self._session_id:
-            return []
-
-        async def _child_messages(child_id: str) -> list[dict[str, Any]]:
-            try:
-                return await _read_v2_messages(client, child_id)
-            except (httpx.HTTPError, TypeError, ValueError):
-                return []
-
-        children_result, active_result = await asyncio.gather(
-            _read_v2_children(client, self._session_id),
-            _read_active_sessions(client),
-            return_exceptions=True,
-        )
-        if isinstance(children_result, Exception):
-            return []
-        # A transient failure of the auxiliary activity map must not discard
-        # successfully fetched children. ``None`` means activity is unknown, and
-        # the conservative counter treats an unknown child as still running.
-        active_ids = (
-            None
-            if isinstance(active_result, Exception)
-            else active_result
-        )
-        children = [child for child in children_result if child.get("id")]
-        if only_child_id is not None:
-            # The same spelling the route filters on: a prefixed id and a bare
-            # one name the same agent.
-            children = [
-                child
-                for child in children
-                if str(child.get("id")).removeprefix("agent-") == only_child_id
-            ]
-        if not include_messages:
-            return [
-                {
-                    "info": child,
-                    "active": (
-                        None
-                        if active_ids is None
-                        else str(child["id"]) in active_ids
-                    ),
-                }
-                for child in children
-            ]
-        histories = await asyncio.gather(
-            *(_child_messages(str(child["id"])) for child in children)
-        )
-        return [
-            {
-                "info": child,
-                "messages": messages,
-                "active": (
-                    None
-                    if active_ids is None
-                    else str(child["id"]) in active_ids
-                ),
-            }
-            for child, messages in zip(children, histories)
-        ]
 
     @property
     def can_drain(self) -> bool:
@@ -2123,7 +1921,7 @@ class OpencodeProvider(BaseSDKProvider):
         except (httpx.HTTPError, ValueError, TypeError, AttributeError, RuntimeError):
             return True
         shells = shells - self._foreground_shells
-        self._replace_background_shells(shells)
+        self._background_shells = shells
         self._set_background_children(active, session_id)
         return not shells and not self._background_children and session_id not in active
 
@@ -2595,11 +2393,8 @@ class OpencodeProvider(BaseSDKProvider):
         self._settled_tool_ids.clear()
         self._background_shells.clear()
         self._foreground_shells.clear()
-        self._shell_commands.clear()
-        self._shell_started.clear()
         self._background_children.clear()
         self._child_sessions.clear()
-        self._background_changed.set()
 
         if self._client is not None:
             await self._client.aclose()
@@ -4472,54 +4267,6 @@ class OpencodeProvider(BaseSDKProvider):
         return (title,)
 
     @classmethod
-    async def read_collab_tree(
-        cls, workspace_root: Path, session_id: str
-    ) -> list[dict[str, Any]]:
-        """Child sessions — opencode's background subagents — with their history.
-
-        Each entry is ``{"info": <child session>, "messages": [...]}`` — the
-        same shape :meth:`read_thread` returns — fetched over the one ephemeral
-        server rather than a server spawn per child.
-        """
-        if not session_id:
-            return []
-        key = (str(workspace_root), session_id)
-        cached = _COLLAB_CACHE.get(key)
-        if cached and time.monotonic() - cached[0] < cached[1]:
-            return cached[2]
-
-        async def _child_messages(client: Any, child_id: str) -> list[dict[str, Any]]:
-            try:
-                return await _read_v2_messages(client, child_id)
-            except (httpx.HTTPError, TypeError, ValueError):
-                return []
-
-        result: list[dict[str, Any]] = []
-        ttl = _READ_CACHE_TTL
-        async with _EphemeralServer(workspace_root) as client:
-            if client is None:
-                # Negative-cache the failed spawn (see read_thread).
-                ttl = _READ_FAILURE_CACHE_TTL
-            else:
-                try:
-                    children = await _read_v2_children(client, session_id)
-                except (httpx.HTTPError, TypeError, ValueError, RuntimeError):
-                    children = []
-                histories = await asyncio.gather(
-                    *(_child_messages(client, str(child["id"])) for child in children)
-                )
-                # This server is a different process from the chat's live
-                # server; its /api/session/active map cannot prove that a
-                # child is idle. Leave activity unknown and let message timing
-                # provide the conservative fallback.
-                result = [
-                    {"info": child, "messages": messages, "active": None}
-                    for child, messages in zip(children, histories)
-                ]
-        _COLLAB_CACHE[key] = (time.monotonic(), ttl, result)
-        return result
-
-    @classmethod
     async def delete_session(cls, workspace_root: Path, session_id: str) -> bool:
         async with _EphemeralServer(workspace_root) as client:
             if client is None or not session_id:
@@ -4529,86 +4276,6 @@ class OpencodeProvider(BaseSDKProvider):
                 return response.status_code < 400
             except httpx.HTTPError:
                 return False
-
-
-def opencode_child_status(
-    messages: list,
-    info: dict | None = None,
-    active: bool | None = None,
-) -> str:
-    """A V2 child session's lifecycle state.
-
-    ``/api/session/active`` is authoritative for the current execution;
-    ``Session.Info.outcome`` describes only the previous completed execution.
-    Normalized projected messages remain a defensive fallback for sparse data.
-    """
-    if active is True:
-        return "running"
-    last: dict | None = None
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        message_info = message.get("info")
-        if isinstance(message_info, dict) and message_info.get("role") == "assistant":
-            last = message_info
-    if last is not None:
-        if last.get("error"):
-            return "failed"
-        time_info = last.get("time")
-        if (
-            isinstance(time_info, dict)
-            and time_info.get("created")
-            and not time_info.get("completed")
-        ):
-            return "running"
-    if isinstance(info, dict):
-        outcome = str(info.get("outcome") or "")
-        if outcome == "failed":
-            return "failed"
-        if outcome in {"succeeded", "interrupted"}:
-            return "completed"
-        if active is None:
-            # A read from a different OpenCode process cannot establish
-            # inactivity. Keep an unobserved child visible/running rather than
-            # allowing an archive or schedule waiter to settle it early.
-            return "running"
-    if active is False:
-        return "completed"
-    if active is None and isinstance(info, dict):
-        return "running"
-    return "completed"
-
-
-def running_opencode_child_ids(tree: Sequence[Mapping[str, Any]]) -> list[str]:
-    """Ids of the children in a collab tree that are still running.
-
-    The one running-child rule, shared by the watcher count and the
-    running-subagents route: a child runs by ``opencode_child_status``
-    (``active`` is authoritative; otherwise message timing and ``outcome``).
-    """
-    ids: list[str] = []
-    for item in tree:
-        if not isinstance(item, Mapping):
-            continue
-        info = item.get("info")
-        info = info if isinstance(info, dict) else {}
-        child_id = str(info.get("id") or "")
-        if not child_id:
-            continue
-        messages = item.get("messages")
-        messages = messages if isinstance(messages, list) else []
-        active = item.get("active")
-        status = opencode_child_status(
-            messages, info, active if isinstance(active, bool) else None
-        )
-        if status == "running":
-            ids.append(child_id)
-    return ids
-
-
-def opencode_collab_tree_counts(tree: Sequence[Mapping[str, Any]]) -> tuple[int, bool]:
-    """Return the running child count and whether the tree has any children."""
-    return len(running_opencode_child_ids(tree)), bool(tree)
 
 
 def catalog_providers(catalog: Sequence[Mapping[str, Any]]) -> set[str]:

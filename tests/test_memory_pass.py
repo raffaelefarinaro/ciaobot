@@ -15,6 +15,7 @@ import contextlib
 import json
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -706,11 +707,12 @@ class _TerminalProvider:
     """A provider whose pass ends on a scripted result.
 
     ``current_session_id`` stays None so the turn stamps no provider session,
-    which keeps these tests off the subagent watcher and the between-turns
-    drain: the foreground turn has to be the only thing that settles a pass.
+    which keeps these tests off the between-turns drain: the foreground turn has
+    to be the only thing that settles a pass.
     """
 
     current_session_id = None
+    background_work_outstanding = False
     #: These fakes stand in for the chat's ProviderService, whose ``provider``
     #: is the live implementation; there is none here, so needs-you detection skips.
     provider = None
@@ -1908,7 +1910,7 @@ async def test_unclean_finish_marks_attention_and_pumps_next(
     assert streams.chat_ids == ids
 
 
-@pytest.mark.parametrize("pending_kind", ["permission", "retry"])
+@pytest.mark.parametrize("pending_kind", ["permission", "retry", "background"])
 async def test_pending_work_keeps_the_slot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1928,6 +1930,11 @@ async def test_pending_work_keeps_the_slot(
     _replied(first, "May I run the ciao memory command?")
     if pending_kind == "permission":
         first.pending_permission = '{"request_id":"r1","tool_name":"Bash"}'
+    elif pending_kind == "background":
+        # The provider still reports background work the pass dispatched.
+        manager._providers[first.chat_id] = SimpleNamespace(  # type: ignore[assignment]
+            background_work_outstanding=True, background_activity_age=0.0
+        )
     else:
         first.retry_status = "pending"
 

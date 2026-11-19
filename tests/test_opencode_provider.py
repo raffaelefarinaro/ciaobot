@@ -49,7 +49,6 @@ from ciao.providers.opencode import (
     model_accepts_images,
     missing_required_paths,
     mode_settings,
-    opencode_collab_tree_counts,
     opencode_default_model,
     resolve_opencode_binary,
     _session_handover_text,
@@ -3095,58 +3094,6 @@ def test_default_model_override():
 
 def test_default_model_on_a_config_without_opencode():
     assert opencode_default_model(object()) == ""
-
-
-# ── collaboration tree counts ────────────────────────────────────────────
-
-
-def test_collab_tree_counts_use_v2_active_session_metadata():
-    tree = [
-        {"info": {"id": "a", "outcome": "failed"}, "active": True, "messages": []},
-        {"info": {"id": "b", "outcome": "succeeded"}, "active": False, "messages": []},
-        {"info": {"id": "c", "outcome": "failed"}, "active": False, "messages": []},
-        {"info": {"id": "d"}, "active": False, "messages": []},
-    ]
-    running, had_subagents = opencode_collab_tree_counts(tree)
-    assert running == 1
-    assert had_subagents is True
-
-
-def test_collab_tree_counts_are_empty_for_an_empty_tree():
-    assert opencode_collab_tree_counts([]) == (0, False)
-
-
-def test_collab_tree_counts_tolerate_junk():
-    assert opencode_collab_tree_counts([None, {"info": {}}, {"messages": "nope"}]) == (0, True)
-
-
-@pytest.mark.asyncio
-async def test_live_collab_tree_preserves_children_when_activity_lookup_fails(
-    tmp_path, monkeypatch,
-):
-    provider = _provider(tmp_path)
-    provider._client = object()  # type: ignore[assignment]
-    provider._session_id = "ses_parent"
-
-    async def children(_client, _parent_id):
-        return [{"id": "ses_child", "parentID": "ses_parent"}]
-
-    async def active(_client):
-        raise RuntimeError("activity endpoint unavailable")
-
-    async def messages(_client, _child_id):
-        return []
-
-    monkeypatch.setattr("ciao.providers.opencode._read_v2_children", children)
-    monkeypatch.setattr("ciao.providers.opencode._read_active_sessions", active)
-    monkeypatch.setattr("ciao.providers.opencode._read_v2_messages", messages)
-
-    tree = await provider.read_live_collab_tree()
-
-    assert tree[0]["info"]["id"] == "ses_child"
-    assert tree[0]["active"] is None
-    # Unknown activity remains conservative instead of looking settled.
-    assert opencode_collab_tree_counts(tree) == (1, True)
 
 
 # ── event normalization ─────────────────────────────────────────────────

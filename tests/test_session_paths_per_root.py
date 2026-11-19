@@ -20,7 +20,6 @@ from typing import Any
 import httpx
 import pytest
 
-from ciao import subagent_tracking
 from ciao.models import AgentRequest, ChatContext
 from ciao.providers import claude as claude_adapter
 from ciao.providers import opencode as opencode_adapter
@@ -79,36 +78,6 @@ def test_slug_differs_per_agent_root(fake_home: Path) -> None:
     assert _projects_dir_for(root_a) != _projects_dir_for(root_b)
 
 
-def test_find_parent_session_file_reads_own_root(fake_home: Path) -> None:
-    root_a = fake_home / "a"
-    root_b = fake_home / "b"
-    session = "33333333-3333-3333-3333-333333333333"
-    path = _write_session(_projects_dir_for(root_a), session)
-
-    # The preferred path is scoped to the root it was handed.
-    assert subagent_tracking.find_parent_session_file(session, root_a, agent_root=root_a) == path
-    assert _projects_dir_for(root_a) != _projects_dir_for(root_b)
-
-    # Querying root_b still finds it, via the cwd-slug glob scan. That net is
-    # deliberate today: the projects dir is a slug of the cwd, so a session
-    # recorded under a different cwd is only reachable this way. Asserting
-    # cross-root invisibility belongs to the re-rooting release, once agent_root
-    # really differs per workspace; asserting it now would lock in the loss of
-    # the net while the hazard it covers is still live.
-    assert (
-        subagent_tracking.find_parent_session_file(session, root_b, agent_root=root_b)
-        == path
-    )
-
-
-def test_find_parent_session_file_defaults_to_workspace_root(fake_home: Path) -> None:
-    root = fake_home / "a"
-    session = "44444444-4444-4444-4444-444444444444"
-    path = _write_session(_projects_dir_for(root), session)
-
-    assert subagent_tracking.find_parent_session_file(session, root) == path
-
-
 def test_claude_session_exists_reads_own_root(
     fake_home: Path, tmp_path: Path
 ) -> None:
@@ -120,8 +89,9 @@ def test_claude_session_exists_reads_own_root(
     pcm = _make_manager(tmp_path)
     assert pcm._claude_session_exists(session, agent_root=root_a) is True
     assert _projects_dir_for(root_a) != _projects_dir_for(root_b)
-    # Found under root_b too, through the same deliberate glob net. See the
-    # note in test_find_parent_session_file_reads_own_root.
+    # Found under root_b too: the projects dir is a slug of the cwd, so a
+    # session recorded under a different cwd is only reachable through the
+    # glob scan, which is deliberate.
     assert pcm._claude_session_exists(session, agent_root=root_b) is True
 
 

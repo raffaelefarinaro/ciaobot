@@ -156,7 +156,7 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 from ciao.os_support.media_types import guess_type as guess_media_type
-from ciao import cli_envelopes, repo_link, repo_location, subagent_tracking, vault_review, vault_verification
+from ciao import cli_envelopes, repo_link, repo_location, vault_review, vault_verification
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.config import (
     CLAUDE_MODELS,
@@ -190,7 +190,7 @@ from ciao.os_support.files import open_fd
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao import provider_registry
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
-from ciao.providers.base import BaseProvider, QuestionResponseResult
+from ciao.providers.base import BACKGROUND_WORK_MAX_S, BaseProvider, QuestionResponseResult
 from ciao.rate_limits import RateLimitStore, default_store_path
 from ciao.schedules import (
     ScheduleEntry,
@@ -213,7 +213,6 @@ from ciao.chat_actions import (
     validate_params,
 )
 from ciao.sessions import StateStore
-from ciao.subagent_tracking import SubagentInfo
 from ciao.web.chat_actions_runtime import ChatActionsRuntime
 from ciao.tool_path import prepend_engine_path
 from ciao.transcripts import (
@@ -255,7 +254,6 @@ from ciao.web.document_conversion import (
     is_natively_readable,
 )
 from ciao.web.file_snapshots import SnapshotStore
-from ciao.web.subagent_watchers import BACKGROUND_WORK_MAX_S, SubagentWatchers
 
 logger = logging.getLogger(__name__)
 
@@ -509,7 +507,6 @@ _CLAUDE_WARM_PROVIDER_LIMIT = 4
 _CLAUDE_WARM_IDLE_TIMEOUT_SECONDS = 3600.0
 RESTART_BLOCKER_REASONS = (
     "streaming",
-    "background_agents",
     "background_work",
     "open_question",
     "open_permission",
@@ -1354,16 +1351,6 @@ class ProjectChatManager:
         # Callers currently holding or waiting on each archive lock, so
         # the lock is only dropped once the last one is done with it.
         self._archive_lock_users: dict[str, int] = {}
-        # Background subagent watching, and the CLI-task wake bookkeeping that
-        # comes with it, live in ciao/web/subagent_watchers.py. It owns the
-        # three dictionaries that used to sit here — the live watcher task per
-        # chat, the last count published per chat, and the wakes already sent —
-        # and reaches back into this class only through SubagentWatcherHost.
-        # `self` is that host; the properties further down keep the old
-        # attribute names pointing at its state. Annotated explicitly: passing
-        # `self` to a collaborator that reads `_subagents` would otherwise make
-        # mypy resolve this assignment's own type through the cycle.
-        self._subagents: SubagentWatchers = SubagentWatchers(self)
         self._streaming = ChatStreaming(self)
         # Scheduled dispatch is a separate lifecycle with its own typed host
         # seam; this manager remains the coordinator for the target chat and
@@ -5142,7 +5129,7 @@ class ProjectChatManager:
             or chat.pending_question
             or chat.pending_permission
             or chat.retry_status
-            or self._subagents.work_count(chat_id) > 0
+            or self._provider_background_busy(chat_id, self._providers.get(chat_id))
         ):
             return False
         try:
@@ -5538,10 +5525,6 @@ class ProjectChatManager:
         Mirrors ``_provider_is_busy`` minus the live-stream check: the caller
         of a reload may be the live foreground stream itself.
         """
-        if chat_id in self.background_agent_counts:
-            return True
-        if chat_id in self._subagents.watching_chat_ids():
-            return True
         if self._streaming.teardown_unsettled(chat_id):
             return True
         if self._provider_background_busy(chat_id, self._providers.get(chat_id)):
@@ -5612,17 +5595,15 @@ class ProjectChatManager:
     def _provider_is_busy(self, chat_id: str, active: set[str]) -> bool:
         """Whether a chat has work that a provider teardown would interrupt.
 
-        ``active_chat_ids`` covers live streams, running background subagents
-        and pending subagent watchers. The rest are per-chat tasks that hold a
-        provider without necessarily opening a broker stream.
+        ``active_chat_ids`` covers live streams. The rest are per-chat tasks
+        that hold a provider without necessarily opening a broker stream.
         """
         if chat_id in active:
             return True
         if self._streaming.teardown_unsettled(chat_id):
             return True
         # A Claude drain lives as long as its CLI (#1402), so an idle drain is
-        # not work. Claude's background agents are counted by active_chat_ids,
-        # a drain streaming a follow-up holds a broker stream, and opencode
+        # not work. a drain streaming a follow-up holds a broker stream, and opencode
         # reports its own outstanding work.
         if self._provider_background_busy(chat_id, self._providers.get(chat_id)):
             return True
@@ -6369,9 +6350,13 @@ class ProjectChatManager:
         return project_ids, chat_ids
 
     def workspace_busy_chat_ids(self, workspace: str) -> list[str]:
-        """Chats in *workspace* with a turn or subagent running."""
+        """Chats in *workspace* with a live stream or background work outstanding."""
         _project_ids, chat_ids = self.workspace_scope(workspace)
         busy = set(self.active_chat_ids())
+        busy.update(
+            cid for cid in chat_ids
+            if self._provider_background_busy(cid, self._providers.get(cid))
+        )
         return sorted(cid for cid in busy if cid in chat_ids)
 
     def refuse_workspace_teardown(self, workspace: str) -> None:
@@ -7406,28 +7391,12 @@ class ProjectChatManager:
     def active_chat_ids(self) -> list[str]:
         """Chats with work that must settle before a safe server restart.
 
-        Include live subagent watchers even before their first poll publishes a
-        running count. Without that slot, the parent stream can finish and
-        briefly make a chat look idle while its background agents still run.
-        Idle between-turn drains are deliberately excluded; a drain only
-        becomes active work when it opens a broker stream.
+        Live streams only. Idle between-turn drains are deliberately excluded;
+        a drain only becomes active work when it opens a broker stream. A
+        provider's own outstanding background work is reported separately by
+        ``restart_blockers`` as ``background_work``.
         """
-        ids = set(self.active_stream_chat_ids())
-        ids.update(self.background_agent_counts)
-        ids.update(self._subagents.watching_chat_ids())
-        return sorted(ids)
-
-    def background_work_chat_ids(self) -> list[str]:
-        """Chats whose provider still reports background work (native shells, subagents).
-
-        Separate from ``active_chat_ids`` on purpose: that set drives restart
-        drains, this one only decides which chats the running-work feed lists.
-        """
-        return sorted(
-            chat_id
-            for chat_id, service in self._providers.items()
-            if self._provider_background_busy(chat_id, service)
-        )
+        return sorted(self.active_stream_chat_ids())
 
     def restart_blockers(self) -> list[dict[str, Any]]:
         """Chats a restart or stop would break, each with the reasons why. Superset of active_chat_ids()."""
@@ -7440,8 +7409,6 @@ class ProjectChatManager:
 
         for cid in self.active_stream_chat_ids():
             add(cid, "streaming")
-        for cid in set(self.background_agent_counts) | set(self._subagents.watching_chat_ids()):
-            add(cid, "background_agents")
         for cid, service in list(self._providers.items()):
             if self._provider_background_busy(cid, service):
                 add(cid, "background_work")
@@ -7575,54 +7542,8 @@ class ProjectChatManager:
             return True
         self._restart_draining = False
         self._drain_owner = ""
-        # Admission is open again, so the wakes the drain deferred are
-        # deliverable now. Skipping this loses them: nothing restarts the
-        # server any more to replay them at the next start().
-        self.resume_after_cancelled_drain()
         self._events.publish({"type": "server_restart_cancelled"})
         return True
-
-    def resume_after_cancelled_drain(self) -> None:
-        """Replay the wakes a cancelled drain deferred "to the next start".
-
-        A draining server defers a chat's CLI-task wake: the watcher leaves its
-        loop because a restart is coming (``sweep_orphaned_cli_tasks`` picks it up
-        after one). A drain that is cancelled has no restart, so without this
-        the owning chat silently never learns its command finished.
-
-        Runs after admission reopens and through the same delivery paths as
-        every other wake. Total by design: a failed replay must not keep the
-        engine refusing turns, which is the one thing the cancel guarantees.
-        """
-        try:
-            for chat in list(self._chats.values()):
-                self._replay_deferred_cli_task_wakes(chat)
-        except Exception:  # noqa: BLE001 — the cancel is the one thing that must not fail
-            logger.exception("Deferred CLI task wake replay failed")
-
-    def _replay_deferred_cli_task_wakes(self, chat: ChatInfo) -> None:
-        """Wake *chat* for the CLI tasks a cancelled drain left without one.
-
-        The tasks are the ones this process has not already woken for and whose
-        owning CLI is gone: a live CLI still answers its own task notifications,
-        so waking it would only talk over its turn. The sweep's provider filter
-        is kept, so the two wake paths read the same chats; its 7-day activity
-        filter stays out — that one is about surviving a restart, and every chat
-        here is live in this very process. Never raises.
-        """
-        if chat.archived or not chat.session_id:
-            return
-        if chat.provider != "claude":
-            return
-        try:
-            tasks = self._subagents.cli_task_candidates(chat)
-            if not tasks or self._cli_owner_alive(chat.chat_id):
-                return
-            self._subagents.wake_for_dead_cli_tasks(chat, chat.project_id, tasks)
-        except Exception:  # noqa: BLE001 — one chat must not strand the others
-            logger.exception(
-                "Deferred CLI task wake replay failed for chat %s", chat.chat_id
-            )
 
     @property
     def restart_draining(self) -> bool:
@@ -7643,11 +7564,6 @@ class ProjectChatManager:
         this owner may reopen admission while it is set.
         """
         return self._drain_owner
-
-    @property
-    def background_agent_counts(self) -> dict[str, int]:
-        """Last announced running-background-subagent count per chat (>0 only)."""
-        return self._subagents.running_counts()
 
     def _park_pending_for_retry(self, chat_id: str, stream: "ChatStream") -> None:
         """Move queued follow-ups off the (about-to-be-torn-down) stream onto
@@ -8629,7 +8545,7 @@ class ProjectChatManager:
         CLI ran the turn by itself when background work finished, so a stub reply ("ok", "done.")
         is the model's own bookkeeping and an OS toast carrying it is noise.
         Below the floor the in-app UI stays the sole signal (subagent count drop
-        plus Activity row), matching the 2026-07-30 watcher-exit fix.
+        plus Activity row).
 
         Deliberately NOT used on the regular turn-done branch. There the reply
         answers something the user actually asked, and "Yes" or "No" is a
@@ -8655,10 +8571,9 @@ class ProjectChatManager:
         follow-up turn.
 
         The patterns are deliberately broad ("waiting on ..."), which is safe
-        for parking: parking now holds the announce until the follow-up at
-        count zero. A false positive only defers the announce: the watcher
-        releases it when it saw no background work or no drain is live, and the
-        drain releases it at count zero or when it ends. It is not safe for
+        for parking: parking now holds the announce until the follow-up once
+        the provider reports no background work. A false positive only defers
+        the announce: the drain releases it then, or when it ends. It is not safe for
         suppressing: a caller that drops
         anything on the strength of this must be certain something else will
         fire in its place. Nothing does that any more — see
@@ -9215,10 +9130,10 @@ class ProjectChatManager:
     # A turn that ends on "I'll report back once the agents finish" is not a
     # result, so it is parked rather than announced. The CLI runs a follow-up
     # turn per finished task, and the between-turns drain streams it. While
-    # agents still run, a follow-up replaces the parked entry; the result that
-    # lands at background count zero announces once and discards the park. The
-    # watcher releases the park when it saw no background work or no drain is
-    # live; the drain releases it when it ends uncancelled; Stop releases it.
+    # the provider still reports background work, a follow-up replaces the
+    # parked entry; the result that lands once it reports none announces once
+    # and discards the park. The drain releases the park when it ends
+    # uncancelled; Stop releases it.
 
     def _park_result_announce(
         self, chat_id: str, project_id: str, title: str, snippet: str
@@ -9237,8 +9152,8 @@ class ProjectChatManager:
         call from a `finally` that may run after an explicit flush.
 
         Refuses while a foreground turn owns the chat, and that check lives
-        HERE rather than at the call sites. There are three of them — the
-        watcher's `finally`, the drain (a result at count zero, or its end) and
+        HERE rather than at the call sites. There are two of them — the
+        drain (a result once no background work remains, or its end) and
         Stop — and a stale park pushed mid-turn looks different from each. A live turn always discards this entry at its
         turn-done and announces its own result in its place, so the entry is
         deliberately left there for it rather than popped. (A turn that ends
@@ -9272,78 +9187,6 @@ class ProjectChatManager:
         """
         stream = self._broker.get(chat_id)
         return stream is not None and not stream.background
-
-    # ── background subagent watching ─────────────────────────────────────
-    # Owned by ciao/web/subagent_watchers.py. What stays here is the
-    # coordination the watcher asks for through SubagentWatcherHost: the
-    # drain-liveness and fresh-count questions, the CLI-liveness question, and
-    # wake delivery. The rest are thin
-    # delegates kept under their old names — they are the seams the suite
-    # patches, and the watcher calls them back through the host so a patch
-    # here is the patch it sees.
-
-    @property
-    def _pending_subagent_watchers(self) -> dict[str, asyncio.Task]:
-        return self._subagents.watchers
-
-    @_pending_subagent_watchers.setter
-    def _pending_subagent_watchers(self, value: dict[str, asyncio.Task]) -> None:
-        watchers = self._subagents.watchers
-        watchers.clear()
-        watchers.update(value)
-
-    @property
-    def _background_agents_last(self) -> dict[str, int]:
-        return self._subagents.last_counts
-
-    @_background_agents_last.setter
-    def _background_agents_last(self, value: dict[str, int]) -> None:
-        counts = self._subagents.last_counts
-        counts.clear()
-        counts.update(value)
-
-    @property
-    def _cli_task_wakes_sent(self) -> set[tuple[str, str]]:
-        return self._subagents.wakes_sent
-
-    def _start_subagent_watcher(self, chat_id: str, project_id: str) -> None:
-        """Replace any existing subagent watcher for this chat with a new one."""
-        self._subagents.start(chat_id, project_id)
-
-    def _publish_subagent_count(
-        self, chat_id: str, project_id: str, count: int
-    ) -> None:
-        self._subagents.publish_count(chat_id, project_id, count)
-
-    async def _watch_subagent_completion(self, chat_id: str, project_id: str) -> None:
-        await self._subagents.watch(chat_id, project_id)
-
-    async def _watch_subagent_completion_inner(
-        self, chat_id: str, project_id: str, saw_work: list[bool]
-    ) -> None:
-        await self._subagents.watch_inner(chat_id, project_id, saw_work)
-
-    def _unwoken_tasks(
-        self, chat_id: str, tasks: list[SubagentInfo]
-    ) -> list[SubagentInfo]:
-        return self._subagents.unwoken_tasks(chat_id, tasks)
-
-    def _wake_for_dead_cli_tasks(
-        self, parent: ChatInfo, project_id: str, tasks: list[SubagentInfo]
-    ) -> None:
-        self._subagents.wake_for_dead_cli_tasks(parent, project_id, tasks)
-
-    def sweep_orphaned_cli_tasks(self) -> int:
-        """Wake chats whose CLI tasks were still running when the server died."""
-        return self._subagents.sweep_orphaned_cli_tasks()
-
-    def record_interrupted_background_work(self) -> int:
-        """At shutdown, record OpenCode background work the restart is about to kill."""
-        return self._subagents.record_interrupted_background_work()
-
-    def sweep_interrupted_background_work(self) -> int:
-        """At boot, wake OpenCode chats whose background work a restart interrupted."""
-        return self._subagents.sweep_interrupted_background_work()
 
     def begin_shutdown(self) -> None:
         """Keep in-flight turn stamps through teardown (#2128).
@@ -9405,30 +9248,10 @@ class ProjectChatManager:
         except Exception:  # noqa: BLE001 — one chat must not break the others
             logger.exception("Restart resume failed for chat %s", chat_id)
 
-    @staticmethod
-    def _build_cli_task_wake_prompt(tasks: list[SubagentInfo]) -> str:
-        return SubagentWatchers.build_cli_task_wake_prompt(tasks)
-
-
-    def _has_live_drain(self, chat_id: str) -> bool:
-        """True while a between-turns drain is consuming this chat's follow-up turns."""
-        return self._streaming.has_live_drain(chat_id)
-
-    def _background_count_now(self, chat_id: str) -> int:
-        """Running background agents for *chat_id*, read now, not from the last poll."""
-        return self._subagents.current_count(chat_id)
-
-    def _cli_owner_alive(self, chat_id: str) -> bool:
-        """True while the chat's CLI subprocess (if any) is still connected.
-
-        A chat with no provider entry at all (server restart) counts as gone:
-        nothing owns its CLI tasks any more. Providers without the concept
-        report alive so only a genuinely dead Claude CLI triggers a wake.
-        """
-        provider_service = self._providers.get(chat_id)
-        if provider_service is None:
-            return False
-        return provider_service.cli_connected
+    def _background_work_outstanding(self, chat_id: str) -> bool:
+        """True while the chat's provider reports background work still running."""
+        service = self._providers.get(chat_id)
+        return bool(service is not None and service.background_work_outstanding)
 
 
     def _deliver_wake(self, parent: ChatInfo, prompt: str, *, count: int, origin: str) -> str:
