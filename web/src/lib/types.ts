@@ -154,39 +154,12 @@ export interface McpStatus {
   shell: { kind: 'posix'; cd_prefix: string }
 }
 
-export interface McpToggleResult {
-  workspace: string
-  provider: 'claude' | 'opencode'
-  server: string
-  enabled: boolean
-  changed: boolean
-  applies_to: string
-  warning: string | null
-  reload: { reloaded: string[]; pending: string[] }
-}
-
 /** Status of the agent CLI surface (Settings → Agent CLI), from /api/agent/status. */
 export interface AgentCliStatus {
   ready: boolean
   operations: string[]
   telemetry_path: string
   version: string
-}
-
-export interface McpToolUsage {
-  tool: string
-  calls: number
-  errors: number
-  avg_ms: number
-  providers: string[]
-  last_used: string
-}
-
-export interface McpUsage {
-  total_calls: number
-  total_errors: number
-  tool_count: number
-  tools: McpToolUsage[]
 }
 
 // ── Projects & Chats ────────────────────────────────────────────────────
@@ -1055,7 +1028,6 @@ export interface ProviderConnection {
     }[]
   }
   protocol?: string
-  mcps?: string[]
   skills?: string[]
   /** Skills that ship with the CLI itself; absent until the CLI has reported them. */
   bundled_skills?: string[]

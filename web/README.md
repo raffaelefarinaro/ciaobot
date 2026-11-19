@@ -323,7 +323,7 @@ web/
     composables/          reactive logic shared between components, and behaviour lifted
                           out of oversized panes (useHoverPinPopover, useChatComposer, useTitleRail (the generic rail model: items in sidebar order, an order frozen across rail switches, the arrival side),
                           useChatRail, useScheduleRail and useProjectRail (the chat, automation and project rails over it), usePullToClose (pull a title down to close),
-                          useMcpServers, useModalFocus, useOverlayBackEntry (one history entry per open
+                          useModalFocus, useOverlayBackEntry (one history entry per open
                           overlay; Back closes it), useWorkspaceAdmin, useProviderChoices,
                           useGwsAccounts, useHomeNoticeWindows, useDragSort: the pointer drag-sort engine
                           for the task lanes and the sidebar's project list; there is no drag handle, so
@@ -845,29 +845,13 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   1-9 shortcuts read `store.workspaceOptions` in that order. Providers is one card, so its page rail
   shows Status only, with no "On this page" list.
   The "On this page" navigation is built from the rendered sections in DOM order,
-  so it follows that order. The MCP tab shows the provider inventory plus an
-  "Ask Ciao" entry (a chat titled "Add an MCP server"), per-CLI tabs built on
-  `TabBar` (the workspace's default provider first), a command builder (name
-  and URL inputs, shell-quoted, with the engine's `cd` prefix from
-  `/api/mcp/status` `shell`) and "Run in terminal", which types the command into
-  the in-app terminal via `composables/useRunInTerminal.ts` and falls back to
-  copying it when the terminal is locked or unavailable. The Providers tab instead shows generic sign-in commands for the user to copy or type manually, and opens the selected workspace's browser terminal without sending input. Verify rereads provider and model information; OpenCode configuration is not credential verification and completed model reads do not prove catalog availability. `composables/useMcpServers.ts`
-  owns status and usage reads and `setEnabled` (Turn off / Turn on, `POST /api/mcp/servers/enabled`, row patched in place), while `components/settings/SettingsMcpServers.vue`
-  renders provider configuration and per-chat connection states.
-  Settings edits native MCP configuration only to turn one server off or on
-  (`POST /api/mcp/servers/enabled`); it never handles secret values or probes
-  servers; commands run only in the terminal the user is watching. A server that
-  needs a sign-in in an open chat gets **Sign in**, which navigates to that
-  chat's MCP section rather than starting OAuth in Settings. The chat's managed
-  control raises and starts its `mcp_auth` action; OpenCode start may start the
-  chat's server. Both providers retain callback paste-back and verification. A terminal sign-in cannot update a running chat: OpenCode V2 has no
-  reconnect route. The selected workspace scopes
-  `/api/mcp/status`; only already running chats in that workspace contribute
-  connection states. An empty connections list means unchecked, and unreadable
-  configuration/provider state is unknown. Claude's workspace server allowlist
-  remains authoritative and is never broadened by Settings. Add/authenticate
-  servers with `claude mcp add` / `claude mcp login` or `opencode mcp add` /
-  `opencode mcp auth` from that workspace's directory.
+  so it follows that order. The MCP tab is one button per installed agent
+  (`ProviderMcpButton.vue`). The button is labelled "Open MCP settings in {cli}"
+  and types that agent's server-built `mcp_command` into the in-app terminal via
+  `composables/useRunInTerminal.ts`, falling back to a copy when the terminal is
+  not ready. *Ask Ciao to add one* still starts a chat titled "Add an MCP server".
+  Changes apply to new chats; a running chat loads them after `ciao chat reload`.
+  The page does not read `/api/mcp/status` or turn servers on or off. The Providers tab instead shows generic sign-in commands for the user to copy or type manually, and opens the selected workspace's browser terminal without sending input. Verify rereads provider and model information; OpenCode configuration is not credential verification and completed model reads do not prove catalog availability.
   Chat details observes the actual chat provider and owning workspace even when
   closed. Duplicate raw names and current actions have deterministic precedence;
   absent or unreadable observations remain unknown. Settings workspace switches
@@ -996,8 +980,6 @@ job runs on release PRs into `main`.
 Browser automation does not reproduce iOS PWA suspension, the software
 keyboard, or native-shell behaviour. The device checklist in "iOS PWA gotchas"
 above still has to be walked by hand on a real phone before a release.
-
-The MCP Settings panel shows provider-native configuration separately from per-chat connection states returned by `/api/mcp/status`. No running observable session means connection not checked, and unreadable configuration/provider status is unknown.
 
 Onboarding's care stage (`components/onboarding/OnboardingCareStage.vue`) asks when the host is usually available, then lets the operator edit the installed workspace-care routine's local time and IANA timezone. It updates only that existing row through the schedules API, and only for a time or zone the operator edited, when Continue commits it through the stage's exposed `save()`; unchanged fields write nothing. No routine is created when the workspace has none.
 

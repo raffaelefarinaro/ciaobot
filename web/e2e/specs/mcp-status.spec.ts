@@ -1,5 +1,20 @@
-import { expect, test } from '@playwright/test'
-import { boot, horizontalOverflow, isolate, openChatDetails, seedInbox, settled } from '../support/app'
+import { expect, test, type Page } from '@playwright/test'
+import { boot, horizontalOverflow, isolate, openChatDetails, quiesce, seedInbox, settled } from '../support/app'
+
+/** Provider rows the MCP settings page turns into one button each. A row with no `mcp_command` is not a button. */
+function providerConnections() {
+  return {
+    connections: {
+      claude: { name: 'claude', label: 'Claude Code', ok: true, auth: 'ok', command: 'claude', mcp_command: 'claude mcp' },
+      opencode: { name: 'opencode', label: 'OpenCode', ok: true, auth: 'ok', command: 'opencode', mcp_command: 'opencode mcp' },
+      missing: { name: 'missing', label: 'Missing', ok: false, auth: 'not_installed', command: '' },
+    },
+  }
+}
+
+function agentMcp(page: Page, label: string) {
+  return page.locator('.mcp-open', { has: page.getByRole('button', { name: `Open MCP settings in ${label}` }) })
+}
 
 const previews = `${process.env.HOME}/repos/ciaobot/.loop-engineering/2026-11-13-mcp-sidebar-plan/state/screenshots-2971`
 
@@ -19,6 +34,7 @@ for (const provider of ['claude', 'opencode'] as const) {
         return { closed: false, opener: null, location: { href: '' }, close() {} }
       }) as unknown as typeof window.open
     })
+    await page.route('**/api/settings/providers', route => route.fulfill({ json: providerConnections() }))
     await page.route('**/api/mcp/status*', route => {
       const workspace = new URL(route.request().url()).searchParams.get('workspace') || 'alpha'
       return route.fulfill({ json: {
@@ -52,20 +68,29 @@ for (const provider of ['claude', 'opencode'] as const) {
     if (!(await rail.isVisible())) await openChatDetails(page)
     await rail.getByRole('button', { name: 'Chat workspace MCP settings' }).click()
     await expect(page).toHaveURL(`/settings/mcp?workspace=alpha&provider=${provider}`)
-    await expect(page.getByRole('tab', { name: provider === 'claude' ? /Claude Code/ : /OpenCode/ })).toHaveAttribute('aria-selected', 'true')
-    const other = page.getByRole('tab', { name: provider === 'claude' ? /OpenCode/ : /Claude Code/ })
-    await other.click()
-    await page.getByRole('button', { name: 'Refresh' }).click()
-    await expect(other).toHaveAttribute('aria-selected', 'true')
-    await page.getByRole('tab', { name: provider === 'claude' ? /Claude Code/ : /OpenCode/ }).click()
-    await page.locator('#mcp-servers').getByRole('button', { name: 'Sign in', exact: true }).click()
-    await expect(page).toHaveURL(`/chat/${chatId}?details=mcp`)
-    await expect(page.locator('.chat-mcp-heading')).toBeFocused()
-    expect(raised).toBe(1)
-    expect(started).toBe(0)
-    expect(await page.evaluate(() => (window as Window & { __mcpPopupCount?: number }).__mcpPopupCount)).toBe(0)
+    const label = provider === 'claude' ? 'Claude Code' : 'OpenCode'
+    const otherLabel = provider === 'claude' ? 'OpenCode' : 'Claude Code'
+    const command = provider === 'claude' ? 'claude mcp' : 'opencode mcp'
+    const nav = page.getByRole('navigation', { name: 'Settings sections' })
+    await expect(nav.getByRole('link', { name: 'MCP servers' })).toHaveAttribute('aria-current', 'page')
+    await expect(nav.getByRole('heading', { name: 'Alpha' })).toBeVisible()
+    const mine = agentMcp(page, label)
+    const other = agentMcp(page, otherLabel)
+    await expect(mine.locator('code')).toHaveText(command)
+    await expect(other.locator('code')).toHaveText(provider === 'claude' ? 'opencode mcp' : 'claude mcp')
+    await expect(page.getByRole('button', { name: 'Open MCP settings in Missing' })).toHaveCount(0)
+    await expect(page.getByRole('tab', { name: /Claude Code|OpenCode/ })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Ask Ciao to add one' })).toBeVisible()
     if (provider === 'claude') await page.screenshot({ path: `${previews}/desktop.png`, animations: 'disabled' })
-    await page.locator('.chat-mcp-connections').getByRole('button', { name: 'Sign in', exact: true }).click()
+    await page.goBack()
+    await expect(page).toHaveURL(new RegExp(`/chat/${chatId}$`))
+    // The URL changes before the chat paints. On a wide pane the rail then
+    // mounts in place, and the details button exists only while it is closed.
+    // Checking in that gap waits for a button the painted page never shows.
+    await expect(page.locator('textarea.chat-input')).toBeVisible()
+    await quiesce(page)
+    if (!(await rail.isVisible())) await openChatDetails(page)
+    await rail.locator('.chat-mcp-connections').getByRole('button', { name: 'Sign in', exact: true }).click()
     await expect.poll(() => started).toBe(1)
     expect(await page.evaluate(() => (window as Window & { __mcpPopupCount?: number }).__mcpPopupCount)).toBe(1)
     expect(raised).toBe(1)
@@ -228,63 +253,69 @@ test(`MCP reveal scrolls only its own rail at ${view.label} size`, async ({ brow
 }
 
 for (const mobile of [false, true]) {
-  test(`MCP failure remains visible on ${mobile ? 'touch' : 'desktop and zoom'}`, async ({ browser }, testInfo) => {
+  test(`an agent MCP command stays visible on ${mobile ? 'touch' : 'desktop and zoom'} when the terminal cannot run it`, async ({ browser }, testInfo) => {
     const context = await browser.newContext({ viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 900 }, hasTouch: mobile, isMobile: mobile })
     const page = await context.newPage()
-    await page.addInitScript(theme => localStorage.setItem('ciao-theme', theme), mobile ? 'light' : 'dark')
+    await page.addInitScript(theme => {
+      localStorage.setItem('ciao-theme', theme)
+      const copied: string[] = []
+      ;(window as Window & { __copied?: string[] }).__copied = copied
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+        writeText: async (text: string) => { copied.push(text) },
+      } })
+    }, mobile ? 'light' : 'dark')
     await isolate(page, `mcp-status-${testInfo.workerIndex}-${mobile}`)
-    await page.route('**/api/mcp/status*', route => route.fulfill({ json: {
-      workspace: 'personal', agent_root: '/workspace/personal',
-      shell: { kind: 'posix', cd_prefix: 'cd -- /workspace/personal && ' },
-      providers: [
-        { provider: 'opencode', available: true, inventory_state: 'loaded',
-          servers: [{ name: 'notion', scope: 'project', source: 'opencode.json', allowed: null, applies_to: '/workspace/personal/opencode.json',
-            connections: [{ state: 'failed', chat_id: 'chat-example', error: 'MCP server connection failed. Check the provider logs.' }] }] },
-        { provider: 'claude', available: true, inventory_state: 'loaded', servers: [] },
-      ],
+    const statusReads: string[] = []
+    page.on('request', request => { if (request.url().includes('/api/mcp/status')) statusReads.push(request.url()) })
+    await page.route('**/api/settings/providers', route => route.fulfill({ json: providerConnections() }))
+    await page.route('**/api/terminal/status*', route => route.fulfill({ json: {
+      available: false, reason: 'unavailable', platform: 'linux', host: 'fixture', unlock_expires_in: 0, detached_ttl_seconds: 600,
     } }))
-    await page.route('**/api/mcp/servers/enabled', route => route.fulfill({ json: { workspace: 'personal', provider: 'opencode', server: 'notion', enabled: false, changed: true, applies_to: '/workspace/personal/opencode.json', warning: null, reload: { reloaded: [], pending: [] } } }))
-    await boot(page, '/settings/mcp', '#mcp-servers')
-    const tabs = page.locator('[role="tab"]')
-    await expect(tabs).toHaveCount(2)
-    await tabs.first().focus()
-    await page.keyboard.press('ArrowRight')
-    await expect(tabs.nth(1)).toHaveAttribute('aria-selected', 'true')
-    await page.keyboard.press('ArrowLeft')
-    await expect(tabs.first()).toHaveAttribute('aria-selected', 'true')
-    await page.getByRole('tab', { name: /OpenCode/ }).click()
-    await expect(page.locator('.mcp-connection')).toContainText('connection failed')
-    const toggle = page.getByRole('switch', { name: 'notion for OpenCode' })
-    await expect(toggle).toHaveAttribute('aria-checked', 'true')
+    await boot(page, '/settings/mcp', 'button:has-text("Open MCP settings in Claude Code")')
+    await expect(page.getByRole('heading', { name: 'MCP servers' })).toBeVisible()
+    if (mobile) await page.getByRole('button', { name: 'Open sidebar' }).click()
+    const nav = page.getByRole('navigation', { name: 'Settings sections' })
+    await expect(nav.getByRole('link', { name: 'MCP servers' })).toHaveAttribute('aria-current', 'page')
+    await expect(nav.getByRole('heading', { name: 'Alpha' })).toBeVisible()
+    // The drawer is 84vw (max 320px), so the backdrop's centre sits under it.
+    if (mobile) await page.locator('.sidebar-backdrop').click({ position: { x: 370, y: 400 } })
+    const claude = agentMcp(page, 'Claude Code')
+    const opencode = agentMcp(page, 'OpenCode')
+    await expect(claude.locator('code')).toHaveText('claude mcp')
+    await expect(opencode.locator('code')).toHaveText('opencode mcp')
+    await expect(page.getByRole('button', { name: 'Open MCP settings in Missing' })).toHaveCount(0)
+    await expect(page.getByRole('tab')).toHaveCount(0)
+    expect(statusReads).toEqual([])
 
     const ask = page.getByRole('button', { name: 'Ask Ciao to add one' })
-    await expect(ask).toBeVisible()
     await ask.focus()
     await expect(ask).toBeFocused()
-
-    await page.locator('details.mcp-manual > summary').click()
-    await page.getByLabel('Server name').fill('notion')
-    await page.getByLabel('Server URL').fill('https://example.com/mcp')
-    const addRow = page.locator('.mcp-commands li[data-row="add"]')
-    await expect(addRow.locator('code')).toContainText('opencode mcp add notion --url https://example.com/mcp')
-
+    const openOpencode = opencode.getByRole('button', { name: 'Open MCP settings in OpenCode' })
     if (mobile) {
-      const targets = [ask, tabs.first(), addRow.getByRole('button', { name: 'Copy' }), addRow.getByRole('button', { name: 'Run in terminal' }), toggle, page.getByLabel('Server name'), page.locator('.mcp-connection a')]
-      for (const target of targets) {
+      for (const target of [claude.getByRole('button', { name: 'Open MCP settings in Claude Code' }), claude.getByRole('button', { name: 'Copy' }), openOpencode, opencode.getByRole('button', { name: 'Copy' }), ask]) {
         await target.scrollIntoViewIfNeeded()
-        expect((await target.boundingBox())!.height).toBeGreaterThanOrEqual(44)
+        const box = (await target.boundingBox())!
+        expect(box.width).toBeGreaterThanOrEqual(44)
+        expect(box.height).toBeGreaterThanOrEqual(44)
+        await target.click({ trial: true })
       }
     } else {
       await page.screenshot({ path: testInfo.outputPath('mcp-status-desktop.png'), fullPage: true })
       await page.setViewportSize({ width: 640, height: 450 })
-      await page.locator('.mcp-connection').scrollIntoViewIfNeeded()
+      await openOpencode.scrollIntoViewIfNeeded()
     }
-    await toggle.focus()
+    await openOpencode.focus()
     await page.keyboard.press('Enter')
-    await expect(toggle).toHaveAttribute('aria-checked', 'false')
-    await expect(toggle).toBeFocused()
-    await expect(page.locator('.mcp-toggle-note')).toContainText('notion is off in /workspace/personal/opencode.json.')
-    await addRow.scrollIntoViewIfNeeded()
+    await expect(opencode.getByRole('status')).toContainText('terminal was not ready')
+    await expect(opencode.locator('code')).toHaveText('opencode mcp')
+    await expect(claude.locator('code')).toHaveText('claude mcp')
+    await expect.poll(() => page.evaluate(() => (window as Window & { __copied?: string[] }).__copied ?? [])).toEqual(['opencode mcp'])
+    const pane = page.locator('.terminal-pane')
+    if (await pane.isVisible()) await pane.getByRole('button', { name: 'Close' }).click()
+    await claude.getByRole('button', { name: 'Copy' }).click()
+    await expect(claude.getByRole('button', { name: 'Copied' })).toBeVisible()
+    await expect.poll(() => page.evaluate(() => (window as Window & { __copied?: string[] }).__copied ?? [])).toEqual(['opencode mcp', 'claude mcp'])
+    expect(statusReads).toEqual([])
     expect((await horizontalOverflow(page)).overflow).toBeLessThanOrEqual(0)
     await page.screenshot({ path: testInfo.outputPath('mcp-status.png'), fullPage: true })
     await context.close()
