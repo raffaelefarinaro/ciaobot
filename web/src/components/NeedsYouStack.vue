@@ -1,11 +1,10 @@
 <script setup lang="ts">
 /** The chat's generic cards share a bounded, independently scrolling region. */
-import { computed, onMounted, ref, watch } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import NeedsYouCard from './NeedsYouCard.vue'
 import type { ChatAction } from '../lib/types'
 
 const props = defineProps<{ chatId: string; actions: ChatAction[] }>()
-const visibleActions = computed(() => props.actions.filter(a => a.kind !== 'mcp_auth'))
 const stackEl = ref<HTMLElement | null>(null)
 
 /** Room left between the revealed control and the stack's edge. */
@@ -49,20 +48,20 @@ function reveal(ids: Set<string>): void {
 
 /** The ids that are new or changed state since the last call. */
 function changedIds(): Set<string> {
-  const next = new Map(visibleActions.value.map(a => [a.id, a.state] as const))
+  const next = new Map(props.actions.map(a => [a.id, a.state] as const))
   const changed = new Set([...next].filter(([id, st]) => seen.get(id) !== st).map(([id]) => id))
   seen = next
   return changed
 }
 
 onMounted(() => reveal(changedIds()))
-watch(() => visibleActions.value.map(a => `${a.id}:${a.state}`).join('|'), () => reveal(changedIds()), { flush: 'post' })
+watch(() => props.actions.map(a => `${a.id}:${a.state}`).join('|'), () => reveal(changedIds()), { flush: 'post' })
 
 </script>
 
 <template>
-  <div v-if="visibleActions.length" ref="stackEl" class="needs-you-stack">
-    <NeedsYouCard v-for="action in visibleActions" :key="action.id" :chat-id="chatId" :action="action" />
+  <div v-if="actions.length" ref="stackEl" class="needs-you-stack">
+    <NeedsYouCard v-for="action in actions" :key="action.id" :chat-id="chatId" :action="action" />
   </div>
 </template>
 
