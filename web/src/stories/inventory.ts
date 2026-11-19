@@ -1047,25 +1047,43 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/ChatPanel.vue"
     ],
-    "variants": [],
-    "variantNotes": "Hidden when empty, real upload-progress rows. Detailed variants are unassessed.",
+    "variants": ["uploads"],
+    "variantNotes": "All rendering derives from the one uploads prop: hidden when empty, one row per upload whose phase comes from isProcessing, the rounded percent from loaded/total, ellipsised labels at composer width.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ComposerUploadProgress.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["composer-upload-progress--default"],
+        "note": "One upload mid-flight: phaseLabel's isProcessing false branch gives 'Loading <label>…' on the role=status span, both there and as the progress element's aria-label, the aria-hidden percent and the progress value at the same rounded loaded/total (42 of 105 → 40)."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "processing",
+        "coverage": "covered",
+        "storyIds": ["composer-upload-progress--processing"],
+        "note": "The isProcessing branch reached with total <= 0 (unknown size): phaseLabel becomes 'Processing <label>…' and percent() is 100 in both the percent text and the progress value."
+      },
+      {
+        "name": "multiple",
+        "coverage": "covered",
+        "storyIds": ["composer-upload-progress--multiple"],
+        "note": "The v-for renders one row per in-flight upload: a Loading row at 40%, an unknown-size Processing row, and a completed-but-still-listed upload (loaded >= total, the branch's second trigger) that shows Processing at 100 as well."
+      },
+      {
+        "name": "empty",
+        "coverage": "covered",
+        "storyIds": ["composer-upload-progress--empty"],
+        "note": "The root v-if=\"uploads.length\" renders nothing while the composer has no in-flight uploads."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["composer-upload-progress--narrow"],
+        "note": "In a maximum 390px wrapper the rows keep the composer inset, the long synthetic label ellipsises (nowrap + overflow hidden) and the row does not overflow its container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in ComposerUploadProgress.vue has not yet been audited."
+      "status": "none",
+      "detail": "Renders only the uploads prop useChatComposer owns: no fetch, no skeleton and no owner-level initial, refresh, failure or stale state, so there is no placeholder geometry to compare with the loaded rows."
     },
     "migration": {
       "status": "unassessed",
@@ -5458,25 +5476,55 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/ChatPanel.vue"
     ],
-    "variants": [],
-    "variantNotes": "Delegation title/description read surface. Detailed variants are unassessed.",
+    "variants": ["title", "description", "knownPaths"],
+    "variantNotes": "Title and description are independent v-if branches (no title hides the h3, an empty description renders the 'No description.' line); knownPaths linkifies touched file names inside the description; the raw prompt always sits verbatim behind the native disclosure.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in TaskHandoverCard.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-handover-card--default"],
+        "note": "Full read surface: the 'Task handed over' label, the h3 title (v-if handover.title), the sanitised description (v-if descriptionHtml) and the closed details disclosure. The stories parse the synthetic fenced prompt with the production parseTaskHandover, exactly what ChatPanel hands over."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "open-raw",
+        "coverage": "covered",
+        "storyIds": ["task-handover-card--open-raw"],
+        "note": "Activating the summary opens the details element so the prompt prop shows verbatim in the pre with real visible height."
+      },
+      {
+        "name": "no-title",
+        "coverage": "covered",
+        "storyIds": ["task-handover-card--no-title"],
+        "note": "An empty handover.title fails the v-if: no h3 renders, while the label, description and disclosure stay."
+      },
+      {
+        "name": "no-description",
+        "coverage": "covered",
+        "storyIds": ["task-handover-card--no-description"],
+        "note": "An empty handover.description leaves descriptionHtml '' so the v-else renders the 'No description.' line instead of the description div; the title keeps rendering."
+      },
+      {
+        "name": "file-links",
+        "coverage": "covered",
+        "storyIds": ["task-handover-card--file-links"],
+        "note": "The knownPaths prop linkifies the touched bare basename (beta-notes.md) in the description and the path-like mention, while an untouched bare name (scratch-pad.txt) stays plain text."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": ["task-handover-card--keyboard-focus"],
+        "note": "Tab lands the focus on the disclosure summary (it is the active element) with a visible :focus-visible outline (the production summary:focus-visible rule). The toggle itself is covered by open-raw via click: the runner's keyboard events reach the summary but do not run its native Enter activation in headless Chromium, while a real browser toggles the focused disclosure on Enter."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["task-handover-card--narrow"],
+        "note": "In a maximum 390px wrapper the card stays at its column width and a long title token wraps through overflow-wrap anywhere instead of overflowing the container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TaskHandoverCard.vue has not yet been audited."
+      "status": "none",
+      "detail": "Props-only read surface: descriptionHtml computes synchronously from the handover and knownPaths props and ChatPanel gates when the card exists at all, so the owner has no fetch, skeleton or failure/stale state of its own."
     },
     "migration": {
       "status": "unassessed",
