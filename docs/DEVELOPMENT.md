@@ -159,8 +159,6 @@ It is the Linux installer; on macOS it refuses and names the app. Install paths:
 - **macOS:** the Ciaobot app (DMG from the latest GitHub release). The app carries the engine. `scripts/install.sh` refuses macOS and names the app.
 - **Linux:** `scripts/install.sh`, run as the account that will own Ciaobot (`sh install.sh`). It installs the release wheel with uv for the invoking user, runs `ciao setup`, and installs the systemd unit through `ciao service install` (asks for sudo). Flags: `--workspace DIR`, `--no-service`, `--replace-unit`, `--wheel PATH`. It refuses to run as root and refuses to run from a source checkout, naming the release asset instead. See [Linux hosting](LINUX.md).
 
-The installer bootstrap (`ciao run --installer-bootstrap`, `ciao/installer_handoff.py`) writes one owner-only handoff result when the first-run wizard completes. `ciao installer activate --run-id <uuid>` starts the service only when that result belongs to the run. `ciao/install_discovery.py` (`require_fresh_installer_entry`) refuses the bootstrap when an existing workspace, service definition or LaunchAgent is found, so an install never adopts a live engine silently.
-
 **Engine updates** for any installer-managed engine are the `ciao update` transaction (`ciao/engine_update.py`):
 
 - `ciao update stage [--version X.Y.Z]` downloads and verifies the release into the state directory without stopping the engine.

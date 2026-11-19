@@ -54,7 +54,7 @@ The chat rail uses Option/Alt+Left and Right to move through the current workspa
 
 ## Dev workflow
 
-The embedded LoginView keeps terminal guidance and the six-item product tour for ordinary CLI bootstrap. Native installer bootstrap uses the same setup form and provider diagnostics without the terminal shell, first-launch note, or tour; installer workspace suggestions remain authoritative until the user types or selects a folder.
+The embedded LoginView keeps terminal guidance and the six-item product tour for the CLI bootstrap.
 
 ```bash
 cd web

@@ -9,7 +9,6 @@ its own.
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import subprocess
@@ -535,89 +534,6 @@ def test_app_engine_refused_outside_the_bundle(
 
     assert dispatched == []
     assert "Ciaobot.app" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize(
-    "installer_args",
-    [
-        pytest.param(["--installer-bootstrap"], id="bootstrap"),
-        pytest.param(["--installer-run-id", "run-1"], id="run-id"),
-        pytest.param(["--installer-suggest-workspace", "/tmp/elsewhere"], id="suggest-workspace"),
-    ],
-)
-def test_app_engine_refuses_each_installer_flag(
-    installer_args: list[str],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """The installer handshake has no parent under the app: any installer flag
-    at all contradicts it.
-
-    The provided-flag check compares the optional values with ``is not None``,
-    not truthiness: an empty run id is an empty value, not an absent one.
-    """
-    from ciao import cli, package_version
-
-    monkeypatch.setattr(package_version, "running_from_app_bundle", lambda: True)
-    dispatched: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        cli, "_run_server", lambda **kwargs: dispatched.append(kwargs) or 0
-    )
-
-    assert cli.main(["run", "--app-engine", *installer_args]) == 2
-
-    assert dispatched == []
-    assert "installer" in capsys.readouterr().err
-
-
-def test_app_engine_refuses_the_installer_flags(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Bootstrap-plus-app-engine stays refused; the refusal message names it."""
-    from ciao import cli, package_version
-
-    monkeypatch.setattr(package_version, "running_from_app_bundle", lambda: True)
-    dispatched: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        cli, "_run_server", lambda **kwargs: dispatched.append(kwargs) or 0
-    )
-
-    assert cli.main(["run", "--app-engine", "--installer-bootstrap"]) == 2
-
-    assert dispatched == []
-    assert "installer" in capsys.readouterr().err
-
-
-def _installer_args(**overrides: object) -> "argparse.Namespace":
-    values: dict[str, object] = {
-        "installer_bootstrap": False,
-        "installer_suggest_workspace": None,
-        "installer_run_id": None,
-    }
-    values.update(overrides)
-    return argparse.Namespace(**values)
-
-
-@pytest.mark.parametrize(
-    "provided",
-    [
-        pytest.param({"installer_bootstrap": True}, id="bootstrap"),
-        pytest.param({"installer_run_id": "run-1"}, id="run-id"),
-        pytest.param({"installer_run_id": ""}, id="empty-run-id"),
-        pytest.param({"installer_suggest_workspace": "/tmp/elsewhere"}, id="suggest-workspace"),
-    ],
-)
-def test_the_app_engine_refusal_treats_every_provided_installer_value_as_one(
-    provided: dict[str, object],
-) -> None:
-    """The refusal compares the optional installer values with `is not None`,
-    not truthiness: fd 0 and an empty run id are provided flags. Checked on the
-    refusal helper directly, because through the whole CLI most of these
-    combinations are refused anyway by the earlier installer guards."""
-    from ciao import cli
-
-    assert cli._app_engine_refuses_installer_flags(_installer_args(**provided)) is True
-    assert cli._app_engine_refuses_installer_flags(_installer_args()) is False
 
 
 def test_app_engine_dispatch_carries_the_app_engine_kwarg(

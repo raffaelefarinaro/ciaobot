@@ -41,11 +41,6 @@ def test_every_reexec_site_repeats_the_flags(monkeypatch: pytest.MonkeyPatch) ->
     assert supervise.default_child_argv()[:5] == head
     assert dev._backend_command()[:5] == head
 
-    seen: list[list[str]] = []
-    monkeypatch.setattr(cli.subprocess, "call", lambda argv: seen.append(argv) or 3)
-    assert cli._resume_installer_bootstrap(None) == 3
-    assert seen[0][1:3] == ["-I", "-B"]
-
     execs: list[list[str]] = []
 
     def fail(_code: int) -> None:  # pragma: no cover
