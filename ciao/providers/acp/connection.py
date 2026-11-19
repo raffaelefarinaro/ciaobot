@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 import acp
+from acp.connection import StreamDirection, StreamEvent
 from acp.schema import ClientCapabilities
 
 from ciao import __version__
@@ -122,6 +123,40 @@ class _TreeWatch:
         return bool(self.known)
 
 
+class _FlushedResponses:
+    """Outgoing JSON-RPC responses observed after ``arm``, once each write has drained."""
+
+    def __init__(self) -> None:
+        self._remaining = 0
+        self._future: asyncio.Future[None] | None = None
+
+    def arm(self, count: int) -> asyncio.Future[None]:
+        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        if count <= 0:
+            future.set_result(None)
+            return future
+        self._remaining = count
+        self._future = future
+        return future
+
+    def observe(self, event: StreamEvent) -> None:
+        future = self._future
+        if future is None or future.done():
+            return
+        if event.direction != StreamDirection.OUTGOING:
+            return
+        message = event.message
+        # A response has an id and a result or error, and no method.
+        if "id" not in message or "method" in message:
+            return
+        if "result" not in message and "error" not in message:
+            return
+        self._remaining -= 1
+        if self._remaining <= 0:
+            self._future = None
+            future.set_result(None)
+
+
 class AcpConnection:
     def __init__(
         self,
@@ -131,6 +166,7 @@ class AcpConnection:
         conn: acp.ClientSideConnection,
         stderr: StderrRing,
         stderr_task: asyncio.Task[None],
+        flushed: _FlushedResponses,
     ) -> None:
         self.spec = spec
         self._process = process
@@ -138,6 +174,7 @@ class AcpConnection:
         self._conn = conn
         self._stderr = stderr
         self._stderr_task = stderr_task
+        self._flushed = flushed
         self._capabilities: Mapping[str, Any] = {}
         self._closing = False
         self._closed = False
@@ -178,12 +215,15 @@ class AcpConnection:
         ring = StderrRing()
         stderr_task = asyncio.create_task(_drain_stderr(process.stderr, ring, spec.id))
         watch.start()
+        flushed = _FlushedResponses()
         try:
-            conn = acp.connect_to_agent(client, process.stdin, process.stdout)
+            conn = acp.connect_to_agent(
+                client, process.stdin, process.stdout, observers=[flushed.observe]
+            )
         except BaseException:
             await asyncio.shield(asyncio.ensure_future(_stop(process, watch, stderr_task)))
             raise
-        self = cls(spec, process, watch, conn, ring, stderr_task)
+        self = cls(spec, process, watch, conn, ring, stderr_task, flushed)
         try:
             await self._initialize()
         except BaseException as exc:
@@ -277,6 +317,14 @@ class AcpConnection:
     @property
     def conn(self) -> acp.ClientSideConnection:
         return self._conn
+
+    def wait_until_responses_flushed(self, count: int) -> asyncio.Future[None]:
+        """Resolves once ``count`` outgoing JSON-RPC responses have been written and drained.
+
+        Arming is synchronous, so a response unblocked just before this call
+        cannot flush until the caller awaits the future.
+        """
+        return self._flushed.arm(count)
 
     def stderr_tail(self, lines: int = 20) -> str:
         return self._stderr.tail(lines)
