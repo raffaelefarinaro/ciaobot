@@ -437,6 +437,190 @@ final class LocalEngineWiringTests: XCTestCase {
         XCTAssertEqual(view.localConnectionPhase, .idle)
     }
 
+    // MARK: The 1.x takeover in the connection screen (S7)
+
+    /// Answers the plan with `json` and nothing else; records each command.
+    private final class PlanRunner: TakeoverRunning {
+        let plan: String
+        private(set) var commands: [[String]] = []
+        var onPlan: (@Sendable () async -> Void)?
+
+        init(plan: String) { self.plan = plan }
+
+        func run(_ arguments: [String]) async throws -> (status: Int32, json: Data) {
+            commands.append(arguments)
+            if arguments.first == "plan" {
+                if let onPlan { await onPlan() }
+                return (0, Data(plan.utf8))
+            }
+            return (0, Data("{}".utf8))
+        }
+    }
+
+    private static func planJSON(action: String, reason: String = "", oldRunning: Bool = false) -> String {
+        """
+        {"action":"\(action)","reason":"\(reason)","label":"com.ciao.server","plist":"/x/com.ciao.server.plist",\
+        "plist_sha256":"abc","workspace":"/x/ws","runtime_root":"/x/ws/.runtime","port":8443,\
+        "program_kind":"installer_env","old_version":"1.10.0","old_running":\(oldRunning),"active_chats":0,\
+        "trash":[],"left_in_place":[],"dropped_env":[],"resume_id":""}
+        """
+    }
+
+    private func takeoverFixture(
+        _ label: String, plan: String
+    ) throws -> (takeover: EngineTakeover, runner: PlanRunner, supervisor: EngineSupervisor, processes: CountingEngineProcesses) {
+        let home = try makeTempDirectory(label)
+        let processes = CountingEngineProcesses()
+        let supervisor = EngineSupervisor(
+            engine: BundledEngine(root: home.appendingPathComponent("engine")),
+            home: EngineHome(home: home),
+            processes: processes,
+            identity: StubIdentity(),
+            environment: ["PATH": "/usr/bin"]
+        )
+        let runner = PlanRunner(plan: plan)
+        let takeover = EngineTakeover(
+            runner: runner, supervisor: supervisor, trash: NoTrashing(), home: EngineHome(home: home),
+            labelOverride: nil, confirmMove: { _ in true }, windowVisible: { true },
+            readyTimeout: 1, pollInterval: 0.01, probe: { _ in false }
+        )
+        return (takeover, runner, supervisor, processes)
+    }
+
+    private final class NoTrashing: Trashing {
+        func trash(_ url: URL) throws -> URL? { XCTFail("nothing should be trashed here"); return nil }
+    }
+
+    /// A connection screen in local mode, with the saved choice in `store`.
+    private func localView(store: TransientEngineModeStore, takeover: EngineTakeover? = nil) throws -> ConnectionView {
+        let home = try makeTempDirectory("takeover-view")
+        let supervisor = EngineSupervisor(
+            engine: BundledEngine(root: home.appendingPathComponent("engine")),
+            home: EngineHome(home: home),
+            processes: CountingEngineProcesses(),
+            identity: StubIdentity(),
+            environment: ["PATH": "/usr/bin"]
+        )
+        return ConnectionView(
+            probe: StubProbe(responds: true), session: AppSessionStatus(),
+            lastServer: lastServer, hostStore: hostStore,
+            supervisor: supervisor, takeover: takeover, engineMode: .local, modeStore: store)
+    }
+
+    private func savedLocal() -> TransientEngineModeStore {
+        let store = TransientEngineModeStore()
+        store.mode = .local
+        return store
+    }
+
+    func testLaterKeepsTheSavedLocalChoice() throws {
+        let store = savedLocal()
+        try localView(store: store).applyTakeover(.deferred(origin: nil))
+        XCTAssertEqual(store.mode, .local, "Later asks again on the next launch")
+    }
+
+    func testADeliberateRefusalSavesExternal() throws {
+        for code in ["custom_data_location", "downgrade", "unknown_program"] {
+            let store = savedLocal()
+            try localView(store: store).applyTakeover(.refused(code: code, oldOrigin: nil))
+            XCTAssertEqual(store.mode, .external, code)
+        }
+    }
+
+    func testATransientOrUnknownFailureKeepsTheSavedLocalChoice() throws {
+        for code in ["plan_failed", "blockers_unavailable", "takeover_failed", "state_unknown", "rollback_failed", "sha_mismatch"] {
+            let store = savedLocal()
+            try localView(store: store).applyTakeover(.refused(code: code, oldOrigin: nil))
+            XCTAssertEqual(store.mode, .local, "\(code) must not persist external")
+        }
+    }
+
+    func testARolledBackOutcomeKeepsTheSavedLocalChoice() throws {
+        let store = savedLocal()
+        try localView(store: store).applyTakeover(.rolledBack(code: "engine_not_ready", oldOrigin: nil))
+        XCTAssertEqual(store.mode, .local)
+    }
+
+    func testAReplayOfAnOlderRunIsIgnoredWhileTheScreenIsLocal() async throws {
+        let fixture = try takeoverFixture("settled-replay", plan: Self.planJSON(action: "none"))
+        _ = await fixture.takeover.runIfNeeded()
+        _ = await fixture.takeover.runIfNeeded()
+        XCTAssertEqual(fixture.takeover.generation, 2)
+        let store = savedLocal()
+        let view = try localView(store: store, takeover: fixture.takeover)
+
+        view.applySettled(EngineTakeover.Settled(
+            serial: 1, generation: 1, outcome: .refused(code: "custom_data_location", oldOrigin: nil)))
+        XCTAssertEqual(store.mode, .local, "a replay of run 1 must not undo the current run")
+
+        view.applySettled(EngineTakeover.Settled(
+            serial: 2, generation: 2, outcome: .refused(code: "custom_data_location", oldOrigin: nil)))
+        XCTAssertEqual(store.mode, .external, "the current run's outcome applies")
+    }
+
+    func testLeavingLocalModeCancelsAMoveBeforeItApplies() async throws {
+        let plan = Self.planJSON(action: "takeover", oldRunning: true)
+        let fixture = try takeoverFixture("cancel-on-switch", plan: plan)
+        let delegate = AppDelegate(
+            session: AppSessionStatus(),
+            presenter: StubMainWindowPresenter(),
+            makeMenuBar: { _, _, _, _, _ in StubMenuBarController() },
+            mode: .local,
+            supervisor: fixture.supervisor,
+            takeover: fixture.takeover
+        )
+        fixture.runner.onPlan = { @MainActor in delegate.modeDidChange(.external) }
+        let outcome = await fixture.takeover.runIfNeeded()
+        guard case .deferred = outcome else { return XCTFail("expected deferred, got \(outcome)") }
+        XCTAssertEqual(fixture.runner.commands.filter { $0.first == "apply" }.count, 0)
+        XCTAssertEqual(fixture.processes.spawns.count, 0, "the engine is never started in external mode")
+    }
+
+    func testTryAgainDoesNotStartTheEngineWhileATakeoverRuns() async throws {
+        // A port held by another program makes Try Again start the engine again.
+        let fixture = try takeoverFixture("try-again-during-takeover",
+                                          plan: Self.planJSON(action: "refuse", reason: "downgrade"))
+        fixture.supervisor.start()
+        fixture.processes.onExit?(5100, EngineSupervisor.portInUseStatus)
+        guard case .portInUse = fixture.supervisor.state else { return XCTFail("the fixture must hold the port") }
+        let view = ConnectionView(
+            probe: StubProbe(responds: true), session: AppSessionStatus(),
+            lastServer: lastServer, hostStore: hostStore,
+            supervisor: fixture.supervisor, takeover: fixture.takeover, engineMode: .local, modeStore: savedLocal())
+        fixture.runner.onPlan = { try? await Task.sleep(nanoseconds: 300_000_000) }
+        let running = Task { await fixture.takeover.runIfNeeded() }
+        for _ in 0..<100 where !fixture.takeover.isRunning {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(fixture.takeover.isRunning)
+
+        view.tryAgainLocal()
+
+        XCTAssertEqual(fixture.processes.spawns.count, 1, "Try Again must not start a second engine during a takeover")
+        _ = await running.value
+        XCTAssertEqual(fixture.processes.spawns.count, 1, "a refused takeover starts nothing")
+    }
+
+    func testTheTakeoverWindowQuestionReadsTheMainWindowWhenItIsAsked() {
+        var reads = 0
+        let visible = AppDelegate.takeoverWindowVisible {
+            reads += 1
+            return nil
+        }
+        XCTAssertFalse(visible(), "no main window means nobody can be asked")
+        XCTAssertEqual(reads, 1, "the window is read at the question, not captured earlier")
+        XCTAssertFalse(visible())
+        XCTAssertEqual(reads, 2)
+    }
+
+    func testAMainWindowThatIsNotOnScreenDoesNotCountAsVisible() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 200, height: 120),
+            styleMask: [.titled], backing: .buffered, defer: true
+        )
+        XCTAssertFalse(AppDelegate.takeoverWindowVisible { window }())
+    }
+
     // MARK: The DEBUG launch overrides stay fail closed
 
     func testLaunchOverridesWithoutTheVariablesAreNil() throws {

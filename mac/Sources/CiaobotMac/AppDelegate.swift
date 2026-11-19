@@ -324,7 +324,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// it starts, from one locate. The takeover is nil without a usable engine
     /// (the supervisor then reports the fixed unavailable copy). A DEBUG test
     /// launch can point the home and the engine resources somewhere isolated.
-    private static func makeEngineParts() -> (supervisor: EngineSupervisor, takeover: EngineTakeover?) {
+    private static func makeEngineParts(
+        mainWindow: @escaping @MainActor () -> NSWindow? = { MainWindowPresenter.mainWindow(in: NSApp.windows) }
+    ) -> (supervisor: EngineSupervisor, takeover: EngineTakeover?) {
         let resourceDirectory: URL?
         let home: URL
         let enginePort: Int?
@@ -371,9 +373,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             trash: FileManagerTrashing(),
             home: engineHome,
             labelOverride: labelOverride,
-            windowVisible: { MainWindowPresenter.mainWindow(in: NSApp.windows)?.isVisible ?? false }
+            windowVisible: takeoverWindowVisible(mainWindow)
         )
         return (supervisor, takeover)
+    }
+
+    /// The takeover's one question is asked only in a window the user can see:
+    /// the main window, if it is on screen. Injected so the wiring is testable.
+    static func takeoverWindowVisible(_ mainWindow: @escaping @MainActor () -> NSWindow?) -> @MainActor () -> Bool {
+        { mainWindow()?.isVisible ?? false }
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -645,6 +653,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// read the mode from here, so they follow it immediately.
     func modeDidChange(_ newMode: EngineMode) {
         mode = newMode
+        // Leaving local mode while a takeover runs cancels it: nothing new starts,
+        // and an applied move is rolled back (S7).
+        if newMode == .external { takeover?.cancel() }
         menuBar?.setLocalEngineMode(newMode == .local)
     }
 }

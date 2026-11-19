@@ -890,7 +890,7 @@ struct ConnectionView: View {
         .onChange(of: installer.state) { handleInstallState($0) }
         .onChange(of: engineUpdater.state) { handleEngineUpdateState($0) }
         .onChange(of: discovery.status) { handleDiscoveryStatus($0) }
-        .onReceive(settledEvents) { applyTakeover($0.outcome) }
+        .onReceive(settledEvents) { applySettled($0) }
     }
 
     private func takeoverNoticeText(_ text: String) -> some View {
@@ -1194,9 +1194,20 @@ struct ConnectionView: View {
         }
     }
 
+    /// A settled takeover from the published value. A replay of a run older than
+    /// the current one (a screen built after a mode switch, reading what the
+    /// switch left behind) is ignored, so it cannot undo a newer choice.
+    func applySettled(_ settled: EngineTakeover.Settled) {
+        guard let takeover, settled.generation == takeover.generation else { return }
+        applyTakeover(settled.outcome)
+    }
+
     /// Applies a settled takeover to this screen. Only the outcomes that leave
-    /// the engine off switch it to external; a replay after the user already
-    /// moved to external is ignored.
+    /// the engine off switch the screen to external; a replay after the user
+    /// already moved to external is ignored. The saved choice follows the
+    /// outcome: only the plan's deliberate verdicts on the old install persist
+    /// external. A transient or unknown failure keeps the saved local choice, so
+    /// the next launch tries again, and the screen offers Use Ciaobot on This Mac.
     func applyTakeover(_ outcome: EngineTakeover.Outcome) {
         guard engineMode == .local else { return }
         takeoverNotice = TakeoverCopy.notice(for: outcome)
@@ -1206,8 +1217,12 @@ struct ConnectionView: View {
         case .deferred(let origin):
             // Later keeps the saved choice, so the next launch asks again.
             switchToExternal(connectTo: origin, saveChoice: false)
-        case .refused(_, let origin), .rolledBack(_, let origin):
-            switchToExternal(connectTo: origin, saveChoice: true)
+        case .refused(let code, let origin):
+            switchToExternal(connectTo: origin, saveChoice: EngineTakeover.isDeliberateRefusal(code))
+        case .rolledBack(_, let origin):
+            // The old install is back and the bundled engine failed a proof. That
+            // is not a verdict on the install, so the saved local choice stays.
+            switchToExternal(connectTo: origin, saveChoice: false)
         }
     }
 
@@ -1265,6 +1280,8 @@ struct ConnectionView: View {
     /// Try Again on the local status screen. Internal for tests.
     func tryAgainLocal() {
         guard let supervisor else { return }
+        // A takeover still running owns the engine's start; a second start here would race it.
+        if let takeover, takeover.isRunning { return }
         switch LocalEnginePresentation.retry(engine: supervisor.state) {
         case .restartEngine: supervisor.restartAfterFailure()
         case .startEngine: supervisor.start()

@@ -1374,3 +1374,127 @@ def test_symlinked_and_valid_lock_reads(machine: Machine) -> None:
     target.write_text(json.dumps({"pid": 6}))
     lock.symlink_to(target)
     assert mac_takeover._read_lock_owner(runtime) is None
+
+
+# --- a resumed takeover says what the app must ask first (#3129 S7) -----------
+
+
+def full_journal(machine: Machine, name: str, state: str, *, port: int = 8443) -> None:
+    """A journal ``_load_journal`` accepts, at ``state``; no backup is needed to read it."""
+    directory = mac_takeover.state_dir() / "takeover" / name
+    directory.mkdir(parents=True, exist_ok=True)
+    private_tree(directory)
+    document = {
+        "schema": 1,
+        "id": name,
+        "state": state,
+        "created": "20261118T100000Z",
+        "label": LABEL,
+        "plist": str(machine.agents / f"{LABEL}.plist"),
+        "plist_sha256": "a" * 64,
+        "workspace": str(machine.workspace),
+        "runtime_root": str(machine.workspace / ".runtime"),
+        "port": port,
+        "program_kind": "installer_env",
+        "old_version": "1.10.0",
+        "active_chats": 0,
+        "trash": [],
+        "left_in_place": [],
+        "dropped_env": [],
+        "protected": [str(machine.workspace)],
+    }
+    journal = directory / mac_takeover.JOURNAL_NAME
+    journal.write_text(json.dumps(document))
+    journal.chmod(0o600)
+
+
+def answering_old_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mac_takeover, "engine_identity", lambda port: {"startup_id": "old", "pid": 5})
+
+
+def test_resume_of_a_running_old_engine_reports_its_chats_and_port(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    full_journal(machine, "20261118T100000Z", "started", port=8777)
+    answering_old_engine(monkeypatch)
+    monkeypatch.setattr(
+        mac_takeover,
+        "restart_blockers",
+        lambda port: [{"chat_id": "c1", "reasons": ["chat"]}, {"chat_id": "c2", "reasons": []}],
+    )
+    result = run_plan(machine)
+    assert (result.action, result.resume_id) == ("resume", "20261118T100000Z")
+    assert (result.old_running, result.active_chats, result.port) == (True, 2, 8777)
+    assert result.plist_sha256 == "a" * 64
+
+
+def test_resume_whose_chats_cannot_be_counted_reads_minus_one(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    full_journal(machine, "20261118T100000Z", "stopping")
+    answering_old_engine(monkeypatch)
+
+    def unavailable(port: int) -> list[dict[str, Any]]:
+        raise RestartBlockersUnavailable("no answer")
+
+    monkeypatch.setattr(mac_takeover, "restart_blockers", unavailable)
+    result = run_plan(machine)
+    assert (result.old_running, result.active_chats) == (True, -1)
+
+
+def test_resume_with_the_job_still_loaded_counts_the_old_engine_as_running(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    full_journal(machine, "20261118T100000Z", "started")
+
+    def loaded(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, "pid = 5\n", "")
+
+    result = mac_takeover.plan(launch_agents_dir=machine.agents, label=LABEL, runner=loaded)
+    assert (result.old_running, result.active_chats) == (True, 0)
+
+
+def test_resume_with_nothing_running_asks_nothing(machine: Machine) -> None:
+    full_journal(machine, "20261118T100000Z", "started")
+    result = run_plan(machine)
+    assert (result.old_running, result.active_chats) == (False, 0)
+
+
+def test_a_resume_past_the_stop_never_probes_the_old_engine(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    full_journal(machine, "20261118T100000Z", "pointer_written")
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("a pointer_written resume reads no old-engine state")
+
+    monkeypatch.setattr(mac_takeover, "engine_identity", forbidden)
+    monkeypatch.setattr(mac_takeover, "restart_blockers", forbidden)
+    result = mac_takeover.plan(launch_agents_dir=machine.agents, label=LABEL, runner=forbidden)
+    assert (result.action, result.old_running, result.active_chats) == ("resume", False, 0)
+
+
+def test_apply_replan_answers_a_resume_from_its_journal_alone(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    full_journal(machine, "20261118T100000Z", "started")
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("apply's own re-plan probes nothing before the hash check")
+
+    monkeypatch.setattr(mac_takeover, "engine_identity", forbidden)
+    monkeypatch.setattr(mac_takeover, "restart_blockers", forbidden)
+    result = mac_takeover.plan(
+        launch_agents_dir=machine.agents, label=LABEL, runner=forbidden, describe_resume=False
+    )
+    assert (result.action, result.resume_id, result.plist_sha256) == ("resume", "20261118T100000Z", "")
+
+
+def test_an_unreadable_resume_carries_only_its_id(machine: Machine) -> None:
+    directory = mac_takeover.state_dir() / "takeover" / "20261118T100000Z"
+    directory.mkdir(parents=True)
+    private_tree(directory)
+    (directory / "journal.json").write_text("{")
+    (directory / "journal.json").chmod(0o600)
+    result = run_plan(machine)
+    assert (result.action, result.resume_id, result.plist) == ("resume", "20261118T100000Z", "")
