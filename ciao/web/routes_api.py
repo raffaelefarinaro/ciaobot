@@ -6277,15 +6277,17 @@ async def list_models(request: Request) -> JSONResponse:
     return JSONResponse({
         "models": list(CLAUDE_MODELS),
         "default": claude_default,
+        # ACP entries come first so an ACP descriptor id that matches a legacy provider
+        # can never replace that provider's entry.
         "provider_models": {
+            **acp_models,
             "claude": claude_models,
             "opencode": opencode_models,
-            **acp_models,
         },
         "provider_defaults": {
+            **acp_defaults,
             "claude": claude_default,
             "opencode": opencode_default,
-            **acp_defaults,
         },
         "backends": {
             "anthropic": True,
@@ -6306,6 +6308,7 @@ async def list_models(request: Request) -> JSONResponse:
         "model_reasoning_levels": {**acp_levels, **opencode_reasoning_levels},
         "thinking_levels": {k: list(v) for k, v in THINKING_LEVELS.items()},
         "provider_catalog_evidence": {
+            **acp_evidence,
             "claude": {
                 "status": claude_evidence.status,
                 "source": claude_evidence.source,
@@ -6313,7 +6316,6 @@ async def list_models(request: Request) -> JSONResponse:
                 "reason": claude_evidence.reason,
             },
             "opencode": opencode_evidence,
-            **acp_evidence,
         },
     })
 

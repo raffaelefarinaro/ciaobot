@@ -16,7 +16,10 @@ import pytest
 from ciao import provider_registry
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.provider_registry import ProviderDescriptor
+from ciao.config import CLAUDE_MODELS
+from ciao.providers.acp import provider as provider_module
 from ciao.providers.acp.provider import AcpProvider
+from ciao.providers.acp.session import AcpSession
 from ciao.providers.acp.spec import AgentSpec
 from ciao.providers.opencode import OpencodeProvider
 from ciao.web.routes_api import list_models
@@ -118,6 +121,56 @@ async def test_catalog_failure_yields_empty_list(monkeypatch, tmp_path: Path, ca
     assert _session_news(calls) == 2
 
 
+@pytest.mark.asyncio
+async def test_catalog_probe_that_never_answers_session_new_is_bounded(
+    monkeypatch, tmp_path: Path, caplog
+) -> None:
+    calls = _install(monkeypatch, tmp_path, config_options=_OPTIONS, new_hang=True)
+    monkeypatch.setattr(provider_module, "_CATALOG_PROBE_TIMEOUT_S", 0.5)
+    workspace = _workspace(tmp_path)
+    caplog.set_level(logging.WARNING)
+
+    # The outer guard turns a missing bound into a failed test instead of a hung run.
+    first = await asyncio.wait_for(FakeCatalogProvider.model_catalog(workspace), 15)
+    assert first == []
+    assert "timed out" in caplog.text
+    # The per-key lock is released and a timed-out probe is not cached: a second call probes again.
+    second = await asyncio.wait_for(FakeCatalogProvider.model_catalog(workspace), 15)
+    assert second == []
+    assert _session_news(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_catalog_keeps_rows_when_closing_the_probe_session_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path, config_options=_OPTIONS)
+
+    async def broken_close(self) -> None:
+        raise RuntimeError("adapter close text")
+
+    monkeypatch.setattr(AcpSession, "close", broken_close)
+
+    assert await FakeCatalogProvider.model_catalog(_workspace(tmp_path), force=True) == _ROWS
+
+
+@pytest.mark.asyncio
+async def test_catalog_probes_again_once_the_ttl_has_passed(monkeypatch, tmp_path: Path) -> None:
+    calls = _install(monkeypatch, tmp_path, config_options=_OPTIONS)
+    workspace = _workspace(tmp_path)
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(provider_module, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+
+    await FakeCatalogProvider.model_catalog(workspace)
+    clock["now"] += provider_module._CATALOG_TTL_S - 1
+    await FakeCatalogProvider.model_catalog(workspace)
+    assert _session_news(calls) == 1  # still inside the TTL: served from the cache
+
+    clock["now"] += 2  # now past the TTL since the first probe
+    assert await FakeCatalogProvider.model_catalog(workspace) == _ROWS
+    assert _session_news(calls) == 2
+
+
 def _route_config(tmp_path: Path) -> CiaoConfig:
     config = CiaoConfig(
         pwa_auth_token="test",
@@ -156,6 +209,32 @@ def test_list_models_includes_acp_provider_catalog(monkeypatch, tmp_path: Path) 
     }
     assert body["model_reasoning_levels"]["m-a"] == ["low", "high"]
     assert {item["id"] for item in body["providers"]} >= {"fake"}
+
+
+def test_list_models_acp_descriptor_cannot_override_a_legacy_provider(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path, config_options=_OPTIONS)
+    # An ACP descriptor reusing the claude id must not replace the claude entries.
+    shadow = ProviderDescriptor(
+        id="claude",
+        label="Shadow",
+        short_label="Shadow",
+        cli_label="Shadow",
+        factory_path="tests.test_acp_model_catalog:FakeCatalogProvider",
+        acp_spec_path="tests.test_acp_model_catalog:SPEC",
+    )
+    monkeypatch.setattr(
+        provider_registry, "_DESCRIPTORS", (*provider_registry.descriptors(), shadow)
+    )
+    monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[]))
+    config = _route_config(tmp_path)
+
+    body = json.loads(asyncio.run(list_models(_models_request(config))).body)
+
+    assert body["provider_models"]["claude"] == list(CLAUDE_MODELS)
+    assert body["provider_defaults"]["claude"] != "m-a"
+    assert body["provider_catalog_evidence"]["claude"]["source"] != "acp_config_options"
 
 
 def test_list_models_keeps_an_acp_provider_empty_when_its_probe_fails(

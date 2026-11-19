@@ -49,6 +49,7 @@ from ciao.providers.base import (
 logger = logging.getLogger(__name__)
 
 _CATALOG_TTL_S = 300.0
+_CATALOG_PROBE_TIMEOUT_S = 25.0
 # Successful probes only: a failed probe is retried on the next call.
 _catalog_cache: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
 _catalog_locks: dict[tuple[str, str], asyncio.Lock] = {}
@@ -441,7 +442,15 @@ class AcpProvider(BaseProvider):
             if not force and cached is not None and time.monotonic() - cached[0] < _CATALOG_TTL_S:
                 return [dict(row) for row in cached[1]]
             try:
-                rows = await cls._probe_catalog(Path(workspace_root))
+                rows = await asyncio.wait_for(
+                    cls._probe_catalog(Path(workspace_root)), timeout=_CATALOG_PROBE_TIMEOUT_S
+                )
+            except TimeoutError:
+                # One adapter that answers initialize and then stalls must not hold /api/models.
+                logger.warning(
+                    "%s model catalog probe timed out after %gs.", cls.spec.id, _CATALOG_PROBE_TIMEOUT_S
+                )
+                return []
             except Exception as exc:  # noqa: BLE001 — a failed probe is an empty catalog
                 # The adapter's error text stays out of the log, as in the turn path.
                 logger.warning("%s model catalog probe failed (%s).", cls.spec.id, type(exc).__name__)
@@ -470,6 +479,8 @@ class AcpProvider(BaseProvider):
             try:
                 return _catalog_rows(cls.spec, session.config_options)
             finally:
-                await session.close()
+                # A close failure must not discard the catalog already read.
+                with contextlib.suppress(Exception):
+                    await session.close()
         finally:
             await connection.close()

@@ -7,6 +7,7 @@ rejected, and the session runs in a directory that holds nothing the agent could
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import tempfile
@@ -15,8 +16,6 @@ from contextlib import aclosing
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
-
-from acp.exceptions import RequestError
 
 from ciao.models import AssistantTextDelta, ResultEvent
 from ciao.providers.acp.connection import AcpConnection, AgentStartError
@@ -47,7 +46,10 @@ async def run_acp_oneshot(
     in an error stop reason raises ``OneShotError`` with a fixed detail: the adapter's own text
     never reaches the caller, and the reason is logged without its value.
     """
-    with tempfile.TemporaryDirectory(prefix="ciaobot-acp-oneshot-") as root:
+    # A cleanup error (Windows holds files open) must not replace the reply or name the path.
+    with tempfile.TemporaryDirectory(
+        prefix="ciaobot-acp-oneshot-", ignore_cleanup_errors=True
+    ) as root:
         work = Path(root) / "work"
         work.mkdir()
         client = AgentClient()  # type: ignore[abstract]
@@ -89,7 +91,9 @@ async def run_acp_oneshot(
                                 f"{spec.id} one-shot ended without a reply.", transient=False
                             )
                 return "".join(text)
-            except RequestError as exc:
+            except (asyncio.CancelledError, OneShotError):
+                raise
+            except Exception as exc:  # noqa: BLE001 — any transport or adapter failure is one fixed detail
                 logger.warning("%s one-shot request failed (%s).", spec.id, type(exc).__name__)
                 raise OneShotError(f"{spec.id} one-shot request failed.", transient=False) from None
         finally:

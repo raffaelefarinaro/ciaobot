@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -12,6 +14,7 @@ from ciao import provider_registry
 from ciao.provider_registry import ProviderDescriptor
 from ciao.providers.acp.oneshot import run_acp_oneshot
 from ciao.providers.acp.provider import AcpProvider
+from ciao.providers.acp.session import AcpSession
 from ciao.providers.acp.spec import AgentSpec, ModeChoice
 from ciao.providers.oneshot import OneShotError, run_oneshot
 from tests.acp_helpers import read_calls, write_scenario
@@ -138,3 +141,41 @@ async def test_run_oneshot_dispatches_acp_descriptor(monkeypatch, tmp_path: Path
     assert text == "PONG"
     assert any(call["method"] == "session/new" for call in read_calls(calls))
 
+
+
+@pytest.mark.asyncio
+async def test_oneshot_cleanup_failure_does_not_replace_the_reply(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _install(monkeypatch, tmp_path, prompts=[{"steps": [{"update": _TEXT}]}])
+
+    def denied_rmtree(cls, name, ignore_errors=False):
+        # Windows-style cleanup failure: the path is in the error text.
+        if not ignore_errors:
+            raise PermissionError(f"[WinError 5] Access is denied: '{name}'")
+        shutil.rmtree(name, ignore_errors=True)
+
+    monkeypatch.setattr(tempfile.TemporaryDirectory, "_rmtree", classmethod(denied_rmtree))
+
+    text = await run_acp_oneshot(FakeOneshotProvider.spec, "hi", system_prompt="", model="", env={})
+
+    assert text == "PONG"
+
+
+@pytest.mark.asyncio
+async def test_oneshot_transport_error_raises_a_fixed_detail(monkeypatch, tmp_path: Path) -> None:
+    _install(monkeypatch, tmp_path, prompts=[{"steps": [{"update": _TEXT}]}])
+
+    async def leaking_apply(self, **kwargs):
+        raise ConnectionError("adapter says /Users/someone/secret-path token=abc")
+
+    monkeypatch.setattr(AcpSession, "apply", leaking_apply)
+
+    with pytest.raises(OneShotError) as raised:
+        await run_acp_oneshot(FakeOneshotProvider.spec, "hi", system_prompt="", model="", env={})
+
+    assert raised.value.transient is False
+    assert str(raised.value) == "fake one-shot request failed."
+    assert "secret-path" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__ is True
