@@ -11,12 +11,14 @@ type Updates = { available: boolean; automatic: boolean; canCheck: boolean; reas
 const UP: Updates = { available: true, automatic: true, canCheck: true, reason: '' }
 
 /** Installs a bridge whose `get` answers with `updates` and whose actions answer
- *  with the same block, updated by the request. */
+ *  with the same block, updated by the request: a started check reads as
+ *  running (`canCheck` false), and an automatic change lands in `automatic`. */
 function install(initial: Updates | null, opts: { refuseActions?: boolean } = {}) {
   let updates = initial
   const postMessage = vi.fn(async (request: { op: string; on?: boolean }) => {
     if (request.op === 'get') return { v: 1, notifications: null, updates }
     if (opts.refuseActions) throw 'refused'
+    if (request.op === 'checkForUpdates' && updates) updates = { ...updates, canCheck: false }
     if (request.op === 'setAutomaticUpdates' && updates) updates = { ...updates, automatic: request.on === true }
     return { v: 1, notifications: null, updates }
   })
@@ -104,10 +106,13 @@ describe('SettingsMacUpdates', () => {
 
   it('sends checkForUpdates on a click and renders the reply', async () => {
     const bridge = install(UP)
-    await mountRow()
+    const view = await mountRow()
     checkButton().click()
     await flushPromises()
     expect(bridge.postMessage).toHaveBeenLastCalledWith({ op: 'checkForUpdates' })
+    // The reply says the check is running: the status and the button must follow it.
+    expect(view.text()).toContain('Checking for updates')
+    expect(checkButton().disabled).toBe(true)
   })
 
   it('sends setAutomaticUpdates with the flipped value and shows the new state', async () => {
@@ -129,6 +134,61 @@ describe('SettingsMacUpdates', () => {
     expect(alert.exists()).toBe(true)
     expect(alert.text()).toContain('did not change this setting')
     expect(switchEl().getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('names the tray row in the refused check copy', async () => {
+    install(UP, { refuseActions: true })
+    const view = await mountRow()
+    checkButton().click()
+    await flushPromises()
+    expect(view.find('[role="alert"]').text()).toContain('Ciaobot > Settings > Check for Updates…')
+  })
+
+  it('still reports a refused action when a read superseded it in flight', async () => {
+    let refuse!: () => void
+    const refusal = new Promise<never>((_, reject) => { refuse = () => reject('refused') })
+    const postMessage = vi.fn(async (request: { op: string }) => {
+      if (request.op === 'get') return { v: 1, notifications: null, updates: UP }
+      return refusal
+    })
+    g.webkit = { messageHandlers: { ciaobotAppSettings: { postMessage } } }
+    const view = await mountRow()
+    switchEl().click()
+    await flushPromises()
+    // A change event re-reads the state while the action is still pending.
+    window.dispatchEvent(new Event(MAC_APP_SETTINGS_CHANGED))
+    await flushPromises()
+    refuse()
+    await flushPromises()
+    expect(view.find('[role="alert"]').text()).toContain('did not change this setting')
+  })
+
+  it('keeps the last good state through a refused read', async () => {
+    const bridge = install(UP)
+    const view = await mountRow()
+    bridge.postMessage.mockRejectedValueOnce('refused')
+    window.dispatchEvent(new Event(MAC_APP_SETTINGS_CHANGED))
+    await flushPromises()
+    expect(view.text()).toContain('Installs updates automatically')
+    expect(switchEl().getAttribute('aria-checked')).toBe('true')
+  })
+
+  it('keeps the last good state through a malformed read', async () => {
+    const bridge = install(UP)
+    const view = await mountRow()
+    bridge.postMessage.mockResolvedValueOnce({ v: 2, notifications: null, updates: UP })
+    window.dispatchEvent(new Event(MAC_APP_SETTINGS_CHANGED))
+    await flushPromises()
+    expect(view.text()).toContain('Installs updates automatically')
+  })
+
+  it('hides the row when the bridge is gone', async () => {
+    install(UP)
+    const view = await mountRow()
+    delete g.webkit
+    window.dispatchEvent(new Event(MAC_APP_SETTINGS_CHANGED))
+    await flushPromises()
+    expect(view.text()).toBe('')
   })
 
   it('re-reads the snapshot on the change event', async () => {

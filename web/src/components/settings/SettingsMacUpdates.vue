@@ -27,10 +27,11 @@
       </span>
     </div>
     <div class="mac-updates-actions">
+      <!-- canCheck is false whenever available is false (see parseUpdates in lib/macAppSettings.ts). -->
       <button
         type="button"
         class="btn-secondary btn-small"
-        :disabled="!mac.available || !mac.canCheck || busy"
+        :disabled="!mac.canCheck || busy"
         :aria-describedby="mac.available ? undefined : reasonId"
         @click="check"
       >
@@ -58,21 +59,28 @@ const reasonId = 'mac-updates-reason'
 const mac = ref<MacUpdateSettings | null>(null)
 const busy = ref(false)
 const actionError = ref('')
-const CHECK_REFUSED = 'Ciaobot for Mac did not start a check. Use the menu bar: Ciaobot → Settings → Check for Updates.'
-const AUTOMATIC_REFUSED = 'Ciaobot for Mac did not change this setting. Use the menu bar: Ciaobot → Settings.'
+const CHECK_REFUSED = 'Ciaobot for Mac did not start a check. Use Ciaobot > Settings > Check for Updates… in the menu bar.'
+const AUTOMATIC_REFUSED = 'Ciaobot for Mac did not change this setting. Use Ciaobot > Settings > Install Updates Automatically in the menu bar.'
 
-// Each read or action takes a ticket; only the latest may write, so a reply
-// that lands late cannot overwrite a newer snapshot.
+// `seq` ranks every request that may write the state, reads and actions alike,
+// so a reply that lands late cannot overwrite a newer snapshot. `actionSeq`
+// ranks actions on their own: a refused action always reports its error, even
+// when a read superseded it, because a refusal carries no state to lose.
 let seq = 0
+let actionSeq = 0
 
 async function refresh() {
   const ticket = ++seq
+  // The row exists only with the app's bridge. A missing bridge hides it.
+  if (!hasMacAppSettings()) {
+    mac.value = null
+    return
+  }
   const snapshot = await readMacAppSettings()
-  if (ticket !== seq) return
-  // No usable snapshot (bridge gone, refused, malformed) or no updates block:
-  // the last state is not trustworthy, so the row hides.
-  mac.value = snapshot?.updates ?? null
-  if (snapshot?.updates) actionError.value = ''
+  // A refused or malformed read keeps the last good state, so a transient
+  // refusal does not hide the row. Only an explicit null block hides it.
+  if (ticket !== seq || snapshot === null) return
+  mac.value = snapshot.updates
 }
 
 function onVisible() {
@@ -115,21 +123,27 @@ const statusDetail = computed(() => {
 })
 
 async function applyOutcome(request: Promise<MacAppSettings | null>, refused: string) {
+  const action = ++actionSeq
+  const ticket = ++seq
   busy.value = true
   actionError.value = ''
   try {
-    const ticket = ++seq
     const snapshot = await request
-    if (ticket !== seq) return
-    if (snapshot?.updates) mac.value = snapshot.updates
-    else actionError.value = refused
+    if (action !== actionSeq) return
+    const updates = snapshot?.updates
+    if (!updates) {
+      actionError.value = refused
+      return
+    }
+    // A newer read has already written a fresher state; keep that one.
+    if (ticket === seq) mac.value = updates
   } finally {
     busy.value = false
   }
 }
 
 function check() {
-  if (!mac.value?.available || !mac.value.canCheck || busy.value) return
+  if (!mac.value?.canCheck || busy.value) return
   void applyOutcome(requestMacCheckForUpdates(), CHECK_REFUSED)
 }
 

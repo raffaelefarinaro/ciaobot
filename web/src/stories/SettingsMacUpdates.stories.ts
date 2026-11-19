@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from '@storybook/vue3-vite'
 import { expect } from 'storybook/test'
 import { onUnmounted } from 'vue'
 import SettingsMacUpdates from '../components/settings/SettingsMacUpdates.vue'
-import type { MacUpdateSettings } from '../lib/macAppSettings'
+import { hasMacAppSettings, type MacUpdateSettings } from '../lib/macAppSettings'
 
 // The row reads the Mac app's bridge. The workshop has none, so each story
 // installs a stub `ciaobotAppSettings` handler for its mount that answers `get`
@@ -76,17 +76,42 @@ export const Narrow: Story = {
   decorators: [() => ({ template: '<div style="max-width: 390px"><story /></div>' })],
   play: async ({ canvas }) => {
     const button = await canvas.findByRole('button', { name: 'Check for Updates…' })
-    expect(button.getBoundingClientRect().width).toBeLessThanOrEqual(390)
-    expect(button.getBoundingClientRect().height).toBeGreaterThanOrEqual(44)
+    // The 390px wrapper is the frame: the button must sit inside it, not overflow.
+    const frame = (button.closest('[style*="max-width: 390px"]') as HTMLElement).getBoundingClientRect()
+    const box = button.getBoundingClientRect()
+    expect(box.right).toBeLessThanOrEqual(frame.right)
+    expect(box.height).toBeGreaterThanOrEqual(44)
   },
 }
 
-export const NoBridge: Story = {
+/** An app whose bridge answers with no updates block. */
+export const NoUpdatesBlock: Story = {
   render: withBridge(null),
   play: async ({ canvasElement }) => {
-    // Without the app's bridge the row renders nothing and the card keeps its
-    // static text.
+    // The row renders nothing and the card keeps its static text.
     await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(canvasElement.textContent?.trim()).toBe('')
+  },
+}
+
+/** A page with no app bridge at all: the handler is absent, not merely silent. */
+export const NoBridge: Story = {
+  render: () => ({
+    components: { SettingsMacUpdates },
+    setup() {
+      const g = globalThis as { webkit?: unknown }
+      const original = g.webkit
+      delete g.webkit
+      onUnmounted(() => {
+        if (original !== undefined) g.webkit = original
+      })
+      return {}
+    },
+    template: '<div style="max-width: 640px"><SettingsMacUpdates /></div>',
+  }),
+  play: async ({ canvasElement }) => {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(hasMacAppSettings()).toBe(false)
     expect(canvasElement.textContent?.trim()).toBe('')
   },
 }

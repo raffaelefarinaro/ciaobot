@@ -9671,12 +9671,20 @@ export const inventory: InventoryEntry[] = [
         "note": "390px container: the check button keeps a 44px height inside the narrow viewport."
       },
       {
+        "name": "no-updates-block",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-mac-updates--no-updates-block"
+        ],
+        "note": "The app's bridge answers with no updates block: the row renders nothing and the card keeps its static text."
+      },
+      {
         "name": "no-bridge",
         "coverage": "covered",
         "storyIds": [
           "settings-mac-updates--no-bridge"
         ],
-        "note": "No updates block from the app: the row renders nothing and the card keeps its static text."
+        "note": "No app bridge at all (a browser): the handler is absent, the row renders nothing and the card keeps its static text."
       },
       {
         "name": "action-pending",

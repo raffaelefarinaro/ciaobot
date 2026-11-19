@@ -212,15 +212,94 @@ final class AppSettingsWebKitTests: XCTestCase {
         XCTAssertEqual(h.updates.checkCount, 1)
     }
 
-    func testCheckForUpdatesWhenUnavailableLeavesTheClickUnspent() throws {
-        let h = try makeHarness(updates: AppSettingsFakeUpdates(reason: "No feed."))
+    /// Available but busy: the check is refused, so the click must survive it
+    /// and still back the automatic-install change that is allowed.
+    func testCheckForUpdatesWhileBusyLeavesTheClickUnspent() throws {
+        let h = try makeHarness(updates: AppSettingsFakeUpdates(canCheck: false))
         try load(h)
         click(h)
         assertRefused(try post(h.webView, "{op: 'checkForUpdates'}"))
         XCTAssertEqual(h.updates.checkCount, 0)
-        // The refusal spent nothing, so the same click still backs an allowed action.
-        assertRefused(try post(h.webView, "{op: 'setAutomaticUpdates', on: true}"))
+        XCTAssertNotNil(try post(h.webView, "{op: 'setAutomaticUpdates', on: true}")["ok"])
+        XCTAssertEqual(h.updates.automaticSets, [true])
+        assertRefused(try post(h.webView, "{op: 'checkForUpdates'}"))
+        XCTAssertEqual(h.updates.checkCount, 0)
+    }
+
+    /// The converse: an available updater refuses a malformed automatic-install
+    /// request, and that refusal must leave the click for the check.
+    func testRefusedSetAutomaticUpdatesLeavesTheClickUnspent() throws {
+        let h = try makeHarness(updates: AppSettingsFakeUpdates(canCheck: true))
+        try load(h)
+        click(h)
+        assertRefused(try post(h.webView, "{op: 'setAutomaticUpdates', on: 'true'}"))
         XCTAssertTrue(h.updates.automaticSets.isEmpty)
+        XCTAssertNotNil(try post(h.webView, "{op: 'checkForUpdates'}")["ok"])
+        XCTAssertEqual(h.updates.checkCount, 1)
+    }
+
+    func testUnavailableUpdaterRefusesBothUpdateOps() throws {
+        let h = try makeHarness(updates: AppSettingsFakeUpdates(reason: "No feed."))
+        try load(h)
+        click(h)
+        assertRefused(try post(h.webView, "{op: 'checkForUpdates'}"))
+        assertRefused(try post(h.webView, "{op: 'setAutomaticUpdates', on: true}"))
+        XCTAssertEqual(h.updates.checkCount, 0)
+        XCTAssertTrue(h.updates.automaticSets.isEmpty)
+    }
+
+    /// Each action op goes through the same three refusals: a cross-document
+    /// click, a sub-frame call and a foreign-origin call. A control call from
+    /// the right place succeeds, so the refusals are the guards and not a
+    /// broken harness.
+    func testEveryActionOpIsRefusedAcrossDocumentSubFrameAndForeignOrigin() throws {
+        let ops: [(body: String, dict: [String: Any])] = [
+            ("{op: 'notifications'}", ["op": "notifications"]),
+            ("{op: 'checkForUpdates'}", ["op": "checkForUpdates"]),
+            ("{op: 'setAutomaticUpdates', on: true}", ["op": "setAutomaticUpdates", "on": true]),
+        ]
+        func effects(_ h: Harness) -> Int {
+            h.fake.actionCount + h.updates.checkCount + h.updates.automaticSets.count
+        }
+        for (body, dict) in ops {
+            // Cross-document: the click belongs to the previous committed document.
+            let crossed = try makeHarness()
+            try load(crossed)
+            click(crossed)
+            let token = NSObject()
+            crossed.coordinator.handleProvisionalStart(from: crossed.webView, navigation: token)
+            crossed.coordinator.handleCommit(from: crossed.webView, navigation: token)
+            assertRefused(try post(crossed.webView, body), file: #filePath, line: #line)
+            XCTAssertEqual(effects(crossed), 0, "cross-document \(body)")
+            click(crossed)
+            XCTAssertNotNil(try post(crossed.webView, body)["ok"], "control \(body)")
+
+            // Sub-frame: a same-origin frame has the handler but is not the main frame.
+            let framed = try makeHarness()
+            try load(framed, body: "<iframe id='f' srcdoc='<p>frame</p>'></iframe>")
+            click(framed)
+            assertRefused(
+                try post(framed.webView, body, in: "document.getElementById('f').contentWindow"),
+                file: #filePath, line: #line
+            )
+            XCTAssertEqual(effects(framed), 0, "sub-frame \(body)")
+
+            // Foreign origin: the sending frame's host is not the selected one.
+            let foreign = try makeHarness()
+            try load(foreign)
+            click(foreign)
+            let refused = foreign.coordinator.handleAppSettingsMessage(
+                isMainFrame: true, scheme: "https", host: "evil.example", port: 443,
+                view: foreign.webView, body: dict
+            )
+            if case .success = refused { XCTFail("foreign origin \(body)") }
+            XCTAssertEqual(effects(foreign), 0, "foreign origin \(body)")
+            if case .success = foreign.coordinator.handleAppSettingsMessage(
+                isMainFrame: true, scheme: "https", host: "example.com", port: 443,
+                view: foreign.webView, body: dict
+            ) {} else { XCTFail("control from the selected origin \(body)") }
+            XCTAssertEqual(effects(foreign), 1, "control \(body)")
+        }
     }
 
     func testSetAutomaticUpdatesWithoutAGestureIsRefused() throws {
