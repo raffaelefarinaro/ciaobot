@@ -149,7 +149,10 @@ def test_handover_block_is_closed_and_message_text_cannot_end_it(tmp_path: Path)
     assert "&lt;/ciao-context>" in prefix and "&lt;/provider-handover>" in prefix
 
 
-def test_handover_chat_validates_and_canonicalizes_model(tmp_path: Path) -> None:
+def test_handover_chat_canonicalizes_and_passes_through_the_model(tmp_path: Path) -> None:
+    """The claude provider runs over ACP with a dynamic catalog, so Ciaobot does not
+    reject a well-formed id it has no list for: the adapter decides. Ciaobot still
+    canonicalizes the id and refuses a blank one."""
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("handover", workspace="personal")
     chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
@@ -162,13 +165,22 @@ def test_handover_chat_validates_and_canonicalizes_model(tmp_path: Path) -> None
     assert updated is not None
     assert updated.model == "sonnet"
 
-    with pytest.raises(ValueError, match="Unknown model"):
+    updated = pcm.handover_chat(
+        chat.chat_id,
+        provider="claude",
+        model="no-such-model",
+    )
+    assert updated is not None
+    assert updated.model == "no-such-model"
+    assert pcm.get_chat(chat.chat_id).model == "no-such-model"
+
+    with pytest.raises(ValueError, match="Model is required"):
         pcm.handover_chat(
             chat.chat_id,
             provider="claude",
-            model="no-such-model",
+            model="   ",
         )
-    assert pcm.get_chat(chat.chat_id).model == "sonnet"
+    assert pcm.get_chat(chat.chat_id).model == "no-such-model"
 
 
 def test_normalize_truncates_oversized_newest_message() -> None:
