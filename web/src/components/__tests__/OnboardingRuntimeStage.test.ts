@@ -190,3 +190,37 @@ describe('OnboardingRuntimeStage missing status', () => {
     await vi.waitFor(() => expect(vi.mocked(api.get).mock.calls.length).toBeGreaterThan(before))
   })
 })
+
+describe('OnboardingRuntimeStage registry runtimes', () => {
+  const withCodex = {
+    connections: {
+      ...ready.connections,
+      codex: { ok: true, auth: 'signed in', label: 'Codex', command: 'codex login' },
+    },
+  }
+  const codexModels = { provider_models: { claude: ['alias'], codex: ['gpt-5.5'] }, provider_catalog_evidence: {} }
+
+  it('accepts codex as a runtime', async () => {
+    const wrapper = mountStage({ status: withCodex, models: codexModels })
+    await vi.waitFor(() => expect(wrapper.find('input[name="runtime"][value="codex"]').exists()).toBe(true))
+    await wrapper.get('input[name="runtime"][value="codex"]').setValue()
+    await vi.waitFor(() => expect(wrapper.text()).toContain('gpt-5.5'))
+    expect(wrapper.text()).toContain('Configured choices')
+  })
+
+  it('restores a saved codex choice from the workspace', async () => {
+    const wrapper = mountStage({
+      status: withCodex,
+      models: codexModels,
+      workspaces: { workspaces: [{ name: 'personal', default_provider: 'codex', provider_overrides: { codex: { model: 'gpt-5.5' } } }] },
+    })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Codex · gpt-5.5'))
+    expect(wrapper.find('input[name="runtime"][value="codex"]').exists()).toBe(false)
+  })
+
+  it('offers one runtime choice per status row, in the registry order', async () => {
+    const wrapper = mountStage({ status: withCodex, models: codexModels })
+    await vi.waitFor(() => expect(wrapper.find('input[name="runtime"][value="codex"]').exists()).toBe(true))
+    expect(wrapper.findAll('input[name="runtime"]').map(input => input.attributes('value'))).toEqual(['claude', 'codex'])
+  })
+})

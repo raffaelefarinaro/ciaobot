@@ -53,11 +53,13 @@ export function useProviderChoices(deps: {
     return models
   }
 
+  // Filtered to available backends: the routine model selectors must not offer
+  // a backend that isn't configured.
   const aliasProviderSections = computed<AliasProviderSection[]>(() => {
     const settings = routines.value
     if (!settings) return []
-    // Filtered to available backends — used by the routine model selectors,
-    // which must not offer a backend that isn't configured.
+    // Claude's list rides on the settings payload, so its defaults block stays
+    // usable (with its own retry) when /api/models cannot be read.
     const sections: AliasProviderSection[] = [
       {
         key: 'claude',
@@ -70,20 +72,14 @@ export function useProviderChoices(deps: {
         available: true,
       },
     ]
-    // opencode can serve routines once its catalog is non-empty.
-    const opencodeModels = parseModelList((
-      workspaceModels.value?.opencode_models
-      || workspaceModels.value?.provider_models?.opencode
-      || []
-    ).join(','))
-    if (opencodeModels.length) {
-      sections.push({
-        key: 'opencode',
-        label: 'opencode',
-        options: opencodeModels,
-        configurable: true,
-        available: true,
-      })
+    // Every other registry provider joins once its catalog reports models.
+    const models = workspaceModels.value
+    for (const descriptor of models?.providers ?? []) {
+      if (descriptor.id === 'claude') continue
+      const options = parseModelList((models?.provider_models?.[descriptor.id] || []).join(','))
+      if (options.length) {
+        sections.push({ key: descriptor.id, label: descriptor.label, options, configurable: true, available: true })
+      }
     }
     return sections
   })

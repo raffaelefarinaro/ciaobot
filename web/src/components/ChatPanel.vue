@@ -1447,7 +1447,7 @@ import InjectedPromptCard from './InjectedPromptCard.vue'
 import { errorNoticePrompt, parseInjectedPrompt, retryScheduledNotice, type InjectedPrompt } from '../lib/injectedPrompt'
 import { linkifyText } from '../lib/filePaths'
 import { isChatId } from '../lib/chatLinks'
-import { sectionsFromModelsResponse } from '../lib/modelSections'
+import { providerForModelSection, sectionKeyForProvider, sectionsFromModelsResponse } from '../lib/modelSections'
 import { isBridgeMode, PERMISSION_MODE_COPY, type BridgeMode } from '../lib/permissionModes'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
@@ -2506,17 +2506,10 @@ type ProviderKey = RuntimeProvider
 type BucketKey = ProviderKey
 type TierAlias = 'haiku' | 'sonnet' | 'opus' | 'fable'
 
-const BUCKET_DEFS: { key: BucketKey; label: string; provider: ProviderKey }[] = [
-  { key: 'claude', label: 'Claude', provider: 'claude' },
-  { key: 'opencode', label: 'opencode', provider: 'opencode' },
-]
-
-// ModelSelector names the Claude section 'anthropic' (the models are Anthropic's,
-// the runner is Claude Code), so the two vocabularies need one hop between them.
-const SECTION_BY_BUCKET: Record<BucketKey, string> = {
-  claude: 'anthropic',
-  opencode: 'opencode',
-}
+// One bucket per registry provider, labelled by the registry's short label.
+const BUCKET_DEFS = computed<{ key: BucketKey; label: string }[]>(() =>
+  (modelsResponse.value?.providers ?? []).map(item => ({ key: item.id, label: item.short_label })),
+)
 
 
 function toggleTrace(i: number) {
@@ -3152,7 +3145,7 @@ function cancelCapability(q: { request_id: string }) {
 // Section key (ModelSelector) for a bucket, used to preselect the backend when
 // the capability card opens the full picker.
 function capabilitySectionForBucket(bucket: BucketKey): string {
-  return SECTION_BY_BUCKET[bucket] || 'anthropic'
+  return sectionKeyForProvider(bucket)
 }
 
 const capabilityPickerSection = ref('')
@@ -5014,7 +5007,7 @@ function routingProviderLabel(bucket: string | undefined, provider: string): str
 }
 
 function bucketLabel(bucket: BucketKey): string {
-  return BUCKET_DEFS.find((def) => def.key === bucket)?.label || 'Claude'
+  return BUCKET_DEFS.value.find((def) => def.key === bucket)?.label || bucket
 }
 
 // Which provider owns a model id. Membership in a provider's catalog is
@@ -5022,7 +5015,8 @@ function bucketLabel(bucket: BucketKey): string {
 // the catalog has not reported yet.
 function bucketForSelectedModel(model: string): BucketKey {
   const response = modelsResponse.value
-  if ((response?.opencode_models || []).includes(model)) return 'opencode'
+  const owner = (response?.providers ?? []).find(item => response?.provider_models?.[item.id]?.includes(model))
+  if (owner) return owner.id
   if (model.includes('/')) return 'opencode'
   return 'claude'
 }
@@ -5094,14 +5088,13 @@ async function selectModel(value: string | string[], sectionKey = '') {
     return
   }
   const chatId = chat.value.chat_id
-  const sectionBucket: Partial<Record<string, BucketKey>> = {
-    anthropic: 'claude',
-    opencode: 'opencode',
-  }
-  // Picking from the Anthropic section is an explicit handover to Claude Code,
+  // Picking from a provider's section is an explicit handover to that provider,
   // never a tier change on whichever provider is active. To change tier while
   // staying on a provider, pick that provider's own model instead.
-  const targetBucket = sectionBucket[sectionKey] || bucketForSelectedModel(model)
+  const sectionProvider = sectionKey ? providerForModelSection(sectionKey) : ''
+  const targetBucket = BUCKET_DEFS.value.some(def => def.key === sectionProvider)
+    ? sectionProvider
+    : bucketForSelectedModel(model)
   const currentEntry = canonicalTier(chat.value.model)
   const sameModelAndRoute = canonicalTier(model) === currentEntry && targetBucket === activeBucket.value
   if (sameModelAndRoute && !recovery) {
@@ -5124,7 +5117,7 @@ async function selectModel(value: string | string[], sectionKey = '') {
     model: string
     thinking_level?: string
   } = {
-    provider: (BUCKET_DEFS.find(def => def.key === targetBucket)?.provider || 'claude') as ProviderKey,
+    provider: targetBucket,
     model,
   }
   const targetLevels = modelsResponse.value?.model_reasoning_levels?.[model]
