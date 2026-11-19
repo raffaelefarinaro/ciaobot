@@ -1776,3 +1776,209 @@ def test_attached_1x_manifest_refuses_a_manifest_for_another_wheel(tmp_path: Pat
 
     assert result.returncode != 0
     assert "does not match the manifest" in result.stderr
+
+
+# #3131 L7: release-rehearsal.yml builds the release artifact set and proves it
+# without a release. It is security-sensitive: it holds the manifest signing
+# secret, so its tests pin where the secret may appear and what the run may do.
+
+
+def _rehearsal_text() -> str:
+    return (
+        Path(__file__).parents[1] / ".github" / "workflows" / "release-rehearsal.yml"
+    ).read_text(encoding="utf-8")
+
+
+def _rehearsal() -> dict:
+    import yaml
+
+    return yaml.safe_load(_rehearsal_text())
+
+
+def _rehearsal_steps() -> list[tuple[str, dict]]:
+    return [
+        (job_name, step)
+        for job_name, job in _rehearsal()["jobs"].items()
+        for step in job["steps"]
+    ]
+
+
+def test_release_rehearsal_never_uploads_to_a_release() -> None:
+    # The rehearsal's outputs are workflow artifacts. A release is never created,
+    # edited, or uploaded to, and no job asks for write access to the repository.
+    rehearsal = _rehearsal()
+    text = _rehearsal_text()
+    assert rehearsal["permissions"] == {"contents": "read"}
+    for name, job in rehearsal["jobs"].items():
+        assert "permissions" not in job, f"job {name} overrides the read-only token"
+    for banned in ("gh release", "gh api", "contents: write", "action-gh-release"):
+        assert banned not in text, f"release-rehearsal.yml uses {banned!r}"
+
+
+def test_release_rehearsal_binds_signing_secret_to_one_step() -> None:
+    # Only the manifest signing step may read the secret, and it reads both of
+    # the two values the signer takes. Mutation: moving either into another step
+    # (or a job-level env) puts the secret in a step that does not sign.
+    holders = [
+        (job, step) for job, step in _rehearsal_steps() if "secrets." in json.dumps(step)
+    ]
+    assert [(job, step.get("name")) for job, step in holders] == [("engine", "Sign engine manifest")]
+    env = holders[0][1]["env"]
+    assert env == {
+        "TAURI_SIGNING_PRIVATE_KEY": "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}",
+        "TAURI_SIGNING_PRIVATE_KEY_PASSWORD": "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}",
+    }
+    assert _rehearsal_text().count("secrets.") == 2
+    assert "env" not in _rehearsal()["jobs"]["engine"]
+    assert "env" not in _rehearsal()
+
+
+def test_release_rehearsal_produces_wheel_installer_and_dmg() -> None:
+    # The engine job makes the wheel, the stamped installer, the manifest and
+    # its signature, and uploads them as one artifact. The Mac job packages the
+    # ad-hoc app and uploads its archive. Mutation: dropping the stamped installer,
+    # the signed manifest, or the archive from its upload breaks the set.
+    rehearsal = _rehearsal()
+    engine = rehearsal["jobs"]["engine"]
+    engine_runs = "\n".join(step.get("run", "") for step in engine["steps"])
+    assert "-m ciao.release_manifest stamp-installer" in engine_runs
+    assert "--template \"$ws/scripts/install.sh\"" in engine_runs
+    assert "--out \"$ws/rehearsal/install.sh\"" in engine_runs
+    assert "-m ciao.release_manifest build" in engine_runs
+    assert "npx --yes @tauri-apps/cli@2.11.4 signer sign ciaobot-engine-manifest.json" in engine_runs
+    assert "-m ciao.release_manifest verify" in engine_runs
+    assert "--asset \"$ws/ciaobot-$VERSION-py3-none-any.whl\"" in engine_runs
+    assert "uv build --wheel --out-dir dist" in engine_runs
+
+    upload = _smoke_step(engine, "Upload the rehearsal artifact set")
+    assert upload["uses"].startswith("actions/upload-artifact@v")
+    assert upload["with"]["name"] == "rehearsal-${{ github.sha }}"
+    assert upload["with"]["path"] == "rehearsal/"
+    assert upload["with"]["if-no-files-found"] == "error"
+
+    assert rehearsal["jobs"]["linux"]["needs"] == "engine"
+    download = _smoke_step(rehearsal["jobs"]["linux"], "Download the rehearsal artifact set")
+    assert download["uses"].startswith("actions/download-artifact@v")
+    assert download["with"]["name"] == "rehearsal-${{ github.sha }}"
+
+    dmg = rehearsal["jobs"]["dmg"]
+    assert dmg["runs-on"] == "macos-15"
+    dmg_runs = "\n".join(step.get("run", "") for step in dmg["steps"])
+    assert "scripts/package-app.sh --output" in dmg_runs
+    # make-dmg.sh refuses ad-hoc builds, so it is deliberately not run here.
+    assert "make-dmg.sh" not in dmg_runs
+    archive = _smoke_step(dmg, "Upload the ad-hoc app archive")
+    assert archive["uses"].startswith("actions/upload-artifact@v")
+    for pattern in ("rehearsal-package/Ciaobot-*-adhoc.zip", "rehearsal-package/MANIFEST.txt", "rehearsal-package/SHA256SUMS"):
+        assert pattern in archive["with"]["path"]
+    assert "mac-app-signing-rehearsal.yml" in _rehearsal_text()
+
+
+def test_release_rehearsal_refuses_refs_other_than_develop_and_main() -> None:
+    # The guard is the first step of the engine and Mac jobs and runs for real.
+    # Mutation: widening the case pattern, or dropping the branch check, lets a
+    # feature ref through and fails here.
+    if sys.platform == "win32":
+        pytest.skip("runs the workflow's bash")
+    guards = [
+        step
+        for _, step in _rehearsal_steps()
+        if step.get("name") == "Refuse refs other than develop and main"
+    ]
+    assert len(guards) == 2
+    for guard in guards:
+        assert guard["env"] == {
+            "REF_NAME": "${{ github.ref_name }}",
+            "REF_TYPE": "${{ github.ref_type }}",
+        }
+        for name, ref_type, expected in (
+            ("develop", "branch", 0),
+            ("main", "branch", 0),
+            ("raffaelefarinaro/feature", "branch", 1),
+            ("release/v2.0.0", "branch", 1),
+            ("develop", "tag", 1),
+            ("", "branch", 1),
+        ):
+            result = _run_bash_step(
+                guard["run"], {"REF_NAME": name, "REF_TYPE": ref_type}
+            )
+            assert result.returncode == expected, (name, ref_type, result.stderr)
+
+
+def test_release_rehearsal_keeps_expressions_out_of_run_blocks_and_pins_actions() -> None:
+    # No expression is interpolated into a shell script (values come in through
+    # env:), every run block fails closed except Diagnostics, and every action
+    # is pinned to a version, not a branch.
+    rehearsal = _rehearsal()
+    for job_name, step in _rehearsal_steps():
+        label = f"job {job_name} step {step.get('name')!r}"
+        run = step.get("run")
+        if run is not None:
+            assert "${{" not in run, f"{label} interpolates an expression into run:"
+            if step.get("name") != "Diagnostics":
+                assert run.lstrip().startswith("set -euo pipefail"), f"{label} is not fail-closed"
+        if "uses" in step:
+            assert "@v" in step["uses"] and not step["uses"].endswith("@main"), label
+    for job_name, job in rehearsal["jobs"].items():
+        assert isinstance(job.get("timeout-minutes"), int), f"job {job_name} has no timeout"
+
+
+def test_release_rehearsal_linux_asserts_are_the_release_smoke_asserts() -> None:
+    # The Linux job copies the L6 service asserts and diagnostics verbatim. Only
+    # the install and the re-run download differ: they install the rehearsal
+    # wheel from the artifact instead of the public release.
+    smoke = _release_smoke()["jobs"]["linux-install"]
+    linux = _rehearsal()["jobs"]["linux"]
+    for name in ("Check the service answers", "Diagnostics"):
+        assert _smoke_step(linux, name)["run"] == _smoke_step(smoke, name)["run"], name
+    assert _smoke_step(linux, "Diagnostics")["if"] == "failure()"
+
+    smoke_rerun = _smoke_step(smoke, "Re-run the one-liner (same-version reinstall)")["run"]
+    rehearsal_rerun = _smoke_step(linux, "Re-run the installer (same-version reinstall)")["run"]
+    tail = smoke_rerun[smoke_rerun.index("port=$(awk") :]
+    assert rehearsal_rerun.endswith(tail)
+
+    linux_text = "\n".join(step.get("run", "") for step in linux["steps"])
+    assert "releases/download" not in linux_text
+    assert "curl -fsSL" not in linux_text
+    assert "setup-token" not in linux_text
+    assert "find " not in linux_text
+    assert linux["runs-on"] == "ubuntu-24.04"
+
+
+def test_release_rehearsal_waits_are_bounded() -> None:
+    # Every job and every step that waits, installs or runs the gate is bounded,
+    # and no loop is unbounded. Mutation: removing a timeout or an iteration cap
+    # fails here.
+    rehearsal = _rehearsal()
+    for job_name, job in rehearsal["jobs"].items():
+        for step in job["steps"]:
+            run = step.get("run", "")
+            if "sleep" in run or "install.sh" in run or "legacy-update-gate.py" in run:
+                if job_name == "linux" or "legacy-update-gate.py" in run:
+                    assert isinstance(step.get("timeout-minutes"), int), (
+                        f"job {job_name} step {step.get('name')!r} waits without a timeout"
+                    )
+            assert "while " not in run and "until " not in run, (
+                f"job {job_name} step {step.get('name')!r} has an unbounded loop"
+            )
+    text = _rehearsal_text()
+    assert "seq 1 90" in text
+    assert text.count("curl -fsS --max-time 5") >= 4
+
+
+def test_release_rehearsal_legacy_gate_reads_the_staged_files_as_a_file_url() -> None:
+    # The 1.x gate reads the rehearsal's files through --release-root (a file://
+    # URL), never from a published release.
+    gate = _smoke_step(_rehearsal()["jobs"]["engine"], "Run the 1.x update gate against the rehearsal files")
+    assert "python3 scripts/legacy-update-gate.py" in gate["run"]
+    assert "--release-root \"$RUNNER_TEMP/legacy\"" in gate["run"]
+    assert "--release-base" not in gate["run"]
+    assert gate["env"]["GH_TOKEN"] == "${{ github.token }}"
+
+
+def test_release_rehearsal_is_documented_for_dispatch() -> None:
+    development = (Path(__file__).parents[1] / "docs" / "DEVELOPMENT.md").read_text(
+        encoding="utf-8"
+    )
+    assert "gh workflow run release-rehearsal.yml --ref develop" in development

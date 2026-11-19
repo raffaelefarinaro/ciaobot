@@ -255,6 +255,14 @@ scripts/prepare-release --apply --create-pr --ready
 
 - **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA and the engine wheel, verifies the wheel in a clean environment, and signs the engine manifest with the release minisign key (`ciaobot-engine-manifest.json` + `.sig`, gated by `ciao.release_manifest verify`), which lists the wheel alone. It attaches the stamped `install.sh` and the wheel it pins on every release. The signed manifest and its signature are attached to 2.0.0 only, the one release 1.x engines update to (#3131 Q3); before upload a 1.x engine must stage that release through `scripts/legacy-update-gate.py`. The server host archive and the installer scripts are no longer built, listed or attached. Cutting a patch release before 2.0.0 strands 1.x engines, because the manifest is 2.0.0-only. `release-smoke.yml` installs the published Linux `install.sh`, re-runs it as a same-version reinstall (the service must restart under a new main PID), and (for the 2.0.0 release only) runs the 1.x update gate against the published assets. After the upload it re-downloads the attached files and fails unless the installer pins this version and the attached wheel's sha256, and, for 2.0.0, `ciao.release_manifest verify --asset` matches the wheel to its signed entry. Since #653 it publishes no app, no `latest.json` feed, no native verifier and no bundled runtime, and its signer is `@tauri-apps/cli` run standalone, so it never depended on the now-deleted `desktop/` tree. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`.
 
+- **Release rehearsal:** `.github/workflows/release-rehearsal.yml` builds the same artifact set a release would publish (the engine wheel, the stamped `install.sh`, the signed engine manifest and its `.sig`) without creating a release. Dispatch it from `develop` or `main` only; other refs are refused:
+
+```bash
+gh workflow run release-rehearsal.yml --ref develop
+```
+
+  The `engine` job uploads `rehearsal-<sha>` (the wheel, `install.sh`, the manifest and its signature) and runs the 1.x update gate against those files through `file://`. The `linux` job installs the rehearsal wheel with the service and runs the same service asserts as `release-smoke.yml`. The `dmg` job packages the ad-hoc Mac app with `mac/scripts/package-app.sh` and uploads the archive, its `MANIFEST.txt` and `SHA256SUMS`. The signed and notarized DMG is not built here; it comes from `mac-app-signing-rehearsal.yml` (#3128 G) once the credentials exist. The manifest signing secret is read by one step only. Nothing in the run has write access to the repository, and nothing is uploaded to a release.
+
 One-time GitHub setup for a fresh clone or repo admin:
 
 ```bash
