@@ -165,10 +165,17 @@ class PermissionBroker:
             item.future.set_result(_outcome(item.options, approved=approved))
         return QuestionResponseResult(ok=True)
 
-    def cancel_all(self) -> None:
-        """Every pending future gets ``{"outcome": "cancelled"}``."""
+    def cancel_all(self) -> int:
+        """Answer every pending future with ``{"outcome": "cancelled"}``.
+
+        Returns how many were still unanswered. The JSON-RPC write of each
+        answer happens later, on the connection task that was awaiting it.
+        """
         pending = list(self._pending.values())
         self._pending.clear()
+        answered = 0
         for item in pending:
             if not item.future.done():
                 item.future.set_result({"outcome": "cancelled"})
+                answered += 1
+        return answered

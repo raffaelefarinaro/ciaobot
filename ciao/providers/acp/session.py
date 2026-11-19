@@ -33,8 +33,6 @@ from ciao.providers.acp.normalize import TurnText, UpdateNormalizer, canonical, 
 from ciao.providers.acp.permissions import PermissionBroker, mode_choices, pick_value
 from ciao.providers.acp.spec import AgentSpec
 
-# Yields after cancel_all so the permission response is written before session/cancel.
-_PERMISSION_FLUSH_TURNS = 4
 _LATE_QUIET = frozenset({"usage_update", "config_option_update", "current_mode_update"})
 _LATE_WAKE = "The agent continued after background work finished."
 
@@ -548,11 +546,12 @@ class AcpSession:
         )
 
     async def cancel(self) -> None:
-        self._broker.cancel_all()
         # The permission response is written by the connection task after the
-        # handler returns. Yield until that write is queued ahead of cancel.
-        for _ in range(_PERMISSION_FLUSH_TURNS):
-            await asyncio.sleep(0)
+        # handler returns. ACP requires that cancelled outcome to be on the
+        # wire before session/cancel, so wait until those writes have flushed.
+        answered = self._broker.cancel_all()
+        if answered:
+            await self._connection.wait_until_responses_flushed(answered)
         await self._connection.conn.cancel(self.session_id)
 
     def late_events(self) -> AsyncGenerator[StreamEvent, None]:
