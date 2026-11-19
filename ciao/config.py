@@ -197,10 +197,10 @@ def installed_workspace_env(base: Mapping[str, str]) -> dict[str, str]:
             runtime_root=str(pointer.runtime_root),
         )
     # The platform branch, the definition it reads and the staleness guard all
-    # live in `ciao.install_discovery`; imported here so the seam stays the one
-    # place that knows the platform and the patch target the existing tests
+    # live in `ciao.workspace_discovery`; imported here so the seam stays the
+    # one place that knows the platform and the patch target the existing tests
     # install (`ciao.macos_service.discover_runtime`) is still reached.
-    from ciao.install_discovery import discover_workspace
+    from ciao.workspace_discovery import discover_workspace
 
     discovered = discover_workspace(base)
     if discovered is None:

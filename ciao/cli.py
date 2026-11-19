@@ -25,7 +25,7 @@ import urllib.error
 import urllib.request
 
 from ciao import dev, gws_wrapper, package_smoke, package_version, proposal_kinds, public_release, release, service_backend
-from ciao.install_discovery import trusted_registry
+from ciao.workspace_discovery import trusted_registry
 from ciao.server_host import (
     BUNDLE_ID,
     EXIT_TIMEOUT_SECONDS,
