@@ -13,6 +13,7 @@ import pytest
 from ciao.models import (
     AssistantTextDelta,
     ModelChangedEvent,
+    SessionTitleEvent,
     SystemStatusEvent,
     ThinkingEvent,
     ToolUseEvent,
@@ -201,10 +202,21 @@ def test_compaction_in_progress_does_not(status: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "kind", ["plan", "available_commands_update", "session_info_update", "notice", "user_message_chunk", "compaction_summary_chunk"]
+    "kind", ["plan", "available_commands_update", "notice", "user_message_chunk", "compaction_summary_chunk"]
 )
 def test_known_silent_kinds_emit_nothing(kind: str) -> None:
     assert _normalizer().feed({"sessionUpdate": kind}) == []
+
+
+def test_session_info_title_emits_a_session_title_event() -> None:
+    (event,) = _normalizer().feed({"sessionUpdate": "session_info_update", "title": "  Fix the login  ", "updatedAt": "2026-11-19T10:00:00Z"})
+    assert isinstance(event, SessionTitleEvent)
+    assert event.title == "Fix the login"
+
+
+@pytest.mark.parametrize("title", [None, "", "   "])
+def test_session_info_without_a_title_emits_nothing(title: object) -> None:
+    assert _normalizer().feed({"sessionUpdate": "session_info_update", "title": title}) == []
 
 
 def test_unknown_kind_is_ignored(caplog: pytest.LogCaptureFixture) -> None:

@@ -27,7 +27,7 @@ def _result(chat) -> ResultEvent:
     return ResultEvent(
         type="result",
         result="assistant answer",
-        session_id="sess-x",
+        session_id="efa632d4-66e7-5764-a29e-02ed1c06def0",
         is_error=False,
         effective_model=chat.model,
         usage={},
@@ -180,7 +180,7 @@ async def test_origin_on_claude_history_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pcm, chat = _setup(tmp_path)
-    chat.session_id = "sess-origin"
+    chat.session_id = "5c3a66eb-8820-544d-bf5e-093ac8e156b0"
     chat.user_turn_origin = {"1": "webhook"}
     fake_sdk = SimpleNamespace(
         get_session_messages=lambda session_id, directory: [
@@ -190,7 +190,7 @@ async def test_origin_on_claude_history_rows(
             _Msg("assistant", "done"),
         ]
     )
-    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", fake_sdk.get_session_messages)
 
     response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
     users = [r for r in json.loads(response.body) if r["role"] == "user"]
@@ -321,7 +321,7 @@ async def test_the_retry_origin_reaches_the_history_rows(
 ) -> None:
     """A reload reconciles the chat from history: the tag must be in it."""
     pcm, chat = _setup(tmp_path)
-    chat.session_id = "sess-retry"
+    chat.session_id = "bd940ee7-03c5-5851-951d-d6e66ec182a7"
     chat.user_turn_origin = {"1": "retry"}
     fake_sdk = SimpleNamespace(
         get_session_messages=lambda session_id, directory: [
@@ -331,7 +331,7 @@ async def test_the_retry_origin_reaches_the_history_rows(
             _Msg("assistant", "done"),
         ]
     )
-    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", fake_sdk.get_session_messages)
 
     response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
     users = [r for r in json.loads(response.body) if r["role"] == "user"]

@@ -102,71 +102,6 @@ async def test_native_title_opencode_placeholder_is_not_final(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_native_title_claude_rejects_leaked_context_capsule(monkeypatch) -> None:
-    """A provider summarizer that echoes the injected capsule must not win.
-
-    Some providers' own titlers degrade on occasion and echo the literal
-    first session message back as the "title" - which carries our injected
-    [CIAO_CONTEXT_BEGIN] capsule. Accepting it verbatim would leak internal
-    routing state into the sidebar. A clean summary should still win when
-    only the custom title is contaminated.
-    """
-    from ciao.web import project_chats as pc
-
-    manager = _manager(chats={"chat-1": _chat(provider="claude")})
-
-    class FakeInfo:
-        custom_title = "[CIAO_CONTEXT_BEGIN]\n[Chat ID: \"chat-1\"]\n[CIAO_CONTEXT_END]\n\nWhat's the weather?"
-        summary = "Claude Summary"
-
-    monkeypatch.setattr(claude_adapter, "get_session_info", lambda _sid, directory=None: FakeInfo())
-    assert await manager._native_chat_title(manager._chats["chat-1"]) == "Claude Summary"
-
-
-@pytest.mark.asyncio
-async def test_native_title_claude_rejects_leaked_context_capsule_in_both(monkeypatch) -> None:
-    from ciao.web import project_chats as pc
-
-    manager = _manager(chats={"chat-1": _chat(provider="claude")})
-    leaked = "[CIAO_CONTEXT_BEGIN]\n[Chat ID: \"chat-1\"]\n[CIAO_CONTEXT_END]\n\nWhat's the weather?"
-
-    class FakeInfo:
-        custom_title = leaked
-        summary = leaked
-
-    monkeypatch.setattr(claude_adapter, "get_session_info", lambda _sid, directory=None: FakeInfo())
-    assert await manager._native_chat_title(manager._chats["chat-1"]) is None
-
-
-@pytest.mark.asyncio
-async def test_native_title_claude(monkeypatch) -> None:
-    from ciao.web import project_chats as pc
-
-    manager = _manager(chats={"chat-1": _chat(provider="claude")})
-
-    class FakeInfo:
-        custom_title = "Claude AI Title"
-        summary = "Claude Summary"
-
-    monkeypatch.setattr(claude_adapter, "get_session_info", lambda _sid, directory=None: FakeInfo())
-    assert await manager._native_chat_title(manager._chats["chat-1"]) == "Claude AI Title"
-
-
-@pytest.mark.asyncio
-async def test_native_title_claude_falls_back_to_summary(monkeypatch) -> None:
-    from ciao.web import project_chats as pc
-
-    manager = _manager(chats={"chat-1": _chat(provider="claude")})
-
-    class FakeInfo:
-        custom_title = None
-        summary = "Claude Summary"
-
-    monkeypatch.setattr(claude_adapter, "get_session_info", lambda _sid, directory=None: FakeInfo())
-    assert await manager._native_chat_title(manager._chats["chat-1"]) == "Claude Summary"
-
-
-@pytest.mark.asyncio
 async def test_native_title_claude_missing(monkeypatch) -> None:
     from ciao.web import project_chats as pc
 
@@ -488,55 +423,6 @@ async def test_auto_title_and_publish_runs_once_per_chat(monkeypatch) -> None:
         manager._auto_title_and_publish("c", "prompt", "reply"),
     )
     assert started == 1
-
-
-@pytest.mark.asyncio
-async def test_native_title_reads_the_chats_own_agent_root(monkeypatch) -> None:
-    """A chat outside the primary workspace must be looked up in ITS root.
-
-    Both readers are root-scoped — Claude Code keys sessions by directory — and
-    the provider that created the session was handed the chat's agent root. The
-    title reader used `config.workspace_root` instead, so after the re-rooting
-    every chat in a non-primary workspace looked up a directory its session was
-    never written under: no native title, ever, and the sidebar sat on the
-    deterministic fallback or "New Chat".
-    """
-    from ciao.web import project_chats as pc
-
-    seen: list[str | None] = []
-
-    class FakeInfo:
-        custom_title = "Work Chat Title"
-        summary = None
-
-    def fake_get_session_info(_sid, directory=None):
-        seen.append(directory)
-        # Only the chat's own root holds the session.
-        return FakeInfo() if directory == "/roots/work" else None
-
-    monkeypatch.setattr(claude_adapter, "get_session_info", fake_get_session_info)
-
-    manager = _manager(
-        config=_config({"personal": "/roots/personal", "work": "/roots/work"}),
-        chats={"chat-1": _chat(provider="claude")},
-        projects={"project-1": SimpleNamespace(project_id="project-1", workspace="work")},
-    )
-
-    runtime_roots: list[Path] = []
-    real_candidates = claude_adapter.ClaudeProvider.native_title_candidates.__func__
-
-    async def spy_candidates(cls, workspace_root, session_id, *, runtime_root):
-        runtime_roots.append(runtime_root)
-        return await real_candidates(cls, workspace_root, session_id, runtime_root=runtime_root)
-
-    monkeypatch.setattr(
-        claude_adapter.ClaudeProvider, "native_title_candidates", classmethod(spy_candidates)
-    )
-
-    assert await manager._native_chat_title(manager._chats["chat-1"]) == "Work Chat Title"
-    assert seen == ["/roots/work"]
-    # The runtime root is the engine's state directory, never the chat's agent root.
-    assert runtime_roots == [manager._config.state_path.parent]
 
 
 @pytest.mark.asyncio
@@ -1114,7 +1000,8 @@ async def test_claude_title_does_not_wait_for_native_poll(monkeypatch) -> None:
         "chat-1", "I want to find out where System One models help"
     )
     assert title == "System One Decision Models"
-    assert native_reads == 1
+    # ACP Claude chats never read the session file: the adapter's title arrives as an event.
+    assert native_reads == 0
     assert slept == []
 
 
@@ -1145,8 +1032,8 @@ async def test_claude_fallback_title_is_not_held_behind_native_polls(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_claude_native_title_is_read_once_and_nothing_polls_after_the_fallback(monkeypatch) -> None:
-    """The fallback stands; no background poll reads the provider again after it is written."""
+async def test_claude_chat_reads_no_native_title_so_nothing_polls(monkeypatch) -> None:
+    """The fallback stands: an ACP Claude chat has no SDK read to poll, so nothing runs after it."""
     from ciao.web import project_chats as pc
 
     manager = _manager(chats={"chat-1": _chat(provider="claude")})
@@ -1180,7 +1067,7 @@ async def test_claude_native_title_is_read_once_and_nothing_polls_after_the_fall
     for _ in range(20):
         await real_sleep(0)
 
-    assert reads == 1
+    assert reads == 0
     assert slept == []
     assert manager._chats["chat-1"].title == "hello"
     assert published == []

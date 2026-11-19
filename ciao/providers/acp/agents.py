@@ -12,16 +12,20 @@ runs, and Ciaobot never reads or stores the credentials it writes.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from ciao import claude_sessions
 from ciao.claude_trim import claude_settings_layer
 from ciao.models import AgentRequest
 from ciao.providers.acp.provider import AcpProvider
 from ciao.providers.acp.spec import AgentSpec, ModeChoice
 from ciao.tool_path import resolve_tool
+
+logger = logging.getLogger(__name__)
 
 CLAUDE = AgentSpec(
     id="claude",
@@ -119,27 +123,16 @@ class ClaudeAcpProvider(AcpProvider):
     async def delete_session(
         cls, workspace_root: Path, session_id: str, *, runtime_root: Path
     ) -> bool | None:
-        # The ACP journal goes first; the CLI's own session file goes too, which the
-        # SDK-era deleter still removes until C2a replaces it. Either one deleting counts.
-        from ciao.providers.claude import ClaudeProvider
-
+        # The ACP journal and the CLI's own session file both go. Either one deleting counts.
         journal = await super().delete_session(workspace_root, session_id, runtime_root=runtime_root)
-        cli_file = await ClaudeProvider.delete_session(
-            workspace_root, session_id, runtime_root=runtime_root
-        )
+        try:
+            cli_file = claude_sessions.delete_session_file(session_id, str(workspace_root))
+        except OSError:
+            # Neither the id nor the OSError text is logged: the id comes from the adapter, and
+            # the error text carries the path.
+            logger.warning("Could not delete a Claude session file; it was left in place.")
+            cli_file = False
         return True if (journal or cli_file) else None
-
-    @classmethod
-    async def native_title_candidates(
-        cls, workspace_root: Path, session_id: str, *, runtime_root: Path
-    ) -> tuple[str, ...]:
-        # The CLI writes the session title to its own session file, which the SDK-era reader
-        # still reads. C2a replaces that reader with one that needs no SDK.
-        from ciao.providers.claude import ClaudeProvider
-
-        return await ClaudeProvider.native_title_candidates(
-            workspace_root, session_id, runtime_root=runtime_root
-        )
 
 
 def claude_auth_command(*, device_auth: bool = False) -> list[str]:

@@ -72,7 +72,7 @@ async def test_synthesis_nudge_renders_as_system_line_and_keeps_turn_indexes(
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Synthesis nudge", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="nudge-render-test")
-    chat.session_id = "sess-nudge-render"
+    chat.session_id = "3e24b4c1-c510-50b7-86fe-ac590ba87c06"
     # Images belong to the second *human* turn; the nudge in between must not
     # claim the bucket.
     chat.user_turn_images = {"1": ["second.png"]}
@@ -86,7 +86,7 @@ async def test_synthesis_nudge_renders_as_system_line_and_keeps_turn_indexes(
             _Msg("user", "thanks, now do the other half"),
         ]
     )
-    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", fake_sdk.get_session_messages)
 
     response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
     messages = json.loads(response.body)

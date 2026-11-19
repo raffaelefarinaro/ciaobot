@@ -67,11 +67,11 @@ def _request(pcm: ProjectChatManager, config: CiaoConfig, chat_id: str) -> Reque
 
 
 _SEGMENTS = {
-    "sess-old": [
+    "46ebb681-ac37-5a9b-8fcf-a938423f292c": [
         _Msg("user", "what should we build first"),
         _Msg("assistant", "let's start with the backend"),
     ],
-    "sess-new": [
+    "9e473bb3-e1e6-5203-9611-a951d9317fe6": [
         _Msg("user", "This session is being continued from a previous conversation"),
         _Msg("assistant", "continuing: backend is done, testing now"),
     ],
@@ -88,14 +88,14 @@ async def test_messages_stitches_history_across_session_rotation(
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Rotation test", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="rotation-test")
-    chat.previous_session_ids = ["sess-old"]
-    chat.session_id = "sess-new"
+    chat.previous_session_ids = ["46ebb681-ac37-5a9b-8fcf-a938423f292c"]
+    chat.session_id = "9e473bb3-e1e6-5203-9611-a951d9317fe6"
     pcm._save()
 
     fake_sdk = SimpleNamespace(
         get_session_messages=lambda session_id, directory: _SEGMENTS[session_id]
     )
-    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", fake_sdk.get_session_messages)
 
     response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
     payload = response.body.decode()
@@ -127,7 +127,7 @@ async def test_flagged_compaction_precedes_user_filters_and_keeps_turn_indices(
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Compaction ordering", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="compaction-ordering")
-    chat.session_id = "sess-compact"
+    chat.session_id = "06f5c971-b66c-58b8-be7d-45da8579389b"
     pcm._save()
 
     compact = SimpleNamespace(
@@ -141,7 +141,7 @@ async def test_flagged_compaction_precedes_user_filters_and_keeps_turn_indices(
             _Msg("user", "next human turn"),
         ]
     )
-    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", fake_sdk.get_session_messages)
 
     response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
     rows = json.loads(response.body)
@@ -169,17 +169,17 @@ async def test_messages_skips_missing_rotated_segment_without_blanking_history(
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Rotation missing", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="rotation-missing-test")
-    chat.previous_session_ids = ["sess-gone"]
-    chat.session_id = "sess-new"
+    chat.previous_session_ids = ["820c7806-7cb6-5b6c-af50-1b59011e8a8f"]
+    chat.session_id = "9e473bb3-e1e6-5203-9611-a951d9317fe6"
     pcm._save()
 
     def _fake_get(session_id: str, directory: str):
-        if session_id == "sess-gone":
+        if session_id == "820c7806-7cb6-5b6c-af50-1b59011e8a8f":
             raise FileNotFoundError("gone")
         return _SEGMENTS[session_id]
 
     fake_sdk = SimpleNamespace(get_session_messages=_fake_get)
-    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", fake_sdk.get_session_messages)
 
     response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
     payload = response.body.decode()
@@ -196,8 +196,8 @@ async def test_new_session_clears_previous_session_ids(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Rotation reset", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="rotation-reset-test")
-    chat.previous_session_ids = ["sess-old"]
-    chat.session_id = "sess-new"
+    chat.previous_session_ids = ["46ebb681-ac37-5a9b-8fcf-a938423f292c"]
+    chat.session_id = "9e473bb3-e1e6-5203-9611-a951d9317fe6"
     pcm._save()
 
     pcm.new_session(chat.chat_id)
@@ -215,7 +215,7 @@ async def test_get_session_messages_full_traverses_logical_parent_uuid(
     pre-compaction and post-compaction turns in chronological order.
     """
     import json
-    from claude_agent_sdk._internal.sessions import project_key_for_directory
+    from ciao.claude_sessions import project_key_for_directory
     from ciao.transcripts import get_session_messages_full
 
     session_id = "11111111-2222-3333-4444-555555555555"
@@ -225,7 +225,7 @@ async def test_get_session_messages_full_traverses_logical_parent_uuid(
     jsonl_path = project_dir / f"{session_id}.jsonl"
 
     monkeypatch.setattr(
-        "claude_agent_sdk._internal.sessions._get_projects_dir",
+        "ciao.claude_sessions._get_projects_dir",
         lambda: tmp_path / ".claude" / "projects",
     )
 
@@ -311,11 +311,11 @@ async def test_get_session_messages_full_traverses_logical_parent_uuid(
 
 
 @pytest.mark.asyncio
-async def test_flagged_compact_recap_is_hidden_on_the_sdk_fallback_path(
+async def test_flagged_compact_recap_is_hidden_on_the_fallback_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import claude_agent_sdk._internal.sessions as sdk_sessions
-    from claude_agent_sdk._internal.sessions import project_key_for_directory
+    import ciao.claude_sessions as sdk_sessions
+    from ciao.claude_sessions import project_key_for_directory
     import ciao.transcripts as transcripts
 
     session_id = "11111111-2222-3333-4444-555555555555"
@@ -387,7 +387,6 @@ async def test_flagged_compact_recap_is_hidden_on_the_sdk_fallback_path(
 def test_compaction_metadata_is_lifted_by_uuid_not_duplicate_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import claude_agent_sdk._internal.sessions as sdk_sessions
     import ciao.transcripts as transcripts
 
     raw = json.dumps({
@@ -396,7 +395,7 @@ def test_compaction_metadata_is_lifted_by_uuid_not_duplicate_text(
         "isCompactSummary": True,
         "message": {"role": "user", "content": "same recap text"},
     })
-    monkeypatch.setattr(sdk_sessions, "_read_session_file", lambda *_args: raw)
+    monkeypatch.setattr(transcripts, "read_session_file", lambda *_args: raw)
     messages = [
         SimpleNamespace(
             type="user", uuid="flagged",
@@ -427,7 +426,7 @@ async def test_messages_number_post_handover_turns_after_earlier_ones(
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Handover numbering", workspace="personal")
     chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
-    chat.session_id = "sess-old"
+    chat.session_id = "46ebb681-ac37-5a9b-8fcf-a938423f292c"
     chat.user_turn_count = 3
     pcm._save()
 
@@ -444,7 +443,7 @@ async def test_messages_number_post_handover_turns_after_earlier_ones(
     # What the send path records for the next turn.
     chat.user_turn_count = 4
     chat.user_turn_timings["3"] = {"sent_at": "2026-10-11T11:38:00Z"}
-    chat.session_id = "sess-after"
+    chat.session_id = "929efa74-6056-5319-831a-5bc31ded7799"
     pcm._save()
 
     fake_sdk = SimpleNamespace(
@@ -453,7 +452,7 @@ async def test_messages_number_post_handover_turns_after_earlier_ones(
             _Msg("assistant", "searching"),
         ]
     )
-    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", fake_sdk.get_session_messages)
 
     response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
     rows = json.loads(response.body)

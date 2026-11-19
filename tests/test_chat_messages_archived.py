@@ -114,7 +114,7 @@ async def test_archived_chat_falls_back_to_transcript(tmp_path: Path, monkeypatc
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Archive fallback", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="archived-fallback")
-    chat.session_id = "sess-archived"
+    chat.session_id = "28ded13b-ed57-5495-afb3-49afc259e3b5"
 
     # Write a fake archived transcript in the vault
     chats_dir = tmp_path / "memory-vault" / "Logs" / "Chats" / chat.chat_id
@@ -133,7 +133,7 @@ async def test_archived_chat_falls_back_to_transcript(tmp_path: Path, monkeypatc
     fake_sdk = SimpleNamespace(
         get_session_messages=lambda session_id, directory: (_ for _ in ()).throw(FileNotFoundError("gone"))
     )
-    monkeypatch.setitem(__import__("sys").modules, "claude_agent_sdk", fake_sdk)
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", fake_sdk.get_session_messages)
 
     response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
     payload = response.body.decode()
@@ -152,7 +152,7 @@ async def test_archived_chat_returns_handover_when_transcript_missing(tmp_path: 
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Archive missing", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="missing-transcript")
-    chat.session_id = "sess-missing"
+    chat.session_id = "788e21ae-ee1d-5ffd-bead-bd50767e6acb"
     chat.archived = True
     chat.archive_path = "memory-vault/Logs/Chats/nope.md"
     chat.handover_messages = [{"role": "user", "content": "seed"}]
@@ -161,7 +161,7 @@ async def test_archived_chat_returns_handover_when_transcript_missing(tmp_path: 
     fake_sdk = SimpleNamespace(
         get_session_messages=lambda session_id, directory: (_ for _ in ()).throw(FileNotFoundError("gone"))
     )
-    monkeypatch.setitem(__import__("sys").modules, "claude_agent_sdk", fake_sdk)
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", fake_sdk.get_session_messages)
 
     response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
     payload = response.body.decode()
@@ -178,7 +178,7 @@ async def test_archived_chat_falls_back_when_sdk_session_is_empty(
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Archive empty SDK", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="empty-sdk-session")
-    chat.session_id = "sess-empty"
+    chat.session_id = "3bf858f3-719b-5bc0-8a22-741f3915775b"
 
     chats_dir = tmp_path / "memory-vault" / "Logs" / "Chats" / chat.chat_id
     claude_dir = chats_dir / "claude"
@@ -190,7 +190,7 @@ async def test_archived_chat_falls_back_when_sdk_session_is_empty(
     pcm._save()
 
     fake_sdk = SimpleNamespace(get_session_messages=lambda session_id, directory: [])
-    monkeypatch.setitem(__import__("sys").modules, "claude_agent_sdk", fake_sdk)
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", fake_sdk.get_session_messages)
 
     response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
     payload = response.body.decode()
@@ -285,7 +285,7 @@ async def _archived_rows(
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Archive meta", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="archived-meta")
-    chat.session_id = "sess-archived"
+    chat.session_id = "28ded13b-ed57-5495-afb3-49afc259e3b5"
     path = tmp_path / "memory-vault" / "Logs" / "Chats" / chat.chat_id / "claude" / "a.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_HEADER + body, encoding="utf-8")
@@ -297,7 +297,7 @@ async def _archived_rows(
     fake_sdk = SimpleNamespace(
         get_session_messages=lambda session_id, directory: (_ for _ in ()).throw(FileNotFoundError("gone"))
     )
-    monkeypatch.setitem(__import__("sys").modules, "claude_agent_sdk", fake_sdk)
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", fake_sdk.get_session_messages)
     response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
     payload = json.loads(response.body.decode())
     return payload["messages"] if isinstance(payload, dict) else payload

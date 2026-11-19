@@ -900,6 +900,10 @@ class ChatInfo:
     # Transient UI flag: "pending" while an auto-title generation is in
     # flight, "ready" otherwise. Not persisted — reset to "ready" on load.
     title_status: str = "ready"
+    # The title the agent last sent over ACP (session_info_update). Provisional: a later
+    # adapter title replaces it while the chat still shows it, and a user rename stops
+    # that. Not persisted, so after a restart the shown title stands as it is.
+    adapter_title: str = ""
     # Needs-you action cards. Transient and memory only:
     # an action can name a sign-in URL or a helper session, so it never reaches
     # the chat registry. It ends with the conversation it was raised in (archive,
@@ -8934,6 +8938,33 @@ class ProjectChatManager:
             sent_at = str(timing.get("sent_at") or "")
         return {"turn_index": found_index, "sent_at": sent_at}
 
+    def apply_adapter_title(self, chat_id: str, title: str) -> bool:
+        """Apply the agent's own session title, provisionally. True when the chat changed.
+
+        Written only while the chat shows the default title or the title an earlier adapter
+        title wrote, so a user rename is never replaced. Titles that fail the provider-title
+        check are dropped, as the native reads drop them.
+        """
+        chat = self._chats.get(chat_id)
+        clean = chat_service._real_title(title)
+        if chat is None or clean is None:
+            return False
+        shows_default = chat.title == DEFAULT_CHAT_TITLE
+        shows_adapter_title = bool(chat.adapter_title) and chat.title == chat.adapter_title
+        if not (shows_default or shows_adapter_title) or clean == chat.title:
+            return False
+        chat.title = clean
+        chat.adapter_title = clean
+        chat.title_status = "ready"
+        self._save()
+        self._events.publish({
+            "type": "chat_title",
+            "chat_id": chat_id,
+            "title": clean,
+            "status": "ready",
+        })
+        return True
+
     async def _auto_title_and_publish(
         self, chat_id: str, user_text: str, assistant_text: str
     ) -> None:
@@ -10079,7 +10110,9 @@ class ProjectChatManager:
            read once, with no wait. Context-prefixed Ciaobot prompts commonly
            suppress Claude's native titler, and nothing polls after the fallback
            is written. Every wait re-checks the chat, so a manual rename or a
-           delete stops titling.
+           delete stops titling. (Claude over ACP sends its title as a
+           ``session_info_update`` event, applied by ``apply_adapter_title``
+           while the turn streams, so no read is made here.)
         2. A one-shot model call (``_llm_chat_title``) when the native title
            is absent, run straight after the inline native read.
         3. The deterministic ``chat_service._fallback_title`` (first 6 words of the

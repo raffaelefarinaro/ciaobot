@@ -331,6 +331,17 @@ class SystemStatusEvent(StreamEvent):
 
 
 @dataclass(slots=True)
+class SessionTitleEvent(StreamEvent):
+    """The agent's own session title (ACP ``session_info_update``).
+
+    Provisional: an agent may send several, and the host applies one only while the chat
+    still has a default or adapter-written title. A user rename is never replaced.
+    """
+
+    title: str = ""
+
+
+@dataclass(slots=True)
 class ModelChangedEvent(StreamEvent):
     """Emitted when the chat's model is switched during a capability fallback.
 
