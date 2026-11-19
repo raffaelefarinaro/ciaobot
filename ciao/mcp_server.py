@@ -359,7 +359,7 @@ class Operation:
 
 async def _op_context_logs(service: CiaoMcpService, lines: int = CONTEXT_LOGS_DEFAULT_LINES) -> dict[str, Any]:
     """Return the installed Ciaobot version plus recent failed background jobs recorded
-    for the calling workspace. Read-only; works under workspace-only file access.
+    for the calling workspace. Read-only.
 
     Engine-wide server error, debug and service logs are not readable here: they carry no
     immutable workspace provenance, so the `error_log`, `debug_log` and `service_log`
