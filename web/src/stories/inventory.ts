@@ -1047,25 +1047,43 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/ChatPanel.vue"
     ],
-    "variants": [],
-    "variantNotes": "Hidden when empty, real upload-progress rows. Detailed variants are unassessed.",
+    "variants": ["uploads"],
+    "variantNotes": "All rendering derives from the one uploads prop: hidden when empty, one row per upload whose phase comes from isProcessing, the rounded percent from loaded/total, ellipsised labels at composer width.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ComposerUploadProgress.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["composer-upload-progress--default"],
+        "note": "One upload mid-flight: phaseLabel's isProcessing false branch gives 'Loading <label>…' on the role=status span, both there and as the progress element's aria-label, the aria-hidden percent and the progress value at the same rounded loaded/total (42 of 105 → 40)."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "processing",
+        "coverage": "covered",
+        "storyIds": ["composer-upload-progress--processing"],
+        "note": "The isProcessing branch reached with total <= 0 (unknown size): phaseLabel becomes 'Processing <label>…' and percent() is 100 in both the percent text and the progress value."
+      },
+      {
+        "name": "multiple",
+        "coverage": "covered",
+        "storyIds": ["composer-upload-progress--multiple"],
+        "note": "The v-for renders one row per in-flight upload: a Loading row at 40%, an unknown-size Processing row, and a completed-but-still-listed upload (loaded >= total, the branch's second trigger) that shows Processing at 100 as well."
+      },
+      {
+        "name": "empty",
+        "coverage": "covered",
+        "storyIds": ["composer-upload-progress--empty"],
+        "note": "The root v-if=\"uploads.length\" renders nothing while the composer has no in-flight uploads."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["composer-upload-progress--narrow"],
+        "note": "In a maximum 390px wrapper the rows keep the composer inset, the long synthetic label ellipsises (nowrap + overflow hidden) and the row does not overflow its container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in ComposerUploadProgress.vue has not yet been audited."
+      "status": "none",
+      "detail": "Renders only the uploads prop useChatComposer owns: no fetch, no skeleton and no owner-level initial, refresh, failure or stale state, so there is no placeholder geometry to compare with the loaded rows."
     },
     "migration": {
       "status": "unassessed",
@@ -5214,25 +5232,55 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/ChatPanel.vue"
     ],
-    "variants": [],
-    "variantNotes": "Delegation title/description read surface. Detailed variants are unassessed.",
+    "variants": ["title", "description", "knownPaths"],
+    "variantNotes": "Title and description are independent v-if branches (no title hides the h3, an empty description renders the 'No description.' line); knownPaths linkifies touched file names inside the description; the raw prompt always sits verbatim behind the native disclosure.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in TaskHandoverCard.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["task-handover-card--default"],
+        "note": "Full read surface: the 'Task handed over' label, the h3 title (v-if handover.title), the sanitised description (v-if descriptionHtml) and the closed details disclosure. The stories parse the synthetic fenced prompt with the production parseTaskHandover, exactly what ChatPanel hands over."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "open-raw",
+        "coverage": "covered",
+        "storyIds": ["task-handover-card--open-raw"],
+        "note": "Activating the summary opens the details element so the prompt prop shows verbatim in the pre with real visible height."
+      },
+      {
+        "name": "no-title",
+        "coverage": "covered",
+        "storyIds": ["task-handover-card--no-title"],
+        "note": "An empty handover.title fails the v-if: no h3 renders, while the label, description and disclosure stay."
+      },
+      {
+        "name": "no-description",
+        "coverage": "covered",
+        "storyIds": ["task-handover-card--no-description"],
+        "note": "An empty handover.description leaves descriptionHtml '' so the v-else renders the 'No description.' line instead of the description div; the title keeps rendering."
+      },
+      {
+        "name": "file-links",
+        "coverage": "covered",
+        "storyIds": ["task-handover-card--file-links"],
+        "note": "The knownPaths prop linkifies the touched bare basename (beta-notes.md) in the description and the path-like mention, while an untouched bare name (scratch-pad.txt) stays plain text."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": ["task-handover-card--keyboard-focus"],
+        "note": "Tab lands the focus on the disclosure summary (it is the active element) with a visible :focus-visible outline (the production summary:focus-visible rule). The toggle itself is covered by open-raw via click: the runner's keyboard events reach the summary but do not run its native Enter activation in headless Chromium, while a real browser toggles the focused disclosure on Enter."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["task-handover-card--narrow"],
+        "note": "In a maximum 390px wrapper the card stays at its column width and a long title token wraps through overflow-wrap anywhere instead of overflowing the container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in TaskHandoverCard.vue has not yet been audited."
+      "status": "none",
+      "detail": "Props-only read surface: descriptionHtml computes synchronously from the handover and knownPaths props and ChatPanel gates when the card exists at all, so the owner has no fetch, skeleton or failure/stale state of its own."
     },
     "migration": {
       "status": "unassessed",
@@ -7955,21 +8003,73 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Detailed configurable variants have not yet been audited.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsAppInstall.vue implements this render; no rendered-state story exists."
+        "name": "browser-tab",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-app-install--default"
+        ],
+        "note": "Browser tab on the workshop loopback origin, which is a secure context: A browser tab, the localhost origin detail, and the collapsed steps list."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "steps-expanded",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-app-install--steps-expanded"
+        ],
+        "note": "expandSteps true (the Home setup card link): the platform steps disclosure is open."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-app-install--keyboard-focus"
+        ],
+        "note": "Keyboard path: Tab reaches the steps summary and its focus ring shows. The open toggle is not simulated by the runner; StepsExpanded covers the open state."
+      },
+      {
+        "name": "installed-on-device",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-app-install--installed-on-device"
+        ],
+        "note": "installedOnDevice true in a browser tab: the device-level detail says the app is installed on this device too."
+      },
+      {
+        "name": "running-as-app",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "Running as the installed app needs display-mode: standalone. The workshop window is a browser tab and cannot enter that mode in isolation."
+      },
+      {
+        "name": "plain-http",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "Plain HTTP on the network needs a non-loopback origin that is not secure. The workshop is served on loopback only."
+      },
+      {
+        "name": "secure-https",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "Secure: HTTPS needs an HTTPS origin. The workshop does not serve one."
+      },
+      {
+        "name": "current-route-badge",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "The Your browser badge follows the user agent and platform probes. The workshop does not set them, so no story pins which row is highlighted."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-app-install--narrow"
+        ],
+        "note": "390px container: the This window row stays inside the narrow viewport."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsAppInstall.vue has not yet been audited."
+      "status": "none",
+      "detail": "No async read: the window, origin and install-route facts are read once at setup. installedOnDevice is filled by SettingsView's app list outside this owner, so the story sets it directly and the owner has no loading state of its own."
     },
     "migration": {
       "status": "unassessed",
@@ -8082,21 +8182,79 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Detailed configurable variants have not yet been audited.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsClaudeTrim.vue implements this render; no rendered-state story exists."
+        "name": "no-options",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-claude-trim--no-options"
+        ],
+        "note": "Workspace form present, catalogue empty: the card renders nothing."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "no-workspace-form",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-claude-trim--no-workspace-form"
+        ],
+        "note": "No active workspace form: the card renders nothing."
+      },
+      {
+        "name": "default",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-claude-trim--default"
+        ],
+        "note": "Catalogue defaults: switches On, the scheduling disclosure shows 4 of 4 hidden, and Reset to defaults is disabled."
+      },
+      {
+        "name": "edited",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-claude-trim--edited"
+        ],
+        "note": "A saved override shows its row Off, a click on another row flips it, and Reset to defaults is enabled."
+      },
+      {
+        "name": "scheduling-unlocked",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-claude-trim--scheduling-unlocked"
+        ],
+        "note": "One scheduling row turned on: the disclosure shows 3 of 4 hidden, the group note appears, and the row reads On."
+      },
+      {
+        "name": "saving",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-claude-trim--saving"
+        ],
+        "note": "workspacesSaving names this workspace: every switch and Reset to defaults are disabled."
+      },
+      {
+        "name": "keyboard-toggle",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-claude-trim--keyboard-toggle"
+        ],
+        "note": "Keyboard path: Tab reaches the first switch and Space toggles it."
+      },
+      {
+        "name": "save-failure",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "The card has no error branch. A failed save is reported by the Save changes row in the parent SettingsWorkspaceOverview, not by this owner."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-claude-trim--narrow"
+        ],
+        "note": "390px container: the first switch stays inside the narrow viewport."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsClaudeTrim.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch: options come from projectStore.claudeTrimOptions and the form from the workspace admin SettingsView provides. An empty catalogue or missing form renders nothing, so a catalogue still loading looks the same as one with no options."
     },
     "migration": {
       "status": "unassessed",
@@ -8202,21 +8360,125 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Detailed configurable variants have not yet been audited.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsEngineLogin.vue implements this render; no rendered-state story exists."
+        "name": "checking",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-engine-login--checking"
+        ],
+        "note": "Initial read pending: the Checking this host line. Story holds the GET until teardown."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "load-failed",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-engine-login--load-failed"
+        ],
+        "note": "Initial read failed with no row: the error alert and a Check again button."
+      },
+      {
+        "name": "enabled",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-engine-login--enabled"
+        ],
+        "note": "Position enabled and licensed: Starts when I sign in, with the Disable at sign-in button."
+      },
+      {
+        "name": "disabled",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-engine-login--disabled"
+        ],
+        "note": "Position disabled and licensed: Does not start when I sign in, with Enable at sign-in. The PATCH answer is the row that is shown."
+      },
+      {
+        "name": "not-installed",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-engine-login--not-installed"
+        ],
+        "note": "installed false: Not installed for this user, the setup lead and the setup command in a code block, and no action."
+      },
+      {
+        "name": "unsupported-platform",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-engine-login--unsupported-platform"
+        ],
+        "note": "supported false: Not read on this platform with the default reason, and no action."
+      },
+      {
+        "name": "unknown-position",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-engine-login--unknown-position"
+        ],
+        "note": "enabled null with can_change false: Unknown with the machine's reason, and no action button."
+      },
+      {
+        "name": "read-only",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-engine-login--read-only"
+        ],
+        "note": "can_change false with a known position: the position shows and no action button is offered."
+      },
+      {
+        "name": "write-pending",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-engine-login--write-pending"
+        ],
+        "note": "PATCH pending: the button reads Working and is disabled with aria-busy."
+      },
+      {
+        "name": "write-refused",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-engine-login--write-refused"
+        ],
+        "note": "PATCH refused (409): the error alert and Check again beside the row the 409 body carried."
+      },
+      {
+        "name": "refresh-failed",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-engine-login--refresh-failed"
+        ],
+        "note": "Stale row: a failed re-read after a refused write keeps the last known row with the Could not refresh warning."
+      },
+      {
+        "name": "refresh-pending",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-engine-login--refresh-pending"
+        ],
+        "note": "Re-read over a row already on screen: the write alert is cleared and no pending indicator shows. Recorded in the loading detail."
+      },
+      {
+        "name": "copy-feedback",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "Copied or blocked feedback after Copy: success depends on the browser clipboard permission, which the workshop runner cannot grant deterministically."
+      },
+      {
+        "name": "desktop-hint",
+        "coverage": "not-applicable",
+        "storyIds": [],
+        "note": "Ciaobot for Mac hint branch (isDesktopClient). In-app branches are not-applicable in the workshop: only isDesktopClient() may read the marker."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-engine-login--narrow"
+        ],
+        "note": "390px container: the action button is full width and inside the narrow viewport."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsEngineLogin.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial: the single Checking this host hint line is the placeholder and does not match the loaded key/value row (116px key column, state line and action), so the geometry differs. Initial failure: the alert with Check again and no row. Refresh over a shown row (refresh-pending): no pending indicator and the write alert is cleared. Stale: a failed refresh keeps the last row under a warning line (refresh-failed)."
     },
     "migration": {
       "status": "unassessed",
@@ -8578,21 +8840,75 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Detailed configurable variants have not yet been audited.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsNotifications.vue implements this render; no rendered-state story exists."
+        "name": "off",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-notifications--off"
+        ],
+        "note": "Notification.permission pinned to default, web push supported, no push subscription: Off on this device with Enable on this device. The read is best-effort and silent."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-notifications--narrow"
+        ],
+        "note": "390px container: the enable button stays inside the narrow viewport."
+      },
+      {
+        "name": "on-this-device",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "On for this device needs an active service-worker push subscription. The workshop registers no service worker."
+      },
+      {
+        "name": "enable-pending",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "Working while enablePush runs needs a real permission request and service-worker registration, which the workshop cannot fence."
+      },
+      {
+        "name": "enable-error",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "The push error alert needs enablePush to throw, which depends on the browser permission and a service worker."
+      },
+      {
+        "name": "permission-denied",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-notifications--permission-denied"
+        ],
+        "note": "Notification.permission pinned to denied for the mount: Blocked by the system with the System Settings fix line and no enable button."
+      },
+      {
+        "name": "needs-home-screen-app",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "Needs the Home Screen app needs an iOS user agent outside standalone mode. The workshop cannot set it."
+      },
+      {
+        "name": "push-unavailable",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "Not available in this browser needs a browser without PushManager. The workshop's secure context provides it."
+      },
+      {
+        "name": "optional-mac-install-note",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "The optional Mac install note shows only on a macOS user agent with push off. The runner's host decides it, so no story pins it."
+      },
+      {
+        "name": "mac-app-bridge",
+        "coverage": "not-applicable",
+        "storyIds": [],
+        "note": "Ciaobot for Mac owns notifications (isDesktopClient): the bridge snapshot and Handled by the Mac app text. In-app branches are not-applicable in the workshop."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsNotifications.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial: support and enabled flags start false, so the first paint before onMounted reads Not available in this browser, and Off on this device is the answer only after isPushEnabled() resolves; an enabled device shows Off until then. Failure is best-effort and silent (no failure line). There is no refresh or stale state."
     },
     "migration": {
       "status": "unassessed",
@@ -8694,21 +9010,57 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Detailed configurable variants have not yet been audited.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in SettingsRestartResume.vue implements this render; no rendered-state story exists."
+        "name": "on",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-restart-resume--on"
+        ],
+        "note": "Switch on: resume_after_restart unset or true. A click saves false, and the switch follows the saved value."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "off",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-restart-resume--off"
+        ],
+        "note": "Switch off: resume_after_restart is false. A click saves true."
+      },
+      {
+        "name": "no-settings",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-restart-resume--no-settings"
+        ],
+        "note": "routines is null before the engine settings arrive: the switch is disabled and a click cannot write."
+      },
+      {
+        "name": "saving",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-restart-resume--saving"
+        ],
+        "note": "routinesSaving: the switch is disabled while a save is in flight."
+      },
+      {
+        "name": "keyboard-toggle",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-restart-resume--keyboard-toggle"
+        ],
+        "note": "Keyboard path: the switch takes focus with Tab and Space toggles it."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-restart-resume--narrow"
+        ],
+        "note": "390px container: the switch keeps a width inside the narrow viewport."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in SettingsRestartResume.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch in this owner: it reads the routines and routinesSaving props SettingsView passes from its settings store. A null routines object is the only pre-load state and renders the disabled switch with no separate loading line."
     },
     "migration": {
       "status": "unassessed",
