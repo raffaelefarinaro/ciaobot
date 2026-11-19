@@ -547,14 +547,13 @@ def update_package(
         # administrator workflow (no `ciao update stage`) was the #567 review
         # finding — the platform check ran first and swallowed this branch.
         #
-        # The command follows the platform, not just the mode: install.sh exits
-        # on Linux with "this installer supports macOS only", so pointing a
-        # Linux installer engine at it would be advice that cannot work.
+        # The engine-only installer script is gone, so the answer is the
+        # engine's own verbs, the same on every platform.
         return {
             "ok": False,
             "mode": mode,
-            "error": "This engine was installed by the Ciaobot installer. Stage an update with `ciao update stage`; applying it from the app arrives in a later release.",
-            "command": "ciao update stage" if sys.platform.startswith("linux") else "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install-engine.sh | sh",
+            "error": "This engine was installed by the Ciaobot installer. Run `ciao update stage`, then `ciao update apply`.",
+            "command": "ciao update stage",
         }
     if sys.platform.startswith("linux"):
         # The documented Linux install is `pip install -e`, which

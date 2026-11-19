@@ -313,9 +313,8 @@ findings land as inline comments.
 3. That fires `publish.yml`:
    - `build-engine` (macos) — builds the PWA and the engine wheel, verifies the
      wheel in a clean environment, signs the engine manifest with the release
-     minisign key, and attaches the wheel, the manifest and its signature, plus
-     the engine installer as both `install.sh` and `install-engine.sh` (the same
-     bytes under both names, #651).
+     minisign key, and attaches exactly three engine assets: the wheel, the
+     manifest and its signature.
      Since #653 there is no app archive, no updater feed, no native verifier and
      no bundled runtime.
    - `release-smoke` (macos) — installs the engine from the release's one-line
@@ -337,9 +336,7 @@ curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/
 `tests/test_ci_workflow.py::test_first_party_install_command_stays_install_sh`
 pins that exact command into this skill, `README.md`, `site/index.html`,
 `site/guide.html` and `docs/DEVELOPMENT.md`, and fails if any of them starts
-pointing a first-time user at `install-engine.sh` instead. The build attaches
-the installer under both names because the public one-liner kept `install.sh`
-while the hand-over path fetched `install-engine.sh` (#651) — but `install.sh` is
+pointing a first-time user at `install-engine.sh` instead. `install.sh` is
 the one a user runs.
 
 **Merging the release PR** is the one irreversible act in this skill. The
