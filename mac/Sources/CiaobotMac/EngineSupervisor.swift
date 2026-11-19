@@ -20,22 +20,34 @@ enum EngineMode: String {
 
 protocol EngineModeStoring: AnyObject {
     var mode: EngineMode? { get set }
+    /// Consecutive launches that ended rolled back by an engine-level refusal
+    /// (see `EngineTakeover.rolledBackStreak`). Reset by a completed takeover and
+    /// by a mode pick.
+    var rolledBackTakeovers: Int { get set }
 }
 
 /// A mode store that touches nothing on disk. The AppDelegate test
 /// initializer uses it, so an ordinary test launch reads no defaults.
 final class TransientEngineModeStore: EngineModeStoring {
     var mode: EngineMode?
+    var rolledBackTakeovers = 0
 }
 
 final class UserDefaultsEngineModeStore: EngineModeStoring {
     static let defaultKey = "CiaobotEngineMode"
+    static let rolledBackKey = "CiaobotEngineRolledBackTakeovers"
     private let defaults: UserDefaults
     private let key: String
+    private let rolledBackKey: String
 
-    init(defaults: UserDefaults = .standard, key: String = UserDefaultsEngineModeStore.defaultKey) {
+    init(
+        defaults: UserDefaults = .standard,
+        key: String = UserDefaultsEngineModeStore.defaultKey,
+        rolledBackKey: String = UserDefaultsEngineModeStore.rolledBackKey
+    ) {
         self.defaults = defaults
         self.key = key
+        self.rolledBackKey = rolledBackKey
     }
 
     var mode: EngineMode? {
@@ -43,6 +55,11 @@ final class UserDefaultsEngineModeStore: EngineModeStoring {
         set {
             if let newValue { defaults.set(newValue.rawValue, forKey: key) } else { defaults.removeObject(forKey: key) }
         }
+    }
+
+    var rolledBackTakeovers: Int {
+        get { defaults.integer(forKey: rolledBackKey) }
+        set { defaults.set(newValue, forKey: rolledBackKey) }
     }
 }
 

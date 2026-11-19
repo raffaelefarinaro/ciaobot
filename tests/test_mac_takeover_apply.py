@@ -1733,6 +1733,61 @@ def test_rollback_refuses_after_the_trash_list_was_handed_out(
     assert app_engine.read_pointer() is not None
 
 
+def test_finish_twice_then_rollback_is_refused_with_the_trash_offered(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two finish answers from healthy, then a rollback: the offer is kept, nothing is undone."""
+    takeover_id = apply_to_pointer_written(machine, monkeypatch)
+    healthy_engine(monkeypatch, machine)
+    first = mac_takeover.finish(takeover_id=takeover_id, runner=Launchd())
+    again = mac_takeover.finish(takeover_id=takeover_id, runner=Launchd())
+
+    assert first["ok"] is True and again["ok"] is True
+    assert [item["path"] for item in again["trash"]] == [item["path"] for item in first["trash"]]
+    journal = mac_takeover._load_journal(takeover_id)
+    assert journal is not None
+    assert journal["state"] == "healthy" and journal["trash_offered"] is True
+
+    release_held_locks_now()
+    launchd = Launchd()
+    old_engine_answers(monkeypatch, machine, launchd)
+    refused = mac_takeover.rollback(
+        takeover_id=takeover_id, runner=launchd, clock=ticking(), sleep=no_sleep
+    )
+
+    assert (refused["ok"], refused["reason"], refused["state"]) == (False, "trash_offered", "healthy")
+    assert launchd.destructive() == []
+    assert not _plist_path(machine).exists()
+    assert app_engine.read_pointer() is not None
+
+
+def test_a_second_finish_from_healthy_offers_only_what_is_still_there(
+    machine: Machine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A finish from healthy re-lists the candidates: what the app already trashed drops out."""
+    takeover_id = apply_to_pointer_written(machine, monkeypatch)
+    healthy_engine(monkeypatch, machine)
+    first = mac_takeover.finish(takeover_id=takeover_id, runner=Launchd())
+    assert sorted(Path(item["path"]).name for item in first["trash"]) == [
+        "ciao",
+        "ciaobot",
+        "install-receipt.json",
+    ]
+    # The app trashed the env root between the two answers (a lost second call).
+    shutil.rmtree(machine.env_root)
+
+    again = mac_takeover.finish(takeover_id=takeover_id, runner=Launchd())
+
+    assert again["ok"] is True
+    assert sorted(Path(item["path"]).name for item in again["trash"]) == [
+        "ciao",
+        "install-receipt.json",
+    ]
+    journal = mac_takeover._load_journal(takeover_id)
+    assert journal is not None
+    assert journal["state"] == "healthy" and journal["trash_offered"] is True
+
+
 def test_the_trash_mark_is_journalled_before_the_list_leaves(
     machine: Machine, monkeypatch: pytest.MonkeyPatch
 ) -> None:

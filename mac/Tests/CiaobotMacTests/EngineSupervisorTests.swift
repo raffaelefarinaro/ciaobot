@@ -142,6 +142,18 @@ final class EngineSupervisorTests: XCTestCase {
         XCTAssertNil(store.mode)
     }
 
+    func testTheRolledBackCounterIsPersistedNextToTheModeInItsOwnKey() throws {
+        let name = IsolatedDefaults.makeName("EngineRolledBack")
+        defer { IsolatedDefaults.remove(name) }
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        let store = UserDefaultsEngineModeStore(defaults: defaults)
+        XCTAssertEqual(store.rolledBackTakeovers, 0)
+        store.rolledBackTakeovers = 2
+        XCTAssertEqual(defaults.integer(forKey: "CiaobotEngineRolledBackTakeovers"), 2)
+        XCTAssertEqual(UserDefaultsEngineModeStore(defaults: defaults).rolledBackTakeovers, 2)
+        XCTAssertNil(store.mode, "the counter does not touch the saved mode")
+    }
+
     func testHomePathsDeriveFromTheInjectedHome() {
         let h = EngineHome(home: URL(fileURLWithPath: "/tmp/h", isDirectory: true))
         XCTAssertEqual(h.stateDir.path, "/tmp/h/Library/Application Support/Ciaobot/engine")

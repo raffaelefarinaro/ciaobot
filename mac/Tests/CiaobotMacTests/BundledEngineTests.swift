@@ -196,6 +196,14 @@ final class BundledEngineTests: XCTestCase {
         }
     }
 
+    func testTakeoverCommandRunsTheMacTakeoverSubcommandAndNeverTakesAPort() throws {
+        let engine = try locate()
+        let launch = engine.launch(.takeover(["plan", "--json"]), port: 9001,
+                                   parentEnvironment: [:], workingDirectory: scratch)
+        XCTAssertEqual(launch.executable, engine.launcher)
+        XCTAssertEqual(launch.arguments, ["mac-takeover", "plan", "--json"])
+    }
+
     func testSourceAvoidsInstallerPathsAndShells() throws {
         let text = try String(contentsOf: Self.sourcesDirectory.appendingPathComponent("BundledEngine.swift"))
         for banned in ["NativeInstaller", "EngineUpdater", "EngineRelease", "/usr/bin/env", "Process(",

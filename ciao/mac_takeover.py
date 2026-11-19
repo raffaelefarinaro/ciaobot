@@ -244,6 +244,8 @@ class TakeoverPlan:
     program_kind: str = ""  # "server_host" | "installer_env" | "checkout" | "python"
     old_version: str = ""
     old_running: bool = False
+    #: Chats an old engine would interrupt. -1 on a resume whose old engine
+    #: answers but whose chats cannot be counted: the app asks without a number.
     active_chats: int = 0
     trash: tuple[TrashCandidate, ...] = ()
     left_in_place: tuple[str, ...] = ()
@@ -889,8 +891,13 @@ def plan(
     launch_agents_dir: Path | None = None,
     label: str = SERVER_LABEL,
     runner: Runner | None = None,
+    describe_resume: bool = True,
 ) -> TakeoverPlan:
-    """Classify this Mac's old engine for takeover. Writes nothing."""
+    """Classify this Mac's old engine for takeover. Writes nothing.
+
+    ``describe_resume`` is False for apply's own re-plan: a resumed takeover is
+    then answered from its journal alone, before any probe or launchctl call.
+    """
     runner = runner if runner is not None else _default_runner()
     # 0. isolation guard: a test never boots out the live engine, and production
     # always names the real label.
@@ -903,7 +910,9 @@ def plan(
         return _refuse("takeover_state_unsafe", label)
     resume_id = _unfinished_journal()
     if resume_id:
-        return TakeoverPlan(action=ACTION_RESUME, label=label, resume_id=resume_id)
+        if not describe_resume:
+            return TakeoverPlan(action=ACTION_RESUME, label=label, resume_id=resume_id)
+        return _resume_plan(resume_id, label=label, launch_agents_dir=launch_agents_dir, runner=runner)
 
     agents = (
         macos_service.default_launch_agents_dir()
@@ -1082,6 +1091,43 @@ def plan(
         left_in_place=left_in_place,
         dropped_env=dropped,
         protected=tuple(str(path) for path in protected),
+    )
+
+
+def _resume_plan(
+    resume_id: str, *, label: str, launch_agents_dir: Path | None, runner: Runner
+) -> TakeoverPlan:
+    """The plan of an unfinished takeover, with what the app must ask before it moves.
+
+    A journal at ``started`` or ``stopping`` may leave the old engine running,
+    so its liveness and chats are read the way a fresh plan reads them. An
+    unreadable journal carries only its id: apply refuses it, and the app says so.
+    """
+    journal = _load_journal(resume_id, launch_agents_dir=launch_agents_dir, label=label)
+    if journal is None:
+        return TakeoverPlan(action=ACTION_RESUME, label=label, resume_id=resume_id)
+    port = int(journal["port"])
+    running = False
+    chats = 0
+    if str(journal["state"]) in (STATE_STARTED, STATE_STOPPING):
+        identity = engine_identity(port)
+        loaded, _ = _job_state(label, runner)
+        running = identity is not None or loaded
+        try:
+            chats = len(restart_blockers(port))
+        except RestartBlockersUnavailable:
+            chats = -1
+    return TakeoverPlan(
+        action=ACTION_RESUME,
+        label=label,
+        plist=str(journal["plist"]),
+        plist_sha256=str(journal["plist_sha256"]),
+        workspace=str(journal["workspace"]),
+        runtime_root=str(journal["runtime_root"]),
+        port=port,
+        old_running=running,
+        active_chats=chats,
+        resume_id=resume_id,
     )
 
 
@@ -1821,7 +1867,9 @@ def _apply_locked(
     sleep: Callable[[float], None],
 ) -> dict[str, Any]:
     _discard_young_entries()
-    current = plan(launch_agents_dir=launch_agents_dir, label=label, runner=runner)
+    current = plan(
+        launch_agents_dir=launch_agents_dir, label=label, runner=runner, describe_resume=False
+    )
     if current.action == ACTION_RESUME:
         takeover_id = current.resume_id
         journal = _load_journal(takeover_id, launch_agents_dir=launch_agents_dir, label=label)
