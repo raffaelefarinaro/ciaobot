@@ -1038,13 +1038,10 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, { ok: true, tasks: UPDATE_TASKS.length })
     }
     if (pathname === '/__fixture__/chat-frame') {
-      // Speak on a chat's own socket. The fixture is otherwise silent there,
-      // and #1413's move chip needs the frames a broker would send for an
-      // OpenCode foreground shell: a `tool_use` carrying `backgroundable`, then
-      // the `tool_result` and `result` that end it. Frames are just delivered,
-      // in order — what they mean is the spec's business. Held for the socket
-      // that opens next when none is up yet, so a spec may opt in before it
-      // navigates.
+      // Speak on a chat's own socket. The fixture is otherwise silent there.
+      // Frames are just delivered, in order — what they mean is the spec's
+      // business. Held for the socket that opens next when none is up yet, so
+      // a spec may opt in before it navigates.
       const body = await readBody(req)
       const chatId = String(body?.chat_id || '')
       const frames = Array.isArray(body?.frames) ? body.frames : []

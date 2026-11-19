@@ -928,12 +928,12 @@
           <span v-if="view.isStreaming" class="queued-label">{{ q.waiting ? 'Waiting' : 'Queued' }}</span>
           <div class="queued-actions">
             <button
-              v-if="!view.isStreaming"
+              v-if="q.waiting || !view.isStreaming"
               type="button"
               class="queued-send-now"
-              title="Start a turn with this message now"
+              :title="view.isStreaming ? 'Run after this reply' : 'Start a turn with this message now'"
               @click="sendNow($event, [q.id])"
-            >Send now</button>
+            >{{ view.isStreaming ? 'Send next' : 'Send now' }}</button>
             <button
               class="queued-action"
               :disabled="i === 0"
@@ -1231,19 +1231,6 @@
             />
             <span v-if="inputText.trim() && !isMcpToken" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
             <button
-              v-if="showMoveToBackground"
-              ref="moveBtnEl"
-              type="button"
-              class="composer-chip composer-move-bg"
-              :disabled="movingToBackground"
-              aria-label="Move to background"
-              title="Move the running command or subagent to the background. The reply ends now and the result arrives when it finishes."
-              @click="moveToBackground"
-            >
-              <span class="composer-move-bg-long">Move to background</span>
-              <span class="composer-move-bg-short" aria-hidden="true">Background</span>
-            </button>
-            <button
               v-if="view.isStreaming && isMcpToken"
               type="button"
               class="btn-small"
@@ -1532,7 +1519,6 @@ import { linkifyText } from '../lib/filePaths'
 import { isChatId } from '../lib/chatLinks'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import { isBridgeMode, PERMISSION_MODE_COPY, type BridgeMode } from '../lib/permissionModes'
-import { canOfferMoveToBackground, shouldRestoreFocus } from '../lib/moveToBackground'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
@@ -1746,41 +1732,7 @@ const canSend = computed(() => isMcpToken.value || (!modeWritePending.value && h
 // Empty composer while a turn is in flight → stop; otherwise the same
 // button queues/sends the draft.
 const showStopAction = computed(() => view.isStreaming && (isMcpToken.value || !hasComposerContent.value))
-const moveBtnEl = ref<HTMLButtonElement | null>(null)
 const composerBarEl = ref<HTMLElement | null>(null)
-const movingToBackground = ref(false)
-const showMoveToBackground = computed(() =>
-  view.isStreaming && canOfferMoveToBackground(view.activeBackgroundableCalls, nowTs.value),
-)
-async function moveToBackground() {
-  if (movingToBackground.value || !chat.value) return
-  const chipEl = moveBtnEl.value
-  const hadFocus = document.activeElement === chipEl
-  movingToBackground.value = true
-  try {
-    await store.moveChatToBackground(chat.value.chat_id)
-  } finally {
-    movingToBackground.value = false
-  }
-  // The chip goes away the moment the turn ends, so focus has to be handed
-  // somewhere that is still there — but only when it is still ours, which
-  // `shouldRestoreFocus` decides.
-  if (hadFocus) {
-    const active = document.activeElement
-    if (shouldRestoreFocus(chipEl, active)) {
-      // Never the send/stop button. It is a single element in three states —
-      // enabled Stop while the turn runs, enabled Send once a draft exists,
-      // disabled Send with an empty draft — and the move we just asked for ends
-      // the turn, so it can be disabled a moment after we focus it; a disabled
-      // control cannot hold focus and it falls to <body> (rounds 1 and 3). The
-      // bar is the one target here that is always focusable and never raises
-      // the on-screen keyboard, which is why the textarea is not used below
-      // COMPOSER_FOCUS_MIN_WIDTH.
-      if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
-      else composerBarEl.value?.focus()
-    }
-  }
-}
 const primaryActionTitle = computed(() => {
   if (showStopAction.value) return 'Stop'
   if (isMcpToken.value) return mcpActionLabel.value
@@ -7436,11 +7388,6 @@ details[open] > .activity-summary::before {
   white-space: nowrap;
 }
 
-.composer-move-bg { flex: none; margin-right: 6px; }
-.composer-move-bg:disabled { opacity: 0.6; cursor: progress; }
-.composer-move-bg:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.composer-move-bg-short { display: none; }
-
 .composer-model-dot {
   width: 7px;
   height: 7px;
@@ -7452,7 +7399,6 @@ details[open] > .activity-summary::before {
 /* Touch layouts keep full 44px targets for every composer control. */
 @media (pointer: coarse), (max-width: 700px) {
   .composer-chip { min-height: var(--touch); }
-  .composer-move-bg { min-width: var(--touch); }
   .image-btn,
   .send-btn { width: var(--touch); height: var(--touch); }
 }
@@ -7460,8 +7406,6 @@ details[open] > .activity-summary::before {
 @media (max-width: 700px) {
   .composer-kbd { display: none; }
   .composer-chip-label { max-width: 16ch; }
-  .composer-move-bg-long { display: none; }
-  .composer-move-bg-short { display: inline; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -7751,9 +7695,9 @@ details[open] > .activity-summary::before {
 :global(:root.keyboard-open .question-form-card) { max-height: calc(var(--app-h) * 0.6); }
 /* A short pane (a phone in landscape) cannot hold an open question card and
    the two-row composer (#2774). While the question waits, the composer folds
-   to one row: the prompt and the send/stop action. The model picker, attach,
-   hints and Move to background come back when the card closes (answer or
-   cancel the question first). Keep the media query in sync with
+   to one row: the prompt and the send/stop action. The model picker, attach
+   and hints come back when the card closes (answer or cancel the question
+   first). Keep the media query in sync with
    SHORT_PANE_QUERY in the script. */
 @media (max-height: 500px) {
   .composer-surface--question {
@@ -7768,8 +7712,7 @@ details[open] > .activity-summary::before {
   .composer-surface--question > .composer-bar { flex: none; padding: 0; border-top: 0; }
   .composer-surface--question .composer-model,
   .composer-surface--question .image-btn,
-  .composer-surface--question .composer-kbd,
-  .composer-surface--question .composer-move-bg { display: none; }
+  .composer-surface--question .composer-kbd { display: none; }
 }
 .question-card-header {
   display: flex;

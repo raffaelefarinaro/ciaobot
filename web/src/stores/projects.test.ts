@@ -3630,49 +3630,6 @@ describe('result frames and unread state', () => {
   })
 })
 
-describe('move to background', () => {
-  test('tracks backgroundable calls from tool_use frames and clears them on result', () => {
-    const store = useProjectStore()
-    const chatId = 'c-backgroundable'
-    store.connectWs(chatId)
-    const socket = fakeSockets[0]
-    const frame = (data: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(data) })
-    frame({ type: 'tool_use', tool_name: 'shell', tool_use_id: 'c1', backgroundable: true })
-    expect(store.backgroundableCalls[chatId]).toHaveProperty('c1')
-    frame({ type: 'tool_result', tool_use_id: 'c1' })
-    expect(store.backgroundableCalls[chatId]).toEqual({})
-    frame({ type: 'tool_use', tool_name: 'shell', tool_use_id: 'c2', backgroundable: true })
-    frame({ type: 'result', text: 'done', is_error: false, effective_model: 'opus', usage: {}, session_id: 's1' })
-    expect(store.backgroundableCalls[chatId]).toBeUndefined()
-  })
-
-  test('a file-touching shell call is still tracked', () => {
-    const store = useProjectStore()
-    const chatId = 'c-backgroundable-file'
-    store.connectWs(chatId)
-    fakeSockets[0].onmessage?.({ data: JSON.stringify({
-      type: 'tool_use', tool_name: 'shell', tool_use_id: 'c1', backgroundable: true,
-      file_touch: { file_path: 'out.txt', action: 'created' },
-    }) })
-    expect(store.backgroundableCalls[chatId]).toHaveProperty('c1')
-  })
-
-  test('moveChatToBackground posts and toasts when nothing moved', async () => {
-    const store = useProjectStore()
-    apiPost.mockResolvedValueOnce({ moved: false })
-    expect(await store.moveChatToBackground('c')).toBe(false)
-    expect(apiPost).toHaveBeenCalledWith('/api/chats/c/move-to-background', {})
-    expect(store.toasts.at(-1)?.title).toBe('Nothing to move')
-    apiPost.mockResolvedValueOnce({ moved: true })
-    const toastCount = store.toasts.length
-    expect(await store.moveChatToBackground('c')).toBe(true)
-    expect(store.toasts).toHaveLength(toastCount)
-    apiPost.mockRejectedValueOnce(new Error('offline'))
-    expect(await store.moveChatToBackground('c')).toBe(false)
-    expect(store.toasts.at(-1)?.title).toBe('Could not move to background')
-  })
-})
-
 describe('stop a background task', () => {
   test('stopBackgroundTask posts to the chat-scoped route with the id escaped', async () => {
     const store = useProjectStore()
@@ -10775,7 +10732,7 @@ describe('queue entries and settings events', () => {
     expect(Object.keys(store.queuedMessages[chatId][0]).sort()).toEqual(['id', 'images', 'text'])
   })
 
-  it('sendQueuedNow sends one frame only when idle', async () => {
+  it('sendQueuedNow sends queue_send_now while a turn runs and while idle', async () => {
     const { store, socket } = await setup()
     emit(socket, { type: 'queue_state', queue: [
       { id: 'a', text: 'one', waiting: true },
@@ -10784,11 +10741,14 @@ describe('queue entries and settings events', () => {
     ] })
     socket.send.mockClear()
     store.sendQueuedNow(chatId, ['b', 'a'])
-    expect(frames(socket, 'queue_set_delivery')).toHaveLength(0)
+    expect(frames(socket, 'queue_send_now')).toEqual([
+      { type: 'queue_send_now', entry_ids: ['a', 'b'] },
+    ])
+    socket.send.mockClear()
     store.streaming[chatId] = false
     store.sendQueuedNow(chatId, ['c', 'a'])
-    expect(frames(socket, 'queue_set_delivery')).toEqual([
-      { type: 'queue_set_delivery', entry_ids: ['a', 'c'], delivery: 'steer' },
+    expect(frames(socket, 'queue_send_now')).toEqual([
+      { type: 'queue_send_now', entry_ids: ['a', 'c'] },
     ])
     // Nothing is changed optimistically: the echo removes the entries.
     expect(store.queuedMessages[chatId].map(q => q.id)).toEqual(['a', 'b', 'c'])

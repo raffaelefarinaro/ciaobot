@@ -85,7 +85,7 @@ INNER_TAG_RE = re.compile(r"<([a-z-]+)>(.*?)</\1>", re.DOTALL)
 CONTROL_SLASH_PREFIXES = ("/model", "/mode")
 
 # Sentinel that the Claude Code CLI writes into the session JSONL when a turn
-# is interrupted (steer/queue mid-stream) or hits an empty rate-limit error.
+# is interrupted (queued interrupts mid-stream) or hits an empty rate-limit error.
 # It's the `UXH` constant in claude_agent_sdk/_bundled/claude. Claude Code's
 # own UI hides these (`case UXH: return null`); we mirror that so reloads
 # don't render a literal "No response requested." bubble after every interrupt.
@@ -100,7 +100,7 @@ _TASK_ID_SENTINEL_PREFIX = "__orphan_summary"
 
 # Matches the Claude Agent SDK's own _SKIP_FIRST_PROMPT_PATTERN
 # ([Request interrupted by user[^\]]*]) so we cover every CLI variant, not
-# just the bare form. Steer/queue interrupts of an in-flight tool call produce
+# just the bare form. Queued interrupts of an in-flight tool call produce
 # "[Request interrupted by user for tool use]" — without this wildcard that
 # variant survives as a synthetic user record and renders as a quoted bubble
 # that looks like an error reply to a question.
