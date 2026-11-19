@@ -800,10 +800,11 @@ def test_branch_protection_declares_conditional_linux_e2e_for_develop() -> None:
     assert len(blocks) == 2
     develop, main = (json.loads(block) for block in blocks)
     assert develop["required_status_checks"]["contexts"] == [
-        "linux-server", "linux-web", "linux-e2e", "mac-app"
+        "linux-server", "linux-web", "linux-install-smoke", "linux-e2e", "mac-app"
     ]
     assert main["required_status_checks"]["contexts"] == [
-        "linux-server", "linux-web", "linux-server-latest-python", "test", "mac-app"
+        "linux-server", "linux-web", "linux-install-smoke",
+        "linux-server-latest-python", "test", "mac-app",
     ]
     assert develop["enforce_admins"] is False
     assert main["enforce_admins"] is True
@@ -852,6 +853,57 @@ def test_develop_prs_run_linux_split_gates() -> None:
     web = by_name["linux-web"]
     assert web.index("npm run build") < web.index("ciao package-smoke --skip-frontend")
     assert not [name for name in by_name if name.startswith("windows")]
+
+
+def test_ci_runs_the_linux_install_smoke_in_a_clean_container() -> None:
+    # #3131 L3: `scripts/install.sh` is the Linux release install path, so
+    # every PR installs this checkout's wheel with it inside a plain
+    # ubuntu:24.04 container, and the planned service unit is re-checked with
+    # the runner's systemd. A guard that disappears here must fail the test,
+    # not surface later as the first failing release install.
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
+    ).read_text(encoding="utf-8")
+    jobs = re.split(r"(?m)^  (?=[a-z0-9-]+:\n)", workflow.split("\njobs:\n", 1)[1])
+    by_name = {job.split(":", 1)[0]: job for job in jobs if job.strip()}
+
+    smoke = by_name["linux-install-smoke"]
+    assert "runs-on: ubuntu-24.04" in smoke
+    # The PWA rides inside the wheel (npm run build writes ciao/web/static),
+    # so it is built before the wheel, and the container runs only once the
+    # wheel exists.
+    assert smoke.index("npm ci") < smoke.index("npm run build")
+    assert smoke.index("npm run build") < smoke.index(
+        "uv build --wheel --out-dir dist"
+    )
+    assert smoke.index("uv build --wheel --out-dir dist") < smoke.index("docker run")
+    assert "ubuntu:24.04 sh -es" in smoke
+
+    install = next(line for line in smoke.splitlines() if "install.sh --wheel" in line)
+    assert "/src/dist/ciaobot-*.whl" in install
+    assert "--no-service" in install
+    assert "su smoke -c" in install
+
+    # The install counts only when the tool answers with this checkout's own
+    # version, read from pyproject, and the service path is exercised as a
+    # bounded dry run.
+    assert '"$HOME/.local/bin/ciao" --version' in smoke
+    assert r's/^version = "\([^"]*\)"/\1/p' in smoke
+    assert '"ciao $version"' in smoke
+    assert "service install --dry-run" in smoke
+
+    # The host strips the dry run's notes and re-checks the unit with
+    # systemd-analyze, uncommented.
+    verify = next(line for line in smoke.splitlines() if "systemd-analyze verify" in line)
+    assert not verify.lstrip().startswith("#"), "the verify call is commented out"
+    assert smoke.index("service install --dry-run") < smoke.index("systemd-analyze verify")
+
+    # The job sits with the other Linux gates, immediately after linux-web.
+    assert (
+        workflow.index("  linux-web:")
+        < workflow.index("  linux-install-smoke:")
+        < workflow.index("  linux-e2e:")
+    )
 
 
 def _rehearsal_workflow() -> str:

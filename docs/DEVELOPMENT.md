@@ -1013,10 +1013,16 @@ while the server is running, because the live schedule store may be writing it.
 - **`develop`** is the integration branch. Feature and fix PRs target `develop`.
 - **`main`** is release-only. Direct pushes and merges to `main` are blocked; only release PRs land there.
 - **CI** (`.github/workflows/ci.yml`) runs on pull requests into `develop` or `main` and manual dispatch.
-  Every PR runs two Linux jobs in parallel: `linux-server` (`mypy ciao`,
-  `pytest -n auto tests/`, about 4 minutes) and `linux-web` (`npm test`,
+  Every PR runs three Linux jobs in parallel: `linux-server` (`mypy ciao`,
+  `pytest -n auto tests/`, about 4 minutes), `linux-web` (`npm test`,
   `npm run build` and a package smoke test of the built wheel, about 3
-  minutes). For a PR into `develop` whose three-dot diff from its base changes
+  minutes) and `linux-install-smoke`, which builds the PWA and the engine
+  wheel this checkout would publish and proves the Linux one-line installer
+  by installing that wheel with `scripts/install.sh` inside a clean
+  `ubuntu:24.04` container as an unprivileged account (`--no-service`; the
+  planned service unit is only dry-run in the container and
+  `systemd-analyze verify` re-checks it on the host, #3131). For a PR into
+  `develop` whose three-dot diff from its base changes
   `web/`, `linux-e2e` runs alongside `linux-web`, after the fast `web-scope`
   detector: it installs Chromium on Ubuntu
   and runs `npm run test:e2e` from the PR merge checkout. That command's npm
@@ -1093,9 +1099,12 @@ PRs without a `web/` change. `mac-app` is required on both branches the same
 way: it passes after the scope check on PRs that do not change `mac/` or
 `web/src/lib/workspaceColors.ts`, and
 activating it live is the same separate admin action, after it has reported on
-a PR. Admins remain exempt on `develop` so the
+a PR. `linux-install-smoke` is likewise required on both branches, with no
+scope condition: GitHub requires it once the workflow has reported on a PR,
+and activating its context live is the same admin action. Admins remain
+exempt on `develop` so the
 post-release sync PR can merge. The checked-in script continues to declare
-`linux-server`, `linux-web`, `linux-server-latest-python`, macOS `test` and
+`linux-server`, `linux-web`, `linux-install-smoke`, `linux-server-latest-python`, macOS `test` and
 `mac-app` required on `main`, including for admins.
 This source change does not update live branch protection: activating the new
 required context needs separate maintainer approval and an admin action after
