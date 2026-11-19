@@ -1008,7 +1008,7 @@ def engine_env(base_env: Mapping[str, str], workdir: Path, ws: Path) -> dict[str
     storage roots are pointed into the throwaway ``workdir``. The queue-lock
     directory is left at its per-user temp default: the lock key hashes the
     (throwaway) vault path, so it cannot collide with the live install, and the
-    agent's sandbox can write there but not into ``workdir``.
+    agent can write there but not into ``workdir``.
     """
     env = _without_live_vars(base_env)
     env.update(
@@ -1527,7 +1527,7 @@ def available_capabilities() -> frozenset[str]:
 
 
 def gws_fake_bin_dir(ws: Path, profile: str) -> Path:
-    """The fake's folder, inside the profile's credential directory (the sandbox grants it)."""
+    """The fake's folder, inside the profile's credential directory."""
     return ws / "secrets" / f"gws-{profile}" / GWS_FAKE_DIRNAME
 
 
@@ -1643,7 +1643,7 @@ def read_gws_calls(log: Path) -> list[dict[str, Any]]:
     return rows
 
 
-# The fake's own code. Each call runs gws_fake_main inside the agent's sandbox.
+# The fake's own code. Each call runs gws_fake_main in the agent's process.
 # The launcher imports ciao.task_eval to reach it, which loads this module's
 # top-level imports (yaml and the ciao helpers above) before gws_fake_main runs.
 # gws_fake_main itself uses only the standard library and never imports ciao.cli.
@@ -2491,7 +2491,7 @@ def provider_version(provider: str) -> str | None:
 def cli_package_mismatch() -> str | None:
     """Why the ``ciao`` an agent would run is not this harness's package, or None.
 
-    The engine's sandbox only reads the package that is running it, so a
+    An agent only sees the package that is running it, so a
     ``ciao`` on the agent's PATH that imports a different checkout is refused.
     Isolated mode (``-I``) ignores PYTHONPATH, which is what the venv's ``ciao``
     script sees.
@@ -2512,7 +2512,7 @@ def cli_package_mismatch() -> str | None:
         return None
     return (
         f"CLI package mismatch: the `ciao` an agent runs imports {installed}, "
-        f"but this harness runs {harness}. The engine sandbox only reads the running "
+        f"but this harness runs {harness}. An agent only sees the running "
         "package, so the agent's ciao calls would be refused. Remedy: run the eval from "
         "an install of the checkout under test, e.g. `uv venv .venv-eval && uv pip install "
         "-p .venv-eval -e .` in that checkout, then `.venv-eval/bin/ciao eval tasks run ...`."

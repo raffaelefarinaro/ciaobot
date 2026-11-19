@@ -4989,8 +4989,7 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
         )
         return 2
     if kind == REPO_DESTINATION:
-        # Not stat'ed: the pass chat's sandbox may not see the repository, and
-        # the accept validates it against the workspace's linked projects.
+        # Not stat'ed: the accept validates it against the workspace's linked projects.
         if "]" in payload:
             print(
                 "kind 'repo' cannot queue a repository path containing ']': "

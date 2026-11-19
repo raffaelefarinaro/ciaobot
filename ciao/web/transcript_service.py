@@ -398,7 +398,7 @@ def _native_task_notice(content: str) -> str | None:
     notification decides: a ``Monitor event`` or an unrecognised summary falls
     through to the one-line status bubble. A record can concatenate several
     completions; the consecutive native ones share one notice. No log path:
-    the provider's output file is outside the file sandbox. A subagent's tail
+    the provider's output file is not copied into the notice. A subagent's tail
     is its inline report.
     """
     runs: list[cli_envelopes.NativeTaskRun] = []

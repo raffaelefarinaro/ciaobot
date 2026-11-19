@@ -41,13 +41,10 @@ def _make_manager(tmp_path: Path, *, gws_profile: str = "") -> ProjectChatManage
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
-        # These tests check the turn env, not the sandbox: whole-machine scope
-        # keeps the spawn unwrapped on every platform (Linux CI has no bwrap).
         workspaces={
             "personal": WorkspaceConfig(
                 name="personal",
                 vault_root="memory-vault/personal",
-                agent_fs_scope="machine",
                 gws_profile=gws_profile,
             )
         },

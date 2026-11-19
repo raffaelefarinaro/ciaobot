@@ -370,7 +370,7 @@ def native_task_run(fields: dict[str, str]) -> NativeTaskRun | None:
 
     None for subagent completions (``Agent "X" ...``) and mid-stream
     ``Monitor event`` lines. The notice carries only a summary: the
-    ``output-file`` sits outside the file sandbox, so there is deliberately no
+    ``output-file`` is not copied into the notice, so there is deliberately no
     log path and no output tail.
     """
     match = _NATIVE_SUMMARY_RE.match(fields.get("summary", "").strip())

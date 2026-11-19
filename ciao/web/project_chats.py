@@ -156,7 +156,7 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 from ciao.os_support.media_types import guess_type as guess_media_type
-from ciao import backup_scope, cli_envelopes, repo_link, repo_location, subagent_tracking, vault_review, vault_verification
+from ciao import cli_envelopes, repo_link, repo_location, subagent_tracking, vault_review, vault_verification
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.config import (
     CLAUDE_MODELS,
@@ -1031,11 +1031,6 @@ class ChatInfo:
     # `{path, branch, is_worktree, exists}`. Kept only for chats in a linked
     # project (see `repo_location.py`).
     repo_location: dict = field(default_factory=dict)
-    # Set only by the memory-backup setup route (#1328). A workspace-scoped
-    # chat with this flag may also read and write the install's data root,
-    # the parent of every workspace folder, because a git repository there is
-    # what the setup creates. Not settable from any request body.
-    grants_data_root: bool = False
 
     def to_dict(self, *, local: bool | None = None) -> dict:
         self.taken_edits = [entry for entry in self.taken_edits
@@ -1563,7 +1558,6 @@ class ProjectChatManager:
                     if isinstance(cd.get("repo_location"), dict)
                     else {}
                 ),
-                grants_data_root=bool(cd.get("grants_data_root", False)),
                 # A pipeline recorded as "running" cannot still be running: the
                 # task died with the previous process. Restore it as done so the
                 # chat reports what it managed to finish instead of pulsing
@@ -1576,6 +1570,14 @@ class ProjectChatManager:
             len(self._chats),
         )
         self._last_local_payload = copy.deepcopy(self._state_payload())
+        # The data-root grant is gone. It is not a field this process owns, so
+        # the merge would otherwise keep the stored key forever. Putting it on
+        # the baseline makes the next save delete it.
+        for cid, cd in data.get("chats", {}).items():
+            if isinstance(cd, dict) and "grants_data_root" in cd:
+                row = self._last_local_payload.get("chats", {}).get(cid)
+                if isinstance(row, dict):
+                    row["grants_data_root"] = cd["grants_data_root"]
 
     def _migrate_remove_claude_code_cli_project(self) -> None:
         """Remove the retired CLI-import project from persisted PWA state."""
@@ -1683,7 +1685,6 @@ class ProjectChatManager:
                     "dismissed_pin_paths": list(c.dismissed_pin_paths),
                     "pin_revision": c.pin_revision,
                     "repo_location": dict(c.repo_location),
-                    "grants_data_root": c.grants_data_root,
                 }
                 for cid, c in self._chats.items()
             },
@@ -4108,7 +4109,6 @@ class ProjectChatManager:
         mode: str | None = None,
         provider: str | None = None,
         helper: dict | None = None,
-        grants_data_root: bool = False,
     ) -> ChatInfo:
         if project_id not in self._projects:
             raise ValueError(f"Project '{project_id}' not found")
@@ -4165,27 +4165,11 @@ class ProjectChatManager:
             thinking_level=default_thinking,
             created_at=chat_service._now_iso(),
             helper=chat_service._normalize_chat_helper(helper),
-            grants_data_root=grants_data_root,
         )
         self._chats[cid] = chat
         self._save()
         self._events.publish({"type": "chat_created", "chat": chat.to_dict(local=True)})
         return chat
-
-    def grant_data_root(self, chat_id: str) -> None:
-        """Give an existing chat the data-root grant (#1328), persisted.
-
-        Used for a live setup chat opened before the grant existed. The chat's
-        next turn sees new roots, so its provider process is rebuilt (see the
-        reuse checks in the providers) rather than keeping the old sandbox.
-        """
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            raise ValueError(f"Chat '{chat_id}' not found")
-        if chat.grants_data_root:
-            return
-        chat.grants_data_root = True
-        self._save()
 
     def is_empty_chat(self, chat_id: str) -> bool:
         """Public form of `_is_empty_chat`, for the conditional-delete route.
@@ -5577,7 +5561,6 @@ class ProjectChatManager:
             return live
         service = self._get_provider(chat_id)
         provider = service.ensure_provider(chat.provider)
-        await self.warm_gh_token(chat)
         request = self.build_agent_request(
             chat, prompt="", resume_session=chat.session_id or None, compact=True
         )
@@ -6102,162 +6085,6 @@ class ProjectChatManager:
         slug = re.sub(r"[^a-z0-9_-]+", "-", (workspace or GWS_DEFAULT_PROFILE).lower()).strip("-")
         return Path(self._config.state_path).parent / "gws-unlinked" / (slug or GWS_DEFAULT_PROFILE), False
 
-    def _agent_read_only_for_chat(self, chat: ChatInfo, fs_scope: str) -> tuple[str, ...]:
-        """Runtime files a workspace-scoped chat reads but never writes (#1945).
-
-        Also the ``gws`` CLI with its links, npm package and node, so
-        ``ciao gws`` runs when it is installed under the home folder (#1959),
-        and the ``gh`` config directory so ``gh`` finds its login (#1961).
-        gws gets its credential directory writable for its token cache (see
-        ``_agent_fs_scope_for_chat``), with the account's ``client_secret.json``
-        and ``credentials.json`` pinned here so they stay write-denied: an
-        agent cannot plant a client secret with a hostile ``token_uri``.
-        A memory pass also gets its one source archive (``_memory_pass_archive_grant``).
-        The workspace's own `Logs/` (derived transcripts) is readable but never writable.
-        """
-        if fs_scope != "workspace":
-            return ()
-        from ciao.fs_sandbox import gh_config_read_root, gws_tool_read_roots  # noqa: PLC0415
-        from ciao.tool_path import login_shell_path  # noqa: PLC0415
-        from ciao.workspace_reroot import receipt_path, registry_file  # noqa: PLC0415
-
-        runtime = self._config.state_path.parent
-        gws_roots = [str(p) for p in gws_tool_read_roots(login_shell_path())]
-        granted = [str(receipt_path(runtime)), str(registry_file(runtime)), *gws_roots]
-        own_logs = self._config.chats_root(self._workspace_for_chat(chat.chat_id)).parent
-        if own_logs != self._config.logs_root:
-            granted.append(str(own_logs))
-        gws_dir = self._granted_gws_dir(chat)
-        if gws_dir is not None:
-            for name in ("client_secret.json", "credentials.json"):
-                pinned = gws_dir / name
-                if pinned.exists():
-                    granted.append(str(pinned))
-        gh_dir = gh_config_read_root(os.environ)
-        if gh_dir is not None:
-            granted.append(str(gh_dir))
-        archive = self._memory_pass_archive_grant(chat)
-        if archive is not None:
-            granted.append(str(archive))
-        return tuple(granted)
-
-    def _granted_gws_dir(self, chat: ChatInfo) -> Path | None:
-        """The linked account's resolved credential directory, or None.
-
-        Resolve before granting: an agent that can write secrets/ must not
-        redirect the profile directory (or secrets itself) to another folder.
-        """
-        gws_dir, linked = self._gws_config_dir(self._workspace_for_chat(chat.chat_id))
-        if (
-            linked
-            and gws_dir.is_dir()
-            and gws_dir.resolve() == Path(self._config.workspace_root).resolve() / "secrets" / gws_dir.name
-        ):
-            return gws_dir.resolve()
-        return None
-
-    def _memory_pass_archive_grant(self, chat: ChatInfo) -> Path | None:
-        """The one transcript archive a memory pass may read, or None (#2459).
-
-        The grant is read-only and limited to this single file, so the pass can
-        read the chat it distils without a folder of other transcripts. The
-        helper lives in the hand-editable registry, so it is validated here and
-        every failure grants nothing: the chat is a memory pass with a
-        ``memory_pass`` helper, the source chat id is one folder name under one of
-        the chats roots (never a symlink), and the archive, resolved, is a regular
-        file with one link inside that folder. A symlinked leaf is refused before
-        it is resolved.
-        """
-        project = self._projects.get(chat.project_id)
-        if not is_memory_pass_chat(chat, project):
-            return None
-        helper = chat_service._normalize_chat_helper(chat.helper)
-        source_chat_id = str(helper.get("source_chat_id") or "")
-        archive_path = str(helper.get("archive_path") or "")
-        if helper.get("kind") != "memory_pass" or not source_chat_id or not archive_path:
-            return None
-        workspace_root = Path(self._config.workspace_root)
-        try:
-            source_dirs: list[Path] = []
-            for root in self._config.chats_roots():
-                chats_root = root.resolve()
-                source_link = chats_root / source_chat_id
-                if source_link.is_symlink() or not source_link.is_dir():
-                    continue
-                source_dir = source_link.resolve()
-                if source_dir.parent == chats_root:
-                    source_dirs.append(source_dir)
-            if not source_dirs:
-                return None
-            candidate = Path(archive_path)
-            if not candidate.is_absolute():
-                candidate = workspace_root / candidate
-            if os.path.islink(candidate):
-                return None
-            resolved = candidate.resolve(strict=True)
-            # A second name for a file another process can read is not an archive.
-            if resolved.stat().st_nlink != 1:
-                return None
-        except (OSError, ValueError, RuntimeError):
-            return None
-        if not resolved.is_file() or not any(
-            resolved.is_relative_to(source_dir) for source_dir in source_dirs
-        ):
-            return None
-        return resolved
-
-    def _agent_denied_for_chat(
-        self, chat: ChatInfo, fs_scope: str, fs_roots: tuple[str, ...]
-    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """The hidden ``secrets`` folder and the linked account re-allowed in it (#1968).
-
-        Set only in workspace scope when ``secrets`` (or, if it is a symlink,
-        its resolved target) is a directory strictly inside a granted root: the agent's shell could then
-        read every account's credentials. The sandbox stays pure; the decision
-        is made here, where the workspace root, roots and linked account are known.
-        """
-        if fs_scope != "workspace":
-            return (), ()
-        secrets = Path(self._config.workspace_root).resolve() / "secrets"
-        if not secrets.is_dir():
-            return (), ()
-        # A symlinked ``secrets`` hides its resolved target. No regrant applies:
-        # ``_granted_gws_dir`` refuses an account directory reached through it.
-        target = secrets.resolve()
-        if not any(target != Path(root) and target.is_relative_to(root) for root in fs_roots):
-            return (), ()
-        gws = None if secrets.is_symlink() else self._granted_gws_dir(chat)
-        return (str(target),), ((str(gws),) if gws else ())
-
-    def _agent_fs_scope_for_chat(self, chat: ChatInfo) -> tuple[str, tuple[str, ...]]:
-        """The chat's workspace filesystem scope and the roots it confines to.
-
-        Roots are the chat's agent root and that workspace's vault root,
-        resolved and de-duplicated, agent root first. A project's linked
-        repository follows the vault root, then the linked Google account's
-        credential directory, writable for gws's token cache (#1959; its client
-        secret and refresh credentials are write-denied, see
-        ``_agent_read_only_for_chat``). A chat granted the data
-        root (the memory-backup setup chat, #1328) also gets that root, last.
-        Machine scope never reads them, so they are only computed for the
-        workspace case.
-        """
-        workspace = self._workspace_for_chat(chat.chat_id)
-        config = self._config.workspace(workspace)
-        if config is None or config.effective_agent_fs_scope() != "workspace":
-            return "machine", ()
-        agent_root = self._config.agent_root(workspace).resolve()
-        vault_root = self._config.workspace_vault_root(workspace).resolve()
-        roots = [str(agent_root), str(vault_root)]
-        linked_repo = self.linked_repo_for_chat(chat)
-        if linked_repo:
-            roots.append(linked_repo)
-        gws_dir = self._granted_gws_dir(chat)
-        if gws_dir is not None and not any(gws_dir.is_relative_to(root) for root in roots):
-            roots.append(str(gws_dir))
-        if chat.grants_data_root:
-            roots.append(str(backup_scope.data_root(self._config).resolve()))
-        return "workspace", tuple(dict.fromkeys(roots))
 
     def _revoke_mcp_chat(self, chat_id: str) -> None:
         service = self._mcp_service
@@ -6344,10 +6171,6 @@ class ProjectChatManager:
         include_stable = self._needs_stable_context(chat)
         chat.instructions_inline_pending = repo_path if include_stable and inlined else ""
         handover = self._format_handover_context(chat)
-        # Only a workspace-scoped chat is confined, so only it is told where
-        # it can write; a machine-scope chat gets no file-access line at all.
-        fs_scope, fs_roots = self._agent_fs_scope_for_chat(chat)
-        archive = self._memory_pass_archive_grant(chat) if fs_scope == "workspace" else None
         capsule = build_context_capsule(
             workspace=workspace,
             gws_profile=gws_profile,
@@ -6358,8 +6181,6 @@ class ProjectChatManager:
             unattended=unattended,
             handover=handover,
             include_stable=include_stable,
-            file_roots=fs_roots if fs_scope == "workspace" else (),
-            file_read_only=(str(archive),) if archive is not None else (),
             linked_repo_block=repo_block,
             linked_repo_line=repo_line,
             permission_mode=self._effective_mode_for_chat(chat, unattended=unattended),
@@ -6885,50 +6706,7 @@ class ProjectChatManager:
         # see this variable. The default (not trimmed) leaves it unset.
         if chat.provider == "claude" and self._claude_ai_connectors_trimmed(workspace):
             env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
-        # The macOS keychain is outside a workspace sandbox, so gh cannot read
-        # its own login there: the engine passes the token in (#1961). Only the
-        # cache is read here; ``warm_gh_token`` fills it off the event loop.
-        gh_path = self._gh_path_for_token(chat, project)
-        if gh_path is not None:
-            from ciao.fs_sandbox import gh_token_for_sandbox  # noqa: PLC0415
-
-            gh_token = gh_token_for_sandbox(gh_path, os.environ, cached_only=True)
-            if gh_token:
-                env["GH_TOKEN"] = gh_token
         return env
-
-    def _gh_path_for_token(self, chat: ChatInfo, project: Any) -> str | None:
-        """The ``gh`` executable whose token a chat gets, or None (#1961).
-
-        None outside workspace scope (the chat reaches the keychain itself), in
-        a memory pass (it must not reach an external surface), when gh is not
-        installed or its shim is broken, and when the agent could have written
-        gh: an executable inside a writable root must never run unsandboxed.
-        """
-        fs_scope, roots = self._agent_fs_scope_for_chat(chat)
-        if fs_scope != "workspace" or is_memory_pass_chat(chat, project):
-            return None
-        from ciao.tool_path import resolve_tool  # noqa: PLC0415
-
-        try:
-            gh_path = resolve_tool("gh")
-        except OSError:
-            return None
-        if gh_path is None:
-            return None
-        resolved = Path(gh_path).resolve()
-        if any(resolved.is_relative_to(Path(root).resolve()) for root in roots):
-            return None
-        return gh_path
-
-    async def warm_gh_token(self, chat: ChatInfo) -> None:
-        """Fill the gh token cache off the event loop before a turn starts (#1961)."""
-        gh_path = self._gh_path_for_token(chat, self._projects.get(chat.project_id))
-        if gh_path is None:
-            return
-        from ciao.fs_sandbox import gh_token_for_sandbox  # noqa: PLC0415
-
-        await asyncio.to_thread(gh_token_for_sandbox, gh_path, dict(os.environ))
 
     def _claude_ai_connectors_trimmed(self, workspace: str) -> bool:
         """Whether a Claude chat in ``workspace`` hides the claude.ai connectors.
@@ -7128,8 +6906,6 @@ class ProjectChatManager:
             extra_env[AGENT_URL_ENV] = agent_url
             extra_env[AGENT_TOKEN_ENV] = token
 
-        fs_scope, fs_roots = self._agent_fs_scope_for_chat(chat)
-        denied, denied_except = self._agent_denied_for_chat(chat, fs_scope, fs_roots)
         return AgentRequest(
             prompt=full_prompt,
             model=self._runtime_model_for_chat(chat),
@@ -7141,11 +6917,6 @@ class ProjectChatManager:
             extra_env=extra_env,
             disallowed_tools=self.disallowed_tools_for_chat(chat),
             claude_settings=self.claude_settings_for_chat(chat),
-            agent_fs_scope=fs_scope,
-            agent_roots=fs_roots,
-            agent_read_only=self._agent_read_only_for_chat(chat, fs_scope),
-            agent_denied=denied,
-            agent_denied_except=denied_except,
             linked_repo=self.linked_repo_for_chat(chat),
             thinking_level=self._thinking_level_for_chat(chat),
             context_digest=context_digest,
