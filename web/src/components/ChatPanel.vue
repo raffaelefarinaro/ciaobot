@@ -963,8 +963,7 @@
     <!-- Dock strip: one counted line for everything not expanded above, so the
          dock never grows past one card plus this. Rendered whenever there is
          anything to collapse OR anything already expanded, so the disclosure
-         works in both directions. Background agents and runs are not here: they
-         are the composer bar's activity cluster. -->
+         works in both directions. -->
     <div v-if="dockStripVisible" class="dock-strip-wrap">
       <!-- aria-live sits on an inner span: an explicit role="status" on the
            button would override its implicit button role and drop

@@ -6437,6 +6437,155 @@ describe('latest status sync', () => {
     expect(store.isStreaming).toBe(true)
     expect(store.streamingText[chatId]).toBe('I\'m in the ciao repo')
   })
+
+  test('active-only syncLatest preserves locally-held archived chats', async () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    const store = useProjectStore()
+    const activeId = 'c-act'
+    const archivedId = 'c-arch'
+    store.chats = [
+      { chat_id: activeId, project_id: 'p1', title: 'Old', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      { chat_id: archivedId, project_id: 'p1', title: 'Done', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: true },
+    ]
+    store.activeChatId = activeId
+
+    // The server's active-only poll omits archived chats entirely.
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/chats?active_only=1') {
+        return Promise.resolve([
+          { chat_id: activeId, project_id: 'p1', title: 'Fresh', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+        ])
+      }
+      return Promise.resolve([])
+    })
+    await store.syncLatest()
+
+    // Active row refreshed; archived row survived the active-only poll.
+    expect(store.chats.find(c => c.chat_id === activeId)?.title).toBe('Fresh')
+    expect(store.chats.some(c => c.chat_id === archivedId && c.archived)).toBe(true)
+  })
+})
+
+describe('store disposal', () => {
+  test('a disposed store stops its liveness watchdog and window listeners', async () => {
+    // The watcher-owned polls were only half the leak. `checkWsLiveness` and the
+    // focus/blur/visibility listeners are registered at setup time, so every
+    // store a test builds kept a real-clock 2s timer and a live focus handler
+    // for the rest of the run — and `checkWsLiveness` can reach `apiGet` and
+    // push a FakeWebSocket onto the module-level array later tests read.
+    // Hidden, so the assertion is this store's socket and focus frame: a visible
+    // page would also poll from stores earlier tests stranded on an untracked pinia.
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
+    try {
+      const store = useProjectStore()
+      apiGet.mockImplementation(() => Promise.resolve([]))
+      const chatId = 'c-dispose-live'
+      store.activeChatId = chatId
+      // A frame time of 0 is "never", so open the sockets after the clock moves.
+      await vi.advanceTimersByTimeAsync(1)
+      store.connectWs(chatId)
+      store.connectEventsWs()
+      const chatSock = fakeSockets.find(s => s.url.includes('/ws/chat/'))!
+      const events = fakeSockets.find(s => s.url.includes('/ws/events'))!
+
+      store.$dispose()
+      const socketsBefore = fakeSockets.length
+      const sendsBefore = chatSock.send.mock.calls.length
+      apiGet.mockClear()
+
+      // Nothing the disposed store registered may still fire. A leftover
+      // watchdog would see the events socket go stale and close it; a leftover
+      // focus listener would send another focus frame.
+      await vi.advanceTimersByTimeAsync(30_000)
+      window.dispatchEvent(new Event('focus'))
+      window.dispatchEvent(new Event('blur'))
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(apiGet.mock.calls).toEqual([])
+      expect(fakeSockets.length).toBe(socketsBefore)
+      expect(events.readyState).toBe(FakeWebSocket.OPEN)
+      expect(chatSock.send.mock.calls.length).toBe(sendsBefore)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a store left on a superseded pinia is disposed too', async () => {
+    // A test that swaps the pinia mid-run strands its first store on an
+    // instance `getActivePinia()` can no longer reach. Disposing only the
+    // survivor left that one holding its watchdog and listeners, which is the
+    // leak this file's cleanup exists to prevent — so the cleanup tracks every
+    // pinia it created rather than the current one.
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
+    try {
+      const stranded = useProjectStore()
+      stranded.activeChatId = 'c1'
+      stranded.streaming = { c1: true }
+      // A frame time of 0 is "never", so open the sockets after the clock moves.
+      await vi.advanceTimersByTimeAsync(1)
+      stranded.connectWs('c1')
+      stranded.connectEventsWs()
+      const chatSock = fakeSockets.find(s => s.url.includes('/ws/chat/'))!
+      const events = fakeSockets.find(s => s.url.includes('/ws/events'))!
+      await Promise.resolve()
+
+      setActivePinia(createPinia())
+      const current = useProjectStore()
+      expect(current).not.toBe(stranded)
+
+      // Both are reachable for disposal, which is what afterEach relies on.
+      expect(piniasCreated.length).toBeGreaterThanOrEqual(2)
+      for (const pinia of piniasCreated) {
+        pinia._s.forEach((store) => store.$dispose())
+      }
+
+      const sendsBefore = chatSock.send.mock.calls.length
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(30_000)
+      window.dispatchEvent(new Event('focus'))
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(apiGet.mock.calls).toEqual([])
+      expect(events.readyState).toBe(FakeWebSocket.OPEN)
+      expect(chatSock.send.mock.calls.length).toBe(sendsBefore)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a disposed store does not resume a settled-reply retry it already scheduled', async () => {
+    // The open path re-fetches /messages on delays while it waits for a settled
+    // reply. Those waits are timers the store owns; a disposed store must cancel
+    // them rather than resume and call the API, or an earlier test's store keeps
+    // calling it on the real clock during a later test.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-dispose-retry'
+      const unsettled: ChatMessage = { role: 'user', content: 'Question', timestamp: '2026-08-27T00:00:00Z', turn_index: 0 }
+      store.activeChatId = chatId
+      store.messages[chatId] = [unsettled]
+      apiGet.mockImplementation((path: string) => {
+        if (!String(path).includes('/messages')) return Promise.resolve([])
+        return Promise.resolve([unsettled])
+      })
+
+      void store.loadMessages(chatId, { waitForSettledReply: true })
+      // The first fetch lands and the first retry wait is now pending.
+      await vi.advanceTimersByTimeAsync(0)
+      expect(apiGet.mock.calls.filter(c => String(c[0]).includes('/messages')).length).toBeGreaterThan(0)
+
+      store.$dispose()
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(apiGet.mock.calls).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
 describe('projectChats order', () => {

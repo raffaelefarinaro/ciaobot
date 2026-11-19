@@ -109,22 +109,15 @@ export const inventory: InventoryEntry[] = [
     ],
     "variants": [
       "working",
-      "run",
       "alert"
     ],
-    "variantNotes": "One mark per kind: working is a 3x3 pixel grid with one lit pixel chasing the perimeter, run is a drawn shell prompt with a blinking cursor, alert is a filled still triangle. Shape and motion carry the meaning, never hue.",
+    "variantNotes": "One mark per kind: working is a 3x3 pixel grid with one lit pixel chasing the perimeter, alert is a filled still triangle. Shape and motion carry the meaning, never hue.",
     "states": [
       {
         "name": "working",
         "coverage": "covered",
         "storyIds": ["activity-glyph--working"],
         "note": "Working renders the nine-cell grid with one fixed dim centre; its reduced-motion frame is the checker."
-      },
-      {
-        "name": "run",
-        "coverage": "covered",
-        "storyIds": ["activity-glyph--run"],
-        "note": "Run renders the drawn prompt and the block cursor, with no pixel grid."
       },
       {
         "name": "alert",
@@ -135,7 +128,7 @@ export const inventory: InventoryEntry[] = [
     ],
     "loading": {
       "status": "none",
-      "detail": "Static SVG marks with no fetch, so there is no initial, refresh, failure or stale state. The working grid and the run cursor animate."
+      "detail": "Static SVG marks with no fetch, so there is no initial, refresh, failure or stale state. The working grid animates."
     },
     "migration": {
       "status": "unassessed",
