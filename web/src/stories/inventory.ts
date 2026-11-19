@@ -6250,29 +6250,71 @@ export const inventory: InventoryEntry[] = [
     },
     "sources": [],
     "consumers": [
-      "web/src/components/needs-you/GwsAuthBody.vue",
+      "web/src/components/needs-you/GwsAuthBody.vue"
     ],
     "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variantNotes": "Props are the chat action and its params; no configurable variants beyond the states listed.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in CallbackPasteField.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "callback-paste-field--default"
+        ],
+        "note": "Empty input: the submit is disabled and the value is empty."
       },
-      { "name": "pending", "coverage": "uncovered", "storyIds": [], "note": "CallbackPasteField.vue busy makes the input readonly and disables the submit button; no rendered-state story exists." },
-      { "name": "action-error", "coverage": "uncovered", "storyIds": [], "note": "CallbackPasteField.vue v-if=\"error\" renders a role=alert callback error; no rendered-state story exists." },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "ready",
+        "coverage": "covered",
+        "storyIds": [
+          "callback-paste-field--ready"
+        ],
+        "note": "A loopback callback address enables the submit; no alert shows."
+      },
+      {
+        "name": "pending",
+        "coverage": "covered",
+        "storyIds": [
+          "callback-paste-field--pending"
+        ],
+        "note": "The callback write is held: input is readonly and the submit reads Sending… and is disabled."
+      },
+      {
+        "name": "action-error",
+        "coverage": "covered",
+        "storyIds": [
+          "callback-paste-field--refused"
+        ],
+        "note": "The engine refusal shows the role=alert copy, linked by aria-describedby, and clears the value."
+      },
+      {
+        "name": "sent",
+        "coverage": "covered",
+        "storyIds": [
+          "callback-paste-field--sent"
+        ],
+        "note": "An accepted callback clears the value and shows no alert; the card owns what follows."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "callback-paste-field--keyboard-focus"
+        ],
+        "note": "Tab lands on the input with a visible focus outline."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "callback-paste-field--narrow"
+        ],
+        "note": "Narrow renders the input inside a maximum 390px container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in CallbackPasteField.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch of its own: the field posts the typed address only on submit. Pending and refused outcomes are covered; there is no initial or refresh loading state."
     },
     "migration": {
       "status": "unassessed",
@@ -6292,29 +6334,93 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/needs-you/registry.ts"
     ],
-    "variants": ["open", "working", "done", "copiedOnce"],
-    "variantNotes": "CommandBody.vue renders a command, terminal typing, manual completion and copy fallback; remaining variants are unassessed.",
+    "variants": [],
+    "variantNotes": "Props are the chat action and its params; no configurable variants beyond the states listed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in CommandBody.vue implements this render; no rendered-state story exists."
+        "name": "open",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--open"
+        ],
+        "note": "Open shows the hint, Type it in a terminal and Copy; no I ran it control."
       },
-      { "name": "open", "coverage": "uncovered", "storyIds": [], "note": "CommandBody.vue action.state === 'open' renders the terminal instruction; no rendered-state story exists." },
-      { "name": "working", "coverage": "uncovered", "storyIds": [], "note": "CommandBody.vue action.state === 'working' switches to I ran it; no rendered-state story exists." },
-      { "name": "done", "coverage": "uncovered", "storyIds": [], "note": "CommandBody.vue action.state === 'done' hides command actions; no rendered-state story exists." },
-      { "name": "action-error", "coverage": "uncovered", "storyIds": [], "note": "CommandBody.vue v-if=\"error\" renders the error alert; no rendered-state story exists." },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "working",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--working"
+        ],
+        "note": "Working swaps Type it for I ran it; a click holds the marking request and blocks the control."
+      },
+      {
+        "name": "done",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--done"
+        ],
+        "note": "Done shows the command only; no controls and no hint."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--failed"
+        ],
+        "note": "Failed keeps Type it and Copy without the hint."
+      },
+      {
+        "name": "copied",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--copied"
+        ],
+        "note": "Copy with a resolving clipboard shows Copied. and offers I ran it."
+      },
+      {
+        "name": "action-error",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--copy-failed"
+        ],
+        "note": "A refused clipboard shows the role=alert copy failure and offers no I ran it."
+      },
+      {
+        "name": "type-fallback",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--type-fallback"
+        ],
+        "note": "Type it with an unavailable terminal falls back to copy and shows the not-ready message."
+      },
+      {
+        "name": "typing",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--typing"
+        ],
+        "note": "The held terminal read keeps Type it disabled while the command is being typed."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--keyboard-focus"
+        ],
+        "note": "Tab lands on the command region, which has a visible focus outline."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "command-body--narrow"
+        ],
+        "note": "Narrow keeps the command region within a maximum 390px container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in CommandBody.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch of its own: the card passes the action in, and every request runs only from a click, so there is no initial, refresh or stale loading state."
     },
     "migration": {
       "status": "unassessed",
@@ -6334,27 +6440,101 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/needs-you/registry.ts"
     ],
-    "variants": ["open", "failed", "waiting", "working", "code", "url"],
-    "variantNotes": "DeviceCodeBody.vue branches on action.state, code and URL; terminal support is conditional. Remaining variants are unassessed.",
+    "variants": [],
+    "variantNotes": "Props are the chat action and its params; no configurable variants beyond the states listed.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in DeviceCodeBody.vue implements this render; no rendered-state story exists."
+        "name": "open",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--open"
+        ],
+        "note": "Open shows Start sign-in only: no code, no Copy."
       },
-      { "name": "open / failed", "coverage": "uncovered", "storyIds": [], "note": "DeviceCodeBody.vue open/failed action states render the start button; starting disables it. No rendered-state story exists." },
-      { "name": "waiting", "coverage": "uncovered", "storyIds": [], "note": "DeviceCodeBody.vue waiting renders code/copy and a URL when available; working/waiting can show HelperTerminalButton. No rendered-state story exists." },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "starting",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--starting"
+        ],
+        "note": "A held start request shows Starting… and blocks the control."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--failed"
+        ],
+        "note": "Failed offers Try again."
+      },
+      {
+        "name": "waiting",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--waiting"
+        ],
+        "note": "Waiting shows the one-time code group, Copy, the verification link and the helper terminal button."
+      },
+      {
+        "name": "copied",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--copied"
+        ],
+        "note": "Copy with a resolving clipboard relabels the control Copied."
+      },
+      {
+        "name": "copy-failed",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--copy-failed"
+        ],
+        "note": "A refused clipboard keeps the Copy label and reports the failure to the card through its error emit."
+      },
+      {
+        "name": "waiting-without-code",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--waiting-without-code"
+        ],
+        "note": "A code outside the engine pattern is never shown or copied; the link still shows."
+      },
+      {
+        "name": "working",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--working"
+        ],
+        "note": "Working shows the helper terminal button and no start control."
+      },
+      {
+        "name": "done",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--done"
+        ],
+        "note": "Done renders no control; the card owns Continue."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--keyboard-focus"
+        ],
+        "note": "Tab lands on Start sign-in with a visible focus outline."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "device-code-body--narrow"
+        ],
+        "note": "Narrow keeps the code group within a maximum 390px container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in DeviceCodeBody.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch of its own: the card passes the action in, and every request runs only from a click, so there is no initial, refresh or stale loading state."
     },
     "migration": {
       "status": "unassessed",
@@ -6374,27 +6554,99 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/needs-you/registry.ts"
     ],
-    "variants": ["open", "failed", "waiting", "onHost"],
-    "variantNotes": "GwsAuthBody.vue branches on action.state and onHost for callback paste; remaining variants are unassessed.",
+    "variants": [],
+    "variantNotes": "Props are the chat action and its params; no configurable variants beyond the states listed.",
     "states": [
       {
-        "name": "default",
+        "name": "open",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--open"
+        ],
+        "note": "Open shows Sign in with Google only, with no link."
+      },
+      {
+        "name": "starting",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--starting"
+        ],
+        "note": "A held start request shows Starting… and blocks the control; the placeholder tab is stubbed."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--failed"
+        ],
+        "note": "Failed offers Try again and no manual-connect link for an ordinary refusal."
+      },
+      {
+        "name": "failed-manual-connect",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--failed-manual-connect"
+        ],
+        "note": "A failure that names the web app adds the link to Settings, which navigates to the workspace page."
+      },
+      {
+        "name": "waiting",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--waiting"
+        ],
+        "note": "Waiting shows the Google consent link with noopener; no button and no paste field."
+      },
+      {
+        "name": "waiting-without-consent",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--waiting-without-consent"
+        ],
+        "note": "A waiting URL that is not a Google consent page shows no link and no control."
+      },
+      {
+        "name": "waiting-off-engine-host",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "<template> in GwsAuthBody.vue implements this render; no rendered-state story exists."
+        "note": "The paste-back branch renders only when isLoopbackPage() is false. The workshop runs on loopback, so this branch cannot render here without mocking the module; CallbackPasteField has its own stories."
       },
-      { "name": "open / failed", "coverage": "uncovered", "storyIds": [], "note": "GwsAuthBody.vue open/failed renders start; a failed web-app error links to manual connect. No rendered-state story exists." },
-      { "name": "waiting", "coverage": "uncovered", "storyIds": [], "note": "GwsAuthBody.vue waiting renders the URL and, when !onHost, CallbackPasteField; no rendered-state story exists." },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "working",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--working"
+        ],
+        "note": "Working renders no control while the sign-in starts."
+      },
+      {
+        "name": "done",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--done"
+        ],
+        "note": "Done renders no control; the card owns Continue."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--keyboard-focus"
+        ],
+        "note": "Tab lands on Sign in with Google with a visible focus outline."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "gws-auth-body--narrow"
+        ],
+        "note": "Narrow keeps the primary control within a maximum 390px container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in GwsAuthBody.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch of its own: the card passes the action in, and every request runs only from a click, so there is no initial, refresh or stale loading state. The start request runs from the primary control."
     },
     "migration": {
       "status": "unassessed",
@@ -6412,28 +6664,55 @@ export const inventory: InventoryEntry[] = [
     },
     "sources": [],
     "consumers": [
-      "web/src/components/needs-you/DeviceCodeBody.vue",
+      "web/src/components/needs-you/DeviceCodeBody.vue"
     ],
     "variants": [],
-    "variantNotes": "Detailed configurable variants have not yet been audited.",
+    "variantNotes": "Props are the chat action and its params; no configurable variants beyond the states listed.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HelperTerminalButton.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "helper-terminal-button--default"
+        ],
+        "note": "With a helper session the control reads Show sign-in terminal."
       },
-      { "name": "hidden", "coverage": "uncovered", "storyIds": [], "note": "HelperTerminalButton.vue v-if=\"sessionId\" hides the terminal action without a session; no rendered-state story exists." },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "hidden",
+        "coverage": "covered",
+        "storyIds": [
+          "helper-terminal-button--hidden"
+        ],
+        "note": "Without a helper session the body renders nothing."
+      },
+      {
+        "name": "show",
+        "coverage": "covered",
+        "storyIds": [
+          "helper-terminal-button--show"
+        ],
+        "note": "Show reads the terminal status once (declared, unavailable); the control stays and no alert shows."
+      },
+      {
+        "name": "keyboard-focus",
+        "coverage": "covered",
+        "storyIds": [
+          "helper-terminal-button--keyboard-focus"
+        ],
+        "note": "Tab lands on the control with a visible focus outline."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "helper-terminal-button--narrow"
+        ],
+        "note": "Narrow keeps the control within a maximum 390px container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HelperTerminalButton.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch on render. Show opens the terminal store, which reads the engine status once when it opens; that read is the only request this owner makes."
     },
     "migration": {
       "status": "unassessed",
@@ -6493,26 +6772,61 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/needs-you/registry.ts"
     ],
-    "variants": ["note"],
-    "variantNotes": "RestartBody.vue owns the optional agent reason and Settings action; remaining variants are unassessed.",
+    "variants": [],
+    "variantNotes": "Props are the chat action and its params; no configurable variants beyond the states listed.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in RestartBody.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "restart-body--default"
+        ],
+        "note": "Config reason with a note: shows Agent's reason and Open Settings."
       },
-      { "name": "reason", "coverage": "uncovered", "storyIds": [], "note": "RestartBody.vue v-if=\"note\" renders the agent reason alongside the Settings action; no rendered-state story exists." },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "update",
+        "coverage": "covered",
+        "storyIds": [
+          "restart-body--update"
+        ],
+        "note": "Update reason shows Open Updates and navigates to the Settings updates place."
+      },
+      {
+        "name": "unknown-reason",
+        "coverage": "covered",
+        "storyIds": [
+          "restart-body--unknown-reason"
+        ],
+        "note": "A reason the PWA does not know gets the generic Open Settings copy and the advanced restart place."
+      },
+      {
+        "name": "no-note",
+        "coverage": "covered",
+        "storyIds": [
+          "restart-body--no-note"
+        ],
+        "note": "Without a note the reason line is absent and the control remains."
+      },
+      {
+        "name": "keyboard-activate",
+        "coverage": "covered",
+        "storyIds": [
+          "restart-body--keyboard-activate"
+        ],
+        "note": "Tab reaches Open Settings with a visible outline; Enter navigates."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "restart-body--narrow"
+        ],
+        "note": "Narrow keeps the control within a maximum 390px container."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in RestartBody.vue has not yet been audited."
+      "status": "none",
+      "detail": "No fetch: the body reads the action's reason and note only, so there is no loading state."
     },
     "migration": {
       "status": "unassessed",
