@@ -81,10 +81,8 @@ def test_no_reexec_argv_bypasses_the_helper() -> None:
 # Interpreters that are an installed tool env or a service-manager plist, never the
 # bundled engine's own sys.executable, so they cannot inherit its -B.
 _FOREIGN_INTERPRETER_FILES = {
-    "ciao/native_repair.py",
     "ciao/engine_update.py",
     "ciao/update_host.py",
-    "ciao/native_installer.py",
 }
 
 

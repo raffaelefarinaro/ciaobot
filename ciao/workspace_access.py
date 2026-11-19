@@ -19,9 +19,7 @@ _GENERIC_WORKSPACE = "your Ciaobot workspace folder"
 
 
 def denial_path() -> Path:
-    """A per-user file outside every workspace. ``scripts/install-engine.sh`` reads
-    the same path (``$HOME/.local/state/ciaobot/workspace-access-denied.txt``);
-    keep both in sync with ``DENIAL_FILE_NAME``."""
+    """A per-user file outside every workspace, beside the install receipt."""
     from ciao.install_receipt import default_receipt_path
 
     return default_receipt_path().parent / DENIAL_FILE_NAME

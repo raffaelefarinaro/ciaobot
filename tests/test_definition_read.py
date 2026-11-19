@@ -1,9 +1,8 @@
-"""The one strict definition reader shared by both native paths.
+"""The strict definition digest the macOS service manager rechecks.
 
-The native handoff records a definition's digest and the macOS service manager
-rechecks it before a fresh bootstrap. Both used to carry their own copy of the
-read, which is exactly how a byte-count check goes missing from one of them.
-These tests exercise both callers against the same files.
+The reader is the one ``macos_service`` uses to digest a LaunchAgent definition
+before it is trusted. The retired native handoff had its own copy; these tests
+exercise the surviving reader.
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ from typing import Callable
 
 import pytest
 
-from ciao import macos_service, native_handoff
+from ciao import macos_service
 
 #: ``(digest, bytes)``; the service manager keeps only the digest.
 Reader = Callable[[Path], tuple[str, bytes | None]]
@@ -25,14 +24,8 @@ def _macos_reader(path: Path) -> tuple[str, bytes | None]:
     return macos_service._definition_digest(path), None
 
 
-def _native_reader(path: Path) -> tuple[str, bytes | None]:
-    read = native_handoff._read_definition(path)
-    return read.sha256, read.data
-
-
 READERS = [
     pytest.param(_macos_reader, id="macos_service"),
-    pytest.param(_native_reader, id="native_handoff"),
 ]
 
 

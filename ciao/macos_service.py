@@ -355,13 +355,10 @@ def host_interpreter_for(engine: str) -> str:
     its own parser demands a python executable — so setup renders this
     process's interpreter for that one documented console name and passes
     anything else through, where the host renderer refuses it with the reason.
-    This function is the same rule for the native handoff, which records the
-    interpreter the hosted definition actually serves.
 
     The direct shape does not use this mapping. A direct console definition
     runs the console script itself, and the kernel then runs the interpreter
-    named on its first line; :func:`ciao.native_handoff.resolve_console_interpreter`
-    reads that interpreter so the result can identify both files.
+    named on its first line.
     """
     if Path(engine).name.lower() == "ciao":
         return sys.executable
