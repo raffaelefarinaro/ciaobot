@@ -213,7 +213,7 @@ arm.
 |---|---|---|
 | Subagent routes return `[]`. | No child transcripts, and the sidebar shows no running agents. | The `chat.provider == "opencode"` gate in `ciao/web/routes_api.py` chat subagents and `_running_subagent_rows`. The gate is the provider id. Inside it the reads dispatch to the shared `read_live_collab_tree` (guarded by `live_for_session`) and `read_collab_tree`. |
 | The subagent watcher falls through to the Claude JSONL reader. | Only if `background_subagents` is true. The watcher then looks for a Claude session file and finds nothing. | The `chat.provider` gate in `ciao/web/subagent_watchers.py` `watch_inner`. The gate is the provider id. Inside the opencode branch the reads dispatch to the shared `read_live_collab_tree`, `read_collab_tree` and `wait_background_change`. The CLI-task orphan sweep is Claude-only and skips everyone else, which is safe. |
-| `disallowed_tools_for_chat` returns `[]`. | The harness denylist is not applied. Credential denies are also not applied unless the adapter sends them itself. | `ProjectChatManager.disallowed_tools_for_chat`. OpenCode applies the shared patterns from `execution_modes.opencode_credential_deny_rules` inside its own permission rules. |
+| `disallowed_tools_for_chat` returns `[]`. | The harness denylist is not applied. | `ProjectChatManager.disallowed_tools_for_chat`. |
 | `native_title_candidates` is not overridden. | No native title: the chat keeps the deterministic title, then the one-shot titler. The read seam itself is id-neutral now — the remaining limitation is polling policy: `auto_title_if_default` still gives Claude one immediate native read and all other ids the existing delayed poll window. Polling neutrality is a separate follow-up. | `ProjectChatManager.auto_title_if_default`. |
 | Transcript reload uses the local markdown only. | The chat bubble history still renders from Ciaobot's own transcript. Provider-side history that never landed there does not. | The `provider == "opencode"` branch in `ciao/web/transcript_service.py`, which dispatches to the shared `read_thread` through `provider_registry`. Claude history uses its own SDK/JSONL helpers. |
 | Stop escalation disconnects only Claude. | A wedged CLI is not torn down on Stop unless `ActiveHandle.stop` already did it. | `ProjectChatManager` force-stop. |
@@ -250,8 +250,7 @@ own scheduler, notifications). The trim catalog is `TRIM_OPTIONS` in
 `ciao/claude_trim.py`: tool denies, bundled-skill overrides and `disable*`
 settings, each with its default. A
 new CLI that ships the same tools needs the equivalent, in its own
-permission language. Deny rules are not a sandbox: the shell can still
-read a path the file tool refuses. See `docs/AGENT_CLI.md`.
+permission language. See `docs/AGENT_CLI.md`.
 
 ## Optional, ship only if the CLI has the feature
 

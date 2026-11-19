@@ -123,11 +123,9 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
     assert settings == claude_settings_layer({})
     assert settings["skillOverrides"]["schedule"] == "off"
     assert settings["skillOverrides"]["loop"] == "off"
-    # Native background Bash and Monitor run unchanged; the one Bash hook only
-    # denies detached launches (nohup, &, setsid, disown).
-    bash_hooks = options.hooks["PreToolUse"]
-    matchers = {hook.matcher for hook in bash_hooks}
-    assert matchers == {"Bash"}
+    # Ciaobot wires no Bash hook: native background Bash and Monitor run
+    # unchanged, and detached launches are only discouraged by the prompt.
+    assert set(options.hooks) == {"UserPromptSubmit"}
     submit_hook = options.hooks["UserPromptSubmit"][0].hooks[0]
     assert submit_hook == provider._slash_context_hook
 
@@ -1552,6 +1550,7 @@ async def test_claude_workspace_scope_sets_sandbox_and_roots(
     guard = [m for m in matchers if "Read" in (m.matcher or "").split("|")]
     assert len(guard) == 1
     assert set(guard[0].matcher.split("|")) >= {"Read", "Write", "Edit", "Glob", "Grep"}
+    assert all("Bash" not in (m.matcher or "") for m in matchers)
     assert options.settings == json.dumps(claude_settings_layer({}))
 
 
@@ -1835,7 +1834,7 @@ async def test_claude_machine_scope_omits_sandbox(tmp_path: Path, monkeypatch) -
     options = captured["options"]
     assert options.sandbox is None
     assert options.add_dirs == []
-    assert [m.matcher for m in options.hooks["PreToolUse"]] == ["Bash"]
+    assert set(options.hooks) == {"UserPromptSubmit"}
     assert options.settings == json.dumps(claude_settings_layer({}))
 
 

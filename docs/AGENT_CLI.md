@@ -55,10 +55,9 @@ flowchart LR
 - The scope is also not a containment boundary against the model itself. The
   same process holds native Read/Bash/Edit over its workspace root, so the
   control plane is the *convenient* path to Ciaobot state, not the only one.
-  `.env` (which holds `PWA_AUTH_TOKEN`), `.runtime/` and `secrets/` are denied
-  to the native file tools on both providers — see `credential_path_deny_rules`
-  in `ciao/execution_modes.py`, which also states what that deny does not cover
-  (the shell).
+  Ciaobot does not restrict the native file tools by path on either provider:
+  `.env` (which holds `PWA_AUTH_TOKEN`), `.runtime/` and `secrets/` are as
+  readable as any other file in the workspace.
 - A chat whose control plane is unavailable fails the turn:
   `build_agent_request` raises `AgentSurfaceUnavailableError`, which is
   published as a normal failed turn with a logged ERROR. The

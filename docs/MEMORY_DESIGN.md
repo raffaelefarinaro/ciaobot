@@ -122,8 +122,10 @@ outperforms any pipeline that summarizes those sources away.
   deleted outright (#627) rather than left as a mode. The memory pass is
   that agentic chat: it reads the archive with tools, so the injection
   surface it opens is answered by bounds instead of by a sandbox — it is a
-  `bypass` chat scoped to memory and the vault (no messages, no commits, no
-  external calls), it is visible and steerable like any other chat, and
+  `bypass` chat. Its scope (no messages, commits or external calls) is
+  enforced only by the prompt text in `MEMORY_PASS_PROMPT`
+  (`ciao/web/memory_pass.py` lines 148–149). It is visible and steerable like
+  any other chat, and
   anything it is unsure about is queued rather than written. The guarded
   code the one-shot relied on is not gone either: it is the accept path, and
   it is what every write goes through now (event-shape filter, reconcile,

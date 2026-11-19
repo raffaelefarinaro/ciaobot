@@ -99,9 +99,6 @@ from ciao.providers.base import (
     build_runtime_context,
     prepend_stable_context,
 )
-from ciao.execution_modes import (
-    opencode_credential_deny_rules,
-)
 from ciao.fs_sandbox import node_tool_read_roots, opencode_sandbox_prefix
 from ciao.os_support.processes import ProcessTree, bounded_output, tree_spawn_options
 from ciao.providers._sse import SSEDecoder
@@ -555,18 +552,6 @@ _READ_ONLY_TOOLS = ("read", "glob", "grep")
 # Tools OpenCode's POST /api/session/{id}/background can move (its job
 # types `shell` and `subagent`; verified on 2.0.27, #1413).
 _BACKGROUNDABLE_TOOLS = frozenset({"shell", "subagent"})
-# V2 sends the glob pattern/regex itself as the permission resource; it does
-# not send the search root or result paths. Require an explicit operator card
-# for both search actions in every mode except bypass, so a broad search
-# cannot silently enumerate credential-bearing files. Bypass already allows
-# shell, which reaches the same files, so a card there only stalls the run.
-# Path-shaped deny rules below still hard-deny direct protected glob patterns
-# after this ask rule.
-_SEARCH_PERMISSION_RULES: tuple[dict[str, str], ...] = (
-    {"action": "glob", "resource": "*", "effect": "ask"},
-    {"action": "grep", "resource": "*", "effect": "ask"},
-)
-
 # Permission changes cannot be patched onto an existing opencode session.
 # Keep the replacement-session handover bounded so a long-running chat does
 # not turn one mode switch into an unbounded prompt.
@@ -1021,11 +1006,7 @@ def _token_usage_events(tokens: object) -> list[StreamEvent]:
 
 
 def mode_settings(
-    mode: BridgeMode,
-    *,
-    tools_enabled: bool = True,
-    runtime_root: object = None,
-    workspace_root: object = None,
+    mode: BridgeMode, *, tools_enabled: bool = True
 ) -> tuple[str, list[dict[str, str]]]:
     """Map a Ciaobot mode onto an opencode (agent, permission ruleset).
 
@@ -1033,75 +1014,16 @@ def mode_settings(
     the opencode API's tool-disable mechanism: unlike plan mode it does not
     allow read/glob/grep/list to reach the provider at all.
 
-    ``runtime_root`` is the resolved runtime directory, when the caller can
-    reach it, so the credential denies cover a relocated
-    ``CIAO_RUNTIME_ROOT`` and not only the default ``.runtime`` name. When a
-    workspace location is known, relative V2 aliases are included as well.
-
     Since S6 every chat is on the CLI surface. Auto mode does not pre-approve
     any ``ciao …`` argv prefix: an allow rule is a prefix a shell suffix
     (``ciao help >/dev/null; <cmd>``) could ride past, so bash stays ``ask``
     and every shell command, including ``ciao …``, keeps a card. Users who want
-    no routine cards switch to ``bypass``; outside bypass, V2 glob/grep search
-    actions still require an explicit card because their resources are not paths.
+    no routine cards switch to ``bypass``.
     """
     key = mode if mode in _MODE_AGENTS else "normal"
     if not tools_enabled:
         return _MODE_AGENTS[key], _rules(("*", "deny"))
-    rules = [dict(rule) for rule in _MODE_PERMISSIONS[key]]
-    # Search resources in V2 are patterns/regexes rather than paths. Keep
-    # search operations behind an explicit card, except in bypass where the
-    # blanket allow (shell included) already covers them.
-    if key != "bypass":
-        rules.extend(dict(rule) for rule in _SEARCH_PERMISSION_RULES)
-    # Last, and for every mode including `bypass`: resolution is
-    # last-match-wins, and this is the one carve-out no mode may buy its way
-    # out of. See `opencode_credential_deny_rules`.
-    rules.extend(opencode_credential_deny_rules(runtime_root, workspace_root))
-    return _MODE_AGENTS[key], rules
-
-
-# Actions a memory pass needs: it reads and edits the vault and shells out
-# to `ciao`/`ciao vault search`. Everything else is denied by the leading
-# wildcard, which is also what blocks MCP (opencode's permission union has
-# no `mcp` action) and the search actions the pass must not use.
-_MEMORY_PASS_ALLOWED_ACTIONS: tuple[str, ...] = (
-    "read", "edit", "write", "shell", "bash",
-    "external_directory", "list", "question", "skill",
-)
-
-
-def memory_pass_guardrail_rules(
-    runtime_root: object = None, workspace_root: object = None
-) -> list[dict[str, str]]:
-    """The session ruleset the end-of-conversation memory pass runs under.
-
-    An allow-list, not the ``bypass`` mode's blanket allow: the pass reads and
-    edits the vault and shells out to ``ciao``, and nothing else. A leading
-    wildcard ``deny`` plus explicit grants is what denies MCP here — opencode's
-    permission union has no ``mcp`` action to name.
-
-    ``glob`` and ``grep`` are denied outright rather than left at ``ask``:
-    opencode always asks for them even in ``bypass`` (7 of 12 agent chats in
-    the #594 experiment stopped on that card), and V2 sends the pattern as the
-    resource, so a search cannot be scoped to the vault anyway. The pass uses
-    ``ciao vault search``.
-
-    Same order as :func:`mode_settings`: wildcard first, specific grants after,
-    and the credential denies last because opencode resolves last-match-wins.
-    """
-    rules = _rules(("*", "deny"))
-    rules.extend(
-        {"action": action, "resource": "*", "effect": "allow"}
-        for action in _MEMORY_PASS_ALLOWED_ACTIONS
-    )
-    # Search stays denied even though `read` is allowed: V2 sends the
-    # pattern as the resource, so it cannot be scoped to the vault.
-    rules.append({"action": "glob", "resource": "*", "effect": "deny"})
-    rules.append({"action": "grep", "resource": "*", "effect": "deny"})
-    rules.append({"action": "skill", "resource": "gws-*", "effect": "deny"})
-    rules.extend(opencode_credential_deny_rules(runtime_root, workspace_root))
-    return rules
+    return _MODE_AGENTS[key], [dict(rule) for rule in _MODE_PERMISSIONS[key]]
 
 
 def _session_permission_matches(
@@ -2652,23 +2574,6 @@ class OpencodeProvider(BaseSDKProvider):
         payload = system_prompt_payload("") or {}
         return str(payload.get("append") or "")
 
-    def _runtime_root(self) -> str:
-        """The resolved runtime directory, or "" when it cannot be reached.
-
-        Feeds the credential denies in ``mode_settings`` so a relocated
-        ``CIAO_RUNTIME_ROOT`` is covered by path, not just by the default
-        ``.runtime`` name. ``self.config`` is optional on this base class and
-        unset in many tests, so a missing one degrades to the name-based
-        patterns rather than raising.
-        """
-        state_path = getattr(self.config, "state_path", None)
-        if not state_path:
-            return ""
-        try:
-            return str(Path(state_path).parent.resolve())
-        except (OSError, ValueError):
-            return ""
-
     def _session_settings(
         self, request: AgentRequest
     ) -> tuple[str, list[dict[str, str]]]:
@@ -2676,22 +2581,11 @@ class OpencodeProvider(BaseSDKProvider):
 
         A caller that supplied ``permission_rules`` is not running a Ciaobot
         mode, so its ruleset is used verbatim and the mode only picks the
-        agent. A memory pass runs under
-        :func:`memory_pass_guardrail_rules` rather than its ``bypass`` mode's
-        blanket allow. Everyone else gets :func:`mode_settings`, unchanged.
+        agent. Everyone else gets :func:`mode_settings`.
         """
         if self._permission_rules is not None:
             return "build", [dict(rule) for rule in self._permission_rules]
-        if request.memory_pass:
-            return "build", memory_pass_guardrail_rules(
-                self._runtime_root(), self.workspace_root
-            )
-        return mode_settings(
-            request.mode,
-            tools_enabled=self._tools_enabled,
-            runtime_root=self._runtime_root(),
-            workspace_root=self.workspace_root,
-        )
+        return mode_settings(request.mode, tools_enabled=self._tools_enabled)
 
     async def _ensure_server(self, request: AgentRequest) -> httpx.AsyncClient:
         """Start (or reuse) this chat's server; one caller at a time (see `_ensure_server_locked`)."""

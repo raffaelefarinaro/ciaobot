@@ -5,11 +5,10 @@ Three SDK features worth knowing when you touch this file:
 - ``fallback_model``: picked by ``_fallback_model_for(primary)``. Fable →
   Opus → Sonnet → Haiku → none. Keeps schedules alive when the primary tier is
   rate-limited.
-- ``hooks={"PreToolUse": ...}``: denies detached shell invocations
-  (``nohup … &``) the CLI cannot track; native background Bash and ``Monitor``
-  run unchanged. Native slash invocations receive the shared request capsule
-  through UserPromptSubmit instead of a prefix, so the CLI can expand skills
-  marked disable-model-invocation without treating context as command arguments.
+- ``hooks={"UserPromptSubmit": ...}``: native slash invocations receive the
+  shared request capsule through UserPromptSubmit instead of a prefix, so the
+  CLI can expand skills marked disable-model-invocation without treating
+  context as command arguments.
 - ``setting_sources=["user", "project", "local"]``: makes the CLI auto-discover
   ``.claude/skills/``, ``.claude/agents/``, and ``.claude/commands/`` (including
   ciao-native commands like ``/remember``).
@@ -59,7 +58,7 @@ from claude_agent_sdk import (
     delete_session as sdk_delete_session,
     get_session_info,
 )
-from claude_agent_sdk.types import TERMINAL_TASK_STATUSES, HookContext, HookInput, HookJSONOutput, PermissionMode, SandboxSettings, SystemPromptPreset
+from claude_agent_sdk.types import TERMINAL_TASK_STATUSES, HookContext, HookEvent, HookInput, HookJSONOutput, PermissionMode, SandboxSettings, SystemPromptPreset
 
 from ciao.tool_summary import summarize_claude_tool_input
 from ciao.mcp_names import is_claudeai_connector
@@ -89,7 +88,6 @@ from ciao.models import (
 )
 from ciao.claude_trim import claude_settings_layer
 from ciao.core_prompt import system_prompt_payload
-from ciao.observability.hooks import build_detached_shell_deny_hook
 from ciao.providers.permission_gate import PermissionGate
 from ciao.providers.base import (
     BACKGROUND_WORK_MAX_S,
@@ -1084,6 +1082,11 @@ class ClaudeProvider(BaseSDKProvider):
         if linked_repo and linked_repo not in {str(d) for d in add_dirs}:
             add_dirs.append(linked_repo)
         self._fs_scope_key = (request.agent_fs_scope, request.agent_roots, request.agent_denied, request.agent_denied_except)
+        hooks: dict[HookEvent, list[HookMatcher]] = {
+            "UserPromptSubmit": [HookMatcher(hooks=[self._slash_context_hook])]
+        }
+        if file_tool_hooks:
+            hooks["PreToolUse"] = file_tool_hooks
 
         # The SDK reads the initialize deadline from os.environ when it builds
         # the client, so it has to be set before ClaudeSDKClient() below.
@@ -1126,17 +1129,7 @@ class ClaudeProvider(BaseSDKProvider):
                 if request.claude_settings is not None
                 else claude_settings_layer({})
             ),
-            hooks={
-                "UserPromptSubmit": [HookMatcher(hooks=[self._slash_context_hook])],
-                # Native run_in_background Bash and Monitor are tracked and
-                # woken by the CLI, and the provider stays alive while they
-                # run. Only detached launches (nohup … &, setsid, disown) are
-                # denied: the CLI cannot track them.
-                "PreToolUse": [HookMatcher(
-                    matcher="Bash",
-                    hooks=[build_detached_shell_deny_hook()],
-                ), *file_tool_hooks],
-            },
+            hooks=hooks,
             # Auto mode's classifier handles most tool calls silently, but
             # escalations (blocked actions the model keeps insisting on)
             # surface here. The gate publishes a PermissionRequestEvent into
