@@ -7,6 +7,10 @@ import Sparkle
 protocol ClientUpdateControlling: AnyObject {
     var canCheckForUpdates: Bool { get }
     var unavailableReason: String? { get }
+    /// Whether verified updates are downloaded and installed without asking.
+    /// Reads false, and the setter does nothing, until the updater has started.
+    var automaticallyInstallsUpdates: Bool { get }
+    func setAutomaticallyInstallsUpdates(_ on: Bool)
     func start()
     func checkForUpdates()
 }
@@ -18,6 +22,9 @@ protocol ClientUpdateControlling: AnyObject {
 protocol ClientUpdaterEngine: AnyObject {
     var canCheckForUpdates: Bool { get }
     var automaticallyChecksForUpdates: Bool { get }
+    /// Sparkle's `automaticallyDownloadsUpdates`: a verified update is
+    /// downloaded in the background and installed through the drain gate.
+    var automaticallyDownloadsUpdates: Bool { get set }
     func start()
     func checkForUpdates()
     func checkForUpdatesInBackground()
@@ -170,6 +177,10 @@ final class SparkleUpdaterEngine: ClientUpdaterEngine {
 
     var canCheckForUpdates: Bool { controller.updater.canCheckForUpdates }
     var automaticallyChecksForUpdates: Bool { controller.updater.automaticallyChecksForUpdates }
+    var automaticallyDownloadsUpdates: Bool {
+        get { controller.updater.automaticallyDownloadsUpdates }
+        set { controller.updater.automaticallyDownloadsUpdates = newValue }
+    }
 
     func start() { controller.startUpdater() }
     func checkForUpdates() { controller.updater.checkForUpdates() }
@@ -276,6 +287,16 @@ final class ClientUpdater: ClientUpdateControlling {
 
     var canCheckForUpdates: Bool {
         started && engine?.canCheckForUpdates == true
+    }
+
+    /// The engine exists only for a started, available updater, so an
+    /// unstarted or unavailable updater reads false and ignores the setter.
+    var automaticallyInstallsUpdates: Bool {
+        engine?.automaticallyDownloadsUpdates ?? false
+    }
+
+    func setAutomaticallyInstallsUpdates(_ on: Bool) {
+        engine?.automaticallyDownloadsUpdates = on
     }
 
     /// Starts the retained updater exactly once. A second call is a no-op, so a
