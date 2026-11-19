@@ -203,6 +203,11 @@ class FakeAgent:
 
     async def delete_session(self, session_id: str, **kwargs: Any) -> Any:
         self.log("session/delete", {"sessionId": session_id})
+        if self.scenario.get("delete_hang"):
+            # Never answers: the caller's timeout is the only way out.
+            await asyncio.Event().wait()
+        if self.scenario.get("delete_not_found"):
+            raise acp.RequestError(-32002, "Resource not found")
         if self.scenario.get("delete_error"):
             raise acp.RequestError(-32000, str(self.scenario["delete_error"]))
         return None

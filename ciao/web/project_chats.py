@@ -191,7 +191,12 @@ from ciao.os_support.files import open_fd
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao import provider_registry
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
-from ciao.providers.base import BACKGROUND_WORK_MAX_S, BaseProvider, QuestionResponseResult
+from ciao.providers.base import (
+    BACKGROUND_WORK_MAX_S,
+    BaseProvider,
+    CleanupTimedOut,
+    QuestionResponseResult,
+)
 from ciao.rate_limits import RateLimitStore, default_store_path
 from ciao.schedules import (
     ScheduleEntry,
@@ -5026,6 +5031,15 @@ class ProjectChatManager:
                 deleted = await descriptor.factory().delete_session(
                     root, sid, runtime_root=self._config.state_path.parent
                 )
+            except CleanupTimedOut:
+                # One id ran out of time: the chat's remaining ids are skipped, so the
+                # archive's total wait stays bounded. Their journals are left in place.
+                logger.warning(
+                    "Reclaiming %s sessions for chat %s timed out; the remaining ids were skipped.",
+                    chat.provider,
+                    chat.chat_id,
+                )
+                break
             except Exception:  # noqa: BLE001 — provider cleanup is fail-open
                 logger.exception(
                     "Failed to reclaim %s session %s for chat %s",
@@ -6829,88 +6843,28 @@ class ProjectChatManager:
 
     # ── Image-capability pre-flight ──────────────────────────────────────
 
-    async def _catalog_image_support(self, provider: str, model: str) -> bool | None:
-        """Whether ``model`` accepts images, per the provider's own catalog.
+    def _agent_accepts_images(self, chat: ChatInfo) -> bool:
+        """Whether the chat's live agent may receive images.
 
-        ``None`` means the provider did not say -- it is unknown, the model is
-        absent from its catalog, or its build reports no capability block.
-        Unknown is not a refusal; the caller treats it as capable.
+        The gate is the agent-level ``promptCapabilities.image`` the agent stated at its
+        handshake, read from the connection the chat already has. Only an explicit
+        False refuses; no connection yet, or no statement, is capable. A model that
+        cannot take an image is the adapter's to refuse, not this pre-flight's.
         """
-        descriptor = provider_registry.get(provider)
-        if descriptor is None:
-            return None
-        try:
-            catalog = await descriptor.factory().model_catalog(
-                self._config.workspace_root
-            )
-        except Exception:  # noqa: BLE001 — a probe must never block a turn
-            logger.info(
-                "%s catalog unavailable for %s; assuming capable",
-                provider,
-                model,
-                exc_info=True,
-            )
-            return None
-        for row in catalog:
-            if row.get("model") == model:
-                value = row.get("images")
-                return value if isinstance(value, bool) else None
-        return None
-
-    async def _model_capable(self, model: str, chat: ChatInfo) -> bool:
-        """Whether ``model`` can accept image input.
-
-        The provider's own ``model_catalog`` is the single source of truth.
-        Only opencode reports one (it is bring-your-own-provider and its
-        catalog spans text-only models); Anthropic's and OpenAI's current
-        models all accept images, and the base default is an empty catalog,
-        so every other provider answers yes without any work.
-
-        Unknown answers resolve to capable, so a cold catalog or an older
-        opencode build never blocks an image turn -- the upstream rejects the
-        attachment itself if it really cannot take one.
-        """
-        if not model:
-            return True
-        supports = await self._catalog_image_support(chat.provider, model)
-        return True if supports is None else supports
+        live = self._providers.get(chat.chat_id)
+        provider = live.provider if live is not None else None
+        return provider is None or provider.agent_accepts_images() is not False
 
     async def _capability_candidates(
         self, chat: ChatInfo, model: str
     ) -> list[dict[str, object]]:
-        """Vision-capable alternatives for the capability question.
+        """The question's candidates: the current model only, disabled.
 
-        Always leads with the current model as a disabled ``current`` entry so
-        the PWA can render the active-but-unsuitable choice. The rest are models
-        the chat's provider states accept images, drawn from the same catalog
-        that ruled the current one out, so a suggestion cannot be a guess.
-        For opencode, every entry with ``images is True`` in its catalog is
-        offered (no 3-item cap); other providers report an empty catalog, so
-        only the current entry is returned there.
+        The image statement covers the whole agent session, not each model, so no
+        alternative model is offered from a per-model table.
         """
-        entries: list[dict] = [{"id": model, "label": model, "disabled": True}]
-        descriptor = provider_registry.get(chat.provider)
-        if descriptor is None:
-            return entries
-        try:
-            catalog = await descriptor.factory().model_catalog(
-                self._config.workspace_root
-            )
-        except Exception:  # noqa: BLE001 — the question is still useful empty
-            logger.info(
-                "%s catalog unavailable for candidates", chat.provider, exc_info=True
-            )
-            return entries
-        for row in catalog:
-            candidate = str(row.get("model") or "")
-            if not candidate or candidate == model or row.get("images") is not True:
-                continue
-            entries.append({
-                "id": candidate,
-                "label": str(row.get("label") or candidate),
-                "supports_vision": True,
-            })
-        return entries
+        del chat
+        return [{"id": model, "label": model, "disabled": True}]
 
     async def _await_capability_answer(
         self, chat_id: str, request_id: str, timeout_s: float

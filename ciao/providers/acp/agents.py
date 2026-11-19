@@ -22,14 +22,16 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from acp.exceptions import RequestError
+
 from ciao import claude_sessions
 from ciao.claude_trim import claude_settings_layer
 from ciao.models import AgentRequest, AssistantTextDelta, StreamEvent, ThinkingEvent, ToolUseEvent
-from ciao.providers.acp.connection import AcpConnection, AgentStartError
+from ciao.providers.acp.connection import AcpConnection, AgentStartError, AgentVersionError
 from ciao.providers.acp.normalize import UpdateNormalizer, child_tool_id, loggable_kind
 from ciao.providers.acp.provider import AcpProvider, AgentClient
 from ciao.providers.acp.spec import AgentSpec, ModeChoice, VersionGate
-from ciao.providers.base import ActiveHandle
+from ciao.providers.base import ActiveHandle, CleanupTimedOut
 from ciao.providers.opencode import (
     OPENCODE_V2_REQUIRED,
     cached_opencode_version,
@@ -228,6 +230,11 @@ _CHILD_TITLE_CHARS = 200
 # Live children (opened, no terminal status yet) per turn. A child leaves the set when its
 # terminal status arrives and when the turn ends, so the cap bounds only children running at once.
 _CHILD_LIMIT = 256
+# The ceiling on one session's store cleanup (open, session/delete, close). A healthy agent
+# answers in well under a second; past this the chat's cleanup gives up rather than hold the caller.
+_DELETE_TIMEOUT_S = 10.0
+# ACP's "resource not found" (JSON-RPC -32002): the session is not in the agent's store.
+_RESOURCE_NOT_FOUND = -32002
 
 
 def _safe_title(raw: object) -> str:
@@ -298,32 +305,54 @@ class OpencodeAcpProvider(AcpProvider):
     ) -> bool | None:
         """Remove the chat's session from opencode's own store, then its journal.
 
-        opencode keeps each session in its store under the agent root, so the cleanup starts
-        ``opencode acp`` there and sends ``session/delete`` when the agent advertises it. A start
-        or delete failure is quiet, as the journal removal is: the caller only sees whether
-        either one removed something.
+        opencode keeps each session in its store under the agent root, so the agent is asked to
+        delete it when it advertises ``session/delete``. The agent is spawned only when this
+        chat's journal exists: no journal means the chat never reached a prompt, or the session
+        is already gone. The whole store cleanup is bounded by ``_DELETE_TIMEOUT_S``; past it,
+        :class:`CleanupTimedOut` tells the caller to skip the chat's remaining session ids.
+        Start and delete failures are logged by type only, and the journal result stands.
         """
         journal = await super().delete_session(workspace_root, session_id, runtime_root=runtime_root)
+        if not journal:
+            return None
         if not session_id:
-            return True if journal else None
+            return True
+        try:
+            await asyncio.wait_for(
+                cls._delete_from_store(workspace_root, session_id), _DELETE_TIMEOUT_S
+            )
+        except TimeoutError as exc:
+            logger.warning(
+                "opencode did not finish deleting a session in time (%s); its store kept it.",
+                type(exc).__name__,
+            )
+            raise CleanupTimedOut(type(exc).__name__) from None
+        return True
+
+    @classmethod
+    async def _delete_from_store(cls, workspace_root: Path, session_id: str) -> None:
         try:
             connection = await AcpConnection.open(
                 cls.spec, cwd=workspace_root, env=cls.spawn_env(), client=AgentClient()  # type: ignore[abstract]
             )
+        except AgentVersionError:
+            return  # the version gate has already logged its one refusal
         except AgentStartError:
             logger.warning("opencode could not start to delete a session; its store kept it.")
-            return True if journal else None
-        removed = False
+            return
         try:
             caps = connection.agent_capabilities.get("sessionCapabilities")
             if isinstance(caps, Mapping) and caps.get("delete") is not None:
                 await connection.conn.delete_session(session_id=session_id)
-                removed = True
+        except RequestError as exc:
+            if exc.code == _RESOURCE_NOT_FOUND:
+                logger.debug("opencode's store has no such session; nothing to delete.")
+            else:
+                logger.warning("opencode could not delete a session (%s).", type(exc).__name__)
         except Exception as exc:  # noqa: BLE001 — the adapter's error text is never logged
             logger.warning("opencode could not delete a session (%s).", type(exc).__name__)
         finally:
             await connection.close()
-        return True if (journal or removed) else None
 
     def ext_update(
         self, normalizer: UpdateNormalizer, method: str, payload: Mapping[str, Any]

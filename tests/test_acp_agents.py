@@ -769,14 +769,26 @@ async def test_opencode_delete_session_asks_the_agent_to_delete_it(
     assert calls == ["open:opencode:ws", f"session/delete:{SESSION}", "close"]
 
 
+def _write_opencode_journal(runtime: Path) -> Path:
+    from ciao.providers.acp.session import journal_file
+
+    journal = journal_file(runtime, OPENCODE.id, SESSION)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text("{}\n", encoding="utf-8")
+    return journal
+
+
 @pytest.mark.asyncio
 async def test_opencode_delete_session_without_the_capability_only_drops_the_journal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    runtime = tmp_path / "rt"
+    journal = _write_opencode_journal(runtime)
     calls: list[str] = []
     _fake_opencode_open(monkeypatch, calls, _FakeOpencodeConnection(calls, delete_advertised=False))
 
-    assert await OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=tmp_path / "rt") is None
+    assert await OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=runtime) is True
+    assert not journal.exists()
     assert calls == ["open:opencode:ws", "close"]
 
 
@@ -784,14 +796,16 @@ async def test_opencode_delete_session_without_the_capability_only_drops_the_jou
 async def test_opencode_delete_session_refusal_is_quiet_and_still_closes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    runtime = tmp_path / "rt"
+    _write_opencode_journal(runtime)
     calls: list[str] = []
     connection = _FakeOpencodeConnection(calls, delete_error=RuntimeError(f"denied {SESSION}"))
     _fake_opencode_open(monkeypatch, calls, connection)
 
     with caplog.at_level("WARNING", logger="ciao.providers.acp.agents"):
-        result = await OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=tmp_path / "rt")
+        result = await OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=runtime)
 
-    assert result is None
+    assert result is True  # the journal was removed
     assert calls[-1] == "close"
     assert "could not delete a session (RuntimeError)" in caplog.text
     assert SESSION not in caplog.text
@@ -818,6 +832,151 @@ async def test_opencode_delete_session_start_failure_keeps_the_journal_result(
     assert not journal.exists()
     assert calls == ["open:opencode:ws"]
     assert "could not start to delete a session" in caplog.text
+
+
+def _opencode_on_fake(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **scenario: object) -> Path:
+    """Point OpenCode's cleanup at the scripted ACP agent; returns the calls-log path."""
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    spec, calls = write_scenario(tmp_path, **scenario)
+    # No version gate: the scripted agent reports no version, and the gate would probe the binary.
+    fake = dataclasses.replace(OPENCODE, binary=spec.binary, args=spec.args, version_gate=None)
+    monkeypatch.setattr(OpencodeAcpProvider, "spec", fake)
+    return calls
+
+
+_DELETE_CAPABLE = {"sessionCapabilities": {"delete": {}}}
+
+
+@pytest.mark.asyncio
+async def test_opencode_delete_session_gives_up_on_a_hung_session_delete(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An agent that never answers session/delete cannot hold the caller: it times out and closes."""
+    from ciao.providers.base import CleanupTimedOut
+
+    monkeypatch.setattr(agents, "_DELETE_TIMEOUT_S", 3.0)
+    runtime = tmp_path / "rt"
+    journal = _write_opencode_journal(runtime)
+    calls = _opencode_on_fake(monkeypatch, tmp_path, initialize=_DELETE_CAPABLE, delete_hang=True)
+    closed: list[bool] = []
+    real_close = agents.AcpConnection.close
+
+    async def recording_close(self) -> None:
+        closed.append(True)
+        await real_close(self)
+
+    monkeypatch.setattr(agents.AcpConnection, "close", recording_close)
+
+    with caplog.at_level("WARNING", logger="ciao.providers.acp.agents"):
+        with pytest.raises(CleanupTimedOut):
+            await asyncio.wait_for(
+                OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=runtime), 20
+            )
+
+    methods = [c["method"] for c in read_calls(calls)]
+    assert "session/delete" in methods
+    assert closed == [True]  # the agent is closed even though its delete was cancelled
+    assert not journal.exists()
+    assert "TimeoutError" in caplog.text
+    assert SESSION not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_opencode_delete_session_gives_up_when_the_agent_never_initializes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from ciao.providers.base import CleanupTimedOut
+
+    monkeypatch.setattr(agents, "_DELETE_TIMEOUT_S", 3.0)
+    runtime = tmp_path / "rt"
+    journal = _write_opencode_journal(runtime)
+    _opencode_on_fake(monkeypatch, tmp_path, initialize_delay_ms=60_000)
+
+    with caplog.at_level("WARNING", logger="ciao.providers.acp.agents"):
+        with pytest.raises(CleanupTimedOut):
+            await asyncio.wait_for(
+                OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=runtime), 20
+            )
+
+    assert not journal.exists()
+    assert "TimeoutError" in caplog.text
+    assert SESSION not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_opencode_absent_session_spawns_nothing_and_warns_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No journal means the chat never reached a prompt, or is already gone: no agent process."""
+
+    async def must_not_spawn(spec, *, cwd, env, client):
+        raise AssertionError("an absent session must not spawn the agent")
+
+    monkeypatch.setattr(agents.AcpConnection, "open", must_not_spawn)
+    with caplog.at_level("DEBUG", logger="ciao.providers.acp.agents"):
+        result = await OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=tmp_path / "rt")
+
+    assert result is None
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+@pytest.mark.asyncio
+async def test_opencode_not_found_session_delete_is_debug_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    runtime = tmp_path / "rt"
+    journal = _write_opencode_journal(runtime)
+    calls = _opencode_on_fake(monkeypatch, tmp_path, initialize=_DELETE_CAPABLE, delete_not_found=True)
+
+    with caplog.at_level("DEBUG", logger="ciao.providers.acp.agents"):
+        result = await OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=runtime)
+
+    assert result is True
+    assert not journal.exists()
+    assert "session/delete" in [c["method"] for c in read_calls(calls)]
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert any(r.levelno == logging.DEBUG and "no such session" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_opencode_other_session_delete_refusal_warns_with_the_type_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    runtime = tmp_path / "rt"
+    _write_opencode_journal(runtime)
+    _opencode_on_fake(monkeypatch, tmp_path, initialize=_DELETE_CAPABLE, delete_error="secret-adapter-text")
+
+    with caplog.at_level("DEBUG", logger="ciao.providers.acp.agents"):
+        result = await OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=runtime)
+
+    assert result is True
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == ["opencode could not delete a session (RequestError)."]
+    assert "secret-adapter-text" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_opencode_below_floor_delete_is_quiet_and_logs_the_gate_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A version-refused install: the gate logs its own warning, the delete adds none."""
+    runtime = tmp_path / "rt"
+    journal = _write_opencode_journal(runtime)
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    spec, calls = write_scenario(tmp_path, agent_info={"name": "opencode", "version": "2.0.16"})
+    monkeypatch.setattr(OpencodeAcpProvider, "spec", dataclasses.replace(OPENCODE, binary=spec.binary, args=spec.args))
+
+    with caplog.at_level("WARNING"):
+        result = await asyncio.wait_for(
+            OpencodeAcpProvider.delete_session(tmp_path / "ws", SESSION, runtime_root=runtime), 20
+        )
+
+    assert result is True  # the journal went; the refused agent is simply not asked
+    assert not journal.exists()
+    assert "initialize" in [c["method"] for c in read_calls(calls)]
+    assert "session/delete" not in [c["method"] for c in read_calls(calls)]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings == ["opencode agent refused: its version is below the supported floor."]
 
 
 @pytest.mark.asyncio

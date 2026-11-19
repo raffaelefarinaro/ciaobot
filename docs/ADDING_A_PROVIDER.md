@@ -100,7 +100,7 @@ set and nothing else.
 | `abort_session(session_id)` | Aborting a provider-side session. | A no-op. |
 | `native_title_candidates(workspace_root, session_id)` (classmethod) | `ProjectChatManager._native_chat_title`, tier 1 of the auto-title poll. | On `BaseProvider` the default returns `()` — no native title for that provider. |
 | `delete_session(workspace_root, session_id)` (classmethod) | `ProjectChatManager._reclaim_provider_sessions_async`, the delete/archive/reset cleanup. | On `BaseProvider` the default returns `None` — an adapter inheriting it intentionally does no reclaim, and the host stays quiet. |
-| `model_catalog(workspace_root, *, force=False)` (classmethod) | `ProjectChatManager._catalog_image_support` (image preflight, via `_model_capable`), `_capability_candidates`, and the `/api/models` assembly, all through `provider_registry`. | On `BaseProvider` the default returns `[]`: no dynamic catalog supplied by this operation. An overriding adapter may start a short-lived server. |
+| `model_catalog(workspace_root, *, force=False)` (classmethod) | `/api/models` assembly, through `provider_registry`. The image preflight no longer reads it: it asks the live provider's `agent_accepts_images()` (the agent's handshake statement). | On `BaseProvider` the default returns `[]`: no dynamic catalog supplied by this operation. An overriding adapter may start a short-lived server. |
 
 `native_title_candidates` is the shared native-title read. It is a
 stateless classmethod on the adapter class — the manager resolves it through
@@ -292,8 +292,10 @@ permission language. See `docs/AGENT_CLI.md`.
   `providerID/modelID`, with its own cache, keyword-only `force` refresh and a
   short-lived `opencode serve` process while it reads. The `/api/models`
   response assembly calls it through `provider_registry.require("opencode")`,
-  and image preflight dispatches it by the chat's provider id. A fixed catalog can
-  live on the descriptor's `default_model` instead.
+  A fixed catalog can live on the descriptor's `default_model` instead. Image
+  support is not read from the catalog: an ACP adapter states it at its handshake
+  (`promptCapabilities.image`), which `agent_accepts_images()` reports to the
+  image preflight.
 
 ## Docs, site, and the weekly probe
 

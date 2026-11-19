@@ -370,6 +370,18 @@ class AcpProvider(BaseProvider):
         self._client.session = opened
         return opened, replaced
 
+    def agent_accepts_images(self) -> bool | None:
+        # The agent-level promptCapabilities from its initialize response: it covers the whole
+        # session, not a model. Nothing connected, or no boolean stated, is None.
+        connection = self._connection
+        if connection is None:
+            return None
+        prompt_caps = connection.agent_capabilities.get("promptCapabilities")
+        if not isinstance(prompt_caps, Mapping):
+            return None
+        value = prompt_caps.get("image")
+        return value if isinstance(value, bool) else None
+
     def _blocks(self, connection: AcpConnection, request: AgentRequest) -> list[dict[str, Any]]:
         prompt_caps = connection.agent_capabilities.get("promptCapabilities")
         slash = native_slash_prompt(request) if self.spec.slash_capsule_as_block and not request.compact else None
@@ -481,7 +493,11 @@ class AcpProvider(BaseProvider):
     async def delete_session(
         cls, workspace_root: Path, session_id: str, *, runtime_root: Path
     ) -> bool | None:
-        """Remove the session journal. The agent is never spawned on a cleanup path."""
+        """Remove the session journal only; the agent is not spawned here.
+
+        An adapter whose agent keeps its own copy of the session overrides this to ask the
+        agent too (OpenCode does, and spawns the agent only when a journal exists to remove).
+        """
         path = journal_file(runtime_root, cls.spec.id, session_id)
         try:
             path.unlink()

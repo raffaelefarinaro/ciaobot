@@ -199,7 +199,7 @@ class ChatStreamingHost(Protocol):
         compact: bool = False,
     ) -> AgentRequest: ...
 
-    async def _model_capable(self, model: str, chat: ChatInfo) -> bool: ...
+    def _agent_accepts_images(self, chat: ChatInfo) -> bool: ...
 
     async def _capability_candidates(
         self, chat: ChatInfo, model: str
@@ -1810,7 +1810,7 @@ class ChatStreaming:
         had_error = False
         tool_events: list[dict[str, Any]] = []
 
-        if images and not await self._host._model_capable(request.model, chat):
+        if images and not self._host._agent_accepts_images(chat):
             if unattended:
                 yield SystemStatusEvent(
                     type="system",
