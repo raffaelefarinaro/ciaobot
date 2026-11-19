@@ -54,6 +54,8 @@ def _chat(chat_id="chat-1", *, provider="claude", session_id="sess-1", title="Ne
         model="opus" if provider == "claude" else "vendor/chat-model",
         session_id=session_id,
         title=title,
+        # A chat named by hand is user-owned, so titling must leave it alone.
+        title_origin="default" if title == "New Chat" else "user",
     )
 
 
@@ -384,6 +386,7 @@ async def test_auto_title_stops_when_user_renames_mid_poll(monkeypatch) -> None:
 
     async def rename_during_wait(*_args, **_kwargs):
         chat.title = "User Picked This"
+        chat.title_origin = "user"  # what update_chat records for a rename
 
     monkeypatch.setattr(OpencodeProvider, "read_thread", fake_read_thread)
     monkeypatch.setattr(pc.asyncio, "sleep", rename_during_wait)
@@ -891,6 +894,7 @@ async def test_rename_during_third_adapter_read_wins(monkeypatch) -> None:
     task = asyncio.ensure_future(manager.auto_title_if_default("chat-1", "hello"))
     await asyncio.wait_for(reached.wait(), 2)
     chat.title = "User Picked This"
+    chat.title_origin = "user"  # what update_chat records for a rename
     release.set()
     assert await asyncio.wait_for(task, 2) is None
     assert manager._chats["chat-1"].title == "User Picked This"
@@ -1085,6 +1089,7 @@ async def test_claude_rename_during_the_titler_wins_over_the_fallback(monkeypatc
 
     async def rename_then_fail(*_args, **_kwargs):
         chat.title = "User Picked This"
+        chat.title_origin = "user"  # what update_chat records for a rename
         raise RuntimeError("model unavailable")
 
     monkeypatch.setattr(claude_adapter, "get_session_info", no_native_title)
@@ -1201,6 +1206,7 @@ async def test_llm_fallback_respects_manual_rename_during_call(monkeypatch) -> N
 
     async def slow_oneshot(*_args, **_kwargs):
         chat.title = "User Picked This"
+        chat.title_origin = "user"  # what update_chat records for a rename
         return "Model's Title"
 
     def missing_session_info(_sid, directory=None):
