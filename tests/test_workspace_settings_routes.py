@@ -468,6 +468,7 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
     assert data["provider_options"] == [
         {"value": "claude", "label": "Anthropic (via Claude Code)"},
         {"value": "opencode", "label": "opencode"},
+        {"value": "codex", "label": "OpenAI (via Codex)"},
     ]
 
     stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
@@ -666,6 +667,7 @@ def test_workspace_provider_options_are_the_runtime_providers(tmp_path):
     assert data["provider_options"] == [
         {"value": "claude", "label": "Anthropic (via Claude Code)"},
         {"value": "opencode", "label": "opencode"},
+        {"value": "codex", "label": "OpenAI (via Codex)"},
     ]
 
     resp = client.post(
@@ -933,7 +935,7 @@ def test_provider_config_offers_no_api_keys(tmp_path, monkeypatch):
     # CLI, so there are no API keys to report or edit.
     assert set(data) == {"connections"}
     assert "sk-anthropic" not in json.dumps(data)
-    assert set(data["connections"]) == {"claude", "opencode"}
+    assert set(data["connections"]) == {"claude", "opencode", "codex"}
     assert client.patch("/api/settings/providers", json={}).status_code == 405
 
 

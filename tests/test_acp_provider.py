@@ -729,8 +729,10 @@ def test_descriptor_acp_spec_resolves_module_attr(monkeypatch: pytest.MonkeyPatc
     assert plain.acp_spec() is None
 
 
-def test_shipped_providers_do_not_run_over_acp() -> None:
-    assert all(item.acp_spec() is None for item in provider_registry.descriptors())
+def test_only_codex_runs_over_acp_so_far() -> None:
+    # Claude and OpenCode switch in C1 and D1; until then Codex is the only shipped ACP agent.
+    acp_ids = {item.id for item in provider_registry.descriptors() if item.acp_spec() is not None}
+    assert acp_ids == {"codex"}
 
 
 

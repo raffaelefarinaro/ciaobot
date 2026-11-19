@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -2520,3 +2521,101 @@ def test_missing_claude_row_has_no_mcp_command(tmp_path, monkeypatch) -> None:
 
     assert claude["auth"] == "not_installed"
     assert "mcp_command" not in claude
+
+
+_FAKE_CODEX = """#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 0.166.0"; exit 0; fi
+if [ "$1" = "login" ] && [ "$2" = "status" ]; then
+  echo "{printed}"
+  echo "{printed}" >&2
+  exit {code}
+fi
+exit 2
+"""
+
+
+from ciao.setup_status import codex_status_probe  # noqa: E402
+
+
+def _fake_codex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, code: int, printed: str = "ok") -> None:
+    script = tmp_path / "codex"
+    script.write_text(_FAKE_CODEX.format(code=code, printed=printed), encoding="utf-8")
+    script.chmod(0o755)
+    from ciao.providers.acp import agents
+
+    monkeypatch.setattr(agents, "codex_binary", lambda: str(script))
+    monkeypatch.setattr(agents, "codex_acp_binary", lambda: "/fake/codex-acp")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fake CLI is a POSIX shell script")
+def test_codex_status_probe_missing_adapter_not_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_codex(tmp_path, monkeypatch, code=0)
+    from ciao.providers.acp import agents
+
+    monkeypatch.setattr(agents, "codex_acp_binary", lambda: None)
+    row = codex_status_probe({})
+    assert row["auth"] == "not_installed"
+    assert row["ok"] is False
+    assert row["terminal_action"] == "codex-install"
+    from ciao import host_terminal
+
+    assert row["command"] == host_terminal.CODEX_INSTALL_COMMAND
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fake CLI is a POSIX shell script")
+def test_codex_status_probe_logged_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_codex(tmp_path, monkeypatch, code=1)
+    row = codex_status_probe({})
+    assert row["auth"] == "logged_out"
+    assert row["ok"] is False
+    assert row["version"] == "0.166.0"
+    assert row["terminal_action"] == "codex-login"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fake CLI is a POSIX shell script")
+def test_codex_status_probe_signed_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_codex(tmp_path, monkeypatch, code=0)
+    row = codex_status_probe({})
+    assert row["auth"] == "signed_in"
+    assert row["ok"] is True
+    assert "terminal_action" not in row
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fake CLI is a POSIX shell script")
+def test_codex_status_probe_never_logs_token_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    token = "sk-live-TOKEN-7f3a9c"
+    _fake_codex(tmp_path, monkeypatch, code=0, printed=f"Logged in as {token}")
+    caplog.set_level(logging.DEBUG)
+    row = codex_status_probe({})
+    assert row["ok"] is True
+    assert token not in json.dumps(row)
+    assert token not in caplog.text
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fake CLI is a POSIX shell script")
+def test_codex_status_probe_child_env_drops_secrets_and_keeps_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import setup_status
+
+    _fake_codex(tmp_path, monkeypatch, code=0)
+    monkeypatch.setenv("CIAO_PROBE_TEST_API_KEY", "sk-probe-secret-123")
+    seen: list[dict[str, str] | None] = []
+    real_run = subprocess.run
+
+    def spy(argv, **kwargs):  # type: ignore[no-untyped-def]
+        seen.append(kwargs.get("env"))
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(setup_status.subprocess, "run", spy)
+    codex_status_probe(dict(os.environ))
+    assert len(seen) == 2
+    for env in seen:
+        assert env is not None
+        assert "CIAO_PROBE_TEST_API_KEY" not in env
+        assert "sk-probe-secret-123" not in env.values()
+        assert env.get("PATH") == os.environ.get("PATH")
