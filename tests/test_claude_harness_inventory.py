@@ -131,8 +131,12 @@ def test_every_bundled_skill_is_classified(base_init: dict) -> None:
 
 
 def test_setting_options_remove_what_they_cover(cli: str, tmp_path: Path, base_init: dict) -> None:
+    # The probe sends the layer the engine would: disable* keys only. The
+    # connectors option is an environment variable, not a CLI settings key.
+    overrides = {o.key: True for o in TRIM_OPTIONS if o.kind == "setting"}
+    layer = claude_settings_layer(overrides)
     trimmed = _init_payload(
-        cli, tmp_path, {o.name: True for o in TRIM_OPTIONS if o.kind == "setting"}
+        cli, tmp_path, {key: value for key, value in layer.items() if key != "skillOverrides"}
     )
     base_names = set(base_init["tools"]) | set(base_init["skills"])
     trimmed_names = set(trimmed["tools"]) | set(trimmed["skills"])

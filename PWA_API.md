@@ -1048,10 +1048,14 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 # defaults, CSV or list; null/none = no extras), claude_trim (object of trim
 # option key -> true/false; sparse, replaces the stored map, {} resets to
 # defaults; an unknown key or a non-boolean is a
-# 400; the scheduling options are trimmed by default and can be un-trimmed), claude_ai_connectors (boolean, default true). When false,
-# Claude chats in the workspace start with ENABLE_CLAUDEAI_MCP_SERVERS=false, so
-# the Claude account's claude.ai connectors (Slack, Jira, ...) do not load into
-# them; a non-boolean value is a 400. Memory passes never load them. POST
+# 400; the scheduling options are trimmed by default and can be un-trimmed).
+# `setting:claude_ai_connectors` (group Connectors, default not trimmed) hides
+# the Claude account's connectors: a trimmed workspace's Claude chats start
+# with ENABLE_CLAUDEAI_MCP_SERVERS=false. Memory passes never load them. A
+# workspace file that still has claude_ai_connectors set to false, and whose
+# trim map does not already name that key, is read once as trimmed; the next
+# save drops the old field. True, a missing field, and any other value add
+# nothing, and a request body that still sends the old field is ignored. POST
 # creates `<CIAO_VAULT_ROOT>/<name>` and PATCH /api/workspaces/{name} updates
 # metadata in place. `vault_root` in a request body is ignored: locations are
 # read-only here so a routine settings save cannot relocate a workspace.

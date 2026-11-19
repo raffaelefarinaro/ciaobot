@@ -6909,12 +6909,13 @@ class ProjectChatManager:
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["GH_PROMPT_DISABLED"] = "1"
         # The claude.ai connectors (the Claude account's remote MCP servers)
-        # load into every Claude chat unless Claude Code is told not to. A
-        # workspace can switch them off; a memory pass always runs without them,
-        # since a pass reads and edits the vault and must not reach an external
-        # surface. Other providers never see this variable.
+        # load into every Claude chat unless Claude Code is told not to.
+        # Trimming setting:claude_ai_connectors switches them off; a memory
+        # pass always runs without them, since a pass reads and edits the
+        # vault and must not reach an external surface. Other providers never
+        # see this variable. The default (not trimmed) leaves it unset.
         if chat.provider == "claude" and (
-            is_memory_pass_chat(chat, project) or not self._claude_ai_connectors_on(workspace)
+            is_memory_pass_chat(chat, project) or self._claude_ai_connectors_trimmed(workspace)
         ):
             env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
         # The macOS keychain is outside a workspace sandbox, so gh cannot read
@@ -6962,15 +6963,16 @@ class ProjectChatManager:
 
         await asyncio.to_thread(gh_token_for_sandbox, gh_path, dict(os.environ))
 
-    def _claude_ai_connectors_on(self, workspace: str) -> bool:
-        """Whether a Claude chat in ``workspace`` loads the claude.ai connectors.
+    def _claude_ai_connectors_trimmed(self, workspace: str) -> bool:
+        """Whether a Claude chat in ``workspace`` hides the claude.ai connectors.
 
-        An unregistered or empty workspace name keeps the default (on).
+        An unregistered or empty workspace name keeps the catalog default (on).
         """
+        from ciao.claude_trim import CONNECTORS_TRIM_KEY, effective_trim  # noqa: PLC0415
+
         config_workspace = self._config.workspace(workspace) if workspace else None
-        if config_workspace is None:
-            return True
-        return bool(config_workspace.claude_ai_connectors)
+        overrides = config_workspace.claude_trim if config_workspace is not None else {}
+        return bool(effective_trim(overrides)[CONNECTORS_TRIM_KEY])
 
     def _effective_mode_for_chat(
         self, chat: ChatInfo, *, unattended: bool = False
