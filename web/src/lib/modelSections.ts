@@ -1,6 +1,12 @@
 import { modelDisplayName, modelProviderPrefix } from './modelLabels'
 import type { ModelsResponse, RuntimeProvider } from './types'
 
+// The picker names the Claude section 'anthropic' (the models are Anthropic's,
+// the runner is Claude Code). Every other provider's section key is its id.
+export function sectionKeyForProvider(provider: string): string {
+  return provider === 'claude' ? 'anthropic' : provider
+}
+
 export function providerForModelSection(sectionKey: string): RuntimeProvider {
   return sectionKey === 'anthropic' ? 'claude' : (sectionKey as RuntimeProvider)
 }
@@ -53,42 +59,30 @@ function badgesFor(models: string[], defaultModel?: string): Record<string, stri
 }
 
 /**
- * Build sections for the chat / schedule pickers from `/api/models`.
+ * Build sections for the chat / schedule pickers from `/api/models`: one
+ * section per provider that reports models, in registry order, labelled by
+ * the registry's short label.
  */
 export function sectionsFromModelsResponse(response: ModelsResponse | null): ModelSection[] {
   if (!response) return []
+  const catalogs = response.provider_models ?? {}
+  const registry = response.providers ?? []
+  // Registry order first; the server lists ACP providers ahead of the
+  // built-in ones in provider_models, so the catalog's own order is not used.
+  const ids = orderedUnique([...registry.map((item) => item.id), ...Object.keys(catalogs)])
   const sections: ModelSection[] = []
-
-  // Tag each provider's default so the picker says what Automatic resolves to,
-  // and name the provider namespace a model id states.
-  const modelBadgesFor = (model: string | undefined, models: string[]) => {
-    const badges = badgesFor(models, model)
-    return Object.keys(badges).length ? { modelBadges: badges } : {}
-  }
-
-  const anthropicModels = orderedUnique(response.models || [])
-  sections.push({
-    key: 'anthropic',
-    label: 'Anthropic',
-    models: anthropicModels,
-    modelLabels: labelsFor(anthropicModels),
-    ...modelBadgesFor(response.provider_defaults?.claude || response.default, anthropicModels),
-  })
-
-  // opencode is bring-your-own-provider: its catalog is whatever backends the
-  // user connected, already namespaced as `providerID/modelID`.
-  const opencodeModels = orderedUnique(
-    response.opencode_models || response.provider_models?.opencode || [],
-  )
-  if (opencodeModels.length) {
+  for (const id of ids) {
+    const models = orderedUnique(catalogs[id] ?? [])
+    if (!models.length) continue
+    const defaultModel = response.provider_defaults?.[id]
+    const badges = badgesFor(models, defaultModel)
     sections.push({
-      key: 'opencode',
-      label: 'opencode',
-      models: opencodeModels,
-      modelLabels: labelsFor(opencodeModels),
-      ...modelBadgesFor(response.provider_defaults?.opencode, opencodeModels),
+      key: sectionKeyForProvider(id),
+      label: registry.find((item) => item.id === id)?.short_label ?? id,
+      models,
+      modelLabels: labelsFor(models),
+      ...(Object.keys(badges).length ? { modelBadges: badges } : {}),
     })
   }
-
   return sections
 }

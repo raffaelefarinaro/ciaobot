@@ -749,10 +749,11 @@
                     </DropdownMenuRoot>
                   </div>
                 </div>
-                <ProviderInventory v-if="connKey === 'opencode'" :inventory="conn.credential_inventory" :workspace="projectStore.activeWorkspace" />
-                <details v-if="connKey === 'claude'" class="provider-sign-in">
-                  <summary>{{ conn.ok ? 'Reconnect Claude Code' : 'Connect Claude Code' }}</summary>
-                  <ProviderSignInGuidance cli="claude" context="Claude Code" :workspace="projectStore.activeWorkspace" />
+                <ProviderInventory v-if="connKey === 'opencode'" :inventory="conn.credential_inventory" :command="conn.command" :workspace="projectStore.activeWorkspace" />
+                <!-- Not for a missing CLI: its payload command is the install line, not a sign-in. -->
+                <details v-if="connKey !== 'opencode' && conn.auth !== 'not_installed'" class="provider-sign-in">
+                  <summary>{{ conn.ok ? `Reconnect ${conn.label || connKey}` : `Connect ${conn.label || connKey}` }}</summary>
+                  <ProviderSignInGuidance :command="conn.command" :context="conn.label || String(connKey)" :workspace="projectStore.activeWorkspace" />
                 </details>
                 <!-- Full width, after the head: inside .set-row-main it shares a line with Connected / Verify and clips at phone width. -->
                 <div v-if="conn.release_check?.state === 'below_tested'" class="set-row-sub provider-release-check">

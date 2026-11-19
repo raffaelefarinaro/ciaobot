@@ -691,9 +691,13 @@ const GET_ROUTES = {
         'claude-3-sonnet-20240229',
         'claude-3-haiku-20240307',
       ],
+      codex: ['gpt-5.5', 'gpt-5.4-mini'],
     },
     provider_defaults: { claude: 'synthetic-model' },
-    providers: [{ id: 'claude', label: 'Claude', short_label: 'Claude', capabilities: {} }],
+    providers: [
+      { id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude', capabilities: {} },
+      { id: 'codex', label: 'OpenAI (via Codex)', short_label: 'Codex', capabilities: {} },
+    ],
     thinking_levels: { claude: ['low', 'high'] },
   }),
   // Settings → Providers reads these. The real endpoints always send every
