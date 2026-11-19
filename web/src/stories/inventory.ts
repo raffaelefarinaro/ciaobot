@@ -535,25 +535,55 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/ChatPanel.vue"
     ],
-    "variants": [],
-    "variantNotes": "Hover/pinned/selection read comment. Detailed variants are unassessed.",
+    "variants": [
+      "hover-preview",
+      "pinned",
+      "actions",
+      "draft-id",
+      "narrow"
+    ],
+    "variantNotes": "The transcript read popover owns its state and is driven imperatively by ChatPanel through the exposed handlers it binds at event time; the host renders the highlights and logs the emitted edits/deletes. Hover preview (quote + note, unpinned), explicit pin (focus + backdrop), the Edit/Delete handoffs, the ignored draft id and the narrow viewport.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ChatCommentPopover.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["chat-comment-popover--default"],
+        "note": "A closed popover renders nothing: no dialog, no backdrop and no recorded emissions until the transcript's handlers run."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "hover-preview",
+        "coverage": "covered",
+        "storyIds": ["chat-comment-popover--hover-preview"],
+        "note": "onTargetOver previews the comment: the quoted selection and the note with Edit/Delete, never a pinned backdrop and never recorded as a handoff."
+      },
+      {
+        "name": "pinned",
+        "coverage": "covered",
+        "storyIds": ["chat-comment-popover--pinned"],
+        "note": "pinFromEvent pins the popover, records the id and gives the first action focus; Escape closes through the popover's own handler."
+      },
+      {
+        "name": "actions",
+        "coverage": "covered",
+        "storyIds": ["chat-comment-popover--actions"],
+        "note": "Edit and Delete each close the popover and hand the comment/id to the panel, the skipNextFocusRestore handoff the transcript relies on."
+      },
+      {
+        "name": "draft-ignored",
+        "coverage": "covered",
+        "storyIds": ["chat-comment-popover--draft-ignored"],
+        "note": "The in-flight draft highlight (data-comment-id = draftId) has no saved comment: hovering it opens nothing, while a genuine id beside it previews."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["chat-comment-popover--narrow"],
+        "note": "The popover is a fixed overlay teleported to body, so the narrow 390px workshop viewport is the constraint: the box stays inside it with the 16px clamp."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in ChatCommentPopover.vue has not yet been audited."
+      "status": "none",
+      "detail": "The popover loads nothing: comments arrive as the transcript's props, and the only async surface is the viewport re-clamp."
     },
     "migration": {
       "status": "unassessed",
@@ -949,25 +979,55 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/FileViewerModal.vue",
       "web/src/components/PinnedFilePanel.vue"
     ],
-    "variants": [],
-    "variantNotes": "Anchored composing with/without images; distinct focus/placement owner. Detailed variants are unassessed.",
+    "variants": [
+      "draft",
+      "images",
+      "inline",
+      "keyboard",
+      "narrow"
+    ],
+    "variantNotes": "The shared floating compose popover used by ChatPanel, FileViewerModal and PinnedFilePanel; anchor/modelValue/images/inline props carry every variant. Teleported to body unless inline. Empty-draft block, typed draft save, attached images, the dialog-inline variant, ⌘/Ctrl+Enter and Escape, and the narrow viewport.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in CommentComposePopover.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["comment-compose-popover--default"],
+        "note": "An anchored empty draft: the textarea takes the caret on open, the placeholder names the note, Add comment is genuinely disabled and no image row renders."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "draft",
+        "coverage": "covered",
+        "storyIds": ["comment-compose-popover--draft"],
+        "note": "Typing emits update:modelValue, unblocks Add comment, and clicking it emits save for the parent to commit — the popover stays anchored because closing is the parent's job."
+      },
+      {
+        "name": "images",
+        "coverage": "covered",
+        "storyIds": ["comment-compose-popover--images"],
+        "note": "Attached images render as thumbs and each remove control emits removeImage with the index to drop."
+      },
+      {
+        "name": "inline",
+        "coverage": "covered",
+        "storyIds": ["comment-compose-popover--inline"],
+        "note": "The inline prop keeps the compose inside the dialog's DOM instead of teleporting to body, where a Reka modal would make it visible but unusable."
+      },
+      {
+        "name": "keyboard",
+        "coverage": "covered",
+        "storyIds": ["comment-compose-popover--keyboard"],
+        "note": "⌘/Ctrl+Enter saves and Escape cancels through the popover's own keydown handler; the anchored box survives both because the parent decides the close."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["comment-compose-popover--narrow"],
+        "note": "The teleported box obeys the ≤640px phone placement in the narrow workshop viewport: 8px gutters across the full width."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in CommentComposePopover.vue has not yet been audited."
+      "status": "none",
+      "detail": "The popover loads nothing: draft text, images and the accent come from props and the seeded store."
     },
     "migration": {
       "status": "unassessed",
@@ -1425,25 +1485,51 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/FileViewerModal.vue",
       "web/src/components/PinnedFilePanel.vue"
     ],
-    "variants": [],
-    "variantNotes": "VueFinder boundary/initial listing/error/truncation; no runtime import into catalogue. Detailed variants are unassessed.",
+    "variants": [
+      "truncated"
+    ],
+    "variantNotes": "Read-only VueFinder over one GET /api/workspace-dir; initialPath/chatId are data props, not variants. Truncation, the held initial listing and the failure alert are states; navigation and file opening are real component+VueFinder flows.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in FolderBrowser.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["folder-browser--default"],
+        "note": "A chat-less read lists the mounted VueFinder explorer (breadcrumb, entries) with the Loading line and the error alert away."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "loading",
+        "coverage": "covered",
+        "storyIds": ["folder-browser--loading"],
+        "note": "The held initial read keeps the 'Loading…' status line and the explorer absent."
+      },
+      {
+        "name": "error",
+        "coverage": "covered",
+        "storyIds": ["folder-browser--load-error"],
+        "note": "A failed listing names the folder in the .fbr-error alert ('Folder not found.'), with no half-mounted explorer."
+      },
+      {
+        "name": "truncated",
+        "coverage": "covered",
+        "storyIds": ["folder-browser--truncated"],
+        "note": "A truncated listing announces 'Showing the first 2 items.' as a status line over the entries it did answer."
+      },
+      {
+        "name": "navigate",
+        "coverage": "covered",
+        "storyIds": ["folder-browser--navigate"],
+        "note": "Entering a folder re-reads the sub listing through the driver (second declared read) and re-emits navigate with the absolute path; the old entries leave."
+      },
+      {
+        "name": "open-file",
+        "coverage": "covered",
+        "storyIds": ["folder-browser--open-file"],
+        "note": "Double-clicking a file emits open-file with its absolute path and no directory read."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in FolderBrowser.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load is one GET /api/workspace-dir answered by a text 'Loading…' status line (not the mounted explorer geometry, so a loading-geometry follow-up applies) and failures become the alert line. Refreshes run through the driver: VueFinder's own menu item re-lists with its linear indicator, and the hosting tile's Refresh remounts the browser wholesale."
     },
     "migration": {
       "status": "unassessed",
@@ -3878,51 +3964,184 @@ export const inventory: InventoryEntry[] = [
     "variants": [
       "loading",
       "error",
+      "folder",
+      "image",
+      "pdf",
+      "pptx",
+      "html",
+      "csv",
+      "markdown",
+      "frontmatter",
       "editing",
-      "return-folder"
+      "return-folder",
+      "comment-popover",
+      "comment-draft",
+      "close-label",
+      "close-disabled",
+      "narrow"
     ],
-    "variantNotes": "Docked file owner; kind/loading/error/editing/return-folder/lead-after-slot branches.",
+    "variantNotes": "Docked file owner over the shared annotation system. Kind branches: text (plain pre lines, markdown, frontmatter properties, CSV), image (plus its load-failure alert), PDF iframe (the LibreOffice notice covers .pptx), HTML artifact (preview/code) and the docked FolderBrowser; the Edit save flight (textarea/CSV); comment draft compose and read popover; return-folder Back; the memory-map note-tile props (inMemoryMap/close-label) and closeDisabled; the menu Refresh; narrow.",
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in PinnedFilePanel.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["pinned-file-panel--default"],
+        "note": "A loaded text file pinned as the chat tile: filename title with the folder hint, Edit, the three pre lines and the Unpin file close control."
       },
       {
         "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "PinnedFilePanel.vue has a loading branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["pinned-file-panel--loading"],
+        "note": "The file read held in flight renders the .pfp-skeleton (role=status, aria-busy) and actually disables Edit; nothing replaces the body."
       },
       {
         "name": "error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "PinnedFilePanel.vue has a error branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["pinned-file-panel--error"],
+        "note": "A failed read (404 here) replaces the body with the .pfp-error line ('File not found.'), Edit stays blocked and the tile stays closable. Other statuses map to the same branch's sentences (Forbidden/too large/unsupported)."
       },
       {
-        "name": "editing",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "PinnedFilePanel.vue has a editing branch; no rendered-state story exists."
+        "name": "folder",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-panel--folder"],
+        "note": "A trailing-slash pin renders the docked FolderBrowser (pfp-body-folder): the browser mounts over one declared listing, Edit is withheld and the close control reads Unpin folder."
       },
       {
         "name": "return-folder",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "PinnedFilePanel.vue has a return-folder branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": ["pinned-file-panel--return-folder"],
+        "note": "Docking a pinnable file out of the browser resolves the dock (declared file-path read) and the local pin write lands; after the parent's pin-prop propagation the tile switches to the file and the real pendingReturn bookkeeping offers 'Back to storybook-drafts', whose click rewrites the chat's pin to the folder. The parent-prop channel is the host's labelled story-repin button; everything else is production code."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "markdown",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-panel--markdown"],
+        "note": "A frontmatter-less .md renders the .pfp-md body; Edit stays available on text kinds."
+      },
+      {
+        "name": "document-properties",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-panel--document-properties"],
+        "note": "YAML frontmatter renders the Document properties region (type/status/summary/tags) and drops the name that repeats the heading, with the markdown body under it."
+      },
+      {
+        "name": "csv",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-panel--csv"],
+        "note": "A CSV path renders the read-only CsvViewer chunk (pfp-body-csv, meta bar, clickable cells for the comment system)."
+      },
+      {
+        "name": "image",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "Cannot render closed under the workshop fence: the img's error path probes the same URL the panel stamped with a Date.now() freshness tag at mount, so the exact declared route cannot be named ahead of the render and the probe would be recorded as a boundary violation."
+      },
+      {
+        "name": "image-error",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "Same blocker as image: the role=alert branch only appears after the <img> fails, and that failure always runs the fenced workspace-image probe whose timestamp tag the story cannot declare."
+      },
+      {
+        "name": "pdf",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-panel--pdf"],
+        "note": "A .pdf renders the workspace-binary iframe with no Edit, and the LibreOffice notice stays away for non-pptx kinds."
+      },
+      {
+        "name": "pptx-libreoffice",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-panel--pptx-libreoffice"],
+        "note": "A .pptx first reads /api/libreoffice-status; an unavailable soffice replaces the iframe with the warn notice and its Install in Chat action."
+      },
+      {
+        "name": "html-preview",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-panel--html-preview"],
+        "note": "The artifact chunk mounts in Preview: the Preview/Code tab group (aria-pressed) over the frame, and the header withholds Edit while the source is unfetched."
+      },
+      {
+        "name": "html-code",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-panel--html-code"],
+        "note": "Switching to Code fetches the declared source read and renders the code block; a loaded source is the one html branch where the header Edit appears."
+      },
+      {
+        "name": "html-code-error",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-panel--html-code-error"],
+        "note": "A failed source read (HTTP 500) shows the artifact's error note and still withholds Edit (sourceLoaded stays false)."
+      },
+      {
+        "name": "editing",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-preview-editor--editing"],
+        "note": "The Edit action swaps the body for .pfp-edit-shell's textarea: buffer starts from content, the caret lands in it, Cancel restores the preview without a write."
+      },
+      {
+        "name": "editing-csv",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-preview-editor--editing-csv"],
+        "note": "Editing a CSV path renders CsvViewer in edit mode inside .pfp-edit-shell (labeled header/cell inputs, row add/delete); Cancel returns the read-only table."
+      },
+      {
+        "name": "saving",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-preview-editor--saving"],
+        "note": "A save POST held by the boundary blocks both Cancel and Save ('Saving…'), the real disabled state not a styled one."
+      },
+      {
+        "name": "save-error",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-preview-editor--save-error"],
+        "note": "A save answered HTTP 500 renders 'Save failed (HTTP 500).' in the editor shell and unblocks the controls without adopting the buffer."
+      },
+      {
+        "name": "csv-save",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-preview-editor--csv-save"],
+        "note": "A successful save adopts the edited CSV: the tile returns to the read-only table with the added row, proving the POST round trip for the CSV editor."
+      },
+      {
+        "name": "comment-popover",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-panel--comment-popover"],
+        "note": "A durable line comment highlights its .pre-line; clicking it pins the read popover (file · line quote, note, Edit/Delete) with the click-away backdrop, focus on Edit, and Escape closes through the popover's handler."
+      },
+      {
+        "name": "comment-draft",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-panel--comment-draft"],
+        "note": "Selecting text floats the Comment trigger; clicking it opens the compose popover (focused, empty draft blocked) and saving stages the note durably on the file, re-highlighting the line."
+      },
+      {
+        "name": "refresh",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-panel--refresh"],
+        "note": "The menu Refresh re-runs load(): the second declared read repaints the body and the header title stays on the pinned path."
+      },
+      {
+        "name": "memory-map-tile",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-panel--memory-map-tile"],
+        "note": "The map's note tile passes inMemoryMap and close-label: the close control reads 'Close note' and is never desktop-only, and the file menu drops Open in memory map (it would reopen the page the tile is on)."
+      },
+      {
+        "name": "close-disabled",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-panel--close-disabled"],
+        "note": "While a pin write is in flight ChatLayout passes closeDisabled and the close control is genuinely disabled with aria-disabled."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": ["pinned-file-panel--narrow"],
+        "note": "The docked tile is in the layout flow, so the story wraps it in the 390px block: the tile fills the wrapper and the body does not overflow horizontally with short content."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in PinnedFilePanel.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial load is one GET /api/workspace-file (held in flight → the .pfp-skeleton role=status grid; failure → the .pfp-error line), so unlike the sibling modal the tile has its own real skeleton geometry. Refresh is the menu's re-read and replaces the loaded body with the skeleton again, and the stream-end/auto-reload watcher defers the same reload while the user is editing or commenting. Folder pins delegate loading to the browser's 'Loading…' line; image/PDF kinds have none. The refresh-replaces-content behavior is flagged for the loading follow-up (DESIGN's first-load rule keeps data on a refresh)."
     },
     "migration": {
       "status": "unassessed",
@@ -10669,30 +10888,24 @@ export const inventory: InventoryEntry[] = [
         "name": "default",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": ".pfp-body in PinnedFilePanel.vue implements this family; no rendered-state story exists."
+        "note": "The .pfp-body preview states are proven by components-pinned-file-panel's covered states (default/markdown/document-properties/csv/pdf/pptx-libreoffice/html-preview/html-code/folder stories render exactly this body); the same markup owns no story file of its own."
       },
       {
         "name": "preview",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": ".pfp-body in PinnedFilePanel.vue includes preview; no rendered-state story exists."
+        "note": "Same body as default, named for the preview-vs-editor split this family owns; covered through components-pinned-file-panel (including html-code/html-code-error for the artifact panel)."
       },
       {
         "name": "editing",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": ".pfp-body in PinnedFilePanel.vue includes editing; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "note": "The edit shell is exercised end to end by components-pinned-file-panel's editing, editing-csv, saving, save-error and csv-save states (the pinned-file-preview-editor--* stories, claimed by the panel component row)."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in PinnedFilePanel.vue has not yet been audited."
+      "status": "none",
+      "detail": "The family loads nothing of its own: the tile's initial read is the panel's skeleton story, and this family's one flight state is the save POST (blocked 'Saving…', proven by the panel row's saving state)."
     },
     "migration": {
       "status": "unassessed",
