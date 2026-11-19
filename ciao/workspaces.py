@@ -22,7 +22,6 @@ from ciao.config import (
     DEFAULT_NEW_WORKSPACE_MEMORY_HANDOVER,
     DEFAULT_WORKSPACE_COLOR,
     WorkspaceConfig,
-    coerce_agent_fs_scope,
     coerce_memory_handover,
     coerce_provider_overrides,
     coerce_workspace_color,
@@ -97,10 +96,6 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
     except ValueError:
         color = DEFAULT_WORKSPACE_COLOR
     try:
-        agent_fs_scope = coerce_agent_fs_scope(getattr(workspace, "agent_fs_scope", None))
-    except ValueError:
-        agent_fs_scope = None
-    try:
         memory_handover = coerce_memory_handover(workspace.memory_handover)
     except ValueError:
         memory_handover = DEFAULT_MEMORY_HANDOVER
@@ -125,7 +120,6 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
         "claude_trim": dict(getattr(workspace, "claude_trim", None) or {}),
         "gws_profile": getattr(workspace, "gws_profile", ""),
         "color": color,
-        "agent_fs_scope": agent_fs_scope,
         "memory_handover": memory_handover,
         "provider_overrides": provider_overrides,
     }
@@ -228,12 +222,6 @@ def workspace_from_request(
             color = DEFAULT_WORKSPACE_COLOR
     else:
         color = DEFAULT_WORKSPACE_COLOR
-    if "agent_fs_scope" in data:
-        agent_fs_scope = coerce_agent_fs_scope(data.get("agent_fs_scope"))
-    elif existing is not None:
-        agent_fs_scope = existing.agent_fs_scope
-    else:
-        agent_fs_scope = None
     if "memory_handover" in data:
         memory_handover = coerce_memory_handover(data.get("memory_handover"))
     elif existing is not None:
@@ -276,7 +264,6 @@ def workspace_from_request(
         claude_trim=claude_trim,
         gws_profile=gws_profile,
         color=color,
-        agent_fs_scope=agent_fs_scope,
         memory_handover=memory_handover,
         provider_overrides=provider_overrides,
     )

@@ -13,9 +13,9 @@ of its own: MCP comes from the user's own OpenCode config, exactly as Claude
 reads it from ``.mcp.json``. What ties a server to one chat is process-scoped,
 not session-scoped: the chat's bearer capability (``CIAO_AGENT_TOKEN``, minted
 per chat) travels in the server's environment, ``OPENCODE_SERVER_PASSWORD`` is
-per server, the filesystem sandbox wraps the server process, and
+per server, and
 ``OPENCODE_CONFIG_CONTENT`` (tool output limits, linked-repo skills) is read at
-startup. A token rotation or scope change therefore restarts this chat's
+startup. A token rotation therefore restarts this chat's
 server. Per-session
 agent, model, and permission rules are OpenCode's own and keep chat behavior
 isolated.
@@ -42,8 +42,6 @@ import os
 import re
 import secrets
 import socket
-import sys
-import tempfile
 import threading
 import time
 import weakref
@@ -94,7 +92,6 @@ from ciao.providers.base import (
     build_runtime_context,
     prepend_stable_context,
 )
-from ciao.fs_sandbox import node_tool_read_roots, opencode_sandbox_prefix
 from ciao.os_support.processes import ProcessTree, bounded_output, tree_spawn_options
 from ciao.providers._sse import SSEDecoder
 from ciao.tool_path import resolve_tool
@@ -301,27 +298,6 @@ def _stop_server_sync(process: subprocess.Popen[bytes], tree: ProcessTree) -> No
                 process.wait()
     finally:
         tree.close()
-
-
-def _read_only_snapshot(request: AgentRequest) -> tuple[tuple[str, tuple[int, int] | None], ...]:
-    """Identity of each granted read-only file, for the server reuse decision (#1960).
-
-    Linux only: ``bwrap`` binds a file by inode when the server starts, so a
-    registry replaced by rename keeps showing its old content and a receipt
-    created later is never bound. A changed snapshot restarts the server with
-    fresh binds. Seatbelt grants by path, so macOS never needs the restart.
-    """
-    if request.agent_fs_scope != "workspace" or not sys.platform.startswith("linux"):
-        return ()
-    snapshot: list[tuple[str, tuple[int, int] | None]] = []
-    for raw in request.agent_read_only:
-        try:
-            st = os.stat(raw)
-        except OSError:  # missing or unreadable: nothing is bound
-            snapshot.append((raw, None))
-            continue
-        snapshot.append((raw, (st.st_ino, st.st_mtime_ns)))
-    return tuple(snapshot)
 
 
 async def _spawn_server(
@@ -1582,56 +1558,6 @@ def _validate_form_answer(
     return answer
 
 
-def _sandboxed_server_dirs(binary: str, *, path: str | None = None) -> tuple[list[Path], list[Path], Path]:
-    """The folders a sandboxed ``opencode serve`` needs beyond the workspace.
-
-    Read-write: its data folder (login and session database), its state folder
-    and its temp folder. Read-only: its config folder and its install, which
-    an unconfined server later loads as code, so a confined agent must not be
-    able to change them. Its cache (plugin packages and helper binaries) is
-    code too, so a sandboxed server gets its own: ``XDG_CACHE_HOME`` points at
-    a cache only sandboxed servers use. Returns ``(writable, read_only,
-    cache_home)``.
-    """
-    home = Path.home()
-
-    def xdg(name: str, default: Path) -> Path:
-        value = os.environ.get(name, "")
-        return Path(value) if value else default
-
-    cache_home = home / ".cache" / "ciaobot-opencode-sandbox"
-    writable = [
-        xdg("XDG_DATA_HOME", home / ".local" / "share") / "opencode",
-        xdg("XDG_STATE_HOME", home / ".local" / "state") / "opencode",
-        cache_home / "opencode",
-        cache_home / "npm",
-        Path(tempfile.gettempdir()) / "opencode",
-    ]
-    install = Path(binary).resolve().parent
-    if install.name == "bin":
-        install = install.parent
-    read_only = [
-        folder
-        for folder in (
-            xdg("XDG_CONFIG_HOME", home / ".config") / "opencode",
-            install,
-            # The user's own skills and instructions, which opencode loads the
-            # way Claude Code does.
-            home / ".claude" / "skills",
-            home / ".claude" / "CLAUDE.md",
-            home / ".agents" / "skills",
-        )
-        if folder.exists()
-    ]
-    read_only = [folder.resolve() for folder in read_only]
-    read_only.extend(node_tool_read_roots(os.environ.get("PATH", "") if path is None else path))
-    return (
-        [folder.resolve() for folder in writable],
-        list(dict.fromkeys(read_only)),
-        cache_home,
-    )
-
-
 #: Skill folders opencode is pointed at inside a linked repository, when present.
 LINKED_REPO_SKILL_DIRS: tuple[str, ...] = (".claude/skills", ".agents/skills", ".opencode/skills")
 
@@ -1761,10 +1687,6 @@ class OpencodeProvider(BaseSDKProvider):
         self._tool_calls: dict[str, str] = {}
         self._settled_tool_ids: set[str] = set()
         self._mcp_token: str = ""
-        # Filesystem scope and roots the live server was started with.
-        self._fs_scope_key: tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]] = ("machine", (), (), ())
-        # The read-only files' identities when it started (`_read_only_snapshot`).
-        self._read_only_snapshot: tuple[tuple[str, tuple[int, int] | None], ...] = ()
         self._linked_repo: str = ""  # linked repo the live server was started with
         # Serializes `_ensure_server` per chat: a turn and a sign-in card can both
         # start this chat's server, and two unserialized starts orphan one process.
@@ -2525,23 +2447,19 @@ class OpencodeProvider(BaseSDKProvider):
 
         A changed MCP token forces a full restart: opencode reads MCP
         configuration at server scope, so the running process cannot be
-        re-pointed at a new token. A changed filesystem scope or linked repo
-        does too, since the sandbox wraps the server process itself, and on
-        Linux so does a replaced, created or deleted read-only runtime file
-        (`_read_only_snapshot`).
+        re-pointed at a new token. A changed linked repo does too, because
+        ``OPENCODE_CONFIG_CONTENT`` is read at startup.
         """
         if self._client is not None and self._process is not None:
             if (
                 self._process.returncode is None
                 and provider_reuse_key(request) == self._mcp_token
-                and (request.agent_fs_scope, request.agent_roots, request.agent_denied, request.agent_denied_except) == self._fs_scope_key
-                and _read_only_snapshot(request) == self._read_only_snapshot
                 and linked_repo_of(request) == self._linked_repo
             ):
                 return self._client
             if self._process.returncode is None and self.background_work_outstanding:
                 logger.warning(
-                    "Restarting the OpenCode server for %s (agent token, filesystem scope, runtime file "
+                    "Restarting the OpenCode server for %s (agent token "
                     "or linked repo changed) stops %d background shell(s) and %d background subagent(s)",
                     self.workspace_root,
                     len(self._background_shells),
@@ -2589,53 +2507,20 @@ class OpencodeProvider(BaseSDKProvider):
     def _server_launch(
         self, request: AgentRequest, binary: str, port: int
     ) -> tuple[list[str], dict[str, str]]:
-        """The argv that starts this chat's ``opencode serve``, and its extra env.
-
-        A workspace-scoped request runs the server, and every child it spawns,
-        inside the sandbox profile for ``request.agent_roots`` (the chat's agent
-        root and its workspace vault, resolved by the engine) plus the folders
-        the server itself needs (``_sandboxed_server_dirs``). Machine scope
-        keeps the bare argv. A missing sandbox tool raises
-        ``FsSandboxUnavailable`` here, before any spawn.
-        """
-        argv = [binary, "serve", "--port", str(port), "--hostname", "127.0.0.1"]
-        if request.agent_fs_scope != "workspace":
-            return argv, {}
-        effective_env = {**os.environ, **(request.extra_env or {})}
-        writable, read_only, cache_home = _sandboxed_server_dirs(binary, path=effective_env.get("PATH", ""))
-        roots = [Path(root) for root in request.agent_roots] + writable
-        prefix = opencode_sandbox_prefix(
-            roots=roots,
-            read_only=[*read_only, *(Path(p) for p in request.agent_read_only)],
-            denied=[Path(p) for p in request.agent_denied],
-            regrant=[Path(p) for p in request.agent_denied_except],
-        )
-        for folder in writable:
-            folder.mkdir(parents=True, exist_ok=True)
-        # Exec the resolved binary: an npm install puts a symlink in
-        # ~/.local/bin, which is outside every granted folder, so bwrap cannot
-        # follow it. The resolved file is inside the read-only install.
-        argv[0] = str(Path(binary).resolve())
-        return [*prefix, *argv], {
-            "XDG_CACHE_HOME": str(cache_home),
-            "npm_config_cache": str(cache_home / "npm"),
-        }
+        """The argv that starts this chat's ``opencode serve``, and its extra env."""
+        return [binary, "serve", "--port", str(port), "--hostname", "127.0.0.1"], {}
 
     async def _start_server_once(
         self, request: AgentRequest, binary: str
     ) -> httpx.AsyncClient:
         """Start, validate, and register one opencode server process."""
         port = _free_port()
-        # Before the argv: the prefix decides each bind as it is built, so a
-        # file changed in between shows up as a difference next turn and
-        # restarts, instead of being recorded as already bound.
-        read_only_snapshot = _read_only_snapshot(request)
-        argv, sandbox_env = self._server_launch(request, binary, port)
+        argv, launch_env = self._server_launch(request, binary, port)
         self._password = secrets.token_urlsafe(24)
         env = {
             **os.environ,
             **(request.extra_env or {}),
-            **sandbox_env,
+            **launch_env,
             "OPENCODE_SERVER_PASSWORD": self._password,
         }
         self._linked_repo = linked_repo_of(request)
@@ -2645,8 +2530,6 @@ class OpencodeProvider(BaseSDKProvider):
         if config_content:
             env["OPENCODE_CONFIG_CONTENT"] = config_content
         self._mcp_token = provider_reuse_key(request)
-        self._fs_scope_key = (request.agent_fs_scope, request.agent_roots, request.agent_denied, request.agent_denied_except)
-        self._read_only_snapshot = read_only_snapshot
 
         # Say it now, while the environment we are about to hand over is in
         # hand: an unresolved placeholder becomes an empty credential and only
@@ -2860,8 +2743,6 @@ class OpencodeProvider(BaseSDKProvider):
             reader.cancel()
         self._base_url = ""
         self._mcp_token = ""
-        self._fs_scope_key = ("machine", (), (), ())
-        self._read_only_snapshot = ()
         self._linked_repo = ""
         self._session_handover_context = ""
         self._reset_settings()
