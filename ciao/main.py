@@ -14,7 +14,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping
 
 from ciao.config import RESTART_EXIT_CODE, CiaoConfig
 from ciao.execution_modes import cap_schedule_mode
@@ -746,6 +746,41 @@ def _pin_app_engine_bootstrap_host(config: CiaoConfig, *, app_engine: bool) -> N
         config.pwa_host = "127.0.0.1"
 
 
+PERMISSION_REFIRE_DELAY_S = 30.0
+PERMISSION_REFIRE_TRIES = 3
+
+
+async def _refire_permission_push(
+    payload: dict[str, Any],
+    *,
+    chat_id: str,
+    request_id: str,
+    providers: Mapping[str, Any],
+    focused_chats: Mapping[str, int],
+    dispatch: Callable[[dict[str, Any]], object],
+    sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
+) -> None:
+    """Re-send a permission push while its request is still pending and nobody is watching.
+
+    Up to ``PERMISSION_REFIRE_TRIES`` re-sends, ``PERMISSION_REFIRE_DELAY_S`` apart. Stops as
+    soon as the request is answered, the chat's provider is gone, or the chat is focused.
+    """
+    for _ in range(PERMISSION_REFIRE_TRIES):
+        await sleep(PERMISSION_REFIRE_DELAY_S)
+        provider_service = providers.get(chat_id)
+        if provider_service is None or provider_service.provider is None:
+            break
+        provider = provider_service.provider
+        if provider is None or not provider.has_permission_request(request_id):
+            break
+        if focused_chats.get(chat_id, 0) > 0:
+            break
+        try:
+            dispatch(payload)
+        except Exception:
+            logger.exception("Permission re-fire failed for %s", chat_id)
+
+
 async def _run_server_locked(
     config: CiaoConfig,
     *,
@@ -1407,25 +1442,17 @@ async def _run_server_locked(
             logger.exception("Failed scheduling permission push for %s", chat_id)
             return
 
-        async def _refire() -> None:
-            for _ in range(3):
-                await asyncio.sleep(30)
-                # Check if the request is still pending in the gate.
-                provider_service = pcm._providers.get(chat_id)
-                if provider_service is None or provider_service.provider is None:
-                    break
-                provider = provider_service.provider
-                if provider is None or not provider.has_permission_request(request_id):
-                    break
-                if app.state.focused_chats.get(chat_id, 0) > 0:
-                    break
-                try:
-                    loop.run_in_executor(None, pm.send, payload)
-                except Exception:
-                    logger.exception("Permission re-fire failed for %s", chat_id)
-
         try:
-            loop.create_task(_refire())
+            loop.create_task(
+                _refire_permission_push(
+                    payload,
+                    chat_id=chat_id,
+                    request_id=request_id,
+                    providers=pcm._providers,
+                    focused_chats=app.state.focused_chats,
+                    dispatch=lambda p: loop.run_in_executor(None, pm.send, p),
+                )
+            )
         except Exception:
             logger.exception("Failed to schedule permission re-fire for %s", chat_id)
 

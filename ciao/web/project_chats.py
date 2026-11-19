@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 if TYPE_CHECKING:
     from ciao.mcp_server import CiaoMcpService
@@ -156,7 +156,7 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 from ciao.os_support.media_types import guess_type as guess_media_type
-from ciao import cli_envelopes, repo_link, repo_location, vault_review, vault_verification
+from ciao import cli_envelopes, repo_link, repo_location, vault_review
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.config import (
     CLAUDE_MODELS,
@@ -204,7 +204,6 @@ from ciao.chat_actions import (
     ActionOrigin,
     ActionState,
     ChatAction,
-    ChatActionError,
     action_key,
     action_payload,
     check_agent_params,
@@ -488,7 +487,7 @@ _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # `session_id` is persisted, so the next turn reconnects and resumes rather
 # than starting a new conversation — the same path a token rotation already
 # takes (ciao/providers/opencode.py::_ensure_server,
-# ciao/providers/claude.py::_ensure_connected).
+# ciao/providers/acp/provider.py::run_streaming).
 _PROVIDER_IDLE_TIMEOUT_SECONDS = 900.0
 # ACP agents (Claude today) are the exception to the timeout above. Each is one
 # agent process whose next turn resumes the same session, but rebuilding it pays a

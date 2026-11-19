@@ -98,6 +98,41 @@ def test_a_memory_pass_chat_is_never_in_code_mode(tmp_path: Path) -> None:
     assert "[Linked repository]" not in manager._build_prompt_prefix(chat)
 
 
+def test_a_link_change_mid_chat_resends_the_stable_context(tmp_path: Path) -> None:
+    """Linking, relinking and unlinking the project each mark the stable context stale, so the
+    next turn re-sends it with the new repository (or without one). Provider-neutral: the
+    process restart that follows is pinned per provider."""
+    manager = _build(tmp_path)
+    repo_a = _git_repo(tmp_path / "repo-a")
+    repo_b = _git_repo(tmp_path / "repo-b")
+    project = manager.create_project("Later", workspace="work")
+    chat = manager.create_chat(project.project_id, provider="claude")
+
+    def take_turn() -> str:
+        """Build the next turn's request, then mark its stable context as delivered."""
+        request = manager.build_agent_request(chat, prompt="hi")
+        chat.session_id = "sess-1"
+        chat.context_digest, chat.context_session_id = manager._stable_context_marker(chat)
+        return request.linked_repo
+
+    assert take_turn() == ""
+    assert not manager._needs_stable_context(chat)
+
+    manager.update_project(project.project_id, repo_path=str(repo_a))
+    assert manager._needs_stable_context(chat)
+    assert "[Linked repository]" in manager._build_prompt_prefix(chat)
+    assert take_turn() == str(repo_a.resolve())
+
+    manager.update_project(project.project_id, repo_path=str(repo_b))
+    assert manager._needs_stable_context(chat)
+    assert take_turn() == str(repo_b.resolve())
+
+    manager.update_project(project.project_id, repo_path="")
+    assert manager._needs_stable_context(chat)
+    assert "[Linked repository]" not in manager._build_prompt_prefix(chat)
+    assert take_turn() == ""
+
+
 def test_moving_a_chat_into_a_linked_project_puts_it_in_code_mode(tmp_path: Path) -> None:
     manager = _build(tmp_path)
     repo = _git_repo(tmp_path / "repo")

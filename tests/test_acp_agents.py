@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 import sys
 from pathlib import Path
@@ -201,6 +202,18 @@ def test_claude_meta_has_no_credential_or_memory_pass_denies(tmp_path: Path) -> 
     for entry in denies:
         for forbidden in (".env", ".runtime", "secrets", "mcp__"):
             assert forbidden not in entry
+
+
+def test_claude_meta_pre_approves_no_ciao_commands(tmp_path: Path) -> None:
+    """No `ciao …` shell prefix and no ciaobot MCP tool is pre-approved: an allow prefix is a
+    shell-suffix bypass risk, so auto mode keeps a card on every ciao shell command."""
+    options = claude_session_options(_chat_request(_config(tmp_path)))
+    serialized = json.dumps(options)
+
+    assert "allowedTools" not in options
+    assert "allow" not in options.get("settings", {})
+    assert "Bash(ciao" not in serialized
+    assert "mcp__ciaobot" not in serialized
 
 
 def test_claude_oneshot_meta_disables_tools_skills_settings_mcp() -> None:

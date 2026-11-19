@@ -902,9 +902,6 @@ async def test_llm_fallback_titles_chat_when_native_never_lands(monkeypatch) -> 
         calls.append({"prompt": prompt, "system_prompt": system_prompt, "model": model})
         return "Zendesk Ticket Thread Follow-Up"
 
-    def missing_session_info(_sid, directory=None):
-        return None
-
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
     title = await manager.auto_title_if_default("chat-1", "Check Zendesk ticket 152025")
@@ -925,7 +922,7 @@ async def test_claude_title_does_not_wait_for_native_poll(monkeypatch) -> None:
     native_reads = 0
     slept: list[float] = []
 
-    def missing_session_info(_sid, directory=None):
+    async def counting_native_title(_chat):
         nonlocal native_reads
         native_reads += 1
         return None
@@ -936,6 +933,7 @@ async def test_claude_title_does_not_wait_for_native_poll(monkeypatch) -> None:
     async def fake_oneshot(*_args, **_kwargs):
         return "System One Decision Models"
 
+    manager._native_chat_title = counting_native_title
     monkeypatch.setattr(pc.asyncio, "sleep", recording_sleep)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
@@ -943,7 +941,7 @@ async def test_claude_title_does_not_wait_for_native_poll(monkeypatch) -> None:
         "chat-1", "I want to find out where System One models help"
     )
     assert title == "System One Decision Models"
-    # ACP Claude chats never read the session file: the adapter's title arrives as an event.
+    # ACP Claude chats have no native read: the adapter's title arrives as an event.
     assert native_reads == 0
     assert slept == []
 
@@ -955,7 +953,13 @@ async def test_claude_fallback_title_is_not_held_behind_native_polls(monkeypatch
 
     manager = _manager(chats={"chat-1": _chat(provider="claude")})
     manager._TITLE_POLL_DELAYS = (0.0, 60.0, 60.0)
+    native_reads = 0
     slept: list[float] = []
+
+    async def counting_native_title(_chat):
+        nonlocal native_reads
+        native_reads += 1
+        return None
 
     async def recording_sleep(delay):
         slept.append(delay)
@@ -963,6 +967,7 @@ async def test_claude_fallback_title_is_not_held_behind_native_polls(monkeypatch
     async def failing_oneshot(*_args, **_kwargs):
         raise RuntimeError("model unavailable")
 
+    manager._native_chat_title = counting_native_title
     monkeypatch.setattr(pc.asyncio, "sleep", recording_sleep)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
 
@@ -970,30 +975,27 @@ async def test_claude_fallback_title_is_not_held_behind_native_polls(monkeypatch
         "Check Zendesk ticket 152025"
     )
     assert manager._chats["chat-1"].title == "Check Zendesk ticket 152025"
+    assert native_reads == 0
     assert slept == []
 
 
 @pytest.mark.asyncio
 async def test_claude_chat_reads_no_native_title_so_nothing_polls(monkeypatch) -> None:
-    """The fallback stands: an ACP Claude chat has no SDK read to poll, so nothing runs after it."""
+    """The fallback stands: an ACP Claude chat has no native read to poll, so nothing runs after it."""
     from ciao.web import project_chats as pc
 
     manager = _manager(chats={"chat-1": _chat(provider="claude")})
-    manager._TITLE_POLL_DELAYS = (0.0, 0.001, 0.001)
+    manager._TITLE_POLL_DELAYS = (0.0, 60.0)
     published: list[dict] = []
     manager._events = SimpleNamespace(publish=published.append)
     reads = 0
     slept: list[float] = []
-    real_sleep = asyncio.sleep
 
-    class FakeInfo:
-        custom_title = "Claude Late Title"
-        summary = ""
-
-    def late_session_info(_sid, directory=None):
+    async def late_native_title(_chat):
+        # Would land on the second read if the poll ran; it must never be asked.
         nonlocal reads
         reads += 1
-        return FakeInfo() if reads >= 2 else None
+        return "Claude Late Title" if reads >= 2 else None
 
     async def recording_sleep(delay):
         slept.append(delay)
@@ -1001,12 +1003,11 @@ async def test_claude_chat_reads_no_native_title_so_nothing_polls(monkeypatch) -
     async def failing_oneshot(*_args, **_kwargs):
         raise RuntimeError("model unavailable")
 
+    manager._native_chat_title = late_native_title
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
     monkeypatch.setattr(pc.asyncio, "sleep", recording_sleep)
 
     assert await manager.auto_title_if_default("chat-1", "hello") == "hello"
-    for _ in range(20):
-        await real_sleep(0)
 
     assert reads == 0
     assert slept == []
@@ -1020,9 +1021,6 @@ async def test_claude_rename_during_the_titler_wins_over_the_fallback(monkeypatc
     chat = _chat(provider="claude")
     manager = _manager(chats={"chat-1": chat})
     manager._TITLE_POLL_DELAYS = (0.0, 0.001)
-
-    def no_native_title(_sid, directory=None):
-        return None
 
     async def rename_then_fail(*_args, **_kwargs):
         chat.title = "User Picked This"
@@ -1049,9 +1047,6 @@ async def test_llm_fallback_prompt_carries_assistant_reply(monkeypatch) -> None:
         prompts.append(prompt)
         return "Automation Page Job Log"
 
-    def missing_session_info(_sid, directory=None):
-        return None
-
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
     title = await manager.auto_title_if_default(
@@ -1072,9 +1067,6 @@ async def test_llm_fallback_failure_still_applies_deterministic_fallback(
     async def failing_oneshot(*_args, **_kwargs):
         raise RuntimeError("usage limit reached")
 
-    def missing_session_info(_sid, directory=None):
-        return None
-
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
 
     assert await manager.auto_title_if_default("chat-1", "hello") == "hello"
@@ -1094,9 +1086,6 @@ async def test_llm_fallback_rejects_contaminated_title(monkeypatch) -> None:
 
     async def leaking_oneshot(*_args, **_kwargs):
         return leaked
-
-    def missing_session_info(_sid, directory=None):
-        return None
 
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", leaking_oneshot)
 
@@ -1141,9 +1130,6 @@ async def test_llm_fallback_respects_manual_rename_during_call(monkeypatch) -> N
         chat.title = "User Picked This"
         chat.title_origin = "user"  # what update_chat records for a rename
         return "Model's Title"
-
-    def missing_session_info(_sid, directory=None):
-        return None
 
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", slow_oneshot)
 

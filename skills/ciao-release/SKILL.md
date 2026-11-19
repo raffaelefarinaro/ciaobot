@@ -187,8 +187,7 @@ env -u PYTHONPATH .venv/bin/python -m ciao.release "$(pwd)" --bump <patch|minor|
 Read the plan. It is the last chance to catch a wrong bump.
 
 Also read the **Provider versions** block. It shows the OpenCode binary on this
-machine and the Claude CLI bundled in the installed `claude-agent-sdk`, each next
-to the latest published version. If it warns that OpenCode is behind latest, the
+machine and the `claude` CLI on PATH, each next to the latest published version. If it warns that OpenCode is behind latest, the
 maintainer decides: update OpenCode first and re-run the plan, or cut with the
 installed version recorded as tested.
 
@@ -215,8 +214,8 @@ What `--apply` does, in order: bumps `pyproject.toml`, `ciao/__init__.py`,
 in both `web/public/sw.js` and `ciao/web/static/sw.js`; writes the notes into
 `CHANGELOG.md` (or, without `--notes-file`, the commit list);
 auto-bumps `auto` dependencies; regenerates the packaged `gws-*` skills if the
-installed `gws` CLI differs from the pin; records the tested OpenCode and bundled
-Claude CLI versions in `ciao/stock/provider-versions.json` (fails on a missing,
+installed `gws` CLI differs from the pin; records the tested OpenCode and Claude
+CLI versions in `ciao/stock/provider-versions.json` (fails on a missing,
 dev, unpublished or unsupported OpenCode unless `--untested-provider opencode`);
 runs the full check suite; commits
 `release: prepare vX.Y.Z`; pushes; opens the PR into `main`.

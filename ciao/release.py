@@ -1208,8 +1208,7 @@ def main(argv: list[str] | None = None) -> int:
         "--skip-dep-check",
         action="store_true",
         help=(
-            "Do not check PyPI/npm for newer dependency versions or "
-            "auto-bump the Claude SDK."
+            "Do not check PyPI/npm for newer dependency versions."
         ),
     )
     parser.add_argument(
