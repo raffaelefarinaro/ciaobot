@@ -17,7 +17,7 @@ import acp
 import pytest
 from acp.schema import AllowedOutcome, DeniedOutcome, RequestPermissionResponse
 
-from ciao.models import PermissionRequestEvent, ResultEvent, SystemStatusEvent
+from ciao.models import ContextCompactedEvent, PermissionRequestEvent, ResultEvent, SystemStatusEvent
 from ciao.providers.acp import connection as connection_module
 from ciao.providers.acp.connection import AcpConnection
 from ciao.providers.acp.permissions import PermissionBroker
@@ -287,6 +287,35 @@ async def test_late_updates_open_and_close_after_quiet_period(tmp_path: Path) ->
         assert event.wake_notice == _WAKE
         assert event.result == "still working"
         assert harness.session.late_turn_open is False
+
+
+@pytest.mark.asyncio
+async def test_compaction_yields_one_context_compacted_event(tmp_path: Path) -> None:
+    async with _started(tmp_path, spec_quiet_period_s=0.2) as harness:
+        await _collect(harness)
+        session_id = harness.session.session_id
+        harness.session.on_update({
+            "sessionId": session_id,
+            "sessionUpdate": "compaction_update",
+            "compactionId": "c",
+            "status": "completed",
+        })
+        harness.session.on_update({
+            "sessionId": session_id,
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "after compaction"},
+        })
+        seen: list[Any] = []
+
+        async def watch() -> None:
+            async for event in harness.session.late_events():
+                seen.append(event)
+                if isinstance(event, ResultEvent):
+                    return
+
+        await asyncio.wait_for(watch(), timeout=1.5)
+        # The flag resets after one yield: the text update after the compaction carries no second marker.
+        assert len([e for e in seen if isinstance(e, ContextCompactedEvent)]) == 1
 
 
 @pytest.mark.asyncio

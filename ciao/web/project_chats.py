@@ -171,6 +171,7 @@ from ciao.context.capsule import (
 from ciao.context.capsule import (
     context_digest as stable_context_digest,
 )
+from ciao.core_prompt import unified_core
 from ciao.entity_types import load_entity_types
 from ciao.frontmatter import split_frontmatter
 from ciao.model_tiers import is_tier
@@ -6031,12 +6032,21 @@ class ProjectChatManager:
             linked_repo_block=repo_block,
             linked_repo_line=repo_line,
             permission_mode=self._effective_mode_for_chat(chat, unattended=unattended),
+            core=self._core_for_chat(chat),
         )
         if capsule:
             capsule = f"[Chat ID: \"{chat.chat_id}\"]\n{capsule}"
         else:
             return ""
         return f"[CIAO_CONTEXT_BEGIN]\n{capsule}\n[CIAO_CONTEXT_END]\n\n"
+
+    def _core_for_chat(self, chat: ChatInfo) -> str:
+        """The Ciaobot core, sent in the stable block of ACP chats only."""
+        descriptor = provider_registry.get(chat.provider)
+        # Non-ACP drivers still send the core as a system prompt; C2b/D2 delete this condition.
+        if descriptor is None or not descriptor.acp_spec_path:
+            return ""
+        return unified_core()
 
     def _needs_stable_context(self, chat: ChatInfo) -> bool:
         digest, session_key = self._stable_context_marker(chat)
@@ -6062,6 +6072,7 @@ class ProjectChatManager:
                 project_context=project_context,
                 canonical_doc=canonical_doc,
                 linked_repo=repo_fp,
+                core=self._core_for_chat(chat),
             ),
             chat.session_id or "__pending__",
         )
@@ -6085,6 +6096,7 @@ class ProjectChatManager:
             include_stable=True,
             linked_repo_block=repo_block,
             linked_repo_line=repo_line,
+            core=self._core_for_chat(chat),
         )
         if not capsule:
             return ""
