@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -75,15 +76,18 @@ def test_ci_builds_and_cold_starts_the_engine_not_the_app() -> None:
     assert "/api/startup-status" in workflow
 
 
-def _publish_steps() -> list[dict]:
+def _publish_workflow() -> dict:
     import yaml
 
-    workflow = yaml.safe_load(
+    return yaml.safe_load(
         (Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml").read_text(
             encoding="utf-8"
         )
     )
-    return workflow["jobs"]["build-engine"]["steps"]
+
+
+def _publish_steps() -> list[dict]:
+    return _publish_workflow()["jobs"]["build-engine"]["steps"]
 
 
 def _step(steps: list[dict], name: str) -> dict:
@@ -94,39 +98,47 @@ def _index_containing(steps: list[dict], fragment: str) -> int:
     return next(i for i, step in enumerate(steps) if fragment in step.get("run", ""))
 
 
-def _uploaded_assets(steps: list[dict]) -> list[str]:
+def _upload_names(script: str) -> list[str]:
     # Every `gh release upload` line, with continuations joined, reduced to the
     # file names it attaches. Parsed from the YAML so a re-added line fails here.
     import shlex
 
     names: list[str] = []
-    for step in steps:
-        script = step.get("run", "").replace("\\\n", " ")
-        for line in script.splitlines():
-            if not line.lstrip().startswith("gh release upload"):
-                continue
-            tokens = shlex.split(line.split("#", 1)[0], posix=True)
-            tag = tokens.index("$TAG")
-            names += [
-                Path(token).name for token in tokens[tag + 1 :] if not token.startswith("--")
-            ]
+    for line in script.replace("\\\n", " ").splitlines():
+        if not line.lstrip().startswith("gh release upload"):
+            continue
+        tokens = shlex.split(line.split("#", 1)[0], posix=True)
+        tag = tokens.index("$TAG")
+        names += [Path(token).name for token in tokens[tag + 1 :] if not token.startswith("--")]
     return names
 
 
-def test_publish_attaches_only_the_four_release_assets() -> None:
-    # #3131 L5: the release carries the stamped Linux installer, the wheel it
-    # pins, and (for 2.0.0 only, see the decision test below) the signed manifest
-    # and its signature. Nothing else: no server host archive, no other installer.
-    names = _uploaded_assets(_publish_steps())
+def _uploaded_assets(steps: list[dict]) -> list[str]:
+    return [name for step in steps for name in _upload_names(step.get("run", ""))]
 
-    assert sorted(names) == sorted(
-        [
-            "install.sh",
-            "ciaobot-*.whl",
-            "ciaobot-engine-manifest.json",
-            "ciaobot-engine-manifest.json.sig",
-        ]
-    ), names
+
+def test_publish_attaches_two_assets_always_and_four_on_the_legacy_release() -> None:
+    # #3131 L5: every release attaches the stamped installer and its wheel. The
+    # 1.x manifest and its signature ride along on the legacy release (2.0.0)
+    # only, behind the decision step. The published-assets check pins the exact
+    # set at runtime; this pins which upload step carries which file.
+    steps = _publish_steps()
+    always = _step(steps, "Attach release assets")
+    legacy = _step(steps, "Attach the 1.x engine manifest")
+
+    assert _upload_names(always["run"]) == ["install.sh", "ciaobot-*.whl"]
+    assert _upload_names(legacy["run"]) == [
+        "ciaobot-engine-manifest.json",
+        "ciaobot-engine-manifest.json.sig",
+    ]
+    assert legacy["if"] == "steps.legacy.outputs.publish == 'true'"
+    assert "if" not in always
+    assert _uploaded_assets(steps) == [
+        "install.sh",
+        "ciaobot-*.whl",
+        "ciaobot-engine-manifest.json",
+        "ciaobot-engine-manifest.json.sig",
+    ]
 
 
 def test_publish_uploads_the_stamped_linux_installer() -> None:
@@ -175,12 +187,16 @@ def test_publish_never_uploads_retired_installers_or_host() -> None:
 
 def test_publish_ships_the_legacy_manifest_for_2_0_0_only() -> None:
     # Maintainer decision (#3131 Q3, 2026-11-18): the wheel-only manifest that 1.x
-    # engines read is published for 2.0.0 only, so every step that makes or
-    # attaches it is gated on the decision step, and the unconditional upload
-    # never names it.
-    steps = _publish_steps()
+    # engines read is published for 2.0.0 only. The version is named once, in the
+    # workflow env, and every step that makes or attaches the manifest is gated on
+    # the decision step, whose output the behavioural test below pins.
+    workflow = _publish_workflow()
+    steps = workflow["jobs"]["build-engine"]["steps"]
 
-    assert '"${VERSION#v}" = "2.0.0"' in _step(steps, "Decide whether the 1.x engine manifest ships")["run"]
+    assert workflow["env"]["LEGACY_MANIFEST_VERSION"] == "2.0.0"
+    decide = _step(steps, "Decide whether the 1.x engine manifest ships")["run"]
+    assert '"${VERSION#v}" = "$LEGACY_MANIFEST_VERSION"' in decide
+    assert '= "2.0.0"' not in decide
     for name in (
         "Write and sign engine manifest",
         "1.x updater accepts this release",
@@ -188,6 +204,44 @@ def test_publish_ships_the_legacy_manifest_for_2_0_0_only() -> None:
     ):
         assert _step(steps, name)["if"] == "steps.legacy.outputs.publish == 'true'", name
     assert "ciaobot-engine-manifest" not in _step(steps, "Attach release assets")["run"]
+
+
+def _run_bash_step(run: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", "-c", run],
+        env={"PATH": os.environ["PATH"], **env},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("tag", "published"),
+    [("v2.0.0", "true"), ("v1.10.1", "false"), ("v2.0.1", "false"), ("v2.1.0", "false")],
+)
+def test_legacy_decision_step_outputs(tmp_path: Path, tag: str, published: str) -> None:
+    # Runs the real step: a swapped true/false echo, or a dropped notice, fails here.
+    workflow = _publish_workflow()
+    step = _step(workflow["jobs"]["build-engine"]["steps"], "Decide whether the 1.x engine manifest ships")
+    output = tmp_path / "github-output"
+    output.touch()
+
+    result = _run_bash_step(
+        step["run"],
+        {
+            "VERSION": tag,
+            "GITHUB_OUTPUT": str(output),
+            "LEGACY_MANIFEST_VERSION": workflow["env"]["LEGACY_MANIFEST_VERSION"],
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8") == f"publish={published}\n"
+    if published == "false":
+        assert f"::notice::1.x engine manifest not published for {tag}" in result.stdout
+    else:
+        assert "::notice::" not in result.stdout
 
 
 def test_publish_workflow_ships_signed_engine_manifest() -> None:
@@ -976,3 +1030,203 @@ def test_docs_drop_the_pinned_install_sh_digest() -> None:
     assert "must pin the sha256" not in development
     assert "pin the `install.sh` digest" not in development
     assert "python -m ciao.release_manifest verify" in development
+
+
+def test_publish_verifies_the_attached_files_after_the_manifest_upload() -> None:
+    # The 1.x manifest is verified against the bytes the release now serves, not
+    # the local copies: upload, re-download, feed each wheel in as --asset, verify.
+    steps = _publish_steps()
+    names = [step.get("name") for step in steps]
+    assert names.index("Attach release assets") < names.index("Attach the 1.x engine manifest")
+    assert names.index("Attach the 1.x engine manifest") < names.index("Check the published assets")
+
+    step = _step(steps, "Attach the 1.x engine manifest")["run"]
+    upload = step.index("gh release upload")
+    download = step.index("gh release download")
+    loop = step.index('for wheel in "$uploaded"/ciaobot-*.whl; do')
+    feed = step.index('asset_args+=(--asset "$wheel")')
+    verify = step.index("-m ciao.release_manifest verify")
+    assert upload < download < loop < feed < verify
+    assert '"${asset_args[@]}"' in step[verify:]
+
+
+def test_publish_check_step_refuses_retired_assets_and_compares_the_wheel_last() -> None:
+    check = _step(_publish_steps(), "Check the published assets")["run"]
+
+    assert "for retired in install-engine.sh install.ps1; do" in check
+    assert "grep -q '^ciaobot-server-host' \"$listed\"" in check
+    digest_pin = check.index('grep -qx "WHEEL_SHA256=$digest" "$downloaded/install.sh"')
+    compare = check.index('cmp "${wheels[0]}" "$GITHUB_WORKSPACE/dist/ciaobot-$version-py3-none-any.whl"')
+    assert digest_pin < compare
+    assert check.rstrip().splitlines()[-1].startswith("cmp ")
+
+
+# A stand-in gh and shasum for the published-assets step. gh answers `release view`
+# from a listing file and `release download` by copying a release directory;
+# shasum is a hashlib wrapper so the step behaves the same on any runner.
+_FAKE_GH = """#!__PYTHON__
+import os, shutil, sys
+args = sys.argv[1:]
+if args[:2] == ["release", "view"]:
+    with open(os.environ["FAKE_LISTING"], encoding="utf-8") as handle:
+        sys.stdout.write(handle.read())
+    sys.exit(0)
+if args[:2] == ["release", "download"]:
+    target = args[args.index("--dir") + 1]
+    for name in os.listdir(os.environ["FAKE_RELEASE"]):
+        shutil.copy(os.path.join(os.environ["FAKE_RELEASE"], name), target)
+    sys.exit(0)
+sys.stderr.write(f"unexpected gh call: {args}\\n")
+sys.exit(1)
+"""
+
+_FAKE_SHASUM = """#!__PYTHON__
+import hashlib, sys
+for name in [a for a in sys.argv[1:] if a not in ("-a", "256")]:
+    with open(name, "rb") as handle:
+        print(f"{hashlib.sha256(handle.read()).hexdigest()}  {name}")
+"""
+
+_CHECK_VERSION = "9.8.7"
+_CHECK_WHEEL = f"ciaobot-{_CHECK_VERSION}-py3-none-any.whl"
+_CHECK_MANIFEST = "ciaobot-engine-manifest.json"
+_CHECK_SIGNATURE = _CHECK_MANIFEST + ".sig"
+
+
+def _check_release() -> dict[str, bytes]:
+    import hashlib
+
+    wheel = b"the wheel bytes"
+    installer = (
+        f"CIAOBOT_VERSION={_CHECK_VERSION}\n"
+        f"WHEEL_SHA256={hashlib.sha256(wheel).hexdigest()}\n"
+    )
+    return {
+        "install.sh": installer.encode(),
+        _CHECK_WHEEL: wheel,
+        _CHECK_MANIFEST: b"manifest",
+        _CHECK_SIGNATURE: b"signature",
+    }
+
+
+def _run_check(
+    tmp_path: Path, *, legacy: str, listed: list[str], released: dict[str, bytes]
+) -> subprocess.CompletedProcess[str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in (("gh", _FAKE_GH), ("shasum", _FAKE_SHASUM)):
+        exe = bin_dir / name
+        exe.write_text(body.replace("__PYTHON__", sys.executable), encoding="utf-8")
+        exe.chmod(0o755)
+    listing = tmp_path / "listing.txt"
+    listing.write_text("".join(f"{name}\n" for name in listed), encoding="utf-8")
+    release = tmp_path / "release"
+    release.mkdir()
+    for name, body in released.items():
+        (release / name).write_bytes(body)
+    workspace = tmp_path / "workspace"
+    (workspace / "dist").mkdir(parents=True)
+    (workspace / "dist" / _CHECK_WHEEL).write_bytes(released[_CHECK_WHEEL])
+    runner_temp = tmp_path / "runner"
+    runner_temp.mkdir()
+
+    step = _step(_publish_steps(), "Check the published assets")
+    return _run_bash_step(
+        step["run"],
+        {
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_WORKSPACE": str(workspace),
+            "TAG": f"v{_CHECK_VERSION}",
+            "VERSION": f"v{_CHECK_VERSION}",
+            "LEGACY_PUBLISH": legacy,
+            "GH_TOKEN": "test-token",
+            "FAKE_LISTING": str(listing),
+            "FAKE_RELEASE": str(release),
+        },
+    )
+
+
+def test_published_assets_check_accepts_the_two_asset_release(tmp_path: Path) -> None:
+    result = _run_check(
+        tmp_path,
+        legacy="false",
+        listed=["install.sh", _CHECK_WHEEL],
+        released=_check_release(),
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_published_assets_check_accepts_the_four_asset_legacy_release(tmp_path: Path) -> None:
+    result = _run_check(
+        tmp_path,
+        legacy="true",
+        listed=["install.sh", _CHECK_WHEEL, _CHECK_MANIFEST, _CHECK_SIGNATURE],
+        released=_check_release(),
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("legacy", "listed", "reason"),
+    [
+        ("false", ["install.sh", _CHECK_WHEEL, _CHECK_MANIFEST], "manifest on a non-legacy release"),
+        ("true", ["install.sh", _CHECK_WHEEL, _CHECK_MANIFEST], "legacy release missing the signature"),
+        ("false", ["install.sh", _CHECK_WHEEL, "install-engine.sh"], "retired installer attached"),
+        (
+            "false",
+            ["install.sh", _CHECK_WHEEL, "ciaobot-server-host-macos-universal-v1.tar.gz"],
+            "server host archive attached",
+        ),
+        ("false", ["install.sh"], "wheel missing"),
+        ("", ["install.sh", _CHECK_WHEEL], "unknown legacy decision"),
+    ],
+)
+def test_published_assets_check_refuses_any_other_asset_set(
+    tmp_path: Path, legacy: str, listed: list[str], reason: str
+) -> None:
+    result = _run_check(tmp_path, legacy=legacy, listed=listed, released=_check_release())
+
+    assert result.returncode != 0, reason
+
+
+def test_published_assets_check_refuses_a_listing_the_download_does_not_match(tmp_path: Path) -> None:
+    # The listing is the release's own answer; a wheel that appears only in the
+    # download is still a second wheel, and the single-wheel guard names it.
+    released = _check_release()
+    released["ciaobot-0.0.1-py3-none-any.whl"] = b"another wheel"
+
+    result = _run_check(
+        tmp_path, legacy="false", listed=["install.sh", _CHECK_WHEEL], released=released
+    )
+
+    assert result.returncode != 0
+    assert "expected exactly one wheel attached, found 2" in result.stderr
+
+
+def test_published_assets_check_refuses_an_installer_pinning_another_digest(tmp_path: Path) -> None:
+    released = _check_release()
+    released["install.sh"] = f"CIAOBOT_VERSION={_CHECK_VERSION}\nWHEEL_SHA256={'0' * 64}\n".encode()
+
+    result = _run_check(
+        tmp_path, legacy="false", listed=["install.sh", _CHECK_WHEEL], released=released
+    )
+
+    assert result.returncode != 0
+
+
+def test_legacy_gate_is_named_only_in_publish_yml_in_the_scripts_readme() -> None:
+    readme = (Path(__file__).parents[1] / "scripts" / "README.md").read_text(encoding="utf-8")
+    row = next(line for line in readme.splitlines() if "legacy-update-gate.py" in line)
+
+    assert "run by `publish.yml` before upload" in row
+    assert "release-smoke.yml" not in row
+
+
+def test_development_doc_warns_that_patch_releases_before_2_0_0_strand_1x() -> None:
+    text = (Path(__file__).parents[1] / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8")
+
+    assert "Cutting a patch release before 2.0.0 strands 1.x engines" in text
+    assert "`release-smoke.yml` still expects the old macOS flow until L6" in text

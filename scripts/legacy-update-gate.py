@@ -14,6 +14,7 @@ checkout: the point is to exercise the 1.x code the released clients run.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import shutil
@@ -22,8 +23,15 @@ import sys
 import tempfile
 from pathlib import Path
 
-#: The 1.x releases that must be able to update to the release under test.
-LEGACY_VERSIONS = ("1.10.0",)
+REPO = "raffaelefarinaro/ciaobot"
+#: The 1.x releases that must be able to update to the release under test, with
+#: the sha256 of each wheel. The digest is trust-on-first-use, taken from the
+#: release's wheel; it matches the wheel sha256 in that release's signed
+#: ``ciaobot-engine-manifest.json`` (checked with ``ciao.release_manifest verify``).
+LEGACY_WHEEL_SHA256 = {
+    "1.10.0": "7d9fd66814e57b32b464bd1f44d6fa31716c4088bb271a2474f331afb1e2133b",
+}
+LEGACY_VERSIONS = tuple(LEGACY_WHEEL_SHA256)
 LEGACY_PYTHON = "3.13"
 MANIFEST_NAME = "ciaobot-engine-manifest.json"
 SIGNATURE_NAME = MANIFEST_NAME + ".sig"
@@ -50,58 +58,111 @@ print(json.dumps(asdict(op), indent=2, sort_keys=True))
 sys.exit(0 if op.phase == "staged" else 2)
 """
 
+#: Variables the child processes may inherit. Everything else, CIAO_* above all,
+#: stays out of the 1.x updater and its uv.
+_ALLOWED_ENV = ("PATH", "LANG", "TMPDIR", "SSL_CERT_FILE")
+
 
 class GateError(RuntimeError):
     """The gate could not run, or the 1.x updater refused the release."""
 
 
+def gh_download_argv(legacy: str, dest: Path) -> list[str]:
+    return [
+        "gh", "release", "download", f"v{legacy}",
+        "--repo", REPO,
+        "--pattern", f"ciaobot-{legacy}-py3-none-any.whl",
+        "--dir", str(dest),
+    ]
+
+
+def uv_venv_argv(uv: str, venv: Path) -> list[str]:
+    return [uv, "venv", "--python", LEGACY_PYTHON, str(venv)]
+
+
+def uv_pip_install_argv(uv: str, py: Path, wheel: Path) -> list[str]:
+    return [uv, "pip", "install", "--python", str(py), str(wheel)]
+
+
+def runner_argv(py: Path, target: str, base: str, uv: str, state: Path) -> list[str]:
+    # -I ignores PYTHON* variables and the working directory, so the 1.x code
+    # is the only ciao the child can import.
+    return [str(py), "-I", "-c", RUNNER, target, base, uv, str(state)]
+
+
+def _allowed(environ: dict[str, str]) -> dict[str, str]:
+    env = {k: environ[k] for k in _ALLOWED_ENV if k in environ}
+    env.update({k: v for k, v in environ.items() if k.startswith("UV_")})
+    return env
+
+
+def gh_env(environ: dict[str, str]) -> dict[str, str]:
+    """Env for the one gh call: the caller's HOME (gh's login) and GH_TOKEN."""
+    env = _allowed(environ)
+    if "HOME" in environ:
+        env["HOME"] = environ["HOME"]
+    if "GH_TOKEN" in environ:
+        env["GH_TOKEN"] = environ["GH_TOKEN"]
+    return env
+
+
+def child_env(environ: dict[str, str], home: Path) -> dict[str, str]:
+    """Env for uv and the 1.x updater: allowlisted, with a throwaway HOME."""
+    return {**_allowed(environ), "HOME": str(home)}
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_wheel_digest(legacy: str, wheel: Path) -> None:
+    actual = sha256_file(wheel)
+    if actual != LEGACY_WHEEL_SHA256[legacy]:
+        raise GateError(
+            f"{wheel.name} sha256 is {actual}, expected {LEGACY_WHEEL_SHA256[legacy]}; "
+            "refusing to install it"
+        )
+
+
 def _run(cmd: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, env=env, check=False, text=True, capture_output=True)
+    try:
+        return subprocess.run(cmd, env=env, check=False, text=True, capture_output=True)
+    except FileNotFoundError as exc:
+        raise GateError(f"cannot run {cmd[0]}: {exc}") from exc
 
 
-def _gate_one(
-    legacy: str,
-    target: str,
-    base: str,
-    uv: str,
-    env: dict[str, str],
-    stage_env: dict[str, str],
-    tmp: Path,
-) -> None:
+def _gate_one(legacy: str, target: str, base: str, uv: str, environ: dict[str, str], tmp: Path) -> None:
     wheel_dir = tmp / "wheel"
     wheel_dir.mkdir()
-    fetched = _run(
-        [
-            "gh", "release", "download", f"v{legacy}",
-            "--pattern", f"ciaobot-{legacy}-py3-none-any.whl",
-            "--dir", str(wheel_dir),
-        ],
-        env,
-    )
+    fetched = _run(gh_download_argv(legacy, wheel_dir), gh_env(environ))
     if fetched.returncode != 0:
         raise GateError(f"could not download the {legacy} wheel: {fetched.stderr.strip()}")
     wheels = sorted(wheel_dir.glob(f"ciaobot-{legacy}-py3-none-any.whl"))
     if len(wheels) != 1:
         raise GateError(f"expected one {legacy} wheel, found {len(wheels)}")
+    verify_wheel_digest(legacy, wheels[0])
 
+    home = tmp / "home"
+    home.mkdir()
+    env = child_env(environ, home)
     venv = tmp / "venv"
-    created = _run([uv, "venv", "--python", LEGACY_PYTHON, str(venv)], env)
+    created = _run(uv_venv_argv(uv, venv), env)
     if created.returncode != 0:
         raise GateError(f"uv venv failed: {created.stderr.strip()}")
     py = venv / "bin" / "python"
-    installed = _run([uv, "pip", "install", "--python", str(py), str(wheels[0])], env)
+    installed = _run(uv_pip_install_argv(uv, py, wheels[0]), env)
     if installed.returncode != 0:
         raise GateError(f"installing the {legacy} wheel failed: {installed.stderr.strip()}")
 
-    state = tmp / "state"
-    staged = _run(
-        [str(py), "-I", "-c", RUNNER, target, base, uv, str(state)],
-        stage_env,
-    )
-    if staged.returncode != 0:
-        print(staged.stdout, end="")
-        raise GateError(f"the {legacy} updater did not stage {target}")
+    staged = _run(runner_argv(py, target, base, uv, tmp / "state"), env)
     print(staged.stdout, end="")
+    if staged.returncode != 0:
+        print(staged.stderr, end="", file=sys.stderr)
+        raise GateError(f"the {legacy} updater did not stage {target}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -111,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         "--legacy-version",
         action="append",
         choices=LEGACY_VERSIONS,
-        help="1.x version to test (repeatable); defaults to every entry of LEGACY_VERSIONS",
+        help="1.x version to test (repeatable); defaults to every entry of LEGACY_WHEEL_SHA256",
     )
     parser.add_argument(
         "--release-root",
@@ -144,19 +205,14 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
         base = args.release_root.resolve().as_uri()
 
-    # CIAO_* settings from the caller's shell must not steer the 1.x updater.
-    # gh and uv keep the caller's HOME (their logins live there); only the
-    # 1.x updater runs with a throwaway HOME and state directory.
-    env = {k: v for k, v in os.environ.items() if not k.startswith("CIAO_")}
+    # CIAO_* settings from the caller's shell must not steer the 1.x updater;
+    # the child environments are built from an allowlist (see _allowed).
+    environ = dict(os.environ)
     legacy_versions = args.legacy_version or list(LEGACY_VERSIONS)
     for legacy in legacy_versions:
         with tempfile.TemporaryDirectory(prefix=f"legacy-gate-{legacy}-") as scratch:
-            tmp = Path(scratch)
-            home = tmp / "home"
-            home.mkdir()
-            stage_env = {**env, "HOME": str(home)}
             try:
-                _gate_one(legacy, target, base, uv, env, stage_env, tmp)
+                _gate_one(legacy, target, base, uv, environ, Path(scratch))
             except GateError as exc:
                 print(f"Error: {exc}", file=sys.stderr)
                 return 1

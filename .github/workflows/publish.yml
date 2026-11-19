@@ -5,6 +5,11 @@ on:
     types: [published]
   workflow_dispatch:
 
+env:
+  # The one release whose wheel-only manifest 1.x engines read (#3131 Q3). The
+  # decision step, the notice and the 1.x gate all key off this value.
+  LEGACY_MANIFEST_VERSION: "2.0.0"
+
 jobs:
   build-engine:
     runs-on: macos-latest
@@ -64,10 +69,11 @@ jobs:
           # 1.x engines read is published for 2.0.0 only. Later releases attach the
           # installer and the wheel alone; a 1.x engine that stays behind is told to
           # reinstall by hand (#3130).
-          if [ "${VERSION#v}" = "2.0.0" ]; then
+          if [ "${VERSION#v}" = "$LEGACY_MANIFEST_VERSION" ]; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
           else
             echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::1.x engine manifest not published for $VERSION: only $LEGACY_MANIFEST_VERSION ships it, so the legacy steps are skipped"
           fi
       - name: Write and sign engine manifest
         if: steps.legacy.outputs.publish == 'true'
@@ -152,18 +158,39 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
           VERSION: ${{ github.event.release.tag_name }}
+          LEGACY_PUBLISH: ${{ steps.legacy.outputs.publish }}
         run: |
           set -euo pipefail
           version="${VERSION#v}"
-          names="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+          # Exactly the installer and the wheel, plus the 1.x manifest and its
+          # signature on the legacy release. Anything else fails the job.
+          expected="$RUNNER_TEMP/expected-assets.txt"
+          printf '%s\n' install.sh "ciaobot-$version-py3-none-any.whl" > "$expected"
+          case "$LEGACY_PUBLISH" in
+            true)
+              printf '%s\n' ciaobot-engine-manifest.json ciaobot-engine-manifest.json.sig >> "$expected"
+              ;;
+            false) ;;
+            *)
+              echo "unknown legacy decision: $LEGACY_PUBLISH" >&2
+              exit 1
+              ;;
+          esac
+          sort -o "$expected" "$expected"
+          listed="$RUNNER_TEMP/published-assets.txt"
+          gh release view "$TAG" --json assets --jq '.assets[].name' | sort > "$listed"
           for retired in install-engine.sh install.ps1; do
-            if grep -qx "$retired" <<<"$names"; then
+            if grep -qx "$retired" "$listed"; then
               echo "retired asset is still attached: $retired" >&2
               exit 1
             fi
           done
-          if grep -q '^ciaobot-server-host' <<<"$names"; then
+          if grep -q '^ciaobot-server-host' "$listed"; then
             echo "the server host archive is still attached" >&2
+            exit 1
+          fi
+          if ! diff "$expected" "$listed"; then
+            echo "the release's assets are not the expected set for $TAG (diff above)" >&2
             exit 1
           fi
           # The public installer must pin this release and the wheel that is
@@ -173,10 +200,15 @@ jobs:
           gh release download "$TAG" --dir "$downloaded" \
             --pattern install.sh \
             --pattern 'ciaobot-*.whl'
+          wheels=("$downloaded"/ciaobot-*.whl)
+          if [ "${#wheels[@]}" -ne 1 ] || [ ! -f "${wheels[0]}" ]; then
+            echo "expected exactly one wheel attached, found ${#wheels[@]}" >&2
+            exit 1
+          fi
           grep -qx "CIAOBOT_VERSION=$version" "$downloaded/install.sh"
-          digest="$(shasum -a 256 "$downloaded"/ciaobot-*.whl | cut -d' ' -f1)"
+          digest="$(shasum -a 256 "${wheels[0]}" | cut -d' ' -f1)"
           grep -qx "WHEEL_SHA256=$digest" "$downloaded/install.sh"
-          cmp "$downloaded"/ciaobot-*.whl "$GITHUB_WORKSPACE/dist/ciaobot-$version-py3-none-any.whl"
+          cmp "${wheels[0]}" "$GITHUB_WORKSPACE/dist/ciaobot-$version-py3-none-any.whl"
 
   release-smoke:
     needs: build-engine

@@ -604,3 +604,136 @@ def test_legacy_gate_refuses_a_release_root_without_the_manifest(tmp_path: Path)
     assert result.returncode == 1
     assert MANIFEST_NAME in result.stderr
 
+
+
+def test_embedded_release_key_is_the_published_release_key() -> None:
+    # Literal pin of the key that signs every published release manifest. Changing
+    # it means no release verifies against this module, so the edit has to be made
+    # here as well, on purpose.
+    assert RELEASE_PUBLIC_KEY == "RWSDUnIeQDnpmnNJiTjLmN6XOVFqgn1A0EXvTVG7AJIZXJxhyFN9osxm"
+
+
+def _load_legacy_gate():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "legacy_update_gate", ROOT / "scripts" / "legacy-update-gate.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+GATE = _load_legacy_gate()
+_GATE_ENVIRON = {
+    "PATH": "/usr/bin:/bin",
+    "LANG": "en_US.UTF-8",
+    "TMPDIR": "/private/tmp",
+    "SSL_CERT_FILE": "/etc/ssl/cert.pem",
+    "UV_CACHE_DIR": "/var/cache/uv",
+    "HOME": "/Users/operator",
+    "GH_TOKEN": "gh-secret",
+    "CIAO_PWA_AUTH_TOKEN": "ciao-secret",
+    "PYTHONPATH": "/evil",
+    "SOMETHING_ELSE": "x",
+}
+
+
+def test_legacy_gate_pins_the_1_10_0_wheel_digest() -> None:
+    # Trust on first use, cross-checked against the signed v1.10.0 manifest: the
+    # digest below is the wheel sha256 that manifest lists.
+    assert GATE.LEGACY_VERSIONS == ("1.10.0",)
+    assert GATE.LEGACY_WHEEL_SHA256 == {
+        "1.10.0": "7d9fd66814e57b32b464bd1f44d6fa31716c4088bb271a2474f331afb1e2133b"
+    }
+
+
+def test_legacy_gate_commands_are_argv_lists_with_python_isolated(tmp_path: Path) -> None:
+    download = GATE.gh_download_argv("1.10.0", tmp_path)
+    assert download == [
+        "gh", "release", "download", "v1.10.0",
+        "--repo", "raffaelefarinaro/ciaobot",
+        "--pattern", "ciaobot-1.10.0-py3-none-any.whl",
+        "--dir", str(tmp_path),
+    ]
+    py = tmp_path / "venv" / "bin" / "python"
+    runner = GATE.runner_argv(py, "2.0.0", "file:///releases", "/bin/uv", tmp_path / "state")
+    assert runner[:3] == [str(py), "-I", "-c"]
+    assert runner[3] == GATE.RUNNER
+    assert runner[4:] == ["2.0.0", "file:///releases", "/bin/uv", str(tmp_path / "state")]
+    assert all(isinstance(arg, str) for arg in runner + download)
+
+
+def test_legacy_gate_child_env_is_an_allowlist_with_a_temp_home(tmp_path: Path) -> None:
+    env = GATE.child_env(_GATE_ENVIRON, tmp_path)
+
+    assert env == {
+        "PATH": "/usr/bin:/bin",
+        "LANG": "en_US.UTF-8",
+        "TMPDIR": "/private/tmp",
+        "SSL_CERT_FILE": "/etc/ssl/cert.pem",
+        "UV_CACHE_DIR": "/var/cache/uv",
+        "HOME": str(tmp_path),
+    }
+
+
+def test_legacy_gate_gh_env_carries_the_token_only_to_gh(tmp_path: Path) -> None:
+    env = GATE.gh_env(_GATE_ENVIRON)
+
+    assert env["GH_TOKEN"] == "gh-secret"
+    assert env["HOME"] == "/Users/operator"
+    assert "CIAO_PWA_AUTH_TOKEN" not in env
+    assert "PYTHONPATH" not in env
+    assert "GH_TOKEN" not in GATE.child_env(_GATE_ENVIRON, tmp_path)
+
+
+def test_legacy_gate_refuses_a_1x_wheel_whose_digest_differs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = _fake_gate_run(monkeypatch, wheel=b"not the 1.10.0 wheel")
+
+    with pytest.raises(GATE.GateError, match="sha256 is"):
+        GATE._gate_one("1.10.0", "2.0.0", "file:///r", "/bin/uv", _GATE_ENVIRON, tmp_path)
+
+    # Refused before uv or the 1.x updater runs at all.
+    assert [cmd for cmd in calls if cmd[0] == "/bin/uv" or cmd[1] == "-I"] == []
+
+
+def test_legacy_gate_prints_the_1x_stderr_before_refusing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wheel = b"a stand-in 1.x wheel"
+    monkeypatch.setitem(GATE.LEGACY_WHEEL_SHA256, "1.10.0", hashlib.sha256(wheel).hexdigest())
+    _fake_gate_run(monkeypatch, wheel=wheel, stage_rc=1, stage_stderr="Traceback: no manifest\n")
+
+    with pytest.raises(GATE.GateError, match="did not stage"):
+        GATE._gate_one("1.10.0", "2.0.0", "file:///r", "/bin/uv", _GATE_ENVIRON, tmp_path)
+
+    assert "Traceback: no manifest" in capsys.readouterr().err
+
+
+def test_legacy_gate_turns_a_missing_binary_into_a_gate_error() -> None:
+    with pytest.raises(GATE.GateError, match="cannot run ciaobot-no-such-binary"):
+        GATE._run(["ciaobot-no-such-binary", "venv"], {"PATH": ""})
+
+
+def _fake_gate_run(
+    monkeypatch: pytest.MonkeyPatch, *, wheel: bytes, stage_rc: int = 0, stage_stderr: str = ""
+) -> list[list[str]]:
+    # Stands in for every child process: gh writes the wheel into --dir, uv
+    # succeeds, and the 1.x runner (python -I) returns the requested outcome.
+    calls: list[list[str]] = []
+
+    def fake(cmd: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if cmd[:3] == ["gh", "release", "download"]:
+            dest = Path(cmd[cmd.index("--dir") + 1])
+            (dest / "ciaobot-1.10.0-py3-none-any.whl").write_bytes(wheel)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if cmd[1] == "-I":
+            return subprocess.CompletedProcess(cmd, stage_rc, "{}\n", stage_stderr)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(GATE, "_run", fake)
+    return calls
