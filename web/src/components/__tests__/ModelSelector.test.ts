@@ -525,7 +525,7 @@ describe('ModelSelector model names', () => {
   const NAMED_SECTIONS: ModelSection[] = [
     {
       key: 'opencode',
-      label: 'opencode',
+      label: 'OpenCode',
       models: ['openai/gpt-5.6-luna'],
       modelLabels: { 'openai/gpt-5.6-luna': 'GPT-5.6 Luna' },
       modelBadges: { 'openai/gpt-5.6-luna': ['Default', 'openai'] },

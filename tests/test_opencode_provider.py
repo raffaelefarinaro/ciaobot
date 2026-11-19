@@ -5378,7 +5378,7 @@ def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
 
     by_id = {item["id"]: item for item in payload["providers"]}
     assert by_id["opencode"]["capabilities"]["background_subagents"] is True
-    assert by_id["opencode"]["short_label"] == "opencode"
+    assert by_id["opencode"]["short_label"] == "OpenCode"
     assert payload["opencode_models"] == ["opencode/big-pickle"]
     assert payload["backends"]["opencode"] is True
 

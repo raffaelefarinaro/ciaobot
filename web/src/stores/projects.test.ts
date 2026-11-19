@@ -7904,7 +7904,7 @@ describe('workspace and chat transitions', () => {
           active: 'home',
           provider_options: [
             { value: 'claude', label: 'Claude' },
-            { value: 'opencode', label: 'opencode' },
+            { value: 'opencode', label: 'OpenCode' },
           ],
         })
       }

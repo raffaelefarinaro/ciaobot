@@ -181,6 +181,8 @@ The Node inventory tests derive story coverage from the story files' own CSF
 index rather than a hand-written list: every covered state's story IDs must
 exist there, every story other than the inventory page must be claimed by
 exactly one row state, and each claimed story file must render that owner.
+Covered states may sit on component, inline or composition rows (a composition
+row's stories render the real composition); css rows claim no stories.
 
 SidebarRow covers default, active, unread, muted, pending and long-content;
 these use its plain-div branch, not links, host controls or keyboard interaction.

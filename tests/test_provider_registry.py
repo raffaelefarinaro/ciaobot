@@ -93,6 +93,13 @@ def test_codex_descriptor_resolves_spec_and_factory() -> None:
     assert descriptor.thinking_levels == ("minimal", "low", "medium", "high", "xhigh")
 
 
+def test_opencode_label_reads_opencode_capitalised() -> None:
+    descriptor = provider_registry.require("opencode")
+    assert descriptor.label == "OpenCode"
+    assert descriptor.short_label == "OpenCode"
+    assert descriptor.cli_label == "opencode"
+
+
 def test_codex_thinking_levels_are_marked_unverified() -> None:
     from pathlib import Path
 

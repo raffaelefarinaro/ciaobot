@@ -92,6 +92,6 @@ ciao context get
 
 ## Long-running commands
 
-For a long command, delegate it to a subagent. The subagent runs the command and reports back when it finishes; wait for that result instead of polling or sleeping. Do not start background shells (`run_in_background`, `Monitor`, a trailing `&`, `nohup`, `setsid`, `disown`): Ciaobot cannot track them, and nothing wakes the chat when they end.
+For a long command, delegate it to a subagent or a schedule. The subagent runs the command and reports back when it finishes; wait for that result instead of polling or sleeping. Do not start background shells (`run_in_background` on Bash, `Monitor`, a trailing `&`, `nohup`, `setsid`, `disown`): Ciaobot cannot track them. Nothing wakes the chat when a shell ends. Dispatching a background subagent (the Agent tool with `run_in_background`) is allowed.
 
 A dev or preview server runs inside a subagent as one auto-reload run for the whole session. Start it with the framework's auto-reload (`uvicorn --reload`, `vite`, `next dev`, `flask run --debug`) so code changes need no restart. Restart it only when the server itself has to change (port, environment, dependencies). Restarting after every edit floods the chat with notices that carry no information.
