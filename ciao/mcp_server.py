@@ -359,7 +359,7 @@ class Operation:
 
 async def _op_context_logs(service: CiaoMcpService, lines: int = CONTEXT_LOGS_DEFAULT_LINES) -> dict[str, Any]:
     """Return the installed Ciaobot version plus recent failed background jobs recorded
-    for the calling workspace. Read-only; works under workspace-only file access.
+    for the calling workspace. Read-only.
 
     Engine-wide server error, debug and service logs are not readable here: they carry no
     immutable workspace provenance, so the `error_log`, `debug_log` and `service_log`
@@ -812,7 +812,7 @@ async def _op_chat_needs_action(
     """Ask the user, in the calling chat, to do something only they can do.
 
     ``kind`` is one of command, gws_auth, permission_mode, device_code,
-    system_setting, restart, mcp_auth. ``params`` holds that kind's values as
+    system_setting, restart. ``params`` holds that kind's values as
     strings (for command: ``command``, optional ``note``). Nothing is executed:
     the request becomes a card the user acts on. There is no chat argument; the
     request belongs to the calling chat. Values are plain strings on purpose, so

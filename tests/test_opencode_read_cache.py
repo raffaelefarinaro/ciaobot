@@ -1,12 +1,11 @@
 """Failed ephemeral opencode spawns must be negative-cached.
 
-The classmethod read paths (`read_thread`, `read_collab_tree`) back PWA
-polls: `/subagents` every ~15s (4s while a turn streams) plus transcript
-replay. When `opencode serve` cannot start at all, `_EphemeralServer` waits
-out the full health deadline per call — so an uncached failure meant one
-doomed server spawn per poll, stacking dying processes while opencode was
-broken (observed as two serve processes spinning at ~155% CPU). Failures
-now cache briefly longer than successful reads; this pins that behavior.
+The classmethod read path (`read_thread`) backs transcript replay. When
+`opencode serve` cannot start at all, `_EphemeralServer` waits out the full
+health deadline per call, so an uncached failure meant one doomed server spawn
+per read, stacking dying processes while opencode was broken (observed as two
+serve processes spinning at ~155% CPU). Failures now cache briefly longer than
+successful reads; this pins that behavior.
 """
 
 from __future__ import annotations
@@ -20,7 +19,6 @@ from typing import Any
 import pytest
 
 from ciao.providers.opencode import (
-    _COLLAB_CACHE,
     _READ_CACHE_TTL,
     _READ_FAILURE_CACHE_TTL,
     _THREAD_CACHE,
@@ -79,30 +77,12 @@ class _HealthyEphemeralServer:
 @pytest.fixture(autouse=True)
 def _clear_caches() -> Iterator[None]:
     _THREAD_CACHE.clear()
-    _COLLAB_CACHE.clear()
     yield
 
 
 def test_read_failure_ttl_exceeds_success_ttl() -> None:
     """A failed spawn is worth remembering longer than a successful read."""
     assert _READ_FAILURE_CACHE_TTL > _READ_CACHE_TTL
-
-
-def test_failed_spawn_is_negative_cached_for_collab_tree(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _DeadEphemeralServer.spawns = 0
-    monkeypatch.setattr(
-        "ciao.providers.opencode._EphemeralServer", _DeadEphemeralServer
-    )
-
-    first = asyncio.run(OpencodeProvider.read_collab_tree(tmp_path, "ses1"))
-    second = asyncio.run(OpencodeProvider.read_collab_tree(tmp_path, "ses1"))
-
-    assert first == []
-    assert second == []
-    # One doomed spawn for the burst of polls, not one per poll.
-    assert _DeadEphemeralServer.spawns == 1
 
 
 def test_failed_spawn_is_negative_cached_for_thread(
@@ -113,31 +93,12 @@ def test_failed_spawn_is_negative_cached_for_thread(
         "ciao.providers.opencode._EphemeralServer", _DeadEphemeralServer
     )
 
-    first = asyncio.run(OpencodeProvider.read_thread(tmp_path, "ses1"))
-    second = asyncio.run(OpencodeProvider.read_thread(tmp_path, "ses1"))
+    first = asyncio.run(OpencodeProvider.read_thread(tmp_path, "ses1", runtime_root=Path("/runtime")))
+    second = asyncio.run(OpencodeProvider.read_thread(tmp_path, "ses1", runtime_root=Path("/runtime")))
 
     assert first == {}
     assert second == {}
     assert _DeadEphemeralServer.spawns == 1
-
-
-def test_successful_collab_read_still_caches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The negative cache must not change the success-path hit behavior."""
-    payload = [{"id": "ses_child", "parentID": "ses_parent"}]
-    _HealthyEphemeralServer.spawns = 0
-    monkeypatch.setattr(
-        "ciao.providers.opencode._EphemeralServer",
-        lambda root: _HealthyEphemeralServer(payload),
-    )
-
-    first = asyncio.run(OpencodeProvider.read_collab_tree(tmp_path, "ses_parent"))
-    second = asyncio.run(OpencodeProvider.read_collab_tree(tmp_path, "ses_parent"))
-
-    assert first == [{"info": payload[0], "messages": [], "active": None}]
-    assert second == first
-    assert _HealthyEphemeralServer.spawns == 1
 
 
 def test_failure_cache_expires_and_recovers(
@@ -145,15 +106,16 @@ def test_failure_cache_expires_and_recovers(
 ) -> None:
     """Once the TTL passes, reads try again — and find opencode healthy."""
     _DeadEphemeralServer.spawns = 0
+    _HealthyEphemeralServer.spawns = 0
     monkeypatch.setattr(
         "ciao.providers.opencode._EphemeralServer", _DeadEphemeralServer
     )
-    asyncio.run(OpencodeProvider.read_collab_tree(tmp_path, "ses1"))
-    assert _COLLAB_CACHE[(str(tmp_path), "ses1")][1] == _READ_FAILURE_CACHE_TTL
+    asyncio.run(OpencodeProvider.read_thread(tmp_path, "ses1", runtime_root=Path("/runtime")))
+    assert _THREAD_CACHE[(str(tmp_path), "ses1")][1] == _READ_FAILURE_CACHE_TTL
 
     # Age the entry past its own TTL, then let opencode work again.
-    stamp, _ttl, value = _COLLAB_CACHE[(str(tmp_path), "ses1")]
-    _COLLAB_CACHE[(str(tmp_path), "ses1")] = (
+    stamp, _ttl, value = _THREAD_CACHE[(str(tmp_path), "ses1")]
+    _THREAD_CACHE[(str(tmp_path), "ses1")] = (
         stamp - _READ_FAILURE_CACHE_TTL - 1,
         _READ_FAILURE_CACHE_TTL,
         value,
@@ -163,8 +125,9 @@ def test_failure_cache_expires_and_recovers(
         "ciao.providers.opencode._EphemeralServer",
         lambda root: _HealthyEphemeralServer(payload),
     )
-    result = asyncio.run(OpencodeProvider.read_collab_tree(tmp_path, "ses1"))
+    result = asyncio.run(OpencodeProvider.read_thread(tmp_path, "ses1", runtime_root=Path("/runtime")))
 
-    assert result == []
-    stamp2, ttl2, _value2 = _COLLAB_CACHE[(str(tmp_path), "ses1")]
+    assert result == {}
+    assert _HealthyEphemeralServer.spawns == 1
+    stamp2, ttl2, _value2 = _THREAD_CACHE[(str(tmp_path), "ses1")]
     assert ttl2 == _READ_CACHE_TTL

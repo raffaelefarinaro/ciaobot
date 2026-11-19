@@ -44,7 +44,7 @@ adapter implementing only `run_streaming` satisfies that contract. A
 missing override for any other row below still degrades to that row's
 base default, an unsupported-feature answer or a silent skip — check each
 row's last column before assuming one fits. No code under `ciao/web`
-names `OpencodeProvider`, `ClaudeProvider` or a provider's private connection
+names `OpencodeProvider`, `ClaudeAcpProvider` or a provider's private connection
 flag (`tests/test_provider_host_seam.py` fails if one appears). What is
 still branched on the provider id, not the class, is in the skip list
 below.
@@ -86,35 +86,21 @@ set and nothing else.
 |---|---|---|
 | `disconnect()` | Session reset, delete, idle reap, stop escalation. | The process is leaked. On `BaseProvider` the default is a no-op. |
 | `ActiveHandle.stop()` | The Stop button. | Registered from `run_streaming`. |
-| `steer_turn(request)` | A user steer during a live turn: returns a delivery id and emits `SteerDeliveredEvent` once the model consumed it. | Falls back to the next-turn queue. On `BaseProvider` the default returns `None`. |
-| `move_to_background()` | The PWA's *Move to background* action (OpenCode's Ctrl+B). | On `BaseProvider` the default returns `"unsupported"` and the route answers 409. A provider that implements it sets `ToolUseEvent.backgroundable` on the calls it can move; the PWA shows the action only for those. |
 | `response_session_id` | Unheld permission and question replies, to reject replies for an old session. | Defaults to `""` when the provider has no session-scoped response fence. |
 | `current_session_id` | Turn delivery session rotation in `_drive_stream` and the host's live session probes; the service getter forwards it. | Defaults to `None`: the adapter tracks no session. A service with no provider instance reports `None` without constructing one. |
 | `has_permission_request`, `permission_request_session`, `tool_use_id_for_request` | Permission ownership, child-session selection, and capturing the tool card id before acknowledgement. | Defaults to false/empty values. |
 | `has_question_request`, `question_request_session` | Native-form ownership and child-session selection. | Defaults to false/empty values. |
-| `respond_permission` | The approval card; return `QuestionResponseResult` after acknowledgement. | Explicit nonretryable unsupported result. Claude adapts its local `PermissionGate` boolean at this boundary. |
+| `respond_permission` | The approval card; return `QuestionResponseResult` after acknowledgement. | Explicit nonretryable unsupported result. Claude's ACP adapter maps the answer onto the agent's permission options at this boundary. |
 | `respond_question` | A native question card; return `QuestionResponseResult` after acknowledgement. | Explicit nonretryable unsupported result. |
 | `can_drain` | The between-turns drain scheduler in `ciao/web/chat_streaming.py`: true only when the adapter permits a between-turn reader right now. | Defaults to `False`, and eligibility is dynamic, not a static capability: OpenCode reports true only with a live server, a session and outstanding background work, Claude additionally requires a connected client. The service forwards `drain_events` without re-checking this. |
-| `cli_connected` | `_cli_owner_alive` in the chat manager, for the orphan-CLI-task wake sweep. | Defaults to `True`: an adapter that keeps no long-lived subprocess reports no owner loss. A service holding no provider instance reports `False`. OpenCode inherits this default — inherited `True` says nothing about whether a server is running. |
+| `cli_connected` | No host reader remains; the value is only reported through the service. | Defaults to `True`: an adapter that keeps no long-lived subprocess reports no owner loss. A service holding no provider instance reports `False`. OpenCode inherits this default — inherited `True` says nothing about whether a server is running. |
 | `drain_events` | Claude and OpenCode, between turns, so a background agent or shell can wake the parent. | Defaults to an empty async generator with no side effects. The service forwards events unchanged — identity, order, exceptions and cancellation. Before starting another stream reader or a foreground turn, the caller cancels the running drain and awaits its full unwind; not every current host path is audited to enforce that obligation. |
 | `read_thread` | OpenCode transcript history and replay (the host branch is still gated on the OpenCode id). The host reaches it through `provider_registry.require(id).factory()` for every session in the chat's lineage and renders the `{"info", "messages"}` payload. Claude history uses its own SDK/JSONL helpers instead. Session reclaim no longer routes through this row. | Returns `{}`; the host then falls back to the local transcript or archived markdown. |
-| `is_connected` | Read paths that may query a live provider connection without starting one (MCP status, the live collab tree), and `live_for_session`. | Defaults to `False`. Claude returns whether its client is connected; OpenCode returns whether its own server process is running. Not `cli_connected`, which defaults to `True` and says nothing about a connection. |
-| `read_mcp_status()` | MCP status rows, needs-auth detection and the Claude sign-in flow. | Defaults to `{}`. Claude and OpenCode override it and return `{}` without a live connection. |
-| `reconnect_mcp_server(server_name)` | The Claude sign-in flow, after `claude mcp login` exits, so the live CLI picks up the token. | Defaults to `False` (nothing reconnected). Only Claude overrides it; OpenCode inherits the default and its flow never calls it. |
-| `mcp_sign_in_exempt(server)` | `detect_mcp_auth`, which skips raising a sign-in card for an exempt server. | Defaults to `False`. Claude returns true for claude.ai connectors, which are connected on claude.ai. |
-| `start_mcp_oauth(server)` | The OpenCode MCP sign-in flow (`OpencodeMcpAuthFlow`), to open one OAuth attempt and get its URL as a `McpOAuthAttempt`. | Defaults to raising `McpOAuthUnavailable("unsupported")`. Only OpenCode overrides it. |
-| `read_mcp_oauth_attempt(integration_id, attempt_id)` | The same flow's poll, returning `(status, message)`. | Defaults to raising `McpOAuthUnavailable("unsupported")`. Only OpenCode overrides it. |
-| `cancel_mcp_oauth(integration_id, attempt_id)` | The same flow, when the card is dismissed or the attempt is abandoned. | Defaults to a no-op. Only OpenCode overrides it. |
-| `ensure_server(request)` | `ProjectChatManager.ensure_opencode_server`, to start a stopped server without a turn. | Defaults to a no-op for adapters without a startable server. OpenCode overrides it. |
-| `live_for_session(provider, session_id)` (module function) | Host guard for "this chat's provider is connected and bound to this session". | `False` for anything that is not a `BaseProvider`, is not `is_connected`, or has a different `current_session_id`. |
-| `read_collab_tree(workspace_root, session_id)` (classmethod), `read_live_collab_tree(*, include_messages=False, only_child_id=None)` | Subagent panels and schedule waits: child sessions with history, from storage or from the live connection. | Defaults return `[]`. |
-| `wait_background_change(timeout)` | The subagent watcher's poll wait between background-work reads. | Defaults to `asyncio.sleep(timeout)`. OpenCode returns early on a shell exit or child end. |
-| `refresh_background_shells()`, `background_count`, `background_shell_rows()`, `background_child_ids()` | The background-process list and the Stop/restart gates. Rows are adapter-shaped, not normalised, like `model_catalog`. | Defaults return `0`, `0`, `[]`, `[]`. |
-| `stop_background_task(task_id)`, `abort_session(session_id)` | Stopping one background task or aborting a provider-side session. | `False` and a no-op. |
-| `interrupted_background_work()` | Shutdown record of work a restart loses: `{"children": [...], "shells": [{"id", "command"}]}`. The host checks `background_work_outstanding` first. | Defaults to `None`: nothing to record. |
+| `is_connected` | Read paths that may query a live provider connection without starting one (the live provider-connection probes). | Defaults to `False`. Claude returns whether its client is connected; OpenCode returns whether its own server process is running. Not `cli_connected`, which defaults to `True` and says nothing about a connection. |
+| `abort_session(session_id)` | Aborting a provider-side session. | A no-op. |
 | `native_title_candidates(workspace_root, session_id)` (classmethod) | `ProjectChatManager._native_chat_title`, tier 1 of the auto-title poll. | On `BaseProvider` the default returns `()` — no native title for that provider. |
 | `delete_session(workspace_root, session_id)` (classmethod) | `ProjectChatManager._reclaim_provider_sessions_async`, the delete/archive/reset cleanup. | On `BaseProvider` the default returns `None` — an adapter inheriting it intentionally does no reclaim, and the host stays quiet. |
-| `model_catalog(workspace_root, *, force=False)` (classmethod) | `ProjectChatManager._catalog_image_support` (image preflight, via `_model_capable`), `_capability_candidates`, and the `/api/models` assembly, all through `provider_registry`. | On `BaseProvider` the default returns `[]`: no dynamic catalog supplied by this operation. An overriding adapter may start a short-lived server. |
+| `model_catalog(workspace_root, *, force=False)` (classmethod) | `/api/models` assembly, through `provider_registry`. The image preflight no longer reads it: it asks the live provider's `agent_accepts_images()` (the agent's handshake statement). | On `BaseProvider` the default returns `[]`: no dynamic catalog supplied by this operation. An overriding adapter may start a short-lived server. |
 
 `native_title_candidates` is the shared native-title read. It is a
 stateless classmethod on the adapter class — the manager resolves it through
@@ -201,6 +187,44 @@ Declare `capabilities = ProviderCapabilities(...)` honestly.
 gates on these flags. The Vue app does not read them yet, so a flag alone
 does not hide a button or skip a backend branch.
 
+## Adding an ACP agent
+
+An agent that speaks the Agent Client Protocol needs no hand-written turn loop.
+Write two things:
+
+1. An `AgentSpec` (`ciao/providers/acp/spec.py`): the binary and argv, fixed
+   environment, `clientCapabilities._meta` opt-ins, the config option each
+   Ciaobot mode maps to, the quiet period and the initialize timeout. The spec
+   is data; no code outside it names the agent.
+2. A subclass of `ciao.providers.acp.provider.AcpProvider` that sets `spec`.
+   Override `session_meta(request)` and `oneshot_meta()` only when the agent
+   needs `_meta` on `session/new`, `session/load` and `session/resume`; both
+   default to `{}`.
+
+Put only the agent's own disable options in `session_meta`. Claude is the
+example: `ClaudeAcpProvider` sends its trim denies, its settings object and the
+connectors env as `_meta.claudeCode.options`, and its one-shot calls send the
+no-tools options through `oneshot_meta`. A spec whose command parser takes only
+the first text block sets `slash_capsule_as_block`, so the context capsule goes
+in a second block.
+
+Then add a descriptor to `ciao/provider_registry.py` with
+`factory_path="ciao.providers.acp.provider:<Subclass>"` and
+`acp_spec_path="<module>:<attr>"` naming the `AgentSpec`. `acp_spec()` resolves
+the spec lazily, the same way `factory()` resolves the class. The subclass and
+the spec are the only ACP-specific code: hosts under `ciao/web` reach the agent
+through `BaseProvider` and the registry, never through `AcpProvider` or
+`ciao.providers.acp` (`tests/test_provider_host_seam.py` fails if one appears).
+
+`ProviderCapabilities` is declared on the subclass like any other adapter. A
+live `AgentRequest` flagged `unattended` is answered with a rejection and no
+permission card. `AgentStartError.stderr_tail` is raw adapter output: it is
+logged and never sent to the PWA, which receives a short sanitized reason.
+
+Tests for an ACP agent drive a scripted agent (`tests/fixtures/acp/fake_agent.py`)
+through `ProviderService`, the way `tests/test_acp_provider.py` does. Run one
+live turn against the real agent before shipping its descriptor.
+
 ## Call sites that still skip an unknown id
 
 These are the reason a descriptor is not enough. Each one names `claude`
@@ -211,14 +235,11 @@ arm.
 
 | If you do nothing | What the user sees | Where |
 |---|---|---|
-| Subagent routes return `[]`. | No child transcripts, and the sidebar shows no running agents. | The `chat.provider == "opencode"` gate in `ciao/web/routes_api.py` chat subagents and `_running_subagent_rows`. The gate is the provider id. Inside it the reads dispatch to the shared `read_live_collab_tree` (guarded by `live_for_session`) and `read_collab_tree`. |
-| The schedule archive wait returns "settled" immediately. | A schedule can archive while its background agents are still running. | The `chat.provider` gate in `ciao/web/schedule_dispatch.py` `_await_schedule_subagents`. The gate is the provider id. Inside the opencode branch the reads dispatch to the shared `read_live_collab_tree` and `read_collab_tree`. |
-| The subagent watcher falls through to the Claude JSONL reader. | Only if `background_subagents` is true. The watcher then looks for a Claude session file and finds nothing. | The `chat.provider` gate in `ciao/web/subagent_watchers.py` `watch_inner`. The gate is the provider id. Inside the opencode branch the reads dispatch to the shared `read_live_collab_tree`, `read_collab_tree` and `wait_background_change`. The CLI-task orphan sweep is Claude-only and skips everyone else, which is safe. |
-| `disallowed_tools_for_chat` returns `[]`. | The harness denylist is not applied. Credential denies are also not applied unless the adapter sends them itself. | `ProjectChatManager.disallowed_tools_for_chat`. OpenCode applies the shared patterns from `execution_modes.opencode_credential_deny_rules` inside its own permission rules. |
+| `disallowed_tools_for_chat` returns `[]`. | The harness denylist is not applied. | `ProjectChatManager.disallowed_tools_for_chat`. |
 | `native_title_candidates` is not overridden. | No native title: the chat keeps the deterministic title, then the one-shot titler. The read seam itself is id-neutral now — the remaining limitation is polling policy: `auto_title_if_default` still gives Claude one immediate native read and all other ids the existing delayed poll window. Polling neutrality is a separate follow-up. | `ProjectChatManager.auto_title_if_default`. |
-| Transcript reload uses the local markdown only. | The chat bubble history still renders from Ciaobot's own transcript. Provider-side history that never landed there does not. | The `provider == "opencode"` branch in `ciao/web/transcript_service.py`, which dispatches to the shared `read_thread` through `provider_registry`. Claude history uses its own SDK/JSONL helpers. |
+| Transcript reload uses the local markdown only. | The chat bubble history still renders from Ciaobot's own transcript. Provider-side history that never landed there does not. | The `provider == "opencode"` branch in `ciao/web/transcript_service.py`, which dispatches to the shared `read_thread` through `provider_registry`. Claude history uses its own SDK/JSONL helpers. ACP agents: handled through the descriptor (`acp_spec_path`), from the session journal. |
 | Stop escalation disconnects only Claude. | A wedged CLI is not torn down on Stop unless `ActiveHandle.stop` already did it. | `ProjectChatManager` force-stop. |
-| One-shot raises `Unknown one-shot provider`. | Titles, doc folding, and routine-model calls fail. | `ciao/providers/oneshot.py`. This is a separate no-tools call, not `run_streaming`. |
+| One-shot raises `Unknown one-shot provider`. | Titles, doc folding, and routine-model calls fail. | `ciao/providers/oneshot.py`. This is a separate no-tools call, not `run_streaming`. ACP agents: handled through the descriptor (`acp_spec_path`), by `ciao/providers/acp/oneshot.py`. |
 | Connect has no `<id>-login` action. | Settings → Connect answers 404. | `ACTION_IDS` and `action_command` in `ciao/host_terminal.py`; `tests/test_provider_connect_route.py::test_every_provider_has_a_login_action` fails until it is added. |
 | Logout assumes `auth_command` is `[binary, auth, login]`. | Settings → Logout runs `[binary, auth, logout]`. A CLI with a different shape signs nobody out and can still exit 0. | `provider_connection_action` in `ciao/web/routes_api.py`. |
 | `ciao auth --print-only` has a missing-binary fallback only for OpenCode. | The printed command errors when the binary is not installed. | `ciao/cli.py`. |
@@ -227,8 +248,8 @@ Two more branches are harmless for a new id and should stay that way.
 Claude tier aliases (`haiku` / `sonnet` / `opus` / `fable`) are rewritten
 to the provider's own default on every non-Claude id
 (`_model_for_provider`). An empty model on a `ResultEvent` is written
-back onto the chat only for OpenCode; other providers keep the model the
-chat already stored.
+back onto the chat only for an ACP provider (its descriptor sets
+`acp_spec_path`); other providers keep the model the chat already stored.
 
 ## Assets
 
@@ -249,10 +270,12 @@ calls it (opencode caches a private-server read for 300 s).
 Claude Code hides harness surfaces the PWA already owns (plan mode, its
 own scheduler, notifications). The trim catalog is `TRIM_OPTIONS` in
 `ciao/claude_trim.py`: tool denies, bundled-skill overrides and `disable*`
-settings, each with its default. A
+settings, each with its default. The options travel to the Claude
+adapter as `_meta.claudeCode.options` (`disallowedTools`, `settings` as an
+object, and `env` for the claude.ai connectors switch); `claude_session_options`
+in `ciao/providers/acp/agents.py` builds them. A
 new CLI that ships the same tools needs the equivalent, in its own
-permission language. Deny rules are not a sandbox: the shell can still
-read a path the file tool refuses. See `docs/AGENT_CLI.md`.
+permission language. See `docs/AGENT_CLI.md`.
 
 ## Optional, ship only if the CLI has the feature
 
@@ -272,8 +295,10 @@ read a path the file tool refuses. See `docs/AGENT_CLI.md`.
   `providerID/modelID`, with its own cache, keyword-only `force` refresh and a
   short-lived `opencode serve` process while it reads. The `/api/models`
   response assembly calls it through `provider_registry.require("opencode")`,
-  and image preflight dispatches it by the chat's provider id. A fixed catalog can
-  live on the descriptor's `default_model` instead.
+  A fixed catalog can live on the descriptor's `default_model` instead. Image
+  support is not read from the catalog: an ACP adapter states it at its handshake
+  (`promptCapabilities.image`), which `agent_accepts_images()` reports to the
+  image preflight.
 
 ## Docs, site, and the weekly probe
 

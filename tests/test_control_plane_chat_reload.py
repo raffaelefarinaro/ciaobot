@@ -92,7 +92,9 @@ async def test_own_chat_with_a_foreground_stream_arms_the_reload(tmp_path: Path)
 async def test_busy_chat_is_refused(tmp_path: Path) -> None:
     pcm, plane, project = _setup(tmp_path)
     chat = pcm.create_chat(project.project_id, title="busy")
-    pcm._subagents._background_agents_last[chat.chat_id] = 1
+    provider = _FakeProvider()
+    provider.background_work_outstanding = True
+    pcm._providers[chat.chat_id] = provider  # type: ignore[assignment]
 
     with pytest.raises(ControlPlaneError) as exc:
         plane.chat_reload(_principal(chat.chat_id, project.project_id), chat.chat_id)

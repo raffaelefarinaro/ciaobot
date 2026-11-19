@@ -96,22 +96,6 @@ private final class FakeClientUpdater: ClientUpdateControlling {
     func checkForUpdates() { checkCount += 1 }
 }
 
-/// Records what the menu asks of the engine-update provider. The rows are set
-/// by the test and `subject` simulates a change; no monitor or probe exists.
-@MainActor
-private final class FakeEngineUpdateMenu: EngineUpdateMenuProviding {
-    var rows: [EngineUpdateMenuRow] = []
-    let subject = PassthroughSubject<Void, Never>()
-    var changes: AnyPublisher<Void, Never> { subject.eraseToAnyPublisher() }
-    private(set) var startCount = 0, stopCount = 0, refreshCount = 0, performCount = 0, acknowledgeCount = 0
-
-    func start() { startCount += 1 }
-    func stop() { stopCount += 1 }
-    func refreshIfNeeded() { refreshCount += 1 }
-    func performUpdate() { performCount += 1 }
-    func acknowledgeOutcome() { acknowledgeCount += 1 }
-}
-
 @MainActor
 private final class FakeNotificationMenu: NotificationMenuProviding {
     let subject: CurrentValueSubject<ChatNotificationState, Never>
@@ -599,7 +583,7 @@ final class MenuBarTests: XCTestCase {
         let delegate = AppDelegate(
             session: AppSessionStatus(),
             presenter: presenter,
-            makeMenuBar: { _, _, _, open, _ in
+            makeMenuBar: { _, _, open, _ in
                 capturedOpen = open
                 return menuBar
             }
@@ -631,7 +615,7 @@ final class MenuBarTests: XCTestCase {
             session: AppSessionStatus(),
             presenter: FakeMainWindowPresenter(),
             updater: updater,
-            makeMenuBar: { _, updates, _, _, _ in
+            makeMenuBar: { _, updates, _, _ in
                 handedUpdater = updates
                 return menuBar
             }
@@ -659,7 +643,7 @@ final class MenuBarTests: XCTestCase {
         let delegate = AppDelegate(
             session: AppSessionStatus(),
             presenter: FakeMainWindowPresenter(),
-            makeMenuBar: { _, updates, _, _, _ in
+            makeMenuBar: { _, updates, _, _ in
                 handedUpdater = updates
                 return FakeMenuBarController()
             }
@@ -672,208 +656,12 @@ final class MenuBarTests: XCTestCase {
         XCTAssertNil(handedUpdater)
     }
 
-    /// The monitor is created once by the app and handed to the menu bar as its
-    /// third factory argument, so the menu and the factory see the same object.
-    func testApplicationLaunchHandsTheSharedEngineUpdatesToTheMenuBar() {
-        _ = NSApplication.shared
-        let engine = FakeEngineUpdateMenu()
-        var handed: EngineUpdateMenuProviding?
+    /// The tray has no engine-update row (#3130 M3). The Ciaobot engine updates
+    /// through the app's one Sparkle feed, so the menu keeps only the status,
+    /// Open and the rest of its own rows. The titles are the ones the deleted
+    /// rows used, so a row that comes back under the old wording fails here.
+    func testAppDelegateDoesNotTerminateWhenTheLastWindowCloses() {
         let delegate = AppDelegate(
-            session: AppSessionStatus(),
-            presenter: FakeMainWindowPresenter(),
-            engineUpdates: engine,
-            makeMenuBar: { _, _, engineUpdates, _, _ in
-                handed = engineUpdates
-                return FakeMenuBarController()
-            }
-        )
-
-        delegate.applicationDidFinishLaunching(
-            Notification(name: NSApplication.didFinishLaunchingNotification)
-        )
-
-        XCTAssertTrue(handed === engine)
-    }
-
-    /// The connection screen and the menu share one updater, so a test can
-    /// inject it and see the app keep that exact instance.
-    func testAnInjectedEngineUpdaterIsTheOneTheAppShares() {
-        let updater = EngineUpdater(run: { _, _, _, _ in }, after: { _, _ in }, isExecutable: { _ in true })
-        let delegate = AppDelegate(
-            session: AppSessionStatus(),
-            presenter: FakeMainWindowPresenter(),
-            engineUpdater: updater
-        )
-
-        XCTAssertTrue(delegate.engineUpdater === updater)
-    }
-
-    /// The test initializer creates no monitor, so no test launch can probe
-    /// the engine or offer an update.
-    func testTheTestAppDelegateHasNoEngineUpdateMonitor() {
-        _ = NSApplication.shared
-        var handed: EngineUpdateMenuProviding?
-        let delegate = AppDelegate(
-            session: AppSessionStatus(),
-            presenter: FakeMainWindowPresenter(),
-            makeMenuBar: { _, _, engineUpdates, _, _ in
-                handed = engineUpdates
-                return FakeMenuBarController()
-            }
-        )
-
-        delegate.applicationDidFinishLaunching(
-            Notification(name: NSApplication.didFinishLaunchingNotification)
-        )
-
-        XCTAssertNil(handed)
-    }
-
-    // MARK: - Engine update rows
-
-    private func makeEngineController(_ engine: FakeEngineUpdateMenu) -> MenuBarController {
-        MenuBarController(
-            status: AppSessionStatus(),
-            statusItemFactory: FakeStatusItemFactory(),
-            openWindow: {},
-            quit: {},
-            engineUpdates: engine
-        )
-    }
-
-    /// The item directly below Open Ciaobot, which is where the engine rows sit.
-    private func itemBelowOpen(in menu: NSMenu) -> NSMenuItem {
-        let index = menu.items.firstIndex { $0.title == MenuBarController.openTitle }!
-        return menu.items[index + 1]
-    }
-
-    func testEngineUpdateRowSitsDirectlyBelowOpen() {
-        let target = EngineUpdateTarget(executable: URL(fileURLWithPath: "/Users/me/.local/bin/ciao"), version: "1.8.0")
-        let engine = FakeEngineUpdateMenu()
-        engine.rows = [.action(title: "Update Ciaobot to 1.8.0…", target: target)]
-        let controller = makeEngineController(engine)
-        controller.start()
-
-        let row = itemBelowOpen(in: controller.menu!)
-
-        XCTAssertEqual(row.title, "Update Ciaobot to 1.8.0…")
-        XCTAssertTrue(row.isEnabled)
-        XCTAssertEqual(row.toolTip, EngineUpdateMenuCopy.actionToolTip)
-        XCTAssertTrue(row.target === controller)
-    }
-
-    func testClickingTheEngineUpdateRowRunsTheUpdate() {
-        let target = EngineUpdateTarget(executable: URL(fileURLWithPath: "/Users/me/.local/bin/ciao"), version: "1.8.0")
-        let engine = FakeEngineUpdateMenu()
-        engine.rows = [.action(title: "Update Ciaobot to 1.8.0…", target: target)]
-        let controller = makeEngineController(engine)
-        controller.start()
-        let row = itemBelowOpen(in: controller.menu!)
-
-        controller.updateEngine(row)
-
-        XCTAssertEqual(engine.performCount, 1)
-    }
-
-    func testEngineUpdateProgressAndOutcomeRowsAreDisabled() {
-        let outcome = FakeEngineUpdateMenu()
-        outcome.rows = [.outcome(title: "boom", toolTip: "boom long", failed: true)]
-        let outcomeController = makeEngineController(outcome)
-        outcomeController.start()
-
-        let outcomeRow = itemBelowOpen(in: outcomeController.menu!)
-        XCTAssertEqual(outcomeRow.title, "boom")
-        XCTAssertFalse(outcomeRow.isEnabled)
-        XCTAssertEqual(outcomeRow.toolTip, "boom long")
-
-        let progress = FakeEngineUpdateMenu()
-        progress.rows = [.progress("Installing Ciaobot 1.8.0…")]
-        let progressController = makeEngineController(progress)
-        progressController.start()
-
-        let progressRow = itemBelowOpen(in: progressController.menu!)
-        XCTAssertEqual(progressRow.title, "Installing Ciaobot 1.8.0…")
-        XCTAssertFalse(progressRow.isEnabled)
-    }
-
-    func testNoEngineUpdateRowsLeaveTheMenuUnchanged() {
-        let engine = FakeEngineUpdateMenu()
-        engine.rows = []
-        let controller = makeEngineController(engine)
-        controller.start()
-
-        XCTAssertTrue(itemBelowOpen(in: controller.menu!).isSeparatorItem)
-    }
-
-    func testTheMenuStartsAndStopsTheEngineUpdateProvider() {
-        let engine = FakeEngineUpdateMenu()
-        let controller = makeEngineController(engine)
-
-        controller.start()
-        XCTAssertEqual(engine.startCount, 1)
-
-        controller.stop()
-        XCTAssertEqual(engine.stopCount, 1)
-    }
-
-    func testOpeningTheMenuRefreshesTheEngineOffer() {
-        let engine = FakeEngineUpdateMenu()
-        let controller = makeEngineController(engine)
-        controller.start()
-
-        controller.menuWillOpen(controller.menu!)
-
-        XCTAssertEqual(engine.refreshCount, 1)
-        controller.menuDidClose(controller.menu!)
-    }
-
-    func testClosingAfterShowingAnOutcomeAcknowledgesItOnce() {
-        let engine = FakeEngineUpdateMenu()
-        engine.rows = [.outcome(title: "Ciaobot was updated to 1.8.0.", toolTip: "Ciaobot was updated to 1.8.0.", failed: false)]
-        let controller = makeEngineController(engine)
-        controller.start()
-        let menu = controller.menu!
-
-        controller.menuWillOpen(menu)
-        controller.menuDidClose(menu)
-        XCTAssertEqual(engine.acknowledgeCount, 1)
-
-        engine.rows = []
-        controller.menuWillOpen(menu)
-        controller.menuDidClose(menu)
-        XCTAssertEqual(engine.acknowledgeCount, 1, "A later close with no outcome shown must not acknowledge again.")
-    }
-
-    func testClosingWithoutAnOutcomeDoesNotAcknowledge() {
-        let engine = FakeEngineUpdateMenu()
-        engine.rows = [.action(title: "Update Ciaobot to 1.8.0…", target: EngineUpdateTarget(
-            executable: URL(fileURLWithPath: "/Users/me/.local/bin/ciao"), version: "1.8.0"))]
-        let controller = makeEngineController(engine)
-        controller.start()
-        let menu = controller.menu!
-
-        controller.menuWillOpen(menu)
-        controller.menuDidClose(menu)
-
-        XCTAssertEqual(engine.acknowledgeCount, 0)
-    }
-
-    func testAnEngineUpdateChangeRebuildsTheClosedMenu() {
-        let engine = FakeEngineUpdateMenu()
-        let controller = makeEngineController(engine)
-        controller.start()
-        let menu = controller.menu!
-        XCTAssertFalse(menu.items.contains { $0.title == "Update Ciaobot to 1.8.0…" })
-
-        engine.rows = [.action(title: "Update Ciaobot to 1.8.0…", target: EngineUpdateTarget(
-            executable: URL(fileURLWithPath: "/Users/me/.local/bin/ciao"), version: "1.8.0"))]
-        engine.subject.send(())
-        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-
-        XCTAssertEqual(itemBelowOpen(in: menu).title, "Update Ciaobot to 1.8.0…")
-    }
-
-    func testAppDelegateDoesNotTerminateWhenTheLastWindowCloses() {        let delegate = AppDelegate(
             session: AppSessionStatus(),
             presenter: FakeMainWindowPresenter()
         )

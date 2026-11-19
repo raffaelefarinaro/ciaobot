@@ -3630,58 +3630,6 @@ describe('result frames and unread state', () => {
   })
 })
 
-describe('move to background', () => {
-  test('tracks backgroundable calls from tool_use frames and clears them on result', () => {
-    const store = useProjectStore()
-    const chatId = 'c-backgroundable'
-    store.connectWs(chatId)
-    const socket = fakeSockets[0]
-    const frame = (data: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(data) })
-    frame({ type: 'tool_use', tool_name: 'shell', tool_use_id: 'c1', backgroundable: true })
-    expect(store.backgroundableCalls[chatId]).toHaveProperty('c1')
-    frame({ type: 'tool_result', tool_use_id: 'c1' })
-    expect(store.backgroundableCalls[chatId]).toEqual({})
-    frame({ type: 'tool_use', tool_name: 'shell', tool_use_id: 'c2', backgroundable: true })
-    frame({ type: 'result', text: 'done', is_error: false, effective_model: 'opus', usage: {}, session_id: 's1' })
-    expect(store.backgroundableCalls[chatId]).toBeUndefined()
-  })
-
-  test('a file-touching shell call is still tracked', () => {
-    const store = useProjectStore()
-    const chatId = 'c-backgroundable-file'
-    store.connectWs(chatId)
-    fakeSockets[0].onmessage?.({ data: JSON.stringify({
-      type: 'tool_use', tool_name: 'shell', tool_use_id: 'c1', backgroundable: true,
-      file_touch: { file_path: 'out.txt', action: 'created' },
-    }) })
-    expect(store.backgroundableCalls[chatId]).toHaveProperty('c1')
-  })
-
-  test('moveChatToBackground posts and toasts when nothing moved', async () => {
-    const store = useProjectStore()
-    apiPost.mockResolvedValueOnce({ moved: false })
-    expect(await store.moveChatToBackground('c')).toBe(false)
-    expect(apiPost).toHaveBeenCalledWith('/api/chats/c/move-to-background', {})
-    expect(store.toasts.at(-1)?.title).toBe('Nothing to move')
-    apiPost.mockResolvedValueOnce({ moved: true })
-    const toastCount = store.toasts.length
-    expect(await store.moveChatToBackground('c')).toBe(true)
-    expect(store.toasts).toHaveLength(toastCount)
-    apiPost.mockRejectedValueOnce(new Error('offline'))
-    expect(await store.moveChatToBackground('c')).toBe(false)
-    expect(store.toasts.at(-1)?.title).toBe('Could not move to background')
-  })
-})
-
-describe('stop a background task', () => {
-  test('stopBackgroundTask posts to the chat-scoped route with the id escaped', async () => {
-    const store = useProjectStore()
-    apiPost.mockResolvedValueOnce({ ok: true })
-    await store.stopBackgroundTask('c1', 'task/1')
-    expect(apiPost).toHaveBeenLastCalledWith('/api/chats/c1/background-tasks/task%2F1/stop', {})
-  })
-})
-
 describe('ephemeral status events', () => {
   test('does not render Claude requesting status as a system message', () => {
     apiGet.mockResolvedValue([])
@@ -3802,12 +3750,32 @@ describe('ephemeral status events', () => {
   })
 })
 
+describe('subagent trace lines', () => {
+  test('renders a subagent tool call as an indented line under the parent trace', () => {
+    const store = useProjectStore()
+    const chatId = 'c-subagent-line'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const send = (event: Record<string, unknown>) => fakeSockets[0].onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'Agent', tool_input: 'Explore the repo', tool_use_id: 'p1' })
+    send({ type: 'tool_use', tool_name: 'Read', tool_input: 'a.py', tool_use_id: 'c1', parent_tool_use_id: 'p1' })
+
+    const tool = store.currentTimeline.find(e => e.kind === 'tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    const lines = tool.content.split('\n')
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).not.toMatch(/^↳/)
+    expect(lines[1]).toMatch(/^↳ .*Read a\.py$/)
+    expect(tool.tool_use_ids).toEqual(['p1', 'c1'])
+  })
+})
+
 describe('subagent thinking deltas', () => {
-  test('do not leak a subagent thinking delta into the parent turn trace or messages', () => {
+  test('drops subagent thinking: do not leak a subagent thinking delta into the parent turn trace or messages', () => {
     // Regression: thinking deltas fired from inside a Task subagent arrive
-    // with parent_tool_use_id set. The subagent's transcript belongs to its
-    // own read-only view, so accumulating the
-    // delta into the parent's thinking buffer used to produce a stray
+    // with parent_tool_use_id set. Subagent reasoning is not shown, so
+    // accumulating the delta into the parent's thinking buffer used to produce a stray
     // _thinking message at the end of the parent turn's trace block and
     // persist it into the chat history after the result event.
     apiGet.mockResolvedValue([])
@@ -4017,7 +3985,7 @@ describe('server-owned chat pins', () => {
 })
 
 describe('needs-you chat actions', () => {
-  // A transient needs-you action on a chat (an MCP sign-in, ...). The engine
+  // A transient needs-you action on a chat (a command to run, ...). The engine
   // owns it and sends it on the chat row, the snapshot and the event; the
   // client holds a copy under the same read-start watermark as the offers.
 
@@ -4038,10 +4006,10 @@ describe('needs-you chat actions', () => {
 
   const action = (id: string, over: Partial<ChatAction> = {}): ChatAction => ({
     id,
-    kind: 'mcp_auth',
+    kind: 'command',
     origin: 'engine',
     state: 'open',
-    params: { server: 'linear', provider: 'opencode' },
+    params: { command: 'echo review-only' },
     error: '',
     created_at: 1,
     ...over,
@@ -4132,59 +4100,49 @@ describe('needs-you chat actions', () => {
   })
 
   test.each(['open', 'working', 'waiting', 'done', 'failed'] as const)(
-    'MCP action in %s state is retained without creating attention',
+    'an action in %s state creates attention and clears with its card',
     (state) => {
       const store = useProjectStore()
       store.chats = [chatInfo('c-1')]
       const sock = events(store)
-      const mcp = action('a1', { state })
-      sock.onmessage?.(frame(actionsChanged('c-1', [mcp])))
-      expect(store.chatActions['c-1']).toEqual([mcp])
-      expect(store.chatNeedsYou('c-1')).toBe(false)
+      const card = action('a1', { state })
+      sock.onmessage?.(frame(actionsChanged('c-1', [card])))
+      expect(store.chatActions['c-1']).toEqual([card])
+      expect(store.chatNeedsYou('c-1')).toBe(true)
       sock.onmessage?.(frame(actionsChanged('c-1', [])))
       expect(store.chatActions['c-1']).toBeUndefined()
+      expect(store.chatNeedsYou('c-1')).toBe(false)
     },
   )
 
   test.each(['command', 'gws_auth', 'permission_mode', 'device_code', 'system_setting', 'restart', 'limit'] as const)(
-    'non-MCP %s action still creates attention alongside MCP',
+    'a %s action creates attention',
     (kind) => {
       const store = useProjectStore()
       store.chats = [chatInfo('c-1')]
-      store.chatActions['c-1'] = [action('mcp'), action('other', { kind })]
+      store.chatActions['c-1'] = [action('other', { kind })]
       expect(store.chatNeedsYou('c-1')).toBe(true)
     },
   )
 
-  test.each([
-    { last_error: 'MCP turn failed' },
-    { pending_permission: '{"tool":"Bash"}' },
-    { pending_question: JSON.stringify({ questions: [{ question: 'Proceed?' }] }) },
-  ])('real chat blocker remains attention alongside MCP: %o', (blocker) => {
-    const store = useProjectStore()
-    store.chats = [chatInfo('c-1', blocker)]
-    store.chatActions['c-1'] = [action('mcp')]
-    expect(store.chatNeedsYou('c-1')).toBe(true)
-  })
-
-  test('snapshot and subsequent event retain and clear MCP without attention', () => {
+  test('snapshot and subsequent event retain and clear an action', () => {
     const store = useProjectStore()
     store.chats = [chatInfo('c-1')]
     const sock = events(store)
-    sock.onmessage?.(frame(snapshotFrame({ chat_actions: { 'c-1': [action('mcp')] } })))
-    expect(store.chatActions['c-1']).toEqual([action('mcp')])
-    expect(store.chatNeedsYou('c-1')).toBe(false)
+    sock.onmessage?.(frame(snapshotFrame({ chat_actions: { 'c-1': [action('card')] } })))
+    expect(store.chatActions['c-1']).toEqual([action('card')])
+    expect(store.chatNeedsYou('c-1')).toBe(true)
     sock.onmessage?.(frame(actionsChanged('c-1', [])))
     expect(store.chatActions['c-1']).toBeUndefined()
   })
 
-  test('memory pass remains excluded even with a real blocker and MCP', () => {
+  test('memory pass remains excluded even with a real blocker and an action', () => {
     const store = useProjectStore()
     store.chats = [chatInfo('c-1', {
       last_error: 'failed turn',
       helper: { kind: 'memory_pass', state: 'running' } as never,
     })]
-    store.chatActions['c-1'] = [action('mcp'), action('command', { kind: 'command' })]
+    store.chatActions['c-1'] = [action('card'), action('command', { kind: 'command' })]
     expect(store.chatNeedsYou('c-1')).toBe(false)
   })
 
@@ -4199,7 +4157,7 @@ describe('needs-you chat actions', () => {
 
   test('startChatAction posts to the start route and adopts the returned action', async () => {
     const store = useProjectStore()
-    apiPost.mockResolvedValueOnce({ action: action('a1', { state: 'waiting', params: { server: 'linear', provider: 'opencode', url: 'https://mcp.linear.app/authorize' } }) })
+    apiPost.mockResolvedValueOnce({ action: action('a1', { state: 'waiting', params: { url: 'https://example.com/authorize' } }) })
     const result = await store.startChatAction('c-1', 'a1')
     expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/a1/start', {})
     expect(result?.state).toBe('waiting')
@@ -4235,21 +4193,6 @@ describe('needs-you chat actions', () => {
     expect(store.chatActions['c-1']?.[0]?.state).toBe('waiting')
   })
 
-  test('requestMcpAuth posts the server and adopts the returned card', async () => {
-    const store = useProjectStore()
-    apiPost.mockResolvedValueOnce({ action: action('a1', { params: { server: 'notion', provider: 'opencode' } }) })
-    const result = await store.requestMcpAuth('c-1', 'notion')
-    expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/mcp-auth', { server: 'notion' })
-    expect(result?.id).toBe('a1')
-    expect(store.chatActions['c-1']?.[0]?.id).toBe('a1')
-  })
-
-  test('requestMcpAuth rethrows a refusal', async () => {
-    const store = useProjectStore()
-    apiPost.mockRejectedValueOnce(Object.assign(new Error('invalid_state'), { status: 400, payload: { error: 'invalid_state', action: null } }))
-    await expect(store.requestMcpAuth('c-1', 'notion')).rejects.toThrow('invalid_state')
-  })
-
   test('dismissChatAction applies the remaining list', async () => {
     const store = useProjectStore()
     const sock = events(store)
@@ -4272,28 +4215,6 @@ describe('needs-you chat actions', () => {
     expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a9'])
   })
 
-  test('turnOffChatActionServer applies the remaining list', async () => {
-    const store = useProjectStore()
-    const sock = events(store)
-    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1'), action('a2')])))
-    apiPost.mockResolvedValueOnce({ actions: [action('a2')], reload: { reloaded: [], pending: [] } })
-    await expect(store.turnOffChatActionServer('c-1', 'a1')).resolves.toBe('turned_off')
-    expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/a1/turn-off', {})
-    expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a2'])
-  })
-
-  test('a turn-off refusal keeps the card and rethrows', async () => {
-    const store = useProjectStore()
-    const sock = events(store)
-    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1', { state: 'open' })])))
-    apiPost.mockRejectedValueOnce(Object.assign(new Error('config_has_comments'), {
-      status: 400,
-      payload: { error: 'config_has_comments', action: action('a1', { state: 'open' }) },
-    }))
-    await expect(store.turnOffChatActionServer('c-1', 'a1')).rejects.toThrow('config_has_comments')
-    expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a1'])
-  })
-
   test('continueChatAction posts to the continue route', async () => {
     const store = useProjectStore()
     apiPost.mockResolvedValueOnce({ actions: [], delivery: 'started' })
@@ -4303,7 +4224,7 @@ describe('needs-you chat actions', () => {
 
   test('submitChatActionCallback posts the url to the callback route and adopts the action', async () => {
     const store = useProjectStore()
-    apiPost.mockResolvedValueOnce({ action: action('a1', { state: 'waiting', params: { server: 'linear', provider: 'opencode', url: 'https://x/authorize', callback_used: '1' } }) })
+    apiPost.mockResolvedValueOnce({ action: action('a1', { state: 'waiting', params: { url: 'https://x/authorize', callback_used: '1' } }) })
     await expect(store.submitChatActionCallback('c-1', 'a1', 'http://127.0.0.1:5/cb?code=x')).resolves.toEqual({ ok: true })
     expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/a1/callback', { url: 'http://127.0.0.1:5/cb?code=x' })
     expect(store.chatActions['c-1']?.[0]?.params.callback_used).toBe('1')
@@ -4810,8 +4731,8 @@ describe('queued message replay handling', () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
     store.queuedMessages[chatId] = [
-      { id: 'q-1', text: 'msg A', delivery: 'queue' },
-      { id: 'q-2', text: 'msg B', delivery: 'queue' },
+      { id: 'q-1', text: 'msg A' },
+      { id: 'q-2', text: 'msg B' },
     ]
     store.connectWs(chatId)
 
@@ -4825,7 +4746,7 @@ describe('queued message replay handling', () => {
     })
 
     expect(store.queuedMessages[chatId]).toEqual([
-      { id: 'q-2', text: 'msg B', delivery: 'queue' },
+      { id: 'q-2', text: 'msg B' },
     ])
   })
 
@@ -4833,8 +4754,8 @@ describe('queued message replay handling', () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
     store.queuedMessages[chatId] = [
-      { id: 'q-1', text: 'same prompt', delivery: 'queue' },
-      { id: 'q-2', text: 'same prompt', delivery: 'queue' },
+      { id: 'q-1', text: 'same prompt' },
+      { id: 'q-2', text: 'same prompt' },
     ]
     store.connectWs(chatId)
 
@@ -4847,7 +4768,7 @@ describe('queued message replay handling', () => {
     })
 
     expect(store.queuedMessages[chatId]).toEqual([
-      { id: 'q-2', text: 'same prompt', delivery: 'queue' },
+      { id: 'q-2', text: 'same prompt' },
     ])
   })
 
@@ -4855,8 +4776,8 @@ describe('queued message replay handling', () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
     store.queuedMessages[chatId] = [
-      { id: 'q-1', text: 'follow-up A', delivery: 'queue' },
-      { id: 'q-2', text: 'follow-up B', delivery: 'queue' },
+      { id: 'q-1', text: 'follow-up A' },
+      { id: 'q-2', text: 'follow-up B' },
     ]
     store.connectWs(chatId)
 
@@ -4869,15 +4790,15 @@ describe('queued message replay handling', () => {
     })
 
     expect(store.queuedMessages[chatId]).toEqual([
-      { id: 'q-1', text: 'follow-up A', delivery: 'queue' },
-      { id: 'q-2', text: 'follow-up B', delivery: 'queue' },
+      { id: 'q-1', text: 'follow-up A' },
+      { id: 'q-2', text: 'follow-up B' },
     ])
   })
 
   test('clears local queued chips when server history contains the flushed user turn', async () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
-    store.queuedMessages[chatId] = [{ id: 'q-1', text: 'msg A', delivery: 'queue' }]
+    store.queuedMessages[chatId] = [{ id: 'q-1', text: 'msg A' }]
     apiGet.mockResolvedValue([
       { role: 'user', content: 'initial', sent_at: '', turn_index: 0 },
       { role: 'assistant', content: 'reply', sent_at: '' },
@@ -6436,7 +6357,6 @@ describe('latest status sync', () => {
           { role: 'assistant', content: 'done', sent_at: '2026-07-06T10:00:00Z' },
         ])
       }
-      if (path === `/api/chats/${chatId}/subagents`) return Promise.resolve([])
       return Promise.resolve([])
     })
 
@@ -6478,7 +6398,6 @@ describe('latest status sync', () => {
           { role: 'assistant', content: 'I\'m in the ciao repo, not ciaobot. Let me cd:' },
         ])
       }
-      if (path === `/api/chats/${chatId}/subagents`) return Promise.resolve([])
       return Promise.resolve([])
     })
 
@@ -6488,99 +6407,6 @@ describe('latest status sync', () => {
     expect(store.projectStreaming[chatId]).toBe(true)
     expect(store.isStreaming).toBe(true)
     expect(store.streamingText[chatId]).toBe('I\'m in the ciao repo')
-  })
-})
-
-describe('background agents indicator', () => {
-  test('tracks the running count and only reconciles on a drop', () => {
-    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
-    // /messages returns a settled assistant turn so the reconcile fired on a
-    // drop resolves on its first pass (no lingering timers after teardown).
-    apiGet.mockImplementation((path: string) =>
-      path.endsWith('/messages')
-        ? Promise.resolve([{ role: 'assistant', content: 'ok', sent_at: '' }])
-        : Promise.resolve([]),
-    )
-    const store = useProjectStore()
-    const chatId = 'c-bg'
-    store.activeChatId = chatId
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-    const fire = (remaining: number) =>
-      sock.onmessage?.({
-        data: JSON.stringify({ type: 'chat_subagents_ready', chat_id: chatId, project_id: 'p1', remaining }),
-      })
-
-    fire(2) // initial announcement
-    expect(store.backgroundAgents[chatId]).toBe(2)
-    fire(3) // a subagent spawned children — still just a badge update
-    expect(store.backgroundAgents[chatId]).toBe(3)
-    fire(2) // one finished (drop)
-    expect(store.backgroundAgents[chatId]).toBe(2)
-    fire(0) // all finished
-    expect(store.backgroundAgents[chatId]).toBeUndefined()
-    expect(store.activeBackgroundAgents).toBe(0)
-  })
-
-  test('ignores an older poll that resolves after a newer poll', async () => {
-    const responses: Array<(value: unknown) => void> = []
-    apiGet.mockImplementation((path: string) => {
-      if (path === '/api/subagents/running') {
-        return new Promise(resolve => responses.push(resolve))
-      }
-      return Promise.resolve([])
-    })
-    const store = useProjectStore()
-
-    const older = store.refreshRunningSubagents()
-    const newer = store.refreshRunningSubagents()
-    responses[1]({ chats: {} })
-    await newer
-    responses[0]({ chats: { 'chat-finished': [{ agent_id: 'stale-agent' }] } })
-    await older
-
-    expect(store.runningSubagents).toEqual({})
-  })
-
-  test('does not set toast or unread marker on background agent completion', () => {
-    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    const chatId = 'c-follow-up'
-    store.activeChatId = 'some-other-chat'
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-    const fire = (remaining: number) =>
-      sock.onmessage?.({
-        data: JSON.stringify({ type: 'chat_subagents_ready', chat_id: chatId, project_id: 'p1', remaining }),
-      })
-
-    fire(1)
-    expect(store.backgroundAgents[chatId]).toBe(1)
-
-    fire(0)
-    expect(store.toasts).toHaveLength(0)
-    expect(store.unread[chatId]).toBeUndefined()
-
-    store.backgroundAgents[chatId] = 1
-
-    fire(0)
-    expect(store.toasts).toHaveLength(0)
-    expect(store.unread[chatId]).toBeUndefined()
-  })
-
-  test('a new turn keeps the background-agents count (agents outlive turns)', () => {
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    const chatId = 'c-bg2'
-    store.activeChatId = chatId
-    store.backgroundAgents[chatId] = 4
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-    sock.onmessage?.({
-      data: JSON.stringify({ type: 'chat_streaming_started', chat_id: chatId, project_id: 'p1' }),
-    })
-    expect(store.backgroundAgents[chatId]).toBe(4)
   })
 
   test('active-only syncLatest preserves locally-held archived chats', async () => {
@@ -6609,23 +6435,127 @@ describe('background agents indicator', () => {
     expect(store.chats.find(c => c.chat_id === activeId)?.title).toBe('Fresh')
     expect(store.chats.some(c => c.chat_id === archivedId && c.archived)).toBe(true)
   })
+})
 
-  test('the events snapshot replaces background-agent counts wholesale', () => {
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    store.backgroundAgents['c-stale'] = 7
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-    sock.onmessage?.({
-      data: JSON.stringify({
-        type: 'snapshot',
-        active_streams: [],
-        background_agents: { 'c-live': 2 },
-        chat_pins: {},
-      }),
-    })
-    expect(store.backgroundAgents['c-stale']).toBeUndefined()
-    expect(store.backgroundAgents['c-live']).toBe(2)
+describe('store disposal', () => {
+  test('a disposed store stops its liveness watchdog and window listeners', async () => {
+    // The watcher-owned polls were only half the leak. `checkWsLiveness` and the
+    // focus/blur/visibility listeners are registered at setup time, so every
+    // store a test builds kept a real-clock 2s timer and a live focus handler
+    // for the rest of the run — and `checkWsLiveness` can reach `apiGet` and
+    // push a FakeWebSocket onto the module-level array later tests read.
+    // Hidden, so the assertion is this store's socket and focus frame: a visible
+    // page would also poll from stores earlier tests stranded on an untracked pinia.
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
+    try {
+      const store = useProjectStore()
+      apiGet.mockImplementation(() => Promise.resolve([]))
+      const chatId = 'c-dispose-live'
+      store.activeChatId = chatId
+      // A frame time of 0 is "never", so open the sockets after the clock moves.
+      await vi.advanceTimersByTimeAsync(1)
+      store.connectWs(chatId)
+      store.connectEventsWs()
+      const chatSock = fakeSockets.find(s => s.url.includes('/ws/chat/'))!
+      const events = fakeSockets.find(s => s.url.includes('/ws/events'))!
+
+      store.$dispose()
+      const socketsBefore = fakeSockets.length
+      const sendsBefore = chatSock.send.mock.calls.length
+      apiGet.mockClear()
+
+      // Nothing the disposed store registered may still fire. A leftover
+      // watchdog would see the events socket go stale and close it; a leftover
+      // focus listener would send another focus frame.
+      await vi.advanceTimersByTimeAsync(30_000)
+      window.dispatchEvent(new Event('focus'))
+      window.dispatchEvent(new Event('blur'))
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(apiGet.mock.calls).toEqual([])
+      expect(fakeSockets.length).toBe(socketsBefore)
+      expect(events.readyState).toBe(FakeWebSocket.OPEN)
+      expect(chatSock.send.mock.calls.length).toBe(sendsBefore)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a store left on a superseded pinia is disposed too', async () => {
+    // A test that swaps the pinia mid-run strands its first store on an
+    // instance `getActivePinia()` can no longer reach. Disposing only the
+    // survivor left that one holding its watchdog and listeners, which is the
+    // leak this file's cleanup exists to prevent — so the cleanup tracks every
+    // pinia it created rather than the current one.
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
+    try {
+      const stranded = useProjectStore()
+      stranded.activeChatId = 'c1'
+      stranded.streaming = { c1: true }
+      // A frame time of 0 is "never", so open the sockets after the clock moves.
+      await vi.advanceTimersByTimeAsync(1)
+      stranded.connectWs('c1')
+      stranded.connectEventsWs()
+      const chatSock = fakeSockets.find(s => s.url.includes('/ws/chat/'))!
+      const events = fakeSockets.find(s => s.url.includes('/ws/events'))!
+      await Promise.resolve()
+
+      setActivePinia(createPinia())
+      const current = useProjectStore()
+      expect(current).not.toBe(stranded)
+
+      // Both are reachable for disposal, which is what afterEach relies on.
+      expect(piniasCreated.length).toBeGreaterThanOrEqual(2)
+      for (const pinia of piniasCreated) {
+        pinia._s.forEach((store) => store.$dispose())
+      }
+
+      const sendsBefore = chatSock.send.mock.calls.length
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(30_000)
+      window.dispatchEvent(new Event('focus'))
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(apiGet.mock.calls).toEqual([])
+      expect(events.readyState).toBe(FakeWebSocket.OPEN)
+      expect(chatSock.send.mock.calls.length).toBe(sendsBefore)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a disposed store does not resume a settled-reply retry it already scheduled', async () => {
+    // The open path re-fetches /messages on delays while it waits for a settled
+    // reply. Those waits are timers the store owns; a disposed store must cancel
+    // them rather than resume and call the API, or an earlier test's store keeps
+    // calling it on the real clock during a later test.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-dispose-retry'
+      const unsettled: ChatMessage = { role: 'user', content: 'Question', timestamp: '2026-08-27T00:00:00Z', turn_index: 0 }
+      store.activeChatId = chatId
+      store.messages[chatId] = [unsettled]
+      apiGet.mockImplementation((path: string) => {
+        if (!String(path).includes('/messages')) return Promise.resolve([])
+        return Promise.resolve([unsettled])
+      })
+
+      void store.loadMessages(chatId, { waitForSettledReply: true })
+      // The first fetch lands and the first retry wait is now pending.
+      await vi.advanceTimersByTimeAsync(0)
+      expect(apiGet.mock.calls.filter(c => String(c[0]).includes('/messages')).length).toBeGreaterThan(0)
+
+      store.$dispose()
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(apiGet.mock.calls).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -6684,7 +6614,7 @@ describe('parked pending_queue chips', () => {
 
   test('an idle chat payload with pending_queue becomes chips', () => {
     const store = useProjectStore()
-    store.queuedMessages.idle = [{ id: 'old', text: 'stale chip', delivery: 'queue' }]
+    store.queuedMessages.idle = [{ id: 'old', text: 'stale chip' }]
     store.reconcileChatList([
       chat({
         chat_id: 'idle',
@@ -6692,14 +6622,14 @@ describe('parked pending_queue chips', () => {
       }),
     ])
     expect(store.queuedMessages.idle).toEqual([
-      { id: 'q-1', text: 'after the error', images: ['shot.png'], delivery: 'queue', steering: false, waiting: true },
+      { id: 'q-1', text: 'after the error', images: ['shot.png'], waiting: true },
     ])
   })
 
   test('a parked chat payload while streaming adds missing waiting chips ahead of the live ones', () => {
     const store = useProjectStore()
     store.streaming.live = true
-    store.queuedMessages.live = [{ id: 'q-live', text: 'live', delivery: 'queue' }]
+    store.queuedMessages.live = [{ id: 'q-live', text: 'live' }]
     store.reconcileChatList([
       chat({ chat_id: 'live', pending_queue: [{ id: 'q-wait', text: 'held' }, { id: 'q-live', text: 'live' }] }),
     ])
@@ -6709,16 +6639,16 @@ describe('parked pending_queue chips', () => {
   test('an empty pending_queue during streaming does not clear existing chips', () => {
     const store = useProjectStore()
     store.streaming.live = true
-    store.queuedMessages.live = [{ id: 'q-live', text: 'still queued', delivery: 'queue' }]
+    store.queuedMessages.live = [{ id: 'q-live', text: 'still queued' }]
     store.reconcileChatList([
       chat({ chat_id: 'live', pending_queue: [] }),
     ])
-    expect(store.queuedMessages.live).toEqual([{ id: 'q-live', text: 'still queued', delivery: 'queue' }])
+    expect(store.queuedMessages.live).toEqual([{ id: 'q-live', text: 'still queued' }])
   })
 
   test('an empty pending_queue on an idle chat clears parked chips', () => {
     const store = useProjectStore()
-    store.queuedMessages.idle = [{ id: 'q-1', text: 'after the error', delivery: 'queue' }]
+    store.queuedMessages.idle = [{ id: 'q-1', text: 'after the error' }]
     store.reconcileChatList([
       chat({ chat_id: 'idle', pending_queue: [] }),
     ])
@@ -7974,7 +7904,7 @@ describe('workspace and chat transitions', () => {
           active: 'home',
           provider_options: [
             { value: 'claude', label: 'Claude' },
-            { value: 'opencode', label: 'opencode' },
+            { value: 'opencode', label: 'OpenCode' },
           ],
         })
       }
@@ -8974,7 +8904,6 @@ describe('switchChat workspace alignment', () => {
   test('automatically switches activeWorkspace to match target chat workspace', async () => {
     apiGet.mockImplementation((url: string) => {
       if (url.includes('/messages')) return Promise.resolve([])
-      if (url.includes('/subagents')) return Promise.resolve([])
       return Promise.resolve([])
     })
     const store = useProjectStore()
@@ -8992,28 +8921,6 @@ describe('switchChat workspace alignment', () => {
 
     expect(store.activeWorkspace).toBe('work')
     expect(store.activeChatId).toBe('c-work')
-  })
-
-  // `/chat/:chatId/subagent/:agentId` carries the same chatId, so matching on
-  // that alone made the chat's own sidebar row a dead click while one of its
-  // subagents was open.
-  test('navigates back to the chat from one of its subagent views', async () => {
-    const { router } = await import('../router')
-    const store = useProjectStore()
-    store.projects = [
-      { project_id: 'p1', name: 'Proj', workspace: 'personal' } as unknown as ProjectInfo,
-    ]
-    store.chats = [
-      { chat_id: 'c1', project_id: 'p1', title: 'Chat' } as unknown as ChatInfo,
-    ]
-    store.activeChatId = 'c1'
-    router.currentRoute.value.params = { chatId: 'c1', agentId: 'a1b2c3d4' }
-    routerPush.mockClear()
-
-    await store.switchChat('c1')
-
-    expect(routerPush).toHaveBeenCalledWith('/chat/c1')
-    router.currentRoute.value.params = {}
   })
 })
 
@@ -10023,438 +9930,6 @@ describe('chatLastSnippet', () => {
   })
 })
 
-describe('running subagent poll', () => {
-  // The server keeps a row "running" until the agent's transcript goes idle,
-  // which lags the parent turn by up to 60s. One refresh on the falling edge
-  // therefore left rows spinning in the sidebar until the next turn.
-  function mockRunning(rows: Record<string, unknown[]>): void {
-    apiGet.mockImplementation((path: string) => {
-      if (path === '/api/subagents/running') return Promise.resolve({ chats: rows })
-      return Promise.resolve([])
-    })
-  }
-
-  test('keeps polling after work stops until the rows clear', async () => {
-    const store = useProjectStore()
-    const row = [{ agent_id: 'a1', description: 'digging', subagent_type: '', status: 'running', is_async: true, turn_index: 0 }]
-    mockRunning({ c1: row })
-
-    vi.useFakeTimers()
-    try {
-      store.streaming = { c1: true }
-      await vi.advanceTimersByTimeAsync(0)
-      expect(store.runningSubagents.c1).toHaveLength(1)
-
-      // Work stops, but the server still names the agent.
-      store.streaming = { c1: false }
-      await vi.advanceTimersByTimeAsync(0)
-      await vi.advanceTimersByTimeAsync(8000)
-      expect(store.runningSubagents.c1).toHaveLength(1)
-
-      // The transcript finally goes idle; the drain picks that up and the row
-      // disappears without needing another turn.
-      mockRunning({})
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(store.runningSubagents.c1).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a disposed store stops polling', async () => {
-    // The watcher owns the interval, so stopping the watcher is not enough —
-    // an interval it already created keeps firing on its own. Without the
-    // store's onScopeDispose cleanup, every test in this file left one behind
-    // and they went on making requests for the rest of the run.
-    const store = useProjectStore()
-    const row = [{ agent_id: 'a1', description: 'digging', subagent_type: '', status: 'running', is_async: true, turn_index: 0 }]
-    mockRunning({ c1: row })
-
-    vi.useFakeTimers()
-    try {
-      store.streaming = { c1: true }
-      await vi.advanceTimersByTimeAsync(0)
-      await vi.advanceTimersByTimeAsync(8000)
-      expect(apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length).toBeGreaterThan(0)
-
-      store.$dispose()
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(30_000)
-      expect(apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running')).toEqual([])
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a disposed store stops its liveness watchdog and window listeners', async () => {
-    // The watcher-owned polls were only half the leak. `checkWsLiveness` and the
-    // focus/blur/visibility listeners are registered at setup time, so every
-    // store a test builds kept a real-clock 2s timer and a live focus handler
-    // for the rest of the run — and `checkWsLiveness` can reach `apiGet` and
-    // push a FakeWebSocket onto the module-level array later tests read.
-    const store = useProjectStore()
-    apiGet.mockImplementation(() => Promise.resolve([]))
-
-    vi.useFakeTimers()
-    try {
-      store.$dispose()
-      const socketsBefore = fakeSockets.length
-      apiGet.mockClear()
-
-      // Nothing the disposed store registered may still fire.
-      await vi.advanceTimersByTimeAsync(30_000)
-      window.dispatchEvent(new Event('focus'))
-      window.dispatchEvent(new Event('blur'))
-      document.dispatchEvent(new Event('visibilitychange'))
-      await vi.advanceTimersByTimeAsync(0)
-
-      expect(apiGet.mock.calls).toEqual([])
-      expect(fakeSockets.length).toBe(socketsBefore)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a store left on a superseded pinia is disposed too', async () => {
-    // A test that swaps the pinia mid-run strands its first store on an
-    // instance `getActivePinia()` can no longer reach. Disposing only the
-    // survivor left that one holding its watchdog and listeners, which is the
-    // leak this file's cleanup exists to prevent — so the cleanup tracks every
-    // pinia it created rather than the current one.
-    const stranded = useProjectStore()
-    stranded.streaming = { c1: true }
-    await Promise.resolve()
-
-    setActivePinia(createPinia())
-    const current = useProjectStore()
-    expect(current).not.toBe(stranded)
-
-    // Both are reachable for disposal, which is what afterEach relies on.
-    expect(piniasCreated.length).toBeGreaterThanOrEqual(2)
-    for (const pinia of piniasCreated) {
-      pinia._s.forEach((store) => store.$dispose())
-    }
-
-    apiGet.mockClear()
-    vi.useFakeTimers()
-    try {
-      await vi.advanceTimersByTimeAsync(30_000)
-      window.dispatchEvent(new Event('focus'))
-      await vi.advanceTimersByTimeAsync(0)
-      expect(apiGet.mock.calls).toEqual([])
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a disposed store does not resume a settled-reply retry it already scheduled', async () => {
-    // The open path re-fetches /messages on delays while it waits for a settled
-    // reply. Those waits are timers the store owns; a disposed store must cancel
-    // them rather than resume and call the API, or an earlier test's store keeps
-    // calling it on the real clock during a later test.
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      const chatId = 'c-dispose-retry'
-      const unsettled: ChatMessage = { role: 'user', content: 'Question', timestamp: '2026-08-27T00:00:00Z', turn_index: 0 }
-      store.activeChatId = chatId
-      store.messages[chatId] = [unsettled]
-      apiGet.mockImplementation((path: string) => {
-        if (!path.includes('/messages')) return Promise.resolve([])
-        return Promise.resolve([unsettled])
-      })
-
-      void store.loadMessages(chatId, { waitForSettledReply: true })
-      // The first fetch lands and the first retry wait is now pending.
-      await vi.advanceTimersByTimeAsync(0)
-      expect(apiGet.mock.calls.filter(c => String(c[0]).includes('/messages')).length).toBeGreaterThan(0)
-
-      store.$dispose()
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(30_000)
-      expect(apiGet.mock.calls).toEqual([])
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('the drain is bounded, so a row the server never retires cannot poll forever', async () => {
-    const store = useProjectStore()
-    const row = [{ agent_id: 'a1', description: 'stuck', subagent_type: '', status: 'running', is_async: true, turn_index: 0 }]
-    mockRunning({ c1: row })
-
-    vi.useFakeTimers()
-    try {
-      store.streaming = { c1: true }
-      await vi.advanceTimersByTimeAsync(0)
-      store.streaming = { c1: false }
-      await vi.advanceTimersByTimeAsync(0)
-
-      await vi.advanceTimersByTimeAsync(95_000)
-      // Count from a clean slate rather than diffing two totals: the totals
-      // include anything else that polled this endpoint, so a stray request
-      // between the two reads used to fail this test for reasons that had
-      // nothing to do with the drain.
-      apiGet.mockClear()
-
-      await vi.advanceTimersByTimeAsync(60_000)
-      const pollsAfterDeadline = apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length
-      expect(pollsAfterDeadline).toBe(0)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a shell row keeps the poll alive past the drain budget until the server omits it', async () => {
-    const store = useProjectStore()
-    const shell = [{ agent_id: 'task:b1', description: 'sleep 3600', subagent_type: 'shell', status: 'running', is_async: true, turn_index: null, stoppable: true }]
-    let rows: unknown[] = shell
-    apiGet.mockImplementation((path: string) => {
-      if (path === '/api/subagents/running') return Promise.resolve({ chats: rows.length ? { c1: rows } : {} })
-      return Promise.resolve([])
-    })
-    const polls = () => apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length
-
-    vi.useFakeTimers()
-    try {
-      store.streaming = { c1: true }
-      await vi.advanceTimersByTimeAsync(0)
-      store.streaming = { c1: false }
-      await vi.advanceTimersByTimeAsync(0)
-
-      await vi.advanceTimersByTimeAsync(95_000)
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(60_000)
-      expect(polls()).toBeGreaterThan(10)
-
-      rows = []
-      await vi.advanceTimersByTimeAsync(8_000)
-      expect(store.runningSubagentsFor('c1')).toEqual([])
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(30_000)
-      expect(polls()).toBe(0)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a shell row discovered while nothing is working starts the poll', async () => {
-    const store = useProjectStore()
-    const shell = [{ agent_id: 'task:b1', description: 'sleep 3600', subagent_type: 'shell', status: 'running', is_async: true, turn_index: null }]
-    mockRunning({ c1: shell })
-
-    vi.useFakeTimers()
-    try {
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(0)
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(120_000)
-      expect(apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length).toBeGreaterThan(10)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-})
-
-describe('running-row reconciliation while the engine count is zero', () => {
-  // The engine count (`backgroundAgents`, from chat_subagents_ready) and the
-  // cheap running list (/api/subagents/running) are separate owners. A row the
-  // list names while the count is 0 on an idle chat used to start nothing: the
-  // full-list poll was gated on the count alone and the running poll only
-  // started on a working edge.
-  const row = { agent_id: 'a1', description: 'digging', subagent_type: '', status: 'running', is_async: true, turn_index: 0 }
-  let running: Record<string, unknown[]>
-  const calls = (suffix: string) => apiGet.mock.calls.filter(c => String(c[0]).endsWith(suffix)).length
-  function mockEndpoints(): void {
-    apiGet.mockImplementation((path: string) => {
-      if (path === '/api/subagents/running') return Promise.resolve({ chats: running })
-      if (path === '/api/chats/c1/subagents') return Promise.resolve([{ ...row, messages: [] }])
-      return Promise.resolve([])
-    })
-  }
-
-  beforeEach(() => {
-    running = { c1: [row] }
-    mockEndpoints()
-  })
-
-  test('known running rows keep an idle active chat refreshing when the event count is zero', async () => {
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(0)
-      expect(store.backgroundAgents.c1).toBeUndefined()
-      expect(store.isStreaming).toBe(false)
-
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(calls('/subagents')).toBeGreaterThan(0)
-      expect(calls('/api/subagents/running')).toBeGreaterThan(0)
-      // The engine count is never written from the cheap list.
-      expect(store.backgroundAgents.c1).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('running-row discovery immediately refreshes the full active list once', async () => {
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      apiGet.mockClear()
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(0)
-      expect(apiGet.mock.calls.filter(c => c[0] === '/api/chats/c1/subagents')).toHaveLength(1)
-      expect(store.subagents.c1).toHaveLength(1)
-
-      // A second refresh that still lists the row is not a new discovery.
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(0)
-      expect(apiGet.mock.calls.filter(c => c[0] === '/api/chats/c1/subagents')).toHaveLength(1)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('completion and disposal stop both polls', async () => {
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(4000)
-
-      running = {}
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(store.runningSubagents.c1).toBeUndefined()
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(30_000)
-      expect(apiGet.mock.calls).toEqual([])
-
-      // Disposal while rows are still known.
-      running = { c1: [row] }
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(4000)
-      store.$dispose()
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(30_000)
-      expect(apiGet.mock.calls).toEqual([])
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a failed running request does not clear the known rows or stop the poll', async () => {
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      await store.refreshRunningSubagents()
-      apiGet.mockImplementation((path: string) =>
-        path === '/api/subagents/running' ? Promise.reject(new Error('offline')) : Promise.resolve([]))
-      await vi.advanceTimersByTimeAsync(8000)
-      expect(store.runningSubagents.c1).toHaveLength(1)
-
-      mockEndpoints()
-      running = {}
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(store.runningSubagents.c1).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a dedicated subagent view does not trigger full-list polling', async () => {
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      store.setSubagentViewActive('c1')
-      apiGet.mockClear()
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(12_000)
-      expect(calls('/api/chats/c1/subagents')).toBe(0)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('rows for another chat do not poll the active chat', async () => {
-    vi.useFakeTimers()
-    try {
-      running = { other: [row] }
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      apiGet.mockClear()
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(12_000)
-      expect(calls('/api/chats/c1/subagents')).toBe(0)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('late old responses do not restore completed agents', async () => {
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      const pending: Array<(v: unknown) => void> = []
-      apiGet.mockImplementation((path: string) => {
-        if (path === '/api/subagents/running') return Promise.resolve({ chats: running })
-        if (path === '/api/chats/c1/subagents') return new Promise(resolve => pending.push(resolve))
-        return Promise.resolve([])
-      })
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(pending.length).toBeGreaterThanOrEqual(2)
-      const last = pending.length - 1
-      pending[last]([{ ...row, status: 'completed', messages: [] }])
-      await vi.advanceTimersByTimeAsync(0)
-      pending[0]([{ ...row, status: 'running', messages: [] }])
-      await vi.advanceTimersByTimeAsync(0)
-      expect(store.subagents.c1?.[0]?.status).toBe('completed')
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-})
-
-describe('loadSubagent', () => {
-  test('fetches one agent and merges it without dropping the others', async () => {
-    const store = useProjectStore()
-    store.subagents = {
-      c1: [
-        { agent_id: 'a1', messages: [], description: 'first' },
-        { agent_id: 'a2', messages: [], description: 'second' },
-      ],
-    } as never
-
-    apiGet.mockResolvedValue([{ agent_id: 'a2', messages: [{ role: 'assistant', content: 'fresh' }], description: 'second' }])
-
-    await store.loadSubagent('c1', 'a2')
-
-    expect(apiGet).toHaveBeenCalledWith('/api/chats/c1/subagents?agent_id=a2')
-    expect(store.subagents.c1).toHaveLength(2)
-    expect(store.subagents.c1[0].agent_id).toBe('a1')
-    expect(store.subagents.c1[1].messages).toHaveLength(1)
-  })
-
-  test('matches across the agent- prefix rather than adding a duplicate row', async () => {
-    const store = useProjectStore()
-    store.subagents = { c1: [{ agent_id: 'agent-a1', messages: [], description: 'first' }] } as never
-    apiGet.mockResolvedValue([{ agent_id: 'a1', messages: [{ role: 'assistant', content: 'fresh' }] }])
-
-    await store.loadSubagent('c1', 'a1')
-
-    expect(store.subagents.c1).toHaveLength(1)
-    expect(store.subagents.c1[0].messages).toHaveLength(1)
-  })
-})
-
 describe('memory pass surfaces', () => {
   function seedProjects(store: ReturnType<typeof useProjectStore>) {
     store.activeWorkspace = 'personal'
@@ -10574,12 +10049,8 @@ describe('delegated task signals', () => {
     expect(store.chatNeedsYou('c-plain')).toBe(false)
   })
 
-  test('a scoped blocked task still needs you with MCP, but another workspace does not', async () => {
+  test('a scoped blocked task still needs you, but another workspace does not', async () => {
     const store = await seeded([taskRow({ attempt_outcome: 'blocked' })])
-    store.chatActions['c-task'] = [{
-      id: 'mcp', kind: 'mcp_auth', origin: 'engine', state: 'open',
-      params: { server: 'linear', provider: 'claude' }, error: '', created_at: 1,
-    }]
     expect(store.chatNeedsYou('c-task')).toBe(true)
     store.projects[0].workspace = 'other'
     expect(store.chatNeedsYou('c-task')).toBe(false)
@@ -10728,8 +10199,8 @@ describe('failed chats count as needs you', () => {
   })
 })
 
-describe('queue delivery: queue or steer', () => {
-  const chatId = 'chat-steer'
+describe('queue entries and settings events', () => {
+  const chatId = 'chat-queue'
 
   function frames(socket: FakeWebSocket, type: string) {
     return socket.send.mock.calls
@@ -10742,13 +10213,11 @@ describe('queue delivery: queue or steer', () => {
   }
 
   async function setup() {
-    const { applyKeyboardSettings } = await import('../composables/useKeyboardSettings')
-    applyKeyboardSettings({ mid_turn_delivery: 'queue' })
     const store = useProjectStore()
     store.activeChatId = chatId
     store.connectWs(chatId)
     store.streaming[chatId] = true
-    return { store, socket: fakeSockets[fakeSockets.length - 1], applyKeyboardSettings }
+    return { store, socket: fakeSockets[fakeSockets.length - 1] }
   }
 
   it('requests a take without changing the queue and applies only successful results', async () => {
@@ -10767,167 +10236,36 @@ describe('queue delivery: queue or steer', () => {
     expect(frames(socket, 'queue_take_ack')[0]).toEqual({ type: 'queue_take_ack', entry_id: 'a' })
   })
 
-  it('sends delivery steer for a mid-turn message when the preference is steer', async () => {
-    const { store, socket, applyKeyboardSettings } = await setup()
-    applyKeyboardSettings({ mid_turn_delivery: 'steer' })
-    store.sendMessage(chatId, 'change course')
-    const [frame] = frames(socket, 'message')
-    expect(frame).toMatchObject({ text: 'change course', delivery: 'steer' })
-    expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'steer', steering: true })
-    applyKeyboardSettings({ mid_turn_delivery: 'queue' })
-  })
-
-  it('sends delivery queue by default', async () => {
+  it('a mid-turn message is queued with no delivery field', async () => {
     const { store, socket } = await setup()
-    store.sendMessage(chatId, 'later')
-    expect(frames(socket, 'message')[0]).toMatchObject({ delivery: 'queue' })
-    expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
+    expect(store.sendMessage(chatId, 'change course')).toBe(true)
+    const frame = frames(socket, 'message')[0]
+    expect(frame).toMatchObject({ text: 'change course', mode: 'queue' })
+    expect(Object.keys(frame)).not.toContain('delivery')
+    expect(store.queuedMessages[chatId]).toHaveLength(1)
+    expect(Object.keys(store.queuedMessages[chatId][0]).sort()).toEqual(['id', 'images', 'text'])
   })
 
-  it('steers a message with images when the preference is steer', async () => {
-    const { store, socket, applyKeyboardSettings } = await setup()
-    applyKeyboardSettings({ mid_turn_delivery: 'steer' })
-    store.pendingImages = ['shot.png']
-    store.sendMessage(chatId, 'look at this')
-    expect(frames(socket, 'message')[0]).toMatchObject({ delivery: 'steer', images: ['shot.png'] })
-    expect(store.queuedMessages[chatId][0].steering).toBe(true)
-    applyKeyboardSettings({ mid_turn_delivery: 'queue' })
-  })
-
-  it('folds a steered event into the transcript once', async () => {
+  it('sendQueuedNow sends queue_send_now while a turn runs and while idle', async () => {
     const { store, socket } = await setup()
-    store.messages[chatId] = []
     emit(socket, { type: 'queue_state', queue: [
-      { id: 'a', text: 'one', delivery: 'steer', steering: true },
-      { id: 'b', text: 'two', delivery: 'queue', steering: false },
+      { id: 'a', text: 'one', waiting: true },
+      { id: 'b', text: 'two', waiting: true },
+      { id: 'c', text: 'three', waiting: true },
     ] })
-    const steered = { type: 'steered', entry_ids: ['a'], text: 'one', turn_index: 3, sent_at: '2026-10-15T10:00:00Z', delivery_id: 'd1' }
-    emit(socket, steered)
-    emit(socket, steered)
-    const bubbles = (store.messages[chatId] || []).filter(m => m.role === 'user' && m.content === 'one')
-    expect(bubbles).toHaveLength(1)
-    expect(bubbles[0]).toMatchObject({ steered: true, turn_index: 3 })
-    expect(store.queuedMessages[chatId].map(q => q.id)).toEqual(['b'])
-  })
-
-  it('steered event carries origin onto the message', async () => {
-    const { store, socket } = await setup()
-    store.messages[chatId] = []
-    emit(socket, { type: 'steered', entry_ids: ['w'], text: '[Ciaobot] 1 background run finished.', turn_index: 4, sent_at: '2026-10-19T10:00:00Z', delivery_id: 'd1', origin: 'background_run' })
-    emit(socket, { type: 'steered', entry_ids: ['t'], text: 'typed', turn_index: 5, sent_at: '2026-10-19T10:00:01Z', delivery_id: 'd2' })
-    const msgs = store.messages[chatId] || []
-    expect(msgs.find(m => m.role === 'user' && m.turn_index === 4)).toMatchObject({ steered: true, origin: 'background_run' })
-    expect(msgs.find(m => m.role === 'user' && m.turn_index === 5)?.origin).toBeUndefined()
-  })
-
-  it('steer_fallback flips chips to queue and sets a notice', async () => {
-    const { store, socket } = await setup()
-    emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'steer', steering: true }] })
-    emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
-    expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
-    expect(store.steerNotice[chatId]).toContain('Steering missed the reply')
-    emit(socket, { type: 'result', text: 'done' })
-    emit(socket, { type: 'user_echo', text: 'one', turn_index: 5, entry_id: 'a' })
-    // The notice outlives the reply that ended and the turn that flushed it.
-    expect(store.steerNotice[chatId]).toContain('Steering missed the reply')
-  })
-
-  it('the fallback notice clears after 8 seconds and on the next send', async () => {
-    vi.useFakeTimers()
-    try {
-      const { store, socket } = await setup()
-      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
-      vi.advanceTimersByTime(7900)
-      expect(store.steerNotice[chatId]).toBeDefined()
-      vi.advanceTimersByTime(200)
-      expect(store.steerNotice[chatId]).toBeUndefined()
-
-      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
-      store.sendMessage(chatId, 'next')
-      expect(store.steerNotice[chatId]).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('a Steering lock the server never answers reverts to queue after 15 seconds with a notice', async () => {
-    vi.useFakeTimers()
-    try {
-      const { store, socket } = await setup()
-      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
-      store.setQueuedDelivery(chatId, ['a'], 'steer')
-      expect(store.queuedMessages[chatId][0].steering).toBe(true)
-      vi.advanceTimersByTime(14000)
-      expect(store.queuedMessages[chatId][0].steering).toBe(true)
-      vi.advanceTimersByTime(1500)
-      expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
-      expect(store.steerNotice[chatId]).toBeTruthy()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('a disposed store never reverts a pending steer lock or fires the notice timer', async () => {
-    vi.useFakeTimers()
-    try {
-      const { store, socket } = await setup()
-      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
-      store.setQueuedDelivery(chatId, ['a'], 'steer')
-      store.$dispose()
-      vi.advanceTimersByTime(20000)
-      expect(store.queuedMessages[chatId][0].steering).toBe(true)
-      expect(store.steerNotice[chatId]).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('clearQueued cancels the lock and notice timers', async () => {
-    vi.useFakeTimers()
-    try {
-      const { store, socket } = await setup()
-      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
-      store.setQueuedDelivery(chatId, ['a'], 'steer')
-      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
-      store.setQueuedDelivery(chatId, ['a'], 'steer')
-      expect(store.steerNotice[chatId]).toBeUndefined()
-      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
-      expect(store.steerNotice[chatId]).toBeDefined()
-      store.clearQueued(chatId)
-      expect(store.steerNotice[chatId]).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('a steer answered by steer_fallback or queue_state cancels the lock timer', async () => {
-    vi.useFakeTimers()
-    try {
-      const { store, socket } = await setup()
-      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
-      store.setQueuedDelivery(chatId, ['a'], 'steer')
-      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'steer', steering: true }] })
-      vi.advanceTimersByTime(16000)
-      expect(store.queuedMessages[chatId][0].steering).toBe(true)
-      expect(store.steerNotice[chatId]).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('a steer-default send arms the lock timer too', async () => {
-    vi.useFakeTimers()
-    const { applyKeyboardSettings } = await import('../composables/useKeyboardSettings')
-    try {
-      const { store } = await setup()
-      applyKeyboardSettings({ mid_turn_delivery: 'steer' })
-      store.sendMessage(chatId, 'go')
-      vi.advanceTimersByTime(15500)
-      expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
-    } finally {
-      applyKeyboardSettings({ mid_turn_delivery: 'queue' })
-      vi.useRealTimers()
-    }
+    socket.send.mockClear()
+    store.sendQueuedNow(chatId, ['b', 'a'])
+    expect(frames(socket, 'queue_send_now')).toEqual([
+      { type: 'queue_send_now', entry_ids: ['a', 'b'] },
+    ])
+    socket.send.mockClear()
+    store.streaming[chatId] = false
+    store.sendQueuedNow(chatId, ['c', 'a'])
+    expect(frames(socket, 'queue_send_now')).toEqual([
+      { type: 'queue_send_now', entry_ids: ['a', 'c'] },
+    ])
+    // Nothing is changed optimistically: the echo removes the entries.
+    expect(store.queuedMessages[chatId].map(q => q.id)).toEqual(['a', 'b', 'c'])
   })
 
   it('reads the waiting flag from queue_state, and the server flag wins over the chat record', async () => {
@@ -10937,13 +10275,13 @@ describe('queue delivery: queue or steer', () => {
     ])
     expect(store.queuedMessages[chatId][0].waiting).toBe(true)
     emit(socket, { type: 'queue_state', queue: [
-      { id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: true },
-      { id: 'l', text: 'live', delivery: 'queue', steering: false, waiting: false },
+      { id: 'w', text: 'held', waiting: true },
+      { id: 'l', text: 'live', waiting: false },
     ] })
     expect(store.queuedMessages[chatId].map(q => !!q.waiting)).toEqual([true, false])
     // The server says it is live now (adopted into the turn).
     emit(socket, { type: 'queue_state', queue: [
-      { id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: false },
+      { id: 'w', text: 'held', waiting: false },
     ] })
     expect(store.queuedMessages[chatId][0].waiting).toBe(false)
   })
@@ -10951,17 +10289,17 @@ describe('queue delivery: queue or steer', () => {
   it('an entry that arrives only via queue_state after a reload is waiting', async () => {
     const { store, socket } = await setup()
     expect(store.queuedMessages[chatId]).toBeUndefined()
-    emit(socket, { type: 'queue_state', queue: [{ id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: true }] })
+    emit(socket, { type: 'queue_state', queue: [{ id: 'w', text: 'held', waiting: true }] })
     expect(store.queuedMessages[chatId][0]).toMatchObject({ id: 'w', waiting: true })
   })
 
-  it('a queued event is live, and steering an entry clears its waiting mark', async () => {
+  it('a queued event is live, and a queue_state entry can be waiting', async () => {
     const { store, socket } = await setup()
-    emit(socket, { type: 'queued', id: 'n', text: 'new', delivery: 'queue', waiting: false })
-    expect(store.queuedMessages[chatId][0].waiting).toBe(false)
-    emit(socket, { type: 'queue_state', queue: [{ id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: true }] })
-    store.setQueuedDelivery(chatId, ['w'], 'steer')
-    expect(store.queuedMessages[chatId][0].waiting).toBe(false)
+    emit(socket, { type: 'queued', id: 'n', text: 'new', waiting: false })
+    expect(store.queuedMessages[chatId][0]).toMatchObject({ id: 'n', waiting: false })
+    expect(Object.keys(store.queuedMessages[chatId][0])).not.toContain('delivery')
+    emit(socket, { type: 'queue_state', queue: [{ id: 'w', text: 'held', waiting: true }] })
+    expect(store.queuedMessages[chatId][0].waiting).toBe(true)
   })
 
   it('prompt_cancelled removes the bubble and partials for that turn; a resend shows once', async () => {
@@ -10978,16 +10316,17 @@ describe('queue delivery: queue or steer', () => {
     expect(bubbles()).toHaveLength(1)
   })
 
-  it('snapshot and keyboard_settings_changed carry the preference', async () => {
+  it('keyboard_settings_changed applies the send mode', async () => {
     const { useKeyboardSettings } = await import('../composables/useKeyboardSettings')
     const store = useProjectStore()
     apiGet.mockResolvedValue([])
     store.connectEventsWs()
     const sock = fakeSockets[fakeSockets.length - 1]
-    sock.onmessage?.({ data: JSON.stringify({ type: 'keyboard_settings_changed', keyboard_shortcuts: {}, keyboard_send_mode: 'modifier', mid_turn_delivery: 'steer', revision: 'r1' }) })
-    expect(useKeyboardSettings().settings.value.mid_turn_delivery).toBe('steer')
-    sock.onmessage?.({ data: JSON.stringify({ type: 'keyboard_settings_changed', keyboard_shortcuts: {}, keyboard_send_mode: 'modifier', mid_turn_delivery: 'queue', revision: 'r2' }) })
-    expect(useKeyboardSettings().settings.value.mid_turn_delivery).toBe('queue')
+    sock.onmessage?.({ data: JSON.stringify({ type: 'keyboard_settings_changed', keyboard_shortcuts: {}, keyboard_send_mode: 'enter', revision: 'r1' }) })
+    expect(useKeyboardSettings().settings.value.keyboard_send_mode).toBe('enter')
+    expect(Object.keys(useKeyboardSettings().settings.value)).not.toContain('mid_turn_delivery')
+    sock.onmessage?.({ data: JSON.stringify({ type: 'keyboard_settings_changed', keyboard_shortcuts: {}, keyboard_send_mode: 'modifier', revision: 'r2' }) })
+    expect(useKeyboardSettings().settings.value.keyboard_send_mode).toBe('modifier')
   })
 
   it('appearance_settings_changed applies the value', async () => {
@@ -11505,84 +10844,25 @@ describe('chatsHealth', () => {
   })
 })
 
-describe('stopBackgroundTask', () => {
-  const shellRow = (id: string) => ({ agent_id: `task:${id}`, description: id, subagent_type: 'shell', stoppable: true })
 
-  beforeEach(() => {
-    setActivePinia(newPinia())
-    apiPost.mockReset()
-    apiPost.mockResolvedValue({ ok: true })
-    vi.useFakeTimers()
-  })
-  afterEach(() => vi.useRealTimers())
-
-  it('counts a chat holding only a native shell as busy', () => {
+describe('chatIsWorking', () => {
+  test('chatIsWorking is true only while a turn streams', () => {
     const store = useProjectStore()
-    expect(store.anyChatBusy).toBe(false)
-    store.runningSubagents = { c1: [shellRow('b1')] } as never
-    expect(store.anyChatBusy).toBe(true)
+    expect(store.chatIsWorking('c1')).toBe(false)
+    store.streaming = { c1: true }
     expect(store.chatIsWorking('c1')).toBe(true)
-  })
+    store.streaming = {}
+    expect(store.chatIsWorking('c1')).toBe(false)
 
-  it('posts to the stop route and marks the task stopping, per chat', async () => {
-    const store = useProjectStore()
-    await store.stopBackgroundTask('c1', 'b1')
-    expect(apiPost).toHaveBeenCalledWith('/api/chats/c1/background-tasks/b1/stop', {})
-    expect(store.stoppingTasks).toEqual({ c1: { b1: true } })
-    expect(store.stopTaskErrors).toEqual({})
-  })
-
-  it('ignores a second stop while one is pending', async () => {
-    const store = useProjectStore()
-    await store.stopBackgroundTask('c1', 'b1')
-    await store.stopBackgroundTask('c1', 'b1')
-    expect(apiPost).toHaveBeenCalledTimes(1)
-  })
-
-  it('lets go of the lock after 15 s so Stop can be retried', async () => {
-    const store = useProjectStore()
-    await store.stopBackgroundTask('c1', 'b1')
-    vi.advanceTimersByTime(14_999)
-    expect(store.stoppingTasks.c1?.b1).toBe(true)
-    vi.advanceTimersByTime(1)
-    expect(store.stoppingTasks.c1?.b1).toBeUndefined()
-    await store.stopBackgroundTask('c1', 'b1')
-    expect(apiPost).toHaveBeenCalledTimes(2)
-  })
-
-  it('records an error and releases the lock when the stop is rejected, clearing it on retry', async () => {
-    const store = useProjectStore()
-    apiPost.mockRejectedValueOnce(new Error('boom'))
-    await store.stopBackgroundTask('c1', 'b1')
-    expect(store.stoppingTasks.c1?.b1).toBeUndefined()
-    expect(store.stopTaskErrors.c1?.b1).toBe('Could not stop this process. Try again.')
-    await store.stopBackgroundTask('c1', 'b1')
-    expect(store.stopTaskErrors.c1?.b1).toBeUndefined()
-    expect(store.stoppingTasks.c1?.b1).toBe(true)
-  })
-
-  it('releases a task, and its error, once its row leaves the running list', async () => {
-    const store = useProjectStore()
-    store.runningSubagents = { c1: [shellRow('b1'), shellRow('b2')] } as unknown as typeof store.runningSubagents
-    await store.stopBackgroundTask('c1', 'b1')
-    await store.stopBackgroundTask('c1', 'b2')
-    store.stopTaskErrors = { c1: { b2: 'Could not stop this process. Try again.' } }
-    store.runningSubagents = { c1: [shellRow('b2')] } as unknown as typeof store.runningSubagents
-    await nextTick()
-    expect(store.stoppingTasks.c1?.b1).toBeUndefined()
-    expect(store.stoppingTasks.c1?.b2).toBe(true)
-    store.runningSubagents = {}
-    await nextTick()
-    expect(store.stoppingTasks).toEqual({})
-    expect(store.stopTaskErrors).toEqual({})
-  })
-
-  it('stops its timers when the store is disposed', async () => {
-    const store = useProjectStore()
-    const before = vi.getTimerCount()
-    await store.stopBackgroundTask('c1', 'b1')
-    expect(vi.getTimerCount()).toBe(before + 1)
-    store.$dispose()
-    expect(vi.getTimerCount()).toBe(0)
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'snapshot',
+        active_streams: [],
+        chat_pins: {},
+      }),
+    })
+    expect(store.chatIsWorking('c1')).toBe(false)
   })
 })

@@ -24,7 +24,7 @@ from ciao import cli_envelopes
 from ciao.models import AgentRequest, ChatContext
 from ciao.transcripts import TranscriptStore
 from ciao.web import app as web_app
-from ciao.providers.opencode import _projected_message, opencode_child_status
+from ciao.providers.opencode import _projected_message
 from ciao.web import transcript_service
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -36,8 +36,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TRANSCRIPT_ROUTES = [
     ("/api/chats/{chat_id}/messages", "GET", "chat_messages"),
     ("/api/chats/{chat_id}/messages/part", "GET", "chat_message_part"),
-    ("/api/chats/{chat_id}/subagents", "GET", "chat_subagents"),
-    ("/api/subagents/running", "GET", "running_subagents"),
 ]
 
 
@@ -118,8 +116,9 @@ def test_nothing_was_left_behind_or_duplicated() -> None:
     assert service & routes == set()
     # Floor on what #498 actually moved out of routes_api. It dropped from 40
     # when #500 lifted the six CLI-envelope constants one level up into
-    # ciao/cli_envelopes.py, which subagent_tracking shares.
-    assert len(service) >= 34
+    # ciao/cli_envelopes.py, and by seven more when the subagent transcript
+    # renderers went with their routes.
+    assert len(service) >= 35
 
 
 # ------------------------------------------------------------------- fixtures
@@ -1082,28 +1081,6 @@ async def test_a_recorded_turn_that_is_still_streaming_is_not_dropped(
     assert rows[4]["sent_at"] == "2026-10-22T12:10:00Z"
 
 
-def test_subagent_rows_match_the_wire_contract() -> None:
-    rendered = transcript_service._render_subagent_messages(
-        [SDK_USER, SDK_ASSISTANT, SDK_RESULT]
-    )
-
-    assert rendered == [
-        {"role": "user", "content": "hello there"},
-        {"role": "assistant", "content": "The answer"},
-        {"role": "system", "content": ACTIVITY_LINE, "tool_name": "_activity"},
-    ]
-
-
-def test_subagent_rows_are_identical_for_sdk_objects_and_jsonl_dicts() -> None:
-    """Both shapes reach this renderer; they must render the same."""
-    objects = [SDK_USER, SDK_ASSISTANT, SDK_RESULT]
-    dicts = [{"type": m.type, "message": m.message} for m in objects]
-
-    assert transcript_service._render_subagent_messages(
-        objects
-    ) == transcript_service._render_subagent_messages(dicts)
-
-
 OPENCODE_THREAD = {
     "info": {"id": "s1"},
     "messages": [
@@ -1195,27 +1172,6 @@ def test_a_child_thread_keeps_its_own_turn_numbering() -> None:
 
     assert rendered[0]["turn_index"] == 3
     assert "sent_at" not in rendered[0]
-
-
-def test_opencode_child_status_reads_the_last_assistant_message() -> None:
-    messages = OPENCODE_THREAD["messages"]
-    assert opencode_child_status(messages) == "failed"
-    assert opencode_child_status(messages[:2]) == "completed"
-    assert (
-        opencode_child_status(
-            [{"info": {"role": "assistant", "time": {"created": 1}}}]
-        )
-        == "running"
-    )
-    assert opencode_child_status([]) == "completed"
-    # The active map describes the current execution, not Session.Info.outcome
-    # from the previous completed turn.
-    assert opencode_child_status(
-        [], {"outcome": "failed"}, active=True
-    ) == "running"
-    assert opencode_child_status(
-        [], {"outcome": "succeeded"}, active=False
-    ) == "completed"
 
 
 def test_prune_rows_for_wire_only_truncates_oversized_thinking() -> None:

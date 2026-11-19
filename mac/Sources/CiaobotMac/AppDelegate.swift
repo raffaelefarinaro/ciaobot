@@ -89,13 +89,9 @@ final class MainWindowPresenter: MainWindowPresenting {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let session: AppSessionStatus
-    // Owned here so quitting can cancel a running install.
-    let installer = NativeInstaller()
     /// The in-window Settings bridge. Created here so the connected main window
     /// can be handed it before the menu-bar controller exists.
     let appSettings = AppSettingsBridge()
-    // One engine updater shared by the connection screen and the menu bar.
-    let engineUpdater: EngineUpdater
     /// The stored engine-mode choice (`CiaobotEngineMode`).
     let engineMode: EngineModeStoring
     /// The engine mode this app runs in: `local` owns the bundled engine
@@ -107,6 +103,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The app-owned engine and everything needed to run it. Never started in
     /// external mode. The test initializer leaves it out unless injected.
     let supervisor: EngineSupervisor?
+    /// The 1.x takeover for this launch (#3129 S7): run before the local engine
+    /// starts, so an old install is moved into the app first. Nil when there is
+    /// no bundled engine, or in the test initializer unless injected.
+    let takeover: EngineTakeover?
     /// The launch's last-server and saved-host stores, handed to the
     /// connection view so one defaults domain (or one DEBUG test suite) holds
     /// all three stored decisions.
@@ -142,12 +142,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// stop-and-exit flow is pending, further quit events wait for its reply.
     private var terminationDeferred = false
 
-    typealias MenuBarFactory = @MainActor (AppSessionStatus, ClientUpdateControlling?, EngineUpdateMenuProviding?,
+    typealias MenuBarFactory = @MainActor (AppSessionStatus, ClientUpdateControlling?,
                                            @escaping () -> Void, @escaping () -> Void) -> MenuBarControlling
 
     private let presenter: MainWindowPresenting
     private let updater: ClientUpdateControlling?
-    private let engineUpdates: EngineUpdateMenuProviding?
     private let makeMenuBar: MenuBarFactory?
     private let loginItem: LoginItemControlling?
     private let dockIcon: DockIconControlling?
@@ -175,7 +174,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             reportFailure: MainWindowPresenter.presentFailureAlert
         )
         let session = AppSessionStatus(workspaceIcon: workspaceIcon)
-        let engineUpdater = EngineUpdater()
         let updateQuit = UpdateQuitIntent()
         // One launch defaults domain for the stored engine mode, last server
         // and saved hosts. A DEBUG test launch with an isolated suite keeps
@@ -195,6 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #else
         addressedTestLaunch = false
         #endif
+        let engineParts = Self.makeEngineParts()
         self.init(
             session: session,
             presenter: presenter,
@@ -202,8 +201,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // a debug build, a test process, or a build without the release
             // updater keys; `start()` decides and records why.
             updater: ClientUpdater(updateQuit: updateQuit),
-            engineUpdater: engineUpdater,
-            engineUpdates: EngineUpdateMonitor(status: session, updater: engineUpdater),
             // The signing probe is the real one here. The row explains an
             // ad-hoc or unsigned build instead of offering a registration macOS
             // would refuse.
@@ -220,7 +217,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 lastOrigin: lastServerStore.savedOrigin,
                 addressedTestLaunch: addressedTestLaunch
             ),
-            supervisor: Self.makeSupervisor(),
+            supervisor: engineParts.supervisor,
+            takeover: engineParts.takeover,
             lastServer: lastServerStore,
             hostStore: UserDefaultsHostListStore(defaults: launchDefaults, lastServer: lastServerStore),
             updateQuit: updateQuit
@@ -233,8 +231,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updater: ClientUpdateControlling? = nil,
         // Without an injected updater the test initializer creates an inert one
         // and no monitor, so no test launch probes the engine.
-        engineUpdater: EngineUpdater? = nil,
-        engineUpdates: EngineUpdateMenuProviding? = nil,
         makeMenuBar: MenuBarFactory? = nil,
         loginItem: LoginItemControlling? = nil,
         dockIcon: DockIconControlling? = nil,
@@ -250,6 +246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // external: an ordinary test launch runs no engine.
         mode: EngineMode? = nil,
         supervisor: EngineSupervisor? = nil,
+        takeover: EngineTakeover? = nil,
         lastServer: LastServerStoring? = nil,
         hostStore: HostListStoring? = nil,
         // The lifecycle surfaces (S6). Defaults are the real behaviour; the
@@ -268,8 +265,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.session = session
         self.presenter = presenter
         self.updater = updater
-        self.engineUpdater = engineUpdater ?? EngineUpdater()
-        self.engineUpdates = engineUpdates
         self.makeMenuBar = makeMenuBar
         self.loginItem = loginItem
         self.dockIcon = dockIcon
@@ -279,6 +274,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.engineMode = engineMode ?? TransientEngineModeStore()
         self.mode = mode ?? self.engineMode.mode ?? .external
         self.supervisor = supervisor
+        self.takeover = takeover
         let lastServer = lastServer ?? UserDefaultsLastServerStore()
         self.lastServer = lastServer
         self.hostStore = hostStore ?? UserDefaultsHostListStore(lastServer: lastServer)
@@ -312,11 +308,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return EngineMode.initial(saved: saved, lastOrigin: lastOrigin, hostIsArm64: BundledEngine.hostIsArm64)
     }
 
-    /// The bundled engine with the app's own supervisor surfaces, or a
-    /// supervisor that reports the fixed unavailable copy when this launch
-    /// has no usable `Contents/Resources/engine`. A DEBUG test launch can
-    /// point both the home and the engine resources somewhere isolated.
-    private static func makeSupervisor() -> EngineSupervisor {
+    /// The bundled engine's supervisor and the 1.x takeover that runs before
+    /// it starts, from one locate. The takeover is nil without a usable engine
+    /// (the supervisor then reports the fixed unavailable copy). A DEBUG test
+    /// launch can point the home and the engine resources somewhere isolated.
+    private static func makeEngineParts(
+        mainWindow: @escaping @MainActor () -> NSWindow? = { MainWindowPresenter.mainWindow(in: NSApp.windows) }
+    ) -> (supervisor: EngineSupervisor, takeover: EngineTakeover?) {
         let resourceDirectory: URL?
         let home: URL
         let enginePort: Int?
@@ -330,13 +328,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         home = FileManager.default.homeDirectoryForCurrentUser
         #endif
         let engine = try? BundledEngine.locate(resourceDirectory: resourceDirectory)
-        return EngineSupervisor(
+        let engineHome = EngineHome(home: home)
+        let supervisor = EngineSupervisor(
             engine: engine,
-            home: EngineHome(home: home),
+            home: engineHome,
             processes: FoundationEngineProcesses(),
             identity: EngineIdentityProbe(),
             enginePort: enginePort
         )
+        guard let engine else { return (supervisor, nil) }
+        // The takeover command runs the same launcher as the engine, with HOME
+        // pinned to the engine's home so a test launch stays inside its folder.
+        let commandLine: ([String]) -> TakeoverCommandLine = { arguments in
+            var parent = ProcessInfo.processInfo.environment
+            parent["HOME"] = home.path
+            let launch = engine.launch(.takeover(arguments), parentEnvironment: parent, workingDirectory: home)
+            return TakeoverCommandLine(
+                executable: launch.executable,
+                arguments: launch.arguments,
+                environment: launch.environment,
+                workingDirectory: launch.workingDirectory
+            )
+        }
+        #if DEBUG
+        let labelOverride = EngineTakeover.testLabel(environment: ProcessInfo.processInfo.environment)
+        #else
+        let labelOverride: String? = nil
+        #endif
+        let takeover = EngineTakeover(
+            runner: FoundationTakeoverRunner(commandLine: commandLine),
+            supervisor: supervisor,
+            trash: FileManagerTrashing(),
+            home: engineHome,
+            labelOverride: labelOverride,
+            windowVisible: takeoverWindowVisible(mainWindow)
+        )
+        return (supervisor, takeover)
+    }
+
+    /// The takeover's one question is asked only in a window the user can see:
+    /// the main window, if it is on screen. Injected so the wiring is testable.
+    static func takeoverWindowVisible(_ mainWindow: @escaping @MainActor () -> NSWindow?) -> @MainActor () -> Bool {
+        { mainWindow()?.isVisible ?? false }
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -380,7 +413,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // engine. External mode runs nothing (S6 adds the closed-window and
         // quit handling).
         if mode == .local {
-            supervisor?.start()
+            // The 1.x takeover (S7) runs first and starts the engine itself
+            // when it settles on "no takeover" or "done".
+            if let takeover {
+                takeover.startLocal()
+            } else {
+                supervisor?.start()
+            }
         }
 
         // A login launch opens no main window: the engine starts as usual and
@@ -428,7 +467,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let session = self.session
-        let engineUpdates = self.engineUpdates
         let open: () -> Void = { [weak self] in
             _ = self?.presenter.present()
         }
@@ -438,7 +476,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let quit = { NSApp.terminate(nil) }
         let controller: MenuBarControlling
         if let makeMenuBar {
-            controller = makeMenuBar(session, updater, engineUpdates, open, quit)
+            controller = makeMenuBar(session, updater, open, quit)
         } else {
             // The menu bar keeps this controller alive for the app's lifetime
             // and stops it with the item. The socket itself only exists after
@@ -474,7 +512,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 systemSettings: systemSettings,
                 changeHost: ConnectionMenuActions.changeConnectedHost(present: present),
                 updates: updater,
-                engineUpdates: engineUpdates,
                 engineSupervisor: supervisor,
                 localEngineMode: mode == .local
             )
@@ -484,7 +521,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        installer.cancel()
         #if DEBUG
         testWindowReporter?.stop()
         testWindowReporter = nil
@@ -602,6 +638,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// read the mode from here, so they follow it immediately.
     func modeDidChange(_ newMode: EngineMode) {
         mode = newMode
+        // Leaving local mode while a takeover runs cancels it: nothing new starts,
+        // and an applied move is rolled back (S7).
+        if newMode == .external { takeover?.cancel() }
         menuBar?.setLocalEngineMode(newMode == .local)
     }
 }

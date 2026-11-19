@@ -16,6 +16,10 @@ import { useTaskBoardStore } from '../../stores/taskBoard'
 import ConfirmDialog from '../ConfirmDialog.vue'
 import { pendingConfirm } from '../../lib/confirm'
 import { askPrompt, pendingPrompt } from '../../lib/prompt'
+import type { ProviderDescriptor } from '../../lib/types'
+
+// The registry row /api/models serves for the Claude catalog.
+const PROVIDERS = [{ id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude', capabilities: {} }] as ProviderDescriptor[]
 
 vi.mock('../../lib/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() },
@@ -46,7 +50,7 @@ it('rejects a delayed Home selection even after switching back to its original w
   const projects = useProjectStore()
   projects.workspaces = [{ name: 'personal' }, { name: 'work' }] as typeof projects.workspaces
   projects.workspaceRegistryStatus = 'ready'
-  vi.mocked(api.get).mockResolvedValue({ models: ['old'], default: 'old', provider_models: { claude: ['old'] } })
+  vi.mocked(api.get).mockResolvedValue({ models: ['old'], default: 'old', providers: PROVIDERS, provider_models: { claude: ['old'] } })
   const wrapper = mount(HomeIntake)
   await wrapper.get('.home-intake-model-trigger').trigger('click')
   await flushPromises()
@@ -66,7 +70,7 @@ it('returns focus to Home’s model opener only when the removed picker held foc
   const projects = useProjectStore()
   projects.workspaces = [{ name: 'personal' }, { name: 'work' }] as typeof projects.workspaces
   projects.workspaceRegistryStatus = 'ready'
-  vi.mocked(api.get).mockResolvedValue({ models: [], default: '', provider_models: {} })
+  vi.mocked(api.get).mockResolvedValue({ models: [], default: '', providers: PROVIDERS, provider_models: { claude: [] } })
   const wrapper = mount(HomeIntake, { attachTo: document.body })
   await wrapper.get('.home-intake-model-trigger').trigger('click')
   await flushPromises()
@@ -83,7 +87,7 @@ it('does not steal focus when Home’s picker closes after focus moved elsewhere
   const projects = useProjectStore()
   projects.workspaces = [{ name: 'personal' }] as typeof projects.workspaces
   projects.workspaceRegistryStatus = 'ready'
-  vi.mocked(api.get).mockResolvedValue({ models: [], default: '', provider_models: {} })
+  vi.mocked(api.get).mockResolvedValue({ models: [], default: '', providers: PROVIDERS, provider_models: { claude: [] } })
   const wrapper = mount(HomeIntake, { attachTo: document.body })
   await wrapper.get('.home-intake-model-trigger').trigger('click')
   await flushPromises()
@@ -102,7 +106,7 @@ it.each([
   const projects = useProjectStore()
   projects.workspaces = [{ name: 'personal' }] as typeof projects.workspaces
   projects.workspaceRegistryStatus = 'ready'
-  vi.mocked(api.get).mockResolvedValue({ models: ['keyboard-model'], default: '', provider_models: {} })
+  vi.mocked(api.get).mockResolvedValue({ models: ['keyboard-model'], default: '', providers: PROVIDERS, provider_models: { claude: ['keyboard-model'] } })
   const wrapper = mount(component, { attachTo: document.body })
   await flushPromises()
   await wrapper.get(trigger).trigger('click')
@@ -123,7 +127,7 @@ it.each([
   const projects = useProjectStore()
   projects.workspaces = [{ name: 'personal' }, { name: 'work' }] as typeof projects.workspaces
   projects.workspaceRegistryStatus = 'ready'
-  vi.mocked(api.get).mockResolvedValue({ models: ['model'], default: '', provider_models: {} })
+  vi.mocked(api.get).mockResolvedValue({ models: ['model'], default: '', providers: PROVIDERS, provider_models: { claude: ['model'] } })
   const wrapper = mount(component, { attachTo: document.body })
   await flushPromises()
   await wrapper.get(trigger).trigger('click')
@@ -143,7 +147,7 @@ it('does not restore Home picker focus after a second transition or a deliberate
   const projects = useProjectStore()
   projects.workspaces = [{ name: 'personal' }, { name: 'work' }] as typeof projects.workspaces
   projects.workspaceRegistryStatus = 'ready'
-  vi.mocked(api.get).mockResolvedValue({ models: [], default: '', provider_models: {} })
+  vi.mocked(api.get).mockResolvedValue({ models: [], default: '', providers: PROVIDERS, provider_models: { claude: [] } })
   const wrapper = mount(HomeIntake, { attachTo: document.body })
   await wrapper.get('.home-intake-model-trigger').trigger('click')
   await flushPromises()
@@ -162,7 +166,7 @@ it('keeps the Home model draft and open picker when a guarded workspace switch i
   projects.workspaces = [{ name: 'personal' }, { name: 'work' }] as typeof projects.workspaces
   projects.workspaceRegistryStatus = 'ready'
   projects.registerWorkspaceSwitchGuard(async () => false)
-  vi.mocked(api.get).mockResolvedValue({ models: ['chosen-model'], default: '', provider_models: {} })
+  vi.mocked(api.get).mockResolvedValue({ models: ['chosen-model'], default: '', providers: PROVIDERS, provider_models: { claude: ['chosen-model'] } })
   const tasks = useTaskStore()
   const wrapper = mount(HomeIntake, { attachTo: document.body })
   await wrapper.get('.home-intake-model-trigger').trigger('click')
@@ -193,7 +197,7 @@ it('does not submit a selected personal model when starting a chat in work', asy
   ] as typeof projects.projects
   vi.mocked(api.get).mockImplementation(async url => ({
     models: [url.includes('workspace=work') ? 'work-model' : 'personal-model'],
-    default: '', provider_models: {},
+    default: '', providers: PROVIDERS, provider_models: { claude: [url.includes('workspace=work') ? 'work-model' : 'personal-model'] },
   }))
   const create = vi.spyOn(projects, 'newChatInProject').mockResolvedValue({ chat_id: 'new' } as never)
   vi.spyOn(projects, 'sendMessage').mockReturnValue(true)
@@ -217,7 +221,7 @@ it('announces Home model failures outside the closed picker and retries', async 
   let attempts = 0
   vi.mocked(api.get).mockImplementation(async (url) => {
     if (url.startsWith('/api/models') && attempts++ === 0) throw new Error('server token: secret-model-key')
-    return { models: [], default: '', provider_models: {} }
+    return { models: [], default: '', providers: PROVIDERS, provider_models: { claude: [] } }
   })
   const wrapper = mount(HomeIntake)
   await wrapper.get('.home-intake-model-trigger').trigger('click')
@@ -266,7 +270,7 @@ it.each([
   status = wrapper.get(`[role="status"][aria-label="${label}"]`)
   expect(status.attributes('aria-live')).toBe('polite')
   expect(status.text()).toContain('Loading')
-  succeed({ models: ['recovered'], default: '', provider_models: {} })
+  succeed({ models: ['recovered'], default: '', providers: PROVIDERS, provider_models: { claude: ['recovered'] } })
   await flushPromises()
   expect(wrapper.find('[role="alert"]').exists()).toBe(false)
   expect(wrapper.get(`[role="status"][aria-label="${label}"]`).text()).toContain('loaded')
@@ -281,7 +285,7 @@ it('labels Home’s last-good same-workspace models stale after a refresh failur
   vi.mocked(api.get).mockImplementation(async url => {
     if (url.startsWith('/api/models')) {
       if (reads++ > 0) throw new Error('offline')
-      return { models: ['saved-model'], default: '', provider_models: {} }
+      return { models: ['saved-model'], default: '', providers: PROVIDERS, provider_models: { claude: ['saved-model'] } }
     }
     return []
   })
@@ -299,7 +303,7 @@ it('labels Home’s last-good same-workspace models stale after a refresh failur
 it('recovers an open Home picker when the registry returns without changing the active name', async () => {
   const projects = useProjectStore()
   const get = vi.mocked(api.get)
-  get.mockResolvedValue({ models: ['ready-model'], default: '', provider_models: {} })
+  get.mockResolvedValue({ models: ['ready-model'], default: '', providers: PROVIDERS, provider_models: { claude: ['ready-model'] } })
   const wrapper = mount(HomeIntake)
   await wrapper.get('.home-intake-model-trigger').trigger('click')
   await flushPromises()
@@ -324,7 +328,7 @@ it('loads a mounted schedule editor when the registry becomes ready without a na
   const projects = useProjectStore()
   const tasks = useTaskStore()
   const get = vi.mocked(api.get)
-  get.mockResolvedValue({ models: [], default: '', provider_models: {} })
+  get.mockResolvedValue({ models: [], default: '', providers: PROVIDERS, provider_models: { claude: [] } })
   const wrapper = mount(NewScheduleForm)
   await flushPromises()
   expect(get).not.toHaveBeenCalled()
@@ -356,7 +360,7 @@ it('loads models when a fixed-chat automation becomes project-bound after regist
   await wrapper.get('#nsf-target').setValue('web:c')
   await wrapper.get('#nsf-target').setValue('proj:p')
   expect(api.get).toHaveBeenCalledTimes(1)
-  resolve({ models: ['available-model'], default: '', provider_models: {} })
+  resolve({ models: ['available-model'], default: '', providers: PROVIDERS, provider_models: { claude: ['available-model'] } })
   await flushPromises()
   await wrapper.get('.model-selector__trigger').trigger('click')
   expect(wrapper.text()).toContain('Available Model')
@@ -368,7 +372,7 @@ it('keeps a failed model read retryable instead of automatically repeating it on
   projects.projects = [{ project_id: 'p', workspace: 'personal', name: 'Project' }] as typeof projects.projects
   projects.chats = [{ chat_id: 'c', project_id: 'p', title: 'Chat', created_at: '2026-01-01' }] as typeof projects.chats
   vi.mocked(api.get).mockRejectedValueOnce(new Error('offline'))
-    .mockResolvedValue({ models: ['recovered-model'], default: '', provider_models: {} })
+    .mockResolvedValue({ models: ['recovered-model'], default: '', providers: PROVIDERS, provider_models: { claude: ['recovered-model'] } })
   const wrapper = mount(NewScheduleForm)
   await flushPromises()
   await wrapper.get('#nsf-frequency').setValue('interval')
@@ -398,7 +402,7 @@ it('does not submit the previous workspace model in a new automation', async () 
     { project_id: 'p', workspace: 'personal', name: 'Personal' },
     { project_id: 'w', workspace: 'work', name: 'Work' },
   ] as typeof projects.projects
-  vi.mocked(api.get).mockResolvedValue({ models: ['old'], default: 'old', provider_models: { claude: ['old'] } })
+  vi.mocked(api.get).mockResolvedValue({ models: ['old'], default: 'old', providers: PROVIDERS, provider_models: { claude: ['old'] } })
   const tasks = useTaskStore()
   const create = vi.spyOn(tasks, 'createSchedule').mockResolvedValue({} as never)
   const wrapper = mount(NewScheduleForm)
@@ -427,7 +431,7 @@ it('remounts the new automation picker on switch, fences delayed selection and r
     if (url.includes('workspace=work') && workReads++ === 0) {
       return new Promise((_, reject) => { failWork = reject })
     }
-    return { models: [url.includes('workspace=work') ? 'work-model' : 'personal-model'], default: '', provider_models: {} }
+    return { models: [url.includes('workspace=work') ? 'work-model' : 'personal-model'], default: '', providers: PROVIDERS, provider_models: { claude: [url.includes('workspace=work') ? 'work-model' : 'personal-model'] } }
   })
   const wrapper = mount(NewScheduleForm, { attachTo: document.body })
   await flushPromises()
@@ -456,7 +460,7 @@ it('ignores delayed automation picker input after A to B to A and never steals n
   const projects = useProjectStore()
   projects.workspaces = [{ name: 'personal' }, { name: 'work' }] as typeof projects.workspaces
   projects.workspaceRegistryStatus = 'ready'
-  vi.mocked(api.get).mockResolvedValue({ models: ['personal-model'], default: '', provider_models: {} })
+  vi.mocked(api.get).mockResolvedValue({ models: ['personal-model'], default: '', providers: PROVIDERS, provider_models: { claude: ['personal-model'] } })
   const wrapper = mount(NewScheduleForm, { attachTo: document.body })
   await flushPromises()
   await wrapper.get('.model-selector__trigger').trigger('click')
@@ -476,7 +480,7 @@ it('ignores delayed automation picker input after A to B to A and never steals n
 
 it('reports registry failure and recovers the mounted automation editor without a name change', async () => {
   const projects = useProjectStore()
-  vi.mocked(api.get).mockResolvedValue({ models: ['recovered-model'], default: '', provider_models: {} })
+  vi.mocked(api.get).mockResolvedValue({ models: ['recovered-model'], default: '', providers: PROVIDERS, provider_models: { claude: ['recovered-model'] } })
   const wrapper = mount(NewScheduleForm)
   await flushPromises()
   expect(vi.mocked(api.get).mock.calls.filter(([url]) => url.startsWith('/api/models'))).toHaveLength(0)
@@ -536,7 +540,7 @@ it.each(['move', 'toggle', 'engine'] as const)('blocks another system routine ed
   } as typeof tasks.schedules[number]
   tasks.schedules = [schedule]
   tasks.schedulesLoaded = true
-  vi.mocked(api.get).mockResolvedValue({ models: ['new-model'], default: '', provider_models: {} })
+  vi.mocked(api.get).mockResolvedValue({ models: ['new-model'], default: '', providers: PROVIDERS, provider_models: { claude: ['new-model'] } })
   let resolve!: (value: unknown) => void
   vi.mocked(api.patch).mockReturnValueOnce(new Promise(done => { resolve = done }))
   const router = createRouter({ history: createMemoryHistory(), routes: [
@@ -580,7 +584,7 @@ it('keeps an unsaved engine edit bound to its schedule when the active workspace
     enabled: true, model: '', provider: '', web_project_id: 'p',
   }] as typeof tasks.schedules
   tasks.schedulesLoaded = true
-  vi.mocked(api.get).mockResolvedValue({ models: ['personal-model'], default: '', provider_models: {} })
+  vi.mocked(api.get).mockResolvedValue({ models: ['personal-model'], default: '', providers: PROVIDERS, provider_models: { claude: ['personal-model'] } })
   const update = vi.spyOn(tasks, 'updateSchedule').mockResolvedValue(tasks.schedules[0])
   const router = createRouter({ history: createMemoryHistory(), routes: [
     { path: '/schedules/:scheduleId?', name: 'schedules', component: defineComponent({}) },
@@ -633,7 +637,7 @@ it('keeps automation model errors and retry available in the engine editor', asy
   let reads = 0
   vi.mocked(api.get).mockImplementation(async url => {
     if (url.startsWith('/api/models') && reads++ === 0) throw new Error('offline')
-    return { models: ['personal-model'], default: '', provider_models: {} }
+    return { models: ['personal-model'], default: '', providers: PROVIDERS, provider_models: { claude: ['personal-model'] } }
   })
   const router = createRouter({ history: createMemoryHistory(), routes: [
     { path: '/schedules/:scheduleId?', name: 'schedules', component: defineComponent({}) },
@@ -672,7 +676,7 @@ it('lets Escape close the engine picker before it closes the editor', async () =
     enabled: true, model: '', provider: '',
   }] as typeof tasks.schedules
   tasks.schedulesLoaded = true
-  vi.mocked(api.get).mockResolvedValue({ models: ['model'], default: '', provider_models: {} })
+  vi.mocked(api.get).mockResolvedValue({ models: ['model'], default: '', providers: PROVIDERS, provider_models: { claude: ['model'] } })
   const router = createRouter({ history: createMemoryHistory(), routes: [
     { path: '/schedules/:scheduleId?', name: 'schedules', component: defineComponent({}) },
   ] })
@@ -707,7 +711,7 @@ it('gives a dirty engine confirmation and IME composition precedence over editor
     enabled: true, model: '', provider: '',
   }] as typeof tasks.schedules
   tasks.schedulesLoaded = true
-  vi.mocked(api.get).mockResolvedValue({ models: ['model'], default: '', provider_models: {} })
+  vi.mocked(api.get).mockResolvedValue({ models: ['model'], default: '', providers: PROVIDERS, provider_models: { claude: ['model'] } })
   const router = createRouter({ history: createMemoryHistory(), routes: [
     { path: '/schedules/:scheduleId?', name: 'schedules', component: defineComponent({}) },
   ] })
@@ -768,7 +772,7 @@ it('restores the engine opener after registry loss but does not steal deliberate
     enabled: true, model: '', provider: '',
   }] as typeof tasks.schedules
   tasks.schedulesLoaded = true
-  vi.mocked(api.get).mockResolvedValue({ models: ['model'], default: '', provider_models: {} })
+  vi.mocked(api.get).mockResolvedValue({ models: ['model'], default: '', providers: PROVIDERS, provider_models: { claude: ['model'] } })
   const router = createRouter({ history: createMemoryHistory(), routes: [
     { path: '/schedules/:scheduleId?', name: 'schedules', component: defineComponent({}) },
   ] })
@@ -807,7 +811,7 @@ it('recovers an open engine editor after registry readiness changes without a wo
     enabled: true, model: '', provider: '',
   }] as typeof tasks.schedules
   tasks.schedulesLoaded = true
-  vi.mocked(api.get).mockResolvedValue({ models: ['recovered-model'], default: '', provider_models: {} })
+  vi.mocked(api.get).mockResolvedValue({ models: ['recovered-model'], default: '', providers: PROVIDERS, provider_models: { claude: ['recovered-model'] } })
   const router = createRouter({ history: createMemoryHistory(), routes: [
     { path: '/schedules/:scheduleId?', name: 'schedules', component: defineComponent({}) },
   ] })
@@ -1077,7 +1081,7 @@ it('closes task delegation on switching and opens the new workspace task with it
     const workspace = url.includes('workspace=work') ? 'work' : 'personal'
     if (url.startsWith('/api/models')) {
       if (workspace === 'work' && workModelReads++ === 0) throw new Error('work offline')
-      return { models: [`${workspace}-model`], default: '', provider_models: {} }
+      return { models: [`${workspace}-model`], default: '', providers: PROVIDERS, provider_models: { claude: [`${workspace}-model`] } }
     }
     if (url.startsWith('/api/tasks?')) return { workspace, tasks: [row(workspace)] }
     if (url.startsWith('/api/tasks/')) return { workspace, task: row(workspace) }
@@ -1199,7 +1203,7 @@ it('closes the task and invalidates a pending delegation preview on synchronous 
   vi.mocked(api.get).mockImplementation(async url => {
     if (url.startsWith('/api/tasks?')) return { workspace: 'personal', tasks: [task] }
     if (url.startsWith('/api/tasks/')) return { workspace: 'personal', task }
-    return { models: [], default: '', provider_models: {} }
+    return { models: [], default: '', providers: PROVIDERS, provider_models: { claude: [] } }
   })
   const route = reactive({ fullPath: '/chat/abc', params: {} })
   const options = {
@@ -1244,7 +1248,7 @@ it('does not apply an old preview to a newly opened delegation after A to B to A
   vi.mocked(api.get).mockImplementation(async url => {
     if (url.startsWith('/api/tasks?')) return { workspace: 'personal', tasks: [task] }
     if (url.startsWith('/api/tasks/')) return { workspace: 'personal', task }
-    return { models: [], default: '', provider_models: {} }
+    return { models: [], default: '', providers: PROVIDERS, provider_models: { claude: [] } }
   })
   const wrapper = mount(TaskWorkspaceSurface, { attachTo: document.body })
   await flushPromises()

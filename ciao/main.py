@@ -14,7 +14,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping
 
 from ciao.config import RESTART_EXIT_CODE, CiaoConfig
 from ciao.execution_modes import cap_schedule_mode
@@ -52,7 +52,6 @@ from ciao.web.push import PushManager
 if TYPE_CHECKING:
     import uvicorn
 
-    from ciao.native_installer import NativeBootstrapContext
     from ciao.provider_service import ProviderService
 
 logger = logging.getLogger(__name__)
@@ -351,7 +350,6 @@ async def _mark_bound_when_serving(
     tracker: StartupTracker,
     *,
     poll_interval: float = 0.05,
-    on_bound: Callable[[], None] | None = None,
 ) -> None:
     """Finish the bind phase once uvicorn is serving, not when it stops.
 
@@ -361,14 +359,10 @@ async def _mark_bound_when_serving(
     ``serve()`` ends before that (a bind failure), the caller cancels this
     watcher and the phase stays in progress.
 
-    ``on_bound`` runs after the phase is recorded done, so a native bootstrap
-    can report the loopback port only once the bind fact exists in the tracker.
     """
     while not server.started:
         await asyncio.sleep(max(0.0, poll_interval))
     tracker.done(BIND_PHASE)
-    if on_bound is not None:
-        on_bound()
 
 
 def _open_browser_when_ready(url: str) -> None:
@@ -409,41 +403,6 @@ def _open_browser_when_ready(url: str) -> None:
     ).start()
 
 
-def _report_native_bound(
-    native_bootstrap: NativeBootstrapContext, port: int, server: uvicorn.Server
-) -> bool:
-    """Tell the native parent the loopback port, or stop serving invisibly.
-
-    Any failure (a closed pipe, a refused record, an unexpected error) makes the
-    server exit rather than serve a wizard nobody can see. The log line is fixed
-    text: no descriptor, path or OS detail. Returns False on that failure; the
-    caller turns it into a nonzero exit.
-    """
-    try:
-        native_bootstrap.notify_bound(port)
-    except Exception:
-        logger.error(
-            "The native bootstrap could not report its bound port; stopping "
-            "instead of serving invisibly."
-        )
-        server.should_exit = True
-        return False
-    return True
-
-
-def _open_wizard_browser(
-    url: str, native_bootstrap: NativeBootstrapContext | None
-) -> None:
-    """Open the wizard tab for a legacy bootstrap, never for a native one.
-
-    The native installer's client owns its own window and its own handover, so
-    the bootstrap child must not race it with an OS-level browser launch.
-    """
-    if native_bootstrap is not None:
-        return
-    _open_browser_when_ready(url)
-
-
 async def _wait_for_chat_drain(
     pcm: ProjectChatManager,
     *,
@@ -453,7 +412,7 @@ async def _wait_for_chat_drain(
     """Wait until chat work stays idle across consecutive observations.
 
     The stable-idle window closes the handoff race between a parent stream
-    ending and its background-subagent watcher or its follow-up turn starting.
+    ending and its between-turns drain or follow-up turn starting.
     ``begin_restart_drain`` prevents unrelated new turns from extending the
     wait after a restart has already been requested.
     """
@@ -540,7 +499,6 @@ def _restart_watchdog(
     restart_code: int,
     *,
     supervised: bool,
-    native_bootstrap: bool = False,
     sleep: Callable[[float], None] = time.sleep,
     execv: Callable[[str, list[str]], object] = os.execv,
     exit_now: Callable[[int], object] = os._exit,
@@ -549,13 +507,9 @@ def _restart_watchdog(
 
     A clean-exit request (``restart_code == 0``) just exits. Under ``ciao supervise``
     the supervisor owns the relaunch, so the process exits with the restart code and
-    never execs (an exec would bypass the supervisor's loop and backoff). A
-    native bootstrap is the same: its parent owns the lifetime and reads the
-    child's exit code, so a relaunch would detach the outcome it is waiting
-    for. Only that flag takes this branch; the legacy installer bootstrap
-    re-execs like any unsupervised run. Otherwise re-exec a fresh interpreter,
-    as before, so launchd keeps tracking the same pid and the relaunch picks
-    up the current environment.
+    never execs (an exec would bypass the supervisor's loop and backoff).
+    Otherwise re-exec a fresh interpreter, so launchd keeps tracking the same
+    pid and the relaunch picks up the current environment.
     """
     sleep(RESTART_WATCHDOG_GRACE_S)
     if restart_code == 0:
@@ -565,10 +519,6 @@ def _restart_watchdog(
         return
     if supervised:
         logger.info("Cleanup did not finish; exiting for the supervisor to relaunch")
-        exit_now(restart_code)
-        return
-    if native_bootstrap:
-        logger.info("Native bootstrap did not finish cleanup; exiting for its parent")
         exit_now(restart_code)
         return
     logger.info("Cleanup did not finish; re-execing for the requested restart")
@@ -587,34 +537,12 @@ def _restart_watchdog(
 async def _async_main(
     *,
     supervised: bool = False,
-    installer_bootstrap: bool = False,
-    installer_run_id: str | None = None,
-    installer_suggest_workspace: str | None = None,
-    installer_native_fd: int | None = None,
-    installer_native_workspace: str | None = None,
     app_engine: bool = False,
     app_engine_port: int | None = None,
 ) -> int:
-    if installer_bootstrap:
-        # Before anything is created: refuse to bootstrap over an install, then
-        # isolate this process from any inherited destination.
-        from ciao.install_discovery import InstallerEntryRefused, require_fresh_installer_entry
-
-        try:
-            require_fresh_installer_entry(environ=os.environ, cwd=Path.cwd())
-        except InstallerEntryRefused as exc:
-            print(f"Ciaobot installer bootstrap refused: {exc}", file=sys.stderr)
-            return 64
-        _enter_installer_bootstrap_environment(config_root=Path.home() / ".ciao" / "installer-bootstrap")
     _ensure_tool_dirs_on_path()
     os.environ.setdefault("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
-    # Ordinary startup keeps its exact call shape; only the installer mode asks
-    # for the scratch branch.
-    config = (
-        CiaoConfig.from_env(installer_bootstrap=True, installer_suggest_workspace=installer_suggest_workspace)
-        if installer_bootstrap
-        else CiaoConfig.from_env()
-    )
+    config = CiaoConfig.from_env()
     if app_engine_port is not None:
         # The app's `--port`: this process only, ahead of the instance lock
         # and the ready record so both carry the port actually served.
@@ -641,16 +569,7 @@ async def _async_main(
         config.import_legacy_gws_profile_env()
         if config._workspace_registry_changed:
             config.persist_workspace_registry()
-        if installer_bootstrap and installer_native_fd is None:
-            return await _run_server_locked(
-                config,
-                supervised=supervised,
-                startup_id=lock.startup_id,
-                engine_pid=os.getpid(),
-                installer_bootstrap=True,
-                installer_run_id=installer_run_id,
-            )
-        if app_engine and not installer_bootstrap:
+        if app_engine:
             # App mode: publish the readiness record for the app's probe and
             # hand the engine's lifetime to the parent watcher, which SIGTERMs
             # this process when the app dies (the engine's graceful shutdown
@@ -665,17 +584,6 @@ async def _async_main(
                 bootstrap=config.bootstrap_mode,
             )
             app_engine_module.watch_parent(lambda: os.kill(os.getpid(), signal.SIGTERM))
-        if installer_bootstrap:
-            return await _run_server_locked(
-                config,
-                supervised=supervised,
-                startup_id=lock.startup_id,
-                engine_pid=os.getpid(),
-                installer_bootstrap=True,
-                installer_run_id=installer_run_id,
-                installer_native_fd=installer_native_fd,
-                installer_native_workspace=installer_native_workspace,
-            )
         if app_engine:
             return await _run_server_locked(
                 config,
@@ -690,23 +598,6 @@ async def _async_main(
             startup_id=lock.startup_id,
             engine_pid=os.getpid(),
         )
-
-
-def _enter_installer_bootstrap_environment(*, config_root: Path) -> None:
-    """Isolate an installer bootstrap child from anything inherited.
-
-    The environment is sanitised in place, not just the mapping handed to the
-    config: several downstream readers hit ``os.environ`` directly. The working
-    directory moves to a neutral launcher folder so cwd discovery cannot see the
-    runtime root, and the no-browser preference survives.
-    """
-    keep = {"CIAO_NO_BROWSER"}
-    for key in [key for key in os.environ if key.startswith(("CIAO_", "PWA_")) and key not in keep]:
-        os.environ.pop(key, None)
-    os.environ.pop("GWS_PROFILE", None)
-    launcher = config_root / "launcher"
-    launcher.mkdir(parents=True, exist_ok=True)
-    os.chdir(launcher)
 
 
 def _start_workspace_move_verify(
@@ -737,13 +628,47 @@ def _start_workspace_move_verify(
 def _pin_app_engine_bootstrap_host(config: CiaoConfig, *, app_engine: bool) -> None:
     """Keep the pre-setup wizard of the app's engine on loopback.
 
-    The installer bootstrap already binds 127.0.0.1; the app engine's
-    bootstrap (no configured workspace yet) must not be a setup wizard
-    reachable on the LAN. Once a workspace is configured the host the
+    The app engine's bootstrap (no configured workspace yet) must not be a
+    setup wizard reachable on the LAN. Once a workspace is configured the host the
     settings overlay chose applies as before. This process only, never saved.
     """
     if app_engine and config.bootstrap_mode:
         config.pwa_host = "127.0.0.1"
+
+
+PERMISSION_REFIRE_DELAY_S = 30.0
+PERMISSION_REFIRE_TRIES = 3
+
+
+async def _refire_permission_push(
+    payload: dict[str, Any],
+    *,
+    chat_id: str,
+    request_id: str,
+    providers: Mapping[str, Any],
+    focused_chats: Mapping[str, int],
+    dispatch: Callable[[dict[str, Any]], object],
+    sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
+) -> None:
+    """Re-send a permission push while its request is still pending and nobody is watching.
+
+    Up to ``PERMISSION_REFIRE_TRIES`` re-sends, ``PERMISSION_REFIRE_DELAY_S`` apart. Stops as
+    soon as the request is answered, the chat's provider is gone, or the chat is focused.
+    """
+    for _ in range(PERMISSION_REFIRE_TRIES):
+        await sleep(PERMISSION_REFIRE_DELAY_S)
+        provider_service = providers.get(chat_id)
+        if provider_service is None or provider_service.provider is None:
+            break
+        provider = provider_service.provider
+        if provider is None or not provider.has_permission_request(request_id):
+            break
+        if focused_chats.get(chat_id, 0) > 0:
+            break
+        try:
+            dispatch(payload)
+        except Exception:
+            logger.exception("Permission re-fire failed for %s", chat_id)
 
 
 async def _run_server_locked(
@@ -752,29 +677,9 @@ async def _run_server_locked(
     supervised: bool = False,
     startup_id: str | None = None,
     engine_pid: int | None = None,
-    installer_bootstrap: bool = False,
-    installer_run_id: str | None = None,
-    installer_native_fd: int | None = None,
-    installer_native_workspace: str | None = None,
     app_engine: bool = False,
 ) -> int:
     """Server implementation; caller owns the workspace instance lock."""
-
-    if installer_native_fd is not None:
-        # Mark the private channel non-inheritable before this process starts
-        # any provider task or child. capture() validates it again, but doing
-        # it here closes the window before the first create_task.
-        from ciao.native_installer import NATIVE_BOOTSTRAP_REFUSED_EXIT_CODE
-
-        try:
-            os.set_inheritable(installer_native_fd, False)
-        except OSError:
-            print(
-                "Ciaobot native bootstrap refused: the private installer "
-                "descriptor is not usable.",
-                file=sys.stderr,
-            )
-            return NATIVE_BOOTSTRAP_REFUSED_EXIT_CODE
 
     # Runtime-mutable settings overlay (PWA Settings). Applied on top of the
     # env-backed config so PATCHes take effect without a restart and survive
@@ -785,16 +690,7 @@ async def _run_server_locked(
 
     app_settings = AppSettingsStore(config.state_path.parent / "app_settings.json")
     app_settings.import_legacy_env(getattr(config, "legacy_env_settings", {}))
-    bootstrap_port = config.pwa_port
     app_settings.apply_to_config(config)
-    if installer_bootstrap:
-        # Stored settings must not move an installer bootstrap off loopback or
-        # into dev mode; this applies to this process only and is never saved.
-        # The port is the bootstrap's own PWA_PORT (see from_env), not a stored setting.
-        config.pwa_host = "127.0.0.1"
-        config.pwa_port = bootstrap_port
-        config.dev_mode = False
-        config.app_repo = None
     _pin_app_engine_bootstrap_host(config, app_engine=app_engine)
 
     setup_error_logging(config.workspace_root)
@@ -843,16 +739,14 @@ async def _run_server_locked(
 
     async def check_claude_code():
         try:
-            # Prefer the SDK's bundled Claude CLI when present; otherwise fall
-            # back to an external ``claude`` resolved against the login-shell
-            # PATH, since launchd omits ~/.local/bin and other tool dirs.
-            from ciao.providers.claude import get_bundled_claude_path
+            # Resolve ``claude`` against the login-shell PATH, since launchd
+            # omits ~/.local/bin and other tool dirs.
             from ciao.tool_path import resolve_tool
-            cli = get_bundled_claude_path() or resolve_tool("claude")
+            cli = resolve_tool("claude")
             if not cli:
                 tracker.fail(
                     "connect_claude_code",
-                    "claude CLI not found (no bundled binary and not on PATH)",
+                    "claude CLI not found on PATH",
                 )
                 return
             proc = await asyncio.create_subprocess_exec(
@@ -1221,53 +1115,10 @@ async def _run_server_locked(
     if not getattr(config, "bootstrap_mode", False):
         mcp_service = CiaoMcpService(config)
 
-    native_bootstrap: NativeBootstrapContext | None = None
-    if installer_native_fd is not None:
-        from ciao.native_installer import (
-            NATIVE_BOOTSTRAP_REFUSED_EXIT_CODE,
-            NativeBootstrapContext,
-            NativeBootstrapError,
-        )
-
-        if not installer_bootstrap:
-            return NATIVE_BOOTSTRAP_REFUSED_EXIT_CODE
-        try:
-            # The owned-host check runs codesign/stat reads; keep it off the
-            # event loop. This is the only place the child binds itself to the
-            # parent's host snapshot, scratch chain, absent definition and
-            # absent handoff result.
-            native_bootstrap = await asyncio.to_thread(
-                NativeBootstrapContext.capture,
-                run_id=installer_run_id or "",
-                startup_id=tracker.startup_id or "",
-                notification_fd=installer_native_fd,
-                config_root=config.workspace_root,
-                runtime_root=config.state_path.parent,
-                bootstrap_host=config.pwa_host,
-                bootstrap_port=config.pwa_port,
-                expected_workspace=(
-                    Path(installer_native_workspace)
-                    if installer_native_workspace is not None
-                    else None
-                ),
-                engine_python=Path(sys.executable),
-            )
-        except NativeBootstrapError:
-            # Fixed text: no path, descriptor or platform detail.
-            print(
-                "Ciaobot native bootstrap refused: the installer state is not "
-                "the one this run prepared.",
-                file=sys.stderr,
-            )
-            return NATIVE_BOOTSTRAP_REFUSED_EXIT_CODE
-
     app = create_app(
         config,
         app_settings=app_settings,
         mcp_service=mcp_service,
-        installer_bootstrap=installer_bootstrap,
-        installer_run_id=installer_run_id,
-        native_bootstrap=native_bootstrap,
     )
     app.state.startup_tracker = tracker
     # The startup gate's own verdict, so routes and tests read the same answer
@@ -1409,25 +1260,17 @@ async def _run_server_locked(
             logger.exception("Failed scheduling permission push for %s", chat_id)
             return
 
-        async def _refire() -> None:
-            for _ in range(3):
-                await asyncio.sleep(30)
-                # Check if the request is still pending in the gate.
-                provider_service = pcm._providers.get(chat_id)
-                if provider_service is None or provider_service.provider is None:
-                    break
-                gate = getattr(provider_service.provider, "permission_gate", None)
-                if gate is None or not gate.has_pending(request_id):
-                    break
-                if app.state.focused_chats.get(chat_id, 0) > 0:
-                    break
-                try:
-                    loop.run_in_executor(None, pm.send, payload)
-                except Exception:
-                    logger.exception("Permission re-fire failed for %s", chat_id)
-
         try:
-            loop.create_task(_refire())
+            loop.create_task(
+                _refire_permission_push(
+                    payload,
+                    chat_id=chat_id,
+                    request_id=request_id,
+                    providers=pcm._providers,
+                    focused_chats=app.state.focused_chats,
+                    dispatch=lambda p: loop.run_in_executor(None, pm.send, p),
+                )
+            )
         except Exception:
             logger.exception("Failed to schedule permission re-fire for %s", chat_id)
 
@@ -1483,19 +1326,6 @@ async def _run_server_locked(
         pruned_imports = sweep_import_batches(config)
         if pruned_imports:
             logger.info("Pruned %d expired import batch(es)", pruned_imports)
-
-        # Wake chats whose CLI-owned tasks (Monitor / background Bash) were
-        # still running when the old server died: no completion watcher
-        # survives a restart, so the wake must be armed here.
-        swept = pcm.sweep_orphaned_cli_tasks()
-        if swept:
-            logger.warning("Woke %d chat(s) with CLI tasks orphaned by the restart", swept)
-        interrupted = pcm.sweep_interrupted_background_work()
-        if interrupted:
-            logger.warning(
-                "Woke %d chat(s) with OpenCode background work interrupted by the restart",
-                interrupted,
-            )
 
         # Resume chats whose turn the previous process never finished (#2128).
         try:
@@ -1690,9 +1520,7 @@ async def _run_server_locked(
             file=sys.stderr,
             flush=True,
         )
-        # The native installer's client owns the window and its own handover;
-        # a bootstrap child must never open a browser tab behind it.
-        _open_wizard_browser(setup_url, native_bootstrap)
+        _open_browser_when_ready(setup_url)
 
     # The port is checked before the server starts, so a port that is already
     # taken fails here — with the errno the reason can be read out of — and
@@ -1741,10 +1569,7 @@ async def _run_server_locked(
             threading.Thread(
                 target=_restart_watchdog,
                 args=(restart_code,),
-                kwargs={
-                    "supervised": supervised,
-                    "native_bootstrap": native_bootstrap is not None,
-                },
+                kwargs={"supervised": supervised},
                 daemon=True,
                 name="ciao-restart-watchdog",
             ).start()
@@ -1811,8 +1636,6 @@ async def _run_server_locked(
         # own, and a sweep racing this teardown would disconnect a service
         # already being torn down here.
         await pcm.stop_provider_reaper()
-        # The providers still hold their background sets here, and disconnect clears them.
-        pcm.record_interrupted_background_work()
         services = list(pcm._providers.values())
         pcm._providers.clear()
         pcm._provider_last_used.clear()
@@ -1883,25 +1706,13 @@ async def _run_server_locked(
         _shutdown_backup,
     ]
 
-    native_notify_failed: list[bool] = [False]
-
-    def _on_native_bound() -> None:
-        assert native_bootstrap is not None
-        if not _report_native_bound(native_bootstrap, config.pwa_port, server):
-            native_notify_failed[0] = True
-
-    native_bound_callback = (
-        _on_native_bound if native_bootstrap is not None else None
-    )
-    bind_watch = asyncio.create_task(_mark_bound_when_serving(server, tracker, on_bound=native_bound_callback))
+    bind_watch = asyncio.create_task(_mark_bound_when_serving(server, tracker))
     try:
         await server.serve()
     except RestartRequested as exc:
         return int(exc.args[0]) if exc.args else RESTART_EXIT_CODE
     finally:
         bind_watch.cancel()
-    if native_notify_failed[0]:
-        return 1
     if restart_flag[0] is not None:
         return restart_flag[0]
     return 0
@@ -1910,11 +1721,6 @@ async def _run_server_locked(
 def main(
     *,
     supervised: bool = False,
-    installer_bootstrap: bool = False,
-    installer_run_id: str | None = None,
-    installer_suggest_workspace: str | None = None,
-    installer_native_fd: int | None = None,
-    installer_native_workspace: str | None = None,
     app_engine: bool = False,
     app_engine_port: int | None = None,
 ) -> None:
@@ -1925,28 +1731,9 @@ def main(
     from ciao.instance_lock import WorkspaceAlreadyRunningError
 
     try:
-        if app_engine:
-            code = asyncio.run(
-                _async_main(
-                    supervised=supervised, app_engine=True, app_engine_port=app_engine_port
-                )
-            )
-        elif installer_native_fd is None:
-            code = asyncio.run(_async_main(
-                supervised=supervised,
-                installer_bootstrap=installer_bootstrap,
-                installer_run_id=installer_run_id,
-                installer_suggest_workspace=installer_suggest_workspace,
-            ))
-        else:
-            code = asyncio.run(_async_main(
-                supervised=supervised,
-                installer_bootstrap=installer_bootstrap,
-                installer_run_id=installer_run_id,
-                installer_suggest_workspace=installer_suggest_workspace,
-                installer_native_fd=installer_native_fd,
-                installer_native_workspace=installer_native_workspace,
-            ))
+        code = asyncio.run(
+            _async_main(supervised=supervised, app_engine=app_engine, app_engine_port=app_engine_port)
+        )
     except WorkspaceAlreadyRunningError as exc:
         print(f"Ciaobot did not start: {exc}", file=sys.stderr)
         code = 2

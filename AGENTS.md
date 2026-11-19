@@ -95,7 +95,7 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   Lint is still worth running; it just will not fail the build for you.
 - Run one full backend suite and one frontend run at a time, here and in any
   gate script. Two concurrent suites starve the machine and time out the 20 s
-  component tests (`SettingsFsScope`), which reads as a red gate. A single
+  component tests (`mountSmoke`), which reads as a red gate. A single
   failure is re-run (`--lf`) before it is called red. Timing tests assert
   relative behaviour with a small absolute allowance, not a fixed millisecond
   budget a loaded machine can miss.
@@ -129,9 +129,9 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   MCP actions are quiet in attention projections; never hide failed turns or
   questions. MCP terminal recovery copies only; the user opens Terminal and
   reviews and runs it separately. See `web/README.md` and `DESIGN.md`.
-- OpenCode provider changes must preserve the V2-only 2.0.16+ contract. Replay
-  the V2 fixtures and run one tiny real turn against the installed OpenCode 2.x
-  server; do not restore V1 route or response-shape fallbacks.
+- OpenCode provider changes run over `opencode acp` at OpenCode 2.3.2 or newer.
+  Replay the ACP fixtures and run one tiny real turn against the installed
+  OpenCode 2.x; do not restore the retired HTTP server or its V1 route fallbacks.
 
 ## Common mistakes
 - **Restarting the service.** Never restart the running engine yourself; it cuts

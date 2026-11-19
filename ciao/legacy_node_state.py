@@ -4,8 +4,8 @@ closed (#562 Phase 4, #636).
 The decision this module owns is the one node mode used to own inside
 `NodeStateManager`: *may this boot run the writers* (schedules, backup push)?
 `NodeStateManager` answers it by reading the state through a manager that
-*creates* a host state when the file is absent — the same trap
-`engine_migration.py` documents — and #577 deletes that manager outright. So
+*creates* a host state when the file is absent — and #577 deletes that manager
+outright. So
 the answer has to survive the deletion, which is what this leaf module is: it
 imports nothing from `ciao` (the same shape as `vault_links.py`), reads the
 file raw, never writes, and never raises.
@@ -74,8 +74,8 @@ class LegacyNodeState:
 def _client_host_url(value: Any) -> str:
     """`value` as a host URL a client was really connected to, else "".
 
-    The same rule `engine_migration._client_host_url` applies, spelled out here
-    because this module has to keep standing when nothing else does: the scheme
+    Spelled out here because this module has to keep standing when nothing
+    else does: the scheme
     has to be http(s), there has to be a hostname that is not whitespace or a
     path, and credentials in the URL are refused rather than printed back at the
     user. A prefix check would accept `https://` and `https://:8443`, neither

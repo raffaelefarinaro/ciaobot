@@ -10,7 +10,7 @@ from ciao.config import CiaoConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.chat_broker import ChatStream
-from ciao.web.project_chats import ProjectChatManager
+from ciao.web.project_chats import RESTART_BLOCKER_REASONS, ProjectChatManager
 
 
 class _StubProvider:
@@ -53,11 +53,16 @@ def test_streaming_chat_is_a_blocker(tmp_path: Path) -> None:
     assert manager.restart_blockers() == [{"chat_id": cid, "reasons": ["streaming"]}]
 
 
-def test_background_agents_are_blockers(tmp_path: Path, monkeypatch) -> None:
+def test_background_work_still_blocks_without_a_watcher(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     cid = _chat(manager)
-    monkeypatch.setattr(manager._subagents, "watching_chat_ids", lambda: {cid})
-    assert manager.restart_blockers() == [{"chat_id": cid, "reasons": ["background_agents"]}]
+    provider = _attach(manager, cid)
+    provider.background_work_outstanding = True
+    provider.background_activity_age = 0.0
+    blockers = manager.restart_blockers()
+    assert blockers == [{"chat_id": cid, "reasons": ["background_work"]}]
+    assert "background_agents" not in RESTART_BLOCKER_REASONS
+    assert manager.active_chat_ids() == []
 
 
 def test_open_native_question_with_live_provider_blocks(tmp_path: Path) -> None:
@@ -118,28 +123,6 @@ def test_blockers_are_a_superset_of_active_chat_ids(tmp_path: Path) -> None:
     blocked = {b["chat_id"] for b in manager.restart_blockers()}
     assert set(manager.active_chat_ids()) <= blocked
     assert blocked == {streaming, asking}
-
-
-def test_claude_background_task_reports_background_work(tmp_path: Path) -> None:
-    from claude_agent_sdk import TaskStartedMessage
-
-    from ciao.provider_service import ProviderService
-    from ciao.providers.claude import ClaudeProvider
-
-    manager = _make_manager(tmp_path)
-    cid = _chat(manager)
-    provider = ClaudeProvider(tmp_path)
-    provider._observe_message(
-        TaskStartedMessage(
-            subtype="task_started", data={}, task_id="bash-1",
-            description="sleep 600", uuid="u", session_id="s", task_type="local_bash",
-        )
-    )
-    service = ProviderService(manager._config, provider="claude")
-    service._provider = provider  # type: ignore[assignment]
-    manager._providers[cid] = service  # type: ignore[assignment]
-
-    assert manager.restart_blockers() == [{"chat_id": cid, "reasons": ["background_work"]}]
 
 
 # ── The unattended-update idle snapshot and its claim ───────────────────

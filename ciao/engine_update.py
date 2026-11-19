@@ -1231,7 +1231,7 @@ def _runs_the_receipt_install(
 
     Two shapes, and the README install has both. `uv tool install` puts the
     interpreter inside the tool env (`live_env`) and the `ciao` entry point
-    *beside* it in `~/.local/bin`; `install-engine.sh` then runs
+    *beside* it in `~/.local/bin`; the retired installer then ran
     `ciao setup --python "$ciao"`, so the LaunchAgent's `ProgramArguments[0]` is
     that bin entry point — the receipt's own `executable`, and outside the env.
     Both belong to the one install: `run_apply` re-points the entry-point links
@@ -1447,8 +1447,8 @@ def run_apply(
         # service actually runs, and a receipt that disagrees with the loaded
         # job means the receipt is the thing that is wrong. Refusing here is the
         # same "nothing is touched" class as the pre-flight checks above. The
-        # receipt's entry point is passed in with its env: `install-engine.sh`
-        # points the LaunchAgent at `~/.local/bin/ciao`, which is outside the
+        # receipt's entry point is passed in with its env: the retired installer
+        # pointed the LaunchAgent at `~/.local/bin/ciao`, which is outside the
         # tool env and is re-pointed by this very swap.
         disagreement = _service_disagreement(
             live_env,

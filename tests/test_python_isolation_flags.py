@@ -41,11 +41,6 @@ def test_every_reexec_site_repeats_the_flags(monkeypatch: pytest.MonkeyPatch) ->
     assert supervise.default_child_argv()[:5] == head
     assert dev._backend_command()[:5] == head
 
-    seen: list[list[str]] = []
-    monkeypatch.setattr(cli.subprocess, "call", lambda argv: seen.append(argv) or 3)
-    assert cli._resume_installer_bootstrap(None) == 3
-    assert seen[0][1:3] == ["-I", "-B"]
-
     execs: list[list[str]] = []
 
     def fail(_code: int) -> None:  # pragma: no cover
@@ -81,10 +76,8 @@ def test_no_reexec_argv_bypasses_the_helper() -> None:
 # Interpreters that are an installed tool env or a service-manager plist, never the
 # bundled engine's own sys.executable, so they cannot inherit its -B.
 _FOREIGN_INTERPRETER_FILES = {
-    "ciao/native_repair.py",
     "ciao/engine_update.py",
     "ciao/update_host.py",
-    "ciao/native_installer.py",
 }
 
 

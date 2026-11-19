@@ -293,7 +293,7 @@ def test_pip_check_and_smoke_run_under_the_same_env_and_sandbox(env):
         assert call[1] == pip[1]
         assert call[0][4:6] == ["-I", "-B"]
     code = smoke[0][smoke[0].index("-c") + 1]
-    for module in ("ssl", "anydoc", "http_ece", "cryptography.hazmat.bindings._rust", "certifi", "claude_agent_sdk"):
+    for module in ("ssl", "anydoc", "http_ece", "cryptography.hazmat.bindings._rust", "certifi", "acp"):
         assert repr(module) in code
     assert len(ei.SMOKE_MODULES) == 28
 

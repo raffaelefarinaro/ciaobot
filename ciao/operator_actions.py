@@ -345,8 +345,6 @@ def _run_provider_recheck(context: DetectionContext, provider: str) -> tuple[dic
         return {"state": state}, (
             f"{label} {check.get('installed', '')} is still older than {check.get('tested', '')}."
         )
-    if state == "bundled":
-        return {"state": state}, f"{label} is bundled with Ciaobot."
     if state == "unsupported":
         return {"state": state}, f"{label} is not compatible with this Ciaobot version."
     return {"state": state}, f"Could not verify {label}'s version."
@@ -1314,9 +1312,7 @@ def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction
     `CIAO_WORKSPACES` gave way to the Settings-owned runtime registry. A variable that is set and silently
     ignored is worse than one that never existed: the operator believes a setting
     is in effect. The fix comments the lines out of `.env`, so it carries a run
-    button — the engine owns that file; the agent's credential denylist does not
-    reach it (``execution_modes.CREDENTIAL_DENY_PATTERNS`` denies `.env` to
-    every provider), which is why a chat alone could never clear the tile.
+    button — the engine owns `.env`; the tile's Remove button edits it.
     """
     stale = _stale_legacy_env(context.config)
     if not stale:
@@ -1340,9 +1336,8 @@ def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction
                 f"These variables in my `.env` are no longer read by the engine: "
                 f"{names}. For each one: "
                 + "; ".join(f"{name}: {hint}" for name, hint in stale)
-                + ". Do not try to read or edit `.env` — the sandbox denies it "
-                "to you, and the tile's own Remove button comments these lines "
-                "out. Explain what each variable used to control and where its "
+                + ". Do not edit `.env` yourself: the tile's Remove button "
+                "comments these lines out. Explain what each variable used to control and where its "
                 "setting lives now, and how I can check the current value (in "
                 "Settings, where it has one)."
             ),
@@ -1538,11 +1533,8 @@ def _comment_out_env_lines(path: Path, keys: set[str]) -> list[str]:
 def _run_legacy_env_cleanup(context: DetectionContext) -> tuple[dict[str, Any], str]:
     """Comment the retired variables out of the workspace ``.env``.
 
-    The tile's chat prompt used to ask the agent to do this, but `.env` is a
-    credential-denied path for every provider
-    (``execution_modes.CREDENTIAL_DENY_PATTERNS``), so the write can never
-    happen there and the tile could never clear (#1134). The engine owns the
-    file, and the lines are inert — commenting them out changes no behaviour.
+    The engine owns `.env`, and the lines are inert — commenting them out
+    changes no behaviour.
 
     Also drops the keys from the running process, because server startup
     ``load_dotenv``ed them into ``os.environ`` and detection reads that; without

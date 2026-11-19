@@ -35,7 +35,7 @@ export type InjectedPrompt =
 
 // Mirrors the format produced by `format_finished_runs` in ciao/background_notice.py.
 export const BACKGROUND_WAKE_RE = /^\[Ciaobot\] (\d+) background runs? finished\./
-// Mirrors subagent_tracking.CLI_TASK_WAKE_PREFIX + SubagentWatchers.build_cli_task_wake_prompt.
+// Chats recorded before 2.0 carry this envelope; the engine no longer sends it.
 export const CLI_TASK_WAKE_PREFIX = '[Ciaobot] Lost CLI tasks:'
 const CLI_TASK_WAKE_RE = /^\[Ciaobot\] Lost CLI tasks: (\d+) CLI tasks? /
 const RUN_HEAD_RE = /^— (.+) \(([^,()]+), (ok|CANCELLED|FAILED)(?:, exit (-?\d+))?\)$/

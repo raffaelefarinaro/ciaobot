@@ -79,6 +79,8 @@ it('installer mode shows re-run guidance and no update button', async () => {
   try {
     await flushPromises()
     expect(wrapper.text()).toContain('no longer updates itself')
+    // The deleted install-engine.sh URL must not come back in the card.
+    expect(wrapper.html()).not.toContain('install-engine')
     const labels = wrapper.findAll('button').map(b => b.text())
     expect(labels).not.toContain('Update to 0.19.0')
     expect(labels).not.toContain('Update & Restart')

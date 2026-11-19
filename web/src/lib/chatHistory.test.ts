@@ -189,11 +189,6 @@ describe('toChatMessage', () => {
     expect(out.unattended).toBeUndefined()
   })
 
-  test('carries the steered marker for a user row sent into a running turn', () => {
-    expect(toChatMessage({ role: 'user', content: 'q', steered: true }).steered).toBe(true)
-    expect(toChatMessage({ role: 'user', content: 'q' }).steered).toBeUndefined()
-  })
-
   test('toChatMessage carries origin', () => {
     expect(toChatMessage({ role: 'user', content: 'q', origin: 'webhook' }).origin).toBe('webhook')
     expect(toChatMessage({ role: 'user', content: 'q' }).origin).toBeUndefined()

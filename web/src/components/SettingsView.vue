@@ -542,10 +542,11 @@
                     </DropdownMenuRoot>
                   </div>
                 </div>
-                <ProviderInventory v-if="connKey === 'opencode'" :inventory="conn.credential_inventory" :workspace="projectStore.activeWorkspace" />
-                <details v-if="connKey === 'claude'" class="provider-sign-in">
-                  <summary>{{ conn.ok ? 'Reconnect Claude Code' : 'Connect Claude Code' }}</summary>
-                  <ProviderSignInGuidance cli="claude" context="Claude Code" :workspace="projectStore.activeWorkspace" />
+                <ProviderInventory v-if="connKey === 'opencode'" :inventory="conn.credential_inventory" :command="conn.command" :workspace="projectStore.activeWorkspace" />
+                <!-- Not for a missing CLI: its payload command is the install line, not a sign-in. -->
+                <details v-if="connKey !== 'opencode' && conn.auth !== 'not_installed'" class="provider-sign-in">
+                  <summary>{{ conn.ok ? `Reconnect ${conn.label || connKey}` : `Connect ${conn.label || connKey}` }}</summary>
+                  <ProviderSignInGuidance :command="conn.command" :context="conn.label || String(connKey)" :workspace="projectStore.activeWorkspace" />
                 </details>
                 <!-- Full width, after the head: inside .set-row-main it shares a line with Connected / Verify and clips at phone width. -->
                 <div v-if="conn.release_check?.state === 'below_tested'" class="set-row-sub provider-release-check">
@@ -570,7 +571,6 @@
                   </div>
                 </div>
                 <p v-else-if="conn.release_check?.state === 'current'" class="set-row-sub">Tested with {{ conn.release_check.tested }}</p>
-                <p v-else-if="conn.release_check?.state === 'bundled'" class="set-row-sub">Bundled with Ciaobot; updates with Ciaobot</p>
                 <div v-if="getProviderSection(String(connKey))" class="provider-inline-defaults">
                   <div class="set-subrow">
                     <span :id="`default-model-label-${connKey}`" class="ws-label set-subrow-label">Default model</span>
@@ -617,6 +617,15 @@
                       </option>
                     </select>
                   </label>
+                  <p class="hint hint--compact set-subrow-hint" data-testid="permission-note">
+                    {{ BYPASS_NOTE }}
+                    <a
+                      v-if="permissionDocsFor(String(connKey))"
+                      :href="permissionDocsFor(String(connKey))!.href"
+                      target="_blank"
+                      rel="noopener"
+                    >{{ permissionDocsFor(String(connKey))!.label }}</a>
+                  </p>
                   <div class="set-subrow">
                     <span :id="`thinking-label-${connKey}`" class="ws-label set-subrow-label">Default thinking</span>
                     <div class="set-subrow-control">
@@ -665,26 +674,8 @@
                      behind a disclosure, collapsed by default. -->
                 <details class="provider-brings">
                   <summary>
-                    What this CLI brings ({{ providerBringsCounts(String(connKey), conn) }})
+                    What this CLI brings ({{ providerBringsCounts(conn) }})
                   </summary>
-                  <div class="provider-mcps-preview">
-                    <div class="ws-connectors-header">
-                      <span class="ws-label">Configured MCP Servers &amp; Connectors ({{ connectionMcps(String(connKey)).length }})</span>
-                    </div>
-                    <div class="workspace-connector-pills">
-                      <template v-if="connectionMcps(String(connKey)).length">
-                        <span
-                          v-for="mcpName in connectionMcps(String(connKey))"
-                          :key="mcpName"
-                          class="connector-pill connector-pill--enabled"
-                          :title="`${mcpName} configured for ${conn.label || connKey}`"
-                        >
-                          <span class="pill-dot"></span> {{ mcpName }}
-                        </span>
-                      </template>
-                      <span v-else class="hint hint--compact">No MCP servers enabled</span>
-                    </div>
-
                     <!-- Platform System Skills -->
                     <div class="ws-connectors-header" style="margin-top: 10px;">
                       <span class="ws-label">Platform System Skills &amp; Plugins ({{ (conn.skills && conn.skills.length) ? conn.skills.length : 0 }})</span>
@@ -702,21 +693,23 @@
                       </template>
                     </div>
 
-                    <!-- Skills the CLI ships itself, not installed by the user -->
-                    <div class="ws-connectors-header" style="margin-top: 10px;">
-                      <span class="ws-label">Built into {{ conn.label || connKey }} ({{ conn.bundled_skills?.length ?? 0 }})</span>
-                    </div>
-                    <div class="workspace-connector-pills">
-                      <template v-if="conn.bundled_skills && conn.bundled_skills.length">
-                        <span v-for="skill in conn.bundled_skills" :key="skill" class="connector-pill connector-pill--enabled" :title="`Ships with ${conn.label || connKey}: ${skill}`">
-                          <span class="pill-dot"></span> {{ skill }}
+                    <!-- Skills the CLI ships itself, not installed by the user. Only providers that
+                         report them (OpenCode) get the block; the Claude CLI reports none. -->
+                    <template v-if="conn.bundled_skills !== undefined">
+                      <div class="ws-connectors-header" style="margin-top: 10px;">
+                        <span class="ws-label">Built into {{ conn.label || connKey }} ({{ conn.bundled_skills.length }})</span>
+                      </div>
+                      <div class="workspace-connector-pills">
+                        <template v-if="conn.bundled_skills.length">
+                          <span v-for="skill in conn.bundled_skills" :key="skill" class="connector-pill connector-pill--enabled" :title="`Ships with ${conn.label || connKey}: ${skill}`">
+                            <span class="pill-dot"></span> {{ skill }}
+                          </span>
+                        </template>
+                        <span v-else class="hint hint--compact">
+                          {{ !conn.ok ? 'Connect to discover' : 'None reported by this CLI' }}
                         </span>
-                      </template>
-                      <span v-else class="hint hint--compact">
-                        {{ !conn.ok ? 'Connect to discover' : conn.bundled_skills ? 'None reported by this CLI' : conn.skills ? 'Listed after the next chat with this CLI.' : 'Could not read this list. Press Verify to try again.' }}
-                      </span>
-                    </div>
-                  </div>
+                      </div>
+                    </template>
                 </details>
               </div>
               <ProviderInventory v-if="!providerKeys.connections.opencode" :workspace="projectStore.activeWorkspace" />
@@ -1127,10 +1120,15 @@
         </div>
       </template>
 
-      <!-- Native provider MCP inventory, scoped to the selected workspace. -->
+      <!-- One button per installed agent. The command comes from the provider row. -->
       <template v-if="currentTab === 'mcp'">
-        <p v-if="mcpLinkError" role="alert" class="action-result --error">{{ mcpLinkError }}</p>
-        <SettingsMcpServers v-if="mcpLinkVisible" :mcp="mcp" :default-provider="mcpDefaultProvider" :target-provider="mcpTargetProvider" :target-provider-key="mcpTargetProviderKey" @ask-ciao="createAssetViaChat('mcp')" />
+        <div class="card">
+          <p class="hint">Each agent manages its own MCP servers and sign-ins.</p>
+          <template v-for="(conn, id) in providerKeys?.connections" :key="id">
+            <ProviderMcpButton v-if="conn.mcp_command" :connection="conn" />
+          </template>
+          <button class="set-link set-link--quiet" type="button" @click="createAssetViaChat('mcp')">Ask Ciao to add one</button>
+        </div>
       </template>
       </div>
 
@@ -1195,9 +1193,8 @@ import CiaoMark from './CiaoMark.vue'
 import SkeletonLoader from './SkeletonLoader.vue'
 import UpdateProgressView from './UpdateProgressView.vue'
 import SettingsAllWorkspaces from './settings/SettingsAllWorkspaces.vue'
-import { formatConnectorLabel } from '../lib/mcpLabels'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch, provide } from 'vue'
-import { isNavigationFailure, NavigationFailureType, useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { isDesktopClient } from '../lib/pwaPlatform'
 import { describeInterruptedCards, type RestartBlocker } from '../lib/restartBlockers'
@@ -1272,7 +1269,7 @@ import SettingsNotifications from './settings/SettingsNotifications.vue'
 import SettingsKeyboardShortcuts from './settings/SettingsKeyboardShortcuts.vue'
 import SettingsRestartResume from './settings/SettingsRestartResume.vue'
 import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
-import SettingsMcpServers from './settings/SettingsMcpServers.vue'
+import ProviderMcpButton from './ProviderMcpButton.vue'
 import SettingsAppearance from './settings/SettingsAppearance.vue'
 import SettingsRadioGroup from './settings/SettingsRadioGroup.vue'
 import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'
@@ -1281,8 +1278,7 @@ import type { ModelSection } from '../lib/modelSections'
 import { modelDisplayName } from '../lib/modelLabels'
 import { settingsTabLabel } from '../lib/settingsNav'
 import { workspaceLabel } from '../lib/workspaceLabel'
-import { parseWorkspaceFileAccessHref } from '../lib/appLinks'
-import { useMcpServers } from '../composables/useMcpServers'
+import { BYPASS_NOTE, permissionDocsFor } from '../lib/permissionDocs'
 import { assetOriginClass, assetOriginLabel, commandOrigin, subagentOrigin } from '../lib/assetOrigin'
 
 
@@ -1297,19 +1293,6 @@ const projectStore = useProjectStore()
 const taskStore = useTaskStore()
 const housekeeping = useHousekeepingStore()
 
-// Native MCP inventory follows the sidebar's selected workspace.
-const mcp = useMcpServers({ api, workspace: () => projectStore.activeWorkspace })
-const mcpDefaultProvider = computed(() => projectStore.workspaceOptions.find(w => w.name === projectStore.activeWorkspace)?.default_provider)
-const mcpLinkReady = ref(false)
-const mcpLinkError = ref('')
-const mcpTargetProvider = ref<'claude' | 'opencode'>()
-const mcpTargetProviderKey = ref(0)
-const mcpLinkVisible = computed(() => {
-  if (route.query.workspace === undefined) return true
-  return mcpLinkReady.value && typeof route.query.workspace === 'string'
-    && projectStore.activeWorkspace === route.query.workspace
-    && (!mcp.status.value || mcp.status.value.workspace === route.query.workspace)
-})
 const currentTab = computed(() => {
   const tab = (route.params.tab as string) || 'home'
   return tab
@@ -1820,15 +1803,13 @@ watch(
 )
 
 /** Summary line for the collapsed "What this CLI brings" disclosure. */
-function providerBringsCounts(providerId: string, conn: ProviderConnection): string {
-  const mcps = connectionMcps(providerId).length
+function providerBringsCounts(conn: ProviderConnection): string {
   const skills = conn.skills?.length ?? 0
-  const mcpLabel = `${mcps} MCP ${mcps === 1 ? 'server' : 'servers'}`
   const skillLabel = conn.ok && !conn.skills
     ? 'skills not read'
     : `${skills} ${skills === 1 ? 'skill or plugin' : 'skills & plugins'}`
   const bundled = conn.bundled_skills?.length
-  return bundled ? `${mcpLabel}, ${skillLabel}, ${bundled} built in` : `${mcpLabel}, ${skillLabel}`
+  return bundled ? `${skillLabel}, ${bundled} built in` : skillLabel
 }
 
 
@@ -2436,11 +2417,8 @@ const workspaceAdmin = useWorkspaceAdmin({
 })
 const {
   workspacesLoaded,
-  workspacesError,
   showNewWorkspace,
-  workspaceForms,
   workspaceLinkStatus,
-  workspaceLinkTarget,
   fetchWorkspacesList,
   fetchArchivedWorkspaces,
 } = workspaceAdmin
@@ -2479,181 +2457,17 @@ function closeSettingsMenuOnEscape(event: KeyboardEvent): void {
 }
 provide(WORKSPACE_ADMIN_KEY, { ...workspaceAdmin, settingsMenu, setSettingsMenu, closeSettingsMenuOnEscape })
 
-// Bumped on every route resolution so a delayed list load from a superseded
-// link cannot open, scroll to or focus the wrong row.
-let workspaceLinkRequest = 0
-const WORKSPACE_LINK_OFFSET = 16
-
-function scrollToWorkspaceFileAccess(name: string): void {
-  const body = bodyEl.value
-  if (!body) return
-  // Scope both lookups to the owning pane, and measure the field row itself:
-  // the card header can be in view while the File access control is still
-  // below the fold.
-  const row = body.querySelector<HTMLElement>(`#workspace-file-access-row-${name}`)
-  const control = body.querySelector<HTMLElement>(`#workspace-file-access-${name}`)
-  if (!row || !control) return
-  // Only the settings pane scrolls. Its scrollTop is the truth; a measured
-  // offset keeps this correct whatever else has rendered above the row.
-  // scrollIntoView is deliberately not used: on a nested pane iOS Safari can
-  // scroll the wrong ancestor.
-  const offset = row.getBoundingClientRect().top - body.getBoundingClientRect().top
-  const top = Math.max(0, body.scrollTop + offset - WORKSPACE_LINK_OFFSET)
-  const reduce = typeof window.matchMedia === 'function'
-    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  body.scrollTo({ top, behavior: reduce ? 'auto' : 'smooth' })
-  control.focus({ preventScroll: true })
-  workspaceLinkTarget.value = name
-}
-
-type WorkspaceLink = { request: number; fullPath: string; name: string; kind: 'file' | 'mcp'; provider?: 'claude' | 'opencode'; completedMcpLoad?: Promise<void> }
-let desiredWorkspaceLink: WorkspaceLink | null = null
-let workspaceLinkDraining = false
-let workspaceLinkDisposed = false
-
-function queueWorkspaceLink(fullPath: string): void {
-  const request = ++workspaceLinkRequest
-  workspaceLinkStatus.value = ''
-  workspaceLinkTarget.value = null
-  mcpLinkReady.value = false
-  mcpLinkError.value = ''
-  const fileName = currentTab.value === 'workspace' ? parseWorkspaceFileAccessHref(fullPath) : null
-  const mcpLink = currentTab.value === 'mcp' && route.query.workspace !== undefined
-  if (!mcpLink) mcpTargetProvider.value = undefined
-  const name = fileName || (mcpLink && typeof route.query.workspace === 'string' ? route.query.workspace : '')
-  const provider = route.query.provider === 'claude' || route.query.provider === 'opencode' ? route.query.provider : undefined
-  const cachedMcp = mcpLink && name ? tabLoads.get(`mcp:${name}`) : undefined
-  const completedMcpLoad = cachedMcp && settledMcpLoads.has(cachedMcp) ? cachedMcp : undefined
-  desiredWorkspaceLink = name ? { request, fullPath, name, kind: fileName ? 'file' : 'mcp', provider, completedMcpLoad } : null
-  if (mcpLink && !name) mcpLinkError.value = 'The requested workspace is invalid. No settings changed.'
-  if (!workspaceLinkDraining && desiredWorkspaceLink) void drainWorkspaceLinks()
-}
-
-async function drainWorkspaceLinks(): Promise<void> {
-  workspaceLinkDraining = true
-  let handled = 0
-  while (!workspaceLinkDisposed && desiredWorkspaceLink && desiredWorkspaceLink.request !== handled) {
-    const link = desiredWorkspaceLink
-    handled = link.request
-    const current = () => !workspaceLinkDisposed && link.request === workspaceLinkRequest && route.fullPath === link.fullPath
-    try {
-      await (link.kind === 'file' ? loadSettingsTab('workspace') : ensureWorkspaceList())
-    } catch {
-      if (current()) {
-        if (link.kind === 'mcp') mcpLinkError.value = 'Could not load workspaces. No settings changed.'
-        else workspaceLinkStatus.value = 'Could not load workspaces. No settings changed.'
-      }
-      continue
-    }
-    if (!current()) continue
-    if (workspacesError.value) {
-      if (link.kind === 'mcp') mcpLinkError.value = 'Could not load workspaces. No settings changed.'
-      continue
-    }
-    if (!workspaceForms.value.some(form => form.name === link.name)) {
-      const message = `No workspace named "${link.name}" exists. No settings changed.`
-      if (link.kind === 'mcp') mcpLinkError.value = message
-      else workspaceLinkStatus.value = message
-      continue
-    }
-    let switched: boolean
-    try {
-      switched = await projectStore.switchWorkspace(link.name, { transition: false, isCurrent: current })
-    } catch {
-      if (current()) {
-        const message = `Settings for "${link.name}" could not be opened. No settings changed.`
-        if (link.kind === 'mcp') mcpLinkError.value = message
-        else workspaceLinkStatus.value = message
-      }
-      continue
-    }
-    if (!current()) continue
-    if (!switched || projectStore.activeWorkspace !== link.name) {
-      const message = `${link.kind === 'file' ? 'File access' : 'MCP settings'} for "${link.name}" was not opened: your unsaved changes to "${projectStore.activeWorkspace}" were kept.`
-      if (link.kind === 'mcp') mcpLinkError.value = message
-      else workspaceLinkStatus.value = message
-      continue
-    }
-    if (link.kind === 'file') {
-      try {
-        const failure = await router.replace({ path: '/settings/workspace', hash: '#file-access' })
-        if (failure && current()) workspaceLinkStatus.value = 'File access could not be opened.'
-      } catch {
-        if (current()) workspaceLinkStatus.value = 'File access could not be opened.'
-      }
-      continue
-    }
-    await nextTick()
-    const loadKey = `mcp:${link.name}`
-    if (link.completedMcpLoad && tabLoads.get(loadKey) === link.completedMcpLoad
-      && mcp.status.value?.workspace !== link.name) {
-      tabLoads.delete(loadKey)
-    }
-    const load = loadSettingsTab('mcp')
-    try {
-      await load
-    } catch {
-      if (tabLoads.get(loadKey) === load) tabLoads.delete(loadKey)
-      if (current()) {
-        mcpLinkError.value = `Could not load MCP settings for "${link.name}".`
-      }
-      continue
-    }
-    if ((mcp.error.value || (!mcp.loading.value && mcp.status.value?.workspace !== link.name))
-      && tabLoads.get(loadKey) === load) tabLoads.delete(loadKey)
-    if (!current()) continue
-    if (projectStore.activeWorkspace !== link.name || mcp.status.value?.workspace !== link.name
-      || (link.provider && !mcp.status.value.providers.some(p => p.provider === link.provider))) {
-      if (tabLoads.get(loadKey) === load) tabLoads.delete(loadKey)
-      mcpLinkError.value = `Could not load MCP settings for "${link.name}".`
-      continue
-    }
-    mcpTargetProvider.value = link.provider
-    mcpTargetProviderKey.value++
-    mcpLinkReady.value = true
-  }
-  workspaceLinkDraining = false
-}
-
-// The Overview page is the active workspace's editor. A File access link lands
-// here with #file-access: scroll to and focus the selector once the list is in.
-// While the link still carries ?workspace=NAME, the workspace link drain
-// owns it: it switches to NAME and then drops the query, which re-runs this
-// watcher on the right workspace (scrolling now would hit the previous one).
+// The Overview page is the active workspace's editor. A #workspace-name link
+// (Rename) focuses the Name field once the list is in.
 watch(
-  [() => route.hash, currentTab, workspacesLoaded, () => route.query.workspace],
-  async ([hash, tab, loaded, linked]) => {
-    if (tab !== 'workspace' || !loaded || linked) return
+  [() => route.hash, currentTab, workspacesLoaded],
+  async ([hash, tab, loaded]) => {
+    if (tab !== 'workspace' || !loaded) return
     await nextTick()
-    if (hash === '#file-access') scrollToWorkspaceFileAccess(projectStore.activeWorkspace)
-    else if (hash === '#workspace-name') document.getElementById('workspace-name-input')?.focus()
+    if (hash === '#workspace-name') document.getElementById('workspace-name-input')?.focus()
   },
   { immediate: true },
 )
-
-// Platform MCP list only — exclude Ciaobot project servers from .mcp.json
-// (n8n_mcp, notion, ciaobot), which have their own MCP status section.
-const EXCLUDED_PLATFORM_MCPS = new Set(['n8n_mcp', 'notion', 'ciaobot', 'ciaobot-fastmcp'])
-
-/**
- * Platform MCP servers a provider's CLI reports.
- *
- * Keyed by provider id rather than written per provider, so a provider added
- * to the backend registry gets a correct card without another branch here.
- * Reports only what the CLI actually discovered — an empty result means
- * "none reported", not a guess, since a placeholder here would be
- * indistinguishable from a real connection.
- */
-function connectionMcps(providerId: string): string[] {
-  const discovered = providerKeys.value?.connections?.[providerId]?.mcps || []
-  const result: string[] = []
-  for (const mcpName of discovered) {
-    if (EXCLUDED_PLATFORM_MCPS.has(mcpName)) continue
-    const label = formatConnectorLabel(mcpName)
-    if (!result.includes(label)) result.push(label)
-  }
-  return result
-}
 
 // `force` bypasses the provider catalog caches, which costs a provider process
 // spawn. Opening Settings is exactly the moment a user has just connected a
@@ -2687,7 +2501,6 @@ async function fetchWorkspaceModels(force = false, workspace = projectStore.acti
 // in-flight load is reused while this view stays mounted; workspace-scoped
 // tabs get a separate load after switching roots.
 const tabLoads = new Map<string, Promise<void>>()
-const settledMcpLoads = new WeakSet<Promise<void>>()
 // The workspace list feeds both workspace pages. It loads once per registry
 // revision, not once per page: a second load would rebuild the forms and drop
 // the unsaved edits a user left on Overview when they open Workspaces.
@@ -2726,7 +2539,7 @@ function loadSettingsTab(tab: string): Promise<void> {
       }), fetchRoutines(), fetchWorkspaceMove(), fetchAgentAssets()]
       break
     case 'providers':
-      reads = [fetchRoutines(), fetchProviderKeys().then(scrollToChatProvidersIfLinked), mcp.fetchStatus(), fetchWorkspaceModels()]
+      reads = [fetchRoutines(), fetchProviderKeys().then(scrollToChatProvidersIfLinked), fetchWorkspaceModels()]
       break
     case 'workspace':
       // Not scoped: the list covers every workspace. Handover and Update tasks
@@ -2743,33 +2556,19 @@ function loadSettingsTab(tab: string): Promise<void> {
       reads = [fetchAgentAssets()]
       break
     case 'mcp':
-      reads = [mcp.fetchStatus()]
+      reads = [fetchProviderKeys()]
       break
     default:
       reads = []
   }
   const request = Promise.all(reads).then(() => {})
   tabLoads.set(key, request)
-  if (tab === 'mcp') void request.then(() => { settledMcpLoads.add(request) }, () => { settledMcpLoads.add(request) })
   return request
 }
 
-// File access links are checked on every navigation, including the direct load
-// of one. `loadSettingsTab` is cached, so a link that arrives with the tab
-// costs no second fetch, and a link that arrives before the first list does
-// waits for that same load instead of opening a row that is not there yet.
-watch(
-  () => route.fullPath,
-  path => { queueWorkspaceLink(path) },
-  { immediate: true, flush: 'sync' },
-)
-const removeWorkspaceLinkAfterEach = router.afterEach((to, from, failure) => {
-  if (currentTab.value === 'mcp' && route.query.workspace !== undefined && to.fullPath === from.fullPath
-    && (!failure || isNavigationFailure(failure, NavigationFailureType.duplicated))) {
-    queueWorkspaceLink(to.fullPath)
-  }
-})
-onUnmounted(() => { workspaceLinkDisposed = true; ++workspaceLinkRequest; removeWorkspaceLinkAfterEach() })
+// The workspace notice (a created workspace that could not be opened) is
+// stale as soon as the user navigates.
+watch(() => route.fullPath, () => { workspaceLinkStatus.value = '' })
 
 onMounted(() => {
   loadAppearanceSettings()
@@ -2800,9 +2599,8 @@ watch(() => projectStore.activeWorkspace, () => {
 }, { flush: 'sync' })
 
 watch(() => projectStore.activeWorkspace, () => {
-  // "Settings ↑" and Create and open land at the top. Only a File access deep
-  // link keeps its own scroll target; every other switch returns to the top.
-  if (currentTab.value === 'workspace' && route.hash !== '#file-access') bodyEl.value?.scrollTo({ top: 0, behavior: 'auto' })
+  // "Settings ↑" and Create and open land at the top.
+  if (currentTab.value === 'workspace') bodyEl.value?.scrollTo({ top: 0, behavior: 'auto' })
   // Asset refs hold one workspace's data, so invalidate cached scope keys:
   // returning to an earlier root must never show a different root's rows.
   for (const key of tabLoads.keys()) {
@@ -4191,18 +3989,6 @@ a.btn-secondary {
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
-.provider-brings[open] > .provider-mcps-preview { margin-top: var(--space-1); }
-
-/* Provider & Workspace MCP Connectors Bar */
-.provider-mcps-preview {
-  margin-top: var(--space-3);
-  margin-bottom: var(--space-3);
-  padding: var(--space-3);
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-
 .workspace-connectors-preview {
   grid-column: 1 / -1;
   background: var(--bg2);
@@ -4265,111 +4051,6 @@ a.btn-secondary {
   height: 6px;
   border-radius: 50%;
   background-color: var(--fg3);
-}
-
-/* MCP Inspector */
-.mcp-inspector-bar {
-  display: flex;
-  gap: var(--space-4);
-  margin-bottom: var(--space-4);
-}
-
-.mcp-inspector-field {
-  flex: 1;
-  max-width: 250px;
-}
-
-.mcp-inspector-panels {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-4);
-}
-
-@media (max-width: 768px) {
-  .mcp-inspector-panels {
-    grid-template-columns: 1fr;
-  }
-}
-
-.mcp-inspector-panel {
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: var(--space-3);
-}
-
-.panel-header {
-  margin-bottom: var(--space-3);
-}
-
-.panel-title-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 2px;
-}
-
-.panel-title {
-  font-weight: 600;
-  font-size: var(--text-sm);
-}
-
-
-
-
-
-
-
-.mcp-tag--active {
-  background: rgba(46, 160, 67, 0.1);
-  color: var(--fg);
-  border-color: rgba(46, 160, 67, 0.4);
-}
-
-.mcp-tag--active .pill-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background-color: #2ea44f;
-}
-
-.mcp-tag--blocked {
-  background: var(--bg);
-  color: var(--fg3);
-  opacity: 0.5;
-  text-decoration: line-through;
-}
-
-.badge--compact {
-  font-size: 10px;
-  padding: 1px 6px;
-}
-
-.mcp-server-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: var(--space-3);
-  margin-top: var(--space-2);
-}
-
-.mcp-server-card {
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: var(--space-3);
-}
-
-.mcp-server-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: var(--space-2);
-}
-
-.mcp-server-name {
-  font-weight: 600;
-  font-size: var(--text-sm);
-  margin-right: var(--space-2);
 }
 
 

@@ -1,11 +1,11 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test'
-import { COMPOSER, openChatDetails, settled } from '../support/app'
+import { COMPOSER, settled } from '../support/app'
 
 /**
  * The needs-you stack's key control, in a real browser.
  *
- * The generic stack is capped and scrolls inside itself. MCP sign-in lives in
- * Chat details; its remote callback must remain accessible inside that panel.
+ * The generic stack is capped and scrolls inside itself. A remote Google
+ * sign-in's callback field must stay reachable inside that stack.
  *
  * The page is served on a host name that is not loopback, which is what makes
  * the paste field appear. A session cookie for that host is set on the context;
@@ -14,20 +14,6 @@ import { COMPOSER, openChatDetails, settled } from '../support/app'
 const HOST = 'ciao.test'
 const CHAT_ID = 'alpha-chat-1'
 const CHAT_PATH = `/chat/${CHAT_ID}`
-
-async function openMcpTestSurface(page: Page): Promise<ReturnType<Page['locator']>> {
-  const detailsAside = page.locator('aside').filter({ has: page.getByRole('heading', { name: 'Chat details' }) })
-  const hideDetails = detailsAside.getByRole('button', { name: 'Hide chat details' })
-  if (!(await detailsAside.isVisible())) {
-    await settled(page.locator('.chat-layout'))
-    if (!(await detailsAside.isVisible())) await openChatDetails(page)
-    await expect(detailsAside).toBeVisible()
-  }
-  await expect(hideDetails).toBeVisible()
-  const rail = detailsAside.locator('.chat-mcp-connections')
-  await expect(rail).toBeVisible()
-  return rail
-}
 
 test.use({
   viewport: { width: 390, height: 844 },
@@ -59,25 +45,22 @@ async function openOffLoopback(page: Page, session: string): Promise<void> {
 
 /** A remote sign-in with a callback field. */
 const SIGN_IN = {
-  kind: 'mcp_auth',
+  kind: 'gws_auth',
   state: 'waiting',
   params: {
-    server: 'linear',
-    provider: 'claude',
-    session_id: 'sess-1',
-    url: 'https://auth.example.invalid/authorize?state=w',
+    profile: 'alpha',
+    url: 'https://accounts.google.com/o/oauth2/auth?state=w',
   },
 }
 
 test.describe('the needs-you stack on a phone', () => {
-  test('an off-loopback sign-in keeps Finish sign-in within the sidebar', async ({ page }, testInfo: TestInfo) => {
+  test('an off-loopback sign-in keeps Finish sign-in within the stack', async ({ page }, testInfo: TestInfo) => {
     const session = `nys-primary-${testInfo.workerIndex}`
     await raise(page, session, SIGN_IN)
     await openOffLoopback(page, session)
 
-    const root = await openMcpTestSurface(page)
-    const stack = root
-    const finish = root.locator('.needs-you-card').getByRole('button', { name: 'Finish sign-in' })
+    const stack = page.locator('.needs-you-stack')
+    const finish = stack.locator('.needs-you-card').getByRole('button', { name: 'Finish sign-in' })
     await expect(finish).toBeVisible()
 
     // The scroll is smooth, so poll until the control is inside the stack.
@@ -89,8 +72,8 @@ test.describe('the needs-you stack on a phone', () => {
 
     const button = (await finish.boundingBox())!
     expect(button.y).toBeGreaterThanOrEqual(0)
-    const rail = (await root.boundingBox())!
-    expect(button.y + button.height).toBeLessThanOrEqual(rail.y + rail.height + 0.5)
+    const bounds = (await stack.boundingBox())!
+    expect(button.y + button.height).toBeLessThanOrEqual(bounds.y + bounds.height + 0.5)
 
     // Nothing covers it: the element at its centre is the button itself.
     const covered = await finish.evaluate(

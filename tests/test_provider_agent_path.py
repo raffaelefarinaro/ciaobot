@@ -41,13 +41,10 @@ def _make_manager(tmp_path: Path, *, gws_profile: str = "") -> ProjectChatManage
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
-        # These tests check the turn env, not the sandbox: whole-machine scope
-        # keeps the spawn unwrapped on every platform (Linux CI has no bwrap).
         workspaces={
             "personal": WorkspaceConfig(
                 name="personal",
                 vault_root="memory-vault/personal",
-                agent_fs_scope="machine",
                 gws_profile=gws_profile,
             )
         },
@@ -205,36 +202,6 @@ def test_engine_ciao_resolves_first_despite_a_decoy_on_the_inherited_path(
 
 
 @pytest.mark.asyncio
-async def test_claude_sdk_env_carries_the_engine_first_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Claude passes ``request.extra_env`` straight to the SDK subprocess."""
-    from ciao.providers.claude import ClaudeProvider
-
-    captured: dict = {}
-
-    class FakeClient:
-        def __init__(self, options):
-            captured["options"] = options
-
-    monkeypatch.setenv("PATH", os.pathsep.join(["/stale", "/user/bin"]))
-    monkeypatch.setattr(
-        "ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude"
-    )
-    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
-
-    manager = _make_manager(tmp_path)
-    project = manager.create_project("path", workspace="personal")
-    chat = manager.create_chat(project.project_id, provider="claude")
-    request = manager.build_agent_request(chat, prompt="hi")
-
-    provider = ClaudeProvider(tmp_path)
-    await provider._ensure_connected(request)
-
-    assert captured["options"].env["PATH"].split(os.pathsep)[0] == engine_bin_dir()
-
-
-@pytest.mark.asyncio
 async def test_opencode_server_env_carries_the_engine_first_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -311,61 +278,43 @@ async def test_oneshot_claude_env_carries_the_engine_first_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import ciao.providers.oneshot as oneshot
+    from ciao import setup_status
+    from ciao.providers.acp import oneshot as acp_oneshot
 
     captured: dict = {}
 
-    async def fake_query(*, prompt: str, options):
-        captured["options"] = options
-        if False:  # pragma: no cover - make this an async generator
-            yield None
+    async def fake_run(spec, prompt, **kwargs):
+        captured["env"] = kwargs["env"]
+        return "ok"
 
-    monkeypatch.setattr(oneshot, "query", fake_query)
+    monkeypatch.setattr(acp_oneshot, "run_acp_oneshot", fake_run)
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "")
     monkeypatch.setenv("PATH", os.pathsep.join(["/stale", "/user/bin"]))
 
     await oneshot.run_oneshot("hi", system_prompt="s", model="haiku")
 
-    assert (
-        captured["options"].env["PATH"].split(os.pathsep)[0] == engine_bin_dir()
-    )
+    assert captured["env"]["PATH"].split(os.pathsep)[0] == engine_bin_dir()
 
 
 @pytest.mark.asyncio
 async def test_oneshot_opencode_env_carries_the_engine_first_path(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import ciao.providers.opencode as opencode_mod
     import ciao.providers.oneshot as oneshot
+    from ciao.providers.acp import oneshot as acp_oneshot
 
     captured: dict = {}
 
-    class FakeOpencodeProvider:
-        def __init__(self, workspace_root, **_kw):
-            pass
+    async def fake_run(spec, prompt, **kwargs):
+        captured["env"] = kwargs["env"]
+        return "ok"
 
-        async def run_streaming(self, request, register_handle):
-            captured["request"] = request
-            register_handle(None)
-            if False:  # pragma: no cover - async generator
-                yield None
-
-        async def disconnect(self):
-            pass
-
-        async def delete_current_session(self):
-            return True
-
-    monkeypatch.setattr(
-        opencode_mod, "OpencodeProvider", FakeOpencodeProvider
-    )
+    monkeypatch.setattr(acp_oneshot, "run_acp_oneshot", fake_run)
     monkeypatch.setenv("PATH", os.pathsep.join(["/stale", "/user/bin"]))
 
-    await oneshot.run_oneshot(
-        "hi", system_prompt="s", model="x/y", provider="opencode", cwd=tmp_path
-    )
+    await oneshot.run_oneshot("hi", system_prompt="s", model="x/y", provider="opencode")
 
-    assert (
-        captured["request"].extra_env["PATH"].split(os.pathsep)[0] == engine_bin_dir()
-    )
+    assert captured["env"]["PATH"].split(os.pathsep)[0] == engine_bin_dir()
 
 
 # ── the shared helper is the single definition ────────────────────────────

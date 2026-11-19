@@ -131,6 +131,18 @@ def _no_installed_opencode(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_installed_codex(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never find the developer's own ``codex`` or ``codex-acp`` on ``PATH``.
+
+    The Codex status probe runs ``codex login status`` against whatever it finds, so a test
+    that reaches Settings would otherwise run the real CLI. A test that needs a binary patches
+    ``ciao.providers.acp.agents.codex_binary`` or ``codex_acp_binary`` itself.
+    """
+    monkeypatch.setattr("ciao.providers.acp.agents.codex_binary", lambda: None)
+    monkeypatch.setattr("ciao.providers.acp.agents.codex_acp_binary", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _git_stores_exact_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every git a test spawns stores exact bytes, as macOS and Linux git do.
 
@@ -178,8 +190,8 @@ def _restore_ciao_env(monkeypatch: pytest.MonkeyPatch) -> None:
     ``monkeypatch`` cannot undo a key it never saw set. A later test's implicit
     workspace resolution then skipped install discovery, because a workspace was
     already named, and read an unregistered root: ``memory-proposals`` listed
-    nothing, but only in the serial full run, where ``test_installer_handoff``
-    precedes ``test_memory_proposal_cli``.
+    nothing, but only in the serial full run, where an earlier driven setup
+    left the variables behind.
 
     Depends on ``monkeypatch`` so it is torn down before it: both then restore
     to the same pre-test state.
@@ -320,24 +332,6 @@ def _isolate_job_runs(tmp_path: Path) -> None:
     jr.configure(tmp_path)
     yield
     jr._runtime_dir_override = None
-
-
-@pytest.fixture(autouse=True)
-def _isolate_gh(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the host's gh login out of every test (#1961).
-
-    A workspace-scoped request would otherwise read ``~/.config/gh`` and run
-    ``gh auth token`` on the machine running the suite. Tests of the real
-    functions import them directly from ``ciao.fs_sandbox``, which this patch
-    does not touch.
-    """
-    from ciao import fs_sandbox
-
-    fs_sandbox.clear_gh_token_cache()
-    monkeypatch.setattr("ciao.fs_sandbox.gh_token_for_sandbox", lambda *a, **k: None)
-    monkeypatch.setattr("ciao.fs_sandbox.gh_config_read_root", lambda env: None)
-    yield
-    fs_sandbox.clear_gh_token_cache()
 
 
 def attach_stub_mcp(manager):

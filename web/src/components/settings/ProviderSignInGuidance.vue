@@ -1,7 +1,6 @@
 <template>
   <div class="guidance">
-    <p class="hint" v-if="cli === 'opencode'">Run this command yourself on the engine's computer and choose the provider in OpenCode. The command does not preselect one. OpenCode must be installed and available on your PATH.</p>
-    <p class="hint" v-else>Run this command yourself on the engine's computer. Claude must be installed and available on your PATH.</p>
+    <p class="hint">{{ note || DEFAULT_NOTE }}</p>
     <code>{{ command }}</code>
     <div class="guidance-actions">
       <button type="button" class="set-link" :aria-label="`Copy sign-in command for ${context}`" @click="copyCommand">Copy</button>
@@ -13,12 +12,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onUnmounted, watch } from 'vue'
+import { ref, onUnmounted, watch } from 'vue'
 import { writeClipboard } from '../../lib/codeCopy'
 import { useTerminalStore } from '../../stores/terminal'
 
-const props = defineProps<{ workspace: string, context: string, cli?: 'opencode' | 'claude' }>()
-const command = computed(() => props.cli === 'claude' ? 'claude auth login' : 'opencode auth login')
+// The sign-in command is the connection payload's `command`, never a literal: each
+// provider reports its own, so a new runtime cannot be shown another one's command.
+const props = defineProps<{ workspace: string, context: string, command: string, note?: string }>()
+const DEFAULT_NOTE = "Run this command yourself on the engine's computer. The CLI must be installed and available on your PATH."
 const terminal = useTerminalStore()
 const message = ref('')
 let alive = true
@@ -28,7 +29,7 @@ onUnmounted(() => { alive = false })
 
 async function copyCommand() {
   try {
-    const copied = await writeClipboard(command.value)
+    const copied = await writeClipboard(props.command)
     if (alive) message.value = copied ? 'Command copied.' : 'Could not copy. Select the command and copy it yourself.'
   } catch {
     if (alive) message.value = 'Could not copy. Select the command and copy it yourself.'

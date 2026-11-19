@@ -217,6 +217,39 @@ def test_an_ordinary_chat_update_still_works(tmp_path: Path) -> None:
     assert manager.get_chat(chat.chat_id).title == "Renamed"
 
 
+def test_a_model_id_over_the_bound_is_refused_and_the_chat_is_unchanged(tmp_path: Path) -> None:
+    """201 characters is refused, as a delegation's model is; the stored model is untouched."""
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    before = manager.get_chat(chat.chat_id).model
+    client = _make_client(manager)
+
+    response = client.patch(
+        f"/api/chats/{chat.chat_id}",
+        json={"model": "m" * 201},
+        headers={"Origin": _ORIGIN},
+    )
+
+    assert response.status_code == 400
+    assert "200 characters" in response.json()["error"]
+    assert manager.get_chat(chat.chat_id).model == before
+
+
+def test_a_model_id_at_the_bound_is_accepted(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    client = _make_client(manager)
+
+    response = client.patch(
+        f"/api/chats/{chat.chat_id}",
+        json={"model": "m" * 200},
+        headers={"Origin": _ORIGIN},
+    )
+
+    assert response.status_code == 200
+    assert manager.get_chat(chat.chat_id).model == "m" * 200
+
+
 # ── The retired terminal-offer body ────────────────────────────────────────
 
 

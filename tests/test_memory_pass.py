@@ -15,6 +15,7 @@ import contextlib
 import json
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -706,11 +707,12 @@ class _TerminalProvider:
     """A provider whose pass ends on a scripted result.
 
     ``current_session_id`` stays None so the turn stamps no provider session,
-    which keeps these tests off the subagent watcher and the between-turns
-    drain: the foreground turn has to be the only thing that settles a pass.
+    which keeps these tests off the between-turns drain: the foreground turn has
+    to be the only thing that settles a pass.
     """
 
     current_session_id = None
+    background_work_outstanding = False
     #: These fakes stand in for the chat's ProviderService, whose ``provider``
     #: is the live implementation; there is none here, so needs-you detection skips.
     provider = None
@@ -1908,7 +1910,7 @@ async def test_unclean_finish_marks_attention_and_pumps_next(
     assert streams.chat_ids == ids
 
 
-@pytest.mark.parametrize("pending_kind", ["permission", "retry"])
+@pytest.mark.parametrize("pending_kind", ["permission", "retry", "background"])
 async def test_pending_work_keeps_the_slot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1928,6 +1930,11 @@ async def test_pending_work_keeps_the_slot(
     _replied(first, "May I run the ciao memory command?")
     if pending_kind == "permission":
         first.pending_permission = '{"request_id":"r1","tool_name":"Bash"}'
+    elif pending_kind == "background":
+        # The provider still reports background work the pass dispatched.
+        manager._providers[first.chat_id] = SimpleNamespace(  # type: ignore[assignment]
+            background_work_outstanding=True, background_activity_age=0.0
+        )
     else:
         first.retry_status = "pending"
 
@@ -2549,9 +2556,7 @@ def test_continuing_an_archived_pass_lands_in_the_workspace_general_project(
 
 
 # ── Guardrails ───────────────────────────────────────────────────────────
-# A pass must be constrained beyond an ordinary chat: MCP and `gws` are denied
-# on Claude, and on opencode (which ignores `disallowed_tools`) the request
-# carries a marker that selects the guardrail ruleset.
+# A pass runs under the same denies as an ordinary chat in its workspace.
 
 
 def _pass_chat(manager: ProjectChatManager) -> ChatInfo:
@@ -2568,37 +2573,22 @@ def _pass_chat(manager: ProjectChatManager) -> ChatInfo:
     )
 
 
-def test_memory_pass_chat_denies_mcp_and_gws_tools(tmp_path: Path) -> None:
+def test_a_memory_pass_request_carries_the_ordinary_chat_denies(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
-    # A declared server reaches an ordinary chat; the pass must deny it.
+    # A declared server and a shipped gws skill reach an ordinary chat; a pass
+    # is not denied them on top.
     (tmp_path / ".mcp.json").write_text(
         json.dumps({"mcpServers": {"n8n": {"command": "n8n"}}}), encoding="utf-8"
     )
     ordinary = _source(manager)
     pass_chat = _pass_chat(manager)
 
-    denied = manager.disallowed_tools_for_chat(pass_chat)
     base = manager.disallowed_tools_for_chat(ordinary)
-    # The workspace's own list is kept, not replaced.
-    assert denied[: len(base)] == base
-    assert "EnterPlanMode" in denied
-    assert "mcp__n8n" in denied
-    # gws is blocked at the skill layer: the shipped set, read from disk.
-    gws = [tool for tool in denied if tool.startswith("Skill(gws-")]
-    assert "Skill(gws-gmail)" in gws
-
-    # An ordinary chat keeps both: no gws deny, and the declared server loads.
-    assert not [tool for tool in base if tool.startswith("Skill(gws-")]
+    assert manager.disallowed_tools_for_chat(pass_chat) == base
     assert "mcp__n8n" not in base
-
-
-def test_build_agent_request_marks_only_the_memory_pass(tmp_path: Path) -> None:
-    manager = _make_manager(tmp_path)
-    ordinary = _source(manager)
-    pass_chat = _pass_chat(manager)
-
-    assert manager.build_agent_request(pass_chat, prompt="p").memory_pass is True
-    assert manager.build_agent_request(ordinary, prompt="p").memory_pass is False
+    assert not [tool for tool in base if tool.startswith("Skill(gws-")]
+    request = manager.build_agent_request(pass_chat, prompt="p")
+    assert request.disallowed_tools == base
 
 
 def test_an_approved_task_pass_extracts_the_procedure_and_is_its_own_pass(

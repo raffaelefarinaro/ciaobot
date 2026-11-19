@@ -120,25 +120,6 @@ finally:
 print("injected")
 """
 
-_MISSING_API_SCRATCH_CHILD = """
-import ctypes
-import os
-import sys
-
-sys.platform = "darwin"
-""" + _NO_NATIVE_ACL + """
-ctypes.CDLL = no_native_acl
-
-from ciao import native_handoff
-
-try:
-    native_handoff.prepare_bootstrap_scratch()
-except native_handoff.NativeHandoffError as exc:
-    print(f"refused: {exc}")
-else:
-    print("prepared")
-"""
-
 _MISSING_API_READ_CHILD = """
 import ctypes
 import os
@@ -211,17 +192,6 @@ def test_the_simulated_mac_harness_injects_the_acl_answer(tmp_path: Path) -> Non
     child = _run(_INJECTED_CHILD, str(tmp_path / "secret"))
     assert child.returncode == 0, child.stderr
     assert child.stdout.strip() == "injected"
-
-
-def test_native_handoff_scratch_refuses_a_missing_native_acl(tmp_path: Path) -> None:
-    """The scratch chain check must not skip the ACL question."""
-    home = tmp_path / "home"
-    home.mkdir(mode=0o700)
-    child = _run(_MISSING_API_SCRATCH_CHILD, env={"HOME": str(home)})
-    assert child.returncode == 0, child.stderr
-    assert child.stdout.startswith("refused:"), child.stdout
-    assert "Could not inspect" in child.stdout
-    assert not (home / ".ciao").exists(), "it refused instead of creating the chain"
 
 
 def test_read_bounded_file_refuses_a_missing_native_acl(tmp_path: Path) -> None:

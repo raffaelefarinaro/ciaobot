@@ -23,8 +23,6 @@ const responses: Record<string, unknown> = {
   '/api/admin/skills': { counts: {}, skills: [] },
   '/api/commands': { commands: [], skills: [] },
   '/api/agent-assets': { subagents: [], commands: [], health: { status: 'ok', checks: [] } },
-  '/api/mcp/status': { workspace: 'personal', agent_root: '/workspace/personal', providers: [] },
-  '/api/mcp/usage': {},
   '/api/settings/providers': { connections: {} },
   // The home tab mounts the handover card, which reads its own payload.
   '/api/proposals/handover': {
@@ -208,11 +206,14 @@ describe('Settings asset tabs are scoped to the active workspace', () => {
     try {
       expect(paths).toContain('/api/admin/skills?workspace=personal')
       expect(paths).not.toContain('/api/commands?workspace=personal')
-      for (const [tab, path] of [['commands', '/api/commands'], ['subagents', '/api/agent-assets'], ['mcp', '/api/mcp/status']]) {
+      for (const [tab, path] of [['commands', '/api/commands'], ['subagents', '/api/agent-assets']]) {
         await router.push(`/settings/${tab}`)
         await nextTick()
         expect(paths).toContain(`${path}?workspace=personal`)
       }
+      await router.push('/settings/mcp')
+      await nextTick()
+      expect(host.textContent).toContain('MCP servers')
     } finally {
       app.unmount()
       host.remove()
@@ -239,8 +240,7 @@ describe('Settings asset tabs are scoped to the active workspace', () => {
       expect(paths).toContain('/api/admin/skills?workspace=work')
       expect(paths).not.toContain('/api/agent-assets?workspace=work')
       expect(paths).not.toContain('/api/commands?workspace=work')
-      expect(paths).not.toContain('/api/mcp/status?workspace=work')
-      for (const [tab, path] of [['commands', '/api/commands'], ['subagents', '/api/agent-assets'], ['mcp', '/api/mcp/status']]) {
+      for (const [tab, path] of [['commands', '/api/commands'], ['subagents', '/api/agent-assets']]) {
         await router.push(`/settings/${tab}`)
         await nextTick()
         expect(paths).toContain(`${path}?workspace=work`)

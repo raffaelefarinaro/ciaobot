@@ -24,12 +24,7 @@ export type WorkspaceForm = {
   default_provider: WorkspaceProvider
   gws_profile: string
   disallowed_tools: string
-  // Whether the workspace's Claude chats load the claude.ai connectors.
-  claude_ai_connectors: boolean
   color: WorkspaceColorId
-  // '' is "no choice": the key is left out of a create, and an update sends
-  // null, so the engine keeps or returns the workspace to its default.
-  agent_fs_scope: FsScopeChoice
   // Sparse per-provider overrides of the engine defaults; always built with
   // normalizeOverrides/setOverride so JSON.stringify(form) stays a stable dirty check.
   provider_overrides: ProviderOverrides
@@ -37,21 +32,6 @@ export type WorkspaceForm = {
   // normalizeClaudeTrim/setTrimmed so JSON.stringify(form) stays a stable dirty check.
   claude_trim: ClaudeTrimOverrides
 }
-
-export type FsScopeChoice = 'workspace' | 'machine' | ''
-
-// Copy for the File access select. The default's name comes from the engine's
-// payload (default_agent_fs_scope), so the PWA never restates the platform rule.
-export const WORKSPACE_FS_SCOPE_LABEL: Record<'workspace' | 'machine', string> = {
-  workspace: 'Workspace only',
-  machine: 'Whole machine',
-}
-export const WORKSPACE_FS_SCOPE_COPY: Record<FsScopeChoice, string> = {
-  '': 'Uses the default this engine applies to workspaces with no File access choice.',
-  workspace: 'Workspace only. The agent and its shell cannot read outside this workspace.',
-  machine: 'Whole machine. The agent can read any file this user can read.',
-}
-export const WORKSPACE_FS_SANDBOX_NOTE = 'If the engine cannot sandbox, a workspace-only chat refuses to start until you choose whole machine.'
 
 export type GwsProfileOption = { name: string; label: string; email: string }
 
@@ -78,14 +58,6 @@ export function useWorkspaceAdmin(deps: {
   const restoringArchiveId = ref<string | null>(null)
   const showNewWorkspace = ref(false)
 
-  // The engine's default for File access, from /api/workspaces. Null until the
-  // list has loaded, when the default option carries no name yet.
-  const fsScopeEngineDefault = ref<'workspace' | 'machine' | null>(null)
-  const fsScopeDefaultOptionLabel = computed(() => {
-    const label = fsScopeEngineDefault.value ? WORKSPACE_FS_SCOPE_LABEL[fsScopeEngineDefault.value] : ''
-    return label ? `Default (${label})` : 'Default'
-  })
-
   function defaultWorkspaceProvider(): WorkspaceProvider {
     return projectStore.workspaceProviderOptions[0]?.value || 'claude'
   }
@@ -97,9 +69,7 @@ export function useWorkspaceAdmin(deps: {
       default_provider: defaultWorkspaceProvider(),
       gws_profile: '',
       disallowed_tools: '',
-      claude_ai_connectors: true,
       color: DEFAULT_WORKSPACE_COLOR,
-      agent_fs_scope: '',
       provider_overrides: {},
       claude_trim: {},
     }
@@ -115,11 +85,6 @@ export function useWorkspaceAdmin(deps: {
       : defaultWorkspaceProvider()
   }
 
-  // A workspace that never chose has no stored scope, so it reads as '' (the default).
-  function fsScopeChoice(raw: unknown): FsScopeChoice {
-    return raw === 'workspace' || raw === 'machine' ? raw : ''
-  }
-
   function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
     return {
       name: ws.name,
@@ -127,9 +92,7 @@ export function useWorkspaceAdmin(deps: {
       default_provider: normalizeWorkspaceProvider(ws.default_provider),
       gws_profile: ws.gws_profile || '',
       disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
-      claude_ai_connectors: ws.claude_ai_connectors !== false,
       color: normalizeWorkspaceColor(ws.color),
-      agent_fs_scope: fsScopeChoice(ws.agent_fs_scope),
       provider_overrides: normalizeOverrides(ws.provider_overrides),
       claude_trim: normalizeClaudeTrim(ws.claude_trim),
     }
@@ -146,17 +109,9 @@ export function useWorkspaceAdmin(deps: {
   // key, PATCH path), and changing it mid-edit would re-key the card and lose focus.
   const workspaceNameDraft = ref('')
 
-  // A File access link (`/settings/workspace?workspace=NAME#file-access`)
-  // switches the active workspace to NAME and focuses its File access control;
-  // it never selects a value and never saves. This is the status shown when it
-  // cannot: an unknown workspace, or unsaved changes the user chose to keep.
+  // Shown on the Overview when a created workspace could not be opened
+  // because unsaved changes to the active one were kept.
   const workspaceLinkStatus = ref('')
-  // The row being pointed at, so the CSS animation has one source of truth.
-  const workspaceLinkTarget = ref<string | null>(null)
-
-  function clearWorkspaceLinkHighlight(name: string): void {
-    if (workspaceLinkTarget.value === name) workspaceLinkTarget.value = null
-  }
 
   function workspaceDirty(form: WorkspaceForm): boolean {
     const saved = workspaceBaseline.value[form.name]
@@ -174,21 +129,17 @@ export function useWorkspaceAdmin(deps: {
     workspaceNameDraft.value = name
   }
 
-  // `provider · file access · Google email`, the one-line summary on the
-  // All workspaces rows. File access is the effective one (own choice, else
-  // the engine's default) and is dropped until the default has loaded.
+  // `provider · Google email`, the one-line summary on the All workspaces rows.
   function workspaceSummary(form: WorkspaceForm): string {
     const provider = workspaceProviderOptions.value.find((option) => option.value === form.default_provider)?.label
       || form.default_provider
-    const effectiveScope = form.agent_fs_scope || fsScopeEngineDefault.value
-    const fsLabel = effectiveScope ? WORKSPACE_FS_SCOPE_LABEL[effectiveScope] : ''
     const linked = form.gws_profile
       ? gwsProfileOptions.value.find((option) => option.name === form.gws_profile)
       : undefined
     const google = form.gws_profile
       ? linked?.email || linked?.label || linked?.name || form.gws_profile
       : 'no Google'
-    return [provider, fsLabel, google].filter(Boolean).join(' · ')
+    return [provider, google].filter(Boolean).join(' · ')
   }
 
   const workspaceProviderOptions = computed(() =>
@@ -208,7 +159,6 @@ export function useWorkspaceAdmin(deps: {
     try {
       const res = await projectStore.fetchWorkspaces()
       primaryWorkspace.value = res?.primary ?? null
-      fsScopeEngineDefault.value = res?.default_agent_fs_scope ?? null
       workspaceForms.value = projectStore.workspaces.map(workspaceToForm)
       workspaceBaseline.value = Object.fromEntries(
         workspaceForms.value.map((form) => [form.name, JSON.stringify(form)]),
@@ -260,13 +210,7 @@ export function useWorkspaceAdmin(deps: {
         vault_root: form.vault_root.trim() || target,
         default_provider: form.default_provider,
         disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
-        claude_ai_connectors: form.claude_ai_connectors,
         color: form.color,
-        // Sent only when File access was changed. Picking the default again goes
-        // as null, which clears an earlier explicit choice.
-        ...(form.agent_fs_scope !== fsScopeChoice(projectStore.workspaces.find(w => w.name === name)?.agent_fs_scope)
-          ? { agent_fs_scope: form.agent_fs_scope || null }
-          : {}),
         // Sent whole only when changed; an emptied map goes as {} and clears.
         ...(JSON.stringify(form.provider_overrides) !== JSON.stringify(normalizeOverrides(
           projectStore.workspaces.find(w => w.name === name)?.provider_overrides,
@@ -336,8 +280,6 @@ export function useWorkspaceAdmin(deps: {
         gws_profile: '',
         disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
         color: form.color,
-        // Sent only when the user picked a value, so the server applies its default.
-        ...(form.agent_fs_scope ? { agent_fs_scope: form.agent_fs_scope } : {}),
       })
       const createdName = form.name.trim()
       notifySaved(`Workspace "${createdName}" created.`, 'Workspaces')
@@ -490,21 +432,16 @@ export function useWorkspaceAdmin(deps: {
     archivedLoadError,
     restoringArchiveId,
     showNewWorkspace,
-    fsScopeEngineDefault,
     workspaceForms,
     newWorkspaceForm,
     workspaceBaseline,
     workspaceNameDraft,
     workspaceLinkStatus,
-    workspaceLinkTarget,
-    fsScopeDefaultOptionLabel,
     defaultWorkspaceProvider,
     blankWorkspaceForm,
     normalizeWorkspaceProvider,
-    fsScopeChoice,
     workspaceToForm,
     activeWorkspaceForm,
-    clearWorkspaceLinkHighlight,
     workspaceDirty,
     discardWorkspace,
     openWorkspaceSettings,

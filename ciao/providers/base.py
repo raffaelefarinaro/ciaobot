@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-import asyncio
-import base64
 import math
 import os
+import re
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator, AsyncIterable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, TypeGuard
+from typing import Any
 
 from ciao.models import (
     AgentRequest,
     BridgeMode,
-    ImageAttachment,
     StreamEvent,
 )
 
@@ -55,9 +53,7 @@ class ProviderCapabilities:
     thinking_levels: bool = False
     usage: bool = False
     quota: bool = False
-    subagents: bool = False
     background_subagents: bool = False
-    subagent_messages: bool = False
     session_history: bool = False
     schedule_unattended: bool = False
 
@@ -74,32 +70,6 @@ class QuestionResponseResult:
     # The request was already answered (another tab won, or V2 returned 409):
     # nothing was applied for this reply; the caller should clear its card.
     already_resolved: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class McpOAuthAttempt:
-    """One OAuth sign-in attempt a provider started for an MCP server."""
-
-    integration_id: str
-    attempt_id: str
-    url: str
-    mode: str
-
-
-class McpOAuthUnavailable(Exception):
-    """A provider cannot offer an MCP sign-in here. ``reason`` names why.
-
-    ``reason`` is one of ``not_running``, ``no_integration``, ``no_oauth_method``
-    or ``unsupported``.
-    """
-
-    def __init__(self, reason: str) -> None:
-        super().__init__(reason)
-        self.reason = reason
-
-
-# Outcome of a "move to background" request (#1413).
-MoveToBackgroundOutcome = Literal["moved", "nothing", "unsupported", "not_running", "failed"]
 
 
 def build_prompt(request: AgentRequest) -> str:
@@ -127,6 +97,26 @@ def build_prompt(request: AgentRequest) -> str:
     return "\n".join(lines).strip()
 
 
+_NATIVE_SLASH = re.compile(r"^/[\w:-]+(?:\s|$)")
+
+
+def native_slash_prompt(request: AgentRequest) -> tuple[str, str] | None:
+    """Split a native slash command from the context capsule Ciaobot put in front of it.
+
+    Returns ``(command_text, capsule)`` when the prompt starts with the recorded
+    ``injected_context_prefix`` and what follows it is a slash command; None
+    otherwise. Trust comes from the recorded prefix only: capsule-shaped text the
+    user typed is never split off, so it stays user text.
+    """
+    capsule = request.injected_context_prefix
+    if not capsule or not request.prompt.startswith(capsule):
+        return None
+    command = request.prompt[len(capsule):]
+    if not _NATIVE_SLASH.match(command):
+        return None
+    return command, capsule
+
+
 def prepend_stable_context(request: AgentRequest) -> None:
     """Re-send stable routing context after a provider replaces a session."""
     prefix = request.stable_context_prefix
@@ -137,47 +127,6 @@ def prepend_stable_context(request: AgentRequest) -> None:
     # ``injected_context_prefix`` moves with the prompt instead of being
     # recomputed from delimiters later.
     request.injected_context_prefix = prefix + request.injected_context_prefix
-
-
-def build_claude_message_content(request: AgentRequest) -> str | list[dict[str, Any]]:
-    """Build Claude SDK message content with native image blocks when present."""
-    prompt = build_prompt(request)
-    if not request.images:
-        return prompt
-
-    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-    for image in request.images:
-        content.append(_claude_image_block(image))
-    return content
-
-
-def build_claude_message_stream(
-    request: AgentRequest,
-    *,
-    session_id: str = "default",
-    uuid: str = "",
-) -> AsyncIterable[dict[str, Any]]:
-    """Build a one-message async stream for Claude structured input.
-
-    ``uuid`` tags the message so the CLI's user-message replay echoes it back
-    unchanged (the delivery signal for ``steer_turn``).
-    """
-
-    async def _stream() -> AsyncGenerator[dict[str, Any], None]:
-        message: dict[str, Any] = {
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": build_claude_message_content(request),
-            },
-            "parent_tool_use_id": None,
-            "session_id": session_id,
-        }
-        if uuid:
-            message["uuid"] = uuid
-        yield message
-
-    return _stream()
 
 
 def build_runtime_context(request: AgentRequest) -> str:
@@ -212,50 +161,8 @@ def build_runtime_context(request: AgentRequest) -> str:
     return "\n".join(lines)
 
 
-def rate_limit_quota_payload(rate_limit_info: Any) -> dict[str, str]:
-    """Normalize Claude rate-limit info into persisted quota fields."""
-    quota: dict[str, str] = {}
-    status = getattr(rate_limit_info, "status", None)
-    if status:
-        quota["status"] = str(status)
-    rate_limit_type = getattr(rate_limit_info, "rate_limit_type", None)
-    if rate_limit_type:
-        quota["rateLimitType"] = str(rate_limit_type)
-    resets_at = getattr(rate_limit_info, "resets_at", None)
-    if resets_at is not None:
-        quota["resetsAt"] = str(resets_at)
-    utilization = getattr(rate_limit_info, "utilization", None)
-    if utilization is not None:
-        quota["utilization"] = f"{float(utilization):.3f}"
-    overage_status = getattr(rate_limit_info, "overage_status", None)
-    if overage_status:
-        quota["overageStatus"] = str(overage_status)
-    overage_resets_at = getattr(rate_limit_info, "overage_resets_at", None)
-    if overage_resets_at is not None:
-        quota["overageResetsAt"] = str(overage_resets_at)
-    overage_disabled_reason = getattr(rate_limit_info, "overage_disabled_reason", None)
-    if overage_disabled_reason:
-        quota["overageDisabledReason"] = str(overage_disabled_reason)
-    return quota
-
-
-def rate_limit_status_text(quota: dict[str, str]) -> str:
-    """Render a short human-facing rate-limit status."""
-    parts = ["Rate limit"]
-    status = quota.get("status")
-    if status:
-        parts.append(str(status))
-    rate_limit_type = quota.get("rateLimitType")
-    if rate_limit_type:
-        parts.append(f"({rate_limit_type})")
-    utilization = quota.get("utilization")
-    if utilization:
-        try:
-            pct = float(utilization) * 100
-            parts.append(f"{pct:.1f}% used")
-        except ValueError:
-            parts.append(f"utilization {utilization}")
-    return ": ".join([parts[0], " ".join(parts[1:])]) if len(parts) > 1 else parts[0]
+class CleanupTimedOut(TimeoutError):
+    """A session cleanup ran out of time. The caller skips the chat's remaining session ids."""
 
 
 class BaseProvider(ABC):
@@ -310,25 +217,31 @@ class BaseProvider(ABC):
 
     @classmethod
     async def native_title_candidates(
-        cls, workspace_root: Path, session_id: str
+        cls, workspace_root: Path, session_id: str, *, runtime_root: Path
     ) -> tuple[str, ...]:
         """Read candidate titles in provider-preference order; empty means unavailable.
 
         A stateless read of the provider's persisted session, usable when no
         live provider instance exists. Adapters only translate their native
         storage into ordered candidate strings; the host validates them.
+        ``runtime_root`` is the chat's runtime directory (``config.state_path.parent``).
         """
         return ()
 
     @classmethod
     async def delete_session(
-        cls, workspace_root: Path, session_id: str
+        cls, workspace_root: Path, session_id: str, *, runtime_root: Path
     ) -> bool | None:
         """Reclaim a persisted session; False requests a cleanup warning.
 
         True is affirmative confirmation. None supplies no confirmation signal:
         an unsupported adapter or a best-effort cleanup with adapter-owned
-        diagnostics. It is not a claim that anything was deleted.
+        diagnostics. It is not a claim that anything was deleted. An adapter
+        whose cleanup ran out of time raises :class:`CleanupTimedOut`.
+
+        ``runtime_root`` is the same runtime directory the live provider writes
+        its own state under (``config.state_path.parent``). It is required with
+        no default, so a caller cannot silently address the workspace instead.
         """
         return None
 
@@ -338,6 +251,19 @@ class BaseProvider(ABC):
     ) -> list[dict[str, Any]]:
         """Optional dynamic model catalog; empty when none is exposed."""
         return []
+
+    def agent_accepts_images(self) -> bool | None:
+        """Whether the live agent takes image input, as it stated at its handshake.
+
+        None when no agent is connected or it states nothing. Only an explicit False
+        is a refusal; the preflight treats every other answer as capable.
+        """
+        return None
+
+    @classmethod
+    def invalidate_model_catalog(cls) -> None:
+        """Drop any cached model catalog so the next ``model_catalog`` probes again."""
+        return None
 
     @abstractmethod
     def run_streaming(
@@ -353,24 +279,6 @@ class BaseProvider(ABC):
         coroutine that *returns* a generator instead.
         """
         ...
-
-    async def steer_turn(self, request: AgentRequest) -> str | None:
-        """Inject a user message into the running foreground turn.
-
-        Returns a delivery id, or None when the provider cannot steer now.
-        """
-        return None
-
-    async def move_to_background(self) -> MoveToBackgroundOutcome:
-        """Move the running turn's foreground tools to the background (OpenCode's Ctrl+B).
-
-        ``moved``: a backgroundable call was running and the provider accepted
-        the request; ``nothing``: accepted, but nothing was running that could
-        move; ``not_running``: no live session; ``failed``: the provider
-        refused or could not be reached. Providers without the feature (Claude)
-        answer ``unsupported``.
-        """
-        return "unsupported"
 
     async def disconnect(self) -> None:
         """Discard any provider-side connection state."""
@@ -398,18 +306,6 @@ class BaseProvider(ABC):
         """
         return True
 
-    async def read_mcp_status(self) -> dict[str, str]:
-        """Per-server MCP state (``connected``, ``needs_auth``, ...) from a live connection; ``{}`` when none."""
-        return {}
-
-    async def reconnect_mcp_server(self, server_name: str) -> bool:
-        """Reconnect one MCP server so a fresh sign-in takes effect; False when nothing was reconnected."""
-        return False
-
-    def mcp_sign_in_exempt(self, server: str) -> bool:
-        """True when ``server`` is signed in outside Ciao, so detection never raises a card for it."""
-        return False
-
     async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
         """Yield between-turn provider events until cancelled.
 
@@ -431,83 +327,24 @@ class BaseProvider(ABC):
     def is_connected(self) -> bool:
         """True while a live provider-side connection exists.
 
-        Read paths (MCP status, the live collab tree) may query it without
+        Read paths (MCP status) may query it without
         starting anything. Distinct from ``cli_connected``, which answers
         "does the CLI subprocess owner still live" and is True by default.
         """
         return False
 
     @classmethod
-    async def read_thread(cls, workspace_root: Path, session_id: str) -> dict[str, Any]:
-        """Session metadata plus message history for transcript replay; ``{}`` when none."""
+    async def read_thread(
+        cls, workspace_root: Path, session_id: str, *, runtime_root: Path
+    ) -> dict[str, Any]:
+        """Session metadata plus message history for transcript replay; ``{}`` when none.
+
+        ``runtime_root`` is ``config.state_path.parent``; see :meth:`delete_session`.
+        """
         return {}
-
-    @classmethod
-    async def read_collab_tree(
-        cls, workspace_root: Path, session_id: str
-    ) -> list[dict[str, Any]]:
-        """Child sessions with their history, read without a live chat; ``[]`` when none."""
-        return []
-
-    async def read_live_collab_tree(
-        self,
-        *,
-        include_messages: bool = False,
-        only_child_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """``read_collab_tree`` over this provider's own live connection; ``[]`` when none."""
-        return []
-
-    async def refresh_background_shells(self) -> int:
-        """Reconcile tracked background shells with the provider; return the count."""
-        return 0
-
-    async def wait_background_change(self, timeout: float) -> None:
-        """Wait up to ``timeout`` seconds for tracked background work to change."""
-        await asyncio.sleep(timeout)
-
-    @property
-    def background_count(self) -> int:
-        """Background shells plus subagents tracked for this provider's session."""
-        return 0
-
-    def background_shell_rows(self) -> list[dict[str, Any]]:
-        """Tracked background shell rows; adapter-shaped, not normalised."""
-        return []
-
-    def background_child_ids(self) -> list[str]:
-        """Session ids of the tracked background subagents."""
-        return []
-
-    async def stop_background_task(self, task_id: str) -> bool:
-        """Stop one tracked background task; False when not tracked or unsupported."""
-        return False
 
     async def abort_session(self, session_id: str) -> None:
         """Abort a provider-side session; a no-op for adapters without one."""
-
-    def interrupted_background_work(self) -> dict[str, Any] | None:
-        """Background work a restart would lose, for the host to record at shutdown.
-
-        ``{"children": [...], "shells": [{"id", "command"}]}``, or None when the
-        adapter has nothing to record. The host checks
-        ``background_work_outstanding`` first.
-        """
-        return None
-
-    async def start_mcp_oauth(self, server: str) -> McpOAuthAttempt:
-        """Start the OAuth sign-in for one MCP server; unsupported by default."""
-        raise McpOAuthUnavailable("unsupported")
-
-    async def read_mcp_oauth_attempt(self, integration_id: str, attempt_id: str) -> tuple[str, str]:
-        """Read one sign-in attempt's ``(status, message)``; unsupported by default."""
-        raise McpOAuthUnavailable("unsupported")
-
-    async def cancel_mcp_oauth(self, integration_id: str, attempt_id: str) -> None:
-        """Cancel one sign-in attempt; a no-op for adapters without one."""
-
-    async def ensure_server(self, request: AgentRequest) -> None:
-        """Start the provider's server for ``request`` without a prompt; a no-op for adapters without a startable server."""
 
     @property
     def seconds_since_activity(self) -> float:
@@ -515,17 +352,8 @@ class BaseProvider(ABC):
         return math.inf
 
 
-def live_for_session(provider: object, session_id: str | None) -> TypeGuard[BaseProvider]:
-    """True when ``provider`` is a connected BaseProvider bound to ``session_id``."""
-    return (
-        isinstance(provider, BaseProvider)
-        and provider.is_connected
-        and provider.current_session_id == session_id
-    )
-
-
 class BaseSDKProvider(BaseProvider):
-    """Shared state and helpers for SDK-backed providers."""
+    """Shared settings-change tracking for providers that run an SDK-style session."""
 
     def __init__(self, workspace_root: Path, *, config: object | None = None) -> None:
         super().__init__(workspace_root, config=config)
@@ -545,15 +373,3 @@ class BaseSDKProvider(BaseProvider):
     def _reset_settings(self) -> None:
         self._current_model = ""
         self._current_mode = "auto"
-
-
-def _claude_image_block(image: ImageAttachment) -> dict[str, Any]:
-    data = base64.b64encode(image.path.read_bytes()).decode("ascii")
-    return {
-        "type": "image",
-        "source": {
-            "type": "base64",
-            "media_type": image.mime_type,
-            "data": data,
-        },
-    }

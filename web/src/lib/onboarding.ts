@@ -24,7 +24,7 @@ export interface StageState {
 }
 
 export interface OnboardingSummaryItem {
-  id: 'location' | 'backup' | 'runtime' | 'model' | 'file_access' | 'approvals' | 'memory' | 'care'
+  id: 'location' | 'backup' | 'runtime' | 'model' | 'approvals' | 'memory' | 'care'
   label: string
   value: string
   state: 'ready' | 'deferred' | 'attention' | 'unknown'

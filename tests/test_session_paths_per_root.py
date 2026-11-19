@@ -14,21 +14,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 
-from ciao import subagent_tracking
+from ciao import claude_sessions
 from ciao.models import AgentRequest, ChatContext
-from ciao.providers import claude as claude_adapter
 from ciao.providers import opencode as opencode_adapter
 from ciao.providers.base import BaseProvider, ProviderCapabilities
-from ciao.providers.claude import ClaudeProvider
+from ciao.providers.acp.agents import OpencodeAcpProvider
 from ciao.providers.opencode import OpencodeProvider
 from ciao.transcripts import _claude_projects_dir
-from ciao.web import transcript_service
 from ciao.web.project_chats import ProjectChatManager, ChatInfo
 
 
@@ -61,40 +60,6 @@ def _write_session(projects_dir: Path, session_id: str) -> Path:
     return path
 
 
-def _write_nested_subagent(projects_dir: Path, session_id: str, agent: str, text: str) -> Path:
-    """Write one nested subagent JSONL (the ``<sid>/subagents/*.jsonl`` layout)."""
-    path = projects_dir / session_id / "subagents" / f"{agent}.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    record = {
-        "type": "user",
-        "message": {
-            "role": "user",
-            "content": [{"type": "text", "text": text}],
-        },
-    }
-    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
-    return path
-
-
-def test_local_subagent_transcripts_stay_inside_their_agent_root(fake_home: Path) -> None:
-    """A session id resumed or copied under another cwd must not mix that
-    root's subagent transcripts into this chat's panel: the nested-subagent
-    slug scan used to ignore `agent_root` while the parent-session lookup
-    beside it already scoped to it."""
-    root_a = fake_home / "a"
-    root_b = fake_home / "b"
-    session = "cccccccc-cccc-cccc-cccc-cccccccccccc"
-    _write_nested_subagent(_projects_dir_for(root_a), session, "agent-x", "from a")
-    _write_nested_subagent(_projects_dir_for(root_b), session, "agent-y", "from b")
-
-    scoped = transcript_service._local_subagent_transcripts(session, root_a, agent_root=root_a)
-    assert [entry["agent_id"] for entry in scoped] == ["agent-x"]
-
-    # Without a root the global net still reads every slug, as today.
-    unscoped = transcript_service._local_subagent_transcripts(session, root_a)
-    assert sorted(entry["agent_id"] for entry in unscoped) == ["agent-x", "agent-y"]
-
-
 @pytest.fixture
 def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point ``Path.home()`` at a temp dir so slugs land under it."""
@@ -114,89 +79,6 @@ def test_slug_differs_per_agent_root(fake_home: Path) -> None:
     assert _projects_dir_for(root_a) != _projects_dir_for(root_b)
 
 
-def test_find_parent_session_file_reads_own_root(fake_home: Path) -> None:
-    root_a = fake_home / "a"
-    root_b = fake_home / "b"
-    session = "33333333-3333-3333-3333-333333333333"
-    path = _write_session(_projects_dir_for(root_a), session)
-
-    # The preferred path is scoped to the root it was handed.
-    assert subagent_tracking.find_parent_session_file(session, root_a, agent_root=root_a) == path
-    assert _projects_dir_for(root_a) != _projects_dir_for(root_b)
-
-    # Querying root_b still finds it, via the cwd-slug glob scan. That net is
-    # deliberate today: the projects dir is a slug of the cwd, so a session
-    # recorded under a different cwd is only reachable this way. Asserting
-    # cross-root invisibility belongs to the re-rooting release, once agent_root
-    # really differs per workspace; asserting it now would lock in the loss of
-    # the net while the hazard it covers is still live.
-    assert (
-        subagent_tracking.find_parent_session_file(session, root_b, agent_root=root_b)
-        == path
-    )
-
-
-def test_find_parent_session_file_defaults_to_workspace_root(fake_home: Path) -> None:
-    root = fake_home / "a"
-    session = "44444444-4444-4444-4444-444444444444"
-    path = _write_session(_projects_dir_for(root), session)
-
-    assert subagent_tracking.find_parent_session_file(session, root) == path
-
-
-def test_local_session_jsonl_paths_reads_own_root(fake_home: Path) -> None:
-    root_a = fake_home / "a"
-    root_b = fake_home / "b"
-    session = "55555555-5555-5555-5555-555555555555"
-    path = _write_session(_projects_dir_for(root_a), session)
-
-    assert transcript_service._local_session_jsonl_paths(session, root_a) == [path]
-    assert (
-        transcript_service._local_session_jsonl_paths(session, root_b, agent_root=root_b) == []
-    )
-
-
-def test_local_session_jsonl_paths_defaults_to_workspace_root(fake_home: Path) -> None:
-    root = fake_home / "a"
-    session = "66666666-6666-6666-6666-666666666666"
-    path = _write_session(_projects_dir_for(root), session)
-
-    assert transcript_service._local_session_jsonl_paths(session, root) == [path]
-
-
-def test_local_session_jsonl_paths_keeps_every_cross_cwd_match(
-    fake_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Codex P2: a session present under several cwd slugs returns them all.
-
-    The interim implementation returned after the first match, so subagent
-    progress records stored in the other file were dropped by
-    _local_subagent_transcripts.
-    """
-    from ciao import transcripts
-
-    session = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-    root = fake_home / "a"
-    preferred = _write_session(_projects_dir_for(root), session)
-    elsewhere_dir = fake_home / ".claude" / "projects" / "-elsewhere"
-    elsewhere = _write_session(elsewhere_dir, session)
-    third_dir = fake_home / ".claude" / "projects" / "-third"
-    third = _write_session(third_dir, session)
-
-    # A stale cache from a prior lookup must not hide the other matches:
-    # _global_session_matches stats each slug live. Seed the cache to prove
-    # freshness comes from the per-slug stat, not the cache age.
-    transcripts._global_session_scan_cache = None
-    paths = transcript_service._local_session_jsonl_paths(session, root)
-
-    # Order: preferred (workspace root) first, then cross-cwd matches. The
-    # tail order is readdir order, which differs per filesystem (APFS vs
-    # ext4/tmpfs), so only the head is pinned — pinning the tail flaked on
-    # Linux CI while passing on every Mac.
-    assert paths[0] == preferred
-    assert set(paths[1:]) == {elsewhere, third}
-
-
 def test_claude_session_exists_reads_own_root(
     fake_home: Path, tmp_path: Path
 ) -> None:
@@ -208,8 +90,9 @@ def test_claude_session_exists_reads_own_root(
     pcm = _make_manager(tmp_path)
     assert pcm._claude_session_exists(session, agent_root=root_a) is True
     assert _projects_dir_for(root_a) != _projects_dir_for(root_b)
-    # Found under root_b too, through the same deliberate glob net. See the
-    # note in test_find_parent_session_file_reads_own_root.
+    # Found under root_b too: the projects dir is a slug of the cwd, so a
+    # session recorded under a different cwd is only reachable through the
+    # glob scan, which is deliberate.
     assert pcm._claude_session_exists(session, agent_root=root_b) is True
 
 
@@ -292,10 +175,11 @@ def test_reclaim_targets_the_chats_agent_root(
 
     seen: list[tuple[str, str]] = []
 
-    def recording_sdk_delete(session_id: str, directory: str) -> None:
-        seen.append((session_id, directory))
+    def recording_delete(session_id: str, directory: str | None) -> bool:
+        seen.append((session_id, directory or ""))
+        return False
 
-    monkeypatch.setattr(claude_adapter, "sdk_delete_session", recording_sdk_delete)
+    monkeypatch.setattr(claude_sessions, "delete_session_file", recording_delete)
 
     with caplog.at_level(logging.WARNING, logger=_RECLAIM_LOGGER):
         asyncio.run(pcm._reclaim_provider_sessions_async(chat, [session]))
@@ -326,18 +210,21 @@ def test_delete_reclaims_against_the_chats_root_not_the_primary(
     expected = pcm._agent_root_for_chat(chat.chat_id)
 
     seen: list[tuple[str, str]] = []
-    cleanup_done = asyncio.Event()
+    # The cleanup runs the file delete in a worker thread, so the signal is a
+    # threading.Event, awaited off the loop.
+    cleanup_done = threading.Event()
 
-    def recording_sdk_delete(session_id: str, directory: str) -> None:
-        seen.append((session_id, directory))
+    def recording_delete(session_id: str, directory: str | None) -> bool:
+        seen.append((session_id, directory or ""))
         cleanup_done.set()
+        return False
 
-    monkeypatch.setattr(claude_adapter, "sdk_delete_session", recording_sdk_delete)
+    monkeypatch.setattr(claude_sessions, "delete_session_file", recording_delete)
 
     async def run() -> None:
         assert pcm.delete_chat(chat.chat_id) is True
-        # The fire-and-forget cleanup ends at the SDK delete call.
-        await asyncio.wait_for(cleanup_done.wait(), 5)
+        # The fire-and-forget cleanup ends at the file delete call.
+        assert await asyncio.wait_for(asyncio.to_thread(cleanup_done.wait, 5), 10)
 
     asyncio.run(run())
     assert seen == [(session, str(expected))]
@@ -410,8 +297,6 @@ _FORBIDDEN_START_KEYS = (
     "service_started",
     "service_provider_built",
     "builtin_reader",
-    "sdk_reader",
-    "sdk_delete",
     "server_spawned",
 )
 
@@ -462,21 +347,7 @@ def _install_forbidden_start_counters(
         counts["builtin_reader"] += 1
         raise AssertionError("cleanup must not fall back to built-in readers")
 
-    monkeypatch.setattr(OpencodeProvider, "read_thread", counting_read_thread)
-
-    def counting_sdk_info(*args: Any, **kwargs: Any) -> Any:
-        counts["sdk_reader"] += 1
-        raise AssertionError("cleanup must not read Claude SDK session state")
-
-    monkeypatch.setattr(claude_adapter, "get_session_info", counting_sdk_info)
-
-    def counting_sdk_delete(*args: Any, **kwargs: Any) -> Any:
-        counts["sdk_delete"] += 1
-        raise AssertionError(
-            "cleanup must not reach the SDK delete outside the adapter seam"
-        )
-
-    monkeypatch.setattr(claude_adapter, "sdk_delete_session", counting_sdk_delete)
+    monkeypatch.setattr(OpencodeAcpProvider, "read_thread", counting_read_thread)
 
     def counting_ephemeral_init(self, *args: Any, **kwargs: Any) -> None:
         counts["server_spawned"] += 1
@@ -508,128 +379,12 @@ def test_base_delete_session_default_supplies_no_signal(tmp_path: Path) -> None:
 
     root = tmp_path / "agent-root"
     assert counts == {"constructor": 0, "stream": 0}
-    result = asyncio.run(_MinimalAdapter.delete_session(root, "sid-1"))
+    result = asyncio.run(_MinimalAdapter.delete_session(root, "sid-1", runtime_root=Path("/runtime")))
     assert result is None
     # Both forbidden entry points stayed uninvoked through the await.
     assert counts == {"constructor": 0, "stream": 0}
     # No capability flag was added for the operation.
     assert _MinimalAdapter.capabilities == ProviderCapabilities()
-
-
-def test_claude_delete_session_owns_the_sdk_seam(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Claude's adapter classmethod drives the SDK delete once, at the root.
-
-    The exact session id and ``directory=str(root)`` reach the SDK; a missing
-    session or SDK-rejected id is quiet (the failing spy's own call count
-    proves the adapter got there); an I/O failure logs the established
-    message once; cancellation is never swallowed.
-    """
-    sdk_calls: list[tuple[str, str]] = []
-
-    def recording_sdk_delete(session_id: str, directory: str) -> None:
-        sdk_calls.append((session_id, directory))
-
-    monkeypatch.setattr(claude_adapter, "sdk_delete_session", recording_sdk_delete)
-    root = tmp_path / "agent-root"
-
-    assert asyncio.run(ClaudeProvider.delete_session(root, "sid-1")) is None
-    assert sdk_calls == [("sid-1", str(root))]
-
-    # An empty id returns without SDK access.
-    sdk_calls.clear()
-    assert asyncio.run(ClaudeProvider.delete_session(root, "")) is None
-    assert sdk_calls == []
-
-    # SDK-rejected ids and missing sessions are suppressed quietly: the
-    # adapter still called the SDK exactly once, with no log record left.
-    for sdk_error in (FileNotFoundError("missing session"), ValueError("not a uuid")):
-        suppressed: list[tuple[str, str]] = []
-
-        def failing_sdk_delete(
-            session_id: str,
-            directory: str,
-            _error: Exception = sdk_error,
-            _reached: list = suppressed,
-        ) -> None:
-            _reached.append((session_id, directory))
-            raise _error
-
-        monkeypatch.setattr(claude_adapter, "sdk_delete_session", failing_sdk_delete)
-        with caplog.at_level(logging.INFO, logger="ciao.providers.claude"):
-            assert asyncio.run(ClaudeProvider.delete_session(root, "sid-2")) is None
-        assert suppressed == [("sid-2", str(root))]
-        assert caplog.records == []
-
-
-def test_claude_delete_session_logs_io_failures_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """An SDK I/O error keeps the established log text and still returns None."""
-    def broken_sdk_delete(session_id: str, directory: str) -> None:
-        raise OSError("disk on fire")
-
-    monkeypatch.setattr(claude_adapter, "sdk_delete_session", broken_sdk_delete)
-    root = tmp_path / "agent-root"
-    with caplog.at_level(logging.INFO, logger="ciao.providers.claude"):
-        assert asyncio.run(ClaudeProvider.delete_session(root, "sid-io")) is None
-    failures = [
-        record
-        for record in caplog.records
-        if "delete_session failed for sid-io" in record.getMessage()
-    ]
-    assert len(failures) == 1
-    assert failures[0].exc_info is not None
-
-
-def test_claude_reclaim_never_draws_the_host_cleanup_warning(
-    tmp_path: Path, fake_home: Path, monkeypatch: pytest.MonkeyPatch, caplog
-) -> None:
-    """No SDK outcome turns Claude's reclaim into a confirmation warning.
-
-    Claude's return value always carries no confirmation signal, so the
-    host's ``deleted is False`` warning must stay silent across success,
-    suppressed SDK rejections and logged I/O failures alike.
-    """
-    pcm = _rerooted_manager(tmp_path, "work")
-    chat = _archived_chat(pcm, "work", "sid-claude")
-
-    for outcome in (None, FileNotFoundError("missing"), ValueError("bad id"), OSError("io")):
-        calls: list[str] = []
-
-        def outcome_sdk_delete(
-            session_id: str,
-            directory: str,
-            _outcome: Exception | None = outcome,
-            _calls: list = calls,
-        ) -> None:
-            _calls.append(session_id)
-            if _outcome is not None:
-                raise _outcome
-
-        monkeypatch.setattr(claude_adapter, "sdk_delete_session", outcome_sdk_delete)
-        caplog.clear()
-        with caplog.at_level(logging.WARNING, logger=_RECLAIM_LOGGER):
-            asyncio.run(pcm._reclaim_provider_sessions_async(chat, ["sid-claude"]))
-        # The adapter saw the exact id once and the host never warned. (The
-        # adapter may keep its own established I/O error log — that is not a
-        # confirmation signal.)
-        assert calls == ["sid-claude"]
-        assert [record for record in caplog.records if record.name == _RECLAIM_LOGGER] == []
-        assert [record for record in caplog.records if record.levelno == logging.WARNING] == []
-
-
-def test_claude_delete_session_propagates_cancellation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A cancelled SDK delete is not converted into a quiet None."""
-    def cancelling_sdk_delete(session_id: str, directory: str) -> None:
-        raise asyncio.CancelledError()
-
-    monkeypatch.setattr(claude_adapter, "sdk_delete_session", cancelling_sdk_delete)
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(ClaudeProvider.delete_session(tmp_path, "sid-x"))
 
 
 class _RecordingServer:
@@ -682,7 +437,7 @@ def test_opencode_delete_session_transport_contract(
                 return httpx.Response(status)
 
         transport = _install_transport(monkeypatch, _Client())
-        assert asyncio.run(OpencodeProvider.delete_session(root, "ses-x")) is expected
+        assert asyncio.run(OpencodeProvider.delete_session(root, "ses-x", runtime_root=Path("/runtime"))) is expected
         assert calls == ["/api/session/ses-x"]
         # The server was entered once and exited cleanly on every status,
         # confirmed or refused.
@@ -701,14 +456,14 @@ def test_opencode_delete_session_transport_failures(
             raise httpx.ConnectError("server vanished")
 
     transport = _install_transport(monkeypatch, _HttpFailClient())
-    assert asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x")) is False
+    assert asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x", runtime_root=Path("/runtime"))) is False
     assert len(transport["contexts"]) == 1
     # The transport method swallowed the HTTP error inside its own body, so
     # the context manager exited cleanly despite the failed DELETE.
     assert transport["contexts"][0]["exit_error"] is None
 
     transport = _install_transport(monkeypatch, None)
-    assert asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x")) is False
+    assert asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x", runtime_root=Path("/runtime"))) is False
     # The absent client yields no context observation beyond its own entry.
     assert len(transport["contexts"]) == 1
     assert transport["contexts"][0]["client"] is None
@@ -719,7 +474,7 @@ def test_opencode_delete_session_transport_failures(
             raise AssertionError("empty id must not DELETE")
 
     transport = _install_transport(monkeypatch, _AbsentDeleteClient())
-    assert asyncio.run(OpencodeProvider.delete_session(Path("/r"), "")) is False
+    assert asyncio.run(OpencodeProvider.delete_session(Path("/r"), "", runtime_root=Path("/runtime"))) is False
     # Entry happens before the empty-id check exactly as today, and the
     # suppressed-body shortcut still exits the context cleanly.
     assert len(transport["contexts"]) == 1
@@ -736,7 +491,7 @@ def test_opencode_delete_session_propagates_non_http_failures(
 
     transport = _install_transport(monkeypatch, _RuntimeFailClient())
     with pytest.raises(RuntimeError) as runtime_exc:
-        asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x"))
+        asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x", runtime_root=Path("/runtime")))
     # The exception the context manager saw on exit is the one that escaped.
     assert transport["contexts"][0]["exit_error"] is runtime_exc.value
 
@@ -746,7 +501,7 @@ def test_opencode_delete_session_propagates_non_http_failures(
 
     transport = _install_transport(monkeypatch, _CancellingClient())
     with pytest.raises(asyncio.CancelledError) as cancel_exc:
-        asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x"))
+        asyncio.run(OpencodeProvider.delete_session(Path("/r"), "ses-x", runtime_root=Path("/runtime")))
     assert transport["contexts"][0]["exit_error"] is cancel_exc.value
 
 
@@ -772,13 +527,15 @@ def test_third_registered_adapter_reclaims_through_the_registry(
     chat = _acme_chat(pcm, "current-old", ["old-a", "", "old-b", "old-a"])
 
     deletes: list[tuple[str, str]] = []
+    runtime_roots: list[Path] = []
 
     class _AcmeAdapter(_make_no_start_adapter("acme")):
         @classmethod
         async def delete_session(
-            cls, workspace_root: Path, session_id: str
+            cls, workspace_root: Path, session_id: str, *, runtime_root: Path
         ) -> bool | None:
             deletes.append((str(workspace_root), session_id))
+            runtime_roots.append(runtime_root)
             return True
 
     descriptor = _SyntheticDescriptor("acme", _AcmeAdapter)
@@ -795,6 +552,8 @@ def test_third_registered_adapter_reclaims_through_the_registry(
         (root, "old-b"),
         (root, "current-old"),
     ]
+    # The chat's runtime root is the config's state directory, never the workspace.
+    assert runtime_roots == [pcm._config.state_path.parent] * 3
     # The seam was actually reached once per reclaimed id: a skipped path
     # cannot satisfy the positive counts alongside the zero no-start counts.
     assert descriptor.factory_calls == ["acme", "acme", "acme"]
@@ -828,7 +587,7 @@ def test_reclaim_confirms_only_a_literal_false(
     class _ConfirmAdapter(_make_no_start_adapter("acme")):
         @classmethod
         async def delete_session(
-            cls, workspace_root: Path, session_id: str
+            cls, workspace_root: Path, session_id: str, *, runtime_root: Path
         ) -> bool | None:
             return confirmations.pop(0)
 
@@ -897,7 +656,7 @@ def test_reclaim_is_fail_open_but_cancellation_propagates(
     class _FlakyAdapter(_make_no_start_adapter("acme")):
         @classmethod
         async def delete_session(
-            cls, workspace_root: Path, session_id: str
+            cls, workspace_root: Path, session_id: str, *, runtime_root: Path
         ) -> bool | None:
             deletes.append(session_id)
             if session_id == "bad":
@@ -938,7 +697,7 @@ def test_reclaim_is_fail_open_but_cancellation_propagates(
     class _CancellingAdapter(_make_no_start_adapter("acme")):
         @classmethod
         async def delete_session(
-            cls, workspace_root: Path, session_id: str
+            cls, workspace_root: Path, session_id: str, *, runtime_root: Path
         ) -> bool | None:
             deletes.append(session_id)
             raise asyncio.CancelledError()
@@ -1015,7 +774,7 @@ def test_reset_reclaims_captured_old_lineage_after_disconnect(
     release_disconnect = asyncio.Event()
     cleanup_done = asyncio.Event()
 
-    async def fake_delete(workspace_root, session_id):
+    async def fake_delete(workspace_root, session_id, *, runtime_root):
         deletes.append((str(workspace_root), session_id))
         events.append(f"delete:{session_id}")
         if session_id == "old-a":
@@ -1044,28 +803,28 @@ def test_reset_reclaims_captured_old_lineage_after_disconnect(
         return result
 
     monkeypatch.setattr(pcm._transcripts, "archive_session", recording_archive)
-    monkeypatch.setattr(OpencodeProvider, "delete_session", fake_delete)
+    monkeypatch.setattr(OpencodeAcpProvider, "delete_session", fake_delete)
     # The live provider is what reset pops and disconnects before reclaiming;
     # a blocking disconnect gates every deletion deterministically.
     pcm._providers[chat.chat_id] = _BlockingDisconnect()
     counts: dict[str, int] = {"constructor": 0, "stream": 0}
     _install_forbidden_start_counters(monkeypatch, counts)
 
-    real_init = OpencodeProvider.__init__
+    real_init = OpencodeAcpProvider.__init__
 
     def counting_init(self, *args: Any, **kwargs: Any):
         counts.setdefault("constructor", 0)
         counts["constructor"] += 1
         return real_init(self, *args, **kwargs)
 
-    monkeypatch.setattr(OpencodeProvider, "__init__", counting_init)
+    monkeypatch.setattr(OpencodeAcpProvider, "__init__", counting_init)
 
     def counting_stream(self, *args: Any, **kwargs: Any):
         counts.setdefault("stream", 0)
         counts["stream"] += 1
         raise AssertionError("reset cleanup must not stream a turn")
 
-    monkeypatch.setattr(OpencodeProvider, "run_streaming", counting_stream)
+    monkeypatch.setattr(OpencodeAcpProvider, "run_streaming", counting_stream)
 
     def chat_row() -> dict[str, Any]:
         payload = json.loads(pcm._path.read_text(encoding="utf-8"))

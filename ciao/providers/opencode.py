@@ -13,9 +13,9 @@ of its own: MCP comes from the user's own OpenCode config, exactly as Claude
 reads it from ``.mcp.json``. What ties a server to one chat is process-scoped,
 not session-scoped: the chat's bearer capability (``CIAO_AGENT_TOKEN``, minted
 per chat) travels in the server's environment, ``OPENCODE_SERVER_PASSWORD`` is
-per server, the filesystem sandbox wraps the server process, and
+per server, and
 ``OPENCODE_CONFIG_CONTENT`` (tool output limits, linked-repo skills) is read at
-startup. A token rotation or scope change therefore restarts this chat's
+startup. A token rotation therefore restarts this chat's
 server. Per-session
 agent, model, and permission rules are OpenCode's own and keep chat behavior
 isolated.
@@ -25,10 +25,7 @@ The V2 wire contract is verified against the server's own OpenAPI document at
 from ``/api/info``; V1 and unknown server shapes fail closed with an explicit
 upgrade message.
 
-Capability note: ``steer_turn`` posts a message with ``delivery: "steer"``,
-which OpenCode delivers into the running execution at its next step boundary
-(or starts one of its own when the execution just ended); its delivery is
-attributed by inbox id. When background work finishes, OpenCode runs a
+Capability note: when background work finishes, OpenCode runs a
 follow-up execution by itself; ``drain_events`` streams it between turns.
 Everything else Ciaobot needs — fork, interrupt, permissions, forms, and
 background subagents as child sessions — is native.
@@ -45,8 +42,6 @@ import os
 import re
 import secrets
 import socket
-import sys
-import tempfile
 import threading
 import time
 import weakref
@@ -56,7 +51,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
 import httpx
 
@@ -76,7 +71,6 @@ from ciao.models import (
     BridgeMode,
     PermissionRequestEvent,
     ResultEvent,
-    SteerDeliveredEvent,
     StreamEvent,
     SystemStatusEvent,
     ThinkingEvent,
@@ -90,22 +84,16 @@ from ciao.models import (
 from ciao.providers.base import (
     ActiveHandle,
     BaseSDKProvider,
-    McpOAuthAttempt,
-    McpOAuthUnavailable,
-    MoveToBackgroundOutcome,
     ProviderCapabilities,
     QuestionResponseResult,
     build_prompt,
     build_runtime_context,
     prepend_stable_context,
 )
-from ciao.execution_modes import (
-    opencode_credential_deny_rules,
-)
-from ciao.fs_sandbox import node_tool_read_roots, opencode_sandbox_prefix
 from ciao.os_support.processes import ProcessTree, bounded_output, tree_spawn_options
 from ciao.providers._sse import SSEDecoder
-from ciao.tool_path import resolve_tool
+from ciao.providers.acp.connection import agent_base_env
+from ciao.tool_path import prepend_engine_path, resolve_tool
 
 logger = logging.getLogger(__name__)
 
@@ -137,8 +125,8 @@ REQUIRED_PATHS: frozenset[str] = frozenset({
 })
 
 OPENCODE_V2_REQUIRED = (
-    "Ciaobot requires OpenCode 2.0.16 or newer 2.x. OpenCode 1 cannot be "
-    "upgraded in place: install OpenCode 2 (npm install -g @opencode/cli, "
+    "Ciaobot requires OpenCode 2.3.2 or newer. OpenCode 1 cannot be "
+    "upgraded in place: install OpenCode 2.3.2 or newer (npm install -g @opencode/cli, "
     "brew install anomalyco/tap/opencode-v2, or "
     "curl -fsSL https://opencode.ai/v2/install | bash), then retry this chat."
 )
@@ -170,26 +158,20 @@ _INVENTORY_TIMEOUT = 15.0
 _INVENTORY_POLL = 0.1
 _SYSTEM_SKILLS_TTL_SECONDS = 300.0
 
-# Session reads (`read_thread` / `read_collab_tree`) also cost a throwaway
-# `opencode serve`. A chat with a live provider attached reuses that server
-# instead (see `is_connected` / `read_live_collab_tree`), so this classmethod
-# path and its cache now mainly cover reads with nothing attached (an archived
-# chat, or a chat viewed from another device). The PWA still polls the routes
-# they back on short intervals (15s status sync, 4s for /subagents while a
-# turn streams), so the TTL stays above that cadence to collapse bursts to
-# roughly one spawn per tick rather than one per poll.
+# Session reads (`read_thread`) cost a throwaway `opencode serve`. The TTL
+# collapses bursts of reads to roughly one spawn per interval rather than one
+# per call.
 _READ_CACHE_TTL = 6.0
 # A spawn that could not start at all (binary missing, process died, health
 # never answered) is cached longer than a read: while opencode is in this
 # state, every uncached read path spawns another doomed `opencode serve` and
 # holds it for up to `_SERVER_START_TIMEOUT`, so an un-negative-cached
-# `/subagents` poll stacks dying servers on every tick. The TTL stays well
+# read stacks dying servers on every call. The TTL stays well
 # under a minute so reads recover promptly once opencode starts working.
 _READ_FAILURE_CACHE_TTL = 20.0
 # Cache entries carry their own TTL as ``(stamp, ttl, value)``: a failed
 # spawn lives longer than a successful read (see `_READ_FAILURE_CACHE_TTL`).
 _THREAD_CACHE: dict[tuple[str, str], tuple[float, float, dict[str, Any]]] = {}
-_COLLAB_CACHE: dict[tuple[str, str], tuple[float, float, list[dict[str, Any]]]] = {}
 
 _SERVER_START_TIMEOUT = 30.0
 _SERVER_START_ATTEMPTS = 3
@@ -212,11 +194,6 @@ _OPENCODE_DRAIN_MAX_S = 3600.0
 # Budget for the turn-end background reconcile; it must never hold back the
 # turn's result (the live client has no read timeout).
 _OPENCODE_RECONCILE_TIMEOUT_S = 5.0
-# A steer is posted while the user watches the chat; past this the message goes
-# back to the queue. The inbox cancels that Stop and a failed steer issue are
-# bounded too, so neither can hold the interrupt back.
-_OPENCODE_STEER_POST_TIMEOUT_S = 10.0
-_OPENCODE_STEER_CANCEL_TIMEOUT_S = 5.0
 _EXECUTION_TERMINAL_EVENTS = frozenset({
     "session.execution.succeeded",
     "session.execution.failed",
@@ -316,27 +293,6 @@ def _stop_server_sync(process: subprocess.Popen[bytes], tree: ProcessTree) -> No
         tree.close()
 
 
-def _read_only_snapshot(request: AgentRequest) -> tuple[tuple[str, tuple[int, int] | None], ...]:
-    """Identity of each granted read-only file, for the server reuse decision (#1960).
-
-    Linux only: ``bwrap`` binds a file by inode when the server starts, so a
-    registry replaced by rename keeps showing its old content and a receipt
-    created later is never bound. A changed snapshot restarts the server with
-    fresh binds. Seatbelt grants by path, so macOS never needs the restart.
-    """
-    if request.agent_fs_scope != "workspace" or not sys.platform.startswith("linux"):
-        return ()
-    snapshot: list[tuple[str, tuple[int, int] | None]] = []
-    for raw in request.agent_read_only:
-        try:
-            st = os.stat(raw)
-        except OSError:  # missing or unreadable: nothing is bound
-            snapshot.append((raw, None))
-            continue
-        snapshot.append((raw, (st.st_ino, st.st_mtime_ns)))
-    return tuple(snapshot)
-
-
 async def _spawn_server(
     *argv: str, **kwargs: Any
 ) -> tuple[asyncio.subprocess.Process, ProcessTree]:
@@ -370,7 +326,7 @@ _STARTUP_CLASSIFICATIONS = frozenset({
     "incompatible_version", "missing_operations", "unauthorized",
 })
 _STARTUP_MESSAGES = {
-    "incompatible_version": "OpenCode 2.0.16 or later is required (2.x only)",
+    "incompatible_version": "OpenCode 2.3.2 or newer is required",
     "missing_operations": "OpenCode API is missing required operations",
     "unauthorized": "OpenCode server authentication failed",
 }
@@ -552,21 +508,6 @@ _MODE_AGENTS: dict[str, str] = {
 # wildcard goes first and specific grants follow. ``auto`` allows routine work
 # while keeping every shell command behind an operator approval card.
 _READ_ONLY_TOOLS = ("read", "glob", "grep")
-# Tools OpenCode's POST /api/session/{id}/background can move (its job
-# types `shell` and `subagent`; verified on 2.0.27, #1413).
-_BACKGROUNDABLE_TOOLS = frozenset({"shell", "subagent"})
-# V2 sends the glob pattern/regex itself as the permission resource; it does
-# not send the search root or result paths. Require an explicit operator card
-# for both search actions in every mode except bypass, so a broad search
-# cannot silently enumerate credential-bearing files. Bypass already allows
-# shell, which reaches the same files, so a card there only stalls the run.
-# Path-shaped deny rules below still hard-deny direct protected glob patterns
-# after this ask rule.
-_SEARCH_PERMISSION_RULES: tuple[dict[str, str], ...] = (
-    {"action": "glob", "resource": "*", "effect": "ask"},
-    {"action": "grep", "resource": "*", "effect": "ask"},
-)
-
 # Permission changes cannot be patched onto an existing opencode session.
 # Keep the replacement-session handover bounded so a long-running chat does
 # not turn one mode switch into an unbounded prompt.
@@ -634,6 +575,9 @@ OPENCODE_INSTALL_DOCS_URL = "https://opencode.ai/download"
 
 #: The sign-in command shown on the provider row and run by the host terminal.
 OPENCODE_LOGIN_COMMAND = "opencode auth login"
+
+#: Opens OpenCode's own MCP management; typed into the terminal by the PWA.
+OPENCODE_MCP_COMMAND = "opencode mcp"
 
 
 def opencode_install_command() -> str:
@@ -774,7 +718,7 @@ def server_version_error(payload: object) -> str | None:
 
     Version-only judgment: a Mapping payload whose ``version`` strings to the
     installed release is supported when its parsed version is in ``2.x`` at
-    or above ``(2, 0, 16)`` — anything unparseable, below the floor, outside
+    or above ``(2, 3, 2)`` — anything unparseable, below the floor, outside
     major 2, blank, or a payload that is not a Mapping at all is refused with
     ``OPENCODE_V2_REQUIRED``, plus ``Installed server version: <version>.``
     when a non-blank version was readable. ``None`` means the version is in
@@ -785,10 +729,71 @@ def server_version_error(payload: object) -> str | None:
         return OPENCODE_V2_REQUIRED
     version = str(payload.get("version") or "").strip()
     parsed = version_number(version)
-    if parsed is None or parsed < (2, 0, 16) or parsed[0] != 2:
+    if parsed is None or parsed < (2, 3, 2) or parsed[0] != 2:
         detail = f" Installed server version: {version}." if version else ""
         return f"{OPENCODE_V2_REQUIRED}{detail}"
     return None
+
+
+def opencode_version_line(binary: str, *, timeout: float = 5.0) -> str:
+    """The first line of ``<binary> --version``, or ``""`` when it cannot be read.
+
+    The one version probe: the Settings status row and the ACP start gate both use it. It runs
+    with the agent's environment policy (no ``CIAO_*`` or PWA token, the engine's bin dir first on
+    PATH), so a ``#!/usr/bin/env node`` shim finds node under a minimal launchd PATH.
+    """
+    import subprocess
+
+    env = agent_base_env(())
+    env["PATH"] = prepend_engine_path(env.get("PATH"))
+    try:
+        result = subprocess.run(
+            [binary, "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+
+
+# A failed probe of a present binary is remembered this long, so a broken install does not cost
+# a timeout on every chat start. A readable version is kept until the binary's mtime changes.
+_VERSION_FAILURE_TTL = 20.0
+# (monotonic time the probe finished, version or "" for a failed probe)
+_VERSION_CACHE: dict[tuple[str, int], tuple[float, str]] = {}
+_VERSION_CACHE_GUARD = threading.Lock()
+
+
+def cached_opencode_version(binary: str) -> str:
+    """``opencode_version_line`` cached per binary path and mtime, so an upgrade is seen.
+
+    A readable version is kept for that mtime. A failed probe is kept for
+    ``_VERSION_FAILURE_TTL`` seconds, then retried. A missing binary is not cached at all.
+    """
+    try:
+        key = (binary, os.stat(binary).st_mtime_ns)
+    except OSError:
+        return opencode_version_line(binary)
+    with _VERSION_CACHE_GUARD:
+        cached = _VERSION_CACHE.get(key)
+    if cached is not None:
+        probed_at, version = cached
+        if version or time.monotonic() - probed_at < _VERSION_FAILURE_TTL:
+            return version
+    version = opencode_version_line(binary)
+    with _VERSION_CACHE_GUARD:
+        _VERSION_CACHE[key] = (time.monotonic(), version)
+    return version
+
+
+def opencode_start_supported(version: str) -> bool:
+    """True when ``version`` is in the OpenCode floor: the ACP start gate's ``supported``."""
+    return server_version_error({"version": version}) is None
 
 
 def _health_failure_reason(
@@ -1018,11 +1023,7 @@ def _token_usage_events(tokens: object) -> list[StreamEvent]:
 
 
 def mode_settings(
-    mode: BridgeMode,
-    *,
-    tools_enabled: bool = True,
-    runtime_root: object = None,
-    workspace_root: object = None,
+    mode: BridgeMode, *, tools_enabled: bool = True
 ) -> tuple[str, list[dict[str, str]]]:
     """Map a Ciaobot mode onto an opencode (agent, permission ruleset).
 
@@ -1030,75 +1031,16 @@ def mode_settings(
     the opencode API's tool-disable mechanism: unlike plan mode it does not
     allow read/glob/grep/list to reach the provider at all.
 
-    ``runtime_root`` is the resolved runtime directory, when the caller can
-    reach it, so the credential denies cover a relocated
-    ``CIAO_RUNTIME_ROOT`` and not only the default ``.runtime`` name. When a
-    workspace location is known, relative V2 aliases are included as well.
-
     Since S6 every chat is on the CLI surface. Auto mode does not pre-approve
     any ``ciao …`` argv prefix: an allow rule is a prefix a shell suffix
     (``ciao help >/dev/null; <cmd>``) could ride past, so bash stays ``ask``
     and every shell command, including ``ciao …``, keeps a card. Users who want
-    no routine cards switch to ``bypass``; outside bypass, V2 glob/grep search
-    actions still require an explicit card because their resources are not paths.
+    no routine cards switch to ``bypass``.
     """
     key = mode if mode in _MODE_AGENTS else "normal"
     if not tools_enabled:
         return _MODE_AGENTS[key], _rules(("*", "deny"))
-    rules = [dict(rule) for rule in _MODE_PERMISSIONS[key]]
-    # Search resources in V2 are patterns/regexes rather than paths. Keep
-    # search operations behind an explicit card, except in bypass where the
-    # blanket allow (shell included) already covers them.
-    if key != "bypass":
-        rules.extend(dict(rule) for rule in _SEARCH_PERMISSION_RULES)
-    # Last, and for every mode including `bypass`: resolution is
-    # last-match-wins, and this is the one carve-out no mode may buy its way
-    # out of. See `opencode_credential_deny_rules`.
-    rules.extend(opencode_credential_deny_rules(runtime_root, workspace_root))
-    return _MODE_AGENTS[key], rules
-
-
-# Actions a memory pass needs: it reads and edits the vault and shells out
-# to `ciao`/`ciao vault search`. Everything else is denied by the leading
-# wildcard, which is also what blocks MCP (opencode's permission union has
-# no `mcp` action) and the search actions the pass must not use.
-_MEMORY_PASS_ALLOWED_ACTIONS: tuple[str, ...] = (
-    "read", "edit", "write", "shell", "bash",
-    "external_directory", "list", "question", "skill",
-)
-
-
-def memory_pass_guardrail_rules(
-    runtime_root: object = None, workspace_root: object = None
-) -> list[dict[str, str]]:
-    """The session ruleset the end-of-conversation memory pass runs under.
-
-    An allow-list, not the ``bypass`` mode's blanket allow: the pass reads and
-    edits the vault and shells out to ``ciao``, and nothing else. A leading
-    wildcard ``deny`` plus explicit grants is what denies MCP here — opencode's
-    permission union has no ``mcp`` action to name.
-
-    ``glob`` and ``grep`` are denied outright rather than left at ``ask``:
-    opencode always asks for them even in ``bypass`` (7 of 12 agent chats in
-    the #594 experiment stopped on that card), and V2 sends the pattern as the
-    resource, so a search cannot be scoped to the vault anyway. The pass uses
-    ``ciao vault search``.
-
-    Same order as :func:`mode_settings`: wildcard first, specific grants after,
-    and the credential denies last because opencode resolves last-match-wins.
-    """
-    rules = _rules(("*", "deny"))
-    rules.extend(
-        {"action": action, "resource": "*", "effect": "allow"}
-        for action in _MEMORY_PASS_ALLOWED_ACTIONS
-    )
-    # Search stays denied even though `read` is allowed: V2 sends the
-    # pattern as the resource, so it cannot be scoped to the vault.
-    rules.append({"action": "glob", "resource": "*", "effect": "deny"})
-    rules.append({"action": "grep", "resource": "*", "effect": "deny"})
-    rules.append({"action": "skill", "resource": "gws-*", "effect": "deny"})
-    rules.extend(opencode_credential_deny_rules(runtime_root, workspace_root))
-    return rules
+    return _MODE_AGENTS[key], [dict(rule) for rule in _MODE_PERMISSIONS[key]]
 
 
 def _session_permission_matches(
@@ -1318,46 +1260,6 @@ async def _read_v2_messages(
     return messages
 
 
-async def _read_v2_children(
-    client: httpx.AsyncClient, parent_id: str
-) -> list[dict[str, Any]]:
-    """Read every V2 child session for a parent, following cursors."""
-    children: list[dict[str, Any]] = []
-    cursor: str | None = None
-    seen_cursors: set[str] = set()
-    while True:
-        params: dict[str, str] = {
-            "parentID": parent_id,
-            "limit": "100",
-        }
-        if cursor:
-            params["cursor"] = cursor
-        response = await client.get("/api/session", params=params)
-        response.raise_for_status()
-        body = response.json()
-        page = _data(body)
-        if not isinstance(page, list):
-            break
-        children.extend(
-            dict(child)
-            for child in page
-            if isinstance(child, Mapping) and child.get("id")
-        )
-        cursor_body = body.get("cursor") if isinstance(body, Mapping) else None
-        next_cursor = (
-            str(cursor_body.get("next") or "")
-            if isinstance(cursor_body, Mapping)
-            else ""
-        )
-        if not next_cursor:
-            break
-        if next_cursor in seen_cursors:
-            raise RuntimeError("OpenCode pagination returned a repeated cursor")
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
-    return children
-
-
 async def _read_active_sessions(client: httpx.AsyncClient) -> set[str]:
     """Session IDs currently executing in this OpenCode server process."""
     response = await client.get("/api/session/active")
@@ -1430,44 +1332,6 @@ def compose_system(developer_instructions: str, runtime: str) -> str:
     return "\n\n".join(
         part for part in (developer_instructions.strip(), runtime.strip()) if part
     )
-
-
-async def _frames_until(
-    source: Any,
-    wake: asyncio.Event,
-    should_stop: Callable[[], bool],
-) -> AsyncGenerator[Any, None]:
-    """Yield frames from ``source``; end early once ``wake`` fires and ``should_stop``.
-
-    Lets the pump stop waiting for an event that will never come, such as the
-    next execution of a steer that was refused after our terminal was skipped.
-    """
-    iterator = source.__aiter__()
-    pending: asyncio.Future[Any] | None = None
-    waiter: asyncio.Future[Any] = asyncio.ensure_future(wake.wait())
-    try:
-        while True:
-            if pending is None:
-                pending = asyncio.ensure_future(iterator.__anext__())
-            if waiter.done():
-                waiter = asyncio.ensure_future(wake.wait())
-            await asyncio.wait({pending, waiter}, return_when=asyncio.FIRST_COMPLETED)
-            if pending.done():
-                frame_task, pending = pending, None
-                try:
-                    frame = frame_task.result()
-                except StopAsyncIteration:
-                    return
-                yield frame
-                continue
-            wake.clear()
-            if should_stop():
-                return
-    finally:
-        tasks = [task for task in (pending, waiter) if task is not None]
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 class OpencodeActiveHandle(ActiveHandle):
@@ -1708,56 +1572,6 @@ def _validate_form_answer(
     return answer
 
 
-def _sandboxed_server_dirs(binary: str, *, path: str | None = None) -> tuple[list[Path], list[Path], Path]:
-    """The folders a sandboxed ``opencode serve`` needs beyond the workspace.
-
-    Read-write: its data folder (login and session database), its state folder
-    and its temp folder. Read-only: its config folder and its install, which
-    an unconfined server later loads as code, so a confined agent must not be
-    able to change them. Its cache (plugin packages and helper binaries) is
-    code too, so a sandboxed server gets its own: ``XDG_CACHE_HOME`` points at
-    a cache only sandboxed servers use. Returns ``(writable, read_only,
-    cache_home)``.
-    """
-    home = Path.home()
-
-    def xdg(name: str, default: Path) -> Path:
-        value = os.environ.get(name, "")
-        return Path(value) if value else default
-
-    cache_home = home / ".cache" / "ciaobot-opencode-sandbox"
-    writable = [
-        xdg("XDG_DATA_HOME", home / ".local" / "share") / "opencode",
-        xdg("XDG_STATE_HOME", home / ".local" / "state") / "opencode",
-        cache_home / "opencode",
-        cache_home / "npm",
-        Path(tempfile.gettempdir()) / "opencode",
-    ]
-    install = Path(binary).resolve().parent
-    if install.name == "bin":
-        install = install.parent
-    read_only = [
-        folder
-        for folder in (
-            xdg("XDG_CONFIG_HOME", home / ".config") / "opencode",
-            install,
-            # The user's own skills and instructions, which opencode loads the
-            # way Claude Code does.
-            home / ".claude" / "skills",
-            home / ".claude" / "CLAUDE.md",
-            home / ".agents" / "skills",
-        )
-        if folder.exists()
-    ]
-    read_only = [folder.resolve() for folder in read_only]
-    read_only.extend(node_tool_read_roots(os.environ.get("PATH", "") if path is None else path))
-    return (
-        [folder.resolve() for folder in writable],
-        list(dict.fromkeys(read_only)),
-        cache_home,
-    )
-
-
 #: Skill folders opencode is pointed at inside a linked repository, when present.
 LINKED_REPO_SKILL_DIRS: tuple[str, ...] = (".claude/skills", ".agents/skills", ".opencode/skills")
 
@@ -1831,9 +1645,7 @@ class OpencodeProvider(BaseSDKProvider):
         # opencode is bring-your-own-provider: there is no unified quota or
         # reset-time snapshot to report.
         quota=False,
-        subagents=True,
         background_subagents=True,
-        subagent_messages=True,
         session_history=True,
         schedule_unattended=True,
     )
@@ -1887,13 +1699,8 @@ class OpencodeProvider(BaseSDKProvider):
         self._tool_calls: dict[str, str] = {}
         self._settled_tool_ids: set[str] = set()
         self._mcp_token: str = ""
-        # Filesystem scope and roots the live server was started with.
-        self._fs_scope_key: tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]] = ("machine", (), (), ())
-        # The read-only files' identities when it started (`_read_only_snapshot`).
-        self._read_only_snapshot: tuple[tuple[str, tuple[int, int] | None], ...] = ()
         self._linked_repo: str = ""  # linked repo the live server was started with
-        # Serializes `_ensure_server` per chat: a turn and a sign-in card can both
-        # start this chat's server, and two unserialized starts orphan one process.
+        # Serializes `_ensure_server` per chat: two unserialized starts orphan one process.
         self._server_lock = asyncio.Lock()
         # Background work of this chat's session. It outlives a turn, so it is
         # not part of `_reset_turn_state`; only `disconnect` and the HTTP
@@ -1901,18 +1708,11 @@ class OpencodeProvider(BaseSDKProvider):
         self._background_shells: set[str] = set()
         # Shells of foreground tool calls still running; OpenCode 2 runs every shell call as a Shell.
         self._foreground_shells: set[str] = set()
-        # Command of each shell seen in `shell.created`, for the composer's
-        # process list. A shell found only by `GET /api/shell` has no entry.
-        self._shell_commands: dict[str, str] = {}
-        # Epoch seconds at which each running shell was first seen here, for
-        # the composer's elapsed time; cleared with the shell.
-        self._shell_started: dict[str, float] = {}
         self._background_children: set[str] = set()
         # Task/subagent sessions spawned under a parent session (any depth),
         # child id -> parent session. Only their permission/form requests are
         # surfaced (#1617). Outlives a turn; cleared by `disconnect`.
         self._child_sessions: dict[str, str] = {}
-        self._background_changed = asyncio.Event()
         # Finished shells and subagents whose synthetic wake items arrived
         # since the last execution ended; `_wake_result` turns them into the
         # notice.
@@ -1927,18 +1727,6 @@ class OpencodeProvider(BaseSDKProvider):
         # through the same accumulator, so both paths share this lookup.
         self._part_types: dict[str, str] = {}
         self._user_message_id: str = ""
-        # Steering (#1392): `_turn_open` while a foreground turn is pumping,
-        # `_owned_delivery_seen` once OpenCode delivered our own message into
-        # the execution being pumped. `_steer_ids_pending` holds steers posted
-        # but not yet delivered, `_steer_ids_owned` every steer id of the turn.
-        self._turn_open = False
-        self._owned_delivery_seen = False
-        self._steer_ids_pending: set[str] = set()
-        self._steer_ids_owned: set[str] = set()
-        self._steer_ids_delivered: set[str] = set()
-        # Set whenever `_steer_ids_pending` empties, so a pump that skipped its
-        # terminal for a steer that was then refused stops waiting.
-        self._steer_pending_emptied = asyncio.Event()
         # The turn's own usage and cost: the sum of this turn's
         # ``session.step.ended`` events, one per model call, keyed by assistant
         # message so a repeated event cannot count twice. ``session.usage.updated``
@@ -1988,11 +1776,6 @@ class OpencodeProvider(BaseSDKProvider):
         self._tool_calls.clear()
         self._settled_tool_ids.clear()
         self._user_message_id = ""
-        self._turn_open = False
-        self._owned_delivery_seen = False
-        self._steer_ids_pending.clear()
-        self._steer_ids_owned.clear()
-        self._steer_ids_delivered.clear()
         self._usage = {}
         self._step_usage.clear()
         self._step_cost.clear()
@@ -2017,125 +1800,12 @@ class OpencodeProvider(BaseSDKProvider):
     def response_session_id(self) -> str:
         return self._session_id or ""
 
-    async def read_mcp_status(self) -> dict[str, str]:
-        """Read MCP connection states from this already-running V2 server.
-
-        An absent/dead server is not started for a Settings read. The V2
-        ``/api/mcp`` contract returns ``data`` rows with a nested status
-        discriminator. Unknown or malformed rows are omitted so callers can
-        report uncertainty instead of claiming a connection.
-        """
-        client = self._client
-        if not self.is_connected or client is None:
-            return {}
-        response = await client.get("/api/mcp", timeout=2.0)
-        response.raise_for_status()
-        body = response.json()
-        rows = body.get("data") if isinstance(body, Mapping) else None
-        if not isinstance(rows, list):
-            raise ValueError("OpenCode MCP status response is malformed")
-        result: dict[str, str] = {}
-        allowed = {
-            "connected", "failed", "disabled", "needs_auth", "pending",
-            "needs_client_registration",
-        }
-        for row in rows:
-            if not isinstance(row, Mapping):
-                continue
-            name = str(row.get("name") or "").strip()
-            status = row.get("status")
-            state = str(status.get("status") or "") if isinstance(status, Mapping) else ""
-            if name and state in allowed:
-                result[name] = (
-                    "needs_auth" if state == "needs_client_registration" else state
-                )
-        return result
-
-    async def start_mcp_oauth(self, server: str) -> McpOAuthAttempt:
-        """Start the OAuth sign-in for one MCP server through the V2 integration API."""
-        client = self._client
-        if not self.is_connected or client is None:
-            raise McpOAuthUnavailable("not_running")
-        listing = await client.get("/api/mcp", timeout=2.0)
-        listing.raise_for_status()
-        body = listing.json()
-        rows = body.get("data") if isinstance(body, Mapping) else None
-        if not isinstance(rows, list):
-            raise ValueError("OpenCode MCP status response is malformed")
-        integration_id = ""
-        for row in rows:
-            if isinstance(row, Mapping) and str(row.get("name") or "").strip() == server:
-                integration_id = str(row.get("integrationID") or "")
-                break
-        if not integration_id:
-            raise McpOAuthUnavailable("no_integration")
-        base = f"/api/integration/{quote(integration_id, safe='')}"
-        info = await client.get(base, timeout=5.0)
-        if info.status_code == 404:
-            raise McpOAuthUnavailable("no_integration")
-        info.raise_for_status()
-        info_body = info.json()
-        data = info_body.get("data") if isinstance(info_body, Mapping) else None
-        methods = data.get("methods") if isinstance(data, Mapping) else None
-        method_id = ""
-        for method in methods if isinstance(methods, list) else []:
-            if isinstance(method, Mapping) and method.get("type") == "oauth" and method.get("id"):
-                method_id = str(method["id"])
-                break
-        if not method_id:
-            raise McpOAuthUnavailable("no_oauth_method")
-        started = await client.post(f"{base}/connect/oauth", json={"methodID": method_id}, timeout=10.0)
-        started.raise_for_status()
-        started_body = started.json()
-        attempt = started_body.get("data") if isinstance(started_body, Mapping) else None
-        if not isinstance(attempt, Mapping):
-            raise ValueError("OpenCode OAuth attempt response is malformed")
-        url = str(attempt.get("url") or "")
-        attempt_id = str(attempt.get("attemptID") or "")
-        if not url or not attempt_id:
-            raise ValueError("OpenCode OAuth attempt response is malformed")
-        return McpOAuthAttempt(integration_id, attempt_id, url, str(attempt.get("mode") or ""))
-
-    async def read_mcp_oauth_attempt(self, integration_id: str, attempt_id: str) -> tuple[str, str]:
-        """Read one attempt's status: ``(status, message)``. A 404 means it expired."""
-        client = self._client
-        if client is None:
-            raise McpOAuthUnavailable("not_running")
-        path = (
-            f"/api/integration/{quote(integration_id, safe='')}"
-            f"/connect/oauth/{quote(attempt_id, safe='')}"
-        )
-        response = await client.get(path, timeout=2.0)
-        if response.status_code == 404:
-            return ("expired", "")
-        response.raise_for_status()
-        body = response.json()
-        data = body.get("data") if isinstance(body, Mapping) else None
-        if not isinstance(data, Mapping):
-            raise ValueError("OpenCode OAuth status response is malformed")
-        status = str(data.get("status") or "")
-        if status not in {"pending", "complete", "failed", "expired"}:
-            raise ValueError("OpenCode OAuth status is not recognized")
-        return (status, str(data.get("message") or ""))
-
-    async def cancel_mcp_oauth(self, integration_id: str, attempt_id: str) -> None:
-        """Cancel one attempt. Returns at once when there is no client; the status is ignored."""
-        client = self._client
-        if client is None:
-            return
-        path = (
-            f"/api/integration/{quote(integration_id, safe='')}"
-            f"/connect/oauth/{quote(attempt_id, safe='')}"
-        )
-        await client.delete(path, timeout=2.0)
-
     @property
     def is_connected(self) -> bool:
         """True while this chat's own opencode server is still running.
 
-        Lets read paths (the subagents poll) reuse this connection instead of
-        paying to spawn a throwaway server via ``_EphemeralServer`` every time
-        the 3-second read cache misses.
+        Lets read paths reuse this connection instead of paying to spawn a
+        throwaway server via ``_EphemeralServer``.
         """
         return (
             self._client is not None
@@ -2143,52 +1813,10 @@ class OpencodeProvider(BaseSDKProvider):
             and self._process.returncode is None
         )
 
-    def interrupted_background_work(self) -> dict[str, Any] | None:
-        return {
-            "children": self.background_child_ids(),
-            "shells": [
-                {"id": row["id"], "command": row["command"]}
-                for row in self.background_shell_rows()
-            ],
-        }
-
     @property
     def background_work_outstanding(self) -> bool:
         """True while this chat's session has background shells or subagents running."""
         return bool(self._background_shells or self._background_children)
-
-    @property
-    def background_count(self) -> int:
-        """Background shells plus subagents tracked for this chat's session."""
-        return len(self._background_shells) + len(self._background_children)
-
-    def background_shell_rows(self) -> list[dict[str, Any]]:
-        """``{id, command, started_at}`` for each live background shell, in id order."""
-        return [
-            {
-                "id": shell_id,
-                "command": self._shell_commands.get(shell_id, ""),
-                "started_at": self._shell_started.setdefault(shell_id, time.time()),
-            }
-            for shell_id in sorted(self._background_shells)
-        ]
-
-    def background_child_ids(self) -> list[str]:
-        """Session ids of the background subagents tracked for this chat, sorted."""
-        return sorted(self._background_children)
-
-    async def stop_background_task(self, shell_id: str) -> bool:
-        """Terminate one tracked background shell (``DELETE /api/shell/:id``).
-
-        False when the shell is not tracked here or the server refused. The
-        shell leaves the tracked set on its ``shell.exited`` event or the next
-        reconcile, not here. A transport failure propagates as ``httpx.HTTPError``.
-        """
-        client = self._client
-        if client is None or shell_id not in self._background_shells:
-            return False
-        response = await client.delete(f"/api/shell/{quote(shell_id, safe='')}")
-        return bool(response.status_code < 400)
 
     @property
     def seconds_since_activity(self) -> float:
@@ -2209,7 +1837,6 @@ class OpencodeProvider(BaseSDKProvider):
         kind = str(event.get("type") or "")
         data = event.get("data")
         props: Mapping[str, Any] = data if isinstance(data, Mapping) else {}
-        changed = False
         if kind == "shell.created":
             info = props.get("info")
             metadata = info.get("metadata") if isinstance(info, Mapping) else None
@@ -2221,17 +1848,11 @@ class OpencodeProvider(BaseSDKProvider):
                 and str(info["id"]) not in self._background_shells
             ):
                 self._background_shells.add(str(info["id"]))
-                self._shell_commands[str(info["id"])] = str(info.get("command") or "")
-                self._shell_started[str(info["id"])] = time.time()
-                changed = True
         elif kind == "shell.exited":
             shell_id = str(props.get("id") or "")
-            self._shell_commands.pop(shell_id, None)
-            self._shell_started.pop(shell_id, None)
             self._foreground_shells.discard(shell_id)
             if shell_id in self._background_shells:
                 self._background_shells.discard(shell_id)
-                changed = True
         elif kind in {"session.tool.progress", "session.tool.success"}:
             metadata = props.get("metadata")
             shell_id = str(metadata.get("shellID") or "") if isinstance(metadata, Mapping) else ""
@@ -2240,7 +1861,6 @@ class OpencodeProvider(BaseSDKProvider):
                     self._foreground_shells.add(shell_id)
                     if shell_id in self._background_shells:
                         self._background_shells.discard(shell_id)
-                        changed = True
                 elif (
                     isinstance(metadata, Mapping)
                     and metadata.get("status") == "running"
@@ -2250,7 +1870,6 @@ class OpencodeProvider(BaseSDKProvider):
                     # already dropped an exited shell from the foreground set.
                     self._foreground_shells.discard(shell_id)
                     self._background_shells.add(shell_id)
-                    changed = True
         elif kind == "session.created":
             child_id = str(props.get("sessionID") or "")
             parent_id = str(props.get("parentID") or "")
@@ -2263,14 +1882,10 @@ class OpencodeProvider(BaseSDKProvider):
                 and child_id not in self._background_children
             ):
                 self._background_children.add(child_id)
-                changed = True
         elif kind in _EXECUTION_TERMINAL_EVENTS:
             child_id = str(props.get("sessionID") or "")
             if child_id in self._background_children:
                 self._background_children.discard(child_id)
-                changed = True
-        if changed:
-            self._background_changed.set()
 
     def _is_child_session(self, candidate: str, session_id: str) -> bool:
         """Whether ``candidate`` is a task/subagent session of ``session_id``'s chat."""
@@ -2293,7 +1908,7 @@ class OpencodeProvider(BaseSDKProvider):
             )
         return admitted
 
-    async def refresh_background_shells(self) -> int:
+    async def _refresh_background_shells(self) -> int:
         """Reconcile ``_background_shells`` with ``GET /api/shell``; return the count.
 
         Without a live server or session, or when the read fails, the set is
@@ -2307,17 +1922,8 @@ class OpencodeProvider(BaseSDKProvider):
         except (httpx.HTTPError, ValueError, TypeError, AttributeError):
             return len(self._background_shells)
         shells = shells - self._foreground_shells
-        if shells != self._background_shells:
-            self._replace_background_shells(shells)
-            self._background_changed.set()
-        return len(self._background_shells)
-
-    def _replace_background_shells(self, shells: set[str]) -> None:
-        """Take the server's running shells, dropping commands of shells that are gone."""
         self._background_shells = shells
-        self._shell_commands = {k: v for k, v in self._shell_commands.items() if k in shells}
-        now = time.time()
-        self._shell_started = {k: self._shell_started.get(k, now) for k in shells}
+        return len(self._background_shells)
 
     def _set_background_children(self, active: set[str], session_id: str) -> None:
         """Replace ``_background_children`` with what the server reports running.
@@ -2326,10 +1932,7 @@ class OpencodeProvider(BaseSDKProvider):
         it other than the parent is the parent's background work. That covers a
         child resumed by id, which emits no ``session.created``.
         """
-        children = active - {session_id}
-        if children != self._background_children:
-            self._background_children = children
-            self._background_changed.set()
+        self._background_children = active - {session_id}
 
     async def _reconcile_background(self) -> None:
         """Re-read background shells and subagents at the end of a turn.
@@ -2339,106 +1942,10 @@ class OpencodeProvider(BaseSDKProvider):
         client, session_id = self._client, self._session_id
         if client is None or not session_id or not self.is_connected:
             return
-        await self.refresh_background_shells()
+        await self._refresh_background_shells()
         active = await self._active_or_none(client)
         if active is not None:
             self._set_background_children(active, session_id)
-
-    async def wait_background_change(self, timeout: float) -> None:
-        """Wait up to ``timeout`` for a tracked change, then clear the flag."""
-        try:
-            await asyncio.wait_for(self._background_changed.wait(), timeout)
-        except asyncio.TimeoutError:
-            pass
-        self._background_changed.clear()
-
-    async def read_live_collab_tree(
-        self,
-        *,
-        include_messages: bool = False,
-        only_child_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """``read_collab_tree`` read over this chat's already-running server.
-
-        Same shape as the classmethod, but skips ``_EphemeralServer`` entirely:
-        while a chat is attached, its own server is already up, so spawning a
-        second one just to poll subagent transcripts every few seconds wastes
-        a process start each time. Callers should check ``is_connected``
-        first and fall back to the classmethod otherwise (e.g. a chat with no
-        attached provider, viewed from another device or after a restart).
-
-        ``include_messages`` is off by default because the callers that run on
-        a timer (the subagent watcher, the schedule waiter, the sidebar poll)
-        only need a count or a status, and both come from the session metadata
-        and the activity map. Reading every child's history on every tick was
-        what made a chat with many background agents re-read every transcript
-        every few seconds. Only the subagent detail view needs the
-        transcript, and it asks for it.
-
-        ``only_child_id`` narrows the tree to one child, so the detail view
-        reads one transcript instead of every sibling's.
-        """
-        client = self._client
-        if client is None or not self._session_id:
-            return []
-
-        async def _child_messages(child_id: str) -> list[dict[str, Any]]:
-            try:
-                return await _read_v2_messages(client, child_id)
-            except (httpx.HTTPError, TypeError, ValueError):
-                return []
-
-        children_result, active_result = await asyncio.gather(
-            _read_v2_children(client, self._session_id),
-            _read_active_sessions(client),
-            return_exceptions=True,
-        )
-        if isinstance(children_result, Exception):
-            return []
-        # A transient failure of the auxiliary activity map must not discard
-        # successfully fetched children. ``None`` means activity is unknown, and
-        # the conservative counter treats an unknown child as still running.
-        active_ids = (
-            None
-            if isinstance(active_result, Exception)
-            else active_result
-        )
-        children = [child for child in children_result if child.get("id")]
-        if only_child_id is not None:
-            # The same spelling the route filters on: a prefixed id and a bare
-            # one name the same agent.
-            children = [
-                child
-                for child in children
-                if str(child.get("id")).removeprefix("agent-") == only_child_id
-            ]
-        if not include_messages:
-            return [
-                {
-                    "info": child,
-                    "active": (
-                        None
-                        if active_ids is None
-                        else str(child["id"]) in active_ids
-                    ),
-                }
-                for child in children
-            ]
-        histories = await asyncio.gather(
-            *(_child_messages(str(child["id"])) for child in children)
-        )
-        return [
-            {
-                "info": child,
-                "messages": messages,
-                "active": (
-                    None
-                    if active_ids is None
-                    else str(child["id"]) in active_ids
-                ),
-            }
-            for child, messages in zip(children, histories)
-        ]
 
     @property
     def can_drain(self) -> bool:
@@ -2476,7 +1983,7 @@ class OpencodeProvider(BaseSDKProvider):
         except (httpx.HTTPError, ValueError, TypeError, AttributeError, RuntimeError):
             return True
         shells = shells - self._foreground_shells
-        self._replace_background_shells(shells)
+        self._background_shells = shells
         self._set_background_children(active, session_id)
         return not shells and not self._background_children and session_id not in active
 
@@ -2649,23 +2156,6 @@ class OpencodeProvider(BaseSDKProvider):
         payload = system_prompt_payload("") or {}
         return str(payload.get("append") or "")
 
-    def _runtime_root(self) -> str:
-        """The resolved runtime directory, or "" when it cannot be reached.
-
-        Feeds the credential denies in ``mode_settings`` so a relocated
-        ``CIAO_RUNTIME_ROOT`` is covered by path, not just by the default
-        ``.runtime`` name. ``self.config`` is optional on this base class and
-        unset in many tests, so a missing one degrades to the name-based
-        patterns rather than raising.
-        """
-        state_path = getattr(self.config, "state_path", None)
-        if not state_path:
-            return ""
-        try:
-            return str(Path(state_path).parent.resolve())
-        except (OSError, ValueError):
-            return ""
-
     def _session_settings(
         self, request: AgentRequest
     ) -> tuple[str, list[dict[str, str]]]:
@@ -2673,59 +2163,35 @@ class OpencodeProvider(BaseSDKProvider):
 
         A caller that supplied ``permission_rules`` is not running a Ciaobot
         mode, so its ruleset is used verbatim and the mode only picks the
-        agent. A memory pass runs under
-        :func:`memory_pass_guardrail_rules` rather than its ``bypass`` mode's
-        blanket allow. Everyone else gets :func:`mode_settings`, unchanged.
+        agent. Everyone else gets :func:`mode_settings`.
         """
         if self._permission_rules is not None:
             return "build", [dict(rule) for rule in self._permission_rules]
-        if request.memory_pass:
-            return "build", memory_pass_guardrail_rules(
-                self._runtime_root(), self.workspace_root
-            )
-        return mode_settings(
-            request.mode,
-            tools_enabled=self._tools_enabled,
-            runtime_root=self._runtime_root(),
-            workspace_root=self.workspace_root,
-        )
+        return mode_settings(request.mode, tools_enabled=self._tools_enabled)
 
     async def _ensure_server(self, request: AgentRequest) -> httpx.AsyncClient:
         """Start (or reuse) this chat's server; one caller at a time (see `_ensure_server_locked`)."""
         async with self._server_lock:
             return await self._ensure_server_locked(request)
 
-    async def ensure_server(self, request: AgentRequest) -> None:
-        """Start this chat's server for ``request`` without sending a prompt, or reuse the live one.
-
-        Used by the MCP sign-in card when the idle sweep stopped the server. ``request``
-        must come from ``ProjectChatManager.build_agent_request`` so the next turn's
-        reuse check matches and does not restart it.
-        """
-        await self._ensure_server(request)
-
     async def _ensure_server_locked(self, request: AgentRequest) -> httpx.AsyncClient:
         """Start (or reuse) this chat's server and return its HTTP client.
 
         A changed MCP token forces a full restart: opencode reads MCP
         configuration at server scope, so the running process cannot be
-        re-pointed at a new token. A changed filesystem scope or linked repo
-        does too, since the sandbox wraps the server process itself, and on
-        Linux so does a replaced, created or deleted read-only runtime file
-        (`_read_only_snapshot`).
+        re-pointed at a new token. A changed linked repo does too, because
+        ``OPENCODE_CONFIG_CONTENT`` is read at startup.
         """
         if self._client is not None and self._process is not None:
             if (
                 self._process.returncode is None
                 and provider_reuse_key(request) == self._mcp_token
-                and (request.agent_fs_scope, request.agent_roots, request.agent_denied, request.agent_denied_except) == self._fs_scope_key
-                and _read_only_snapshot(request) == self._read_only_snapshot
                 and linked_repo_of(request) == self._linked_repo
             ):
                 return self._client
             if self._process.returncode is None and self.background_work_outstanding:
                 logger.warning(
-                    "Restarting the OpenCode server for %s (agent token, filesystem scope, runtime file "
+                    "Restarting the OpenCode server for %s (agent token "
                     "or linked repo changed) stops %d background shell(s) and %d background subagent(s)",
                     self.workspace_root,
                     len(self._background_shells),
@@ -2773,53 +2239,20 @@ class OpencodeProvider(BaseSDKProvider):
     def _server_launch(
         self, request: AgentRequest, binary: str, port: int
     ) -> tuple[list[str], dict[str, str]]:
-        """The argv that starts this chat's ``opencode serve``, and its extra env.
-
-        A workspace-scoped request runs the server, and every child it spawns,
-        inside the sandbox profile for ``request.agent_roots`` (the chat's agent
-        root and its workspace vault, resolved by the engine) plus the folders
-        the server itself needs (``_sandboxed_server_dirs``). Machine scope
-        keeps the bare argv. A missing sandbox tool raises
-        ``FsSandboxUnavailable`` here, before any spawn.
-        """
-        argv = [binary, "serve", "--port", str(port), "--hostname", "127.0.0.1"]
-        if request.agent_fs_scope != "workspace":
-            return argv, {}
-        effective_env = {**os.environ, **(request.extra_env or {})}
-        writable, read_only, cache_home = _sandboxed_server_dirs(binary, path=effective_env.get("PATH", ""))
-        roots = [Path(root) for root in request.agent_roots] + writable
-        prefix = opencode_sandbox_prefix(
-            roots=roots,
-            read_only=[*read_only, *(Path(p) for p in request.agent_read_only)],
-            denied=[Path(p) for p in request.agent_denied],
-            regrant=[Path(p) for p in request.agent_denied_except],
-        )
-        for folder in writable:
-            folder.mkdir(parents=True, exist_ok=True)
-        # Exec the resolved binary: an npm install puts a symlink in
-        # ~/.local/bin, which is outside every granted folder, so bwrap cannot
-        # follow it. The resolved file is inside the read-only install.
-        argv[0] = str(Path(binary).resolve())
-        return [*prefix, *argv], {
-            "XDG_CACHE_HOME": str(cache_home),
-            "npm_config_cache": str(cache_home / "npm"),
-        }
+        """The argv that starts this chat's ``opencode serve``, and its extra env."""
+        return [binary, "serve", "--port", str(port), "--hostname", "127.0.0.1"], {}
 
     async def _start_server_once(
         self, request: AgentRequest, binary: str
     ) -> httpx.AsyncClient:
         """Start, validate, and register one opencode server process."""
         port = _free_port()
-        # Before the argv: the prefix decides each bind as it is built, so a
-        # file changed in between shows up as a difference next turn and
-        # restarts, instead of being recorded as already bound.
-        read_only_snapshot = _read_only_snapshot(request)
-        argv, sandbox_env = self._server_launch(request, binary, port)
+        argv, launch_env = self._server_launch(request, binary, port)
         self._password = secrets.token_urlsafe(24)
         env = {
             **os.environ,
             **(request.extra_env or {}),
-            **sandbox_env,
+            **launch_env,
             "OPENCODE_SERVER_PASSWORD": self._password,
         }
         self._linked_repo = linked_repo_of(request)
@@ -2829,8 +2262,6 @@ class OpencodeProvider(BaseSDKProvider):
         if config_content:
             env["OPENCODE_CONFIG_CONTENT"] = config_content
         self._mcp_token = provider_reuse_key(request)
-        self._fs_scope_key = (request.agent_fs_scope, request.agent_roots, request.agent_denied, request.agent_denied_except)
-        self._read_only_snapshot = read_only_snapshot
 
         # Say it now, while the environment we are about to hand over is in
         # hand: an unresolved placeholder becomes an empty credential and only
@@ -3024,16 +2455,8 @@ class OpencodeProvider(BaseSDKProvider):
         self._settled_tool_ids.clear()
         self._background_shells.clear()
         self._foreground_shells.clear()
-        self._shell_commands.clear()
-        self._shell_started.clear()
         self._background_children.clear()
         self._child_sessions.clear()
-        self._background_changed.set()
-        self._turn_open = False
-        self._owned_delivery_seen = False
-        self._steer_ids_pending.clear()
-        self._steer_ids_owned.clear()
-        self._steer_ids_delivered.clear()
 
         if self._client is not None:
             await self._client.aclose()
@@ -3049,8 +2472,6 @@ class OpencodeProvider(BaseSDKProvider):
             reader.cancel()
         self._base_url = ""
         self._mcp_token = ""
-        self._fs_scope_key = ("machine", (), (), ())
-        self._read_only_snapshot = ()
         self._linked_repo = ""
         self._session_handover_context = ""
         self._reset_settings()
@@ -3240,114 +2661,10 @@ class OpencodeProvider(BaseSDKProvider):
             raise RuntimeError("OpenCode returned a session without an id")
         return self._session_id
 
-    async def _cancel_inbox_item(
-        self, client: httpx.AsyncClient, session_id: str, inbox_id: str
-    ) -> None:
-        """Best-effort cancel of one undelivered inbox item, bounded in time."""
-        try:
-            await asyncio.wait_for(
-                client.delete(
-                    f"/api/session/{session_id}/inbox/{inbox_id}",
-                    timeout=_OPENCODE_STEER_CANCEL_TIMEOUT_S,
-                ),
-                timeout=_OPENCODE_STEER_CANCEL_TIMEOUT_S,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 - a failed cancel must never wedge Stop
-            logger.warning(
-                "OpenCode did not confirm cancelling inbox item %s", inbox_id,
-                exc_info=True,
-            )
-
-    def _discard_pending_steer(self, inbox_id: str) -> None:
-        self._steer_ids_pending.discard(inbox_id)
-        if not self._steer_ids_pending:
-            self._steer_pending_emptied.set()
-
-    async def _cancel_pending_steers(
-        self, client: httpx.AsyncClient, session_id: str
-    ) -> None:
-        """Cancel every undelivered steer in the inbox (bounded, concurrent)."""
-        undelivered = sorted(self._steer_ids_pending)
-        self._steer_ids_pending.clear()
-        self._steer_pending_emptied.set()
-        if not undelivered:
-            return
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(
-                asyncio.gather(
-                    *(
-                        self._cancel_inbox_item(client, session_id, inbox_id)
-                        for inbox_id in undelivered
-                    )
-                ),
-                timeout=_OPENCODE_STEER_CANCEL_TIMEOUT_S,
-            )
-
-    async def steer_turn(self, request: AgentRequest) -> str | None:
-        """Steer the running foreground turn with ``delivery: "steer"``.
-
-        Returns the inbox id the pump will see delivered, or None when the turn
-        cannot take it now: no open turn, our own prompt not yet delivered (a
-        steer would join a foreign wake execution), a Stop, or a failed post.
-        Whether the message ran is decided from our own delivered/pending
-        tracking, never from the cancel call's answer.
-        """
-        client, session_id = self._client, self._session_id
-        if (
-            client is None
-            or not session_id
-            or not self._turn_open
-            or not self._owned_delivery_seen
-            or self._stop_requested == session_id
-        ):
-            return None
-        delivery_id = f"msg_{secrets.token_hex(12)}"
-        # Before the await: the pump may see our terminal while the post is in
-        # flight, and must then keep listening for this id.
-        self._steer_pending_emptied.clear()
-        self._steer_ids_pending.add(delivery_id)
-        self._steer_ids_owned.add(delivery_id)
-        body = {**self._prompt_body(request), "id": delivery_id, "delivery": "steer"}
-        admitted: object = None
-        try:
-            response = await client.post(
-                f"/api/session/{session_id}/prompt",
-                json=body,
-                timeout=_OPENCODE_STEER_POST_TIMEOUT_S,
-            )
-            if response.status_code >= 400:
-                self._discard_pending_steer(delivery_id)
-                return None
-            admitted = _data(response.json())
-        except (httpx.HTTPError, ValueError, TypeError):
-            admitted = None
-        if delivery_id in self._steer_ids_delivered:
-            # It already ran, whatever the reply looked like.
-            return delivery_id
-        if (
-            isinstance(admitted, Mapping)
-            and str(admitted.get("id") or "") == delivery_id
-            and delivery_id in self._steer_ids_pending
-            and self._stop_requested != session_id
-        ):
-            return delivery_id
-        # Refused, lost reply, or the turn ended/stopped while the post was in
-        # flight: the server may still hold the item, and the host re-queues
-        # the message, so do not let this copy run.
-        self._discard_pending_steer(delivery_id)
-        await self._cancel_inbox_item(client, session_id, delivery_id)
-        return None
-
     async def abort_session(self, session_id: str) -> None:
         client = self._client
         if client is None or not session_id:
             return
-        # Stop wins: a steer still in the inbox would run after the interrupt.
-        # Cancel it first (the host re-queues undelivered steers). This can
-        # delay the interrupt by up to _OPENCODE_STEER_CANCEL_TIMEOUT_S.
-        await self._cancel_pending_steers(client, session_id)
         try:
             await client.post(f"/api/session/{session_id}/interrupt")
         except asyncio.CancelledError:
@@ -3356,32 +2673,6 @@ class OpencodeProvider(BaseSDKProvider):
             # This runs detached from the Stop request; observe every failure so
             # it can never become an unretrieved task exception.
             logger.debug("OpenCode interrupt failed for %s", session_id, exc_info=True)
-
-    async def move_to_background(self) -> MoveToBackgroundOutcome:
-        """Ask OpenCode to background this session's running shells and subagents (#1413).
-
-        POST /api/session/{id}/background moves every running foreground
-        shell or subagent call to background observation: the call succeeds
-        with a "moved to the background" result, OpenCode steers the model to
-        finish its step, and the turn ends normally. The work then finishes as
-        a wake that `drain_events` streams. An idle session is a no-op (204).
-        """
-        client, session_id = self._client, self._session_id
-        if client is None or not session_id or not self.is_connected:
-            return "not_running"
-        eligible = any(name in _BACKGROUNDABLE_TOOLS for name in self._tool_calls.values())
-        try:
-            response = await client.post(f"/api/session/{session_id}/background")
-        except httpx.HTTPError:
-            logger.info("OpenCode background request failed for %s", session_id, exc_info=True)
-            return "failed"
-        if response.status_code >= 400:
-            logger.info(
-                "OpenCode refused to background %s: %s",
-                session_id, _sanitize_error(response.text),
-            )
-            return "failed"
-        return "moved" if eligible else "nothing"
 
     async def _compact_session(
         self, client: httpx.AsyncClient, session_id: str, request: AgentRequest
@@ -4166,7 +3457,6 @@ class OpencodeProvider(BaseSDKProvider):
                 work_dirs=tool_work_dirs(tool, raw_input) or None,
                 input_chars=input_chars,
                 control_surface=surface,
-                backgroundable=tool in _BACKGROUNDABLE_TOOLS,
             )]
         if kind in {"session.tool.success", "session.tool.failed"}:
             call_id = str(props.get("id") or "")
@@ -4325,7 +3615,6 @@ class OpencodeProvider(BaseSDKProvider):
                 work_dirs=tool_work_dirs(tool, raw_input) or None,
                 input_chars=input_chars,
                 control_surface=surface,
-                backgroundable=tool in _BACKGROUNDABLE_TOOLS,
             )]
 
         if status in {"completed", "error"}:
@@ -4624,9 +3913,6 @@ class OpencodeProvider(BaseSDKProvider):
         # not ours is running; `owned_delivery` once our own prompt was delivered.
         foreign_execution = False
         owned_delivery = False
-        # Our execution ended while a steer was still undelivered: the steer
-        # starts an execution of its own (#1392), so keep listening.
-        skipped_terminal = False
 
         # The SSE subscription can drop mid-turn (network blip, server hiccup)
         # before `session.execution.*` arrives. Rather than failing the whole turn,
@@ -4648,7 +3934,7 @@ class OpencodeProvider(BaseSDKProvider):
             """One SSE subscription, pumped until idle or premature close."""
             nonlocal prompt_attempted, prompt_accepted, prompt_rejected
             nonlocal prompt_receipt_error, error, saw_output, terminal_seen
-            nonlocal foreign_execution, owned_delivery, skipped_terminal
+            nonlocal foreign_execution, owned_delivery
             if prompt_accepted:
                 # A reconnect: our prompt is already in. Whatever was running at
                 # the first attempt has long finished or been handled.
@@ -4703,7 +3989,6 @@ class OpencodeProvider(BaseSDKProvider):
                         self._core_sent_session_id = session_id
                         self._core_dropped = False
                     prompt_accepted = True
-                    self._turn_open = True
                 if prompt_accepted:
                     for converted in await self._reload_pending_requests(
                         client, session_id
@@ -4714,13 +3999,7 @@ class OpencodeProvider(BaseSDKProvider):
                 # Closed before the stream, so an early exit never leaves a
                 # read task behind on a closed connection.
                 frames = await closing.enter_async_context(
-                    contextlib.aclosing(
-                        _frames_until(
-                            decoder.aiter_bytes(stream.aiter_bytes()),
-                            self._steer_pending_emptied,
-                            lambda: skipped_terminal and not self._steer_ids_pending,
-                        )
-                    )
+                    contextlib.aclosing(decoder.aiter_bytes(stream.aiter_bytes()))
                 )
                 async for sse in frames:
                     if self._stop_requested == session_id:
@@ -4728,7 +4007,6 @@ class OpencodeProvider(BaseSDKProvider):
                         # issued: end locally now. Waiting for the server's
                         # `session.execution.*` can drag through SSE reconnects and
                         # the poll backstop, leaving Stop feeling dead.
-                        self._turn_open = False
                         terminal_seen = True
                         return
                     try:
@@ -4755,17 +4033,9 @@ class OpencodeProvider(BaseSDKProvider):
 
                     if kind == "session.inbox.delivered":
                         inbox_id = str(props.get("inboxID") or "")
-                        if inbox_id == message_id or inbox_id in self._steer_ids_owned:
+                        if inbox_id == message_id:
                             owned_delivery = True
-                            self._owned_delivery_seen = True
                             foreign_execution = False
-                            if inbox_id in self._steer_ids_pending:
-                                self._steer_ids_delivered.add(inbox_id)
-                                self._discard_pending_steer(inbox_id)
-                                skipped_terminal = False
-                                yield SteerDeliveredEvent(
-                                    type="steer_delivered", delivery_id=inbox_id
-                                )
                         elif not owned_delivery:
                             foreign_execution = True
                         continue
@@ -4779,32 +4049,19 @@ class OpencodeProvider(BaseSDKProvider):
                         continue
                     if kind == "session.execution.failed":
                         error = error or error_text(props.get("error"))
-                        self._turn_open = False
                         terminal_seen = True
                         break
                     if kind == "session.execution.interrupted":
                         error = error or "OpenCode execution was interrupted"
-                        self._turn_open = False
                         terminal_seen = True
                         break
                     if kind == "session.execution.succeeded":
-                        if self._steer_ids_pending:
-                            owned_delivery = False
-                            self._owned_delivery_seen = False
-                            skipped_terminal = True
-                            continue
-                        self._turn_open = False
                         terminal_seen = True
                         break
 
                     for converted in self._event_to_stream(event):
                         saw_output = saw_output or converted.type in {"text", "tool_use"}
                         yield converted
-                if skipped_terminal and not self._steer_ids_pending:
-                    # The steer we waited for was refused or cancelled: the
-                    # skipped terminal was the turn's real end.
-                    self._turn_open = False
-                    terminal_seen = True
 
         # The SSE subscription can drop mid-turn (network blip, server hiccup)
         # before `session.execution.*` arrives. Rather than failing the whole turn,
@@ -4841,11 +4098,6 @@ class OpencodeProvider(BaseSDKProvider):
                 reconnects += 1
                 await asyncio.sleep(0.5 * reconnects)
 
-            # No steer can join this turn any more. One still pending is
-            # cancelled on the server; the host re-queues it, so leaving it
-            # would run it twice.
-            self._turn_open = False
-            await self._cancel_pending_steers(client, session_id)
             degraded_final = False
             if (
                 not terminal_seen
@@ -4872,7 +4124,6 @@ class OpencodeProvider(BaseSDKProvider):
                 if not self._turn_recovered_via_poll:
                     error = error or prompt_receipt_error
         finally:
-            self._turn_open = False
             register_handle(None)
 
         with contextlib.suppress(Exception):
@@ -5037,9 +4288,13 @@ class OpencodeProvider(BaseSDKProvider):
 
     @classmethod
     async def read_thread(
-        cls, workspace_root: Path, session_id: str
+        cls, workspace_root: Path, session_id: str, *, runtime_root: Path
     ) -> dict[str, Any]:
-        """Session metadata plus its message history, for transcript replay."""
+        """Session metadata plus its message history, for transcript replay.
+
+        The session lives in the OpenCode server under ``workspace_root``, so
+        ``runtime_root`` is unused here.
+        """
         if not session_id:
             return {}
         key = (str(workspace_root), session_id)
@@ -5069,64 +4324,19 @@ class OpencodeProvider(BaseSDKProvider):
 
     @classmethod
     async def native_title_candidates(
-        cls, workspace_root: Path, session_id: str
+        cls, workspace_root: Path, session_id: str, *, runtime_root: Path
     ) -> tuple[str, ...]:
         """The session's own title, the only candidate, exactly as read_thread exposes it."""
-        thread = await cls.read_thread(workspace_root, session_id)
+        thread = await cls.read_thread(workspace_root, session_id, runtime_root=runtime_root)
         info = thread.get("info") if isinstance(thread, dict) else None
         title = str(info.get("title") or "") if isinstance(info, dict) else ""
         return (title,)
 
     @classmethod
-    async def read_collab_tree(
-        cls, workspace_root: Path, session_id: str
-    ) -> list[dict[str, Any]]:
-        """Child sessions — opencode's background subagents — with their history.
-
-        Each entry is ``{"info": <child session>, "messages": [...]}`` — the
-        same shape :meth:`read_thread` returns — fetched over the one ephemeral
-        server rather than a server spawn per child.
-        """
-        if not session_id:
-            return []
-        key = (str(workspace_root), session_id)
-        cached = _COLLAB_CACHE.get(key)
-        if cached and time.monotonic() - cached[0] < cached[1]:
-            return cached[2]
-
-        async def _child_messages(client: Any, child_id: str) -> list[dict[str, Any]]:
-            try:
-                return await _read_v2_messages(client, child_id)
-            except (httpx.HTTPError, TypeError, ValueError):
-                return []
-
-        result: list[dict[str, Any]] = []
-        ttl = _READ_CACHE_TTL
-        async with _EphemeralServer(workspace_root) as client:
-            if client is None:
-                # Negative-cache the failed spawn (see read_thread).
-                ttl = _READ_FAILURE_CACHE_TTL
-            else:
-                try:
-                    children = await _read_v2_children(client, session_id)
-                except (httpx.HTTPError, TypeError, ValueError, RuntimeError):
-                    children = []
-                histories = await asyncio.gather(
-                    *(_child_messages(client, str(child["id"])) for child in children)
-                )
-                # This server is a different process from the chat's live
-                # server; its /api/session/active map cannot prove that a
-                # child is idle. Leave activity unknown and let message timing
-                # provide the conservative fallback.
-                result = [
-                    {"info": child, "messages": messages, "active": None}
-                    for child, messages in zip(children, histories)
-                ]
-        _COLLAB_CACHE[key] = (time.monotonic(), ttl, result)
-        return result
-
-    @classmethod
-    async def delete_session(cls, workspace_root: Path, session_id: str) -> bool:
+    async def delete_session(
+        cls, workspace_root: Path, session_id: str, *, runtime_root: Path
+    ) -> bool:
+        # The OpenCode server owns the session under ``workspace_root``; no runtime file.
         async with _EphemeralServer(workspace_root) as client:
             if client is None or not session_id:
                 return False
@@ -5135,86 +4345,6 @@ class OpencodeProvider(BaseSDKProvider):
                 return response.status_code < 400
             except httpx.HTTPError:
                 return False
-
-
-def opencode_child_status(
-    messages: list,
-    info: dict | None = None,
-    active: bool | None = None,
-) -> str:
-    """A V2 child session's lifecycle state.
-
-    ``/api/session/active`` is authoritative for the current execution;
-    ``Session.Info.outcome`` describes only the previous completed execution.
-    Normalized projected messages remain a defensive fallback for sparse data.
-    """
-    if active is True:
-        return "running"
-    last: dict | None = None
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        message_info = message.get("info")
-        if isinstance(message_info, dict) and message_info.get("role") == "assistant":
-            last = message_info
-    if last is not None:
-        if last.get("error"):
-            return "failed"
-        time_info = last.get("time")
-        if (
-            isinstance(time_info, dict)
-            and time_info.get("created")
-            and not time_info.get("completed")
-        ):
-            return "running"
-    if isinstance(info, dict):
-        outcome = str(info.get("outcome") or "")
-        if outcome == "failed":
-            return "failed"
-        if outcome in {"succeeded", "interrupted"}:
-            return "completed"
-        if active is None:
-            # A read from a different OpenCode process cannot establish
-            # inactivity. Keep an unobserved child visible/running rather than
-            # allowing an archive or schedule waiter to settle it early.
-            return "running"
-    if active is False:
-        return "completed"
-    if active is None and isinstance(info, dict):
-        return "running"
-    return "completed"
-
-
-def running_opencode_child_ids(tree: Sequence[Mapping[str, Any]]) -> list[str]:
-    """Ids of the children in a collab tree that are still running.
-
-    The one running-child rule, shared by the watcher count and the
-    running-subagents route: a child runs by ``opencode_child_status``
-    (``active`` is authoritative; otherwise message timing and ``outcome``).
-    """
-    ids: list[str] = []
-    for item in tree:
-        if not isinstance(item, Mapping):
-            continue
-        info = item.get("info")
-        info = info if isinstance(info, dict) else {}
-        child_id = str(info.get("id") or "")
-        if not child_id:
-            continue
-        messages = item.get("messages")
-        messages = messages if isinstance(messages, list) else []
-        active = item.get("active")
-        status = opencode_child_status(
-            messages, info, active if isinstance(active, bool) else None
-        )
-        if status == "running":
-            ids.append(child_id)
-    return ids
-
-
-def opencode_collab_tree_counts(tree: Sequence[Mapping[str, Any]]) -> tuple[int, bool]:
-    """Return the running child count and whether the tree has any children."""
-    return len(running_opencode_child_ids(tree)), bool(tree)
 
 
 def catalog_providers(catalog: Sequence[Mapping[str, Any]]) -> set[str]:
@@ -5604,16 +4734,14 @@ def _credential_count(binary: str, *, timeout: float) -> int | None:
     return None
 
 
-_InventoryRows = tuple[
-    list[dict[str, Any]] | None, list[dict[str, Any]] | None, list[dict[str, Any]] | None
-]
-_NO_INVENTORY: _InventoryRows = (None, None, None)
+_InventoryRows = tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]
+_NO_INVENTORY: _InventoryRows = (None, None)
 
 
 def _read_loaded_inventory(
     client: httpx.Client, process: Any, *, deadline: float, location: str
 ) -> _InventoryRows:
-    """Skill, plugin and MCP rows of a private server once it has loaded.
+    """Skill and plugin rows of a private server once it has loaded.
 
     A fresh server answers before it has loaded: first nothing, then only the
     two built-in skills, then everything at once with `plugin.updated` last
@@ -5650,7 +4778,7 @@ def _read_loaded_inventory(
                 return _NO_INVENTORY
             if isinstance(data, list) and data:
                 plugin_rows = [row for row in data if isinstance(row, dict)]
-                return rows("/api/skill"), plugin_rows, rows("/api/mcp")
+                return rows("/api/skill"), plugin_rows
         time.sleep(_INVENTORY_POLL)
     return _NO_INVENTORY
 
@@ -5709,11 +4837,10 @@ class _Inventory:
 
     skills: list[str] | None
     bundled_skills: list[str] | None
-    mcps: list[str] | None
 
 
 def _opencode_inventory(binary: str) -> _Inventory:
-    """Skills and plugins, the skills opencode ships, and MCP servers.
+    """Skills and plugins, and the skills opencode ships.
 
     A skill whose path is under ``/builtin/`` ships with opencode. Built-in
     plugins are opencode internals, and a plugin that failed to load (a
@@ -5723,7 +4850,7 @@ def _opencode_inventory(binary: str) -> _Inventory:
     starts and stops, never through `opencode api`, which goes to the shared
     background service.
     """
-    skill_rows, plugin_rows, mcp_rows = _fetch_inventory_rows(binary)
+    skill_rows, plugin_rows = _fetch_inventory_rows(binary)
     skills = bundled = None
     if skill_rows is not None and plugin_rows is not None:
         bundled = _row_names([
@@ -5736,14 +4863,11 @@ def _opencode_inventory(binary: str) -> _Inventory:
             and (row.get("state") or {}).get("status", "active") == "active"
         ])
         skills = own + [name for name in plugins if name not in own]
-    mcps = _row_names(mcp_rows) if mcp_rows is not None else None
-    return _Inventory(skills=skills, bundled_skills=bundled, mcps=mcps)
+    return _Inventory(skills=skills, bundled_skills=bundled)
 
 
 def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> dict[str, Any]:
     """Bounded, credential-free opencode install/auth status for Settings."""
-    import subprocess
-
     from ciao.provider_versions import release_check
     from ciao.setup_status import _provider
 
@@ -5780,15 +4904,8 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
             # the provider. Empty when the installer used needs none.
             path_command=opencode_path_hint(),
         )
-    version = ""
-    try:
-        # Unlike auth-list, this version probe still captures unbounded output.
-        result = subprocess.run(
-            [binary, "--version"], capture_output=True, text=True, encoding="utf-8", timeout=timeout
-        )
-        version = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
-    except (OSError, subprocess.SubprocessError):
-        version = ""
+    # Unlike auth-list, this version probe still captures unbounded output.
+    version = opencode_version_line(binary, timeout=timeout)
     if server_version_error({"version": version}) is not None:
         return _provider(
             name="opencode",
@@ -5814,18 +4931,18 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
     else:
         detail = "no credentials — free models only"
         auth = "free"
-    found = _opencode_inventory(binary) if inventory else _Inventory(None, None, None)
+    found = _opencode_inventory(binary) if inventory else _Inventory(None, None)
     return _provider(
         name="opencode",
         ok=True,
         auth=auth,
         command=OPENCODE_LOGIN_COMMAND,
         terminal_action="opencode-login",
+        mcp_command=OPENCODE_MCP_COMMAND,
         detail=detail,
         version=version or "unknown",
         skills=found.skills,
         bundled_skills=found.bundled_skills,
-        mcps=found.mcps,
         release_check=release_check("opencode", version, binary=binary),
     )
 
@@ -5852,7 +4969,7 @@ def opencode_system_skills(env: Mapping[str, str] | None = None) -> list[str]:
         except OSError:
             binary = None
         if binary:
-            skill_rows, _plugins, _mcps = _fetch_inventory_rows(binary)
+            skill_rows, _plugins = _fetch_inventory_rows(binary)
             if skill_rows is not None:
                 names = _row_names(skill_rows)
         _system_skills_cache = (now, tuple(names))

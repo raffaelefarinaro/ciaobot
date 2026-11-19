@@ -1,7 +1,7 @@
 """One-shot model calls, dispatched to a runtime provider.
 
-``provider`` selects the runner: ``claude`` (Claude Agent SDK) or
-``opencode``.
+``provider`` selects the runner: a provider whose descriptor names an ACP
+``AgentSpec`` (see :mod:`ciao.providers.acp.oneshot`).
 
 Calls are intentionally bare: custom system prompt, no filesystem
 settings/skills, no tools, no MCP discovery. Titles, insights,
@@ -12,36 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import tempfile
-from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ResultMessage,
-    TextBlock,
-    query,
-)
-
+from ciao import provider_registry
 from ciao.tool_path import prepend_engine_path
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_claude_cli() -> str | None:
-    """Absolute path to the Claude CLI for the SDK, or None to use its bundled one.
-
-    Prefers the SDK's own bundled binary when present, then an external
-    ``claude`` resolved against the login-shell PATH (the runtime strips the
-    bundled binary to keep the app small, and launchd omits dirs like
-    ``~/.local/bin``).
-    """
-    from ciao.providers.claude import get_bundled_claude_path
-    from ciao.tool_path import resolve_tool
-
-    return get_bundled_claude_path() or resolve_tool("claude")
 
 
 class OneShotError(RuntimeError):
@@ -64,202 +41,6 @@ class OneShotError(RuntimeError):
         self.transient = transient
 
 
-# HTTP statuses / message markers that mean "this will fail again" -- do not
-# retry these. Everything else (empty body, 5xx, unexpected EOF, timeouts on
-# the upstream copy) is treated as transient.
-_NON_TRANSIENT_STATUSES = frozenset({400, 401, 402, 403, 404, 405, 422})
-_NON_TRANSIENT_MARKERS = (
-    "authentication",
-    "unauthorized",
-    "invalid api key",
-    "invalid_api_key",
-    "x-api-key",
-    "subscription",
-    "credit balance",
-    "insufficient",
-    "quota",
-    "usage limit",
-    "rate limit",
-    "permission",
-    "forbidden",
-    "not found",
-    "issue with the selected model",
-    "invalid model",
-    "does not exist",
-    "unsupported",
-)
-
-
-def _result_error_detail(msg: ResultMessage) -> tuple[str, int | None]:
-    """Compose a human-readable detail string from an error ResultMessage.
-
-    A gateway can return a contentless ``is_error`` result (empty body, no
-    status), so the parts are all best-effort and we fall back to an explicit
-    "empty error result" marker when nothing is set.
-    """
-    status = getattr(msg, "api_error_status", None)
-    parts: list[str] = []
-    subtype = getattr(msg, "subtype", None)
-    if subtype and subtype not in ("success", ""):
-        parts.append(f"subtype={subtype}")
-    if status:
-        parts.append(f"status={status}")
-    stop_reason = getattr(msg, "stop_reason", None)
-    if stop_reason:
-        parts.append(f"stop_reason={stop_reason}")
-    result = (getattr(msg, "result", None) or "").strip()
-    if result:
-        parts.append(result)
-    for err in getattr(msg, "errors", None) or []:
-        text = str(err).strip()
-        if text and text not in parts:
-            parts.append(text)
-    detail = "; ".join(parts) if parts else "empty error result (no status or body)"
-    return detail, status
-
-
-def _is_transient(detail: str, status: int | None) -> bool:
-    if status is not None and status in _NON_TRANSIENT_STATUSES:
-        return False
-    low = detail.lower()
-    if any(marker in low for marker in _NON_TRANSIENT_MARKERS):
-        return False
-    return True
-
-
-async def _run_claude_oneshot(
-    prompt: str,
-    *,
-    system_prompt: str,
-    model: str,
-    env: dict[str, str] | None,
-    max_turns: int = 2,
-    options_hook: Callable[[ClaudeAgentOptions], None] | None = None,
-) -> str:
-    # Titles / doc folds never need agent tooling. Leaving
-    # ``tools`` unset keeps the CLI's default Claude Code tool schemas in
-    # the prompt (Bash/Read/Edit/…), which burns tokens for no benefit.
-    # ``tools=[]`` maps to ``--tools ""``; ``strict_mcp_config`` with the
-    # empty default ``mcp_servers`` also blocks project/user MCP discovery.
-    # ``setting_sources=[]`` / ``skills=[]`` already skip CLAUDE.md and
-    # skill listings (the useful half of Claude Code ``--bare``).
-    options = ClaudeAgentOptions(
-        model=model,
-        system_prompt=system_prompt,
-        setting_sources=[],
-        skills=[],
-        tools=[],
-        strict_mcp_config=True,
-        # Resolve the external Claude CLI so one-shots keep working after the
-        # bundled _bundled/claude binary is stripped and under launchd, whose
-        # PATH omits login-shell dirs like ~/.local/bin. cli_path is optional;
-        # the SDK falls back to its own bundled binary when set to None.
-        cli_path=_resolve_claude_cli(),
-        # ``max_turns=2`` (not 1) absorbs a stray ``stop_reason=tool_use`` the
-        # model occasionally emits under ``tools=[]`` — a known SDK quirk
-        # where the model starts to call a tool, gets nothing back, and the
-        # SDK aborts the turn. With 2 turns the model recovers and returns
-        # the actual text on the next iteration. Title callers
-        # never loop, so this is one extra API call at most. A caller that
-        # counts billable attempts (the behavioral eval's budget) passes
-        # ``max_turns=1`` so one reserved slot is one provider call.
-        max_turns=max(1, int(max_turns)),
-        env=env or {},
-    )
-    parts: list[str] = []
-    # The no-tools contract above is currently only observable by patching this
-    # module's ``query`` import, which binds a test to an import name rather
-    # than to a contract. ``options_hook`` (#1012) is the narrow seam for that:
-    # it hands the constructed options to a caller before the turn starts. It
-    # adds no policy and changes no option — a hook that raises propagates,
-    # because a caller observing the options must not be able to swallow the
-    # turn it is observing.
-    if options_hook is not None:
-        options_hook(options)
-    agen = query(prompt=prompt, options=options)
-    try:
-        async for msg in agen:
-            if isinstance(msg, AssistantMessage):
-                if getattr(msg, "error", None):
-                    error_text = "".join(
-                        block.text for block in msg.content
-                        if isinstance(block, TextBlock)
-                    ).strip()
-                    detail = error_text or f"assistant error: {msg.error}"
-                    raise OneShotError(detail, transient=_is_transient(detail, None))
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        parts.append(block.text)
-            elif isinstance(msg, ResultMessage):
-                if msg.is_error:
-                    detail, status = _result_error_detail(msg)
-                    raise OneShotError(
-                        detail, status=status,
-                        transient=_is_transient(detail, status),
-                    )
-    finally:
-        # Close the SDK generator deterministically. When the loop
-        # raises (model error, subprocess exit 1) or wait_for cancels
-        # us on timeout, the generator is otherwise left for GC to
-        # close in a fire-and-forget task; the SDK's teardown then
-        # re-surfaces the ProcessError as a "Task exception was never
-        # retrieved" log entry. aclose() is a no-op on an exhausted
-        # generator, so the normal path is unaffected.
-        try:
-            # SDK types query() as AsyncIterator, but it returns an async
-            # generator that exposes aclose().
-            await cast("AsyncGenerator[Any, None]", agen).aclose()
-        except Exception:  # noqa: BLE001
-            logger.debug("oneshot query generator cleanup raised; already handled")
-    return "".join(parts).strip()
-
-
-async def _run_opencode_oneshot(
-    prompt: str,
-    *,
-    system_prompt: str,
-    model: str,
-    env: dict[str, str] | None,
-    cwd: Path | None,
-) -> str:
-    from ciao.models import AgentRequest, ResultEvent
-    from ciao.providers.opencode import OpencodeProvider
-
-    # One-shot routines have a no-tools contract. Keep the server in a fresh
-    # empty directory so opencode cannot discover project instructions,
-    # configs, or MCP registrations from the workspace. Its deny-all session
-    # permission rules also prevent read/glob/grep/list from reaching files.
-    with tempfile.TemporaryDirectory(prefix="ciaobot-opencode-oneshot-") as isolated:
-        opencode = OpencodeProvider(
-            Path(isolated),
-            developer_instructions=system_prompt,
-            tools_enabled=False,
-        )
-        try:
-            async for event in opencode.run_streaming(
-                AgentRequest(
-                    prompt=prompt,
-                    model=model,
-                    mode="auto",
-                    provider="opencode",
-                    extra_env=env or {},
-                ),
-                lambda _handle: None,
-            ):
-                if isinstance(event, ResultEvent):
-                    if event.is_error:
-                        detail = (event.result or "").strip() or "opencode one-shot failed"
-                        # opencode reports a rejected prompt or a dead server as a
-                        # terminal ResultEvent; it does not distinguish retriable
-                        # upstream flakes, so do not double-retry here.
-                        raise OneShotError(detail, transient=False)
-                    return event.result
-            return ""
-        finally:
-            await opencode.delete_current_session()
-            await opencode.disconnect()
-
-
 async def run_oneshot(
     prompt: str,
     *,
@@ -272,7 +53,6 @@ async def run_oneshot(
     max_retries: int = 1,
     retry_backoff_s: float = 0.5,
     max_turns: int = 2,
-    options_hook: Callable[[ClaudeAgentOptions], None] | None = None,
 ) -> str:
     """Run a single-turn model call and return the assistant's text.
 
@@ -280,24 +60,14 @@ async def run_oneshot(
     caller decides how to handle it. ``timeout_s`` wraps each attempt via
     :func:`asyncio.wait_for`.
 
-    ``max_turns`` bounds the Claude path's turns. It stays 2 by default so a
-    stray ``stop_reason=tool_use`` is absorbed; a caller that must count
-    billable provider attempts (the behavioral eval's budget) passes 1 so one
-    reserved slot is exactly one provider call.
+    ``max_turns`` is still accepted for the callers that count their attempts
+    (the behavioral eval's budget). No runner reads it now: an ACP one-shot is one
+    prompt on one session.
 
-    ``options_hook`` is called with the constructed ``ClaudeAgentOptions`` just
-    before the Claude turn starts, so a caller can read the no-tools contract
-    off a real object instead of patching this module's ``query`` import
-    (#1012). It is an observation point and nothing else: it sets no option, no
-    existing caller passes it, and it is not called on the opencode path, whose
-    deny-all is derived at session-create time rather than in an options object.
-
-    On a transient failure (an empty-body / ``is_error`` result) the call is
-    retried up to ``max_retries``
-    times with exponential backoff; non-transient failures (auth /
-    subscription / bad-model) and timeouts are raised immediately. On
-    failure an :class:`OneShotError` carrying the upstream ``detail`` is
-    raised so callers can log the real cause instead of a generic string.
+    On a transient failure the call is retried up to ``max_retries`` times with
+    exponential backoff; a non-transient failure and a timeout are raised at once.
+    On failure an :class:`OneShotError` carrying the upstream ``detail`` is raised
+    so callers can log the real cause instead of a generic string.
     """
     # Chats can run with Claude Code's fast-mode suffix ("[1m]"), but the
     # one-shot API path rejects annotated model ids ("There's an issue with
@@ -306,36 +76,25 @@ async def run_oneshot(
     if model.endswith("[1m]"):
         model = model[: -len("[1m]")]
 
-    if provider == "opencode":
+    descriptor = provider_registry.get(provider)
+    acp_spec = descriptor.acp_spec() if descriptor is not None else None
+    if acp_spec is not None and descriptor is not None:
+        # An ACP agent runs its own one-shot session; its no-tools contract is its ``oneshot_meta``.
+        provider_cls: Any = descriptor.factory()
+        session_meta = provider_cls.oneshot_meta()
+
         async def _attempt() -> str:
-            one_shot_env = dict(env or {})
-            # The engine's own bin dir leads PATH so a ``ciao`` the one-shot's
-            # opencode server launches is this engine's CLI, not a stale install
-            # earlier on the user's PATH (#989).
-            one_shot_env["PATH"] = prepend_engine_path(one_shot_env.get("PATH"))
-            return await _run_opencode_oneshot(
+            from ciao.providers.acp.oneshot import run_acp_oneshot
+
+            acp_env = {**provider_cls.spawn_env(), **dict(env or {})}
+            acp_env["PATH"] = prepend_engine_path(acp_env.get("PATH"))
+            return await run_acp_oneshot(
+                acp_spec,
                 prompt,
                 system_prompt=system_prompt,
                 model=model,
-                env=one_shot_env,
-                cwd=cwd,
-            )
-    elif provider == "claude":
-        async def _attempt() -> str:
-            # Disable Claude Code's auto memory to avoid double memory layers
-            merged_env = dict(env or {})
-            merged_env.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
-            # Artifacts publish to claude.ai; ciaobot has no use for that surface
-            merged_env.setdefault("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
-            # Same engine-first PATH as the opencode path (#989).
-            merged_env["PATH"] = prepend_engine_path(merged_env.get("PATH"))
-            return await _run_claude_oneshot(
-                prompt,
-                system_prompt=system_prompt,
-                model=model,
-                env=merged_env,
-                max_turns=max_turns,
-                options_hook=options_hook,
+                env=acp_env,
+                session_meta=session_meta,
             )
     else:
         raise ValueError(f"Unknown one-shot provider '{provider}'")

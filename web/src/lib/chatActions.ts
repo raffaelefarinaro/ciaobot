@@ -9,7 +9,7 @@ import { isBridgeMode, PERMISSION_MODE_COPY } from './permissionModes'
 import type { ChatAction, ChatActionKind, ChatActionState } from './types'
 
 export const CHAT_ACTION_KINDS: readonly ChatActionKind[] = [
-  'mcp_auth', 'command', 'gws_auth', 'permission_mode', 'device_code', 'system_setting', 'restart', 'limit',
+  'command', 'gws_auth', 'permission_mode', 'device_code', 'system_setting', 'restart', 'limit',
 ]
 
 export const CHAT_ACTION_STATES: readonly ChatActionState[] = ['open', 'working', 'waiting', 'done', 'failed']
@@ -20,12 +20,6 @@ export interface ActionCopy {
   primaryLabel: string
   meta: string
 }
-
-/** The steps of an MCP sign-in, shown while the card is waiting. */
-export const MCP_AUTH_STEPS: readonly string[] = ['Sign-in page opened', 'Sign in in the browser', 'Ciao picks up the tools']
-
-/** Step 1 until this card has opened the page: nothing was opened yet, so it is the step to do. */
-export const MCP_AUTH_OPEN_STEP = 'Open the sign-in page'
 
 export function isChatAction(value: unknown): value is ChatAction {
   if (typeof value !== 'object' || value === null) return false
@@ -43,52 +37,6 @@ export function normalizeChatActions(value: unknown): ChatAction[] {
   return Array.isArray(value)
     ? value.filter(isChatAction).map(a => ({ ...a, params: { ...a.params } }))
     : []
-}
-
-/** A server's name for people: Claude names a plugin's server `plugin:<plugin>:<server>`. */
-export function mcpServerName(server: string): string {
-  return /^plugin:[^:]+:(.+)$/.exec(server)?.[1] ?? server
-}
-
-function mcpAuthCopy(action: ChatAction): ActionCopy {
-  const server = mcpServerName(action.params.server ?? '')
-  const meta = `${action.params.provider ?? ''} · MCP`
-  // Claude's sign-in runs in an engine helper terminal: the URL arrives a poll later.
-  const claude = action.params.provider === 'claude'
-  switch (action.state) {
-    case 'open':
-      return {
-        title: `Sign in to ${server}`,
-        why: `${server} is set up for this chat but not signed in. Sign in once so this chat can use its tools.`,
-        primaryLabel: 'Sign in',
-        meta,
-      }
-    case 'working':
-      return {
-        title: `Starting the sign-in to ${server}…`,
-        why: claude ? 'Starting a sign-in terminal for this chat.' : 'Getting the sign-in page.',
-        primaryLabel: '',
-        meta,
-      }
-    case 'waiting':
-      return {
-        title: `Waiting for ${server} to connect…`,
-        why: claude
-          ? 'Open the sign-in page and finish there. This card updates by itself.'
-          : 'Finish the sign-in in the page that opened. This card updates by itself.',
-        primaryLabel: claude ? 'Open the sign-in page' : 'Open the sign-in page again',
-        meta,
-      }
-    case 'done':
-      return { title: `${server} is connected`, why: 'This chat can use it now.', primaryLabel: 'Continue the chat', meta }
-    case 'failed':
-      return {
-        title: `Couldn't sign in to ${server}`,
-        why: action.error || 'The sign-in did not finish.',
-        primaryLabel: 'Try again',
-        meta,
-      }
-  }
 }
 
 /** The display name of a device-code tool. The engine allows only gh and az. */
@@ -315,8 +263,6 @@ function systemSettingCopy(action: ChatAction): ActionCopy {
 /** The card copy for an action, or null for a kind with no copy yet. */
 export function actionCopy(action: ChatAction): ActionCopy | null {
   switch (action.kind) {
-    case 'mcp_auth':
-      return mcpAuthCopy(action)
     case 'command':
       return commandCopy(action)
     case 'restart':
@@ -338,33 +284,6 @@ export function actionCopy(action: ChatAction): ActionCopy | null {
 export function chatActionErrorReason(e: unknown): string {
   const err = (e ?? null) as { payload?: { error?: unknown } } | null
   return typeof err?.payload?.error === 'string' ? err.payload.error : ''
-}
-
-/** Why a needs-you card could not turn its MCP server off, in the user's words. */
-export function mcpTurnOffErrorText(reason: string, server: string): string {
-  switch (reason) {
-    case 'config_has_comments':
-      return `The OpenCode config file that defines ${server} has comments or trailing commas, so Ciaobot leaves it alone. Change ${server} in that file yourself.`
-    case 'env_config':
-      return `OPENCODE_CONFIG_CONTENT in Ciaobot's environment defines ${server}; change it there.`
-    case 'not_configured':
-      return `No OpenCode config file for this workspace defines ${server}. Turn it off where it is defined.`
-    case 'managed':
-      return `${server} is managed by your organization and can't be turned off here.`
-    case 'config_busy':
-      return 'Claude Code is saving its settings. Try again in a moment.'
-    case 'unreadable_config':
-      return "The command line tool's settings file could not be read or changed, so nothing was changed."
-    default:
-      return `${server} could not be turned off. Try again.`
-  }
-}
-
-/** Where a needs-you card's Turn off applies, shown before the user clicks. */
-export function mcpTurnOffScopeText(provider: string): string {
-  return provider === 'claude'
-    ? "Turn off applies to Claude Code for this workspace's folder (the whole git repository, if it is one)."
-    : 'Turn off edits the OpenCode config file that defines this server.'
 }
 
 /** The URL when it is http or https, else null. Nothing else is ever opened or linked. */

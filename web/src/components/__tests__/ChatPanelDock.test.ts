@@ -147,12 +147,9 @@ async function mountPanel(
       stubs: {
         PaneHeader: PaneHeaderStub,
         ModelSelector: ChildStub,
-        SubagentPanel: ChildStub,
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,
         RouterLink: RouterLinkStub,
-        // Real: the rail's shell rows are the unit under test here.
-        ShellRows: false,
         // Real: the shared title row holds the close button.
         ItemTitleRow: false,
       },
@@ -216,7 +213,7 @@ describe('ChatPanel automation origin', () => {
     expect(row.get('.cd-primary').text()).toBe('schedule-1')
     expect(row.get('.cd-detail').text()).toBe('Automation')
     expect(origin.findAll('button')).toHaveLength(0)
-    expect(rail.findAll('.cd-heading').map(h => h.text())).toEqual(['Origin', 'Open', 'Files'])
+    expect(rail.findAll('.cd-heading').map(h => h.text())).toEqual(['Origin', 'Open', 'MCP', 'Files'])
     vi.unstubAllGlobals()
     wrapper.unmount()
   })
@@ -243,7 +240,7 @@ describe('ChatPanel automation origin', () => {
     wrapper.unmount()
   })
 
-  it('lists agents above shells in one Running list in Chat details', async () => {
+  it('stacks Open and Files in that order under one heading style', async () => {
     const observers: Array<() => void> = []
     vi.stubGlobal('ResizeObserver', class {
       private cb: ResizeObserverCallback
@@ -254,59 +251,15 @@ describe('ChatPanel automation origin', () => {
       disconnect() {}
       unobserve() {}
     })
-    const { wrapper } = await mountPanel(store => {
-      store.runningSubagents = {
-        'chat-1': [{ agent_id: 'a1', description: 'Explore repo layout', subagent_type: 'Explore', status: 'running' }],
-      } as unknown as typeof store.runningSubagents
-      store.runningSubagents['chat-1'].push(
-        { agent_id: 'task:b1', description: 'npm run dev', subagent_type: 'shell', status: 'running', started_at: new Date(Date.now() - 125_000).toISOString(), stoppable: true },
-      )
-    })
+    const { wrapper } = await mountPanel()
     observers.forEach(fire => fire())
     await nextTick()
 
     const rail = wrapper.get('#chat-work-rail')
-    expect(rail.find('.chat-rail-subhead').exists()).toBe(false)
-    expect(rail.get('.chat-rail-running .cd-heading').text()).toBe('Running')
-    expect(rail.get('.chat-rail-running .cd-count').text()).toBe('2')
-    const agent = rail.findAllComponents(RouterLinkStub).find((l: { classes: () => string[] }) => l.classes().includes('chat-rail-agent'))!
-    expect(agent.props('to')).toBe('/chat/chat-1/subagent/a1')
-    expect(agent.text()).toContain('Explore repo layout')
-    expect(agent.text()).toContain('Explore')
-    expect(agent.get('.cd-detail').text()).toBe('Agent · Explore')
-    expect(agent.findComponent({ name: 'ActivityGlyph' }).props('kind')).toBe('working')
-    const shells = rail.getComponent({ name: 'ShellRows' })
-    expect(shells.props('variant')).toBe('rail')
-    expect(shells.text()).toContain('npm run dev')
-    expect(shells.get('.shell-row-age').text()).toBe('2m')
-    expect(shells.get('.cd-detail').text()).toBe('Shell · 2m')
-    expect(shells.find('a').exists()).toBe(false)
-    expect(agent.element.compareDocumentPosition(shells.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    vi.unstubAllGlobals()
-    wrapper.unmount()
-  })
-
-  it('stacks Open, Running and Files in that order under one heading style', async () => {
-    const observers: Array<() => void> = []
-    vi.stubGlobal('ResizeObserver', class {
-      private cb: ResizeObserverCallback
-      constructor(cb: ResizeObserverCallback) { this.cb = cb }
-      observe() {
-        observers.push(() => this.cb([{ contentRect: { width: 1200 } } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver))
-      }
-      disconnect() {}
-      unobserve() {}
-    })
-    const { wrapper } = await mountPanel(store => {
-      store.runningSubagents = {
-        'chat-1': [{ agent_id: 'task:b1', description: 'npm run dev', subagent_type: 'shell', status: 'running', started_at: new Date(Date.now() - 125_000).toISOString(), stoppable: true }],
-      } as unknown as typeof store.runningSubagents
-    })
-    observers.forEach(fire => fire())
-    await nextTick()
-
-    const rail = wrapper.get('#chat-work-rail')
-    expect(rail.findAll('.cd-heading').map(h => h.text())).toEqual(['Open', 'Running', 'Files'])
+    const headings = rail.findAll('.cd-heading').map(h => h.text())
+    expect(headings).not.toContain('Running')
+    expect(headings.indexOf('Open')).toBeGreaterThanOrEqual(0)
+    expect(headings.indexOf('Files')).toBeGreaterThan(headings.indexOf('Open'))
     expect(rail.find('.chat-rail-open .chat-rail-terminal').exists()).toBe(true)
     expect(rail.get('.chat-rail-open').element.compareDocumentPosition(rail.get('.chat-rail-agent-context').element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     vi.unstubAllGlobals()
@@ -365,91 +318,6 @@ describe('ChatPanel action dock', () => {
       store.activeQuestions = { 'chat-1': liveQuestion() } as unknown as typeof store.activeQuestions
     })
     expect(wrapper.find('.question-card').exists()).toBe(true)
-    wrapper.unmount()
-  })
-
-  // The count used to render three times in this one view.
-  it('reports background agents in the composer bar, not the dock', async () => {
-    const { wrapper } = await mountPanel(store => {
-      store.backgroundAgents = { 'chat-1': 3 }
-    })
-    expect(wrapper.find('.bg-agents-bar').exists()).toBe(false)
-    expect(wrapper.find('.dock-strip').exists()).toBe(false)
-    expect(wrapper.find('.dock-agent-links').exists()).toBe(false)
-    expect(wrapper.getComponent({ name: 'ComposerActivity' }).props('agentCount')).toBe(3)
-    wrapper.unmount()
-  })
-
-  // A background shell is not the user's move, so it is not a dock pill and not
-  // a line above the composer: the composer bar's activity cluster draws it, and
-  // keeps drawing it while a turn streams.
-  const SHELL = {
-    agent_id: 'task:b1', description: 'npm run dev', subagent_type: 'shell', status: 'running',
-    started_at: new Date(Date.now() - 125_000).toISOString(), stoppable: true,
-  }
-
-  it('hands live shells to the composer bar, which no longer takes engine runs', async () => {
-    const { wrapper, store } = await mountPanel(s => {
-      s.runningSubagents = { 'chat-1': [SHELL] } as unknown as typeof s.runningSubagents
-    })
-    expect(wrapper.find('.dock-strip').exists()).toBe(false)
-    expect(wrapper.find('.run-status').exists()).toBe(false)
-    const bar = () => wrapper.getComponent({ name: 'ComposerActivity' })
-    expect(bar().props('agents')).toHaveLength(1)
-    expect(bar().props()).not.toHaveProperty('runs')
-    expect(bar().props()).not.toHaveProperty('finished')
-
-    store.projectStreaming = { 'chat-1': true }
-    await nextTick()
-    expect(bar().props('agents')).toHaveLength(1)
-    wrapper.unmount()
-  })
-
-  it('opens Chat details at its Running section from the composer bar on a narrow pane', async () => {
-    const { wrapper } = await mountPanel(s => {
-      s.runningSubagents = { 'chat-1': [SHELL] } as unknown as typeof s.runningSubagents
-    })
-    wrapper.getComponent({ name: 'ComposerActivity' }).vm.$emit('open-details')
-    await flushPromises()
-    const panel = wrapper.get('#chat-work-rail .chat-rail-running')
-    expect(panel.text()).toContain('Running')
-    expect(document.activeElement).toBe(panel.element)
-    expect(panel.text()).toContain('npm run dev')
-    expect(panel.findComponent({ name: 'ShellRows' }).exists()).toBe(true)
-    wrapper.unmount()
-  })
-
-  it('stops a native shell from its Chat details row through the background-tasks route', async () => {
-    const { wrapper, store } = await mountPanel(s => {
-      s.runningSubagents = { 'chat-1': [SHELL] } as unknown as typeof s.runningSubagents
-    })
-    const post = vi.spyOn(api, 'post').mockResolvedValue({} as never)
-    wrapper.getComponent({ name: 'ComposerActivity' }).vm.$emit('open-details')
-    await flushPromises()
-    const rail = wrapper.get('#chat-work-rail .chat-rail-running')
-    const button = rail.get('.shell-row-stop')
-    expect(button.attributes('aria-label')).toBe('Stop npm run dev')
-    await button.trigger('click')
-    await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/chats/chat-1/background-tasks/b1/stop', {})
-    expect(store.stoppingTasks['chat-1']).toEqual({ b1: true })
-    expect(button.text()).toBe('Stopping…')
-    wrapper.unmount()
-  })
-
-  it('passes the larger agent count to the composer bar', async () => {
-    const { wrapper, store } = await mountPanel(s => {
-      s.backgroundAgents = { 'chat-1': 1 }
-    })
-    // Seeded after mount: a pushed count makes the store refetch the poll,
-    // which the mocked API answers with nothing.
-    store.runningSubagents = {
-      'chat-1': [{ agent_id: 'a1', description: 'One' }, { agent_id: 'a2', description: 'Two' }],
-    } as unknown as typeof store.runningSubagents
-    await nextTick()
-    const bar = wrapper.getComponent({ name: 'ComposerActivity' })
-    expect(bar.props('agentCount')).toBe(2)
-    expect(bar.props('agents')).toHaveLength(2)
     wrapper.unmount()
   })
 

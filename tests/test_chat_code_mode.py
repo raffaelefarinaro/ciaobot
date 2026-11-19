@@ -14,7 +14,6 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig, WorkspaceConfig
-from ciao.providers.claude import ClaudeProvider
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
@@ -99,46 +98,39 @@ def test_a_memory_pass_chat_is_never_in_code_mode(tmp_path: Path) -> None:
     assert "[Linked repository]" not in manager._build_prompt_prefix(chat)
 
 
-def test_a_link_change_mid_chat_reaches_the_next_turn(tmp_path: Path) -> None:
-    """Linking, relinking and unlinking the project re-sends the stable context
-    and changes what the provider is started with, so the next turn restarts it."""
+def test_a_link_change_mid_chat_resends_the_stable_context(tmp_path: Path) -> None:
+    """Linking, relinking and unlinking the project each mark the stable context stale, so the
+    next turn re-sends it with the new repository (or without one). Provider-neutral: the
+    process restart that follows is pinned per provider."""
     manager = _build(tmp_path)
     repo_a = _git_repo(tmp_path / "repo-a")
     repo_b = _git_repo(tmp_path / "repo-b")
     project = manager.create_project("Later", workspace="work")
     chat = manager.create_chat(project.project_id, provider="claude")
-    claude = ClaudeProvider(tmp_path)
 
-    def take_turn() -> tuple[object, str]:
-        """Build the next turn's request and mark its stable context as delivered."""
+    def take_turn() -> str:
+        """Build the next turn's request, then mark its stable context as delivered."""
         request = manager.build_agent_request(chat, prompt="hi")
         chat.session_id = "sess-1"
         chat.context_digest, chat.context_session_id = manager._stable_context_marker(chat)
-        return claude._spawn_key_for(request), request.linked_repo
+        return request.linked_repo
 
-    unlinked_key, linked = take_turn()
-    assert linked == ""
+    assert take_turn() == ""
     assert not manager._needs_stable_context(chat)
 
     manager.update_project(project.project_id, repo_path=str(repo_a))
     assert manager._needs_stable_context(chat)
     assert "[Linked repository]" in manager._build_prompt_prefix(chat)
-    key_a, linked = take_turn()
-    assert linked == str(repo_a.resolve())
-    assert key_a != unlinked_key
+    assert take_turn() == str(repo_a.resolve())
 
     manager.update_project(project.project_id, repo_path=str(repo_b))
     assert manager._needs_stable_context(chat)
-    key_b, linked = take_turn()
-    assert linked == str(repo_b.resolve())
-    assert key_b != key_a
+    assert take_turn() == str(repo_b.resolve())
 
     manager.update_project(project.project_id, repo_path="")
     assert manager._needs_stable_context(chat)
     assert "[Linked repository]" not in manager._build_prompt_prefix(chat)
-    key_off, linked = take_turn()
-    assert linked == ""
-    assert key_off != key_b
+    assert take_turn() == ""
 
 
 def test_moving_a_chat_into_a_linked_project_puts_it_in_code_mode(tmp_path: Path) -> None:

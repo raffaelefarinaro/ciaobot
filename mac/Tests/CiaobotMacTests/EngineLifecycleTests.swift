@@ -359,7 +359,7 @@ final class EngineLifecycleTests: XCTestCase {
         let delegate = AppDelegate(
             session: AppSessionStatus(),
             presenter: LifecycleMainWindowPresenter(),
-            makeMenuBar: { _, _, _, _, _ in self.menuBar },
+            makeMenuBar: { _, _, _, _ in self.menuBar },
             engineMode: TransientEngineModeStore(),
             mode: mode,
             supervisor: supervisor,
@@ -1050,15 +1050,33 @@ final class EngineLifecycleTests: XCTestCase {
         )
     }
 
+    /// A failed startup probe names the bundled engine as the other way forward
+    /// only when the screen actually offers it.
+    func testStartupFailureNamesUseThisMacOnlyWhenItIsOffered() {
+        let store = TransientEngineModeStore()
+        store.mode = .external
+        let offered = makeExternalView(supervisor: makeSupervisor(), modeStore: store)
+        XCTAssertTrue(offered.offersThisMac)
+        XCTAssertTrue(ConnectionView.startupFailureText(offersThisMac: offered.offersThisMac)
+            .contains("or use Ciaobot on This Mac"))
+
+        let plain = makeExternalView(supervisor: nil, modeStore: store)
+        XCTAssertFalse(plain.offersThisMac)
+        XCTAssertEqual(ConnectionView.startupFailureText(offersThisMac: plain.offersThisMac),
+                       "Could not verify the server’s startup response. Check the address and try again.")
+    }
+
     func testUseThisMacSwitchesToLocalAndStartsTheEngine() {
         let store = TransientEngineModeStore()
         store.mode = .external
+        store.rolledBackTakeovers = 2
         var changes: [EngineMode] = []
         let view = makeExternalView(supervisor: makeSupervisor(), modeStore: store) { changes.append($0) }
 
         XCTAssertTrue(view.offersThisMac)
         view.useThisMac()
         XCTAssertEqual(store.mode, .local)
+        XCTAssertEqual(store.rolledBackTakeovers, 0, "a mode pick starts a fresh streak")
         XCTAssertEqual(changes, [.local])
         XCTAssertEqual(processes.spawns.count, 1, "the supervisor starts after the mode is saved")
     }

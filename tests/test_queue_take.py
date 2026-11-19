@@ -31,25 +31,13 @@ def test_parked_take_receipt_and_ack(tmp_path):
     assert chat.to_dict()["pending_takes"] == []
 
 
-def test_steering_entry_cannot_be_taken():
-    stream = ChatStream("hello")
-    entry_id = stream.enqueue("message")
-    stream._pending[0]["steer_id"] = "delivery"
-    assert stream.take_pending(entry_id) is None
-    assert stream.pending[0]["id"] == entry_id
-
-
-def test_live_take_records_receipt_and_refuses_steering(tmp_path):
+def test_live_take_records_receipt(tmp_path):
     manager = _make_manager(tmp_path)
     project = manager.create_project("queue", workspace="work")
     chat = manager.create_chat(project.project_id, title="queue")
     stream = ChatStream("hello")
     manager._broker.register(chat.chat_id, stream)
     entry_id = stream.enqueue("message", images=["x.png"])
-    stream._pending[0]["steer_id"] = "delivery"
-    assert manager.take_queue_for_edit(chat.chat_id, entry_id) is None
-    assert chat.to_dict()["pending_takes"] == []
-    stream._pending[0]["steer_id"] = ""
     assert manager.take_queue_for_edit(chat.chat_id, entry_id) == {
         "entry_id": entry_id, "text": "message", "images": ["x.png"]
     }

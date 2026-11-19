@@ -17,9 +17,12 @@ from typing import TYPE_CHECKING, Any, cast
 # so the stock workspace-evidence set below can be derived from it (see
 # `_WORKSPACE_EVIDENCE_DIRS`) without a cycle.
 from ciao.entity_types import stock_entity_type_registry
-from ciao.claude_trim import claude_settings_layer, load_claude_trim, trim_tool_denies
-from ciao.execution_modes import credential_path_deny_rules
-from ciao.fs_sandbox import AGENT_FS_SCOPES
+from ciao.claude_trim import (
+    absorb_legacy_claude_ai_connectors,
+    claude_settings_layer,
+    load_claude_trim,
+    trim_tool_denies,
+)
 from ciao.models import THINKING_LEVELS, BridgeMode
 from ciao.os_support.paths import resolve_path
 from ciao.providers.opencode import OpencodeSettings
@@ -64,29 +67,6 @@ _EXPORTED_DOTENV_KEYS: set[str] = set()
 # is dropped wherever the file is read, so no reader can disagree about where
 # the runtime lives. The legacy-env-ignored tile reports a non-default one.
 DOTENV_IGNORED_KEYS: frozenset[str] = frozenset({"CIAO_RUNTIME_ROOT"})
-
-
-def _installer_bootstrap_port(dotenv_path: Path) -> int:
-    """The port an installer bootstrap serves setup on.
-
-    ``PWA_PORT`` in the bootstrap's own ``.env`` when set, else 8443. The file
-    is read directly, not from ``os.environ``, which the bootstrap sanitises.
-    A value that is not a port number is an error, not a silent default.
-    """
-    if not dotenv_path.is_file():
-        return 8443
-    from dotenv import dotenv_values
-
-    raw = (dotenv_values(dotenv_path).get("PWA_PORT") or "").strip()
-    if not raw:
-        return 8443
-    try:
-        port = int(raw)
-    except ValueError as exc:
-        raise ValueError(f"PWA_PORT in {dotenv_path} is not a port number: {raw!r}") from exc
-    if not 1 <= port <= 65535:
-        raise ValueError(f"PWA_PORT in {dotenv_path} is outside 1-65535: {port}")
-    return port
 
 
 def without_ignored_dotenv_keys(values: Mapping[str, str | None]) -> dict[str, str]:
@@ -194,10 +174,10 @@ def installed_workspace_env(base: Mapping[str, str]) -> dict[str, str]:
             runtime_root=str(pointer.runtime_root),
         )
     # The platform branch, the definition it reads and the staleness guard all
-    # live in `ciao.install_discovery`; imported here so the seam stays the one
-    # place that knows the platform and the patch target the existing tests
+    # live in `ciao.workspace_discovery`; imported here so the seam stays the
+    # one place that knows the platform and the patch target the existing tests
     # install (`ciao.macos_service.discover_runtime`) is still reached.
-    from ciao.install_discovery import discover_workspace
+    from ciao.workspace_discovery import discover_workspace
 
     discovered = discover_workspace(base)
     if discovered is None:
@@ -387,25 +367,6 @@ def coerce_workspace_color(raw: object) -> str:
     )
 
 
-def default_agent_fs_scope() -> str:
-    """Filesystem scope for a workspace with none stored. A stored value is never overridden by this."""
-    return "workspace"
-
-
-def coerce_agent_fs_scope(raw: object) -> str | None:
-    """Normalize a workspace filesystem scope. Missing/empty → None (no choice made)."""
-    if raw is None:
-        return None
-    cleaned = str(raw).strip()
-    if not cleaned:
-        return None
-    if cleaned in AGENT_FS_SCOPES:
-        return cleaned
-    raise ValueError(
-        f"agent_fs_scope must be one of: {', '.join(AGENT_FS_SCOPES)}"
-    )
-
-
 # Execution (permission) modes a provider default may pin. ``manual`` is the
 # PWA-facing name for the BridgeMode ``normal`` (ask for every action);
 # ``plan`` stays chat-only and is not a settings default.
@@ -516,20 +477,9 @@ class WorkspaceConfig:
     default_provider: str = "claude"
     # Extra tools to deny on top of the trim catalog. None, [] and 'none' all mean no extras.
     disallowed_tools: list[str] | None = None
-    # Whether this workspace's Claude chats load the Claude account's claude.ai
-    # connectors (remote MCP servers). Off sets ENABLE_CLAUDEAI_MCP_SERVERS=false
-    # on the spawned Claude Code process. True keeps the behavior from before
-    # this switch existed, so a workspace that never set it is unchanged.
-    claude_ai_connectors: bool = True
     gws_profile: str = ""
     # PWA accent preset id. Defaults to Ciao orange (amber).
     color: str = DEFAULT_WORKSPACE_COLOR
-    # Filesystem scope for agent tool execution: "workspace" confines the agent
-    # and its shell to the workspace; "machine" is the whole-machine escape
-    # hatch. ``None`` means the workspace never chose one: it follows
-    # default_agent_fs_scope() on whichever platform reads it. Only an explicit
-    # value is persisted, so the platform default is never frozen into storage.
-    agent_fs_scope: str | None = None
     # Whether Workspace care may act on its own [memory]/[profile] verdicts
     # (off, dismiss, all). Operator-only: never set from an agent surface.
     memory_handover: str = DEFAULT_MEMORY_HANDOVER
@@ -539,10 +489,6 @@ class WorkspaceConfig:
     provider_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
     # Sparse per-workspace Claude context-trim overrides (ciao/claude_trim.py); only keys that differ from the catalog default.
     claude_trim: dict[str, bool] = field(default_factory=dict)
-
-    def effective_agent_fs_scope(self) -> str:
-        """The scope the agent runs under: the explicit choice, else the platform default."""
-        return self.agent_fs_scope or default_agent_fs_scope()
 
 
 def _coerce_workspace_disallowed(raw: object) -> list[str] | None:
@@ -555,14 +501,6 @@ def _coerce_workspace_disallowed(raw: object) -> list[str] | None:
     return None
 
 
-def _coerce_claude_ai_connectors(raw: object) -> bool:
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, str):
-        return raw.strip().lower() not in {"false", "0", "no", "off"}
-    return True
-
-
 def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
     name = str(data.get("name", "")).strip()
     if not name:
@@ -572,10 +510,6 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         color = coerce_workspace_color(data.get("color"))
     except ValueError:
         color = DEFAULT_WORKSPACE_COLOR
-    try:
-        agent_fs_scope = coerce_agent_fs_scope(data.get("agent_fs_scope"))
-    except ValueError:
-        agent_fs_scope = None
     try:
         memory_handover = coerce_memory_handover(data.get("memory_handover"))
     except ValueError:
@@ -592,13 +526,11 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         vault_root=vault_root,
         default_provider=str(data.get("default_provider", "claude")).strip() or "claude",
         disallowed_tools=_coerce_workspace_disallowed(data.get("disallowed_tools")),
-        claude_ai_connectors=_coerce_claude_ai_connectors(
-            data.get("claude_ai_connectors")
+        claude_trim=absorb_legacy_claude_ai_connectors(
+            data, load_claude_trim(data.get("claude_trim"))
         ),
-        claude_trim=load_claude_trim(data.get("claude_trim")),
         gws_profile=str(data.get("gws_profile", "")).strip(),
         color=color,
-        agent_fs_scope=agent_fs_scope,
         memory_handover=memory_handover,
         provider_overrides=provider_overrides,
     )
@@ -796,7 +728,6 @@ class CiaoConfig:
     dev_mode: bool = False
     app_repo: Path | None = None
     bootstrap_mode: bool = False
-    suggested_workspace: Path | None = None
     vault_root: Path = Path("memory-vault")
     claude_default_model: str = CLAUDE_MODELS[0]
     # Per-workspace default models and tool denylists live on the WorkspaceConfig
@@ -1309,17 +1240,12 @@ class CiaoConfig:
                     workspace.name
                 ),
                 "disallowed_tools": workspace.disallowed_tools,
-                "claude_ai_connectors": workspace.claude_ai_connectors,
                 "gws_profile": workspace.gws_profile,
                 "color": workspace.color,
             }
             # Sparse: a workspace on the catalog defaults keeps no key.
             if workspace.claude_trim:
                 row["claude_trim"] = workspace.claude_trim
-            # Only an explicit choice is stored; an unset scope keeps no key
-            # so it keeps following the platform it loads on.
-            if workspace.agent_fs_scope is not None:
-                row["agent_fs_scope"] = workspace.agent_fs_scope
             if workspace.memory_handover != DEFAULT_MEMORY_HANDOVER:
                 row["memory_handover"] = workspace.memory_handover
             if workspace.provider_overrides:
@@ -1657,52 +1583,6 @@ class CiaoConfig:
             return cast(BridgeMode, mode)
         return self.claude_mode
 
-    def _declared_mcp_server_names(self, workspace: str | None = None) -> list[str]:
-        """Names of servers declared in the project ``.mcp.json`` files.
-
-        Returns the union of server names across the same candidate files the
-        MCP status panel discovers, with ``workspace``'s agent root first: a
-        chat runs with its agent root as cwd, so ``<install>/<name>/.mcp.json``
-        is the file that actually grants servers to it. A file that cannot be
-        parsed contributes no names; Claude Code cannot load servers from it
-        either.
-        """
-        workspace_root = self.workspace_root
-        candidates = [
-            workspace_root / ".mcp.json",
-            workspace_root.parent / ".mcp.json",
-            workspace_root.parent / "ciao" / ".mcp.json",
-        ]
-        if workspace:
-            try:
-                agent_root = self.agent_root(workspace)
-            except ValueError:
-                # An unusable workspace name names no root; the shared
-                # candidates still apply.
-                agent_root = workspace_root
-            if agent_root != workspace_root:
-                candidates.insert(0, agent_root / ".mcp.json")
-        names: list[str] = []
-        seen: set[str] = set()
-        for path in candidates:
-            if not path.is_file():
-                continue
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError, TypeError):
-                continue
-            if not isinstance(data, dict):
-                continue
-            mcp_dict = data.get("mcpServers") or data.get("mcp_servers") or {}
-            if not isinstance(mcp_dict, dict):
-                continue
-            for raw_name in mcp_dict:
-                name = str(raw_name)
-                if name and name not in seen:
-                    seen.add(name)
-                    names.append(name)
-        return names
-
     def disallowed_tools_for_workspace(self, workspace: str | None) -> list[str]:
         """Tools to deny for a chat in this workspace.
 
@@ -1714,19 +1594,9 @@ class CiaoConfig:
         declared — each workspace's own agent-root ``.mcp.json`` and the
         provider's local scope — and every declared server loads.
 
-        Prepended to all of it, unconditionally, is
-        :func:`credential_path_deny_rules` — the ``.env`` / ``.runtime`` /
-        ``secrets`` file-tool denies. Those are not part of ``extras``, so a
-        workspace that overrides ``disallowed_tools`` (or opts out with the
-        literal ``none``) still gets them. See that function for what they do
-        and do not cover.
-
         ``disallowed_tools`` is only applied when the chat's provider is
         ``claude`` (see the ``if chat.provider != "claude": return []`` guard in
-        project_chats). opencode is constrained by the equivalent session
-        permission rules its own provider builds
-        (``ciao/providers/opencode.py::mode_settings``), not by this list, so
-        the credential denies above exist in both places and must stay in sync.
+        project_chats).
 
         An unregistered workspace name — a stale reference, or a renamed or
         deleted workspace — gets the catalog defaults rather than an empty
@@ -1735,11 +1605,7 @@ class CiaoConfig:
         workspace_config = self.workspace(workspace)
         trim = workspace_config.claude_trim if workspace_config else {}
         extras = (workspace_config.disallowed_tools or []) if workspace_config else []
-        # The resolved runtime root, not just the `**/.runtime/**` name: an
-        # operator who moved it with `CIAO_RUNTIME_ROOT` must not lose the
-        # guard on the stores it holds.
-        fixed = credential_path_deny_rules(self.state_path.parent)
-        return list(dict.fromkeys([*fixed, *trim_tool_denies(trim), *extras]))
+        return list(dict.fromkeys([*trim_tool_denies(trim), *extras]))
 
     def claude_settings_for_workspace(self, workspace: str | None) -> dict[str, Any]:
         """The Claude CLI settings layer (``skillOverrides`` plus ``disable*`` keys) for this workspace.
@@ -1749,30 +1615,9 @@ class CiaoConfig:
         workspace_config = self.workspace(workspace)
         return claude_settings_layer(workspace_config.claude_trim if workspace_config else {})
 
-    def memory_pass_denied_tools(self, workspace: str | None) -> list[str]:
-        """Tool denies carried only by the end-of-conversation memory pass.
-
-        Additive to :meth:`disallowed_tools_for_workspace`, not a replacement
-        for it: the pass keeps every workspace deny and adds two blocks a pass
-        must never have. First, all MCP — every ``mcp__<server>`` for every
-        server ``.mcp.json`` declares. Second, all shipped ``gws-*`` skills, as
-        ``Skill(<name>)`` denies, so the pass cannot reach Google Workspace.
-
-        The skill set is read from the packaged stock skills on disk, so a
-        newly shipped gws skill is denied without a code change.
-        """
-        from ciao.gws_skills import shipped_gws_skills
-
-        mcp = [f"mcp__{name}" for name in self._declared_mcp_server_names(workspace)]
-        stock = Path(__file__).resolve().parent / "stock" / "skills"
-        skills = [f"Skill({name})" for name in shipped_gws_skills(stock)]
-        return list(dict.fromkeys([*mcp, *skills]))
-
     @classmethod
     def from_env(
         cls, env: dict[str, str] | None = None, *, export: bool = True,
-        installer_bootstrap: bool = False,
-        installer_suggest_workspace: str | None = None,
     ) -> "CiaoConfig":
         """Build a config from the environment.
 
@@ -1793,25 +1638,6 @@ class CiaoConfig:
         discovery branch below already uses. Use it for anything read-only —
         a diagnostic must not change its caller's environment.
         """
-        if installer_bootstrap:
-            root = Path.home() / ".ciao" / "installer-bootstrap"
-            launcher, runtime = root / "launcher", root / "runtime"
-            for path in (root, launcher, runtime):
-                if path.is_symlink():
-                    raise ValueError(f"installer bootstrap refuses symlink path: {path}")
-            launcher.mkdir(parents=True, exist_ok=True)
-            runtime.mkdir(parents=True, exist_ok=True)
-            return cls(
-                pwa_auth_token=secrets.token_urlsafe(32),
-                workspace_root=root,
-                state_path=runtime / "state.json",
-                media_root=runtime / "media",
-                vault_root=root / "memory-vault",
-                bootstrap_mode=True,
-                suggested_workspace=Path(installer_suggest_workspace) if installer_suggest_workspace is not None else None,
-                pwa_host="127.0.0.1",
-                pwa_port=_installer_bootstrap_port(root / ".env"),
-            )
         overlay: dict[str, str] = {}
         if env is None:
             workspace_env_val = os.environ.get("CIAO_WORKSPACE", "").strip() or "."

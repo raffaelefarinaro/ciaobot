@@ -2,17 +2,9 @@
 
 The Claude Code CLI writes user-role records into the session JSONL that the
 human never typed: subagent completion notifications, bash output, echoes of
-slash commands, interrupt sentinels. Two subsystems have to agree on exactly
-which records those are:
-
-- ``ciao/subagent_tracking.py`` parses the parent JSONL and must not let a
-  synthetic record advance ``turn_index``;
-- ``ciao/web/transcript_service.py`` renders the same JSONL and must not let a
-  synthetic record render as a user bubble.
-
-The two counters are anchored to each other — a record skipped by one and kept
-by the other shifts every subsequent ``turn_index`` — so the predicates live
-here once instead of as near-copies in both modules. They drifted while they
+slash commands, interrupt sentinels. ``ciao/web/transcript_service.py`` renders
+that JSONL and must not let a synthetic record render as a user bubble, so the
+predicates live here once instead of as near-copies. They drifted while they
 were copies (see issue #500), which is the reason this module exists.
 """
 
@@ -25,7 +17,7 @@ from dataclasses import dataclass
 # user-role messages wrapped in these XML tags to feed the parent agent
 # subagent completion, bash output, slash-command invocations, etc. They are
 # NOT from the human; they're the CLI talking to its own model. The tag names
-# come from the constant table in claude_agent_sdk/_bundled/claude
+# come from the constant table in the Claude Code CLI itself
 # (IO="task-notification", EtH="bash-input", WV="command-name", and so on).
 #
 # Without this filter the envelopes leak into chat history as user bubbles:
@@ -76,17 +68,17 @@ TASK_NOTIFICATION_RE = re.compile(
 # summary, plus an optional task-type).
 INNER_TAG_RE = re.compile(r"<([a-z-]+)>(.*?)</\1>", re.DOTALL)
 
-# Slash commands the Claude Agent SDK injects as user turns when the PWA
-# changes model or mode mid-session (via ClaudeSDKClient.set_model /
-# set_permission_mode). They end up in the session JSONL and would otherwise
+# Slash commands the Claude Code CLI records as user turns when the model or
+# mode changes mid-session (the SDK sent them before the ACP switch, #3138). They
+# end up in the session JSONL and would otherwise
 # render as user bubbles the user didn't type. The assistant acknowledgement
 # ("Set model to ..." / "Set mode to ...") is collapsed into a single system
 # bubble by the transcript renderer.
 CONTROL_SLASH_PREFIXES = ("/model", "/mode")
 
 # Sentinel that the Claude Code CLI writes into the session JSONL when a turn
-# is interrupted (steer/queue mid-stream) or hits an empty rate-limit error.
-# It's the `UXH` constant in claude_agent_sdk/_bundled/claude. Claude Code's
+# is interrupted (queued interrupts mid-stream) or hits an empty rate-limit error.
+# It's the `UXH` constant in the Claude Code CLI. Claude Code's
 # own UI hides these (`case UXH: return null`); we mirror that so reloads
 # don't render a literal "No response requested." bubble after every interrupt.
 NO_RESPONSE_SENTINEL = "No response requested."
@@ -100,7 +92,7 @@ _TASK_ID_SENTINEL_PREFIX = "__orphan_summary"
 
 # Matches the Claude Agent SDK's own _SKIP_FIRST_PROMPT_PATTERN
 # ([Request interrupted by user[^\]]*]) so we cover every CLI variant, not
-# just the bare form. Steer/queue interrupts of an in-flight tool call produce
+# just the bare form. Queued interrupts of an in-flight tool call produce
 # "[Request interrupted by user for tool use]" — without this wildcard that
 # variant survives as a synthetic user record and renders as a quoted bubble
 # that looks like an error reply to a question.
@@ -370,7 +362,7 @@ def native_task_run(fields: dict[str, str]) -> NativeTaskRun | None:
 
     None for subagent completions (``Agent "X" ...``) and mid-stream
     ``Monitor event`` lines. The notice carries only a summary: the
-    ``output-file`` sits outside the file sandbox, so there is deliberately no
+    ``output-file`` is not copied into the notice, so there is deliberately no
     log path and no output tail.
     """
     match = _NATIVE_SUMMARY_RE.match(fields.get("summary", "").strip())

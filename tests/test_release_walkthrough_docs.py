@@ -78,7 +78,7 @@ def _omits(text: str, pattern: str) -> bool:
 
 
 def test_settings_walk_names_current_routes_and_scoped_checks() -> None:
-    """Settings is ten routes; the four asset lists are compared through the scoped API.
+    """Settings is ten routes; the three asset lists are compared through the scoped API.
 
     The old task called Settings one scrolling page with an "On this page" rail
     and treated a bare `curl` 401 as proof the endpoint worked. Both are wrong:
@@ -108,9 +108,10 @@ def test_settings_walk_names_current_routes_and_scoped_checks() -> None:
         "/api/admin/skills?workspace=",
         "/api/agent-assets?workspace=",
         "/api/commands?workspace=",
-        "/api/mcp/status?workspace=",
     ):
         assert endpoint in text, endpoint
+    # The MCP tab is one button per agent; there is no MCP status route to compare.
+    assert "/api/mcp/status" not in text
 
     # The old "one page" claim is gone; the rail is route-specific, not one scroll.
     assert "one long scrolling page" not in lowered

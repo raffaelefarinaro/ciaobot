@@ -213,7 +213,7 @@ McpPrincipal = AgentPrincipal
 # mode can be compared against its ceiling instead of being overwritten by it.
 # ``plan`` is read-only, ``normal`` asks before acting, ``auto`` acts with safer
 # defaults, ``bypass`` skips approvals. Mirrors ``BridgeMode`` in ciao.models
-# and the SDK mapping in ciao.providers.claude.
+# and the adapter's mode map in ciao.providers.acp.agents.
 _MODE_RANK = MODE_RANK
 
 RELOAD_OWN_NOTE = (
@@ -1444,6 +1444,16 @@ class CiaoControlPlane:
         self._subscribe_turn_watch()
         self._subscribe_chat_ended()
 
+    def _chat_is_working(self, chat_id: str) -> bool:
+        """A live stream, or background work a teardown would cut off."""
+        if chat_id in self.pcm.active_chat_ids():
+            return True
+        providers = getattr(self.pcm, "_providers", None)
+        busy = getattr(self.pcm, "_provider_background_busy", None)
+        if not isinstance(providers, dict) or not callable(busy):
+            return False
+        return bool(busy(chat_id, providers.get(chat_id)))
+
     def _defer_until_chat_idle(
         self,
         principal: AgentPrincipal,
@@ -1466,7 +1476,7 @@ class CiaoControlPlane:
 
         async def _run() -> None:
             try:
-                while principal.chat_id in self.pcm.active_chat_ids():
+                while self._chat_is_working(principal.chat_id):
                     await asyncio.sleep(0.25)
                 record["status"] = "running"
                 value = operation()
@@ -3427,8 +3437,6 @@ class CiaoControlPlane:
         if not isinstance(params, Mapping):
             raise ControlPlaneError("invalid_action", "The request was refused (invalid_type).")
         raw: dict[str, Any] = dict(params)
-        if kind == "mcp_auth" and "provider" not in raw:
-            raw["provider"] = chat.provider
         try:
             check_agent_params(kind, raw)
             validated = validate_params(kind, raw)

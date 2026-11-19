@@ -10,7 +10,7 @@
           <p class="section-title">Workspace</p>
         </div>
         <p class="hint">
-          Name, colour and file access for this workspace.
+          Name and colour for this workspace.
         </p>
       </div>
       <div class="overview-body">
@@ -34,41 +34,6 @@
             :disabled="workspacesSaving === form.name"
           />
         </div>
-        <label
-          class="settings-field set-subrow"
-          :class="{ 'workspace-card--target': workspaceLinkTarget === form.name }"
-          :id="`workspace-file-access-row-${form.name}`"
-          @animationend.self="clearWorkspaceLinkHighlight(form.name)"
-        >
-          <span class="ws-label set-subrow-label">File access</span>
-          <select
-            :id="`workspace-file-access-${form.name}`"
-            class="routine-input routine-select workspace-select set-subrow-control"
-            v-model="form.agent_fs_scope"
-            :disabled="workspacesSaving === form.name"
-          >
-            <option value="">{{ fsScopeDefaultOptionLabel }}</option>
-            <option value="workspace">Workspace only</option>
-            <option value="machine">Whole machine</option>
-          </select>
-        </label>
-        <p class="hint hint--compact set-subrow-hint">{{ WORKSPACE_FS_SCOPE_COPY[form.agent_fs_scope] }} {{ WORKSPACE_FS_SANDBOX_NOTE }}</p>
-        <div class="settings-switch-row set-subrow">
-          <span class="ws-label set-subrow-label">claude.ai connectors</span>
-          <button
-            class="settings-switch"
-            type="button"
-            role="switch"
-            :aria-checked="form.claude_ai_connectors"
-            aria-label="claude.ai connectors"
-            :disabled="workspacesSaving === form.name"
-            @click="form.claude_ai_connectors = !form.claude_ai_connectors"
-          >
-            <span class="switch-word">{{ form.claude_ai_connectors ? 'On' : 'Off' }}</span>
-            <span class="switch-track" aria-hidden="true"></span>
-          </button>
-        </div>
-        <p class="hint hint--compact set-subrow-hint">Load your Claude account's connectors (Slack, Jira, …) in this workspace's Claude chats.</p>
       </div>
     </div>
 
@@ -124,11 +89,7 @@ import SettingsMemoryHandover from './SettingsMemoryHandover.vue'
 import SettingsUpdateTasks from './SettingsUpdateTasks.vue'
 import WorkspaceGoogleAccount from './WorkspaceGoogleAccount.vue'
 import WorkspaceColorPicker from './WorkspaceColorPicker.vue'
-import {
-  WORKSPACE_ADMIN_KEY,
-  WORKSPACE_FS_SANDBOX_NOTE,
-  WORKSPACE_FS_SCOPE_COPY,
-} from '../../composables/useWorkspaceAdmin'
+import { WORKSPACE_ADMIN_KEY } from '../../composables/useWorkspaceAdmin'
 
 // Workspace > Overview: the page for the workspace the sidebar has active. The
 // editor state belongs to SettingsView's useWorkspaceAdmin (one load, one set
@@ -144,10 +105,7 @@ const {
   workspaceLinkStatus,
   archivingWorkspace,
   workspaceNameDraft,
-  workspaceLinkTarget,
-  fsScopeDefaultOptionLabel,
   activeWorkspaceForm: form,
-  clearWorkspaceLinkHighlight,
   workspaceArchivable,
   archiveWorkspace,
 } = admin

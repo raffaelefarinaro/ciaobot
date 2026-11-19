@@ -531,39 +531,25 @@ def test_read_app_settings_writes_nothing(tmp_path):
     assert read_app_settings(tmp_path / "missing.json") == AppSettings()
 
 
-def test_mid_turn_delivery_roundtrip_and_validation(tmp_path):
+def test_a_legacy_mid_turn_delivery_key_on_disk_is_ignored_and_dropped_on_save(tmp_path):
     path = tmp_path / "app_settings.json"
+    path.write_text(json.dumps({"mid_turn_delivery": "steer"}))
     store = AppSettingsStore(path)
-    assert store.settings.mid_turn_delivery == ""
-
-    store.update({"mid_turn_delivery": "steer"})
-    assert AppSettingsStore(path).settings.mid_turn_delivery == "steer"
-
-    store.update({"mid_turn_delivery": "queue"})
-    assert AppSettingsStore(path).settings.mid_turn_delivery == ""
-
-    with pytest.raises(ValueError, match="mid_turn_delivery must be queue or steer"):
-        store.update({"mid_turn_delivery": "sometimes"})
+    assert not hasattr(store.settings, "mid_turn_delivery")
+    store._save()
+    assert "mid_turn_delivery" not in json.loads(path.read_text())
 
 
-def test_mid_turn_delivery_garbage_on_disk_loads_as_queue(tmp_path):
-    path = tmp_path / "app_settings.json"
-    path.write_text(json.dumps({"mid_turn_delivery": "sometimes"}))
-    assert AppSettingsStore(path).settings.mid_turn_delivery == ""
-
-
-@pytest.mark.parametrize("key", ["mid_turn_delivery", "keyboard_send_mode"])
-@pytest.mark.parametrize("value", [[], {}, ["steer"], 5, None])
-def test_non_string_composer_preferences_are_a_value_error(tmp_path, key, value):
+@pytest.mark.parametrize("value", [[], {}, ["enter"], 5, None])
+def test_non_string_composer_preferences_are_a_value_error(tmp_path, value):
     with pytest.raises(ValueError):
-        AppSettingsStore(tmp_path / "app_settings.json").update({key: value})
+        AppSettingsStore(tmp_path / "app_settings.json").update({"keyboard_send_mode": value})
 
 
-@pytest.mark.parametrize("key", ["mid_turn_delivery", "keyboard_send_mode"])
-def test_non_string_composer_preferences_on_disk_load_as_default(tmp_path, key):
+def test_non_string_composer_preferences_on_disk_load_as_default(tmp_path):
     path = tmp_path / "app_settings.json"
-    path.write_text(json.dumps({key: ["steer"]}))
-    assert getattr(AppSettingsStore(path).settings, key) == ""
+    path.write_text(json.dumps({"keyboard_send_mode": ["enter"]}))
+    assert AppSettingsStore(path).settings.keyboard_send_mode == ""
 
 
 def test_text_contrast_roundtrip(tmp_path):

@@ -8,7 +8,6 @@ only request-scoped routing facts; native ``CLAUDE.md`` /
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from ciao.memory_policy import UNATTENDED_CAPSULE_GUIDANCE
@@ -113,17 +112,6 @@ PERMISSION_MODE_HINTS = {
 }
 
 
-def _file_access_line(file_roots: Sequence[str], file_read_only: Sequence[str] = ()) -> str:
-    """One line: where a workspace-scoped chat may write, what it only reads, and who widens it."""
-    roots = ", ".join(_field(root, limit=300) for root in file_roots)
-    read_only = "".join(f"read only: {_field(path, limit=300)}; " for path in file_read_only)
-    return (
-        f"file_access=workspace only: read and write under {roots}; {read_only}other paths "
-        'are refused by the sandbox ("Operation not permitted"). The owner changes '
-        "this in Settings → Overview → File access."
-    )
-
-
 def build_context_capsule(
     *,
     workspace: str = "",
@@ -135,27 +123,25 @@ def build_context_capsule(
     unattended: bool = False,
     handover: str = "",
     include_stable: bool = True,
-    file_roots: Sequence[str] = (),
-    file_read_only: Sequence[str] = (),
     linked_repo_block: str = "",
     linked_repo_line: str = "",
     permission_mode: str = "",
+    core: str = "",
 ) -> str:
     """Render the compact context visible to every provider.
 
+    ``core`` is the Ciaobot core (``core_prompt.unified_core``),
+    sent with the stable facts so it rides the same once-per-session and after-compaction schedule.
+
     ``workspace_vault_root`` is the active workspace's vault, relative to the
     provider's cwd, so a path the model writes is usable verbatim.
-
-    ``file_roots`` are the folders a workspace-scoped chat may read and write.
-    Empty means no file-access line (machine scope). ``file_read_only`` are single
-    files it may read and never write (a memory pass's source archive, #2459).
 
     ``permission_mode`` is the chat's effective permission mode; it is sent every
     turn with a one-line hint (see ``PERMISSION_MODE_HINTS``), since it can change
     mid-session. Empty means no line.
 
     Stable project facts can be omitted after the first turn of a provider
-    session. The date, the unattended marker, the file-access line and handover
+    session. The date, the unattended marker and handover
     data are sent on every turn.
 
     The task-board hint is neither: it is a constant line rather than a routing
@@ -169,6 +155,8 @@ def build_context_capsule(
     """
 
     stable: list[str] = []
+    if core:
+        stable.append(core)
     if workspace:
         stable.append(f"workspace={_field(workspace, limit=120)}")
     if workspace_vault_root:
@@ -194,8 +182,6 @@ def build_context_capsule(
     dynamic: list[str] = [f"today={datetime.now(UTC).date().isoformat()}"]
     if unattended:
         dynamic.append(UNATTENDED_CAPSULE_GUIDANCE)
-    if file_roots:
-        dynamic.append(_file_access_line(file_roots, file_read_only))
     if permission_mode:
         line = f"permission_mode={_field(permission_mode, limit=20)}"
         hint = PERMISSION_MODE_HINTS.get(permission_mode)
@@ -222,14 +208,18 @@ def context_digest(
     project_context: str,
     canonical_doc: str,
     linked_repo: str = "",
+    core: str = "",
 ) -> str:
     """Return a stable digest for deciding whether routing facts changed.
 
     ``linked_repo`` is hashed in only when non-empty, so an unlinked chat keeps
-    the digest it had before linking existed.
+    the digest it had before linking existed. ``core`` follows the same rule, and
+    is hashed as its own digest: editing the core re-sends it on the next turn.
     """
     parts = [workspace, gws_profile, project_name, project_context, canonical_doc]
     if linked_repo:
         parts.append(linked_repo)
+    if core:
+        parts.append(hashlib.sha256(core.encode("utf-8")).hexdigest())
     raw = "\0".join(parts)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]

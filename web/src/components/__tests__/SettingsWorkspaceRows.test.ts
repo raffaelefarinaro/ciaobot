@@ -67,7 +67,6 @@ function workspaces(names: string[]): WorkspacesResponse {
     })),
     active: names[0] ?? null,
     primary: names[0] ?? null,
-    default_agent_fs_scope: 'workspace',
     provider_options: [{ value: 'claude', label: 'Claude' }],
   }
 }

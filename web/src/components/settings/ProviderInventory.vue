@@ -9,15 +9,15 @@
       <li v-for="provider in inventory.providers" :key="provider.id" class="inventory-row">
         <div><strong>{{ provider.name }}</strong> <span class="hint">({{ provider.id }})</span></div>
         <p class="hint">{{ provider.auth_types.map(methodLabel).join(', ') }} · Configured · verification unknown</p>
-        <details>
+        <details v-if="command">
           <summary>Reconnect {{ provider.name }} ({{ provider.id }})</summary>
-          <SignInGuidance :workspace="workspace" cli="opencode" :context="`${provider.name} (${provider.id})`" />
+          <SignInGuidance :workspace="workspace" :command="command" :note="note" :context="`${provider.name} (${provider.id})`" />
         </details>
       </li>
     </ul>
-    <details>
+    <details v-if="command">
       <summary>Connect provider</summary>
-      <SignInGuidance :workspace="workspace" cli="opencode" context="a provider" />
+      <SignInGuidance :workspace="workspace" :command="command" :note="note" context="a provider" />
     </details>
   </section>
 </template>
@@ -36,7 +36,11 @@ export interface ProviderInventoryData {
   }[]
 }
 
-defineProps<{ inventory?: ProviderInventoryData, workspace: string }>()
+// The OpenCode row's own sign-in command, from the connection payload. Absent
+// when no OpenCode row was reported, so no sign-in guidance is offered.
+defineProps<{ inventory?: ProviderInventoryData, workspace: string, command?: string }>()
+
+const note = "Run this command yourself on the engine's computer and choose the provider in OpenCode. The command does not preselect one. OpenCode must be installed and available on your PATH."
 
 function methodLabel(method: string): string {
   return ({ oauth: 'OAuth', api_key: 'API key', environment: 'Environment', unknown: 'Unknown' } as Record<string, string>)[method] || 'Unknown'

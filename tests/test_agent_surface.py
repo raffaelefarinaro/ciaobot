@@ -1350,8 +1350,8 @@ def test_cli_help_topics_retain_operational_guards(capsys: pytest.CaptureFixture
     assert "`/mcp`, `/reload-plugins`" in chat
     assert "ciao chat reload" in chat
     assert "Standalone `/mcp` is app navigation" in chat
-    assert "Chat details → MCP → Sign in" in chat
-    assert "ciao chat needs-action mcp_auth --server" in chat
+    assert "Chat details → MCP, which runs the agent's own MCP command" in chat
+    assert "mcp_auth" not in chat
 
     webhook = topic_help("webhook")
     assert "never save a copy in notes, memory or source files" in webhook
@@ -1362,7 +1362,7 @@ def test_cli_help_topics_retain_operational_guards(capsys: pytest.CaptureFixture
     assert "shared entry" in examples
     assert "linked references" in examples
     assert "ciao help <topic>" in examples
-    assert "one background run for the whole session" in examples
+    assert "runs inside a subagent as one auto-reload run for the whole session" in examples
     assert "SKILL.md` has the command syntax" not in examples
     assert "prints both" not in examples
 
@@ -1741,37 +1741,6 @@ def test_no_argv_allow_or_ask_patterns_remain() -> None:
     assert not hasattr(em, "agent_cli_permission_rules")
 
 
-@pytest.mark.asyncio
-async def test_claude_cli_surface_does_not_pre_approve_ciao_commands(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """No `ciao …` argv prefix is pre-approved (an allow prefix is a shell-suffix
-    bypass risk); auto mode keeps a card on every shell command."""
-    from ciao.models import AgentRequest
-    from ciao.providers.claude import ClaudeProvider
-
-    captured: dict = {}
-
-    class FakeClient:
-        def __init__(self, options):
-            captured["options"] = options
-
-    provider = ClaudeProvider(
-        tmp_path,
-        config=SimpleNamespace(memory_char_limit=2200, user_char_limit=1375, vault_root=tmp_path / "v"),
-    )
-    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
-    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
-
-    await provider._ensure_connected(
-        AgentRequest(prompt="t", model="sonnet", mode="auto", provider="claude")
-    )
-    allowed = captured["options"].allowed_tools or []
-    assert not [entry for entry in allowed if entry.startswith("Bash(ciao ")]
-    assert not [entry for entry in allowed if entry.startswith("mcp__ciaobot__")]
-    assert not captured["options"].mcp_servers  # no MCP server is attached
-
-
 def test_opencode_cli_auto_mode_keeps_shell_ask_for_ciao_commands() -> None:
     """Auto mode emits one generic V2 `shell: ask` rule."""
     from ciao.providers.opencode import mode_settings
@@ -1779,7 +1748,7 @@ def test_opencode_cli_auto_mode_keeps_shell_ask_for_ciao_commands() -> None:
     _agent, rules = mode_settings("auto")
     shell = [rule for rule in rules if rule["action"] == "shell"]
     assert shell == [{"action": "shell", "resource": "*", "effect": "ask"}]
-    assert rules[-1]["effect"] == "deny"
+    assert rules[-1] == {"action": "shell", "resource": "*", "effect": "ask"}
 
 
 @pytest.mark.parametrize("mode", ["plan", "normal", "bypass"])
@@ -2145,6 +2114,22 @@ def test_a_needs_action_lands_in_the_calling_chat(tmp_path: Path) -> None:
     assert len(action["id"]) == 32
     # The state the manager holds is the state the caller was told about.
     assert manager.get_chat(chat.chat_id).actions[0].id == action["id"]
+
+
+def test_an_agent_cannot_raise_the_retired_mcp_auth_kind(tmp_path: Path) -> None:
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager)
+    token = _offer_token(service, chat, project)
+    with _client(service) as client:
+        response = _post(
+            client,
+            token,
+            "chat_needs_action",
+            {"kind": "mcp_auth", "params": {"server": "linear", "provider": "claude"}},
+        )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_action_kind"
+    assert manager.get_chat(chat.chat_id).actions == []
 
 
 def test_a_needs_action_cannot_target_another_chat(tmp_path: Path) -> None:

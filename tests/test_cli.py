@@ -109,6 +109,21 @@ def test_run_parser_accepts_supervised_flag() -> None:
     assert cli.build_parser().parse_args(["run", "--supervised"]).supervised is True
 
 
+def test_run_has_no_installer_flags() -> None:
+    """The installer bootstrap is gone: each removed flag, and the `installer`
+    command, is an unknown argument to argparse (exit 2)."""
+    parser = cli.build_parser()
+    for argv in (
+        ["run", "--installer-bootstrap"],
+        ["run", "--installer-run-id", "run-1"],
+        ["run", "--installer-suggest-workspace", "/tmp/elsewhere"],
+        ["installer", "activate", "--run-id", "run-1"],
+    ):
+        with pytest.raises(SystemExit) as caught:
+            parser.parse_args(argv)
+        assert caught.value.code == 2, argv
+
+
 def test_run_server_passes_supervised_to_the_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """The engine's restart watchdog has to know it is supervised too, or a
     wedged cleanup re-execs and bypasses the supervisor's relaunch."""
@@ -1553,12 +1568,9 @@ def test_auth_rejects_a_non_runtime_provider(capsys) -> None:
         cli.main(["auth", "ollama", "--print-only"])
 
 
-def test_auth_claude_uses_bundled_cli(monkeypatch) -> None:
+def test_auth_claude_uses_the_resolved_cli(monkeypatch) -> None:
     calls: list[list[str]] = []
-    monkeypatch.setattr(
-        "ciao.providers.claude.get_bundled_claude_path",
-        lambda: "/opt/ciao/claude",
-    )
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "/opt/ciao/claude")
     monkeypatch.setattr(
         cli.subprocess,
         "run",
@@ -1646,24 +1658,6 @@ def test_create_chat_command_uses_active_workspace_without_name_clamp(
     assert "Workspace: client" in capsys.readouterr().out
 
 
-
-
-def test_desktop_uninstall_reports_when_nothing_is_installed(
-    tmp_path: Path, capsys
-) -> None:
-    assert cli.main(["desktop", "uninstall", "--app-dir", str(tmp_path)]) == 0
-    assert "Nothing to remove" in capsys.readouterr().out
-
-
-def test_desktop_uninstall_json_reports_a_refusal(tmp_path: Path, capsys) -> None:
-    pwa = tmp_path / "Ciaobot.app" / "Contents" / "MacOS"
-    pwa.mkdir(parents=True)
-    (pwa / "app_mode_loader").write_text("chrome pwa", encoding="utf-8")
-
-    assert cli.main(["desktop", "uninstall", "--app-dir", str(tmp_path), "--json"]) == 1
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is False
-    assert "not the Ciaobot desktop app" in payload["error"]
 
 
 def test_setup_does_not_download_or_install_the_desktop_app(

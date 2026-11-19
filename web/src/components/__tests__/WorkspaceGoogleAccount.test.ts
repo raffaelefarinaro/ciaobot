@@ -100,7 +100,6 @@ function registry(links: Record<string, string>): WorkspacesResponse {
     })),
     active: 'work',
     primary: 'work',
-    default_agent_fs_scope: 'workspace',
     provider_options: [{ value: 'claude', label: 'Claude' }],
   } as WorkspacesResponse
 }

@@ -31,7 +31,6 @@ def _events_app() -> Starlette:
     app.state.project_chat_manager = SimpleNamespace(
         active_stream_chat_ids=lambda: [],
         get_chat=lambda _cid: None,
-        background_agent_counts={},
         chat_pin_states={},
         chat_action_states={},
         events=SimpleNamespace(attach=_IdleSubscription),
@@ -138,7 +137,6 @@ def test_event_published_while_the_snapshot_is_built_reaches_the_client() -> Non
     app.state.project_chat_manager = SimpleNamespace(
         active_stream_chat_ids=_ids,
         get_chat=lambda _cid: None,
-        background_agent_counts={},
         chat_pin_states={},
         chat_action_states={},
         events=hub,
@@ -162,7 +160,6 @@ def test_snapshot_failure_detaches_the_events_subscription() -> None:
     app.state.project_chat_manager = SimpleNamespace(
         active_stream_chat_ids=_boom,
         get_chat=lambda _cid: None,
-        background_agent_counts={},
         chat_pin_states={},
         chat_action_states={},
         events=hub,

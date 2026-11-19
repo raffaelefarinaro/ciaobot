@@ -67,8 +67,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger(__name__)
 
-# On since the guardrail work (D2a-2) and the PWA work (D2a-3) landed. Every
-# reader must go through this module attribute so the flip is a single edit.
+# Every reader must go through this module attribute so the flip is a single edit.
 MEMORY_PASS_CHATS = True
 _PUMP_RETRY_SECONDS = 30
 
@@ -997,7 +996,7 @@ class MemoryPassCoordinator:
             or chat.pending_question
             or chat.pending_permission
             or chat.retry_status == "pending"
-            or host._subagents.work_count(chat_id) > 0
+            or host._provider_background_busy(chat_id, host._providers.get(chat_id))
         ):
             return False
 

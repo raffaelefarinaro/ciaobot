@@ -1,26 +1,9 @@
-"""Tests for provider-level SDK upgrades: fallback model + runtime context."""
+"""Tests for the per-request runtime context every provider appends (the fallback model went with the SDK driver, #3138 C2b)."""
 
 from __future__ import annotations
 
 from ciao.models import AgentRequest
 from ciao.providers.base import build_runtime_context
-from ciao.providers.claude import _fallback_model_for
-
-
-def test_fallback_model_downgrades_tier() -> None:
-    assert _fallback_model_for("fable") == "opus"
-    assert _fallback_model_for("claude-fable-5") == "opus"
-    assert _fallback_model_for("opus") == "sonnet"
-    assert _fallback_model_for("claude-opus-4-7") == "sonnet"
-    assert _fallback_model_for("sonnet") == "haiku"
-    assert _fallback_model_for("claude-sonnet-4-6") == "haiku"
-
-
-def test_fallback_model_returns_none_for_cheapest_tier() -> None:
-    # Haiku has nowhere cheaper to go, so we must not fall back to self.
-    assert _fallback_model_for("haiku") is None
-    assert _fallback_model_for("claude-haiku-4-5") is None
-    assert _fallback_model_for("") is None
 
 
 def test_runtime_context_includes_today(monkeypatch) -> None:

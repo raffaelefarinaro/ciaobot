@@ -18,24 +18,9 @@ _HOST_SEAMS = (
     "is_connected",
     "current_session_id",
     "read_thread",
-    "read_collab_tree",
-    "read_live_collab_tree",
-    "wait_background_change",
-    "refresh_background_shells",
-    "background_count",
-    "background_shell_rows",
-    "background_child_ids",
-    "stop_background_task",
     "abort_session",
-    "interrupted_background_work",
-    "read_mcp_status",
-    "reconnect_mcp_server",
-    "mcp_sign_in_exempt",
-    "start_mcp_oauth",
-    "read_mcp_oauth_attempt",
-    "cancel_mcp_oauth",
-    "ensure_server",
     "model_catalog",
+    "invalidate_model_catalog",
     "native_title_candidates",
     "delete_session",
 )
@@ -50,6 +35,33 @@ def test_web_sources_name_no_concrete_provider_class_or_private_flag() -> None:
     assert offenders == []
 
 
+_ACP_FORBIDDEN = re.compile(r"\bAcpProvider\b|ciao\.providers\.acp\b")
+
+
+def test_web_sources_name_no_acp_provider_class() -> None:
+    """ACP agents reach the hosts through ``provider_registry`` and ``BaseProvider`` only (#3137)."""
+    offenders = [
+        path.relative_to(_WEB_ROOT).as_posix()
+        for path in sorted(_WEB_ROOT.rglob("*.py"))
+        if _ACP_FORBIDDEN.search(path.read_text(encoding="utf-8"))
+    ]
+    assert offenders == []
+
 @pytest.mark.parametrize("name", _HOST_SEAMS)
 def test_base_provider_defines_every_host_seam(name: str) -> None:
     assert hasattr(BaseProvider, name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "reconnect_mcp_server",
+        "mcp_sign_in_exempt",
+        "start_mcp_oauth",
+        "read_mcp_oauth_attempt",
+        "cancel_mcp_oauth",
+        "ensure_server",
+    ),
+)
+def test_base_provider_has_no_mcp_management_seam(name: str) -> None:
+    assert not hasattr(BaseProvider, name)

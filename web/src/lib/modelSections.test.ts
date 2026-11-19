@@ -1,15 +1,26 @@
 import { describe, expect, it } from 'vitest'
 import {
   providerForModelSection,
+  sectionKeyForProvider,
   sectionsFromModelsResponse,
 } from './modelSections'
-import type { ModelsResponse } from './types'
+import type { ModelsResponse, ProviderDescriptor } from './types'
+
+// The server's registry rows, as /api/models serves them.
+function descriptor(id: string, label: string, shortLabel: string): ProviderDescriptor {
+  return { id, label, short_label: shortLabel, capabilities: {} as ProviderDescriptor['capabilities'] }
+}
+
+const CLAUDE = descriptor('claude', 'Anthropic (via Claude Code)', 'Claude')
+const OPENCODE = descriptor('opencode', 'OpenCode', 'OpenCode')
+const CODEX = descriptor('codex', 'OpenAI (via Codex)', 'Codex')
 
 describe('modelSections', () => {
   it('renders each provider from its own catalog', () => {
     const response: ModelsResponse = {
       models: ['opus', 'sonnet', 'haiku'],
       default: 'opus',
+      providers: [CLAUDE, OPENCODE],
       provider_models: {
         claude: ['opus', 'sonnet', 'haiku'],
         opencode: ['anthropic/claude-sonnet-4-6'],
@@ -23,8 +34,8 @@ describe('modelSections', () => {
     const sections = sectionsFromModelsResponse(response)
 
     expect(sections.map((section) => section.label)).toEqual([
-      'Anthropic',
-      'opencode',
+      'Claude',
+      'OpenCode',
     ])
     expect(sections.find((section) => section.key === 'anthropic')?.models).toEqual([
       'opus',
@@ -41,11 +52,49 @@ describe('modelSections', () => {
     })
   })
 
+  it('builds a codex section from provider_models', () => {
+    const sections = sectionsFromModelsResponse({
+      models: ['opus'],
+      default: 'opus',
+      providers: [CLAUDE, OPENCODE, CODEX],
+      provider_models: {
+        claude: ['opus'],
+        opencode: [],
+        codex: ['gpt-5.5', 'gpt-5.4-mini'],
+      },
+      provider_defaults: { codex: 'gpt-5.5' },
+    } as ModelsResponse)
+
+    const codex = sections.find((section) => section.key === 'codex')
+    expect(codex?.label).toBe('Codex')
+    expect(codex?.models).toEqual(['gpt-5.5', 'gpt-5.4-mini'])
+    expect(codex?.modelLabels).toEqual({ 'gpt-5.5': 'GPT-5.5', 'gpt-5.4-mini': 'GPT-5.4 Mini' })
+    expect(codex?.modelBadges).toEqual({ 'gpt-5.5': ['Default'] })
+    // An empty catalog is not a section, and the registry order is kept.
+    expect(sections.map((section) => section.key)).toEqual(['anthropic', 'codex'])
+  })
+
+  it('takes section order from the registry, not from the catalog object', () => {
+    const sections = sectionsFromModelsResponse({
+      models: ['opus'],
+      default: 'opus',
+      providers: [CLAUDE, CODEX],
+      provider_models: { codex: ['gpt-5.5'], claude: ['opus'] },
+      provider_defaults: {},
+    } as ModelsResponse)
+
+    expect(sections.map((section) => section.key)).toEqual(['anthropic', 'codex'])
+  })
+
   it('names every model for the picker and leaves the raw ids alone', () => {
     const response: ModelsResponse = {
       models: ['opus', 'sonnet', 'haiku'],
       default: 'opus',
-      provider_models: { claude: ['opus', 'sonnet', 'haiku'] },
+      providers: [CLAUDE, OPENCODE],
+      provider_models: {
+        claude: ['opus', 'sonnet', 'haiku'],
+        opencode: ['openai/gpt-5.6-luna'],
+      },
       provider_defaults: {},
       opencode_models: ['openai/gpt-5.6-luna'],
       backends: { anthropic: true, opencode: true },
@@ -71,9 +120,10 @@ describe('modelSections', () => {
     const sections = sectionsFromModelsResponse({
       models: ['opus'],
       default: 'opus',
+      providers: [CLAUDE],
       provider_models: { claude: ['opus'] },
       provider_defaults: { claude: 'opus' },
-    })
+    } as ModelsResponse)
 
     const anthropic = sections.find((section) => section.key === 'anthropic')
     expect(anthropic?.modelBadges).toEqual({ opus: ['Default'] })
@@ -85,13 +135,21 @@ describe('providerForModelSection', () => {
   it('maps the Anthropic UI section and preserves provider sections', () => {
     expect(providerForModelSection('anthropic')).toBe('claude')
     expect(providerForModelSection('opencode')).toBe('opencode')
+    expect(providerForModelSection('codex')).toBe('codex')
+  })
+
+  it('is the inverse of sectionKeyForProvider for every provider id', () => {
+    for (const id of ['claude', 'opencode', 'codex']) {
+      expect(providerForModelSection(sectionKeyForProvider(id))).toBe(id)
+    }
   })
 })
 
 describe('opencode section', () => {
-  const base: ModelsResponse = {
+  const base = {
     models: [],
     default: 'opus',
+    providers: [OPENCODE],
     provider_models: {},
     provider_defaults: {},
   } as unknown as ModelsResponse
@@ -99,22 +157,22 @@ describe('opencode section', () => {
   it('renders opencode models as their own section', () => {
     const sections = sectionsFromModelsResponse({
       ...base,
-      opencode_models: ['anthropic/claude-sonnet-4-6', 'opencode/big-pickle'],
+      provider_models: { opencode: ['anthropic/claude-sonnet-4-6', 'opencode/big-pickle'] },
     })
     const opencode = sections.find((s) => s.key === 'opencode')
-    expect(opencode?.label).toBe('opencode')
+    expect(opencode?.label).toBe('OpenCode')
     expect(opencode?.models).toContain('opencode/big-pickle')
   })
 
   it('omits the section when nothing is authenticated', () => {
-    const sections = sectionsFromModelsResponse({ ...base, opencode_models: [] })
+    const sections = sectionsFromModelsResponse({ ...base, provider_models: { opencode: [] } })
     expect(sections.find((s) => s.key === 'opencode')).toBeUndefined()
   })
 
   it('owns the `provider/model` id shape outright', () => {
     const sections = sectionsFromModelsResponse({
       ...base,
-      opencode_models: ['anthropic/claude-sonnet-4-6', 'google/gemini-3-pro'],
+      provider_models: { opencode: ['anthropic/claude-sonnet-4-6', 'google/gemini-3-pro'] },
     })
     const opencode = sections.find((s) => s.key === 'opencode')
     expect(opencode?.models).toEqual([
@@ -126,8 +184,9 @@ describe('opencode section', () => {
   it("tags each provider's default model", () => {
     const sections = sectionsFromModelsResponse({
       ...base,
+      providers: [CLAUDE, OPENCODE],
       models: ['a-model', 'b-model'],
-      opencode_models: ['google/gemini-3-pro'],
+      provider_models: { claude: ['a-model', 'b-model'], opencode: ['google/gemini-3-pro'] },
       provider_defaults: { claude: 'b-model', opencode: 'google/gemini-3-pro' },
     })
     expect(sections.find((s) => s.key === 'anthropic')?.modelBadges).toEqual({ 'b-model': ['Default'] })

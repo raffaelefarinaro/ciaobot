@@ -14,7 +14,7 @@ and yields one :class:`ServerSentEvent` per dispatch.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,7 +59,7 @@ class SSEDecoder:
 
     # ----------------------------------------------------------------- async
 
-    async def aiter_bytes(self, iterator: AsyncIterator[bytes]) -> AsyncIterator[ServerSentEvent]:
+    async def aiter_bytes(self, iterator: AsyncIterator[bytes]) -> AsyncGenerator[ServerSentEvent, None]:
         async for chunk in self._aiter_chunks(iterator):
             for raw_line in chunk.splitlines():
                 sse = self.decode(raw_line.decode("utf-8"))

@@ -265,17 +265,10 @@ class _DriveHost:
         self.discarded: list[str] = []
         self.detached_names: list[str] = []
         self.drain_awaits: list[str] = []
-        self.detections: list[str] = []
 
     def _agent_root_for_chat(self, chat_id: str) -> Path:
         del chat_id
         return self._agent_root
-
-    def _fallback_steers(self, chat_id: str, stream: object, reason: str) -> None:
-        del chat_id, stream, reason
-
-    def on_steer_delivered(self, chat_id: str, stream: object, steer_id: str) -> None:
-        del chat_id, stream, steer_id
 
     def on_prompt_cancelled(
         self,
@@ -324,9 +317,6 @@ class _DriveHost:
         self, chat_id: str, user_text: str, assistant_text: str
     ) -> None:
         del chat_id, user_text, assistant_text
-
-    def _start_subagent_watcher(self, chat_id: str, project_id: str) -> None:
-        del chat_id, project_id
 
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None:
         del chat, status
@@ -385,9 +375,6 @@ class _DriveHost:
 
     def _start_between_turns_drain(self, chat_id: str, project_id: str) -> None:
         del chat_id, project_id
-
-    def _schedule_action_detection(self, chat_id: str) -> None:
-        self.detections.append(chat_id)
 
     def _native_question_request_id(self, pending_question: str) -> str:
         del pending_question
@@ -768,12 +755,6 @@ async def test_manager_private_streaming_state_is_collaborator_views() -> None:
 
     manager._turn_perf_started = {("chat-2", 1): 2.5}
     assert manager._streaming.turn_perf_started == {("chat-2", 1): 2.5}
-
-    manager._last_drain_result["chat-1"] = ("summary", False)
-    assert manager._streaming.last_drain_results["chat-1"] == ("summary", False)
-
-    manager._last_drain_result = {"chat-2": ("error", True)}
-    assert manager._streaming.last_drain_results == {"chat-2": ("error", True)}
 
     task = asyncio.create_task(asyncio.sleep(0))
     manager._between_turn_drains["chat-1"] = task
@@ -1587,7 +1568,7 @@ async def test_stop_while_waiting_withdraws_prompt_to_a_waiting_chip(
 
         entry_id = chat.pending_queue[0]["id"]
         probe.release.set()
-        assert await manager.set_queue_delivery(chat.chat_id, [entry_id], "steer")
+        assert await manager.send_queued_now(chat.chat_id, [entry_id])
         await _join_drives(manager)
         assert probe.calls == [(chat.chat_id, "send during stop")]
         assert manager.find_turn_by_send_id(chat.chat_id, "S") is not None
@@ -1762,7 +1743,6 @@ def _drain_case(manager, chat, monkeypatch, script):
     monkeypatch.setattr(manager._events, "publish", publish)
     monkeypatch.setattr(manager._broker, "register", register)
     monkeypatch.setattr(manager, "_memory_pass_turn_finished", memory)
-    monkeypatch.setattr(manager, "_start_subagent_watcher", lambda *a, **k: None)
     return service, release, seen
 
 
@@ -1811,7 +1791,6 @@ async def test_superseded_drain_event_has_no_side_effects(
         ]
         assert chat.last_response == "before"
         assert chat.last_response_status == "success"
-        assert chat.chat_id not in manager._streaming.last_drain_results
         await _ticks()
         assert seen.memory == []
         probe.release.set()
@@ -1863,7 +1842,6 @@ def _assert_drain_left_no_trace(manager, chat, seen) -> None:
     assert seen.published == []
     assert chat.last_response == "before"
     assert chat.last_response_status == "success"
-    assert chat.chat_id not in manager._streaming.last_drain_results
 
 
 async def test_a_cancelled_drain_with_no_foreground_owner_has_no_side_effects(
@@ -1990,7 +1968,6 @@ async def test_withdrawn_stop_leaves_a_replacement_drain_for_background_wakes(
     chat.session_id = "sess-drain"
     service = _StubProviderService(can_drain=True)
     manager._providers[chat.chat_id] = service
-    monkeypatch.setattr(manager, "_start_subagent_watcher", lambda *a, **k: None)
     hold = _hold_background_drain(manager, chat)
     await _ticks(2)
     replacement = None
@@ -2032,7 +2009,6 @@ async def test_send_after_a_withdrawn_stop_still_waits_for_the_old_drain(
     chat.session_id = "sess-drain"
     service = _StubProviderService(can_drain=True)
     manager._providers[chat.chat_id] = service
-    monkeypatch.setattr(manager, "_start_subagent_watcher", lambda *a, **k: None)
     hold = _hold_background_drain(manager, chat)
     await _ticks(2)
     try:
@@ -2070,7 +2046,6 @@ async def test_replacement_drain_exits_without_draining_after_teardown(
     chat.session_id = "sess-drain"
     service = _StubProviderService(can_drain=True)
     manager._providers[chat.chat_id] = service
-    monkeypatch.setattr(manager, "_start_subagent_watcher", lambda *a, **k: None)
     hold = _hold_background_drain(manager, chat)
     await _ticks(2)
     try:
@@ -2227,7 +2202,6 @@ def _through_provider_service(manager, chat, monkeypatch):
     service = ProviderService(manager._config)
     service._provider = provider  # type: ignore[assignment]
     manager._providers[chat.chat_id] = service
-    monkeypatch.setattr(manager, "_start_subagent_watcher", lambda *a, **k: None)
     return provider
 
 
@@ -2328,3 +2302,47 @@ async def test_a_drive_with_no_predecessor_does_not_suspend_before_the_turn(
     with pytest.raises(StopIteration) as done:
         coro.send(None)  # a suspension would yield a future instead
     assert done.value.value is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_id", "is_acp", "chat_model", "expected_model"),
+    [
+        # An ACP agent that picked its own model: the chat keeps it when it had none.
+        ("opencode", True, "", "vendor/picked"),
+        ("codex", True, "", "vendor/picked"),
+        # A chat that already names its model keeps it, whatever the agent reports.
+        ("opencode", True, "opus", "opus"),
+        # A non-ACP provider is never written back.
+        ("claude", False, "", ""),
+    ],
+)
+async def test_empty_model_is_written_back_for_any_acp_agent_only(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_id: str,
+    is_acp: bool,
+    chat_model: str,
+    expected_model: str,
+) -> None:
+    from ciao import provider_registry
+
+    descriptor = SimpleNamespace(id=provider_id, acp_spec_path="pkg.mod:SPEC" if is_acp else "")
+    monkeypatch.setattr(provider_registry, "get", lambda pid: descriptor if pid == provider_id else None)
+    events: list[StreamEvent] = [
+        AssistantTextDelta(type="text", text="hi"),
+        ResultEvent(type="result", result="hi", session_id="s1", effective_model="vendor/picked"),
+    ]
+    host = _PassHost(_Provider(events))
+    host.chat.provider = provider_id
+    host.chat.model = chat_model
+    streaming = ChatStreaming(cast(ChatStreamingHost, host))
+    outcome = StreamOutcome()
+
+    [_ async for _ in streaming.drive_stream(
+        chat_id="chat-1",
+        request=AgentRequest(prompt="hello", model=chat_model, mode="auto"),
+        outcome=outcome,
+    )]
+
+    assert host.chat.model == expected_model
+    assert outcome.effective_model == "vendor/picked"

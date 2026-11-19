@@ -14,13 +14,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from claude_agent_sdk import (
+from ciao.agent_paths import claude_projects_dir
+from ciao.claude_sessions import (
     SessionMessage,
     get_session_messages,
-    get_session_messages as _sdk_get_session_messages,
+    is_visible_message,
+    parse_transcript_entries,
+    read_session_file,
+    to_session_message,
+    validate_uuid,
 )
-
-from ciao.agent_paths import claude_projects_dir
 from ciao.frontmatter import yaml_scalar
 from ciao.jsonio import read_json_dict
 from ciao.memory_policy import is_unattended_turn
@@ -1608,15 +1611,8 @@ def _lift_compact_summary_flags(
 ) -> list[SessionMessage]:
     if not messages:
         return messages
-    lines: list[str] | None = None
-    try:
-        from claude_agent_sdk._internal.sessions import _read_session_file
-
-        raw = _read_session_file(session_id, directory)
-        if raw:
-            lines = raw.splitlines()
-    except (ImportError, AttributeError, OSError, TypeError, ValueError, RuntimeError):
-        pass
+    raw = read_session_file(session_id, directory)
+    lines: list[str] | None = raw.splitlines() if raw else None
     if lines is None:
         root = Path(directory) if directory is not None else Path.cwd()
         try:
@@ -1699,6 +1695,14 @@ def _steered_user_entry(entry: dict) -> dict | None:
     }
 
 
+def _page(messages: list[SessionMessage], limit: int | None, offset: int) -> list[SessionMessage]:
+    if limit is not None and limit > 0:
+        return messages[offset : offset + limit]
+    if offset > 0:
+        return messages[offset:]
+    return messages
+
+
 def get_session_messages_full(
     session_id: str,
     directory: str | None = None,
@@ -1709,54 +1713,24 @@ def get_session_messages_full(
     stitching history across autocompact / compact_boundary entries by following
     both `parentUuid` and `logicalParentUuid`.
     """
-    import sys
 
-    def _fallback(gsm: Any | None = None) -> list[SessionMessage]:
-        if gsm is None:
-            gsm = get_session_messages
-        if limit is None and offset == 0:
-            result = cast("list[SessionMessage]", gsm(session_id, directory=directory))
-        else:
-            try:
-                result = cast(
-                    "list[SessionMessage]",
-                    gsm(session_id, directory=directory, limit=limit, offset=offset),
-                )
-            except TypeError:
-                result = cast("list[SessionMessage]", gsm(session_id, directory=directory))
-        return _lift_compact_summary_flags(result, session_id, directory)
+    def _fallback() -> list[SessionMessage]:
+        messages = get_session_messages(session_id, directory=directory)
+        return _page(_lift_compact_summary_flags(messages, session_id, directory), limit, offset)
 
-    if get_session_messages is not _sdk_get_session_messages:
-        return _fallback()
-
-    sdk = sys.modules.get("claude_agent_sdk")
-    if sdk and hasattr(sdk, "get_session_messages") and not hasattr(sdk, "_internal"):
-        return _fallback(sdk.get_session_messages)
-
-    try:
-        from claude_agent_sdk._internal.sessions import (
-            _is_visible_message,
-            _parse_transcript_entries,
-            _read_session_file,
-            _to_session_message,
-            _validate_uuid,
-        )
-    except (ImportError, AttributeError):
-        return _fallback(get_session_messages)
-
-    if not _validate_uuid(session_id):
+    if not validate_uuid(session_id):
         return []
 
     try:
-        content = _read_session_file(session_id, directory)
+        content = read_session_file(session_id, directory)
     except Exception:
         content = None
 
     if not content:
-        return _fallback(get_session_messages)
+        return _fallback()
 
     try:
-        entries = _parse_transcript_entries(content)
+        entries = parse_transcript_entries(content)
         if not entries:
             return []
 
@@ -1830,20 +1804,16 @@ def get_session_messages_full(
             steered = _steered_user_entry(e)
             if steered is not None:
                 visible.append(steered)
-            elif _is_visible_message(e):
+            elif is_visible_message(e):
                 visible.append(e)
         messages: list[SessionMessage] = []
         for e in visible:
-            msg = _to_session_message(e)
+            msg = to_session_message(e)
             if e.get("isCompactSummary") and isinstance(msg.message, dict):
                 msg.message["isCompactSummary"] = True
             messages.append(msg)
 
-        if limit is not None and limit > 0:
-            return messages[offset : offset + limit]
-        if offset > 0:
-            return messages[offset:]
-        return messages
+        return _page(messages, limit, offset)
     except Exception:
         logger.exception("get_session_messages_full custom chain failed for %s; falling back", session_id)
-        return _fallback(get_session_messages)
+        return _fallback()

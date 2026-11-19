@@ -12,13 +12,13 @@ Ciaobot is your **second brain and personal assistant**: a persistent personal w
 
 ## Install
 
-**macOS 13+ on Apple Silicon (M1 or newer):**
+**macOS 13+ on Apple Silicon (M1 or newer):** download the [Ciaobot app](https://github.com/raffaelefarinaro/ciaobot/releases/latest) (DMG). The app includes the engine: open it and follow its first-use steps, and on a machine updating from an older install Home shows where to get it. Your workspace defaults to `~/Ciaobot`, and Ciaobot uses Claude Code as the AI tool unless you change it.
+
+**Linux (Ubuntu 24.04 or similar):** run this as the account that will own Ciaobot. It installs the engine in your account with uv and asks once for `sudo` to install and start the systemd service, then prints the one-time login link for opening Ciaobot in a browser.
 
 ```bash
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
 ```
-
-Installs the engine with uv, starts it as a LaunchAgent, and opens Ciaobot in your browser already signed in, through a one-time link it also prints. There is nothing to fill in: the installer puts your workspace in `~/Ciaobot`, generates a password and uses Claude Code as the AI tool. The first time you open Ciaobot, Home shows the folder and the password on the computer running it (the password is also `PWA_AUTH_TOKEN` in the folder's `.env`). Change the AI tool in **Settings → Overview** and the password in **Settings → General**.
 
 To use another folder, such as a notes folder you already have, pass `--workspace`:
 
@@ -28,12 +28,14 @@ curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/
 
 The folder stays yours, in plain Markdown, usable with any other tool. Keep it out of iCloud Drive, Dropbox, Google Drive and OneDrive; [Before you start](https://www.raffaelefarinaro.com/ciaobot/guide.html#before-you-start) explains why, and what Ciaobot does with Git in it.
 
+The first time you open Ciaobot, Home shows your workspace folder and the password on the computer running it (the password is also `PWA_AUTH_TOKEN` in the folder's `.env`). Change the AI tool in **Settings → Overview** and the password in **Settings → General**.
+
 ### Connect your agent
 
 Ciaobot has no model account of its own. It drives a CLI you have already signed in to:
 
 - **Claude:** install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) (`curl -fsSL https://claude.ai/install.sh | bash`) and run `claude auth login`. If its installer says `~/.local/bin` is not in your `PATH`, Ciaobot still finds Claude Code; for the login, run the command it prints or use `~/.local/bin/claude auth login`.
-- **OpenAI, OpenRouter, Ollama and others:** install [OpenCode 2.0.16+](https://opencode.ai/v2/docs/) (`npm install -g @opencode/cli`; see [INTEGRATIONS.md](INTEGRATIONS.md#opencode) for other routes) and authenticate the provider there. Its models appear in Ciaobot's model picker.
+- **OpenAI, OpenRouter, Ollama and others:** install [OpenCode 2.3.2+](https://opencode.ai/v2/docs/) (`npm install -g @opencode/cli`; see [INTEGRATIONS.md](INTEGRATIONS.md#opencode) for other routes) and authenticate the provider there. Its models appear in Ciaobot's model picker.
 
 See [INTEGRATIONS.md](INTEGRATIONS.md) for current commands. Contributors running from a git checkout: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
@@ -85,4 +87,4 @@ The user-facing product is **Ciaobot**. The CLI is installed as both `ciaobot` a
 
 ## Built on
 
-Ciaobot builds a persistent personal workspace on excellent open tools: Claude Code, the Claude Agent SDK, OpenCode, Starlette, Vue, and more. See [docs/CREDITS.md](docs/CREDITS.md) for the full list.
+Ciaobot builds a persistent personal workspace on excellent open tools: Claude Code (through claude-agent-acp), OpenCode, Starlette, Vue, and more. See [docs/CREDITS.md](docs/CREDITS.md) for the full list.

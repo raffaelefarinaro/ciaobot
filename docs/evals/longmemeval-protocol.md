@@ -608,11 +608,10 @@ haystack, both with the deterministic fake extractor in
 
 ### Limits
 
-- **No sandbox.** In a workspace with workspace-only file access (the temp
-  install is one), a real pass runs inside the provider's filesystem sandbox,
-  limited to the workspace and a read-only grant on the archive. The harness
-  cannot apply that to an arbitrary command; the capsule still tells the agent
-  its file roots, but the command is trusted to stay in the temp install.
+- **No sandbox.** Ciaobot applies no filesystem sandbox, so a real pass has the
+  file access of the user account, limited only by the CLI's permission mode.
+  The harness cannot confine an arbitrary command; the capsule still tells the
+  agent its file roots, but the command is trusted to stay in the temp install.
 - **One agent, not the provider.** The engine's provider adds its own
   behaviour (the Claude SDK's preset system prompt, hooks, MCP wiring, retries).
   `--extract-cmd` replaces all of it; how close a run is to a real pass depends

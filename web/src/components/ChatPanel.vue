@@ -9,7 +9,6 @@
          and the action icons. -->
     <PaneHeader
       phone-overflow
-      :active-bg-agents="view.activeBackgroundAgents"
       @open-sidebar="$emit('open-sidebar')"
     >
       <template #title>
@@ -84,12 +83,11 @@
           class="btn-icon work-inspector-trigger work-inspector-trigger--header"
           :aria-expanded="inspectorOpen"
           :aria-controls="domId('chat-work-rail')"
-          :aria-label="detailsTriggerLabel"
+          aria-label="Show chat details"
           title="Show chat details"
           @click="toggleWorkDetails"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
-          <span v-if="closedMcpProblemCount" class="chat-mcp-indicator" aria-hidden="true"></span>
         </button>
         <!-- Archive is the header's one action, so it gets words, not just a
              glyph. Chat details opens from the info tab and hides from its own heading. -->
@@ -111,7 +109,6 @@
           ref="moreMenu"
           class="chat-more"
           :can-archive="!chat.archived"
-          :mcp-problems="closedMcpProblemCount"
           @details="showDetailsFromMenu"
           @archive="doArchive"
         />
@@ -135,12 +132,11 @@
       class="btn-icon work-inspector-trigger"
       :aria-expanded="false"
       :aria-controls="domId('chat-work-rail')"
-      :aria-label="detailsTriggerLabel"
+      aria-label="Show chat details"
       title="Show chat details"
       @click="toggleWorkDetails"
     >
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
-      <span v-if="closedMcpProblemCount" class="chat-mcp-indicator" aria-hidden="true"></span>
     </button>
     <div
       ref="chatColumnEl"
@@ -235,12 +231,10 @@
         <ChatTurnActivity
           v-if="item.kind === 'trace'"
           :steps="item.steps"
-          :subs="item.subs"
           :outputs="item.outputs"
           :outputs-open="Boolean(openOutputs[i])"
           :outputs-id="domId(`outputs-${i}`)"
           :open="Boolean(openTraces[i])"
-          :chat-id="chat.chat_id"
           :thinking-expanded="thinkingExpanded"
           :render-markdown="renderMarkdown"
           :render-activity-line="renderActivityLine"
@@ -312,12 +306,6 @@
               <!-- An automation's tick, not something the reader typed.
                    Without this the two are indistinguishable in the
                    transcript. -->
-              <div v-if="item.msg.steered" class="message-meta">
-                <span
-                  class="steered-mark"
-                  title="Sent into the running reply"
-                >steered</span>
-              </div>
               <div v-if="item.msg.unattended && !item.msg.origin" class="message-meta">
                 <span
                   class="unattended-mark"
@@ -574,7 +562,7 @@
           <span class="sr-only">, {{ liveTraceOpen ? 'expanded' : 'collapsed' }}</span>
         </button>
         <div
-          v-if="liveTraceOpen && (view.currentTimeline.length || view.currentStreamingText || view.currentStreamingThinking || liveSubagents.length)"
+          v-if="liveTraceOpen && (view.currentTimeline.length || view.currentStreamingText || view.currentStreamingThinking)"
           ref="liveTraceBodyEl"
           class="trace-body"
           @click="onLiveTraceBodyClick"
@@ -653,11 +641,6 @@
           <div v-if="view.currentStreamingText" class="trace-step trace-step--note trace-step--now">
             <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z" /></svg></span>
             <div class="trace-text trace-streaming" v-html="renderMarkdown(view.currentStreamingText)"></div>
-          </div>
-          <!-- Subagents for the in-flight turn nest in the live trace -->
-          <div v-if="liveSubagents.length" class="trace-step trace-step--subagent">
-            <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3" /><path d="M6 20a6 6 0 0 1 12 0" /></svg></span>
-            <SubagentPanel :subagents="liveSubagents" :chat-id="chat.chat_id" />
           </div>
         </div>
       </div>
@@ -907,14 +890,14 @@
 
     <!-- Queued messages (sent while a response was already streaming). -->
     <div v-if="view.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
-      <div v-if="steerAllIds.length >= 2" class="queued-head">
+      <div v-if="!view.isStreaming && waitingIds.length >= 2" class="queued-head">
         <span class="queued-count">{{ view.currentQueued.length }} queued</span>
         <button
           type="button"
-          class="queued-steer-all"
-          :title="view.isStreaming ? 'Send these into the running reply as one message' : 'Send these now as one message'"
-          @click="steerQueued($event, steerAllIds, 'steer')"
-        >{{ view.isStreaming ? 'Steer all' : 'Send all now' }}</button>
+          class="queued-send-all"
+          title="Send these now as one message"
+          @click="sendNow($event, waitingIds)"
+        >Send all now</button>
       </div>
       <div
         v-for="(q, i) in view.currentQueued"
@@ -922,47 +905,24 @@
         class="queued-chip"
         tabindex="-1"
         :data-queue-id="q.id"
-        :class="{ 'is-steering': q.steering }"
         :title="queuedChipTitle(q)"
       >
-        <span class="queued-steering">{{ q.steering ? 'Steering…' : '' }}</span>
         <div class="queued-body">
           <div v-if="q.images?.length" class="queued-images">
             <img v-for="img in q.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="queued-image-thumb" />
           </div>
           <span class="queued-text">{{ queuedDisplayText(q.text) }}</span>
         </div>
-        <div v-if="!q.steering" class="queued-controls">
-          <div
-            v-if="view.isStreaming && !q.waiting"
-            class="queued-mode"
-            role="group"
-            :aria-label="`What “${queuedExcerpt(q.text)}” will do`"
-          >
-            <button
-              type="button"
-              class="queued-mode-option"
-              :aria-pressed="q.delivery === 'queue'"
-              title="Send as the next message when the reply finishes"
-              @click="q.delivery === 'queue' || steerQueued($event, [q.id], 'queue')"
-            >Queue</button>
-            <button
-              type="button"
-              class="queued-mode-option"
-              :aria-pressed="q.delivery === 'steer'"
-              title="Send into the running reply now"
-              @click="q.delivery === 'steer' || steerQueued($event, [q.id], 'steer')"
-            >Steer</button>
-          </div>
-          <span v-else class="queued-label">Waiting</span>
+        <div class="queued-controls">
+          <span v-if="view.isStreaming" class="queued-label">{{ q.waiting ? 'Waiting' : 'Queued' }}</span>
           <div class="queued-actions">
             <button
               v-if="q.waiting || !view.isStreaming"
               type="button"
               class="queued-send-now"
-              :title="view.isStreaming ? 'Send this into the running reply now' : 'Start a turn with this message now'"
-              @click="steerQueued($event, [q.id], 'steer')"
-            >{{ view.isStreaming ? 'Steer' : 'Send now' }}</button>
+              :title="view.isStreaming ? 'Run after this reply' : 'Start a turn with this message now'"
+              @click="sendNow($event, [q.id])"
+            >{{ view.isStreaming ? 'Send next' : 'Send now' }}</button>
             <button
               class="queued-action"
               :disabled="i === 0"
@@ -988,20 +948,12 @@
         </div>
       </div>
     </div>
-    <!-- One live region for the whole queue, always mounted: a chip that
-         appears already in the Steering state is announced by this text
-         changing, not by a new element. -->
-    <span class="queue-live sr-only" aria-live="polite">{{ steeringAnnouncement }}</span>
-    <p v-if="queueEditNotice" class="queue-edit-notice steer-notice" role="status">{{ queueEditNotice }}</p>
-    <!-- Outside the queue block: the fallback reply usually empties it, and a
-         collapsed dock hides it, but the notice must still be read. -->
-    <p v-if="store.steerNotice[chat.chat_id]" class="steer-notice" role="status">{{ store.steerNotice[chat.chat_id] }}</p>
+    <p v-if="queueEditNotice" class="queue-edit-notice queue-notice" role="status">{{ queueEditNotice }}</p>
 
     <!-- Dock strip: one counted line for everything not expanded above, so the
          dock never grows past one card plus this. Rendered whenever there is
          anything to collapse OR anything already expanded, so the disclosure
-         works in both directions. Background agents and runs are not here: they
-         are the composer bar's activity cluster. -->
+         works in both directions. -->
     <div v-if="dockStripVisible" class="dock-strip-wrap">
       <!-- aria-live sits on an inner span: an explicit role="status" on the
            button would override its implicit button role and drop
@@ -1156,7 +1108,7 @@
             @focus="handleInputFocus"
             @click="refreshComposerPickers"
           ></textarea>
-          <p v-if="isMcpToken" :id="domId('mcp-shortcut-hint')" class="hint">{{ mcpUnavailableReason || 'Open MCP connections — no message is sent' }}</p>
+          <p v-if="isMcpToken" :id="domId('mcp-shortcut-hint')" class="hint">{{ mcpUnavailableReason || 'Open MCP settings — no message is sent' }}</p>
           <div
             class="input-actions composer-bar"
             ref="composerBarEl"
@@ -1253,32 +1205,8 @@
               <input type="file" multiple hidden @change="handleFileSelect" />
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </label>
-            <!-- Background work the turn left running: agents and shells, right
-                 against Send. Fills the bar's free space, so it is also the spacer. -->
-            <ComposerActivity
-              :chat-id="chat.chat_id"
-              :agent-count="composerAgentCount"
-              :agents="runningRows"
-              :now="nowTs"
-              :stop-task="stopShell"
-              :stopping="store.stoppingTasks[chat.chat_id]"
-              :stop-errors="store.stopTaskErrors[chat.chat_id]"
-              @open-details="openRunDetails"
-            />
+            <span class="composer-spacer" aria-hidden="true"></span>
             <span v-if="inputText.trim() && !isMcpToken" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
-            <button
-              v-if="showMoveToBackground"
-              ref="moveBtnEl"
-              type="button"
-              class="composer-chip composer-move-bg"
-              :disabled="movingToBackground"
-              aria-label="Move to background"
-              title="Move the running command or subagent to the background. The reply ends now and the result arrives when it finishes."
-              @click="moveToBackground"
-            >
-              <span class="composer-move-bg-long">Move to background</span>
-              <span class="composer-move-bg-short" aria-hidden="true">Background</span>
-            </button>
             <button
               v-if="view.isStreaming && isMcpToken"
               type="button"
@@ -1384,16 +1312,12 @@
           </button>
         </div>
       </section>
-      <ChatMcpConnections
-        v-if="!chat.archived && chatMcpProvider"
-        ref="mcpConnections"
-        :chat-id="chat.chat_id"
-        :provider="chatMcpProvider"
-        :controller="chatMcp"
-        :prioritize-heading="mcpHeadingPriority"
-        @settings="openMcpSettings"
-      />
-      <p v-if="mcpSettingsError" role="alert">{{ mcpSettingsError }}</p>
+      <section v-if="!chat.archived" class="cd-section cd-block chat-rail-mcp" :aria-labelledby="domId('chat-rail-mcp')">
+        <div class="cd-head"><h3 :id="domId('chat-rail-mcp')" class="cd-heading chat-mcp-heading" tabindex="-1">MCP</h3></div>
+        <ProviderMcpButton v-if="mcpConnection" :connection="mcpConnection" :chat-id="chat.chat_id" />
+        <p v-if="mcpUnavailableReason" class="hint">{{ mcpUnavailableReason }}</p>
+        <p v-if="mcpLoadError" role="alert">{{ mcpLoadError }}</p>
+      </section>
       <!-- The linked repository; the header's `code` badge opens here. -->
       <div v-if="project?.repo" ref="railRepoEl" class="chat-rail-repo cd-block" tabindex="-1">
         <ChatRepoSection
@@ -1416,43 +1340,6 @@
           @compact="compactContext"
         />
       </div>
-      <section
-        v-if="runningRows.length"
-        ref="railRunningEl"
-        class="cd-section cd-block chat-rail-running"
-        :aria-labelledby="domId('chat-rail-running')"
-        tabindex="-1"
-      >
-        <div class="cd-head">
-          <h3 :id="domId('chat-rail-running')" class="cd-heading">Running</h3>
-          <span class="cd-count">{{ runningRows.length }}</span>
-        </div>
-        <!-- One list, agents first: an agent has a transcript to open, a shell only a Stop. -->
-        <div class="cd-rows">
-          <router-link
-            v-for="sub in runningSubagents"
-            :key="sub.agent_id"
-            :to="subagentPath(chat.chat_id, sub.agent_id)"
-            class="cd-row cd-row--link chat-rail-agent"
-          >
-            <span class="cd-icon"><ActivityGlyph kind="working" /></span>
-            <span class="cd-main">
-              <span class="cd-primary">{{ subagentLabel(sub) }}</span>
-              <span class="cd-detail">Agent<template v-if="sub.subagent_type"> · {{ sub.subagent_type }}</template></span>
-            </span>
-            <span class="cd-trail" aria-hidden="true"><AppIcon name="arrow" /></span>
-          </router-link>
-          <ShellRows
-            v-if="runningShells.length"
-            variant="rail"
-            :rows="runningShells"
-            :now="nowTs"
-            :stop-task="stopShell"
-            :stopping="store.stoppingTasks[chat.chat_id]"
-            :errors="store.stopTaskErrors[chat.chat_id]"
-          />
-        </div>
-      </section>
       <section v-if="railTools.length" class="cd-section cd-block chat-rail-tools" :aria-labelledby="domId('chat-rail-tools')">
         <div class="cd-head">
           <h3 :id="domId('chat-rail-tools')" class="cd-heading">Skills and MCP</h3>
@@ -1514,7 +1401,6 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
-import { isNavigationFailure, NavigationFailureType, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { errorMessage } from '../lib/errorMessage'
 import { isApplePlatform } from '../lib/platform'
@@ -1522,10 +1408,6 @@ import { useKeyboardSettings } from '../composables/useKeyboardSettings'
 import { memoryPassChatId, memoryPassSource } from '../lib/memoryPass'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useTerminalStore } from '../stores/terminal'
-// Subagent transcripts carry `turn_index` (the user turn that dispatched
-// them, parsed server-side from the session JSONL), so each panel anchors
-// under the turn that spawned its agents.
-import SubagentPanel from './SubagentPanel.vue'
 import AgentContextSection from './AgentContextSection.vue'
 import { latestContextUsage } from '../lib/contextUsage'
 import ChatTurnActivity from './ChatTurnActivity.vue'
@@ -1535,7 +1417,7 @@ import { recordSentPrompt } from '../lib/chatDrafts'
 import { splitAttachmentBlock, type AttachedFile } from '../lib/chatAttachments'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useArchiveChat } from '../composables/useArchiveChat'
-import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatInfo, ChatMessage, SubagentTranscript, TurnVerification } from '../lib/types'
+import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatInfo, ChatMessage, ProviderConfigSettings, ProviderConnection, TurnVerification } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
@@ -1546,9 +1428,8 @@ import ChatHeaderMoreMenu from './ChatHeaderMoreMenu.vue'
 import { markChatRailArrival, takeChatRailArrival, useChatRail } from '../composables/useChatRail'
 import { chatDetailsClosed, rememberChatDetails } from '../lib/chatDetailsPref'
 import { useChatView } from '../composables/useChatView'
-import { useChatMcpConnections } from '../composables/useChatMcpConnections'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
-import ChatMcpConnections from './ChatMcpConnections.vue'
+import ProviderMcpButton from './ProviderMcpButton.vue'
 import NeedsYouStack from './NeedsYouStack.vue'
 import { actionCopy } from '../lib/chatActions'
 import ModelSelector from './ModelSelector.vue'
@@ -1566,16 +1447,13 @@ import InjectedPromptCard from './InjectedPromptCard.vue'
 import { errorNoticePrompt, parseInjectedPrompt, retryScheduledNotice, type InjectedPrompt } from '../lib/injectedPrompt'
 import { linkifyText } from '../lib/filePaths'
 import { isChatId } from '../lib/chatLinks'
-import { sectionsFromModelsResponse } from '../lib/modelSections'
+import { providerForModelSection, sectionKeyForProvider, sectionsFromModelsResponse } from '../lib/modelSections'
 import { isBridgeMode, PERMISSION_MODE_COPY, type BridgeMode } from '../lib/permissionModes'
-import { canOfferMoveToBackground, shouldRestoreFocus } from '../lib/moveToBackground'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
 import { errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
-import ShellRows from './ShellRows.vue'
-import ComposerActivity from './ComposerActivity.vue'
 import ComposerUploadProgress from './ComposerUploadProgress.vue'
 import ActivityGlyph from './ActivityGlyph.vue'
 import {
@@ -1626,7 +1504,6 @@ import { useChatComposer } from '../composables/useChatComposer'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 import SlashCommandPicker from './SlashCommandPicker.vue'
-import { isShellRow, subagentLabel, subagentPath } from '../lib/subagentIds'
 import { handleAppLinkClick } from '../lib/appLinks'
 
 /** The footer facts for one turn: when it landed, how long it took, which
@@ -1644,7 +1521,7 @@ type RenderItemInput =
   | { kind: 'user'; msg: ChatMessage; turnIndex?: number }
   | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; turnIndex?: number; meta?: TurnMeta }
   | { kind: 'system'; msg: ChatMessage }
-  | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[]; turnIndex?: number }
+  | { kind: 'trace'; steps: ChatMessage[]; outputs?: TraceOutput[]; turnIndex?: number }
 
 type RenderItem = RenderItemInput & { key: string }
 
@@ -1760,9 +1637,8 @@ const {
 } = composer
 const isContinuing = ref(false)
 
-// Ticks once a second while streaming, a background run is going or a native
-// shell is listed (see the watch below `runningRows`), so the live
-// elapsed-time labels advance.
+// Ticks once a second while a turn is streaming, so the live elapsed-time
+// labels advance.
 const nowTs = ref(Date.now())
 let clockTimer: ReturnType<typeof setInterval> | null = null
 
@@ -1782,41 +1658,7 @@ const canSend = computed(() => isMcpToken.value || (!modeWritePending.value && h
 // Empty composer while a turn is in flight → stop; otherwise the same
 // button queues/sends the draft.
 const showStopAction = computed(() => view.isStreaming && (isMcpToken.value || !hasComposerContent.value))
-const moveBtnEl = ref<HTMLButtonElement | null>(null)
 const composerBarEl = ref<HTMLElement | null>(null)
-const movingToBackground = ref(false)
-const showMoveToBackground = computed(() =>
-  view.isStreaming && canOfferMoveToBackground(view.activeBackgroundableCalls, nowTs.value),
-)
-async function moveToBackground() {
-  if (movingToBackground.value || !chat.value) return
-  const chipEl = moveBtnEl.value
-  const hadFocus = document.activeElement === chipEl
-  movingToBackground.value = true
-  try {
-    await store.moveChatToBackground(chat.value.chat_id)
-  } finally {
-    movingToBackground.value = false
-  }
-  // The chip goes away the moment the turn ends, so focus has to be handed
-  // somewhere that is still there — but only when it is still ours, which
-  // `shouldRestoreFocus` decides.
-  if (hadFocus) {
-    const active = document.activeElement
-    if (shouldRestoreFocus(chipEl, active)) {
-      // Never the send/stop button. It is a single element in three states —
-      // enabled Stop while the turn runs, enabled Send once a draft exists,
-      // disabled Send with an empty draft — and the move we just asked for ends
-      // the turn, so it can be disabled a moment after we focus it; a disabled
-      // control cannot hold focus and it falls to <body> (rounds 1 and 3). The
-      // bar is the one target here that is always focusable and never raises
-      // the on-screen keyboard, which is why the textarea is not used below
-      // COMPOSER_FOCUS_MIN_WIDTH.
-      if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
-      else composerBarEl.value?.focus()
-    }
-  }
-}
 const primaryActionTitle = computed(() => {
   if (showStopAction.value) return 'Stop'
   if (isMcpToken.value) return mcpActionLabel.value
@@ -1851,38 +1693,29 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const titleInputEl = ref<HTMLInputElement | null>(null)
 const chat = computed(() => view.chat!)
-const router = useRouter()
-const chatMcpProvider = computed<'claude' | 'opencode' | null>(() => {
-  const provider = chat.value?.provider
-  return provider === 'claude' || provider === 'opencode' ? provider as 'claude' | 'opencode' : null
-})
-const mcpUnavailableReason = computed(() => {
-  if (!chatMcpProvider.value) return "MCP details are unavailable for this chat's provider."
-  if (!store.projects.find(p => p.project_id === chat.value?.project_id)?.workspace?.trim()) return "This chat's workspace is not available yet. Try again after it loads."
-  return ''
-})
-const mcpActionLabel = computed(() => mcpUnavailableReason.value ? 'Why MCP details are unavailable' : 'Open MCP connections')
-const chatMcp = useChatMcpConnections({
-  workspace: () => store.projects.find(p => p.project_id === chat.value?.project_id)?.workspace ?? '',
-  provider: () => chat.value?.provider ?? '',
-  chatId: () => chat.value?.chat_id ?? '',
-  actions: () => store.chatActions[chat.value?.chat_id ?? ''] ?? [],
-  archived: () => !!chat.value?.archived,
-})
-const mcpSettingsError = ref('')
-async function openMcpSettings() {
-  const workspace = store.projects.find(p => p.project_id === chat.value?.project_id)?.workspace
-  const provider = chatMcpProvider.value
-  if (!workspace || !provider || !router) {
-    mcpSettingsError.value = 'This chat’s workspace or CLI could not be resolved.'
-    return
-  }
-  mcpSettingsError.value = ''
+// Chat details shows one button that opens the chat's agent CLI MCP settings.
+// The command is the provider row's `mcp_command`, read once from the engine
+// the first time Chat details opens; the browser never builds it.
+const mcpConnection = ref<ProviderConnection | null>(null)
+const mcpLoadError = ref('')
+let mcpLoading = false
+const mcpUnavailableReason = computed(() => mcpConnection.value && !mcpConnection.value.mcp_command
+  ? "No MCP command is available for this chat's agent."
+  : '')
+const mcpActionLabel = computed(() => mcpUnavailableReason.value ? 'Why MCP settings are unavailable' : 'Open MCP settings')
+async function loadMcpConnection() {
+  if (mcpConnection.value || mcpLoading) return
+  mcpLoading = true
+  mcpLoadError.value = ''
   try {
-    const failure = await router.push({ path: '/settings/mcp', query: { workspace, provider } })
-    if (failure && !isNavigationFailure(failure, NavigationFailureType.duplicated)) throw failure
-  } catch {
-    mcpSettingsError.value = 'Could not open this chat’s MCP settings.'
+    const res = await api.get<ProviderConfigSettings>('/api/settings/providers')
+    const row = res.connections?.[chat.value?.provider ?? '']
+    if (row) mcpConnection.value = row
+    else mcpLoadError.value = "Could not find this chat's agent."
+  } catch (e) {
+    mcpLoadError.value = `Could not look up the MCP command: ${(e as Error)?.message || e}`
+  } finally {
+    mcpLoading = false
   }
 }
 
@@ -1911,7 +1744,7 @@ function selectAdjacentChat(direction: -1 | 1): boolean {
 const needsYouActions = computed(() => {
   const current = chat.value
   if (!current || current.archived) return []
-  return (store.chatActions[current.chat_id] ?? []).filter(a => a.kind !== 'mcp_auth' && actionCopy(a) !== null)
+  return (store.chatActions[current.chat_id] ?? []).filter(a => actionCopy(a) !== null)
 })
 
 // A needs-you card that holds the focus and goes away hands it to the
@@ -2002,18 +1835,10 @@ watch(() => chat.value.provider, () => {
 
 const queueEditNotice = ref('')
 
-// Entries that "Steer all" combines: queue-mode ones not already handed over,
-// in list order.
-const steerAllIds = computed(() =>
-  view.currentQueued.filter(q => q.delivery === 'queue' && !q.steering).map(q => q.id),
-)
+// Entries that "Send all now" combines, in list order.
+const waitingIds = computed(() => view.currentQueued.map(q => q.id))
 
-const steeringAnnouncement = computed(() => {
-  const n = view.currentQueued.filter(q => q.steering).length
-  return n ? `Steering ${n} ${n === 1 ? 'message' : 'messages'}` : ''
-})
-
-// When the chip that holds focus leaves the queue (it was steered, sent or
+// When the chip that holds focus leaves the queue (it was sent or
 // removed), focus would fall to <body>. Hand it to the composer instead.
 watch(
   () => view.currentQueued.map(q => q.id),
@@ -2044,20 +1869,18 @@ function queuedExcerpt(text: string): string {
 // The clicked button is replaced once the chip changes state, which would drop
 // keyboard focus to the page. Hand it to the chip (or the composer when the
 // chip is gone) so the next Tab starts from a sensible place.
-function steerQueued(event: Event, ids: string[], delivery: 'queue' | 'steer') {
+function sendNow(event: Event, ids: string[]) {
   const chip = (event.currentTarget as HTMLElement | null)?.closest<HTMLElement>('.queued-chip') ?? null
-  store.setQueuedDelivery(chat.value.chat_id, ids, delivery)
+  store.sendQueuedNow(chat.value.chat_id, ids)
   void nextTick(() => {
     if (chip?.isConnected) chip.focus()
     else inputEl.value?.focus()
   })
 }
 
-function queuedChipTitle(q: { delivery: string; steering?: boolean }): string {
-  if (q.steering) return 'Handed to the running reply; waiting for it to take the message'
-  if (!view.isStreaming) return 'Held until you send it, edit it or remove it'
-  return q.delivery === 'steer'
-    ? 'Will be sent into the running reply'
+function queuedChipTitle(q: { waiting?: boolean }): string {
+  return !view.isStreaming || q.waiting
+    ? 'Held until you send it, edit it or remove it'
     : 'Will be sent when current response finishes'
 }
 
@@ -2240,8 +2063,8 @@ const inspectorOutputs = computed<TraceOutput[]>(() => collapseOutputsByName(mer
     .reverse()
     .map(outputs => outputs && [...outputs].reverse()),
 ).filter(output => !isScratchPath(output.file_path))))
-// Every activity line this chat has produced: its turns, the subagents they
-// ran, and the turn in flight. The rail reads skills and MCP tools from it.
+// Every activity line this chat has produced: its turns and the turn in
+// flight. The rail reads skills and MCP tools from it.
 const chatActivityLines = computed<string[]>(() => {
   const lines: string[] = []
   const take = (messages: ChatMessage[] | undefined) => {
@@ -2252,7 +2075,6 @@ const chatActivityLines = computed<string[]>(() => {
   for (const item of renderItems.value) {
     if (item.kind !== 'trace') continue
     take(item.steps)
-    for (const sub of item.subs ?? []) take(sub.messages)
   }
   for (const entry of view.currentTimeline) {
     if (entry.kind === 'tool') lines.push(...activityLines(entry.content))
@@ -2332,16 +2154,8 @@ function compactContext() {
   void store.compactChat(chat.value.chat_id)
 }
 
-// The poll's rows include background shells (`subagent_type: "shell"`); the
-// composer lists those as processes, everything else counts as an agent.
-const runningRows = computed(() => (chat.value ? store.runningSubagentsFor(chat.value.chat_id) : []))
-const runningSubagents = computed(() => runningRows.value.filter(sub => !isShellRow(sub)))
-function stopShell(taskId: string) {
-  if (chat.value) void store.stopBackgroundTask(chat.value.chat_id, taskId)
-}
-const runningShells = computed(() => runningRows.value.filter(isShellRow))
 watch(
-  () => view.isStreaming || runningShells.value.length > 0,
+  () => view.isStreaming,
   (ticking) => {
     if (ticking && !clockTimer) {
       nowTs.value = Date.now()
@@ -2353,9 +2167,6 @@ watch(
   },
   { immediate: true },
 )
-// Same rule as the sidebar row (ChatSignals): the watcher's pushed count and
-// the running-subagent poll tick on different clocks, so take the larger.
-const composerAgentCount = computed(() => Math.max(view.activeBackgroundAgents, runningSubagents.value.length))
 
 
 // On a pane wide enough for the rail beside a full reading column, Chat
@@ -2378,10 +2189,7 @@ const isWidePane = ref(false)
 const railOpen = ref(!props.filePinned && !chatDetailsClosed())
 const railShown = computed(() => isWidePane.value && railOpen.value)
 const drawerShown = computed(() => !isWidePane.value && inspectorOpen.value)
-const closedMcpProblemCount = computed(() => railShown.value || drawerShown.value ? 0 : chatMcp.problemCount.value)
-const detailsTriggerLabel = computed(() => closedMcpProblemCount.value
-  ? `Show chat details, ${closedMcpProblemCount.value} MCP connections need attention`
-  : 'Show chat details')
+watch([railShown, drawerShown], ([rail, drawer]) => { if (rail || drawer) void loadMcpConnection() }, { immediate: true })
 let panelObserver: ResizeObserver | null = null
 onMounted(() => {
   if (typeof ResizeObserver === 'undefined' || !panelEl.value) return
@@ -2402,7 +2210,6 @@ onMounted(() => {
 onBeforeUnmount(() => { panelObserver?.disconnect() })
 
 const railHideButton = ref<HTMLButtonElement | null>(null)
-const railRunningEl = ref<HTMLElement | null>(null)
 
 /**
  * Show Chat details: in place on a wide pane, as the drawer otherwise. Focus
@@ -2410,17 +2217,9 @@ const railRunningEl = ref<HTMLElement | null>(null)
  * drops on a trigger that just unmounted. The drawer's focus trap places it,
  * so the named section has to be its initial focus rather than a later move.
  */
-type DetailsTarget = 'close' | 'running' | 'context' | 'repo' | 'mcp'
+type DetailsTarget = 'close' | 'context' | 'repo' | 'mcp'
 const detailsTarget = ref<DetailsTarget>('close')
-const mcpHeadingPriority = ref(false)
-const mcpConnections = ref<InstanceType<typeof ChatMcpConnections> | null>(null)
-let mcpHeadingEpoch = 0
-function clearMcpHeadingPriority() {
-  mcpHeadingEpoch++
-  mcpHeadingPriority.value = false
-}
 const detailsFocusEl = computed<HTMLElement | null>(() => {
-  if (detailsTarget.value === 'running') return railRunningEl.value ?? railHideButton.value
   if (detailsTarget.value === 'context') return railContextEl.value ?? railHideButton.value
   if (detailsTarget.value === 'repo') return railRepoEl.value ?? railHideButton.value
   if (detailsTarget.value === 'mcp') return railEl.value?.querySelector<HTMLElement>('.chat-mcp-heading') ?? railHideButton.value
@@ -2431,8 +2230,6 @@ const detailsFocusEl = computed<HTMLElement | null>(() => {
 const contextRevealKey = ref(0)
 function showDetails(target: DetailsTarget = 'close') {
   detailsTarget.value = target
-  mcpHeadingEpoch++
-  mcpHeadingPriority.value = target === 'mcp'
   // The rail may not be mounted yet (narrow drawer, or a wide rail that
   // starts closed), and its watch is lazy: bump the key once it exists.
   const reveal = () => { if (target === 'context') contextRevealKey.value += 1 }
@@ -2458,77 +2255,25 @@ function showDetails(target: DetailsTarget = 'close') {
   })
 }
 function closeDetails() {
-  pendingMcpReveal.value = false
-  clearMcpHeadingPriority()
   if (isWidePane.value) { railOpen.value = false; rememberChatDetails(false) }
   else inspectorOpen.value = false
   // Opened from ⋯: the drawerShown watch below returns focus there instead.
   if (!detailsFromMenu) void nextTick(() => inspectorTrigger.value?.focus())
 }
 function toggleWorkDetails() {
-  const marked = closedMcpProblemCount.value > 0
-  showDetails(marked ? 'mcp' : 'close')
-  if (marked && !isWidePane.value) {
-    const epoch = mcpHeadingEpoch
-    void nextTick(async () => {
-      await nextTick()
-      if (epoch !== mcpHeadingEpoch || !drawerShown.value) return
-      clearMcpHeadingPriority()
-      await nextTick()
-      mcpConnections.value?.revealDrawerAction(true)
-    })
-  }
-}
-// The composer bar's activity cluster opens Chat details at Running; a finished
-// run's notice can outlive the section it points at.
-function openRunDetails() {
-  showDetails('running')
+  showDetails('close')
 }
 function openProjectKnowledge() {
   showDetails('context')
 }
 useModalFocus(railEl, drawerShown, {
   initialFocus: detailsFocusEl,
-  onEscape: () => { pendingMcpReveal.value = false; clearMcpHeadingPriority(); inspectorOpen.value = false },
+  onEscape: () => { inspectorOpen.value = false },
 })
-const pendingMcpReveal = ref(false)
-function matchesMcpRoute(route: { params: Record<string, unknown>; query: Record<string, unknown> }) {
-  return route.params.chatId === props.chatId && route.query.details === 'mcp'
-}
-function signature(route: { params: Record<string, unknown>; query: Record<string, unknown> }) {
-  return `${String(route.params.chatId ?? '')}|${String(route.query.details ?? '')}`
-}
-if (router) {
-  pendingMcpReveal.value = matchesMcpRoute(router.currentRoute.value)
-  const removeAfterEach = router.afterEach((to, from, failure) => {
-    if (failure && !isNavigationFailure(failure, NavigationFailureType.duplicated)) return
-    if (!matchesMcpRoute(to)) { pendingMcpReveal.value = false; clearMcpHeadingPriority(); return }
-    if (signature(to) !== signature(from) || to.fullPath === from.fullPath) pendingMcpReveal.value = true
-  })
-  onBeforeUnmount(removeAfterEach)
-}
-watch([pendingMcpReveal, () => view.chat, chatMcpProvider], async ([pending, loaded, provider]) => {
-  if (!pending || !loaded || loaded.chat_id !== props.chatId || !provider || loaded.archived) return
-  showDetails('mcp')
-  const epoch = mcpHeadingEpoch
-  await nextTick()
-  if (!pendingMcpReveal.value) return
-  const heading = railEl.value?.querySelector<HTMLElement>('.chat-mcp-heading')
-  if (!heading) return
-  heading.focus({ preventScroll: true })
-  if (document.activeElement !== heading) return
-  const rail = railEl.value!
-  const header = rail.querySelector<HTMLElement>('.chat-rail-head')
-  rail.scrollTo({ top: Math.max(0, rail.scrollTop + heading.getBoundingClientRect().top - rail.getBoundingClientRect().top - (header?.getBoundingClientRect().height ?? 0) - 8), behavior: 'auto' })
-  pendingMcpReveal.value = false
-  await nextTick()
-  if (epoch === mcpHeadingEpoch) clearMcpHeadingPriority()
-}, { immediate: true })
 // Chat details opened from the ⋯ menu return focus to ⋯ however they close (the
 // close button or Escape). Registered after useModalFocus, so this runs after
 // its restore of the opener, which is the menu item that has already gone.
 watch(drawerShown, (open) => {
-  if (!open) clearMcpHeadingPriority()
   if (open || !detailsFromMenu) return
   detailsFromMenu = false
   void nextTick(() => moreMenu.value?.focusTrigger())
@@ -2761,17 +2506,10 @@ type ProviderKey = RuntimeProvider
 type BucketKey = ProviderKey
 type TierAlias = 'haiku' | 'sonnet' | 'opus' | 'fable'
 
-const BUCKET_DEFS: { key: BucketKey; label: string; provider: ProviderKey }[] = [
-  { key: 'claude', label: 'Claude', provider: 'claude' },
-  { key: 'opencode', label: 'opencode', provider: 'opencode' },
-]
-
-// ModelSelector names the Claude section 'anthropic' (the models are Anthropic's,
-// the runner is Claude Code), so the two vocabularies need one hop between them.
-const SECTION_BY_BUCKET: Record<BucketKey, string> = {
-  claude: 'anthropic',
-  opencode: 'opencode',
-}
+// One bucket per registry provider, labelled by the registry's short label.
+const BUCKET_DEFS = computed<{ key: BucketKey; label: string }[]>(() =>
+  (modelsResponse.value?.providers ?? []).map(item => ({ key: item.id, label: item.short_label })),
+)
 
 
 function toggleTrace(i: number) {
@@ -2815,8 +2553,8 @@ function onLiveBodyScroll() {
 }
 
 // Click on an expanded activity/thinking bubble body collapses it, unless the
-// click landed on an interactive descendant (a link, file card/chip, subagent
-// panel, inline code, copy button, or anything stopPropagation-bearing).
+// click landed on an interactive descendant (a link, file card/chip,
+// inline code, copy button, or anything stopPropagation-bearing).
 // Selection drags that happen to end inside the body are ignored so users
 // can highlight text without accidentally closing the bubble.
 function isInteractiveTraceChild(target: EventTarget | null): boolean {
@@ -2824,7 +2562,6 @@ function isInteractiveTraceChild(target: EventTarget | null): boolean {
   if (target.closest('a')) return true
   if (target.closest('button, [role="button"]')) return true
   if (target.closest('.file-card, .answer-outputs')) return true
-  if (target.closest('.subagent-rows')) return true
   if (target.closest('code, pre, kbd')) return true
   return false
 }
@@ -2930,7 +2667,7 @@ function scrollToBottom() {
 // later. The height of the transcript keeps changing for a few hundred
 // milliseconds after its rows first paint — the history fetch resolves after
 // the skeleton has already been measured, images and avatars load, the
-// subagent fetch adds trace blocks, the composer resizes — and each of those
+// composer resizes — and each of those
 // growths leaves the viewport where it was, i.e. at the top. The
 // stick-to-bottom watcher only catches up on the *next* change, so the
 // correction was always visible as a scroll.
@@ -3408,7 +3145,7 @@ function cancelCapability(q: { request_id: string }) {
 // Section key (ModelSelector) for a bucket, used to preselect the backend when
 // the capability card opens the full picker.
 function capabilitySectionForBucket(bucket: BucketKey): string {
-  return SECTION_BY_BUCKET[bucket] || 'anthropic'
+  return sectionKeyForProvider(bucket)
 }
 
 const capabilityPickerSection = ref('')
@@ -4480,39 +4217,13 @@ function attachTurnMeta(items: RenderItem[], meta: TurnMeta | null): void {
   if (last && last.kind === 'assistant') last.meta = meta
 }
 
-const renderData = computed<{
-  items: RenderItem[]
-  liveSubs: SubagentTranscript[]
-  liveStandaloneSubs: SubagentTranscript[]
-}>(() => {
+const renderItems = computed<RenderItem[]>(() => {
   const items: RenderItem[] = []
   let buffer: ChatMessage[] = []
 
-  // Subagent transcripts grouped by the user turn that dispatched them.
-  // Entries without a resolvable turn (older sessions, remote chats) attach
-  // to the last turn so they stay visible.
-  const subsByTurn = new Map<number, SubagentTranscript[]>()
-  const unanchoredSubs: SubagentTranscript[] = []
-  for (const sub of view.activeSubagents) {
-    if (typeof sub.turn_index === 'number') {
-      const list = subsByTurn.get(sub.turn_index) || []
-      list.push(sub)
-      subsByTurn.set(sub.turn_index, list)
-    } else {
-      unanchoredSubs.push(sub)
-    }
-  }
   let currentTurnIndex: number | null = null
   // The current turn's footer facts, carried across flushes of one turn.
   let turnMeta: TurnMeta | null = null
-
-  const takeForegroundSubs = (turnIndex: number | null): SubagentTranscript[] => {
-    if (turnIndex === null) return []
-    const subs = subsByTurn.get(turnIndex)
-    if (!subs?.length) return []
-    subsByTurn.delete(turnIndex)
-    return subs
-  }
 
   const flushTurn = (isFinal = false) => {
     if (!buffer.length) return
@@ -4539,12 +4250,10 @@ const renderData = computed<{
     // a normal assistant bubble; the trailing tools just join the trace.
 
     if (finalMsg && isInterruptedTail(finalMsg, trailing)) {
-      const traceSubs = takeForegroundSubs(currentTurnIndex)
       items.push(withKey({
         kind: 'trace',
         steps: buffer.slice(),
         turnIndex: currentTurnIndex ?? undefined,
-        ...(traceSubs.length ? { subs: traceSubs } : {}),
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
       }))
       buffer = []
@@ -4563,7 +4272,6 @@ const renderData = computed<{
       return
     }
 
-    const traceSubs = takeForegroundSubs(currentTurnIndex)
     // Earlier explicitly completed replies are bubbles of their own; the rest
     // is Activity. Only the final reply owns the turn footer and Outputs.
     const turnItems: RenderItem[] = buildTurnParts(buffer, finalIdx).map((part) =>
@@ -4571,13 +4279,11 @@ const renderData = computed<{
         ? withKey({ kind: 'assistant', msg: part.msg, turnIndex: currentTurnIndex ?? undefined })
         : withKey({ kind: 'trace', steps: part.steps, turnIndex: currentTurnIndex ?? undefined }),
     )
-    // Foreground subagents and (when there's no answer bubble) file outputs
-    // belong to the one Activity trace that sits right before the reply. Reuse
-    // the trailing trace if there is one; otherwise mint an empty one so those
-    // attachments still have a home adjacent to the answer.
-    const needsHost =
-      traceSubs.length > 0
-      || ((!finalMsg || finalMsg.is_error) && turnOutputs.length > 0)
+    // When there's no answer bubble, file outputs belong to the one Activity
+    // trace that sits right before the reply. Reuse the trailing trace if
+    // there is one; otherwise mint an empty one so the outputs still have a
+    // home adjacent to the answer.
+    const needsHost = (!finalMsg || finalMsg.is_error) && turnOutputs.length > 0
     const last = turnItems[turnItems.length - 1]
     let host = last && last.kind === 'trace' ? last : null
     if (!host && needsHost) {
@@ -4585,7 +4291,6 @@ const renderData = computed<{
       turnItems.push(host)
     }
     if (host) {
-      if (traceSubs.length) host.subs = traceSubs
       if ((!finalMsg || finalMsg.is_error) && turnOutputs.length) host.outputs = turnOutputs
     }
     for (const it of turnItems) items.push(it)
@@ -4624,101 +4329,10 @@ const renderData = computed<{
     }
   }
   flushTurn(true)
-  // Only the latest messages are loaded, so subagents of older turns find no
-  // rendered turn to attach to. A finished one stays out of view until its turn
-  // loads; it must not pile into the live trace or the last turn's trace.
-  let firstRenderedTurn: number | null = null
-  for (const it of items) {
-    if (it.kind === 'user' && typeof it.turnIndex === 'number') { firstRenderedTurn = it.turnIndex; break }
-  }
-  const belongsToUnloadedTurn = (sub: SubagentTranscript): boolean =>
-    sub.status !== 'running'
-    && typeof sub.turn_index === 'number'
-    && firstRenderedTurn !== null
-    && sub.turn_index < firstRenderedTurn
-  // While streaming, the in-flight turn's subagents nest in the live trace,
-  // along with any still running from an earlier turn. Drop settled children
-  // created before this stream, even when background wakes share a turn index.
-  if (view.isStreaming) {
-    const streamStartedAt = view.currentStreamStartedAt
-    const live = [...subsByTurn.values()].flat().concat(unanchoredSubs)
-      .filter(sub => !belongsToUnloadedTurn(sub))
-      .filter(sub => sub.status === 'running'
-        || !streamStartedAt
-        || typeof sub.started_at !== 'number'
-        || sub.started_at >= streamStartedAt)
-    return { items, liveSubs: live, liveStandaloneSubs: [] }
-  }
-  // Anything still unplaced (turn not in history yet, or no turn info):
-  // attach anchored subagents to their actual user-turn's trace block so a
-  // late-finishing agent doesn't drift to the most recent trace. Unanchored
-  // leftovers still fall back to the last trace block, or a fresh block if
-  // there is none.
-  const leftovers = [...subsByTurn.values()].flat().concat(unanchoredSubs)
-    .filter(sub => !belongsToUnloadedTurn(sub))
-  if (leftovers.length) {
-    const anchored = new Map<number, SubagentTranscript[]>()
-    const unanchored: SubagentTranscript[] = []
-    for (const sub of leftovers) {
-      if (typeof sub.turn_index === 'number') {
-        const list = anchored.get(sub.turn_index) || []
-        list.push(sub)
-        anchored.set(sub.turn_index, list)
-      } else {
-        unanchored.push(sub)
-      }
-    }
-
-    // Attach each anchored group to the matching turn's trace block. If the
-    // turn has no trace block (e.g. the model replied with plain text), mint
-    // one right before the first assistant/system item of that turn.
-    for (const [turnIdx, subs] of anchored) {
-      let turnStart = -1
-      for (let i = 0; i < items.length; i++) {
-        const it = items[i]
-        if (it.kind === 'user' && it.turnIndex === turnIdx) {
-          turnStart = i
-        }
-      }
-      if (turnStart === -1) {
-        // Matching user turn isn't rendered yet; keep with unanchored fallback.
-        unanchored.push(...subs)
-        continue
-      }
-      let traceIdx = -1
-      for (let i = turnStart + 1; i < items.length && items[i].kind !== 'user'; i++) {
-        if (items[i].kind === 'trace') traceIdx = i
-      }
-      if (traceIdx >= 0) {
-        const host = items[traceIdx]
-        if (host.kind === 'trace') {
-          host.subs = [...(host.subs || []), ...subs]
-        }
-      } else {
-        let insertAt = turnStart + 1
-        while (insertAt < items.length && items[insertAt].kind === 'user') insertAt++
-        items.splice(insertAt, 0, withKey({ kind: 'trace', steps: [], subs, turnIndex: turnIdx }))
-      }
-    }
-
-    if (unanchored.length) {
-      let lastTrace: RenderItem | undefined
-      for (let i = items.length - 1; i >= 0; i--) {
-        if (items[i].kind === 'trace') { lastTrace = items[i]; break }
-      }
-      if (lastTrace && lastTrace.kind === 'trace') {
-        lastTrace.subs = [...(lastTrace.subs || []), ...unanchored]
-      } else {
-        items.push(withKey({ kind: 'trace', steps: [], subs: unanchored }))
-      }
-    }
-  }
-  return { items: dedupeRenderItemKeys(items), liveSubs: [], liveStandaloneSubs: [] }
+  return dedupeRenderItemKeys(items)
 })
 
-const renderItems = computed<RenderItem[]>(() => renderData.value.items)
 const transcriptEmpty = computed(() => renderItems.value.length === 0)
-const liveSubagents = computed<SubagentTranscript[]>(() => renderData.value.liveSubs)
 
 // One consistent full-screen state for "this chat isn't ready to show yet" —
 // previously this forked three ways depending on whether stale cached
@@ -5393,7 +5007,7 @@ function routingProviderLabel(bucket: string | undefined, provider: string): str
 }
 
 function bucketLabel(bucket: BucketKey): string {
-  return BUCKET_DEFS.find((def) => def.key === bucket)?.label || 'Claude'
+  return BUCKET_DEFS.value.find((def) => def.key === bucket)?.label || bucket
 }
 
 // Which provider owns a model id. Membership in a provider's catalog is
@@ -5401,7 +5015,8 @@ function bucketLabel(bucket: BucketKey): string {
 // the catalog has not reported yet.
 function bucketForSelectedModel(model: string): BucketKey {
   const response = modelsResponse.value
-  if ((response?.opencode_models || []).includes(model)) return 'opencode'
+  const owner = (response?.providers ?? []).find(item => response?.provider_models?.[item.id]?.includes(model))
+  if (owner) return owner.id
   if (model.includes('/')) return 'opencode'
   return 'claude'
 }
@@ -5473,14 +5088,13 @@ async function selectModel(value: string | string[], sectionKey = '') {
     return
   }
   const chatId = chat.value.chat_id
-  const sectionBucket: Partial<Record<string, BucketKey>> = {
-    anthropic: 'claude',
-    opencode: 'opencode',
-  }
-  // Picking from the Anthropic section is an explicit handover to Claude Code,
+  // Picking from a provider's section is an explicit handover to that provider,
   // never a tier change on whichever provider is active. To change tier while
   // staying on a provider, pick that provider's own model instead.
-  const targetBucket = sectionBucket[sectionKey] || bucketForSelectedModel(model)
+  const sectionProvider = sectionKey ? providerForModelSection(sectionKey) : ''
+  const targetBucket = BUCKET_DEFS.value.some(def => def.key === sectionProvider)
+    ? sectionProvider
+    : bucketForSelectedModel(model)
   const currentEntry = canonicalTier(chat.value.model)
   const sameModelAndRoute = canonicalTier(model) === currentEntry && targetBucket === activeBucket.value
   if (sameModelAndRoute && !recovery) {
@@ -5503,7 +5117,7 @@ async function selectModel(value: string | string[], sectionKey = '') {
     model: string
     thinking_level?: string
   } = {
-    provider: (BUCKET_DEFS.find(def => def.key === targetBucket)?.provider || 'claude') as ProviderKey,
+    provider: targetBucket,
     model,
   }
   const targetLevels = modelsResponse.value?.model_reasoning_levels?.[model]
@@ -5890,17 +5504,7 @@ onMounted(() => {
   background: transparent;
   color: var(--fg2);
 }
-.work-inspector-trigger .chat-mcp-indicator {
-  position: absolute;
-  right: 5px;
-  bottom: 5px;
-  width: 8px;
-  height: 8px;
-  box-sizing: border-box;
-  border: 1.5px solid var(--accent);
-  transform: rotate(45deg);
-  pointer-events: none;
-}
+.chat-mcp-heading:focus { outline: 2px solid var(--accent); outline-offset: 3px; }
 .work-inspector-trigger--header:hover {
   color: var(--fg);
   border-color: transparent;
@@ -6694,33 +6298,6 @@ details[open] > .activity-summary::before {
   border-top: 1px solid var(--border);
 }
 
-/* "N agents" header pill: background subagents still running after the
-   parent turn ended (view.activeBackgroundAgents, fed by /ws/events). */
-.bg-agents-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 9px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: 11px;
-  color: var(--fg2);
-  white-space: nowrap;
-}
-
-.bg-agents-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent2);
-  animation: bg-agents-pulse 1.6s ease-in-out infinite;
-}
-
-@keyframes bg-agents-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
-}
-
 /* Message content (markdown) */
 .message-content {
   min-width: 0;
@@ -7050,15 +6627,6 @@ details[open] > .activity-summary::before {
   text-align: right;
 }
 
-/* Marks a request sent into the running reply. Same treatment as the
-   automation mark: a property of the message, not part of the timestamp. */
-.steered-mark {
-  color: var(--accent);
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  margin-right: 6px;
-}
-
 /* Marks a turn fired by an automation. Accent-coloured so it reads as a
    property of the message, not as part of the timestamp next to it. */
 .unattended-mark {
@@ -7289,26 +6857,6 @@ details[open] > .activity-summary::before {
   background: none;
 }
 
-/* Focus lands here from the composer bar's activity cluster; the outline says where. */
-.chat-rail-running:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 4px;
-  border-radius: var(--radius-xs);
-}
-
-.bg-agents-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  flex-shrink: 0;
-  animation: bg-agents-pulse 1.4s ease-in-out infinite;
-}
-
-@keyframes bg-agents-pulse {
-  0%, 100% { opacity: 0.35; }
-  50% { opacity: 1; }
-}
 
 
 /* Slash-command picker styles are shared with SlashCommandPicker.vue through
@@ -7353,6 +6901,11 @@ details[open] > .activity-summary::before {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.composer-spacer {
+  flex: 1;
+  min-width: 0;
 }
 
 
@@ -7491,11 +7044,6 @@ details[open] > .activity-summary::before {
   white-space: nowrap;
 }
 
-.composer-move-bg { flex: none; margin-right: 6px; }
-.composer-move-bg:disabled { opacity: 0.6; cursor: progress; }
-.composer-move-bg:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.composer-move-bg-short { display: none; }
-
 .composer-model-dot {
   width: 7px;
   height: 7px;
@@ -7507,7 +7055,6 @@ details[open] > .activity-summary::before {
 /* Touch layouts keep full 44px targets for every composer control. */
 @media (pointer: coarse), (max-width: 700px) {
   .composer-chip { min-height: var(--touch); }
-  .composer-move-bg { min-width: var(--touch); }
   .image-btn,
   .send-btn { width: var(--touch); height: var(--touch); }
 }
@@ -7515,8 +7062,6 @@ details[open] > .activity-summary::before {
 @media (max-width: 700px) {
   .composer-kbd { display: none; }
   .composer-chip-label { max-width: 16ch; }
-  .composer-move-bg-long { display: none; }
-  .composer-move-bg-short { display: inline; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -7609,7 +7154,7 @@ details[open] > .activity-summary::before {
 }
 
 /* Queued message chips. Each chip is the message text, then one control row:
-   the delivery toggle on the left, the edit actions on the right. In a wide
+   the status on the left, the edit actions on the right. In a wide
    pane the two share a line; in a narrow one the controls wrap under the text
    instead of the text being squeezed between them. */
 .queued-messages {
@@ -7649,14 +7194,6 @@ details[open] > .activity-summary::before {
   color: var(--fg2);
 }
 .queued-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.queued-chip.is-steering { opacity: 0.85; padding: 8px 12px; }
-.queued-steering {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--accent);
-  flex-shrink: 0;
-}
-.queued-steering:empty { display: none; }
 /* The body's grow factor dwarfs the controls': on a shared line the text takes
    the free space and the controls sit at their own width on the right; once
    wrapped, the controls are alone on their line and stretch to push the
@@ -7702,32 +7239,6 @@ details[open] > .activity-summary::before {
   color: var(--accent);
   flex-shrink: 0;
 }
-.queued-mode {
-  display: inline-flex;
-  flex-shrink: 0;
-  padding: 2px;
-  gap: 2px;
-  background: var(--bg);
-  border-radius: var(--radius-sm);
-}
-.queued-mode-option {
-  background: none;
-  border: none;
-  border-radius: calc(var(--radius-sm) - 2px);
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  font-weight: 600;
-  padding: 3px 10px;
-  cursor: pointer;
-}
-.queued-mode-option[aria-pressed="true"] { background: var(--accent); color: var(--bg); }
-.queued-mode-option:not([aria-pressed="true"]):hover { background: var(--bg2); color: var(--fg); }
-/* Inset and in --fg: the pressed option is filled with --accent, so an accent
-   ring would vanish on it. */
-.queued-mode-option:focus-visible {
-  outline: 2px solid var(--fg);
-  outline-offset: -2px;
-}
 .queued-actions {
   display: flex;
   align-items: center;
@@ -7735,7 +7246,7 @@ details[open] > .activity-summary::before {
   flex-shrink: 0;
   margin-left: auto;
 }
-.queued-steer-all,
+.queued-send-all,
 .queued-send-now {
   background: none;
   color: var(--accent);
@@ -7747,9 +7258,9 @@ details[open] > .activity-summary::before {
   cursor: pointer;
   flex-shrink: 0;
 }
-.queued-steer-all:hover,
+.queued-send-all:hover,
 .queued-send-now:hover { background: var(--bg2); }
-.queued-steer-all:disabled,
+.queued-send-all:disabled,
 .queued-send-now:disabled { opacity: 0.4; cursor: not-allowed; }
 .queued-action,
 .queued-remove {
@@ -7770,7 +7281,7 @@ details[open] > .activity-summary::before {
 .queued-remove:hover { color: var(--fg); background: var(--bg2); }
 .queued-action:disabled,
 .queued-remove:disabled { opacity: 0.3; cursor: not-allowed; }
-.queued-steer-all:focus-visible,
+.queued-send-all:focus-visible,
 .queued-send-now:focus-visible,
 .queued-action:focus-visible,
 .queued-remove:focus-visible {
@@ -7778,9 +7289,8 @@ details[open] > .activity-summary::before {
   outline-offset: -2px;
 }
 @media (pointer: coarse) {
-  .queued-steer-all,
-  .queued-send-now,
-  .queued-mode-option {
+  .queued-send-all,
+  .queued-send-now {
     min-height: 44px;
   }
   .queued-action,
@@ -7788,10 +7298,8 @@ details[open] > .activity-summary::before {
     width: 44px;
     height: 44px;
   }
-  .queued-mode { padding: 0; gap: 0; }
-  .queued-mode-option { min-width: 64px; }
 }
-.steer-notice {
+.queue-notice {
   padding: 0 0 6px;
   margin: 0;
   font-size: 12px;
@@ -7843,9 +7351,9 @@ details[open] > .activity-summary::before {
 :global(:root.keyboard-open .question-form-card) { max-height: calc(var(--app-h) * 0.6); }
 /* A short pane (a phone in landscape) cannot hold an open question card and
    the two-row composer (#2774). While the question waits, the composer folds
-   to one row: the prompt and the send/stop action. The model picker, attach,
-   hints and Move to background come back when the card closes (answer or
-   cancel the question first). Keep the media query in sync with
+   to one row: the prompt and the send/stop action. The model picker, attach
+   and hints come back when the card closes (answer or cancel the question
+   first). Keep the media query in sync with
    SHORT_PANE_QUERY in the script. */
 @media (max-height: 500px) {
   .composer-surface--question {
@@ -7860,8 +7368,7 @@ details[open] > .activity-summary::before {
   .composer-surface--question > .composer-bar { flex: none; padding: 0; border-top: 0; }
   .composer-surface--question .composer-model,
   .composer-surface--question .image-btn,
-  .composer-surface--question .composer-kbd,
-  .composer-surface--question .composer-move-bg { display: none; }
+  .composer-surface--question .composer-kbd { display: none; }
 }
 .question-card-header {
   display: flex;

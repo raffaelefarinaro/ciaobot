@@ -214,45 +214,9 @@ def test_foreground_shell_is_not_background_work(tmp_path):
     assert provider._foreground_shells == set()
 
 
-def test_foreground_shell_moved_to_background_counts(tmp_path):
-    provider = OpencodeProvider(tmp_path)
-    session = "ses_fgshell_parent"
-
-    def track(line: str) -> None:
-        provider._track_background_event(json.loads(line), session)
-
-    track(_event(
-        "shell.created",
-        info={"id": "sh_slow", "command": "sleep 99", "metadata": {"sessionID": session}},
-    ))
-    track(_event(
-        "session.tool.progress", sessionID=session, id="call_slow",
-        metadata={"shellID": "sh_slow"},
-    ))
-    assert provider.background_work_outstanding is False
-    track(_event(
-        "session.tool.success", sessionID=session, id="call_slow",
-        metadata={"status": "running", "shellID": "sh_slow"},
-    ))
-    assert provider.background_work_outstanding is True
-    assert provider._background_shells == {"sh_slow"}
-    track(_event("shell.exited", id="sh_slow", exit=0, status="exited"))
-    assert provider.background_work_outstanding is False
-
-
 def _track_all(provider: OpencodeProvider, *lines: str) -> None:
     for line in lines:
         provider._track_background_event(json.loads(line), "ses_fgshell_parent")
-
-
-def _slow_created() -> str:
-    return _event(
-        "shell.created",
-        info={
-            "id": "sh_slow", "command": "sleep 99",
-            "metadata": {"sessionID": "ses_fgshell_parent"},
-        },
-    )
 
 
 def _slow_progress() -> str:
@@ -267,22 +231,6 @@ def _slow_backgrounded() -> str:
         "session.tool.success", sessionID="ses_fgshell_parent", id="call_slow",
         metadata={"status": "running", "shellID": "sh_slow"},
     )
-
-
-def test_moved_to_background_survives_mid_call_reconcile(tmp_path):
-    provider = OpencodeProvider(tmp_path)
-    _track_all(provider, _slow_created(), _slow_progress())
-    provider._replace_background_shells(set())
-    _track_all(provider, _slow_backgrounded())
-    assert provider._background_shells == {"sh_slow"}
-    assert provider._foreground_shells == set()
-    assert provider.background_work_outstanding is True
-
-
-def test_moved_to_background_without_shell_created(tmp_path):
-    provider = OpencodeProvider(tmp_path)
-    _track_all(provider, _slow_progress(), _slow_backgrounded())
-    assert provider._background_shells == {"sh_slow"}
 
 
 def test_exited_shell_not_promoted_by_late_success(tmp_path):
@@ -303,7 +251,7 @@ async def test_refresh_excludes_running_foreground_shell(tmp_path, monkeypatch):
     provider._foreground_shells = {"sh_fg"}
     _script(monkeypatch, provider, shells=[{"sh_fg", "sh_bg"}])
 
-    assert await provider.refresh_background_shells() == 1
+    assert await provider._refresh_background_shells() == 1
     assert provider._background_shells == {"sh_bg"}
 
 
@@ -714,7 +662,7 @@ async def test_drain_streams_a_background_subagent_wake(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_drain_counts_children_from_the_active_map(tmp_path, monkeypatch):
-    """A failed child listing reads as an empty tree; it must not end the drain.
+    """A child still on the active map keeps the drain alive.
 
     The idle reaper reads the set once the drain ends, so emptying it while the
     server still runs the child let the reaper stop that server mid-review.
@@ -725,10 +673,6 @@ async def test_drain_counts_children_from_the_active_map(tmp_path, monkeypatch):
     monkeypatch.setattr(opencode_module, "_OPENCODE_DRAIN_MAX_S", 0.2)
     _script(monkeypatch, provider, shells=[set()], active=[{"ses_bgsub_child"}])
 
-    async def empty_tree():
-        return []
-
-    monkeypatch.setattr(provider, "read_live_collab_tree", empty_tree)
     started = asyncio.get_running_loop().time()
 
     assert await _drain(provider) == []
@@ -1021,18 +965,3 @@ async def test_disconnect_forgets_child_sessions(tmp_path):
     await provider.disconnect()
 
     assert provider._child_sessions == {}
-
-
-@pytest.mark.asyncio
-async def test_refresh_background_shells_drops_commands_of_vanished_shells(tmp_path, monkeypatch):
-    provider = OpencodeProvider(tmp_path)
-    _attach_live(provider, object(), "ses_a")
-    provider._background_shells = {"sh_gone", "sh_live"}
-    provider._shell_commands = {"sh_gone": "sleep 60", "sh_live": "npm run dev"}
-    _script(monkeypatch, provider, shells=[{"sh_live"}])
-
-    assert await provider.refresh_background_shells() == 1
-    rows = provider.background_shell_rows()
-    assert [(row["id"], row["command"]) for row in rows] == [("sh_live", "npm run dev")]
-    assert isinstance(rows[0]["started_at"], float)
-    assert provider._shell_commands == {"sh_live": "npm run dev"}

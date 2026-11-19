@@ -164,7 +164,6 @@ def env(tmp_path, monkeypatch):
     _dist(site, "pip", "26.3", scripts=("pip", "pip3", "pip3.12"), prefix=prefix)
     _dist(site, "foo", "1.0", requires=["http-ece", "certifi"])
     _write(site / "foo/__init__.py", b"# foo\n")
-    _write(site / "claude_agent_sdk/_bundled/claude", _macho(), 0o755)
     http_licence = b"http-ece MIT\n"
     _dist(site, "http-ece", "1.2.1")
     _write(site / "http_ece-1.2.1.dist-info/licenses/LICENSE", http_licence)
@@ -646,7 +645,7 @@ def test_provenance_is_deterministic_and_path_free(env, tmp_path):
     assert receipt["provenance_sha256"] == _sha(one.read_bytes())
     assert {"schema", "kind", "provenance_sha256", "launcher", "macho", "totals", "largest", "inventory",
             "host_python"} == set(receipt)
-    assert receipt["totals"]["macho_files"] == len(receipt["macho"]) == 2
+    assert receipt["totals"]["macho_files"] == len(receipt["macho"]) == 1
 
 
 @pytest.mark.parametrize("which", ["runtime", "http-ece", "ciaobot", "cafile"])
@@ -674,7 +673,6 @@ def test_runtime_minor_must_match_the_launcher(env):
 def _engine(tmp_path, extra=None):
     engine = tmp_path / "engine"
     _write(engine / ea.PYTHON_REL, _macho(), 0o755)
-    _write(engine / ea.REQUIRED_MACHO[1], _macho(), 0o755)
     for rel, data in (extra or {}).items():
         _write(engine / rel, data)
     return engine

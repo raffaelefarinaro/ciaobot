@@ -642,6 +642,20 @@ describe('SettingsWorkspaceModels', () => {
     expect((select(view, 'thinking').element as HTMLSelectElement).value).toBe('high')
   })
 
+  it("the hint under Permission mode states what bypass is and links the selected provider's docs", async () => {
+    const view = await mountCard()
+    const note = () => view.get('[data-testid="permission-note"]')
+    expect(note().text()).toContain('full user access')
+    expect(note().get('a').attributes('href')).toBe('https://code.claude.com/docs/en/permissions')
+    expect(note().get('a').attributes('target')).toBe('_blank')
+    expect(note().get('a').attributes('rel')).toBe('noopener')
+
+    await view.findAll('button[role="radio"]')[1].trigger('click')
+    await flushPromises()
+    expect(form().default_provider).toBe('opencode')
+    expect(note().get('a').attributes('href')).toBe('https://opencode.ai/docs/permissions/')
+  })
+
   it('the provider radiogroup takes arrow keys', async () => {
     const view = await mountCard()
     const group = view.get('[role="radiogroup"]')

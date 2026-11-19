@@ -222,16 +222,14 @@ class RuntimeStateUnreadable(RuntimeError):
 
     Raised instead of guessing: a denied receipt or registry would otherwise
     read as "not re-rooted" / "no workspaces" and send the caller to the
-    wrong vault. Typically a workspace-scoped chat's sandbox.
+    wrong vault. Check this account can read it.
     """
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         super().__init__(
             f"cannot read Ciaobot runtime state at {self.path}: permission denied. "
-            "This shell's filesystem sandbox does not grant it; run the command "
-            "from a terminal outside the chat, or set the workspace's file access "
-            "to whole machine."
+            "Check this account can read it."
         )
 
 

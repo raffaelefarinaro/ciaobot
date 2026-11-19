@@ -160,9 +160,8 @@ case $UPDATE_TEAM_ID in
 esac
 
 # A bundled engine (#3128 G) must be distribution-signed by this team wherever
-# those bytes are read: every non-vendor Mach-O with Developer ID, hardened
-# runtime and a secure timestamp, and the SDK's CLI still verifying as
-# Anthropic's. The property belongs to the exact bytes at the exact location,
+# those bytes are read: every Mach-O with Developer ID, hardened runtime and a
+# secure timestamp. The property belongs to the exact bytes at the exact location,
 # and the image is built from a later `ditto` copy staged in a scratch tree, so
 # every copy is checked where it is used: the source app before staging, the
 # staged copy right before the image is created, and the app on the mounted

@@ -1430,10 +1430,6 @@ function openProject(projectId: string) {
 }
 
 const expandedProjects = reactive(new Set<string>())
-// Subagent groups are open by default: a row only exists while its agent is
-// working, so hiding it behind a closed disclosure would defeat the point.
-// Deliberately component-local, matching the project disclosure state above
-// and the chat context disclosure in ChatPanel.
 const projectMenu = ref<string | null>(null)
 const chatMenu = ref<string | null>(null)
 type MenuReference = HTMLElement | { getBoundingClientRect: () => DOMRect }
@@ -1447,8 +1443,7 @@ const moveSubmenu = ref(false)
 const editingProject = ref<string | null>(null)
 const renamingChat = ref<string | null>(null)
 const renameValue = ref('')
-// Match Home's visible chats and selected workspace; the store owns the
-// definition of working, including background agents and shells.
+// Match Home's visible chats and selected workspace; the store owns working.
 const isAnyChatWorking = computed(() => store.activeChatsAll.some(
   chat => store.projectFor(chat.chat_id)?.workspace === store.activeWorkspace && store.chatIsWorking(chat.chat_id),
 ))

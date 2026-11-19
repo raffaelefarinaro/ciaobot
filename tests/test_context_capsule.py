@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
+import json
 from pathlib import Path
 
 import pytest
@@ -180,10 +181,10 @@ def test_the_board_hint_is_a_constant_and_not_a_routing_fact() -> None:
     """It must not make every capsule look like its routing changed.
 
     `context_digest` decides whether the stable block is re-sent to a provider
-    session. It reads exactly the five routing facts plus the linked-repo
-    fingerprint (#1436) and nothing else, so the hint — which never varies —
-    cannot reach it: a board hint that fed the digest would re-send the whole
-    stable block on every turn of every session forever.
+    session. It reads exactly the five routing facts, the linked-repo
+    fingerprint (#1436) and the core (A4; hashed only when set, ACP chats only),
+    so the hint — which never varies — cannot reach it: a board hint that fed the
+    digest would re-send the whole stable block on every turn of every session forever.
     """
     assert tuple(inspect.signature(context_digest).parameters) == (
         "workspace",
@@ -192,6 +193,7 @@ def test_the_board_hint_is_a_constant_and_not_a_routing_fact() -> None:
         "project_context",
         "canonical_doc",
         "linked_repo",
+        "core",
     )
     # And the hint is byte-identical in both capsules: it is a constant wearing a
     # workspace's name, not a fact about one.
@@ -216,41 +218,35 @@ def test_the_board_hint_travels_with_the_stable_block_only() -> None:
     assert "today=" in without_stable
 
 
+def test_no_capsule_names_file_access(tmp_path: Path) -> None:
+    """A chat in a workspace that used to store a file-access scope gets no file_access line."""
+    from tests.conftest import attach_stub_mcp
 
-def test_the_file_access_line_names_the_roots_only_for_a_confined_chat() -> None:
-    """A workspace-scoped chat is told where it may write and who can widen it,
-    once per turn. A chat with no roots (machine scope) gets no such line."""
-    capsule = build_context_capsule(
-        workspace="work",
-        file_roots=("/work/agent", "/work/agent/memory-vault/work"),
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    (runtime / "workspaces.json").write_text(
+        json.dumps([{
+            "name": "personal",
+            "vault_root": "memory-vault/personal",
+            "agent_fs_scope": "workspace",
+        }]),
+        encoding="utf-8",
     )
-
-    line = next(
-        entry for entry in capsule.splitlines() if entry.startswith("file_access=")
-    )
-    assert "/work/agent, /work/agent/memory-vault/work" in line
-    assert '"Operation not permitted"' in line
-    assert "Settings → Overview → File access" in line
-    assert "file_access=" not in build_context_capsule(workspace="work")
-
-
-@pytest.mark.parametrize(("scope", "confined"), [("workspace", True), ("machine", False)])
-def test_the_prompt_prefix_states_file_access_only_for_workspace_scope(
-    tmp_path: Path, scope: str, confined: bool
-) -> None:
-    manager = _make_manager(tmp_path)
-    config = manager._config
-    workspace = config.workspace("work")
-    assert workspace is not None
-    config.workspaces["work"] = dataclasses.replace(workspace, agent_fs_scope=scope)
-    project = manager.create_project("Ciaobot", workspace="work")
-    chat = manager.create_chat(project.project_id)
-
-    prefix = manager._build_prompt_prefix(chat)
-
-    assert ("file_access=workspace only" in prefix) is confined
-    if confined:
-        assert str(config.agent_root("work").resolve()) in prefix
+    config = CiaoConfig.from_env({
+        "PWA_AUTH_TOKEN": "t",
+        "CIAO_WORKSPACE": str(tmp_path),
+        "CIAO_RUNTIME_ROOT": str(runtime),
+    })
+    manager = attach_stub_mcp(ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    ))
+    project = manager.create_project("scoped", workspace="personal")
+    chat = manager.create_chat(project.project_id, provider="claude")
+    request = manager.build_agent_request(chat, prompt="hi")
+    assert "file_access=" not in request.prompt
 
 
 def test_the_capsule_states_the_permission_mode_every_turn() -> None:
@@ -325,6 +321,29 @@ def _linked_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: i
     )
     chat = manager.create_chat(project.project_id)
     return manager, chat, repo
+
+
+def test_core_rides_stable_block_only() -> None:
+    core = "<ciaobot_core>CORE-TEXT</ciaobot_core>"
+    stable = build_context_capsule(workspace="personal", core=core)
+    assert stable.index(core) < stable.index("workspace=personal")
+    dynamic = build_context_capsule(workspace="personal", core=core, include_stable=False)
+    assert "CORE-TEXT" not in dynamic
+    assert "today=" in dynamic
+
+
+def test_core_change_changes_stable_digest() -> None:
+    values = {
+        "workspace": "personal",
+        "gws_profile": "",
+        "project_name": "General",
+        "project_context": "",
+        "canonical_doc": "",
+    }
+    # An empty core is hashed out, so non-ACP chats keep their digest.
+    assert context_digest(**values, core="") == context_digest(**values)
+    assert context_digest(**values, core="core a") != context_digest(**values)
+    assert context_digest(**values, core="core a") != context_digest(**values, core="core b")
 
 
 def test_a_linked_project_prefix_injects_agents_md_and_resends_on_edit(
@@ -474,39 +493,3 @@ def test_repo_instructions_are_capped_at_8000_characters() -> None:
     assert repo_link.REPO_INSTRUCTIONS_MAX_CHARS == 8_000
 
 
-def test_the_file_access_line_names_the_read_only_archive() -> None:
-    """A memory pass is told its source archive is readable and never writable (#2459)."""
-    capsule = build_context_capsule(
-        workspace="work",
-        file_roots=("/work/agent",),
-        file_read_only=("/work/Logs/Chats/src-1/claude/s.md",),
-    )
-
-    line = next(entry for entry in capsule.splitlines() if entry.startswith("file_access="))
-    assert "read and write under /work/agent; read only: /work/Logs/Chats/src-1/claude/s.md;" in line
-    assert "read only:" not in build_context_capsule(workspace="work", file_roots=("/work/agent",))
-
-
-def test_the_prompt_prefix_names_a_memory_pass_archive_as_read_only(tmp_path: Path) -> None:
-    manager = _make_manager(tmp_path)
-    config = manager._config
-    workspace = config.workspace("work")
-    assert workspace is not None
-    config.workspaces["work"] = dataclasses.replace(workspace, agent_fs_scope="workspace")
-    archive = config.logs_root / "Chats" / "src-1" / "claude" / "s.md"
-    archive.parent.mkdir(parents=True)
-    archive.write_text("transcript", encoding="utf-8")
-    project = manager._memory_pass.ensure_project("work")
-    chat = manager.create_chat(
-        project.project_id,
-        helper={
-            "kind": "memory_pass",
-            "source_chat_id": "src-1",
-            "archive_path": str(archive),
-            "archive_policy": "when_clean",
-        },
-    )
-
-    prefix = manager._build_prompt_prefix(chat)
-
-    assert f"read only: {archive.resolve()}" in prefix

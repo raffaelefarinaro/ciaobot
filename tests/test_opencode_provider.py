@@ -26,13 +26,14 @@ from ciao.models import (
     TokenUsageEvent,
     ToolUseEvent,
 )
-from ciao.execution_modes import opencode_credential_deny_rules
 from ciao.background_notice import native_shell_run, native_subagent_run, native_wake_run
+from ciao.providers.acp.agents import OpencodeAcpProvider
 from ciao.providers.opencode import (
     OPENCODE_V2_REQUIRED,
     OpencodeProvider,
     OpencodeSettings,
     _catalog_from_api,
+    _MODE_PERMISSIONS,
     _context_window_for,
     _form_answer_value,
     _form_field_active,
@@ -46,11 +47,9 @@ from ciao.providers.opencode import (
     compose_system,
     config_placeholder_problems,
     error_text,
-    memory_pass_guardrail_rules,
     model_accepts_images,
     missing_required_paths,
     mode_settings,
-    opencode_collab_tree_counts,
     opencode_default_model,
     resolve_opencode_binary,
     _session_handover_text,
@@ -170,10 +169,6 @@ async def test_successful_cleanup_sanitizes_startup_exception(
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda *args: "fake")
     monkeypatch.setattr(mod, "_spawn_server", spawn)
@@ -208,10 +203,6 @@ async def test_chat_spawn_exception_is_sanitized(monkeypatch, tmp_path, boundary
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     def resolve(*args):
         if boundary == "resolve":
@@ -291,7 +282,7 @@ async def test_ephemeral_none_cleanup_failure_keeps_safe_classification(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome,message", [
-    ("version", "OpenCode 2.0.16 or later is required"),
+    ("version", "OpenCode 2.3.2 or newer is required"),
     ("operations", "OpenCode API is missing required operations"),
     ("unauthorized", "OpenCode server authentication failed"),
 ])
@@ -325,7 +316,7 @@ async def test_chat_real_startup_contract_failure_has_safe_actionable_message(
 
         async def get(self, path, **kwargs):
             payload = {"version": "private-version-sentinel"} if outcome == "version" else (
-                {"version": "2.0.16"} if path == "/api/info" else {"paths": {"private-path-sentinel": {}}}
+                {"version": "2.3.2"} if path == "/api/info" else {"paths": {"private-path-sentinel": {}}}
             )
             return SimpleNamespace(status_code=401 if outcome == "unauthorized" else 200,
                                    text="authentication-response-sentinel",
@@ -337,10 +328,6 @@ async def test_chat_real_startup_contract_failure_has_safe_actionable_message(
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     async def spawn(*args, **kwargs):
         return Process(), Tree()
@@ -401,10 +388,6 @@ async def test_cancellation_during_failed_startup_cleanup_has_no_raw_context(
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     async def spawn(*args, **kwargs):
         return Process(), Tree()
@@ -476,10 +459,6 @@ async def test_chat_cancellation_while_waiting_for_exited_server_stderr(monkeypa
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     async def spawn(*args, **kwargs):
         return Process(), Tree()
@@ -531,10 +510,6 @@ def test_forcibly_closed_loop_quarantines_real_startup_owner(monkeypatch, tmp_pa
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     async def spawn(*args, **kwargs):
         if phase == "spawn":
@@ -616,10 +591,6 @@ async def test_cancellation_during_failing_spawn_has_no_raw_context(monkeypatch,
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda *args: "fake")
     monkeypatch.setattr(mod, "_spawn_server", spawn)
@@ -919,10 +890,6 @@ async def test_chat_immediate_post_spawn_failure_is_cleaned(monkeypatch, tmp_pat
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda *args: "fake")
     monkeypatch.setattr(mod, "_spawn_server", spawn)
@@ -1191,7 +1158,7 @@ def test_cross_loop_startup_serializes_chat_and_ephemeral(monkeypatch, tmp_path,
             nonlocal active
             with guard:
                 active -= 1
-            return SimpleNamespace(status_code=200, json=lambda: {"version": "2.0.16"})
+            return SimpleNamespace(status_code=200, json=lambda: {"version": "2.3.2"})
 
         async def aclose(self):
             pass
@@ -1199,10 +1166,6 @@ def test_cross_loop_startup_serializes_chat_and_ephemeral(monkeypatch, tmp_path,
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     async def chat_health(*args):
         nonlocal active
@@ -1299,10 +1262,6 @@ async def test_transient_chat_retry_releases_gate_to_queued_contender(monkeypatc
     class Request:
         extra_env = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots = ()
-        agent_denied = ()
-        agent_denied_except = ()
 
     async def spawn(*args, **kwargs):
         return Process(), Tree()
@@ -1674,7 +1633,7 @@ async def test_real_enter_cleanup_precedes_waiter_and_quarantines(monkeypatch, t
         return Process(), Tree()
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
-    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform), raising=False)
     monkeypatch.setattr(mod, "_spawn_server", spawn)
     monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
     owner = asyncio.create_task(mod._EphemeralServer(tmp_path).__aenter__())
@@ -1757,7 +1716,7 @@ async def test_cancelled_spawn_is_owned_until_child_is_reaped(monkeypatch, tmp_p
             pass
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
-    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform), raising=False)
     monkeypatch.setattr(mod, "_spawn_server", spawn)
     monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
     owner = asyncio.create_task(mod._EphemeralServer(tmp_path).__aenter__())
@@ -1814,7 +1773,7 @@ async def test_tree_construction_failure_quarantines_uncertain_spawn(
     def tree(*args, **kwargs):
         raise OSError("tree-secret")
 
-    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform), raising=False)
     monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", create)
     monkeypatch.setattr(mod, "tree_spawn_options", lambda **kwargs: {})
     monkeypatch.setattr(mod, "ProcessTree", tree)
@@ -2006,7 +1965,7 @@ def test_real_enter_cleanup_blocks_other_loop_and_quarantines(monkeypatch, tmp_p
         asyncio.run(run())
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
-    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform), raising=False)
     monkeypatch.setattr(mod, "_spawn_server", spawn)
     monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
     owner, waiter = threading.Thread(target=worker), threading.Thread(target=worker)
@@ -2118,7 +2077,7 @@ def test_cross_loop_cancelled_owner_drains_cleanup_before_waiter(
             asyncio.set_event_loop(None)
             loop.close()
 
-    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform), raising=False)
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda: "fake")
     monkeypatch.setattr(mod, "_spawn_server", spawn)
     monkeypatch.setattr(mod.httpx, "AsyncClient", Client)
@@ -2166,73 +2125,6 @@ def test_cross_loop_cancelled_owner_drains_cleanup_before_waiter(
             mod._SERVER_START_LOCKS.pop(str(tmp_path.resolve()), None)
 
 
-def test_shell_and_subagent_calls_are_backgroundable(tmp_path: Path) -> None:
-    provider = OpencodeProvider(tmp_path)
-    for tool in ("shell", "subagent"):
-        event = _convert(provider, "session.tool.called", {"id": "c1", "name": tool, "input": {}})[0]
-        assert isinstance(event, ToolUseEvent) and event.backgroundable is True
-    event = _convert(provider, "session.tool.called", {"id": "c2", "name": "read", "input": {}})[0]
-    assert isinstance(event, ToolUseEvent) and event.backgroundable is False
-
-
-def test_tool_result_is_never_backgroundable(tmp_path: Path) -> None:
-    provider = OpencodeProvider(tmp_path)
-    _convert(provider, "session.tool.called", {"id": "c1", "name": "shell", "input": {}})
-    event = _convert(provider, "session.tool.success", {"id": "c1"})[0]
-    assert isinstance(event, ToolUseEvent) and event.type == "tool_result" and not event.backgroundable
-
-
-def test_recovered_running_shell_part_is_backgroundable(tmp_path: Path) -> None:
-    provider = OpencodeProvider(tmp_path)
-    event = provider._tool_part({"callID": "c1", "tool": "shell", "state": {"status": "running", "input": {"command": "sleep 1"}}})[0]
-    assert isinstance(event, ToolUseEvent) and event.backgroundable
-
-
-def _background_provider(tmp_path: Path, post) -> tuple[OpencodeProvider, list[str]]:
-    provider = OpencodeProvider(tmp_path)
-    paths: list[str] = []
-    async def fake_post(path, json=None, timeout=None):
-        paths.append(path)
-        return await post(path, json, timeout)
-    provider._client = SimpleNamespace(post=fake_post)
-    provider._process = SimpleNamespace(returncode=None)
-    provider._session_id = "ses_s"
-    return provider, paths
-
-
-@pytest.mark.asyncio
-async def test_move_to_background_posts_and_reports_a_running_shell(tmp_path: Path) -> None:
-    async def post(*args): return SimpleNamespace(status_code=204, text="")
-    provider, paths = _background_provider(tmp_path, post)
-    provider._tool_calls = {"c1": "shell"}
-    assert await provider.move_to_background() == "moved"
-    assert paths == ["/api/session/ses_s/background"]
-
-
-@pytest.mark.asyncio
-async def test_move_to_background_with_only_other_tools_is_nothing(tmp_path: Path) -> None:
-    async def post(*args): return SimpleNamespace(status_code=204, text="")
-    provider, paths = _background_provider(tmp_path, post)
-    provider._tool_calls = {"c1": "read"}
-    assert await provider.move_to_background() == "nothing"
-    assert paths == ["/api/session/ses_s/background"]
-
-
-@pytest.mark.asyncio
-async def test_move_to_background_without_a_live_server_is_not_running(tmp_path: Path) -> None:
-    provider = OpencodeProvider(tmp_path)
-    assert await provider.move_to_background() == "not_running"
-
-
-@pytest.mark.asyncio
-async def test_move_to_background_reports_a_refusal_as_failed(tmp_path: Path) -> None:
-    async def refused(*args): return SimpleNamespace(status_code=404, text='{"_tag":"SessionNotFoundError"}')
-    provider, _ = _background_provider(tmp_path, refused)
-    assert await provider.move_to_background() == "failed"
-    async def broken(*args): raise httpx.ConnectError("x")
-    provider, _ = _background_provider(tmp_path, broken)
-    assert await provider.move_to_background() == "failed"
-
 FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
 
 
@@ -2275,7 +2167,6 @@ def test_quota_is_unsupported():
 def test_background_subagents_are_supported():
     """Child sessions carry parentID, so background agents are inspectable."""
     assert OpencodeProvider.capabilities.background_subagents is True
-    assert OpencodeProvider.capabilities.subagent_messages is True
 
 
 # ── contract verification ───────────────────────────────────────────────
@@ -2301,7 +2192,7 @@ def test_v1_and_unknown_server_versions_fail_with_the_upgrade_message():
     assert server_version_error({"version": "2.0.0"}) is not None
     assert server_version_error({"version": "3.0.0"}) is not None
     assert server_version_error({"version": "unknown"}) is not None
-    assert server_version_error({"version": "2.0.16"}) is None
+    assert server_version_error({"version": "2.3.2"}) is None
 
 
 @pytest.mark.parametrize(
@@ -2312,13 +2203,13 @@ def test_v1_and_unknown_server_versions_fail_with_the_upgrade_message():
         ("", None),
         ("unknown", None),
         # The two documented CLI forms.
-        ("2.0.16", (2, 0, 16)),
-        ("opencode v2.0.16", (2, 0, 16)),
+        ("2.3.2", (2, 3, 2)),
+        ("opencode v2.3.2", (2, 3, 2)),
         # A build suffix is not part of the number.
-        ("2.0.16-beta.3", (2, 0, 16)),
+        ("2.3.2-beta.3", (2, 3, 2)),
         # Two parts, and more than three.
         ("2.0", (2, 0)),
-        ("2.0.16.1", (2, 0, 16, 1)),
+        ("2.3.2.1", (2, 3, 2, 1)),
     ],
 )
 def test_version_number_parses_a_dotted_integer_prefix(
@@ -2332,8 +2223,8 @@ def test_version_number_parses_a_dotted_integer_prefix(
     ("payload", "expected"),
     [
         # Not a Mapping: nothing version-shaped is read from any other shape.
-        ("2.0.16", OPENCODE_V2_REQUIRED),
-        (["version", "2.0.16"], OPENCODE_V2_REQUIRED),
+        ("2.3.2", OPENCODE_V2_REQUIRED),
+        (["version", "2.3.2"], OPENCODE_V2_REQUIRED),
         # Missing or blank: refused, with no installed-version detail.
         ({}, OPENCODE_V2_REQUIRED),
         ({"version": "   "}, OPENCODE_V2_REQUIRED),
@@ -2341,6 +2232,9 @@ def test_version_number_parses_a_dotted_integer_prefix(
         ({"version": "unknown"}, f"{OPENCODE_V2_REQUIRED} Installed server version: unknown."),
         ({"version": "1.18.18"}, f"{OPENCODE_V2_REQUIRED} Installed server version: 1.18.18."),
         ({"version": "2.0.15"}, f"{OPENCODE_V2_REQUIRED} Installed server version: 2.0.15."),
+        ({"version": "2.0.16"}, f"{OPENCODE_V2_REQUIRED} Installed server version: 2.0.16."),
+        ({"version": "2.3.0"}, f"{OPENCODE_V2_REQUIRED} Installed server version: 2.3.0."),
+        ({"version": "2.3.1"}, f"{OPENCODE_V2_REQUIRED} Installed server version: 2.3.1."),
         ({"version": "2.0"}, f"{OPENCODE_V2_REQUIRED} Installed server version: 2.0."),
         ({"version": "3.0.0"}, f"{OPENCODE_V2_REQUIRED} Installed server version: 3.0.0."),
     ],
@@ -2354,7 +2248,7 @@ def test_server_version_error_refuses_beyond_the_v2_floor(
 
 @pytest.mark.parametrize(
     "reported",
-    ["2.0.16", "opencode v2.0.16", "2.3.0", "2.0.16-beta.3"],
+    ["2.3.2", "opencode v2.3.2", "2.4.0", "2.3.2-beta.3"],
 )
 def test_server_version_error_accepts_supported_v2(reported: str) -> None:
     """``None`` still means version-supported, not healthy or authenticated."""
@@ -2365,8 +2259,8 @@ def test_server_version_error_accepts_mapping_subclasses_and_strips() -> None:
     """Mapping acceptance is structural, and a padded version is stripped first."""
     from collections import UserDict
 
-    assert server_version_error(UserDict(version="2.0.16")) is None
-    assert server_version_error({"version": "  2.0.16  "}) is None
+    assert server_version_error(UserDict(version="2.3.2")) is None
+    assert server_version_error({"version": "  2.3.2  "}) is None
 
 
 def test_public_version_helpers_are_defined_exactly_once_and_not_aliased() -> None:
@@ -2447,9 +2341,9 @@ def test_public_version_helpers_touch_no_provider_resources(monkeypatch) -> None
         calls[seam] = 0
 
     # ...so a zero count over the helper calls means none of them fired.
-    assert mod.version_number("2.0.16") == (2, 0, 16)
+    assert mod.version_number("2.3.2") == (2, 3, 2)
     assert mod.version_number(None) is None
-    assert mod.server_version_error({"version": "2.0.16"}) is None
+    assert mod.server_version_error({"version": "2.3.2"}) is None
     assert mod.server_version_error({"version": "1.18.18"}) == (
         f"{OPENCODE_V2_REQUIRED} Installed server version: 1.18.18."
     )
@@ -2561,39 +2455,9 @@ def test_auto_allows_everything_but_keeps_shell_gated():
     actions = _actions("auto")
     assert actions["*"] == "allow"
     assert actions["shell"] == "ask"
-    assert actions["glob"] == "ask"
-    assert actions["grep"] == "ask"
     assert "edit" not in actions
     shell = _shell_patterns("auto")
     assert shell["ask"] == {"*"}
-
-
-@pytest.mark.parametrize("mode", ["plan", "normal", "auto"])
-def test_v2_search_actions_require_explicit_approval(mode: BridgeMode):
-    rules = mode_settings(mode)[1]
-    for action in {"glob", "grep"}:
-        matching = [
-            rule for rule in rules
-            if rule["action"] == action and rule["resource"] == "*"
-        ]
-        assert matching[-1]["effect"] == "ask"
-
-
-def test_bypass_lets_search_actions_run_without_a_card():
-    rules = mode_settings("bypass")[1]
-    for action in ("glob", "grep"):
-        matching = [
-            rule for rule in rules
-            if rule["action"] in (action, "*") and rule["resource"] == "*"
-        ]
-        assert matching[-1]["effect"] == "allow"
-
-
-def test_protected_glob_patterns_remain_hard_denied_after_search_approval():
-    rules = mode_settings("bypass")[1]
-    glob_rules = [rule for rule in rules if rule["action"] == "glob"]
-    assert next(rule["effect"] for rule in reversed(glob_rules) if rule["resource"] == ".env") == "deny"
-    assert next(rule["effect"] for rule in reversed(glob_rules) if rule["resource"] == ".runtime/**") == "deny"
 
 
 def test_plan_mode_is_read_only():
@@ -2609,50 +2473,12 @@ def test_tools_can_be_disabled_for_one_shot_sessions():
     assert rules == [{"action": "*", "resource": "*", "effect": "deny"}]
 
 
-# ── memory-pass guardrails ──────────────────────────────────────────────
-# The end-of-conversation memory pass runs as an attended `bypass` chat, but
-# a blanket `allow` is the wrong ruleset for it: the pass edits the vault and
-# needs nothing else. opencode also ignores `disallowed_tools`, so the only
-# place a stricter ruleset can live is the session's own permission set.
-
-
-def test_memory_pass_rule_is_an_allow_list_that_denies_search_and_mcp():
-    rules = memory_pass_guardrail_rules()
-
-    # Deny-all first: opencode resolves last-match-wins, so every carve-out has
-    # to follow the wildcard. That wildcard is also what blocks MCP — its
-    # permission union has no `mcp` action to name.
-    assert rules[0] == {"action": "*", "resource": "*", "effect": "deny"}
-
-    allowed = {rule["action"] for rule in rules if rule["effect"] == "allow"}
-    # What a pass actually needs: read and edit the vault, and shell out to
-    # `ciao vault search` because a search cannot be scoped to the vault.
-    assert {
-        "read",
-        "edit",
-        "write",
-        "shell",
-        "external_directory",
-        "question",
-    } <= allowed
-    # Search is denied outright, not left at the default `ask`: 7 of 12
-    # opencode agent chats in the #594 experiment stopped on that card, and V2
-    # sends the pattern as the resource so it cannot be scoped anyway.
-    assert not allowed & {"glob", "grep"}
-    for action in ("glob", "grep"):
-        assert next(
-            rule["effect"] for rule in reversed(rules) if rule["action"] == action
-        ) == "deny"
-    # gws skills are denied by name even though `skill` is allowed, so the
-    # vault skills around them still run.
-    assert {"action": "skill", "resource": "gws-*", "effect": "deny"} in rules
-    # Every grant is a bare `*` resource, so an action nobody allowed — an
-    # MCP call among them — matches no allow and falls through to the deny.
-    assert {rule["resource"] for rule in rules if rule["effect"] == "allow"} == {"*"}
-    # The credential denies come last so nothing above can outrank them.
-    assert rules[len(rules) - len(opencode_credential_deny_rules()):] == (
-        opencode_credential_deny_rules()
-    )
+@pytest.mark.parametrize("mode", ["plan", "normal", "auto", "bypass"])
+def test_mode_rules_are_the_mode_table_only(mode: BridgeMode):
+    assert mode_settings(mode)[1] == _MODE_PERMISSIONS[mode]
+    assert mode_settings(mode, tools_enabled=False)[1] == [
+        {"action": "*", "resource": "*", "effect": "deny"}
+    ]
 
 
 @pytest.mark.parametrize("mode", ["plan", "bypass"])
@@ -2671,30 +2497,6 @@ def test_session_settings_prefers_custom_rules(tmp_path: Path, mode: BridgeMode)
     assert agent == "build"
     assert rules == custom
     assert rules is not custom
-
-
-def test_session_settings_uses_the_guardrail_for_a_memory_pass(tmp_path: Path):
-    plain = OpencodeProvider(tmp_path)
-    request = AgentRequest(
-        prompt="p", model="m", mode="bypass", provider="opencode", memory_pass=True
-    )
-
-    # A pass takes the allow-list instead of bypass's blanket `allow`, so the
-    # marker — not the mode — is what selects the guardrail.
-    assert plain._session_settings(request) == (
-        "build",
-        memory_pass_guardrail_rules(plain._runtime_root(), plain.workspace_root),
-    )
-
-    # An ordinary chat in the same mode is untouched.
-    ordinary = AgentRequest(prompt="p", model="m", mode="bypass", provider="opencode")
-    assert plain._session_settings(ordinary) == mode_settings("bypass")
-
-    # A caller-supplied ruleset still wins: it is the read-only memory agent,
-    # not a pass, and it is not running a Ciaobot mode at all.
-    custom = [{"action": "*", "resource": "*", "effect": "deny"}]
-    scoped = OpencodeProvider(tmp_path, permission_rules=custom)
-    assert scoped._session_settings(request) == ("build", custom)
 
 
 class _SessionResponse:
@@ -3298,58 +3100,6 @@ def test_default_model_on_a_config_without_opencode():
     assert opencode_default_model(object()) == ""
 
 
-# ── collaboration tree counts ────────────────────────────────────────────
-
-
-def test_collab_tree_counts_use_v2_active_session_metadata():
-    tree = [
-        {"info": {"id": "a", "outcome": "failed"}, "active": True, "messages": []},
-        {"info": {"id": "b", "outcome": "succeeded"}, "active": False, "messages": []},
-        {"info": {"id": "c", "outcome": "failed"}, "active": False, "messages": []},
-        {"info": {"id": "d"}, "active": False, "messages": []},
-    ]
-    running, had_subagents = opencode_collab_tree_counts(tree)
-    assert running == 1
-    assert had_subagents is True
-
-
-def test_collab_tree_counts_are_empty_for_an_empty_tree():
-    assert opencode_collab_tree_counts([]) == (0, False)
-
-
-def test_collab_tree_counts_tolerate_junk():
-    assert opencode_collab_tree_counts([None, {"info": {}}, {"messages": "nope"}]) == (0, True)
-
-
-@pytest.mark.asyncio
-async def test_live_collab_tree_preserves_children_when_activity_lookup_fails(
-    tmp_path, monkeypatch,
-):
-    provider = _provider(tmp_path)
-    provider._client = object()  # type: ignore[assignment]
-    provider._session_id = "ses_parent"
-
-    async def children(_client, _parent_id):
-        return [{"id": "ses_child", "parentID": "ses_parent"}]
-
-    async def active(_client):
-        raise RuntimeError("activity endpoint unavailable")
-
-    async def messages(_client, _child_id):
-        return []
-
-    monkeypatch.setattr("ciao.providers.opencode._read_v2_children", children)
-    monkeypatch.setattr("ciao.providers.opencode._read_active_sessions", active)
-    monkeypatch.setattr("ciao.providers.opencode._read_v2_messages", messages)
-
-    tree = await provider.read_live_collab_tree()
-
-    assert tree[0]["info"]["id"] == "ses_child"
-    assert tree[0]["active"] is None
-    # Unknown activity remains conservative instead of looking settled.
-    assert opencode_collab_tree_counts(tree) == (1, True)
-
-
 # ── event normalization ─────────────────────────────────────────────────
 
 
@@ -3822,7 +3572,6 @@ def test_v2_form_validation_covers_typed_constraints():
         )
     with pytest.raises(ValueError, match="Choose one answer"):
         _validate_form_field({"type": "string", "custom": True}, ["option", "other"])
-
 
 
 # ── permission.asked surfaces a card ────────────────────────────────────
@@ -5251,7 +5000,7 @@ async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch, p
         return FakeProcess()
 
     monkeypatch.setattr("ciao.providers.opencode.ProcessTree", FakeTree)
-    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform=platform), raising=False)
 
     monkeypatch.setattr(
         "ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: "/bin/opencode"
@@ -5266,10 +5015,6 @@ async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch, p
     class Request:
         extra_env: dict = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots: tuple = ()
-        agent_denied: tuple = ()
-        agent_denied_except: tuple = ()
 
     with pytest.raises(RuntimeError, match="OpenCode startup failed"):
         await provider._ensure_server(Request())  # type: ignore[arg-type]
@@ -5278,101 +5023,6 @@ async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch, p
     assert provider._process is None
     assert provider._client is None
     FakeProcess.returncode = None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("live_roots", "expect_restart"),
-    [(("/w/agent",), True), (("/w/agent", "/w/data"), False)],
-)
-async def test_a_changed_root_set_restarts_the_opencode_server(
-    tmp_path, monkeypatch, live_roots, expect_restart
-):
-    """The sandbox profile wraps the server process, so a changed root set (a
-    setup chat granted the data root) must restart it; an unchanged one keeps it."""
-    from types import SimpleNamespace
-
-    from ciao.models import provider_reuse_key
-
-    provider = _provider(tmp_path)
-    live_client = object()
-    provider._client = live_client  # type: ignore[assignment]
-    provider._process = SimpleNamespace(returncode=None)  # type: ignore[assignment]
-
-    class Request:
-        extra_env: dict = {}
-        mcp_token = ""
-        agent_fs_scope = "workspace"
-        agent_roots = ("/w/agent", "/w/data")
-        agent_denied: tuple = ()
-        agent_denied_except: tuple = ()
-        agent_read_only: tuple = ()
-
-    request = Request()
-    provider._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
-    provider._fs_scope_key = ("workspace", live_roots, (), ())
-    stopped: list[bool] = []
-
-    async def fake_disconnect() -> None:
-        stopped.append(True)
-        provider._client = None
-        provider._process = None
-
-    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
-    # Stop after the reuse decision: with no binary, a restart raises here.
-    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: None)
-
-    if expect_restart:
-        with pytest.raises(FileNotFoundError):
-            await provider._ensure_server(request)  # type: ignore[arg-type]
-        assert stopped == [True]
-    else:
-        assert await provider._ensure_server(request) is live_client  # type: ignore[arg-type]
-        assert stopped == []
-
-
-@pytest.mark.asyncio
-async def test_a_changed_denied_except_restarts_the_opencode_server(tmp_path, monkeypatch):
-    """Re-linking a Google account changes the re-allowed folder in the sandbox
-    profile, so the server must restart."""
-    from types import SimpleNamespace
-
-    from ciao.models import provider_reuse_key
-
-    provider = _provider(tmp_path)
-    provider._client = object()  # type: ignore[assignment]
-    provider._process = SimpleNamespace(returncode=None)  # type: ignore[assignment]
-
-    class Request:
-        extra_env: dict = {}
-        mcp_token = ""
-        agent_fs_scope = "workspace"
-        agent_roots = ("/w/agent",)
-        agent_denied = ("/w/agent/secrets",)
-        agent_denied_except = ("/w/agent/secrets/gws-b",)
-        agent_read_only: tuple = ()
-
-    request = Request()
-    provider._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
-    provider._fs_scope_key = (
-        "workspace",
-        ("/w/agent",),
-        ("/w/agent/secrets",),
-        ("/w/agent/secrets/gws-a",),
-    )
-    stopped: list[bool] = []
-
-    async def fake_disconnect() -> None:
-        stopped.append(True)
-        provider._client = None
-        provider._process = None
-
-    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
-    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: None)
-
-    with pytest.raises(FileNotFoundError):
-        await provider._ensure_server(request)  # type: ignore[arg-type]
-    assert stopped == [True]
 
 
 @pytest.mark.asyncio
@@ -5424,10 +5074,6 @@ async def test_database_lock_during_startup_retries_after_contention(tmp_path, m
     class Request:
         extra_env: dict = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots: tuple = ()
-        agent_denied: tuple = ()
-        agent_denied_except: tuple = ()
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]
 
@@ -5491,10 +5137,6 @@ async def test_never_healthy_server_gets_startup_retries(tmp_path, monkeypatch):
     class Request:
         extra_env: dict = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots: tuple = ()
-        agent_denied: tuple = ()
-        agent_denied_except: tuple = ()
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]
 
@@ -5589,8 +5231,6 @@ async def test_missing_binary_says_how_to_fix_it(tmp_path, monkeypatch):
     class Request:
         extra_env: dict = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots: tuple = ()
 
     with pytest.raises(FileNotFoundError, match="login shell PATH"):
         await provider._ensure_server(Request())  # type: ignore[arg-type]
@@ -5639,10 +5279,6 @@ async def test_the_servers_stderr_is_drained_and_kept_for_errors(tmp_path, monke
     class Request:
         extra_env: dict = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots: tuple = ()
-        agent_denied: tuple = ()
-        agent_denied_except: tuple = ()
 
     with pytest.raises(RuntimeError, match="OpenCode startup failed"):
         await provider._ensure_server(Request())  # type: ignore[arg-type]
@@ -5689,10 +5325,6 @@ async def test_opencode_process_does_not_inherit_the_agent_token(tmp_path, monke
     class Request:
         extra_env: dict = {"CIAO_AGENT_TOKEN": "stale-from-request-env"}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots: tuple = ()
-        agent_denied: tuple = ()
-        agent_denied_except: tuple = ()
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]
 
@@ -5735,7 +5367,7 @@ def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
         state_path=tmp_path / ".runtime" / "state.json",
         media_root=tmp_path / ".runtime" / "media",
     )
-    monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[
+    monkeypatch.setattr(OpencodeAcpProvider, "model_catalog", AsyncMock(return_value=[
         {"model": "opencode/big-pickle", "label": "Big Pickle (opencode)"},
     ]))
     def _request(query: bytes = b"") -> Request:
@@ -5749,15 +5381,15 @@ def test_models_route_reports_opencode_capabilities(tmp_path, monkeypatch):
 
     by_id = {item["id"]: item for item in payload["providers"]}
     assert by_id["opencode"]["capabilities"]["background_subagents"] is True
-    assert by_id["opencode"]["short_label"] == "opencode"
+    assert by_id["opencode"]["short_label"] == "OpenCode"
     assert payload["opencode_models"] == ["opencode/big-pickle"]
     assert payload["backends"]["opencode"] is True
 
     # `?refresh=1` bypasses the provider catalog caches, so a provider connected
     # in another window shows up without waiting out the 5-minute TTL.
-    assert OpencodeProvider.model_catalog.await_args.kwargs["force"] is False
+    assert OpencodeAcpProvider.model_catalog.await_args.kwargs["force"] is False
     asyncio.run(list_models(_request(b"refresh=1")))
-    assert OpencodeProvider.model_catalog.await_args.kwargs["force"] is True
+    assert OpencodeAcpProvider.model_catalog.await_args.kwargs["force"] is True
 
 
 # ── credential reporting ────────────────────────────────────────────────
@@ -6279,7 +5911,7 @@ def test_credential_count_reads_the_v2_json_listing(monkeypatch):
     assert mod._credential_count("/bin/opencode", timeout=1.0) == 0
 
 
-def test_status_reports_skills_plugins_and_mcps_from_the_server(monkeypatch):
+def test_status_reports_skills_and_plugins_from_the_server(monkeypatch):
     """Settings lists what the opencode CLI brings; the V2 server's list routes
     are the source, minus built-in and failed plugins."""
     from types import SimpleNamespace
@@ -6293,7 +5925,6 @@ def test_status_reports_skills_plugins_and_mcps_from_the_server(monkeypatch):
             {"id": "review", "source": {"type": "local"}, "state": {"status": "active"}},
             {"id": "dupe", "source": {"type": "local"}, "state": {"status": "failed"}},
         ],
-        "/api/mcp": [{"name": "github"}],
     }
 
     run_calls = []
@@ -6301,7 +5932,7 @@ def test_status_reports_skills_plugins_and_mcps_from_the_server(monkeypatch):
     def fake_run(cmd, *a, **k):
         run_calls.append(cmd)
         if cmd[1] == "--version":
-            return SimpleNamespace(stdout="opencode v2.0.16\n", returncode=0)
+            return SimpleNamespace(stdout="opencode v2.3.2\n", returncode=0)
         return SimpleNamespace(stdout="[]", returncode=0)
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
@@ -6310,14 +5941,14 @@ def test_status_reports_skills_plugins_and_mcps_from_the_server(monkeypatch):
     monkeypatch.setattr(
         mod,
         "_fetch_inventory_rows",
-        lambda binary, **_k: (routes["/api/skill"], routes["/api/plugin"], routes["/api/mcp"]),
+        lambda binary, **_k: (routes["/api/skill"], routes["/api/plugin"]),
     )
 
     status = mod.opencode_login_status()
 
     assert status["skills"] == ["pdf", "review"]
     assert status["bundled_skills"] == ["opencode"]
-    assert status["mcps"] == ["github"]
+    assert "mcps" not in status
     assert not any(len(cmd) > 1 and cmd[1] == "api" for cmd in run_calls)
 
 
@@ -6329,20 +5960,20 @@ def test_status_leaves_out_lists_the_server_could_not_report(monkeypatch):
 
     def fake_run(cmd, *a, **k):
         if cmd[1] == "--version":
-            return SimpleNamespace(stdout="opencode v2.0.16\n", returncode=0)
+            return SimpleNamespace(stdout="opencode v2.3.2\n", returncode=0)
         return SimpleNamespace(stdout="[]", returncode=0)
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
     monkeypatch.setattr("subprocess.run", fake_run)
     monkeypatch.setattr(mod, "_credential_count", lambda *a, **k: 0)
-    monkeypatch.setattr(mod, "_fetch_inventory_rows", lambda binary, **_k: (None, [], []))
+    monkeypatch.setattr(mod, "_fetch_inventory_rows", lambda binary, **_k: (None, []))
 
     status = mod.opencode_login_status()
 
     assert status["ok"] is True
     assert "skills" not in status
     assert "bundled_skills" not in status
-    assert status["mcps"] == []
+    assert "mcps" not in status
 
 
 def _inventory_client(handler):
@@ -6378,17 +6009,17 @@ def test_inventory_waits_until_plugins_load(monkeypatch):
             if plugin_calls <= 2:
                 return httpx.Response(200, json={"data": [builtin, {"id": "opencode2"}]})
             return httpx.Response(200, json={"data": [builtin, {"id": "pdf"}]})
-        return httpx.Response(200, json={"data": [{"name": "github"}]})
+        return httpx.Response(404)
 
     with _inventory_client(handler) as client:
-        skills, plugins, mcps = mod._read_loaded_inventory(
+        skills, plugins = mod._read_loaded_inventory(
             client, SimpleNamespace(poll=lambda: None),
             deadline=time.monotonic() + 5, location="/home/x",
         )
 
     assert any(row["id"] == "pdf" for row in skills)
     assert len(plugins) == 1
-    assert mcps == [{"name": "github"}]
+    assert not any(r.url.path == "/api/mcp" for r in seen)
     assert all(r.url.params["location[directory]"] == "/home/x" for r in seen)
     assert sum(1 for r in seen if r.url.path == "/api/plugin") == 3
 
@@ -6412,7 +6043,7 @@ def test_inventory_is_unknown_when_the_server_never_loads(monkeypatch):
             deadline=time.monotonic() + 0.05, location="/home/x",
         )
 
-    assert rows == (None, None, None)
+    assert rows == (None, None)
 
 
 def test_inventory_is_unknown_when_the_server_exits():
@@ -6435,7 +6066,7 @@ def test_inventory_is_unknown_when_the_server_exits():
             deadline=time.monotonic() + 5, location="/home/x",
         )
 
-    assert rows == (None, None, None)
+    assert rows == (None, None)
     assert called == []
 
 
@@ -6452,7 +6083,7 @@ def test_inventory_spawns_a_private_server_in_home_not_the_service(monkeypatch):
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
 
-    assert mod._fetch_inventory_rows("/bin/opencode") == (None, None, None)
+    assert mod._fetch_inventory_rows("/bin/opencode") == (None, None)
 
     argv, kwargs = recorded[0]
     assert argv[:2] == ["/bin/opencode", "serve"]
@@ -6474,7 +6105,7 @@ def test_login_status_without_inventory_starts_no_server(monkeypatch):
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
     monkeypatch.setattr(
-        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout="opencode v2.0.27\n", returncode=0)
+        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout="opencode v2.3.2\n", returncode=0)
     )
     monkeypatch.setattr(mod, "_credential_count", lambda *a, **k: 1)
     monkeypatch.setattr(mod, "_fetch_inventory_rows", no_server)
@@ -6497,7 +6128,7 @@ def test_system_skills_lists_every_skill_row(monkeypatch):
     monkeypatch.setattr(
         mod,
         "_fetch_inventory_rows",
-        lambda binary, **_k: (skills, [{"id": "review"}], [{"name": "github"}]),
+        lambda binary, **_k: (skills, [{"id": "review"}]),
     )
 
     assert mod.opencode_system_skills() == ["loop-engineering", "opencode"]
@@ -6512,7 +6143,7 @@ def test_system_skills_cached_within_ttl(monkeypatch):
 
     def fetch(binary, **_k):
         calls.append(binary)
-        return ([{"name": "pdf"}], [], [])
+        return ([{"name": "pdf"}], [])
 
     monkeypatch.setattr(mod, "_fetch_inventory_rows", fetch)
     start = 1000.0
@@ -6534,7 +6165,7 @@ def test_system_skills_empty_without_binary_or_server(monkeypatch):
 
     def fetch(binary, **_k):
         calls.append(binary)
-        return (None, None, None)
+        return (None, None)
 
     monkeypatch.setattr(mod, "_fetch_inventory_rows", fetch)
 
@@ -6576,7 +6207,7 @@ def test_status_does_not_claim_authentication_without_credentials(monkeypatch):
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
     monkeypatch.setattr(mod, "_credential_count", lambda *_a, **_k: 0)
-    monkeypatch.setattr("subprocess.run", lambda *a, **k: __import__("types").SimpleNamespace(stdout="opencode v2.0.16\n"))
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: __import__("types").SimpleNamespace(stdout="opencode v2.3.2\n"))
 
     status = mod.opencode_login_status()
 
@@ -6616,8 +6247,8 @@ def test_dynamic_catalog_providers_skip_the_configured_model_check():
     from ciao.provider_service import capabilities_for
 
     assert capabilities_for("opencode").dynamic_models is True
-    # Claude's catalog is configured, so it must stay validated.
-    assert capabilities_for("claude").dynamic_models is False
+    # Claude's model list is the adapter's own catalog too (#3138), so it is exempt as well.
+    assert capabilities_for("claude").dynamic_models is True
     # An unknown provider must not be waved through.
     assert capabilities_for("nope").dynamic_models is False
 
@@ -6648,15 +6279,6 @@ def test_an_opencode_model_id_is_accepted(tmp_path):
     """`opencode/hy3-free` must not be rejected against the Claude model list."""
     manager = _chat_manager(tmp_path)
     manager._validate_configured_model("opencode/hy3-free", "opencode")
-
-
-def test_an_unconfigured_claude_model_is_still_rejected(tmp_path):
-    """The exemption must not disable validation for configured-catalog providers."""
-    from ciao.web.project_chats import UnknownModelError
-
-    manager = _chat_manager(tmp_path)
-    with pytest.raises(UnknownModelError):
-        manager._validate_configured_model("totally-made-up-model", "claude")
 
 
 # ── catalog caching ─────────────────────────────────────────────────────
@@ -7272,666 +6894,95 @@ async def test_the_ephemeral_server_degrades_when_the_wrapper_is_broken(
         assert client is None
 
 
-@pytest.mark.parametrize("failure", [False, True])
-async def test_live_mcp_status_uses_v2_contract_and_is_bounded(tmp_path, failure):
-    from types import SimpleNamespace
-
-    provider = OpencodeProvider(tmp_path)
-    calls = []
-
-    class Response:
-        def raise_for_status(self):
-            if failure:
-                raise TimeoutError("private upstream detail")
-
-        def json(self):
-            return {
-                "data": [
-                    {"name": "notion", "status": {"status": "failed", "error": "secret"}},
-                    {"name": "linear", "status": {"status": "connected"}},
-                    {"name": "disabled", "status": {"status": "disabled"}},
-                ]
-            }
+@pytest.mark.asyncio
+async def test_opencode_stop_interrupts_without_touching_the_inbox(tmp_path):
+    """Stop posts the interrupt and does not cancel inbox items."""
+    provider = _provider(tmp_path)
 
     class Client:
-        async def get(self, path, *, timeout):
-            calls.append((path, timeout))
-            if failure:
-                raise TimeoutError("private upstream detail")
-            return Response()
+        def __init__(self) -> None:
+            self.posts: list[str] = []
+            self.deletes: list[str] = []
 
-    provider._client = Client()
-    provider._process = SimpleNamespace(returncode=None)
-    if failure:
-        with pytest.raises(TimeoutError):
-            await provider.read_mcp_status()
-    else:
-        assert await provider.read_mcp_status() == {
-            "notion": "failed", "linear": "connected", "disabled": "disabled"
-        }
-    assert calls == [("/api/mcp", 2.0)]
+        async def post(self, path: str, json=None, timeout=None):
+            self.posts.append(path)
 
+        async def delete(self, path: str, timeout=None):
+            self.deletes.append(path)
 
-# ── #1392 B: steering a running turn ─────────────────────────────────────
-#
-# `steer_turn.jsonl` and `steer_new_execution.jsonl` are sanitized 2.0.27
-# captures of a `delivery: "steer"` prompt joining a running execution and
-# starting a new one. Ids are shortened: `msg_ours` is the turn's prompt and
-# `msg_steer` the steered message.
-
-
-class _SteerStream(_FakeEventStream):
-    """A turn stream whose ``lines`` may hold async hooks run between frames."""
-
-    async def aiter_bytes(self):
-        for line in self._lines:
-            if callable(line):
-                await line()
-            else:
-                yield line.encode("utf-8")
-
-
-class _SteerClient(_FakeServerClient):
-    """Records prompt, steer and inbox-cancel calls."""
-
-    def __init__(self, lines, steer_failure: Exception | None = None) -> None:
-        super().__init__(lines)
-        self.posts: list[tuple[str, dict]] = []
-        self.deletes: list[str] = []
-        self.steer_failure = steer_failure
-
-    def stream(self, _method: str, _path: str) -> _SteerStream:
-        return _SteerStream(self._lines)
-
-    async def post(self, path: str, json=None, timeout=None):
-        body = dict(json or {})
-        self.posts.append((path, body))
-        if body.get("delivery") == "steer":
-            self.steer_timeout = timeout
-            if self.steer_failure is not None:
-                raise self.steer_failure
-        return await super().post(path, json=json)
-
-    async def delete(self, path: str, timeout=None):
-        self.deletes.append(path)
-
-        class _Gone:
-            status_code = 204
-            text = ""
-
-        return _Gone()
-
-
-def _steer_lines(name: str) -> list[str]:
-    return [
-        line
-        for line in (FIXTURES / name).read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-
-
-def _steer_frames(
-    lines: list[str], hook, *, before: str | None = None, after: str | None = None
-) -> list:
-    """Frame the fixture lines, running ``hook`` before/after the first ``kind``."""
-    frames: list = []
-    placed = False
-    for line in lines:
-        kind = json.loads(line)["type"]
-        if before and kind == before and not placed:
-            frames.append(hook)
-            placed = True
-        frames.append(f"data: {line}\n\n")
-        if after and kind == after and not placed:
-            frames.append(hook)
-            placed = True
-    assert placed
-    return frames
-
-
-def _tokens(monkeypatch, *names: str) -> None:
-    from ciao.providers import opencode as module
-
-    queue = list(names)
-    monkeypatch.setattr(module.secrets, "token_hex", lambda _n: queue.pop(0))
-
-
-async def _steered_turn(provider, monkeypatch, client, session: str):
-    """Run a turn; the hook in ``client`` frames calls ``steer_turn``."""
-    async def fake_server(_request):
-        return client
-
-    async def fake_session(_request):
-        return session
-
-    monkeypatch.setattr(provider, "_ensure_server", fake_server)
-    monkeypatch.setattr(provider, "_ensure_session", fake_session)
+    client = Client()
     provider._client = client
-    provider._session_id = session
-    request = AgentRequest(prompt="go", model="", mode="bypass", provider="opencode")
-    return [
-        event async for event in provider.run_streaming(request, lambda _handle: None)
-    ]
+    await provider.abort_session("ses_stop")
 
-
-def _hook(provider, results: list, text: str = "Also, say PINEAPPLE."):
-    async def steer() -> None:
-        results.append(
-            await provider.steer_turn(
-                AgentRequest(prompt=text, model="", mode="bypass", provider="opencode")
-            )
-        )
-
-    return steer
-
-
-@pytest.mark.asyncio
-async def test_steer_turn_refused_before_own_delivery(tmp_path):
-    provider = _provider(tmp_path)
-    client = _SteerClient([])
-    provider._client = client
-    provider._session_id = "ses_1"
-    provider._turn_open = True
-    provider._owned_delivery_seen = False
-
-    request = AgentRequest(prompt="x", model="", mode="bypass", provider="opencode")
-    assert await provider.steer_turn(request) is None
-    assert client.posts == []
-    assert provider._steer_ids_pending == set()
-
-
-@pytest.mark.asyncio
-async def test_steer_turn_refused_without_an_open_turn_or_after_stop(tmp_path):
-    provider = _provider(tmp_path)
-    client = _SteerClient([])
-    provider._client = client
-    provider._session_id = "ses_1"
-    provider._owned_delivery_seen = True
-    request = AgentRequest(prompt="x", model="", mode="bypass", provider="opencode")
-
-    assert await provider.steer_turn(request) is None
-    provider._turn_open = True
-    provider._stop_requested = "ses_1"
-    assert await provider.steer_turn(request) is None
-    assert client.posts == []
-
-
-@pytest.mark.asyncio
-async def test_steer_turn_posts_steer_delivery_with_our_id(tmp_path):
-    import re
-
-    provider = _provider(tmp_path)
-    client = _SteerClient([])
-    provider._client = client
-    provider._session_id = "ses_1"
-    provider._turn_open = True
-    provider._owned_delivery_seen = True
-
-    request = AgentRequest(prompt="Also PINEAPPLE", model="", mode="bypass", provider="opencode")
-    delivery_id = await provider.steer_turn(request)
-
-    (path, body), = client.posts
-    assert path == "/api/session/ses_1/prompt"
-    assert body["delivery"] == "steer"
-    assert re.fullmatch(r"msg_[0-9a-f]{24}", body["id"])
-    assert delivery_id == body["id"]
-    assert "Also PINEAPPLE" in body["text"]
-    assert provider._steer_ids_pending == {delivery_id}
-    assert client.steer_timeout is not None
-
-
-@pytest.mark.asyncio
-async def test_steer_turn_sends_images_as_files(tmp_path):
-    from ciao.models import ImageAttachment
-
-    image = tmp_path / "red.png"
-    image.write_bytes(b"png")
-    provider = _provider(tmp_path)
-    client = _SteerClient([])
-    provider._client = client
-    provider._session_id = "ses_1"
-    provider._turn_open = True
-    provider._owned_delivery_seen = True
-    request = AgentRequest(
-        prompt="what colour?", model="", mode="bypass", provider="opencode",
-        images=[ImageAttachment(path=image, mime_type="image/png", original_filename="red.png")],
-    )
-
-    assert await provider.steer_turn(request) is not None
-    (_path, body), = client.posts
-    assert body["files"] == [{"uri": image.resolve().as_uri(), "name": "red.png"}]
-
-
-@pytest.mark.asyncio
-async def test_steer_turn_timeout_returns_none_and_cancels_the_item(tmp_path):
-    import httpx
-
-    provider = _provider(tmp_path)
-    client = _SteerClient([], steer_failure=httpx.ReadTimeout("slow"))
-    provider._client = client
-    provider._session_id = "ses_1"
-    provider._turn_open = True
-    provider._owned_delivery_seen = True
-    request = AgentRequest(prompt="x", model="", mode="bypass", provider="opencode")
-
-    assert await provider.steer_turn(request) is None
-    assert provider._steer_ids_pending == set()
-    sent_id = client.posts[0][1]["id"]
-    # The request may have landed server-side: do not leave a ghost steer.
-    assert client.deletes == [f"/api/session/ses_1/inbox/{sent_id}"]
-
-
-@pytest.mark.asyncio
-async def test_steered_item_joins_running_execution(tmp_path, monkeypatch):
-    from ciao.models import ResultEvent, SteerDeliveredEvent
-
-    provider = _provider(tmp_path)
-    results: list = []
-    frames = _steer_frames(
-        _steer_lines("steer_turn.jsonl"), _hook(provider, results),
-        after="session.tool.called",
-    )
-    client = _SteerClient(frames)
-    _tokens(monkeypatch, "ours", "steer")
-    events = await _steered_turn(provider, monkeypatch, client, "ses_steer_turn")
-
-    assert results == ["msg_steer"]
-    steered = [e for e in events if isinstance(e, SteerDeliveredEvent)]
-    assert [e.delivery_id for e in steered] == ["msg_steer"]
-    final_text = next(
-        i for i, e in enumerate(events) if e.type == "text" and "PINEAPPLE" in e.text
-    )
-    assert events.index(steered[0]) < final_text
-    (result,) = [e for e in events if isinstance(e, ResultEvent)]
-    assert "PINEAPPLE" in result.result and not result.is_error
-    assert provider._steer_ids_pending == set()
-    assert provider._turn_open is False
-
-
-@pytest.mark.asyncio
-async def test_steer_after_terminal_keeps_pump_open(tmp_path, monkeypatch):
-    from ciao.models import ResultEvent, SteerDeliveredEvent
-
-    provider = _provider(tmp_path)
-    results: list = []
-    frames = _steer_frames(
-        _steer_lines("steer_new_execution.jsonl"), _hook(provider, results),
-        before="session.execution.succeeded",
-    )
-    client = _SteerClient(frames)
-    _tokens(monkeypatch, "ours", "steer")
-    events = await _steered_turn(provider, monkeypatch, client, "ses_steer_idle")
-
-    assert results == ["msg_steer"]
-    assert [e.delivery_id for e in events if isinstance(e, SteerDeliveredEvent)] == [
-        "msg_steer"
-    ]
-    (result,) = [e for e in events if isinstance(e, ResultEvent)]
-    assert "HI PINEAPPLE" in result.result and not result.is_error
-    assert result.result.startswith("HI")
-
-
-@pytest.mark.asyncio
-async def test_foreign_wake_during_steer_wait_is_not_ours(tmp_path, monkeypatch):
-    from ciao.models import ResultEvent, SteerDeliveredEvent
-
-    def ev(kind: str, **data) -> str:
-        return json.dumps({"id": f"e_{kind}", "type": kind, "data": {"sessionID": "ses_w", **data}})
-
-    def text(message: str, body: str) -> str:
-        return ev("session.text.ended", assistantMessageID=message, ordinal=0, text=body)
-
-    lines = [
-        ev("session.execution.started"),
-        ev("session.inbox.delivered", inboxID="msg_ours"),
-        text("msg_a1", "FIRST "),
-        ev("session.execution.succeeded"),
-        ev("session.execution.started"),
-        ev("session.inbox.delivered", inboxID="msg_wake"),
-        text("msg_wake_a", "BGDONE"),
-        ev("session.execution.succeeded"),
-        ev("session.execution.started"),
-        ev("session.inbox.delivered", inboxID="msg_steer"),
-        text("msg_a2", "ANSWER"),
-        ev("session.execution.succeeded"),
-    ]
-    provider = _provider(tmp_path)
-    results: list = []
-    frames = _steer_frames(lines, _hook(provider, results), before="session.execution.succeeded")
-    _tokens(monkeypatch, "ours", "steer")
-    events = await _steered_turn(provider, monkeypatch, _SteerClient(frames), "ses_w")
-
-    (result,) = [e for e in events if isinstance(e, ResultEvent)]
-    assert result.result.split() == ["FIRST", "ANSWER"]
-    assert "BGDONE" not in result.result
-    assert len([e for e in events if isinstance(e, SteerDeliveredEvent)]) == 1
-
-
-@pytest.mark.asyncio
-async def test_failed_execution_clears_pending_steers(tmp_path, monkeypatch):
-    from ciao.models import ResultEvent, SteerDeliveredEvent
-
-    def ev(kind: str, **data) -> str:
-        return json.dumps({"id": f"e_{kind}", "type": kind, "data": {"sessionID": "ses_f", **data}})
-
-    lines = [
-        ev("session.execution.started"),
-        ev("session.inbox.delivered", inboxID="msg_ours"),
-        ev("session.execution.failed", error={"message": "boom"}),
-    ]
-    provider = _provider(tmp_path)
-    results: list = []
-    frames = _steer_frames(lines, _hook(provider, results), after="session.inbox.delivered")
-    _tokens(monkeypatch, "ours", "steer")
-    events = await _steered_turn(provider, monkeypatch, _SteerClient(frames), "ses_f")
-
-    assert results == ["msg_steer"]
-    assert provider._steer_ids_pending == set()
-    (result,) = [e for e in events if isinstance(e, ResultEvent)]
-    assert result.is_error
-    assert not any(isinstance(e, SteerDeliveredEvent) for e in events)
-
-
-@pytest.mark.asyncio
-async def test_failed_steer_post_after_terminal_does_not_hang_the_pump(tmp_path, monkeypatch):
-    """A steer whose POST fails after the terminal was skipped must not wait forever."""
-    import httpx
-
-    from ciao.models import ResultEvent
-
-    def ev(kind: str, **data) -> str:
-        return json.dumps({"id": f"e_{kind}", "type": kind, "data": {"sessionID": "ses_h", **data}})
-
-    lines = [
-        ev("session.execution.started"),
-        ev("session.inbox.delivered", inboxID="msg_ours"),
-        ev("session.execution.succeeded"),
-        ev("session.usage.updated", cost=0, tokens={}),
-    ]
-    provider = _provider(tmp_path)
-    results: list = []
-    frames = _steer_frames(lines, _hook(provider, results), before="session.execution.succeeded")
-    client = _SteerClient(frames, steer_failure=httpx.ReadTimeout("slow"))
-    _tokens(monkeypatch, "ours", "steer")
-    events = await asyncio.wait_for(
-        _steered_turn(provider, monkeypatch, client, "ses_h"), timeout=5
-    )
-
-    assert results == [None]
-    assert [e for e in events if isinstance(e, ResultEvent)]
-
-
-@pytest.mark.asyncio
-async def test_stop_cancels_pending_steers_before_interrupting(tmp_path):
-    provider = _provider(tmp_path)
-    order: list[str] = []
-
-    class Client(_SteerClient):
-        async def post(self, path, json=None, timeout=None):
-            order.append(f"POST {path}")
-
-            class _Ok:
-                status_code = 204
-                text = ""
-
-            return _Ok()
-
-        async def delete(self, path, timeout=None):
-            order.append(f"DELETE {path}")
-
-            class _Ok:
-                status_code = 204
-                text = ""
-
-            return _Ok()
-
-    provider._client = Client([])
-    provider._session_id = "ses_s"
-    provider._steer_ids_pending = {"msg_steer"}
-    provider._steer_ids_owned = {"msg_steer"}
-
-    await provider.abort_session("ses_s")
-
-    assert order == [
-        "DELETE /api/session/ses_s/inbox/msg_steer",
-        "POST /api/session/ses_s/interrupt",
-    ]
-    assert provider._steer_ids_pending == set()
-
-
-@pytest.mark.asyncio
-async def test_stop_still_interrupts_when_the_cancel_hangs(tmp_path, monkeypatch):
-    from ciao.providers import opencode as module
-
-    monkeypatch.setattr(module, "_OPENCODE_STEER_CANCEL_TIMEOUT_S", 0.05)
-    provider = _provider(tmp_path)
-    posts: list[str] = []
-
-    class Client(_SteerClient):
-        async def post(self, path, json=None, timeout=None):
-            posts.append(path)
-
-        async def delete(self, path, timeout=None):
-            await asyncio.Event().wait()
-
-    provider._client = Client([])
-    provider._session_id = "ses_s"
-    provider._steer_ids_pending = {"msg_steer"}
-
-    await asyncio.wait_for(provider.abort_session("ses_s"), timeout=2)
-
-    assert posts == ["/api/session/ses_s/interrupt"]
-
-
-# ── #1392 B review round 1: lifecycle edges ──────────────────────────────
-
-
-class _HeldSteerClient(_SteerClient):
-    """A steer POST that stays in flight until ``release`` is set."""
-
-    def __init__(self, lines) -> None:
-        super().__init__(lines)
-        self.release = asyncio.Event()
-        self.posted = asyncio.Event()
-
-    async def post(self, path: str, json=None, timeout=None):
-        if (json or {}).get("delivery") == "steer":
-            self.posts.append((path, dict(json)))
-            self.posted.set()
-            await self.release.wait()
-            return await _FakeServerClient.post(self, path, json=json)
-        return await super().post(path, json=json, timeout=timeout)
-
-
-def _steer_request(text: str = "steer me") -> AgentRequest:
-    return AgentRequest(prompt=text, model="", mode="bypass", provider="opencode")
-
-
-@pytest.mark.asyncio
-async def test_steer_in_flight_when_stop_is_pressed_is_cancelled(tmp_path):
-    provider = _provider(tmp_path)
-    client = _HeldSteerClient([])
-    provider._client = client
-    provider._session_id = "ses_s"
-    provider._turn_open = True
-    provider._owned_delivery_seen = True
-
-    task = asyncio.create_task(provider.steer_turn(_steer_request()))
-    await asyncio.wait_for(client.posted.wait(), 2)
-    provider._stop_requested = "ses_s"
-    await provider.abort_session("ses_s")
-    client.release.set()
-
-    assert await task is None
-    sent = client.posts[0][1]["id"]
-    # Once before the interrupt, and again for a POST that landed after it.
-    assert client.deletes == [f"/api/session/ses_s/inbox/{sent}"] * 2
-
-
-@pytest.mark.asyncio
-async def test_steer_in_flight_when_the_turn_ends_is_cancelled(tmp_path, monkeypatch):
-    from ciao.models import ResultEvent
-
-    def ev(kind: str, **data) -> str:
-        return json.dumps({"id": f"e_{kind}", "type": kind, "data": {"sessionID": "ses_e", **data}})
-
-    lines = [
-        ev("session.execution.started"),
-        ev("session.inbox.delivered", inboxID="msg_ours"),
-        ev("session.execution.failed", error={"message": "boom"}),
-    ]
-    provider = _provider(tmp_path)
-    tasks: list = []
-
-    async def start_steer() -> None:
-        tasks.append(asyncio.create_task(provider.steer_turn(_steer_request())))
-        await asyncio.wait_for(client.posted.wait(), 2)
-
-    client = _HeldSteerClient(
-        _steer_frames(lines, start_steer, after="session.inbox.delivered")
-    )
-    _tokens(monkeypatch, "ours", "steer")
-    events = await _steered_turn(provider, monkeypatch, client, "ses_e")
-    assert [e for e in events if isinstance(e, ResultEvent)]
-    assert provider._turn_open is False
-    client.release.set()
-
-    assert await tasks[0] is None
-    # The turn-end cancel, then the one for the POST that landed afterwards.
-    assert client.deletes == ["/api/session/ses_e/inbox/msg_steer"] * 2
-
-
-@pytest.mark.asyncio
-async def test_refused_steer_does_not_leave_the_pump_waiting(tmp_path, monkeypatch):
-    """The terminal was skipped for an in-flight steer that then fails.
-
-    No further SSE event arrives, and the pump must still end.
-    """
-    import httpx
-
-    from ciao.models import ResultEvent
-
-    def ev(kind: str, **data) -> str:
-        return json.dumps({"id": f"e_{kind}", "type": kind, "data": {"sessionID": "ses_q", **data}})
-
-    lines = [
-        ev("session.execution.started"),
-        ev("session.inbox.delivered", inboxID="msg_ours"),
-        ev("session.execution.succeeded"),
-    ]
-    provider = _provider(tmp_path)
-    tasks: list = []
-
-    async def start_steer() -> None:
-        tasks.append(asyncio.create_task(provider.steer_turn(_steer_request())))
-        await asyncio.wait_for(client.posted.wait(), 2)
-
-    async def fail_the_post_then_idle() -> None:
-        client.release.set()
-        await asyncio.Event().wait()
-
-    class Client(_HeldSteerClient):
-        async def post(self, path, json=None, timeout=None):
-            if (json or {}).get("delivery") == "steer":
-                self.posted.set()
-                await self.release.wait()
-                raise httpx.ReadTimeout("slow")
-            return await super().post(path, json=json, timeout=timeout)
-
-    frames = _steer_frames(lines, start_steer, before="session.execution.succeeded")
-    frames.append(fail_the_post_then_idle)
-    client = Client(frames)
-    opened = 0
-    plain_stream = client.stream
-
-    def counting_stream(method: str, path: str):
-        nonlocal opened
-        opened += 1
-        return plain_stream(method, path)
-
-    client.stream = counting_stream  # type: ignore[method-assign]
-    _tokens(monkeypatch, "ours", "steer")
-    events = await asyncio.wait_for(
-        _steered_turn(provider, monkeypatch, client, "ses_q"), timeout=5
-    )
-
-    assert await tasks[0] is None
-    (result,) = [e for e in events if isinstance(e, ResultEvent)]
-    assert opened == 1
-    assert not result.is_error and not result.fallback_final
-
-
-@pytest.mark.asyncio
-async def test_failed_execution_cancels_the_pending_steer_on_the_server(tmp_path, monkeypatch):
-    def ev(kind: str, **data) -> str:
-        return json.dumps({"id": f"e_{kind}", "type": kind, "data": {"sessionID": "ses_x", **data}})
-
-    lines = [
-        ev("session.execution.started"),
-        ev("session.inbox.delivered", inboxID="msg_ours"),
-        ev("session.execution.failed", error={"message": "boom"}),
-    ]
-    provider = _provider(tmp_path)
-    results: list = []
-    frames = _steer_frames(lines, _hook(provider, results), after="session.inbox.delivered")
-    client = _SteerClient(frames)
-    _tokens(monkeypatch, "ours", "steer")
-    await _steered_turn(provider, monkeypatch, client, "ses_x")
-
-    assert results == ["msg_steer"]
-    assert client.deletes == ["/api/session/ses_x/inbox/msg_steer"]
-    assert provider._steer_ids_pending == set()
-
-
-@pytest.mark.asyncio
-async def test_ambiguous_post_failure_after_delivery_returns_the_id(tmp_path):
-    import httpx
-
-    provider = _provider(tmp_path)
-
-    class Client(_SteerClient):
-        async def post(self, path, json=None, timeout=None):
-            # The reply is lost, but the execution already delivered the item.
-            sent = (json or {})["id"]
-            provider._steer_ids_pending.discard(sent)
-            provider._steer_ids_delivered.add(sent)
-            raise httpx.ReadTimeout("slow")
-
-    client = Client([])
-    provider._client = client
-    provider._session_id = "ses_a"
-    provider._turn_open = True
-    provider._owned_delivery_seen = True
-
-    delivery_id = await provider.steer_turn(_steer_request())
-
-    assert delivery_id is not None and delivery_id.startswith("msg_")
+    assert client.posts == ["/api/session/ses_stop/interrupt"]
     assert client.deletes == []
 
 
 @pytest.mark.asyncio
-async def test_frames_until_cancel_leaves_no_pending_tasks():
-    from ciao.providers.opencode import _frames_until
+async def test_own_delivery_then_success_ends_the_turn(tmp_path, monkeypatch):
+    """Our inbox delivery followed by execution success ends the pump."""
+    from ciao.models import AgentRequest, ResultEvent
 
-    async def never():
-        await asyncio.Event().wait()
-        yield b""
+    provider = _provider(tmp_path)
 
-    wake = asyncio.Event()
-    before = asyncio.all_tasks()
+    class Client(_FakeServerClient):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.message_id = ""
 
-    async def consume() -> None:
-        async for _frame in _frames_until(never(), wake, lambda: False):
-            pass
+        def stream(self, _method: str, _path: str):
+            owner = self
 
-    task = asyncio.create_task(consume())
-    await asyncio.sleep(0.05)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    await asyncio.sleep(0)
+            class _Stream:
+                def raise_for_status(self) -> None:
+                    return None
 
-    assert asyncio.all_tasks() - before == set()
+                async def aiter_bytes(self):
+                    yield _sse_event(
+                        "session.inbox.delivered",
+                        "ses_own",
+                        inboxID=owner.message_id,
+                    ).encode()
+                    yield _sse_event(
+                        "session.execution.succeeded", "ses_own"
+                    ).encode()
+                    await asyncio.Event().wait()
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_exc: object) -> bool:
+                    return False
+
+            return _Stream()
+
+        async def post(self, path: str, json=None, timeout=None):
+            self.message_id = str((json or {}).get("id") or "")
+            return await super().post(path, json=json)
+
+    client = Client()
+
+    async def fake_server(_request):
+        return client
+
+    async def fake_session(_request):
+        return "ses_own"
+
+    monkeypatch.setattr(provider, "_ensure_server", fake_server)
+    monkeypatch.setattr(provider, "_ensure_session", fake_session)
+    request = AgentRequest(prompt="hi", model="", mode="bypass", provider="opencode")
+    events = await asyncio.wait_for(
+        _events(provider.run_streaming(request, lambda _handle: None)),
+        timeout=2,
+    )
+
+    assert events[-1].type == "result"
+    assert isinstance(events[-1], ResultEvent)
+    assert events[-1].is_error is False
+
+
+async def _events(gen):
+    return [event async for event in gen]
 
 
 def test_server_config_content_lists_existing_skill_dirs(tmp_path):
@@ -8006,15 +7057,10 @@ async def test_a_changed_linked_repo_restarts_the_opencode_server(
     class Request:
         extra_env: dict = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots: tuple = ()
-        agent_denied: tuple = ()
-        agent_denied_except: tuple = ()
         linked_repo = "/r/new"
 
     request = Request()
     provider._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
-    provider._fs_scope_key = ("machine", (), (), ())
     provider._linked_repo = live_repo
     stopped: list[bool] = []
 
@@ -8071,10 +7117,6 @@ async def test_the_server_env_carries_the_linked_repo_skills(tmp_path, monkeypat
     class Request:
         extra_env: dict = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots: tuple = ()
-        agent_denied: tuple = ()
-        agent_denied_except: tuple = ()
         linked_repo = str(repo)
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]
@@ -8133,11 +7175,6 @@ async def test_concurrent_ensure_server_calls_start_one_server(tmp_path, monkeyp
     class Request:
         extra_env: dict = {}
         mcp_token = ""
-        agent_fs_scope = "machine"
-        agent_roots: tuple = ()
-        agent_denied: tuple = ()
-        agent_denied_except: tuple = ()
-        agent_read_only: tuple = ()
 
     request = Request()
     starts: list[int] = []
@@ -8148,16 +7185,70 @@ async def test_concurrent_ensure_server_calls_start_one_server(tmp_path, monkeyp
         self._client = object()  # type: ignore[assignment]
         self._process = SimpleNamespace(returncode=None)  # type: ignore[assignment]
         self._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
-        self._fs_scope_key = ("machine", (), (), ())
-        self._read_only_snapshot = ()
         self._linked_repo = ""
         return self._client
 
     monkeypatch.setattr(OpencodeProvider, "_start_server_once", fake_start)
 
     await asyncio.gather(
-        provider.ensure_server(request),  # type: ignore[arg-type]
-        provider.ensure_server(request),  # type: ignore[arg-type]
+        provider._ensure_server(request),  # type: ignore[arg-type]
+        provider._ensure_server(request),  # type: ignore[arg-type]
     )
 
     assert len(starts) == 1
+
+
+def test_server_argv_is_bare_for_every_workspace(tmp_path: Path) -> None:
+    """A stored workspace scope does not prefix the server or set a cache home."""
+    from ciao.config import CiaoConfig
+    from ciao.sessions import StateStore
+    from ciao.transcripts import TranscriptStore
+    from ciao.web.project_chats import ProjectChatManager
+    from tests.conftest import attach_stub_mcp
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    (runtime / "workspaces.json").write_text(
+        json.dumps([{
+            "name": "personal",
+            "vault_root": "memory-vault/personal",
+            "agent_fs_scope": "workspace",
+        }]),
+        encoding="utf-8",
+    )
+    config = CiaoConfig.from_env({
+        "PWA_AUTH_TOKEN": "t",
+        "CIAO_WORKSPACE": str(tmp_path),
+        "CIAO_RUNTIME_ROOT": str(runtime),
+    })
+    manager = attach_stub_mcp(ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    ))
+    project = manager.create_project("plain", workspace="personal")
+    chat = manager.create_chat(project.project_id, provider="opencode")
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert _provider(tmp_path)._server_launch(request, "/x/opencode", 4000) == (
+        ["/x/opencode", "serve", "--port", "4000", "--hostname", "127.0.0.1"],
+        {},
+    )
+
+
+def test_installed_status_row_carries_mcp_command(monkeypatch):
+    from types import SimpleNamespace
+
+    import ciao.providers.opencode as mod
+
+    def fake_run(cmd, *a, **k):
+        return SimpleNamespace(stdout="opencode v2.3.2\n", returncode=0)
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(mod, "_credential_count", lambda *a, **k: 0)
+
+    status = mod.opencode_login_status(inventory=False)
+
+    assert status["mcp_command"] == mod.OPENCODE_MCP_COMMAND == "opencode mcp"

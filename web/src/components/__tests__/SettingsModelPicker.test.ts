@@ -10,7 +10,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h, nextTick } from 'vue'
 import { modelDisplayName } from '../../lib/modelLabels'
 import { sectionsFromModelsResponse } from '../../lib/modelSections'
-import type { ModelsResponse } from '../../lib/types'
+import type { ModelsResponse, ProviderDescriptor } from '../../lib/types'
 
 // A namespaced id, the shape opencode's catalog carries.
 const NAMESPACED = 'openai/gpt-5.6-luna'
@@ -69,6 +69,11 @@ vi.mock('../../lib/api', () => {
 const MODELS: ModelsResponse = {
   models: ['haiku', 'sonnet', 'opus'],
   default: 'sonnet',
+  // The registry rows /api/models serves, in its order.
+  providers: [
+    { id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude', capabilities: {} },
+    { id: 'opencode', label: 'OpenCode', short_label: 'OpenCode', capabilities: {} },
+  ] as ProviderDescriptor[],
   provider_models: { claude: ['haiku', 'sonnet', 'opus'], opencode: [NAMESPACED] },
   provider_defaults: { claude: 'sonnet', opencode: NAMESPACED },
   opencode_models: [NAMESPACED],

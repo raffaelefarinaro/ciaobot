@@ -713,8 +713,8 @@ def test_release_commit_guard_is_skipped_under_allow_dirty(
 def _oc(**kw) -> release_mod.ProviderProbe:
     base = dict(
         provider="opencode",
-        installed="2.1.0",
-        latest="2.1.0",
+        installed="2.4.0",
+        latest="2.4.0",
         published=True,
         note="",
     )
@@ -729,7 +729,7 @@ def _claude(**kw) -> release_mod.ProviderProbe:
         latest=None,
         published=None,
         note="",
-        source="claude-agent-sdk 0.2.168",
+        source="claude 2.1.301",
     )
     base.update(kw)
     return release_mod.ProviderProbe(**base)
@@ -748,7 +748,7 @@ def _build(opencode, claude, untested=()) -> dict:
 def test_build_provider_record_tested() -> None:
     record = _build(_oc(), _claude())
     assert record["providers"]["opencode"]["status"] == "tested"
-    assert record["providers"]["opencode"]["version"] == "2.1.0"
+    assert record["providers"]["opencode"]["version"] == "2.4.0"
     assert record["providers"]["claude"]["status"] == "tested"
     assert record["providers"]["claude"]["version"] == "2.1.301"
     assert record["ciaobot"] == "1.6.1"
@@ -772,6 +772,8 @@ def test_build_provider_record_refuses_missing_opencode() -> None:
     [
         _oc(installed="0.0.0-dev-1"),
         _oc(installed="2.1.0-beta.1"),
+        _oc(installed="2.1.0"),
+        _oc(installed="2.3.1"),
         _oc(published=False),
         _oc(published=None),
         _oc(installed="1.14.0"),
@@ -801,7 +803,7 @@ def test_pr_body_lists_provider_versions() -> None:
     body = release_mod._pr_body("1.6.1", "notes", ["pytest"], provider_record=record)
     assert "## Provider versions tested" in body
     assert "OpenCode" in body
-    assert "2.1.0" in body
+    assert "2.4.0" in body
     skipped = release_mod._pr_body("1.6.1", "notes", [], provider_record=None)
     assert "Not re-recorded" in skipped
 
@@ -833,7 +835,7 @@ def test_main_apply_writes_and_stages_provider_record(
         else "",
     )
     monkeypatch.setattr(release_mod, "_probe_opencode", lambda: _oc())
-    monkeypatch.setattr(release_mod, "_probe_bundled_claude", lambda root: _claude())
+    monkeypatch.setattr(release_mod, "_probe_claude", lambda: _claude())
 
     result = release_mod.main(
         [
@@ -865,52 +867,62 @@ def test_main_apply_writes_and_stages_provider_record(
         )
     )
     assert record["ciaobot"] == "0.3.0"
-    assert record["providers"]["opencode"]["version"] == "2.1.0"
+    assert record["providers"]["opencode"]["version"] == "2.4.0"
 
 
-def test_probe_bundled_claude_reads_fresh_interpreter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_probe_claude_reads_the_cli_and_the_pinned_adapter(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import json
     import subprocess
-    import sys
-    import types
 
-    # Stale modules already imported in this process must be ignored.
-    for name, attr in (
-        ("claude_agent_sdk._version", "__version__"),
-        ("claude_agent_sdk._cli_version", "__cli_version__"),
-    ):
-        fake = types.ModuleType(name)
-        setattr(fake, attr, "0.0.1")
-        monkeypatch.setitem(sys.modules, name, fake)
-    (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "ciao"\nversion = "0.2.0"\n'
-        'dependencies = ["claude-agent-sdk[otel]==0.2.168"]\n',
-        encoding="utf-8",
-    )
+    from ciao import setup_status
+
+    pin = setup_status.CLAUDE_ADAPTER_PACKAGE.rpartition("@")[2]
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "/fake/claude")
+    monkeypatch.setattr(setup_status, "claude_adapter_path", lambda: "/fake/claude-agent-acp")
 
     def fake_run(cmd, **kwargs):
-        out = (
-            json.dumps({"sdk": "0.2.168", "cli": "2.1.301"})
-            if "-c" in cmd
-            else "2.1.301 (Claude Code)"
-        )
+        out = "2.1.301 (Claude Code)" if cmd[0] == "/fake/claude" else pin
         return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
 
     monkeypatch.setattr(release_mod.subprocess, "run", fake_run)
     monkeypatch.setattr(
-        "ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude"
+        "ciao.dependency_updates.get_latest_npm_version", lambda name: None
     )
+
+    probe = release_mod._probe_claude()
+
+    assert probe.installed == "2.1.301"
+    assert probe.note == ""
+    assert probe.source == "claude 2.1.301"
+
+
+@pytest.mark.parametrize("adapter", [None, "0.1.0"])
+def test_probe_claude_notes_a_missing_or_unpinned_adapter(
+    monkeypatch: pytest.MonkeyPatch, adapter: str | None
+) -> None:
+    import subprocess
+
+    from ciao import setup_status
+
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "/fake/claude")
+    monkeypatch.setattr(
+        setup_status, "claude_adapter_path", lambda: None if adapter is None else "/fake/acp"
+    )
+
+    def fake_run(cmd, **kwargs):
+        out = "2.1.301 (Claude Code)" if cmd[0] == "/fake/claude" else adapter
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(release_mod.subprocess, "run", fake_run)
     monkeypatch.setattr(
         "ciao.dependency_updates.get_latest_npm_version", lambda name: None
     )
 
-    probe = release_mod._probe_bundled_claude(tmp_path)
+    probe = release_mod._probe_claude()
 
     assert probe.installed == "2.1.301"
-    assert probe.note == ""
-    assert probe.source == "claude-agent-sdk 0.2.168"
+    assert "claude-agent-acp" in probe.note or "not installed" in probe.note
 
 
 def test_main_rejects_refresh_with_skip_provider_versions(tmp_path: Path) -> None:
@@ -925,22 +937,26 @@ def test_main_rejects_refresh_with_skip_provider_versions(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize("failure", ["rc1", "timeout"])
-def test_probe_bundled_claude_reports_unreadable_sdk(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+def test_probe_claude_reports_an_unreadable_cli(
+    monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     import subprocess
 
+    from ciao import setup_status
+
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "/fake/claude")
+
     def fake_run(cmd, **kwargs):
         if failure == "timeout":
-            raise subprocess.TimeoutExpired(cmd, 30)
+            raise subprocess.TimeoutExpired(cmd, 10)
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
 
     monkeypatch.setattr(release_mod.subprocess, "run", fake_run)
 
-    probe = release_mod._probe_bundled_claude(tmp_path)
+    probe = release_mod._probe_claude()
 
     assert probe.installed is None
-    assert probe.note.startswith("claude_agent_sdk unreadable")
+    assert probe.note
 
 
 def _apply_args(tmp_path: Path) -> list[str]:
@@ -996,4 +1012,4 @@ def test_repo_pins_uv_and_ci_workflows_use_the_same_version() -> None:
             m = re.search(r"version:\s*[\"']?([^\s\"']+)", window)
             assert m, f"{wf.name}:{i + 1} setup-uv has no version input"
             assert m.group(1) == pinned, f"{wf.name}:{i + 1} pins {m.group(1)}, pyproject pins {pinned}"
-    assert seen >= 3
+    assert seen >= 2  # publish.yml and release-smoke.yml; R1 removed the server-host rehearsal workflow that was the third

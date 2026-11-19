@@ -199,9 +199,6 @@ def _domain_fixture() -> tuple[CiaoControlPlane, AgentPrincipal, asyncio.Task[No
         def send(self, *_args, **_kwargs):
             pytest.fail("recall checking must not send")
 
-        def steer(self, *_args, **_kwargs):
-            pytest.fail("recall checking must not steer")
-
         def notify(self, *_args, **_kwargs):
             pytest.fail("recall checking must not notify")
 
@@ -2979,7 +2976,7 @@ async def test_budget_follows_provider_pass_not_steer_index(monkeypatch) -> None
         assert (await cp.vault_recall_check(principal, claims_json=_claims(), authorization_factory=_authorization_factory()))["data"]["status"] == "unavailable"
         stream = cp.pcm.get_active_stream("chat")
         stream.running_turn_index += 1
-        cp.pcm.get_chat("chat").user_turn_count += 1  # steering does not create a new provider task
+        cp.pcm.get_chat("chat").user_turn_count += 1  # a later index does not create a new provider task
         with pytest.raises(ControlPlaneError) as exhausted:
             await asyncio.create_task(cp.vault_recall_check(principal, claims_json=_claims(), authorization_factory=_authorization_factory()))
         assert exhausted.value.code == "recall_check_budget_exhausted"

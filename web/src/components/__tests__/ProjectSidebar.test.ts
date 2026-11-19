@@ -536,35 +536,6 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 
-  // Running subagents are listed in the Chat details rail, not as
-  // rows under the chat in this tree.
-  it('does not list running subagents as rows in the tree', async () => {
-    const store = useProjectStore()
-    store.runningSubagents = {
-      [chatId]: [{ agent_id: 'a1b2c3d4', description: 'Sweep the callers', status: 'running' }],
-    }
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [
-        { path: '/', component: { template: '<div />' } },
-        { path: '/chat/:chatId/subagent/:agentId', component: { template: '<div />' } },
-      ],
-    })
-    await router.push(`/chat/${chatId}/subagent/a1b2c3d4`)
-    await router.isReady()
-
-    const wrapper = mount(ProjectSidebar, {
-      attachTo: document.body,
-      props: { collapsed: false, mode: 'chat' },
-      global: { plugins: [router] },
-    })
-    expect(wrapper.findAll('.chat-item')).toHaveLength(1)
-    expect(wrapper.text()).not.toContain('Sweep the callers')
-    expect(wrapper.find('.subagent-toggle').exists()).toBe(false)
-
-    wrapper.unmount()
-  })
-
   async function mountWithProjectRoute() {
     const router = createRouter({
       history: createMemoryHistory(),

@@ -55,10 +55,9 @@ flowchart LR
 - The scope is also not a containment boundary against the model itself. The
   same process holds native Read/Bash/Edit over its workspace root, so the
   control plane is the *convenient* path to Ciaobot state, not the only one.
-  `.env` (which holds `PWA_AUTH_TOKEN`), `.runtime/` and `secrets/` are denied
-  to the native file tools on both providers — see `credential_path_deny_rules`
-  in `ciao/execution_modes.py`, which also states what that deny does not cover
-  (the shell).
+  Ciaobot does not restrict the native file tools by path on either provider:
+  `.env` (which holds `PWA_AUTH_TOKEN`), `.runtime/` and `secrets/` are as
+  readable as any other file in the workspace.
 - A chat whose control plane is unavailable fails the turn:
   `build_agent_request` raises `AgentSurfaceUnavailableError`, which is
   published as a normal failed turn with a logged ERROR. The
@@ -109,16 +108,11 @@ there is no Ciaobot MCP server to attach. Every chat is on the CLI surface, so
 restarted when the token changes (`provider_reuse_key`).
 
 Separately, Claude Code and OpenCode own their external MCP server configuration
-and authentication. Settings → MCP is a native-config inventory plus live status from already running
-chats in the selected workspace; it writes configuration only to turn one server
-off or on (`POST /api/mcp/servers/enabled`), and never writes credentials or probes
-a server. For a server an open chat reports as needing a sign-in, that
-chat's sign-in card is the live path (Settings' **Sign in** raises and starts it,
-and may start the chat's OpenCode server); a CLI sign-in only reaches sessions
-started afterwards. Add servers, and authenticate them for new sessions, through
-the provider CLI from the workspace directory (`claude mcp add` / `claude mcp login`, or OpenCode V2's
-`opencode mcp add` / `opencode mcp auth`). Every server declared for the
-workspace loads; `mcp__<name>` in its `disallowed_tools` blocks one.
+and authentication. Ciaobot keeps no MCP inventory or status and does not read or write that
+configuration or any credential; Settings → MCP only opens the CLI's own MCP command. Add servers,
+and authenticate them for new sessions, through the provider CLI from the workspace directory
+(`claude mcp add` / `claude mcp login`, or OpenCode V2's `opencode mcp add` / `opencode mcp auth`).
+Every server declared for the workspace loads; `mcp__<name>` in its `disallowed_tools` blocks one.
 
 Static configuration in an unrelated terminal is intentionally unsupported: the
 token is a live chat capability, not an operator credential. Use Ciaobot's
@@ -210,7 +204,7 @@ that simply finished: a turn ending is not a verified edit.
 `ciao chat needs-action KIND [flags]` puts a request in front of the user in
 the calling chat: a card the user acts on. The kinds are the engine's
 `AGENT_ACTION_KINDS` in `ciao/chat_actions.py`: `command`, `gws_auth`,
-`permission_mode`, `device_code`, `system_setting`, `restart` and `mcp_auth`.
+`permission_mode`, `device_code`, `system_setting` and `restart`.
 `limit` is the engine's own and is never agent-raisable.
 
 ```
@@ -220,7 +214,6 @@ ciao chat needs-action permission_mode --mode MODE [--note TEXT]
 ciao chat needs-action device_code --tool gh|az
 ciao chat needs-action system_setting --setting NAME [--note TEXT]
 ciao chat needs-action restart --reason config|update [--note TEXT]
-ciao chat needs-action mcp_auth --server NAME [--provider claude|opencode]
 ```
 
 The CLI routes each flag to the one kind that takes it; a flag that does not
@@ -292,9 +285,7 @@ Durable writes must load `ciao-memory` for destinations, frontmatter,
 verification stamps and consolidation. Integration and provider mechanics stay
 in their relevant skills or CLI help. The core requires the managed interface
 and forbids routing around its checks or refusals; it does not blacklist HTTP
-clients or forbid ordinary authorized note-content edits. Workspace-only file
-access does not imply that GitHub is signed out: the engine can grant its
-existing login to a sandboxed chat.
+clients or forbid ordinary authorized note-content edits.
 
 ## Validation status
 

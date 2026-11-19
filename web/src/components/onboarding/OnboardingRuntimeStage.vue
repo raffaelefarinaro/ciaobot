@@ -22,8 +22,6 @@ interface ProviderStatus {
 const props = defineProps<OnboardingStageProps>()
 const emit = defineEmits<{ state: [state: StageState] }>()
 
-const PROVIDER_LABELS: Record<RuntimeProvider, string> = { claude: 'Claude Code', opencode: 'OpenCode' }
-
 const connections = ref<Record<string, ProviderStatus> | null>(null)
 const models = ref<ModelsResponse | null>(null)
 const loadingStatus = ref(false)
@@ -56,7 +54,12 @@ const signedIn = computed(() => !!connection.value?.ok && !/not|missing|no accou
 // not evidence that this provider is usable.
 const ready = computed(() => !!connection.value && !error.value)
 const terminalAction = computed<HostTerminalAction | undefined>(() => connection.value?.terminal_action)
-const providerLabel = computed(() => connection.value?.label ?? PROVIDER_LABELS[provider.value])
+const providerLabel = computed(() => providerName(provider.value))
+// The runtimes this computer reports, one per registry provider, in the order the status payload lists them.
+const providers = computed(() => Object.entries(connections.value ?? {}).map(([id, row]) => ({ id, label: row.label ?? id })))
+function providerName(id: string): string {
+  return connections.value?.[id]?.label ?? id
+}
 const state = computed<StageState>(() => ({
   dirty: false,
   pending: loadingStatus.value || loadingModels.value || saving.value,
@@ -72,7 +75,7 @@ async function loadCurrent(): Promise<void> {
     const row = payload.workspaces.find(item => item.name === props.context.workspace)
     const chosen = row?.default_provider
     const model = chosen ? normalizeOverrides(row?.provider_overrides)[chosen]?.model : ''
-    if ((chosen === 'claude' || chosen === 'opencode') && model) {
+    if (chosen && providers.value.some(item => item.id === chosen) && model) {
       current.value = { provider: chosen, model }
       provider.value = chosen
       selection.value = model
@@ -135,7 +138,7 @@ async function checkAgain(): Promise<void> {
 
 function selectProvider(id: string): void {
   // Re-clicking the current runtime keeps the model choice.
-  if (saving.value || id === provider.value || (id !== 'claude' && id !== 'opencode')) return
+  if (saving.value || id === provider.value || !providers.value.some(item => item.id === id)) return
   provider.value = id
   saveError.value = ''
   selection.value = ''
@@ -195,8 +198,10 @@ async function save(): Promise<boolean> {
 }
 
 onMounted(async () => {
+  // The status first: a saved choice is only restored when its runtime is in the registry.
+  const statusLoaded = await loadStatus()
   await loadCurrent()
-  if (await loadStatus()) await showModels()
+  if (statusLoaded) await showModels()
 })
 
 defineExpose({ refresh: checkAgain, save })
@@ -212,15 +217,14 @@ defineExpose({ refresh: checkAgain, save })
     <div v-if="!editing && current" class="set-row">
       <div class="set-text">
         <span class="set-label">Runtime and model</span>
-        <span class="set-value">{{ PROVIDER_LABELS[current.provider] }} · <code>{{ current.model }}</code></span>
+        <span class="set-value">{{ providerName(current.provider) }} · <code>{{ current.model }}</code></span>
       </div>
       <OnboardingButton variant="link" class="change" @click="change">Change</OnboardingButton>
     </div>
 
     <template v-else>
       <OnboardingChoiceGroup label="Runtime" name="runtime" layout="segmented" :model-value="provider" @update:model-value="selectProvider">
-        <OnboardingChoice value="claude">Claude Code</OnboardingChoice>
-        <OnboardingChoice value="opencode">OpenCode</OnboardingChoice>
+        <OnboardingChoice v-for="item in providers" :key="item.id" :value="item.id">{{ item.label }}</OnboardingChoice>
       </OnboardingChoiceGroup>
     </template>
 

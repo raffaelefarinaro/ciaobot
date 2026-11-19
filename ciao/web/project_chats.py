@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 if TYPE_CHECKING:
     from ciao.mcp_server import CiaoMcpService
@@ -156,7 +156,7 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 from ciao.os_support.media_types import guess_type as guess_media_type
-from ciao import backup_scope, cli_envelopes, repo_link, repo_location, subagent_tracking, vault_review, vault_verification
+from ciao import cli_envelopes, repo_link, repo_location, vault_review
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.config import (
     CLAUDE_MODELS,
@@ -171,6 +171,7 @@ from ciao.context.capsule import (
 from ciao.context.capsule import (
     context_digest as stable_context_digest,
 )
+from ciao.core_prompt import unified_core
 from ciao.entity_types import load_entity_types
 from ciao.frontmatter import split_frontmatter
 from ciao.model_tiers import is_tier
@@ -190,8 +191,12 @@ from ciao.os_support.files import open_fd
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao import provider_registry
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
-from ciao.providers.base import BaseProvider, MoveToBackgroundOutcome, QuestionResponseResult
-from ciao.rate_limits import RateLimitStore, default_store_path
+from ciao.providers.base import (
+    BACKGROUND_WORK_MAX_S,
+    BaseProvider,
+    CleanupTimedOut,
+    QuestionResponseResult,
+)
 from ciao.schedules import (
     ScheduleEntry,
     ScheduleStore,
@@ -204,7 +209,6 @@ from ciao.chat_actions import (
     ActionOrigin,
     ActionState,
     ChatAction,
-    ChatActionError,
     action_key,
     action_payload,
     check_agent_params,
@@ -213,7 +217,6 @@ from ciao.chat_actions import (
     validate_params,
 )
 from ciao.sessions import StateStore
-from ciao.subagent_tracking import SubagentInfo
 from ciao.web.chat_actions_runtime import ChatActionsRuntime
 from ciao.tool_path import prepend_engine_path
 from ciao.transcripts import (
@@ -227,8 +230,6 @@ from ciao.transcripts import (
 from ciao.web import chat_service
 from ciao.web import restart_resume
 from ciao.web.chat_broker import (
-    QUEUE_DELIVERIES,
-    STEER_DISPATCHING,
     TURN_ORIGINS,
     ChatStream,
     ChatStreamBroker,
@@ -257,14 +258,8 @@ from ciao.web.document_conversion import (
     is_natively_readable,
 )
 from ciao.web.file_snapshots import SnapshotStore
-from ciao.web.subagent_watchers import BACKGROUND_WORK_MAX_S, SubagentWatchers
 
 logger = logging.getLogger(__name__)
-
-# How long ``steer_queue`` waits for the provider to take a steer. The call is
-# a stdin write on Claude, so this only bites on a wedged CLI; it must not hold
-# the chat's socket loop.
-_STEER_DISPATCH_TIMEOUT_S = 10.0
 
 _ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
@@ -322,8 +317,7 @@ _RESUME_CONTINUE_PROMPT = "continue"
 _MAX_CONNECTION_DROP_RETRIES = 6
 # Cap on quota retries: every usage-limit retry is hourly (_RETRY_INTERVAL_SECONDS),
 # so a week of attempts covers a weekly limit, and a limit that never clears
-# still stops. When Claude's saved rate-limit snapshot names the rejected
-# five-hour bucket's reset, the retry is pointed there instead (_quota_reset_at).
+# still stops.
 _MAX_QUOTA_RETRIES = 7 * 24
 # A retry that comes due while the chat is running a turn waits this long and
 # checks again, not a whole retry interval.
@@ -480,11 +474,6 @@ def _retry_cap(kind: str) -> int | None:
     return None
 
 
-# Claude rate-limit buckets whose rejection explains each quota retry kind.
-_QUOTA_RESET_BUCKETS = {
-    "quota": ("five_hour",),
-}
-
 _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # ── Idle provider reaping ────────────────────────────────────────────────
 # `self._providers` is keyed by chat id and, before this, was only ever
@@ -503,20 +492,27 @@ _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # `session_id` is persisted, so the next turn reconnects and resumes rather
 # than starting a new conversation — the same path a token rotation already
 # takes (ciao/providers/opencode.py::_ensure_server,
-# ciao/providers/claude.py::_ensure_connected).
+# ciao/providers/acp/provider.py::run_streaming).
 _PROVIDER_IDLE_TIMEOUT_SECONDS = 900.0
-# Claude is the exception to the timeout above. Its provider is one CLI
-# process whose next turn resumes the same session, but rebuilding it pays a
+# ACP agents (Claude today) are the exception to the timeout above. Each is one
+# agent process whose next turn resumes the same session, but rebuilding it pays a
 # cold start that measured 13-53 s on a loaded 10-core Mac — which is what the
 # SDK's initialize deadline times out on. The most recently used few are
 # therefore kept warm past the idle timeout. Both bounds matter: the count
 # stops a day of touching chats from pinning one CLI per chat, and the idle
 # age stops a chat left open for days from doing the same.
 _CLAUDE_WARM_PROVIDER_LIMIT = 4
-_CLAUDE_WARM_IDLE_TIMEOUT_SECONDS = 3600.0
+_ACP_WARM_IDLE_TIMEOUT_SECONDS = 3600.0
+
+
+def _runs_over_acp(provider: str) -> bool:
+    """Whether a provider id runs as an ACP agent process, which the warm pool keeps."""
+    descriptor = provider_registry.get(provider)
+    return descriptor is not None and bool(descriptor.acp_spec_path)
+
+
 RESTART_BLOCKER_REASONS = (
     "streaming",
-    "background_agents",
     "background_work",
     "open_question",
     "open_permission",
@@ -635,7 +631,6 @@ def _has_running_loop() -> bool:
 # local backend simply times out and the deterministic fallback applies, the
 # same trade the schedule attention classifier makes with a longer window.
 _TITLE_LLM_TIMEOUT_S = 45.0
-
 _TITLE_SYSTEM_PROMPT = """\
 You name chat sessions for a sidebar. Reply with ONLY the title: a short \
 specific noun phrase (3-8 words) naming the session's subject. No quotes, no \
@@ -809,6 +804,14 @@ def _prune_send_id_history(send_ids: dict) -> None:
             del send_ids[key]
 
 
+# Origins of a chat title (ChatInfo.title_origin). "default" and "fallback" are Ciaobot's
+# own auto-title; the agent's title replaces only those, and an "adapter" title only
+# when a later one differs.
+TITLE_ORIGINS = ("default", "fallback", "adapter", "user")
+CIAOBOT_AUTO_TITLE_ORIGINS = ("default", "fallback")
+ADAPTER_REPLACEABLE_TITLE_ORIGINS = ("default", "fallback", "adapter")
+
+
 @dataclass(slots=True)
 class ChatInfo:
     chat_id: str
@@ -902,6 +905,15 @@ class ChatInfo:
     # Transient UI flag: "pending" while an auto-title generation is in
     # flight, "ready" otherwise. Not persisted — reset to "ready" on load.
     title_status: str = "ready"
+    # Who wrote the current title, which decides whether a later write may replace it:
+    #   "default"  the New Chat placeholder
+    #   "fallback" Ciaobot's own auto-title (deterministic or LLM); the agent's title replaces it
+    #   "adapter"  the agent's session title (ACP session_info_update, or a native
+    #              provider title); provisional, so a later adapter title replaces it
+    #   "user"     a rename, or any title set on purpose (fork, schedule, recovered chat)
+    # Persisted. A record with no origin, or an unknown one, reads as "default" when its
+    # title is New Chat and as "user" otherwise, so an existing title is never replaced.
+    title_origin: str = ""
     # Needs-you action cards. Transient and memory only:
     # an action can name a sign-in URL or a helper session, so it never reaches
     # the chat registry. It ends with the conversation it was raised in (archive,
@@ -1038,11 +1050,10 @@ class ChatInfo:
     # `{path, branch, is_worktree, exists}`. Kept only for chats in a linked
     # project (see `repo_location.py`).
     repo_location: dict = field(default_factory=dict)
-    # Set only by the memory-backup setup route (#1328). A workspace-scoped
-    # chat with this flag may also read and write the install's data root,
-    # the parent of every workspace folder, because a git repository there is
-    # what the setup creates. Not settable from any request body.
-    grants_data_root: bool = False
+
+    def __post_init__(self) -> None:
+        if self.title_origin not in TITLE_ORIGINS:
+            self.title_origin = "default" if self.title == DEFAULT_CHAT_TITLE else "user"
 
     def to_dict(self, *, local: bool | None = None) -> dict:
         self.taken_edits = [entry for entry in self.taken_edits
@@ -1268,14 +1279,6 @@ class ProjectChatManager:
         self._path = path
         self._projects: dict[str, ProjectInfo] = {}
         self._chats: dict[str, ChatInfo] = {}
-        #: Engine-detected MCP sign-ins the user turned down with Not now, by
-        #: workspace, provider and dedupe key. Detection runs after every turn
-        #: of every chat and a provider can list every connector of the
-        #: account, so a per-chat memory raised the same cards again in each
-        #: new chat. Workspaces configure their own servers, so a decline in
-        #: one does not silence a same-named server in another. The set lives
-        #: as long as the engine, like the cards themselves.
-        self.declined_mcp_auth: set[tuple[str, str, str]] = set()
         self._file_refs: dict[str, tuple[str, str, float]] = {}
         # Canonical-doc frontmatter memo, keyed by path -> ((mtime_ns, size),
         # (name, context)). Vault discovery re-reads every project doc on each
@@ -1294,9 +1297,6 @@ class ProjectChatManager:
             "chats": {},
         }
         self._providers: dict[str, ProviderService] = {}
-        # One lock per chat serializes steer dispatches so entries that become
-        # steers while one is in flight are combined into the next.
-        self._steer_locks: dict[str, asyncio.Lock] = {}
         # Monotonic stamp of the last time each chat's provider was handed
         # out, plus the single sweep task that reclaims the idle ones. See
         # `_PROVIDER_IDLE_TIMEOUT_SECONDS` for why this exists; the task is
@@ -1377,16 +1377,6 @@ class ProjectChatManager:
         # Callers currently holding or waiting on each archive lock, so
         # the lock is only dropped once the last one is done with it.
         self._archive_lock_users: dict[str, int] = {}
-        # Background subagent watching, and the CLI-task wake bookkeeping that
-        # comes with it, live in ciao/web/subagent_watchers.py. It owns the
-        # three dictionaries that used to sit here — the live watcher task per
-        # chat, the last count published per chat, and the wakes already sent —
-        # and reaches back into this class only through SubagentWatcherHost.
-        # `self` is that host; the properties further down keep the old
-        # attribute names pointing at its state. Annotated explicitly: passing
-        # `self` to a collaborator that reads `_subagents` would otherwise make
-        # mypy resolve this assignment's own type through the cycle.
-        self._subagents: SubagentWatchers = SubagentWatchers(self)
         self._streaming = ChatStreaming(self)
         # Scheduled dispatch is a separate lifecycle with its own typed host
         # seam; this manager remains the coordinator for the target chat and
@@ -1496,6 +1486,9 @@ class ProjectChatManager:
                 chat_id=cid,
                 project_id=cd["project_id"],
                 title=cd.get("title", "New Chat"),
+                # Migration: records written before title_origin read it as "" and
+                # __post_init__ infers it, so an existing non-default title is user-owned.
+                title_origin=str(cd.get("title_origin", "") or ""),
                 model=chat_model,
                 # Migration: legacy chats without a `provider` key default to "claude".
                 provider=cd.get("provider") or "claude",
@@ -1573,7 +1566,6 @@ class ProjectChatManager:
                     if isinstance(cd.get("repo_location"), dict)
                     else {}
                 ),
-                grants_data_root=bool(cd.get("grants_data_root", False)),
                 # A pipeline recorded as "running" cannot still be running: the
                 # task died with the previous process. Restore it as done so the
                 # chat reports what it managed to finish instead of pulsing
@@ -1586,6 +1578,14 @@ class ProjectChatManager:
             len(self._chats),
         )
         self._last_local_payload = copy.deepcopy(self._state_payload())
+        # The data-root grant is gone. It is not a field this process owns, so
+        # the merge would otherwise keep the stored key forever. Putting it on
+        # the baseline makes the next save delete it.
+        for cid, cd in data.get("chats", {}).items():
+            if isinstance(cd, dict) and "grants_data_root" in cd:
+                row = self._last_local_payload.get("chats", {}).get(cid)
+                if isinstance(row, dict):
+                    row["grants_data_root"] = cd["grants_data_root"]
 
     def _migrate_remove_claude_code_cli_project(self) -> None:
         """Remove the retired CLI-import project from persisted PWA state."""
@@ -1634,6 +1634,7 @@ class ProjectChatManager:
                 cid: {
                     "project_id": c.project_id,
                     "title": c.title,
+                    "title_origin": c.title_origin,
                     "model": c.model,
                     "provider": c.provider,
                     "mode": c.mode,
@@ -1693,7 +1694,6 @@ class ProjectChatManager:
                     "dismissed_pin_paths": list(c.dismissed_pin_paths),
                     "pin_revision": c.pin_revision,
                     "repo_location": dict(c.repo_location),
-                    "grants_data_root": c.grants_data_root,
                 }
                 for cid, c in self._chats.items()
             },
@@ -4118,7 +4118,6 @@ class ProjectChatManager:
         mode: str | None = None,
         provider: str | None = None,
         helper: dict | None = None,
-        grants_data_root: bool = False,
     ) -> ChatInfo:
         if project_id not in self._projects:
             raise ValueError(f"Project '{project_id}' not found")
@@ -4175,27 +4174,11 @@ class ProjectChatManager:
             thinking_level=default_thinking,
             created_at=chat_service._now_iso(),
             helper=chat_service._normalize_chat_helper(helper),
-            grants_data_root=grants_data_root,
         )
         self._chats[cid] = chat
         self._save()
         self._events.publish({"type": "chat_created", "chat": chat.to_dict(local=True)})
         return chat
-
-    def grant_data_root(self, chat_id: str) -> None:
-        """Give an existing chat the data-root grant (#1328), persisted.
-
-        Used for a live setup chat opened before the grant existed. The chat's
-        next turn sees new roots, so its provider process is rebuilt (see the
-        reuse checks in the providers) rather than keeping the old sandbox.
-        """
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            raise ValueError(f"Chat '{chat_id}' not found")
-        if chat.grants_data_root:
-            return
-        chat.grants_data_root = True
-        self._save()
 
     def is_empty_chat(self, chat_id: str) -> bool:
         """Public form of `_is_empty_chat`, for the conditional-delete route.
@@ -4339,6 +4322,7 @@ class ProjectChatManager:
             chat.repo_location = {}
         if title is not None:
             chat.title = title
+            chat.title_origin = "user"
         if changes_model:
             new_provider = provider if provider is not None else chat.provider
             # Cross-provider switches mid-chat would silently break: the
@@ -4615,18 +4599,8 @@ class ProjectChatManager:
         del chat.actions[index]
         if remember:
             chat.dismissed_action_keys.add(action_key(action.kind, action.params))
-            if action.kind == "mcp_auth" and action.origin == "engine":
-                self.declined_mcp_auth.add(self.mcp_auth_decline_key(chat, action_key(action.kind, action.params)))
         self._publish_actions(chat)
         return action_payload(action)
-
-    def mcp_auth_decline_key(self, chat: ChatInfo, key: str) -> tuple[str, str, str]:
-        """Where a Not now on a detected sign-in applies: the chat's workspace and provider."""
-        return (self._workspace_for_chat(chat.chat_id), chat.provider, key)
-
-    def forget_mcp_auth_decline(self, workspace: str, provider: str, server: str) -> None:
-        """Let a turned-on server's sign-in card come back: drop the Not now remembered for it."""
-        self.declined_mcp_auth.discard((workspace, provider, action_key("mcp_auth", {"server": server})))
 
     def get_action(self, chat_id: str, action_id: str) -> ChatAction | None:
         chat = self._chats.get(chat_id)
@@ -4664,15 +4638,6 @@ class ProjectChatManager:
             self._publish_actions(chat)
             self.actions_runtime.cancel_removed(chat.chat_id, removed)
         return had
-
-    def _schedule_action_detection(self, chat_id: str) -> None:
-        """After a turn, look for MCP sign-ins. Spawns work only for a live OpenCode server or a connected Claude session."""
-        if self.actions_runtime.detection_provider(chat_id) is None:
-            return
-        self._spawn_detached(
-            self.actions_runtime.detect_mcp_auth(chat_id),
-            f"chat-actions-detect-{chat_id}",
-        )
 
     def _parse_transcript_messages(self, text: str) -> list[dict]:
         """Extract user and assistant messages from transcript markdown."""
@@ -5055,7 +5020,18 @@ class ProjectChatManager:
                 descriptor = provider_registry.get(chat.provider)
                 if descriptor is None:
                     continue
-                deleted = await descriptor.factory().delete_session(root, sid)
+                deleted = await descriptor.factory().delete_session(
+                    root, sid, runtime_root=self._config.state_path.parent
+                )
+            except CleanupTimedOut:
+                # One id ran out of time: the chat's remaining ids are skipped, so the
+                # archive's total wait stays bounded. Their journals are left in place.
+                logger.warning(
+                    "Reclaiming %s sessions for chat %s timed out; the remaining ids were skipped.",
+                    chat.provider,
+                    chat.chat_id,
+                )
+                break
             except Exception:  # noqa: BLE001 — provider cleanup is fail-open
                 logger.exception(
                     "Failed to reclaim %s session %s for chat %s",
@@ -5150,7 +5126,6 @@ class ProjectChatManager:
         ctx = ChatContext.for_web(chat_id)
         self._advance_retry_generation(chat_id)
         self._cancel_between_turns_drain(chat_id)
-        self._streaming.discard_drain_result(chat_id)
         provider = self._pop_provider(chat_id)
         self._schedule_provider_cleanup(chat, provider, agent_root=agent_root)
         # Explicit deletion is a tombstone, not merely a sidebar mutation.
@@ -5196,7 +5171,7 @@ class ProjectChatManager:
             or chat.pending_question
             or chat.pending_permission
             or chat.retry_status
-            or self._subagents.work_count(chat_id) > 0
+            or self._provider_background_busy(chat_id, self._providers.get(chat_id))
         ):
             return False
         try:
@@ -5566,41 +5541,7 @@ class ProjectChatManager:
         self._provider_last_used.pop(chat_id, None)
         self._provider_disconnect_failures.pop(chat_id, None)
         self._provider_kind.pop(chat_id, None)
-        self._steer_locks.pop(chat_id, None)
         return self._providers.pop(chat_id, None)
-
-    async def ensure_opencode_server(self, chat_id: str) -> BaseProvider:
-        """Start an OpenCode chat's server without a turn, or return the live one.
-
-        The MCP sign-in card needs the server a turn would start; the idle sweep
-        may have stopped it (``_PROVIDER_IDLE_TIMEOUT_SECONDS``). The request is
-        built exactly as a turn builds it, so the next turn reuses this server.
-        ``compact=True`` only skips the capsule and prefix, whose builder mutates
-        chat state. The provider is registered and freshly stamped, so the sweep
-        keeps it for the whole sign-in wait (``POLL_DEADLINE_S`` < the timeout).
-        """
-        chat = self._chats.get(chat_id)
-        if chat is None or chat.archived or chat.provider != "opencode":
-            raise ValueError(f"chat {chat_id} is not an active OpenCode chat")
-        existing = self._providers.get(chat_id)
-        live = existing.provider if existing is not None else None
-        if live is not None and live.is_connected:
-            self._provider_last_used[chat_id] = time.monotonic()
-            return live
-        service = self._get_provider(chat_id)
-        provider = service.ensure_provider(chat.provider)
-        await self.warm_gh_token(chat)
-        request = self.build_agent_request(
-            chat, prompt="", resume_session=chat.session_id or None, compact=True
-        )
-        await provider.ensure_server(request)
-        if self._providers.get(chat_id) is not service:
-            # Archive, new session, handover or reload dropped this service while
-            # the server started; nothing else holds it, so stop it here.
-            await service.disconnect()
-            raise RuntimeError(f"chat {chat_id} changed while its OpenCode server started")
-        self._provider_last_used[chat_id] = time.monotonic()
-        return provider
 
     def evict_workspace_providers(self, workspace: str) -> list[str]:
         """Disconnect and forget the cached providers of *workspace*'s chats.
@@ -5626,10 +5567,6 @@ class ProjectChatManager:
         Mirrors ``_provider_is_busy`` minus the live-stream check: the caller
         of a reload may be the live foreground stream itself.
         """
-        if chat_id in self.background_agent_counts:
-            return True
-        if chat_id in self._subagents.watching_chat_ids():
-            return True
         if self._streaming.teardown_unsettled(chat_id):
             return True
         if self._provider_background_busy(chat_id, self._providers.get(chat_id)):
@@ -5655,28 +5592,6 @@ class ProjectChatManager:
         provider = self._pop_provider(chat_id)
         self._cancel_between_turns_drain(chat_id)
         return await self._disconnect_provider(chat_id, provider)
-
-    async def reload_workspace_providers(self, workspace: str, provider: str) -> dict[str, list[str]]:
-        """Reload the idle cached providers of the workspace's chats on ``provider``.
-
-        So a turned-on or turned-off MCP server takes effect. A chat in ``active_chat_ids()``
-        (a turn, subagents) is never reloaded, because ``reload_provider``'s own guard skips
-        the live-stream check. Busy or blocked chats are returned as ``pending``.
-        """
-        _project_ids, chat_ids = self.workspace_scope(workspace)
-        reloaded: list[str] = []
-        pending: list[str] = []
-        for chat_id in sorted(chat_ids):
-            chat = self._chats.get(chat_id)
-            if chat is None or chat.provider != provider or chat_id not in self._providers:
-                continue
-            # Checked per chat: each await below yields, so a turn may have started meanwhile.
-            # A pending chat keeps its old provider until it is idle and reloaded again.
-            if chat_id in self.active_chat_ids() or not await self.reload_provider(chat_id):
-                pending.append(chat_id)
-            else:
-                reloaded.append(chat_id)
-        return {"reloaded": reloaded, "pending": pending}
 
     # ── Idle provider reaping ────────────────────────────────────────────
 
@@ -5722,17 +5637,15 @@ class ProjectChatManager:
     def _provider_is_busy(self, chat_id: str, active: set[str]) -> bool:
         """Whether a chat has work that a provider teardown would interrupt.
 
-        ``active_chat_ids`` covers live streams, running background subagents
-        and pending subagent watchers. The rest are per-chat tasks that hold a
-        provider without necessarily opening a broker stream.
+        ``active_chat_ids`` covers live streams. The rest are per-chat tasks
+        that hold a provider without necessarily opening a broker stream.
         """
         if chat_id in active:
             return True
         if self._streaming.teardown_unsettled(chat_id):
             return True
         # A Claude drain lives as long as its CLI (#1402), so an idle drain is
-        # not work. Claude's background agents are counted by active_chat_ids,
-        # a drain streaming a follow-up holds a broker stream, and opencode
+        # not work. a drain streaming a follow-up holds a broker stream, and opencode
         # reports its own outstanding work.
         if self._provider_background_busy(chat_id, self._providers.get(chat_id)):
             return True
@@ -5771,18 +5684,18 @@ class ProjectChatManager:
         were in) into a ~2 s warm turn instead of a cold start.
 
         Bounded by count and by idle age so neither a long day of chat-hopping
-        nor a chat left open for days pins a process per chat. opencode is
-        never kept: its provider is a whole `opencode serve` with a port and an
-        SSE stream, which is what the idle timeout exists for.
+        nor a chat left open for days pins a process per chat. Every ACP agent
+        (opencode included, as `opencode acp`) qualifies; a provider that is not
+        an ACP agent is reclaimed by the idle timeout.
         """
         candidates = [
             (self._provider_last_used[chat_id], chat_id)
             for chat_id, kind in self._provider_kind.items()
-            if kind == "claude"
+            if _runs_over_acp(kind)
             and chat_id in self._providers
             and chat_id in self._provider_last_used
             and now - self._provider_last_used[chat_id]
-            < _CLAUDE_WARM_IDLE_TIMEOUT_SECONDS
+            < _ACP_WARM_IDLE_TIMEOUT_SECONDS
         ]
         candidates.sort(reverse=True)
         return {chat_id for _, chat_id in candidates[:_CLAUDE_WARM_PROVIDER_LIMIT]}
@@ -5803,7 +5716,7 @@ class ProjectChatManager:
 
         The most recently used Claude providers are exempt while they are
         within ``_CLAUDE_WARM_PROVIDER_LIMIT`` and
-        ``_CLAUDE_WARM_IDLE_TIMEOUT_SECONDS``; rebuilding one costs a cold
+        ``_ACP_WARM_IDLE_TIMEOUT_SECONDS``; rebuilding one costs a cold
         start (``_warm_claude_ids``). ``force`` ignores that exemption too.
         """
         if not self._providers:
@@ -5928,61 +5841,6 @@ class ProjectChatManager:
         if not self._is_known_workspace(workspace):
             workspace = self._config.primary_workspace()
         return workspace
-
-    async def provider_mcp_runtime_connections(
-        self, workspace: str, server_names: dict[str, list[str]]
-    ) -> dict[str, dict[str, list[dict[str, str]]]]:
-        """Read provider-native MCP status from cached live sessions only."""
-        result: dict[str, dict[str, list[dict[str, str]]]] = {
-            provider: {name: [] for name in names}
-            for provider, names in server_names.items()
-        }
-        sessions: list[tuple[str, str, Any]] = []
-        for chat_id, provider_service in list(self._providers.items()):
-            chat = self._chats.get(chat_id)
-            if chat is None or chat.provider not in {"opencode", "claude"}:
-                continue
-            if self._workspace_for_chat(chat_id) != workspace:
-                continue
-            provider = getattr(provider_service, "_provider", None)
-            if provider is not None and provider.is_connected:
-                sessions.append((chat_id, chat.provider, provider))
-
-        async def read(
-            session: tuple[str, str, Any]
-        ) -> tuple[str, str, dict[str, str] | None]:
-            chat_id, provider_name, provider = session
-            try:
-                states = await provider.read_mcp_status()
-            except Exception:  # noqa: BLE001 — status must not expose provider errors
-                return chat_id, provider_name, None
-            return chat_id, provider_name, states
-
-        states_by_session = await asyncio.gather(*(read(session) for session in sessions))
-        for chat_id, provider_name, states in states_by_session:
-            provider_result = result.setdefault(provider_name, {})
-            all_names = set(server_names.get(provider_name, []))
-            if states is not None:
-                all_names.update(states)
-            for name in all_names:
-                connections = provider_result.setdefault(name, [])
-                raw_state = states.get(name) if states is not None else None
-                state = raw_state if raw_state in {
-                    "connected", "failed", "disabled", "needs_auth"
-                } else "unknown"
-                connection = {
-                    "state": state,
-                    "provider": provider_name,
-                    "chat_id": chat_id,
-                }
-                if state == "failed":
-                    connection["error"] = "MCP server connection failed. Check the provider logs."
-                elif state == "needs_auth":
-                    connection["error"] = "MCP server needs authentication."
-                elif states is None:
-                    connection["error"] = "Could not read provider MCP status."
-                connections.append(connection)
-        return result
 
     def chat_archive_root(self, chat_key: str) -> Path:
         """The chats root a chat archives into: its workspace's ``Logs/Chats``.
@@ -6114,162 +5972,6 @@ class ProjectChatManager:
         slug = re.sub(r"[^a-z0-9_-]+", "-", (workspace or GWS_DEFAULT_PROFILE).lower()).strip("-")
         return Path(self._config.state_path).parent / "gws-unlinked" / (slug or GWS_DEFAULT_PROFILE), False
 
-    def _agent_read_only_for_chat(self, chat: ChatInfo, fs_scope: str) -> tuple[str, ...]:
-        """Runtime files a workspace-scoped chat reads but never writes (#1945).
-
-        Also the ``gws`` CLI with its links, npm package and node, so
-        ``ciao gws`` runs when it is installed under the home folder (#1959),
-        and the ``gh`` config directory so ``gh`` finds its login (#1961).
-        gws gets its credential directory writable for its token cache (see
-        ``_agent_fs_scope_for_chat``), with the account's ``client_secret.json``
-        and ``credentials.json`` pinned here so they stay write-denied: an
-        agent cannot plant a client secret with a hostile ``token_uri``.
-        A memory pass also gets its one source archive (``_memory_pass_archive_grant``).
-        The workspace's own `Logs/` (derived transcripts) is readable but never writable.
-        """
-        if fs_scope != "workspace":
-            return ()
-        from ciao.fs_sandbox import gh_config_read_root, gws_tool_read_roots  # noqa: PLC0415
-        from ciao.tool_path import login_shell_path  # noqa: PLC0415
-        from ciao.workspace_reroot import receipt_path, registry_file  # noqa: PLC0415
-
-        runtime = self._config.state_path.parent
-        gws_roots = [str(p) for p in gws_tool_read_roots(login_shell_path())]
-        granted = [str(receipt_path(runtime)), str(registry_file(runtime)), *gws_roots]
-        own_logs = self._config.chats_root(self._workspace_for_chat(chat.chat_id)).parent
-        if own_logs != self._config.logs_root:
-            granted.append(str(own_logs))
-        gws_dir = self._granted_gws_dir(chat)
-        if gws_dir is not None:
-            for name in ("client_secret.json", "credentials.json"):
-                pinned = gws_dir / name
-                if pinned.exists():
-                    granted.append(str(pinned))
-        gh_dir = gh_config_read_root(os.environ)
-        if gh_dir is not None:
-            granted.append(str(gh_dir))
-        archive = self._memory_pass_archive_grant(chat)
-        if archive is not None:
-            granted.append(str(archive))
-        return tuple(granted)
-
-    def _granted_gws_dir(self, chat: ChatInfo) -> Path | None:
-        """The linked account's resolved credential directory, or None.
-
-        Resolve before granting: an agent that can write secrets/ must not
-        redirect the profile directory (or secrets itself) to another folder.
-        """
-        gws_dir, linked = self._gws_config_dir(self._workspace_for_chat(chat.chat_id))
-        if (
-            linked
-            and gws_dir.is_dir()
-            and gws_dir.resolve() == Path(self._config.workspace_root).resolve() / "secrets" / gws_dir.name
-        ):
-            return gws_dir.resolve()
-        return None
-
-    def _memory_pass_archive_grant(self, chat: ChatInfo) -> Path | None:
-        """The one transcript archive a memory pass may read, or None (#2459).
-
-        The grant is read-only and limited to this single file, so the pass can
-        read the chat it distils without a folder of other transcripts. The
-        helper lives in the hand-editable registry, so it is validated here and
-        every failure grants nothing: the chat is a memory pass with a
-        ``memory_pass`` helper, the source chat id is one folder name under one of
-        the chats roots (never a symlink), and the archive, resolved, is a regular
-        file with one link inside that folder. A symlinked leaf is refused before
-        it is resolved.
-        """
-        project = self._projects.get(chat.project_id)
-        if not is_memory_pass_chat(chat, project):
-            return None
-        helper = chat_service._normalize_chat_helper(chat.helper)
-        source_chat_id = str(helper.get("source_chat_id") or "")
-        archive_path = str(helper.get("archive_path") or "")
-        if helper.get("kind") != "memory_pass" or not source_chat_id or not archive_path:
-            return None
-        workspace_root = Path(self._config.workspace_root)
-        try:
-            source_dirs: list[Path] = []
-            for root in self._config.chats_roots():
-                chats_root = root.resolve()
-                source_link = chats_root / source_chat_id
-                if source_link.is_symlink() or not source_link.is_dir():
-                    continue
-                source_dir = source_link.resolve()
-                if source_dir.parent == chats_root:
-                    source_dirs.append(source_dir)
-            if not source_dirs:
-                return None
-            candidate = Path(archive_path)
-            if not candidate.is_absolute():
-                candidate = workspace_root / candidate
-            if os.path.islink(candidate):
-                return None
-            resolved = candidate.resolve(strict=True)
-            # A second name for a file another process can read is not an archive.
-            if resolved.stat().st_nlink != 1:
-                return None
-        except (OSError, ValueError, RuntimeError):
-            return None
-        if not resolved.is_file() or not any(
-            resolved.is_relative_to(source_dir) for source_dir in source_dirs
-        ):
-            return None
-        return resolved
-
-    def _agent_denied_for_chat(
-        self, chat: ChatInfo, fs_scope: str, fs_roots: tuple[str, ...]
-    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """The hidden ``secrets`` folder and the linked account re-allowed in it (#1968).
-
-        Set only in workspace scope when ``secrets`` (or, if it is a symlink,
-        its resolved target) is a directory strictly inside a granted root: the agent's shell could then
-        read every account's credentials. The sandbox stays pure; the decision
-        is made here, where the workspace root, roots and linked account are known.
-        """
-        if fs_scope != "workspace":
-            return (), ()
-        secrets = Path(self._config.workspace_root).resolve() / "secrets"
-        if not secrets.is_dir():
-            return (), ()
-        # A symlinked ``secrets`` hides its resolved target. No regrant applies:
-        # ``_granted_gws_dir`` refuses an account directory reached through it.
-        target = secrets.resolve()
-        if not any(target != Path(root) and target.is_relative_to(root) for root in fs_roots):
-            return (), ()
-        gws = None if secrets.is_symlink() else self._granted_gws_dir(chat)
-        return (str(target),), ((str(gws),) if gws else ())
-
-    def _agent_fs_scope_for_chat(self, chat: ChatInfo) -> tuple[str, tuple[str, ...]]:
-        """The chat's workspace filesystem scope and the roots it confines to.
-
-        Roots are the chat's agent root and that workspace's vault root,
-        resolved and de-duplicated, agent root first. A project's linked
-        repository follows the vault root, then the linked Google account's
-        credential directory, writable for gws's token cache (#1959; its client
-        secret and refresh credentials are write-denied, see
-        ``_agent_read_only_for_chat``). A chat granted the data
-        root (the memory-backup setup chat, #1328) also gets that root, last.
-        Machine scope never reads them, so they are only computed for the
-        workspace case.
-        """
-        workspace = self._workspace_for_chat(chat.chat_id)
-        config = self._config.workspace(workspace)
-        if config is None or config.effective_agent_fs_scope() != "workspace":
-            return "machine", ()
-        agent_root = self._config.agent_root(workspace).resolve()
-        vault_root = self._config.workspace_vault_root(workspace).resolve()
-        roots = [str(agent_root), str(vault_root)]
-        linked_repo = self.linked_repo_for_chat(chat)
-        if linked_repo:
-            roots.append(linked_repo)
-        gws_dir = self._granted_gws_dir(chat)
-        if gws_dir is not None and not any(gws_dir.is_relative_to(root) for root in roots):
-            roots.append(str(gws_dir))
-        if chat.grants_data_root:
-            roots.append(str(backup_scope.data_root(self._config).resolve()))
-        return "workspace", tuple(dict.fromkeys(roots))
 
     def _revoke_mcp_chat(self, chat_id: str) -> None:
         service = self._mcp_service
@@ -6356,10 +6058,6 @@ class ProjectChatManager:
         include_stable = self._needs_stable_context(chat)
         chat.instructions_inline_pending = repo_path if include_stable and inlined else ""
         handover = self._format_handover_context(chat)
-        # Only a workspace-scoped chat is confined, so only it is told where
-        # it can write; a machine-scope chat gets no file-access line at all.
-        fs_scope, fs_roots = self._agent_fs_scope_for_chat(chat)
-        archive = self._memory_pass_archive_grant(chat) if fs_scope == "workspace" else None
         capsule = build_context_capsule(
             workspace=workspace,
             gws_profile=gws_profile,
@@ -6370,17 +6068,24 @@ class ProjectChatManager:
             unattended=unattended,
             handover=handover,
             include_stable=include_stable,
-            file_roots=fs_roots if fs_scope == "workspace" else (),
-            file_read_only=(str(archive),) if archive is not None else (),
             linked_repo_block=repo_block,
             linked_repo_line=repo_line,
             permission_mode=self._effective_mode_for_chat(chat, unattended=unattended),
+            core=self._core_for_chat(chat),
         )
         if capsule:
             capsule = f"[Chat ID: \"{chat.chat_id}\"]\n{capsule}"
         else:
             return ""
         return f"[CIAO_CONTEXT_BEGIN]\n{capsule}\n[CIAO_CONTEXT_END]\n\n"
+
+    def _core_for_chat(self, chat: ChatInfo) -> str:
+        """The Ciaobot core, sent in the stable block of ACP chats only."""
+        descriptor = provider_registry.get(chat.provider)
+        # Non-ACP drivers still send the core as a system prompt; C2b/D2 delete this condition.
+        if descriptor is None or not descriptor.acp_spec_path:
+            return ""
+        return unified_core()
 
     def _needs_stable_context(self, chat: ChatInfo) -> bool:
         digest, session_key = self._stable_context_marker(chat)
@@ -6406,6 +6111,7 @@ class ProjectChatManager:
                 project_context=project_context,
                 canonical_doc=canonical_doc,
                 linked_repo=repo_fp,
+                core=self._core_for_chat(chat),
             ),
             chat.session_id or "__pending__",
         )
@@ -6429,6 +6135,7 @@ class ProjectChatManager:
             include_stable=True,
             linked_repo_block=repo_block,
             linked_repo_line=repo_line,
+            core=self._core_for_chat(chat),
         )
         if not capsule:
             return ""
@@ -6580,35 +6287,16 @@ class ProjectChatManager:
         workspace's own `disallowed_tools` in `workspaces.json`, or the PWA
         field). Declared MCP servers all load unless that list names them.
 
-        It also always carries the unconditional credential/runtime-state file
-        denies (``ciao.execution_modes.credential_path_deny_rules``), which no
-        workspace override or ``none`` opt-out clears.
-
-        A memory pass carries more than an ordinary chat: on top of the
-        workspace list, it denies every declared MCP server and every shipped
-        ``gws-*`` skill (``CiaoConfig.memory_pass_denied_tools``). A pass reads
-        and edits the vault; it must not reach an external surface.
-
-        Two limits stated plainly. This scopes REACHABILITY, not authority: a
-        shared account behind a reachable server still holds that account's full
-        authority. And this list is only applied when the chat's provider is
-        ``claude`` (see the guard below). opencode is not left unconstrained:
-        it gets the equivalent credential denies as session permission rules
-        from its own provider
-        (``ciao.providers.opencode.mode_settings``, sharing the patterns in
-        ``ciao.execution_modes``). The part that remains Claude-only is the
-        harness denylist and any ``mcp__<server>`` deny; closing that needs a per-provider mechanism and is out of scope.
+        This scopes REACHABILITY, not authority: a shared account behind a
+        reachable server still holds that account's full authority. The list is
+        only applied when the chat's provider is ``claude`` (see the guard
+        below).
         """
         if chat.provider != "claude":
             return []
         project = self._projects.get(chat.project_id)
         workspace = project.workspace if project else None
-        base = self._config.disallowed_tools_for_workspace(workspace)
-        if is_memory_pass_chat(chat, project):
-            base = list(dict.fromkeys(
-                [*base, *self._config.memory_pass_denied_tools(workspace)]
-            ))
-        return base
+        return self._config.disallowed_tools_for_workspace(workspace)
 
     def claude_settings_for_chat(self, chat: ChatInfo) -> dict[str, Any] | None:
         """The Claude CLI settings layer for a chat's spawned CLI; None off the claude provider."""
@@ -6715,9 +6403,13 @@ class ProjectChatManager:
         return project_ids, chat_ids
 
     def workspace_busy_chat_ids(self, workspace: str) -> list[str]:
-        """Chats in *workspace* with a turn or subagent running."""
+        """Chats in *workspace* with a live stream or background work outstanding."""
         _project_ids, chat_ids = self.workspace_scope(workspace)
         busy = set(self.active_chat_ids())
+        busy.update(
+            cid for cid in chat_ids
+            if self._provider_background_busy(cid, self._providers.get(cid))
+        )
         return sorted(cid for cid in busy if cid in chat_ids)
 
     def refuse_workspace_teardown(self, workspace: str) -> None:
@@ -6910,68 +6602,24 @@ class ProjectChatManager:
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["GH_PROMPT_DISABLED"] = "1"
         # The claude.ai connectors (the Claude account's remote MCP servers)
-        # load into every Claude chat unless Claude Code is told not to. A
-        # workspace can switch them off; a memory pass always runs without them,
-        # since a pass reads and edits the vault and must not reach an external
-        # surface. Other providers never see this variable.
-        if chat.provider == "claude" and (
-            is_memory_pass_chat(chat, project) or not self._claude_ai_connectors_on(workspace)
-        ):
+        # load into every Claude chat unless Claude Code is told not to.
+        # Trimming setting:claude_ai_connectors switches them off. A memory
+        # pass follows the same switch as any other chat. Other providers never
+        # see this variable. The default (not trimmed) leaves it unset.
+        if chat.provider == "claude" and self._claude_ai_connectors_trimmed(workspace):
             env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
-        # The macOS keychain is outside a workspace sandbox, so gh cannot read
-        # its own login there: the engine passes the token in (#1961). Only the
-        # cache is read here; ``warm_gh_token`` fills it off the event loop.
-        gh_path = self._gh_path_for_token(chat, project)
-        if gh_path is not None:
-            from ciao.fs_sandbox import gh_token_for_sandbox  # noqa: PLC0415
-
-            gh_token = gh_token_for_sandbox(gh_path, os.environ, cached_only=True)
-            if gh_token:
-                env["GH_TOKEN"] = gh_token
         return env
 
-    def _gh_path_for_token(self, chat: ChatInfo, project: Any) -> str | None:
-        """The ``gh`` executable whose token a chat gets, or None (#1961).
+    def _claude_ai_connectors_trimmed(self, workspace: str) -> bool:
+        """Whether a Claude chat in ``workspace`` hides the claude.ai connectors.
 
-        None outside workspace scope (the chat reaches the keychain itself), in
-        a memory pass (it must not reach an external surface), when gh is not
-        installed or its shim is broken, and when the agent could have written
-        gh: an executable inside a writable root must never run unsandboxed.
+        An unregistered or empty workspace name keeps the catalog default (on).
         """
-        fs_scope, roots = self._agent_fs_scope_for_chat(chat)
-        if fs_scope != "workspace" or is_memory_pass_chat(chat, project):
-            return None
-        from ciao.tool_path import resolve_tool  # noqa: PLC0415
+        from ciao.claude_trim import CONNECTORS_TRIM_KEY, effective_trim  # noqa: PLC0415
 
-        try:
-            gh_path = resolve_tool("gh")
-        except OSError:
-            return None
-        if gh_path is None:
-            return None
-        resolved = Path(gh_path).resolve()
-        if any(resolved.is_relative_to(Path(root).resolve()) for root in roots):
-            return None
-        return gh_path
-
-    async def warm_gh_token(self, chat: ChatInfo) -> None:
-        """Fill the gh token cache off the event loop before a turn starts (#1961)."""
-        gh_path = self._gh_path_for_token(chat, self._projects.get(chat.project_id))
-        if gh_path is None:
-            return
-        from ciao.fs_sandbox import gh_token_for_sandbox  # noqa: PLC0415
-
-        await asyncio.to_thread(gh_token_for_sandbox, gh_path, dict(os.environ))
-
-    def _claude_ai_connectors_on(self, workspace: str) -> bool:
-        """Whether a Claude chat in ``workspace`` loads the claude.ai connectors.
-
-        An unregistered or empty workspace name keeps the default (on).
-        """
         config_workspace = self._config.workspace(workspace) if workspace else None
-        if config_workspace is None:
-            return True
-        return bool(config_workspace.claude_ai_connectors)
+        overrides = config_workspace.claude_trim if config_workspace is not None else {}
+        return bool(effective_trim(overrides)[CONNECTORS_TRIM_KEY])
 
     def _effective_mode_for_chat(
         self, chat: ChatInfo, *, unattended: bool = False
@@ -7160,8 +6808,6 @@ class ProjectChatManager:
             extra_env[AGENT_URL_ENV] = agent_url
             extra_env[AGENT_TOKEN_ENV] = token
 
-        fs_scope, fs_roots = self._agent_fs_scope_for_chat(chat)
-        denied, denied_except = self._agent_denied_for_chat(chat, fs_scope, fs_roots)
         return AgentRequest(
             prompt=full_prompt,
             model=self._runtime_model_for_chat(chat),
@@ -7173,16 +6819,7 @@ class ProjectChatManager:
             extra_env=extra_env,
             disallowed_tools=self.disallowed_tools_for_chat(chat),
             claude_settings=self.claude_settings_for_chat(chat),
-            agent_fs_scope=fs_scope,
-            agent_roots=fs_roots,
-            agent_read_only=self._agent_read_only_for_chat(chat, fs_scope),
-            agent_denied=denied,
-            agent_denied_except=denied_except,
             linked_repo=self.linked_repo_for_chat(chat),
-            # The guardrail marker: Claude reads the extra denies off
-            # ``disallowed_tools``, opencode needs a marker to pick its own
-            # stricter ruleset.
-            memory_pass=is_memory_pass_chat(chat, project),
             thinking_level=self._thinking_level_for_chat(chat),
             context_digest=context_digest,
             context_session_id=context_session_id,
@@ -7193,92 +6830,33 @@ class ProjectChatManager:
             # parsing delimiters.
             injected_context_prefix=prefix,
             compact=compact,
+            unattended=unattended,
         )
 
     # ── Image-capability pre-flight ──────────────────────────────────────
 
-    async def _catalog_image_support(self, provider: str, model: str) -> bool | None:
-        """Whether ``model`` accepts images, per the provider's own catalog.
+    def _agent_accepts_images(self, chat: ChatInfo) -> bool:
+        """Whether the chat's live agent may receive images.
 
-        ``None`` means the provider did not say -- it is unknown, the model is
-        absent from its catalog, or its build reports no capability block.
-        Unknown is not a refusal; the caller treats it as capable.
+        The gate is the agent-level ``promptCapabilities.image`` the agent stated at its
+        handshake, read from the connection the chat already has. Only an explicit
+        False refuses; no connection yet, or no statement, is capable. A model that
+        cannot take an image is the adapter's to refuse, not this pre-flight's.
         """
-        descriptor = provider_registry.get(provider)
-        if descriptor is None:
-            return None
-        try:
-            catalog = await descriptor.factory().model_catalog(
-                self._config.workspace_root
-            )
-        except Exception:  # noqa: BLE001 — a probe must never block a turn
-            logger.info(
-                "%s catalog unavailable for %s; assuming capable",
-                provider,
-                model,
-                exc_info=True,
-            )
-            return None
-        for row in catalog:
-            if row.get("model") == model:
-                value = row.get("images")
-                return value if isinstance(value, bool) else None
-        return None
-
-    async def _model_capable(self, model: str, chat: ChatInfo) -> bool:
-        """Whether ``model`` can accept image input.
-
-        The provider's own ``model_catalog`` is the single source of truth.
-        Only opencode reports one (it is bring-your-own-provider and its
-        catalog spans text-only models); Anthropic's and OpenAI's current
-        models all accept images, and the base default is an empty catalog,
-        so every other provider answers yes without any work.
-
-        Unknown answers resolve to capable, so a cold catalog or an older
-        opencode build never blocks an image turn -- the upstream rejects the
-        attachment itself if it really cannot take one.
-        """
-        if not model:
-            return True
-        supports = await self._catalog_image_support(chat.provider, model)
-        return True if supports is None else supports
+        live = self._providers.get(chat.chat_id)
+        provider = live.provider if live is not None else None
+        return provider is None or provider.agent_accepts_images() is not False
 
     async def _capability_candidates(
         self, chat: ChatInfo, model: str
     ) -> list[dict[str, object]]:
-        """Vision-capable alternatives for the capability question.
+        """The question's candidates: the current model only, disabled.
 
-        Always leads with the current model as a disabled ``current`` entry so
-        the PWA can render the active-but-unsuitable choice. The rest are models
-        the chat's provider states accept images, drawn from the same catalog
-        that ruled the current one out, so a suggestion cannot be a guess.
-        For opencode, every entry with ``images is True`` in its catalog is
-        offered (no 3-item cap); other providers report an empty catalog, so
-        only the current entry is returned there.
+        The image statement covers the whole agent session, not each model, so no
+        alternative model is offered from a per-model table.
         """
-        entries: list[dict] = [{"id": model, "label": model, "disabled": True}]
-        descriptor = provider_registry.get(chat.provider)
-        if descriptor is None:
-            return entries
-        try:
-            catalog = await descriptor.factory().model_catalog(
-                self._config.workspace_root
-            )
-        except Exception:  # noqa: BLE001 — the question is still useful empty
-            logger.info(
-                "%s catalog unavailable for candidates", chat.provider, exc_info=True
-            )
-            return entries
-        for row in catalog:
-            candidate = str(row.get("model") or "")
-            if not candidate or candidate == model or row.get("images") is not True:
-                continue
-            entries.append({
-                "id": candidate,
-                "label": str(row.get("label") or candidate),
-                "supports_vision": True,
-            })
-        return entries
+        del chat
+        return [{"id": model, "label": model, "disabled": True}]
 
     async def _await_capability_answer(
         self, chat_id: str, request_id: str, timeout_s: float
@@ -7458,16 +7036,14 @@ class ProjectChatManager:
         text: str,
         images: list[ImageAttachment] | None = None,
         entry_id: str | None = None,
-        delivery: str = "queue",
         origin: str = "",
         send_id: str = "",
     ) -> bool:
         """Append a user message to the active stream's pending queue.
 
-        ``delivery="steer"`` marks it for injection into the running turn; the
-        caller then awaits ``steer_queue`` to dispatch it. ``origin`` tags an
-        engine-written message or user-requested retry (see ``start_stream``);
-        it rides on the entry.
+        A message sent while a turn runs always waits for that turn to finish.
+        ``origin`` tags an engine-written message or user-requested retry
+        (see ``start_stream``); it rides on the entry.
         ``send_id`` is the client send id, recorded on the queue entry so the
         flushed turn can carry it.
 
@@ -7489,18 +7065,14 @@ class ProjectChatManager:
             ref = getattr(img, "ref", None) or getattr(img, "original_filename", None)
             if ref:
                 image_refs.append(str(ref))
-        if delivery not in QUEUE_DELIVERIES:
-            delivery = "queue"
         resolved_id = stream.enqueue(
-            text, image_refs, entry_id=entry_id, delivery=delivery, origin=origin,
-            send_id=send_id,
+            text, image_refs, entry_id=entry_id, origin=origin, send_id=send_id,
         )
         stream.publish({
             "type": "queued",
             "id": resolved_id,
             "text": text,
             "images": image_refs,
-            "delivery": delivery,
             "waiting": False,
             **({"send_id": send_id} if send_id else {}),
         })
@@ -7518,58 +7090,36 @@ class ProjectChatManager:
         stream.reload_continue = True
         return True
 
-    async def set_queue_delivery(
-        self, chat_id: str, entry_ids: list[str], delivery: str
-    ) -> bool:
-        """Switch queued entries between next-turn and steer delivery.
+    async def send_queued_now(self, chat_id: str, entry_ids: list[str]) -> bool:
+        """Send waiting entries now, or move them into the live queue.
 
-        Switching to ``"steer"`` dispatches immediately, combined with every
-        other steer-mode entry not yet dispatched (see ``steer_queue``).
-        Returns False for an unknown delivery, or when no named entry exists
-        or is still switchable (a dispatched steer is locked).
+        With a live foreground turn, the named waiting entries move into that
+        turn's queue ahead of later entries and flush after the current turn.
+        With no live turn, they start a turn: texts joined with a blank line,
+        images in list order. The turn keeps an origin only when every entry
+        shares it. Overflow past the send-id cap stays waiting. Returns True
+        when any named waiting entry was adopted or sent.
         """
-        if delivery not in QUEUE_DELIVERIES:
-            return False
         stream = self._broker.get(chat_id)
         chat = self._chats.get(chat_id)
         wanted = set(entry_ids)
         if stream is not None and not stream.background:
-            # Waiting (parked) entries can be named too: "queue" leaves them
-            # waiting; "steer" hands them to this running turn, where they are
-            # ordinary live entries (they flush as the next turn if the steer
-            # falls back).
-            waiting = [
-                e for e in (chat.pending_queue if chat is not None else [])
-                if e.get("id") in wanted
-            ]
-            waiting_ids = {e.get("id") for e in waiting}
-            live_ids = [i for i in entry_ids if i not in waiting_ids]
-            changed = bool(live_ids) and stream.set_delivery(live_ids, delivery)
-            if waiting and delivery == "steer" and chat is not None:
-                moved = {id(e) for e in waiting}
-                chat.pending_queue = [e for e in chat.pending_queue if id(e) not in moved]
-                stream.adopt_waiting(waiting, "steer")
-                self._save()
-                changed = True
-            elif waiting:
-                changed = True
-            if not changed:
+            if chat is None:
                 return False
+            waiting = [e for e in chat.pending_queue if e.get("id") in wanted]
+            if not waiting:
+                return False
+            moved = {id(e) for e in waiting}
+            chat.pending_queue = [e for e in chat.pending_queue if id(e) not in moved]
+            stream.adopt_waiting(waiting)
+            self._save()
             stream.publish_pending()
-            if delivery == "steer":
-                await self.steer_queue(chat_id)
             return True
         if chat is None:
             return False
         selected = [e for e in chat.pending_queue if e.get("id") in wanted]
         if not selected:
             return False
-        if delivery == "queue":
-            return True  # a waiting entry is already queued
-        # Steer with nothing running sends the waiting entries now, as a new
-        # turn: texts joined with a blank line and every image, in list order.
-        # The turn keeps an origin only when every entry shares it. The rest of
-        # the waiting queue stays.
         turn_index = chat.user_turn_count
         selected, overflow = _entries_within_send_id_limit(
             chat, turn_index, selected
@@ -7579,7 +7129,6 @@ class ProjectChatManager:
                 f"This turn can own at most {MAX_SEND_IDS_PER_TURN} send ids; "
                 "the entries remain queued."
             )
-        overflow_entry_ids = [str(entry["id"]) for entry in overflow]
         text = "\n\n".join(
             t for t in (str(e.get("text", "")).strip() for e in selected) if t
         )
@@ -7633,141 +7182,9 @@ class ProjectChatManager:
             raise
         # What still waits stays on the chat; publish it with the new stream.
         stream.publish_pending()
-        if overflow_entry_ids:
-            self._publish_steer_fallback(stream, overflow_entry_ids, "send_id_limit")
+        if overflow:
+            stream.publish_queue_state(chat.pending_queue)
         return True
-
-    async def steer_queue(self, chat_id: str) -> None:
-        """Hand every undispatched steer-mode entry to the running turn.
-
-        The entries go out as one message (texts joined with a blank line, all
-        images, in list order). They stay in the queue, locked and marked
-        ``steering``, until the provider confirms delivery
-        (``on_steer_delivered``). Whatever cannot be steered reverts to queue
-        mode with a ``steer_fallback`` notice. Dispatches are serialized per
-        chat, so a steer arriving mid-dispatch joins the next one.
-        """
-        lock = self._steer_locks.setdefault(chat_id, asyncio.Lock())
-        async with lock:
-            stream = self._broker.get(chat_id)
-            provider = self._providers.get(chat_id)
-            chat = self._chats.get(chat_id)
-            if (
-                stream is None
-                or stream.background
-                or not stream.accepting_queue
-                or provider is None
-                or chat is None
-            ):
-                if stream is not None:
-                    self._fallback_steers(chat_id, stream, "no_turn")
-                return
-            blank = stream.revert_blank_steers()
-            if blank:
-                self._publish_steer_fallback(stream, blank, "not_running")
-            entries = stream.steer_candidates()
-            if not entries:
-                return
-            turn_index = chat.user_turn_count
-            entries, overflow = _entries_within_send_id_limit(
-                chat, turn_index, entries
-            )
-            if overflow:
-                overflow_ids = [str(entry["id"]) for entry in overflow]
-                stream.set_delivery(overflow_ids, "queue")
-                self._publish_steer_fallback(stream, overflow_ids, "send_id_limit")
-            if not entries:
-                return
-            entry_ids = [str(e["id"]) for e in entries]
-            text = "\n\n".join(
-                t for t in (str(e["text"]).strip() for e in entries) if t
-            )
-            if text:
-                # The same @file expansion a normal prompt gets, but no prefix
-                # or capsule: the running turn already carries them.
-                text = self.expand_file_refs(text, chat_id)
-            images: list[ImageAttachment] = []
-            for entry in entries:
-                for ref in entry.get("images") or []:
-                    attachment = self.resolve_image_ref(ref)
-                    if attachment:
-                        images.append(attachment)
-            fs_scope, fs_roots = self._agent_fs_scope_for_chat(chat)
-            denied, denied_except = self._agent_denied_for_chat(chat, fs_scope, fs_roots)
-            request = AgentRequest(
-                prompt=text,
-                model=self._runtime_model_for_chat(chat),
-                provider=chat.provider,
-                mode=self._effective_mode_for_chat(chat),
-                resume_session=chat.session_id or None,
-                images=images,
-                extra_env=self._build_extra_env(chat),
-                disallowed_tools=self.disallowed_tools_for_chat(chat),
-                claude_settings=self.claude_settings_for_chat(chat),
-                agent_fs_scope=fs_scope,
-                agent_roots=fs_roots,
-                agent_read_only=self._agent_read_only_for_chat(chat, fs_scope),
-                agent_denied=denied,
-                agent_denied_except=denied_except,
-                linked_repo=self.linked_repo_for_chat(chat),
-                thinking_level=self._thinking_level_for_chat(chat),
-            )
-            # Lock the chips before the await: an edit or remove landing while
-            # the provider call is in flight would change what was sent.
-            stream.mark_steering(entry_ids, STEER_DISPATCHING)
-            stream.publish_pending()
-            stream.steer_inflight = True
-            try:
-                steer_id = await asyncio.wait_for(
-                    provider.steer_turn(request), _STEER_DISPATCH_TIMEOUT_S
-                )
-            except asyncio.CancelledError:
-                self._fallback_steers(chat_id, stream, "not_running")
-                raise
-            except Exception:  # noqa: BLE001 - a steer failure is a fallback, not a crash
-                # Includes the dispatch timeout. The message stays queued. A
-                # wedged CLI could still deliver the cancelled steer after the
-                # timeout, so a rare duplicate is possible.
-                logger.warning(
-                    "steer_turn failed for chat %s", chat_id, exc_info=True
-                )
-                steer_id = None
-            finally:
-                stream.steer_inflight = False
-            if not steer_id:
-                self._fallback_steers(chat_id, stream, "not_running")
-                return
-            if not stream.confirm_steering(steer_id):
-                # Stop or the turn's end reverted them while we awaited.
-                return
-            if steer_id in stream.early_steer_deliveries:
-                stream.early_steer_deliveries.discard(steer_id)
-                self.on_steer_delivered(chat_id, stream, steer_id)
-            # Otherwise nothing visible changed since the "steering" publish
-            # before the await (only the internal delivery id), so no second
-            # queue_state.
-
-    def _fallback_steers(self, chat_id: str, stream: "ChatStream", reason: str) -> None:
-        """Revert steer-mode entries to queue mode and say so.
-
-        Used when a steer cannot be dispatched and when the turn ends with one
-        still undelivered. The entries stay in the list, so they flush as the
-        next turn (or park) through the usual path. With nothing to revert
-        there is nothing to publish.
-        """
-        entry_ids = stream.revert_steers()
-        if entry_ids:
-            self._publish_steer_fallback(stream, entry_ids, reason)
-
-    def _publish_steer_fallback(
-        self, stream: "ChatStream", entry_ids: list[str], reason: str
-    ) -> None:
-        stream.publish({
-            "type": "steer_fallback",
-            "entry_ids": entry_ids,
-            "reason": reason,
-        })
-        stream.publish_pending()
 
     def on_prompt_cancelled(
         self,
@@ -7781,7 +7198,7 @@ class ProjectChatManager:
 
         The turn's own prompt (not the provider's capsule-prefixed one) joins
         the chat's waiting queue like a message parked by Stop, so the user
-        resends it with the chip's Send now or Steer. The turn never ran, so
+        resends it with the chip's Send now. The turn never ran, so
         its index and per-turn records are rolled back: the resend takes the
         same index and later history rows do not shift.
         """
@@ -7830,78 +7247,6 @@ class ProjectChatManager:
         chat.pending_queue = [*chat.pending_queue, entry]
         self._save()
         stream.publish_queue_state(chat.pending_queue)
-
-    def on_steer_delivered(
-        self, chat_id: str, stream: "ChatStream", steer_id: str
-    ) -> None:
-        """A dispatched steer reached the running turn: it is now a user turn.
-
-        The turn keeps an origin only when every steered entry carries the same
-        one (see shared_origin).
-        """
-        entries = stream.take_steered(steer_id)
-        if not entries:
-            if stream.steer_inflight:
-                # The echo beat ``steer_queue``'s bookkeeping; it claims this id.
-                stream.early_steer_deliveries.add(steer_id)
-            else:
-                # Nothing is dispatching, so no entry can own it (Stop or the
-                # turn's end already reverted them). Remembering it would let a
-                # later dispatch be mistaken for delivered.
-                logger.info(
-                    "Dropping steer delivery %s for chat %s: no entry owns it",
-                    steer_id, chat_id,
-                )
-            return
-        text = "\n\n".join(
-            t for t in (str(e.get("text", "")).strip() for e in entries) if t
-        )
-        images = [str(ref) for e in entries for ref in (e.get("images") or [])]
-        origin = shared_origin(entries)
-        chat = self._chats.get(chat_id)
-        turn_index = -1
-        sent_at = chat_service._now_iso()
-        if chat is not None:
-            turn_index = chat.user_turn_count
-            chat.user_turn_count = turn_index + 1
-            if images:
-                chat.user_turn_images[str(turn_index)] = images
-            chat.user_turn_timings[str(turn_index)] = {"sent_at": sent_at}
-            chat.user_turn_steered[str(turn_index)] = True
-            if origin:
-                chat.user_turn_origin[str(turn_index)] = origin
-            running = stream.running_turn_index
-            if running is not None and chat.user_turn_unattended.get(str(running)):
-                # The control plane reads the newest turn index to decide
-                # whether a person is present. A steer into a scheduled turn
-                # must not make it look attended.
-                chat.user_turn_unattended[str(turn_index)] = True
-            chat.record_send_ids(
-                turn_index,
-                [
-                    str(sid)
-                    for e in entries
-                    for sid in ([e["send_id"]] if e.get("send_id") else [])
-                    + list(e.get("send_ids") or [])
-                ],
-            )
-            chat.last_activity_at = sent_at
-            chat.last_read_at = sent_at  # user sending = implicitly read
-            self._save()
-            stream.steered_turn_indexes.append(turn_index)
-        steered_event: dict = {
-            "type": "steered",
-            "entry_ids": [str(e["id"]) for e in entries],
-            "text": text,
-            "images": images,
-            "turn_index": turn_index,
-            "sent_at": sent_at,
-            "delivery_id": steer_id,
-        }
-        if origin:
-            steered_event["origin"] = origin
-        stream.publish(steered_event)
-        stream.publish_pending()
 
     def reorder_queue(
         self,
@@ -7976,8 +7321,6 @@ class ProjectChatManager:
             return None
         stream = self._broker.get(chat_id)
         live = stream if stream is not None and not stream.background else None
-        if live is not None and live._is_steering(entry_id):
-            return None
         entry = live.take_pending(entry_id) if live is not None else None
         if entry is None:
             entry = take_pending_list(chat.pending_queue, entry_id)
@@ -8042,28 +7385,12 @@ class ProjectChatManager:
     def active_chat_ids(self) -> list[str]:
         """Chats with work that must settle before a safe server restart.
 
-        Include live subagent watchers even before their first poll publishes a
-        running count. Without that slot, the parent stream can finish and
-        briefly make a chat look idle while its background agents still run.
-        Idle between-turn drains are deliberately excluded; a drain only
-        becomes active work when it opens a broker stream.
+        Live streams only. Idle between-turn drains are deliberately excluded;
+        a drain only becomes active work when it opens a broker stream. A
+        provider's own outstanding background work is reported separately by
+        ``restart_blockers`` as ``background_work``.
         """
-        ids = set(self.active_stream_chat_ids())
-        ids.update(self.background_agent_counts)
-        ids.update(self._subagents.watching_chat_ids())
-        return sorted(ids)
-
-    def background_work_chat_ids(self) -> list[str]:
-        """Chats whose provider still reports background work (native shells, subagents).
-
-        Separate from ``active_chat_ids`` on purpose: that set drives restart
-        drains, this one only decides which chats the running-work feed lists.
-        """
-        return sorted(
-            chat_id
-            for chat_id, service in self._providers.items()
-            if self._provider_background_busy(chat_id, service)
-        )
+        return sorted(self.active_stream_chat_ids())
 
     def restart_blockers(self) -> list[dict[str, Any]]:
         """Chats a restart or stop would break, each with the reasons why. Superset of active_chat_ids()."""
@@ -8076,8 +7403,6 @@ class ProjectChatManager:
 
         for cid in self.active_stream_chat_ids():
             add(cid, "streaming")
-        for cid in set(self.background_agent_counts) | set(self._subagents.watching_chat_ids()):
-            add(cid, "background_agents")
         for cid, service in list(self._providers.items()):
             if self._provider_background_busy(cid, service):
                 add(cid, "background_work")
@@ -8211,54 +7536,8 @@ class ProjectChatManager:
             return True
         self._restart_draining = False
         self._drain_owner = ""
-        # Admission is open again, so the wakes the drain deferred are
-        # deliverable now. Skipping this loses them: nothing restarts the
-        # server any more to replay them at the next start().
-        self.resume_after_cancelled_drain()
         self._events.publish({"type": "server_restart_cancelled"})
         return True
-
-    def resume_after_cancelled_drain(self) -> None:
-        """Replay the wakes a cancelled drain deferred "to the next start".
-
-        A draining server defers a chat's CLI-task wake: the watcher leaves its
-        loop because a restart is coming (``sweep_orphaned_cli_tasks`` picks it up
-        after one). A drain that is cancelled has no restart, so without this
-        the owning chat silently never learns its command finished.
-
-        Runs after admission reopens and through the same delivery paths as
-        every other wake. Total by design: a failed replay must not keep the
-        engine refusing turns, which is the one thing the cancel guarantees.
-        """
-        try:
-            for chat in list(self._chats.values()):
-                self._replay_deferred_cli_task_wakes(chat)
-        except Exception:  # noqa: BLE001 — the cancel is the one thing that must not fail
-            logger.exception("Deferred CLI task wake replay failed")
-
-    def _replay_deferred_cli_task_wakes(self, chat: ChatInfo) -> None:
-        """Wake *chat* for the CLI tasks a cancelled drain left without one.
-
-        The tasks are the ones this process has not already woken for and whose
-        owning CLI is gone: a live CLI still answers its own task notifications,
-        so waking it would only talk over its turn. The sweep's provider filter
-        is kept, so the two wake paths read the same chats; its 7-day activity
-        filter stays out — that one is about surviving a restart, and every chat
-        here is live in this very process. Never raises.
-        """
-        if chat.archived or not chat.session_id:
-            return
-        if chat.provider != "claude":
-            return
-        try:
-            tasks = self._subagents.cli_task_candidates(chat)
-            if not tasks or self._cli_owner_alive(chat.chat_id):
-                return
-            self._subagents.wake_for_dead_cli_tasks(chat, chat.project_id, tasks)
-        except Exception:  # noqa: BLE001 — one chat must not strand the others
-            logger.exception(
-                "Deferred CLI task wake replay failed for chat %s", chat.chat_id
-            )
 
     @property
     def restart_draining(self) -> bool:
@@ -8280,18 +7559,12 @@ class ProjectChatManager:
         """
         return self._drain_owner
 
-    @property
-    def background_agent_counts(self) -> dict[str, int]:
-        """Last announced running-background-subagent count per chat (>0 only)."""
-        return self._subagents.running_counts()
-
     def _park_pending_for_retry(self, chat_id: str, stream: "ChatStream") -> None:
         """Move queued follow-ups off the (about-to-be-torn-down) stream onto
         the chat, where they wait (chips visible, never flushed on their own)
         instead of being dropped when the errored stream's
         ``finish()``/``clear()`` runs.
         """
-        self._fallback_steers(chat_id, stream, "finished")
         parked = stream.drain_pending()
         if not parked:
             return
@@ -8391,7 +7664,6 @@ class ProjectChatManager:
             prompt,
             image_refs=image_refs,
             reason=reason,
-            next_at=self._quota_reset_at(chat, kind),
             interval_seconds=interval,
             unattended=unattended,
             _owner=stream,
@@ -8401,41 +7673,6 @@ class ProjectChatManager:
         stream.publish({"type": "chat_retry", "status": "pending"})
         self._park_pending_for_retry(chat_id, stream)
         return True
-
-    def _quota_reset_at(self, chat: ChatInfo | None, kind: str) -> str | None:
-        """Return when the rejected Claude bucket behind a quota retry resets, plus a minute.
-
-        ``kind`` picks the buckets: the five-hour session window for "quota";
-        any other kind has none. The next attempt is pointed at the reset
-        instead of the hourly interval when the saved rate-limit snapshot names one. The file is user state,
-        so every field is type-checked and nothing here raises.
-        """
-        bucket_names = _QUOTA_RESET_BUCKETS.get(kind)
-        if bucket_names is None or chat is None or chat.provider != "claude":
-            return None
-        try:
-            payload = RateLimitStore(
-                path=default_store_path(self._runtime_root)
-            ).load()
-        except (OSError, ValueError):
-            return None
-        buckets = payload.get("buckets") if isinstance(payload, dict) else None
-        if not isinstance(buckets, dict):
-            return None
-        now = time.time()
-        resets = []
-        for name in bucket_names:
-            bucket = buckets.get(name)
-            if not isinstance(bucket, dict) or bucket.get("status") != "rejected":
-                continue
-            resets_at = bucket.get("resets_at")
-            if isinstance(resets_at, int) and not isinstance(resets_at, bool) and resets_at > now:
-                resets.append(resets_at)
-        if not resets:
-            return None
-        return datetime.fromtimestamp(min(resets) + 60, UTC).replace(
-            microsecond=0
-        ).isoformat().replace("+00:00", "Z")
 
     def recovery_status(self, chat_id: str) -> dict[str, Any] | None:
         """Read the authoritative registry after an uncertain scheduling result."""
@@ -9266,7 +8503,7 @@ class ProjectChatManager:
         CLI ran the turn by itself when background work finished, so a stub reply ("ok", "done.")
         is the model's own bookkeeping and an OS toast carrying it is noise.
         Below the floor the in-app UI stays the sole signal (subagent count drop
-        plus Activity row), matching the 2026-07-30 watcher-exit fix.
+        plus Activity row).
 
         Deliberately NOT used on the regular turn-done branch. There the reply
         answers something the user actually asked, and "Yes" or "No" is a
@@ -9292,10 +8529,9 @@ class ProjectChatManager:
         follow-up turn.
 
         The patterns are deliberately broad ("waiting on ..."), which is safe
-        for parking: parking now holds the announce until the follow-up at
-        count zero. A false positive only defers the announce: the watcher
-        releases it when it saw no background work or no drain is live, and the
-        drain releases it at count zero or when it ends. It is not safe for
+        for parking: parking now holds the announce until the follow-up once
+        the provider reports no background work. A false positive only defers
+        the announce: the drain releases it then, or when it ends. It is not safe for
         suppressing: a caller that drops
         anything on the strength of this must be certain something else will
         fire in its place. Nothing does that any more — see
@@ -9634,6 +8870,38 @@ class ProjectChatManager:
             sent_at = str(timing.get("sent_at") or "")
         return {"turn_index": found_index, "sent_at": sent_at}
 
+    def apply_adapter_title(self, chat_id: str, title: str) -> bool:
+        """Apply the agent's own session title, provisionally. True when the chat changed.
+
+        Replaces a title Ciaobot wrote (the New Chat placeholder or its own auto-title) and an
+        earlier adapter title, but never a user-owned title. The origin becomes "adapter" even
+        when the text is unchanged, so Ciaobot's fallback stops being written. Titles that fail
+        the provider-title check are dropped, as the native reads drop them. The agent's text is
+        untrusted: it is reduced to one short printable line before the check.
+        """
+        chat = self._chats.get(chat_id)
+        clean = chat_service._real_title(chat_service._clean_adapter_title(title) or "")
+        if chat is None or clean is None:
+            return False
+        if chat.title_origin not in ADAPTER_REPLACEABLE_TITLE_ORIGINS:
+            return False
+        if chat.title_origin == "adapter" and clean == chat.title:
+            return False
+        same_text = clean == chat.title
+        chat.title = clean
+        chat.title_origin = "adapter"
+        chat.title_status = "ready"
+        self._save()
+        if same_text:
+            return False
+        self._events.publish({
+            "type": "chat_title",
+            "chat_id": chat_id,
+            "title": clean,
+            "status": "ready",
+        })
+        return True
+
     async def _auto_title_and_publish(
         self, chat_id: str, user_text: str, assistant_text: str
     ) -> None:
@@ -9852,10 +9120,10 @@ class ProjectChatManager:
     # A turn that ends on "I'll report back once the agents finish" is not a
     # result, so it is parked rather than announced. The CLI runs a follow-up
     # turn per finished task, and the between-turns drain streams it. While
-    # agents still run, a follow-up replaces the parked entry; the result that
-    # lands at background count zero announces once and discards the park. The
-    # watcher releases the park when it saw no background work or no drain is
-    # live; the drain releases it when it ends uncancelled; Stop releases it.
+    # the provider still reports background work, a follow-up replaces the
+    # parked entry; the result that lands once it reports none announces once
+    # and discards the park. The drain releases the park when it ends
+    # uncancelled; Stop releases it.
 
     def _park_result_announce(
         self, chat_id: str, project_id: str, title: str, snippet: str
@@ -9874,8 +9142,8 @@ class ProjectChatManager:
         call from a `finally` that may run after an explicit flush.
 
         Refuses while a foreground turn owns the chat, and that check lives
-        HERE rather than at the call sites. There are three of them — the
-        watcher's `finally`, the drain (a result at count zero, or its end) and
+        HERE rather than at the call sites. There are two of them — the
+        drain (a result once no background work remains, or its end) and
         Stop — and a stale park pushed mid-turn looks different from each. A live turn always discards this entry at its
         turn-done and announces its own result in its place, so the entry is
         deliberately left there for it rather than popped. (A turn that ends
@@ -9909,78 +9177,6 @@ class ProjectChatManager:
         """
         stream = self._broker.get(chat_id)
         return stream is not None and not stream.background
-
-    # ── background subagent watching ─────────────────────────────────────
-    # Owned by ciao/web/subagent_watchers.py. What stays here is the
-    # coordination the watcher asks for through SubagentWatcherHost: the
-    # drain-liveness and fresh-count questions, the CLI-liveness question, and
-    # wake delivery. The rest are thin
-    # delegates kept under their old names — they are the seams the suite
-    # patches, and the watcher calls them back through the host so a patch
-    # here is the patch it sees.
-
-    @property
-    def _pending_subagent_watchers(self) -> dict[str, asyncio.Task]:
-        return self._subagents.watchers
-
-    @_pending_subagent_watchers.setter
-    def _pending_subagent_watchers(self, value: dict[str, asyncio.Task]) -> None:
-        watchers = self._subagents.watchers
-        watchers.clear()
-        watchers.update(value)
-
-    @property
-    def _background_agents_last(self) -> dict[str, int]:
-        return self._subagents.last_counts
-
-    @_background_agents_last.setter
-    def _background_agents_last(self, value: dict[str, int]) -> None:
-        counts = self._subagents.last_counts
-        counts.clear()
-        counts.update(value)
-
-    @property
-    def _cli_task_wakes_sent(self) -> set[tuple[str, str]]:
-        return self._subagents.wakes_sent
-
-    def _start_subagent_watcher(self, chat_id: str, project_id: str) -> None:
-        """Replace any existing subagent watcher for this chat with a new one."""
-        self._subagents.start(chat_id, project_id)
-
-    def _publish_subagent_count(
-        self, chat_id: str, project_id: str, count: int
-    ) -> None:
-        self._subagents.publish_count(chat_id, project_id, count)
-
-    async def _watch_subagent_completion(self, chat_id: str, project_id: str) -> None:
-        await self._subagents.watch(chat_id, project_id)
-
-    async def _watch_subagent_completion_inner(
-        self, chat_id: str, project_id: str, saw_work: list[bool]
-    ) -> None:
-        await self._subagents.watch_inner(chat_id, project_id, saw_work)
-
-    def _unwoken_tasks(
-        self, chat_id: str, tasks: list[SubagentInfo]
-    ) -> list[SubagentInfo]:
-        return self._subagents.unwoken_tasks(chat_id, tasks)
-
-    def _wake_for_dead_cli_tasks(
-        self, parent: ChatInfo, project_id: str, tasks: list[SubagentInfo]
-    ) -> None:
-        self._subagents.wake_for_dead_cli_tasks(parent, project_id, tasks)
-
-    def sweep_orphaned_cli_tasks(self) -> int:
-        """Wake chats whose CLI tasks were still running when the server died."""
-        return self._subagents.sweep_orphaned_cli_tasks()
-
-    def record_interrupted_background_work(self) -> int:
-        """At shutdown, record OpenCode background work the restart is about to kill."""
-        return self._subagents.record_interrupted_background_work()
-
-    def sweep_interrupted_background_work(self) -> int:
-        """At boot, wake OpenCode chats whose background work a restart interrupted."""
-        return self._subagents.sweep_interrupted_background_work()
 
     def begin_shutdown(self) -> None:
         """Keep in-flight turn stamps through teardown (#2128).
@@ -10042,30 +9238,10 @@ class ProjectChatManager:
         except Exception:  # noqa: BLE001 — one chat must not break the others
             logger.exception("Restart resume failed for chat %s", chat_id)
 
-    @staticmethod
-    def _build_cli_task_wake_prompt(tasks: list[SubagentInfo]) -> str:
-        return SubagentWatchers.build_cli_task_wake_prompt(tasks)
-
-
-    def _has_live_drain(self, chat_id: str) -> bool:
-        """True while a between-turns drain is consuming this chat's follow-up turns."""
-        return self._streaming.has_live_drain(chat_id)
-
-    def _background_count_now(self, chat_id: str) -> int:
-        """Running background agents for *chat_id*, read now, not from the last poll."""
-        return self._subagents.current_count(chat_id)
-
-    def _cli_owner_alive(self, chat_id: str) -> bool:
-        """True while the chat's CLI subprocess (if any) is still connected.
-
-        A chat with no provider entry at all (server restart) counts as gone:
-        nothing owns its CLI tasks any more. Providers without the concept
-        report alive so only a genuinely dead Claude CLI triggers a wake.
-        """
-        provider_service = self._providers.get(chat_id)
-        if provider_service is None:
-            return False
-        return provider_service.cli_connected
+    def _background_work_outstanding(self, chat_id: str) -> bool:
+        """True while the chat's provider reports background work still running."""
+        service = self._providers.get(chat_id)
+        return bool(service is not None and service.background_work_outstanding)
 
 
     def _deliver_wake(self, parent: ChatInfo, prompt: str, *, count: int, origin: str) -> str:
@@ -10121,16 +9297,6 @@ class ProjectChatManager:
         drains = self._streaming.between_turn_drains
         drains.clear()
         drains.update(value)
-
-    @property
-    def _last_drain_result(self) -> dict[str, tuple[str, bool]]:
-        return self._streaming.last_drain_results
-
-    @_last_drain_result.setter
-    def _last_drain_result(self, value: dict[str, tuple[str, bool]]) -> None:
-        results = self._streaming.last_drain_results
-        results.clear()
-        results.update(value)
 
     @property
     def _turn_perf_started(self) -> dict[tuple[str, int], float]:
@@ -10697,47 +9863,6 @@ class ProjectChatManager:
             payload["duration_ms"] = duration_ms
         return payload
 
-    async def move_chat_to_background(self, chat_id: str) -> MoveToBackgroundOutcome:
-        """Move the chat's running foreground shells/subagents to the background (#1413).
-
-        The turn then ends normally and the work finishes as a wake the
-        between-turns drain streams. A moved turn's reply is interim, so its
-        stream is flagged and the turn-end announce is parked for the wake.
-        """
-        service = self._providers.get(chat_id)
-        if service is None:
-            return "not_running"
-        stream = self._broker.get(chat_id)
-        if stream is None:
-            return await service.move_to_background()
-        # Mark at request time: the reply is interim from the moment the user
-        # asks, so the turn-end read can never be too early and a slow response
-        # can never land on a later turn (#1413 review rounds 1-2).
-        epoch = stream.move_epoch
-        stream.move_in_flight += 1
-        stream.moved_to_background = True
-        try:
-            outcome = await service.move_to_background()
-        finally:
-            if stream.move_epoch == epoch:
-                stream.move_in_flight -= 1
-        # No await may be introduced between here and the returns below: these
-        # checks must see a stable epoch and a stable in-flight count.
-        if stream.move_epoch != epoch:
-            # A queued follow-up turn began while we waited: this request
-            # belongs to the turn that has already ended, and must not touch
-            # the current one (#1413 review round 2).
-            return outcome
-        if outcome == "moved":
-            stream.move_succeeded = True
-        elif not stream.move_in_flight and not stream.move_succeeded:
-            # Nothing in this turn moved and nothing is still waiting to
-            # answer: undo this request's own mark so an ordinary reply is not
-            # parked. A successful sibling keeps the mark until the turn
-            # boundary (#1413 review round 3).
-            stream.moved_to_background = False
-        return outcome
-
     async def _finish_background_stop(self, chat_id: str) -> None:
         """Abort OpenCode's follow-up execution and release the parked announce."""
         # OpenCode's follow-up execution runs in the server, not in the
@@ -10767,8 +9892,7 @@ class ProjectChatManager:
 
         Stop holds the whole queue: the drive loop parks every queued follow-up
         on the chat (chips stay, waiting for the user) instead of
-        running it, and a steer the provider had not delivered reverts to the
-        queue first.
+        running it.
 
         Two layers, so Stop works with every provider and never hangs:
 
@@ -10819,8 +9943,6 @@ class ProjectChatManager:
         turn_task = stream.turn_task if stream is not None else None
         drive_task = self._streaming.drive_task(chat_id, stream)
         if turn_task is None or turn_task.done():
-            if stream is not None:
-                self._fallback_steers(chat_id, stream, "stopped")
             if drive_task is not None:
                 return await self._streaming.wait_for_drive_cleanup(
                     chat_id, stream, self._STOP_GRACE_S
@@ -10849,13 +9971,6 @@ class ProjectChatManager:
         # exception was never retrieved" at GC time.
         if handle is not None:
             self._spawn_detached(handle.stop(), f"stop-{chat_id}")
-            # Let the stop begin before reverting: the provider drops a pending
-            # steer when it runs, and an echo that lands first is still
-            # delivered rather than sent again as a queued turn.
-            await asyncio.sleep(0)
-        if stream is not None:
-            # Stop wins over a steer the provider has not delivered.
-            self._fallback_steers(chat_id, stream, "stopped")
         stopped = False
         try:
             # Shielded: the timeout must not cancel the turn itself, because
@@ -10886,14 +10001,11 @@ class ProjectChatManager:
                     chat_id,
                     exc_info=True,
                 )
-            # Claude escalation: a wedged CLI means generation may never
-            # have stopped, and the interrupted turn can leave a stale
-            # terminal message in the SDK transport buffer that would
-            # truncate the next turn's receive_response(). Dropping the
-            # client solves both; the next turn reconnects and resumes the
-            # session (ProviderService._provider is rebuilt on demand).
-            chat_meta = self._chats.get(chat_id)
-            if chat_meta is not None and chat_meta.provider == "claude":
+            # Escalation: a wedged agent may never have stopped generating.
+            # Dropping its connection ends the process; the next turn
+            # reconnects and resumes the session (ProviderService._provider is
+            # rebuilt on demand).
+            if self._chats.get(chat_id) is not None:
                 try:
                     await asyncio.wait_for(provider.disconnect(), timeout=5.0)
                 except Exception:  # noqa: BLE001 — teardown is best-effort
@@ -10929,29 +10041,80 @@ class ProjectChatManager:
 
         Three tiers, in order:
 
-        1. The provider's native session title (opencode's ``title`` agent or
-           Claude Code's ``aiTitle``). Poll OpenCode via ``_TITLE_POLL_DELAYS``;
-           check Claude once, since context-prefixed Ciaobot prompts commonly
-           suppress its native titler. Every wait re-checks the chat, so a
+        1. The provider's native session title, read through
+           ``BaseProvider.native_title_candidates``. Every ACP agent is read once,
+           with no wait. Claude (ACP) has no native read: its title arrives as a
+           ``session_info_update`` event, applied by ``apply_adapter_title`` while
+           the turn streams, so the read finds nothing and the lower tiers run.
+           opencode's own title is not forwarded over ACP (anomalyco/opencode#56894),
+           so its ``New session - <timestamp>`` placeholder is refused by
+           ``_real_title`` and nothing polls for it. Context-prefixed Ciaobot
+           prompts commonly suppress Claude's native titler, and nothing polls
+           after the fallback is written. Every wait re-checks the chat, so a
            manual rename or a delete stops titling.
         2. A one-shot model call (``_llm_chat_title``) when the native title
-           is absent. For Claude this runs immediately, not after the full
-           OpenCode poll window.
+           is absent, run straight after the inline native read.
         3. The deterministic ``chat_service._fallback_title`` (first 6 words of the
-           prompt) so the sidebar never stays stuck on "New Chat". An end-of-turn
-           pass can still upgrade it when a title becomes available.
+           prompt) so the sidebar never stays stuck on "New Chat".
         """
         fallback = chat_service._fallback_title(user_text)
 
-        def _is_titling_target(title: str) -> bool:
-            # "New Chat" is always a target; the deterministic fallback is also
-            # considered a target so a late poll can upgrade it to the native
-            # title once the provider finally publishes one.
-            return title == "New Chat" or (fallback is not None and title == fallback)
+        def _is_titling_target(chat: ChatInfo) -> bool:
+            # The New Chat placeholder and Ciaobot's own auto-title are targets, so the
+            # end-of-turn pass in `_drive()` can replace the fallback with a title that
+            # reads the assistant's reply. An agent's title or a user rename is not.
+            return chat.title_origin in CIAOBOT_AUTO_TITLE_ORIGINS
 
         chat = self._chats.get(chat_id)
         provider = getattr(chat, "provider", "claude") if chat else "claude"
-        delays = (0.0,) if provider == "claude" else self._TITLE_POLL_DELAYS
+        delays: tuple[float, ...] = self._TITLE_POLL_DELAYS
+        descriptor = provider_registry.get(provider)
+        if provider == "claude":
+            # Claude's title arrives as a session_info_update event (see tier 1): no native read,
+            # so no poll. Polling would hold the LLM title back by the schedule's tail.
+            delays = ()
+        elif descriptor is not None and descriptor.acp_spec_path:
+            # Other ACP agents are read once, with no wait: their title, if any, is on the
+            # event stream, so a poll has nothing to catch up with.
+            delays = (0.0,)
+        stopped, native = await self._poll_native_title(chat_id, delays, _is_titling_target)
+        if stopped:
+            return None
+        if native:
+            return native
+        # Native title was absent. A model-generated label beats the raw
+        # prompt snippet; the end-of-turn pass can retry a failed early call.
+        chat = self._chats.get(chat_id)
+        if chat is not None and _is_titling_target(chat):
+            llm_title = await self._llm_chat_title(chat, user_text, assistant_text)
+            if llm_title:
+                # Re-check: user may have renamed while the model ran, or the agent
+                # may have sent its own title.
+                chat = self._chats.get(chat_id)
+                if chat is not None and _is_titling_target(chat):
+                    chat.title = llm_title
+                    chat.title_origin = "fallback"
+                    self._save()
+                    return llm_title
+        if fallback is None:
+            return None
+        chat = self._chats.get(chat_id)
+        if chat is None or not _is_titling_target(chat):
+            return None
+        chat.title = fallback
+        chat.title_origin = "fallback"
+        self._save()
+        return fallback
+
+    async def _poll_native_title(
+        self, chat_id: str, delays: Sequence[float], is_target: Callable[[ChatInfo], bool]
+    ) -> tuple[bool, str | None]:
+        """Wait through ``delays`` for the provider's native title and write it when it lands.
+
+        Returns ``(stopped, title)``: ``stopped`` when the chat was renamed, deleted or left
+        the titling targets, so no further titling applies; ``title`` when a native title
+        was written.
+        """
         for delay in delays:
             if delay:
                 await asyncio.sleep(delay)
@@ -10960,8 +10123,8 @@ class ProjectChatManager:
             # may still be creating it, and a later poll will find it.
             # The fallback title is still considered title-able so the late
             # poll (fired after the turn) can upgrade it to the native title.
-            if chat is None or not _is_titling_target(chat.title):
-                return None
+            if chat is None or not is_target(chat):
+                return True, None
             if not chat.session_id:
                 continue
 
@@ -10971,31 +10134,13 @@ class ProjectChatManager:
 
             # Re-check: user may have renamed while we were reading.
             chat = self._chats.get(chat_id)
-            if chat is None or not _is_titling_target(chat.title):
-                return None
+            if chat is None or not is_target(chat):
+                return True, None
             chat.title = title
+            chat.title_origin = "adapter"
             self._save()
-            return title
-        # Native title was absent. A model-generated label beats the raw
-        # prompt snippet; the end-of-turn pass can retry a failed early call.
-        chat = self._chats.get(chat_id)
-        if chat is not None and _is_titling_target(chat.title):
-            llm_title = await self._llm_chat_title(chat, user_text, assistant_text)
-            if llm_title:
-                # Re-check: user may have renamed while the model ran.
-                chat = self._chats.get(chat_id)
-                if chat is not None and _is_titling_target(chat.title):
-                    chat.title = llm_title
-                    self._save()
-                    return llm_title
-        if fallback is None:
-            return None
-        chat = self._chats.get(chat_id)
-        if chat is None or not _is_titling_target(chat.title):
-            return None
-        chat.title = fallback
-        self._save()
-        return fallback
+            return False, title
+        return False, None
 
     async def _llm_chat_title(
         self, chat: ChatInfo, user_text: str, assistant_text: str
@@ -11041,10 +10186,10 @@ class ProjectChatManager:
         `BaseProvider.native_title_candidates` contract, in provider
         preference order; each is validated here with `_real_title`, so a
         contaminated candidate keeps losing to a clean one. Returns None when
-        the provider has not yet produced a real title — including its
-        placeholder default (e.g. opencode's ``New session - <timestamp>``) —
-        so the caller keeps polling until the generated title lands instead
-        of accepting the placeholder as final.
+        the provider has no real title, including its placeholder default
+        (e.g. opencode's ``New session - <timestamp>``), which is refused and
+        never written. The caller reads once per trigger; it does not poll
+        for a title that lands later.
         """
         provider = getattr(chat, "provider", "claude")
         # The chat's OWN agent root, not the install root. Every adapter's
@@ -11062,7 +10207,7 @@ class ProjectChatManager:
             if descriptor is None:
                 return None
             candidates = await descriptor.factory().native_title_candidates(
-                workspace, chat.session_id
+                workspace, chat.session_id, runtime_root=self._config.state_path.parent
             )
             for candidate in candidates:
                 title = chat_service._real_title(candidate)
@@ -11089,30 +10234,6 @@ class ProjectChatManager:
             dispatcher = ScheduleDispatcher(self)
             self._schedule_dispatcher = dispatcher
             return dispatcher
-
-    async def _await_schedule_subagents(
-        self, chat_id: str, *, timeout_s: float = 900.0
-    ) -> tuple[bool, bool]:
-        """Delegate the schedule subagent wait to its lifecycle collaborator."""
-        return await self._schedule_dispatcher_for()._await_schedule_subagents(
-            chat_id, timeout_s=timeout_s
-        )
-
-    async def _wait_for_drain_result(
-        self, chat_id: str, *, timeout_s: float = 180.0
-    ) -> tuple[str, bool] | None:
-        return await self._streaming.wait_for_drain_result(
-            chat_id, timeout_s=timeout_s
-        )
-
-    def _discard_schedule_drain_result(self, chat_id: str) -> None:
-        """Drop a stale follow-up result before a scheduled run waits.
-
-        The schedule collaborator calls this manager seam instead of reaching
-        into ``ChatStreaming`` directly, keeping the streaming owner explicit
-        while preserving the existing drain lifecycle patch point.
-        """
-        self._streaming.discard_drain_result(chat_id)
 
     async def _schedule_run_needs_user(
         self, entry: ScheduleEntry, outcome: chat_service.ScheduleRunOutcome,

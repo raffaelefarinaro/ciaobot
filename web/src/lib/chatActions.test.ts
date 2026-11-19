@@ -6,9 +6,6 @@ import {
   isChatAction,
   isGoogleConsentUrl,
   looksLikeLoopbackCallback,
-  mcpServerName,
-  mcpTurnOffErrorText,
-  mcpTurnOffScopeText,
   normalizeChatActions,
   restartTarget,
   SYSTEM_SETTING_TITLES,
@@ -19,10 +16,10 @@ import type { ChatAction } from './types'
 function action(over: Partial<ChatAction> = {}): ChatAction {
   return {
     id: 'a1',
-    kind: 'mcp_auth',
+    kind: 'command',
     origin: 'engine',
     state: 'open',
-    params: { server: 'linear', provider: 'opencode' },
+    params: { command: 'echo review-only' },
     error: '',
     created_at: 1,
     ...over,
@@ -49,10 +46,11 @@ describe('isChatAction', () => {
   it.each([
     ['an empty id', { id: '' }],
     ['an unknown kind', { kind: 'nope' }],
+    ['the removed mcp_auth kind', { kind: 'mcp_auth' }],
     ['an unknown state', { state: 'gone' }],
     ['an unknown origin', { origin: 'x' }],
-    ['a non-string param value', { params: { server: 3 } }],
-    ['params as an array', { params: ['linear'] }],
+    ['a non-string param value', { params: { command: 3 } }],
+    ['params as an array', { params: ['echo'] }],
     ['a null error', { error: null }],
     ['a string created_at', { created_at: '1' }],
   ])('rejects %s', (_label, over) => {
@@ -69,51 +67,12 @@ describe('normalizeChatActions', () => {
     const input = [action(), { id: '' }]
     const result = normalizeChatActions(input)
     expect(result).toHaveLength(1)
-    result[0].params.server = 'changed'
-    expect((input[0] as ChatAction).params.server).toBe('linear')
+    result[0].params.command = 'changed'
+    expect((input[0] as ChatAction).params.command).toBe('echo review-only')
   })
 })
 
 describe('actionCopy', () => {
-  it.each([
-    ['open', 'Sign in to linear', 'linear is set up for this chat but not signed in. Sign in once so this chat can use its tools.', 'Sign in'],
-    ['working', 'Starting the sign-in to linear…', 'Getting the sign-in page.', ''],
-    ['waiting', 'Waiting for linear to connect…', 'Finish the sign-in in the page that opened. This card updates by itself.', 'Open the sign-in page again'],
-    ['done', 'linear is connected', 'This chat can use it now.', 'Continue the chat'],
-    ['failed', "Couldn't sign in to linear", 'The sign-in did not finish.', 'Try again'],
-  ] as const)('gives the mcp_auth copy for %s', (state, title, why, primaryLabel) => {
-    const copy = actionCopy(action({ state }))
-    expect(copy).toEqual({ title, why, primaryLabel, meta: 'opencode · MCP' })
-  })
-
-  it('gives the Claude sign-in copy while waiting', () => {
-    const claude = actionCopy(action({
-      state: 'waiting',
-      params: { server: 'notion', provider: 'claude', url: 'https://x' },
-    }))
-    expect(claude?.primaryLabel).toBe('Open the sign-in page')
-    expect(claude?.why).toContain('finish there')
-    const opencode = actionCopy(action({
-      state: 'waiting',
-      params: { server: 'notion', provider: 'opencode', url: 'https://x' },
-    }))
-    expect(opencode?.primaryLabel).toBe('Open the sign-in page again')
-  })
-
-  it('says a Claude sign-in is starting a terminal', () => {
-    const copy = actionCopy(action({
-      state: 'working',
-      params: { server: 'notion', provider: 'claude' },
-    }))
-    expect(copy?.why).toBe('Starting a sign-in terminal for this chat.')
-  })
-
-  it('shows the engine error for a failed sign-in, and a default without one', () => {
-    expect(actionCopy(action({ state: 'failed', error: 'Timed out waiting for sign-in' }))?.why)
-      .toBe('Timed out waiting for sign-in')
-    expect(actionCopy(action({ state: 'failed', error: '' }))?.why).toBe('The sign-in did not finish.')
-  })
-
   it('gives the device_code copy for gh and az', () => {
     expect(actionCopy(action({ kind: 'device_code', params: { tool: 'gh' } }))).toEqual({
       title: 'Sign in to GitHub CLI',
@@ -364,40 +323,5 @@ describe('gws_auth copy', () => {
     expect(isGoogleConsentUrl('https://accounts.google.com.evil.io/x')).toBe(false)
     expect(isGoogleConsentUrl('javascript:alert(1)')).toBe(false)
     expect(isGoogleConsentUrl(undefined)).toBe(false)
-  })
-})
-
-describe('mcpServerName', () => {
-  it.each([
-    ['plugin:scandit-sdk:scandit', 'scandit'],
-    ['plugin:a:b:c', 'b:c'],
-    ['linear', 'linear'],
-    ['plugin:', 'plugin:'],
-    ['', ''],
-  ])('turns %j into %j', (server, name) => {
-    expect(mcpServerName(server)).toBe(name)
-  })
-
-  it('titles a plugin server by its own name', () => {
-    const copy = actionCopy(action({ params: { server: 'plugin:scandit-sdk:scandit', provider: 'claude' } }))
-    expect(copy?.title).toBe('Sign in to scandit')
-    expect(copy?.title).not.toContain('plugin:')
-  })
-})
-
-describe('mcpTurnOffErrorText', () => {
-  it('says why in words for each refusal', () => {
-    expect(mcpTurnOffErrorText('unreadable_config', 'linear')).toBe(
-      "The command line tool's settings file could not be read or changed, so nothing was changed.",
-    )
-    expect(mcpTurnOffErrorText('managed', 'linear')).toContain('managed by your organization')
-    expect(mcpTurnOffErrorText('', 'linear')).toBe('linear could not be turned off. Try again.')
-  })
-})
-
-describe('mcpTurnOffScopeText', () => {
-  it('says where Turn off applies for each provider', () => {
-    expect(mcpTurnOffScopeText('claude')).toContain('git repository')
-    expect(mcpTurnOffScopeText('opencode')).toContain('config file')
   })
 })

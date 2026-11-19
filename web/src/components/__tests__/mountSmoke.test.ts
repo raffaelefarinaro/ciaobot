@@ -133,6 +133,10 @@ vi.mock('../../lib/api', () => {
         opencode: ['openai/gpt-5.6-luna', 'anthropic/claude-sonnet-4-6'],
       },
       provider_defaults: { claude: 'sonnet', opencode: 'opus' },
+      providers: [
+        { id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude', capabilities: {} },
+        { id: 'opencode', label: 'OpenCode', short_label: 'OpenCode', capabilities: {} },
+      ],
       opencode_models: ['openai/gpt-5.6-luna', 'anthropic/claude-sonnet-4-6'],
       backends: { opencode: true },
       thinking_levels: { claude: ['low', 'medium', 'high', 'xhigh', 'max'], opencode: ['low', 'medium', 'high', 'max'] },
@@ -149,7 +153,7 @@ vi.mock('../../lib/api', () => {
       active: null,
       provider_options: [
         { value: 'claude', label: 'Anthropic (via Claude Code)' },
-        { value: 'opencode', label: 'opencode' },
+        { value: 'opencode', label: 'OpenCode' },
       ],
     },
     '/api/local/backup': {
@@ -234,7 +238,6 @@ const NoopStub = { name: 'NoopStub', render: () => h('div') }
 // as the component.
 const AsyncNoopStub = { default: NoopStub, __esModule: true }
 vi.mock('../ChatPanel.vue', () => ({ default: NoopStub }))
-vi.mock('../SubagentPanel.vue', () => ({ default: NoopStub }))
 vi.mock('../PinnedFilePanel.vue', () => ({ default: NoopStub }))
 vi.mock('../FileViewerModal.vue', () => ({ default: NoopStub }))
 vi.mock('../NewScheduleForm.vue', () => ({ default: NoopStub }))
@@ -635,10 +638,10 @@ describe('component mount smoke', () => {
 
     const providerOptions = wrapper.findAll('select.routine-input option').map((option) => option.text())
     expect(providerOptions).toContain('Anthropic (via Claude Code)')
-    expect(providerOptions).toContain('opencode')
-    // Provider and File access are native selects (Google is set on Overview);
-    // Default model uses the custom ModelSelector component, not a third <select>.
-    expect(wrapper.findAll('select.workspace-select')).toHaveLength(2)
+    expect(providerOptions).toContain('OpenCode')
+    // Provider is a native select (Google is set on Overview);
+    // Default model uses the custom ModelSelector component, not a second <select>.
+    expect(wrapper.findAll('select.workspace-select')).toHaveLength(1)
 
     const providerField = wrapper.findAll('label.settings-field')
       .find((field) => field.find('.ws-label').text() === 'Agent CLI/Runtime')
@@ -664,7 +667,7 @@ describe('component mount smoke', () => {
       active: 'legacy',
       provider_options: [
         { value: 'claude', label: 'Anthropic (via Claude Code)' },
-        { value: 'opencode', label: 'opencode' },
+        { value: 'opencode', label: 'OpenCode' },
       ],
     })
 
@@ -685,7 +688,7 @@ describe('component mount smoke', () => {
       const card = wrapper.findAll('.card').find((c) => c.find('.section-title').text() === 'Chats and models')
       expect(card).toBeTruthy()
       const radios = card!.findAll('[role="radiogroup"] button[role="radio"]')
-      expect(radios.map((r) => r.text())).toEqual(['Anthropic (via Claude Code)', 'opencode'])
+      expect(radios.map((r) => r.text())).toEqual(['Anthropic (via Claude Code)', 'OpenCode'])
       expect(radios.map((r) => r.attributes('aria-checked'))).toEqual(['true', 'false'])
     } finally {
       wrapper.unmount()
@@ -709,7 +712,7 @@ describe('component mount smoke', () => {
       active: 'personal',
       provider_options: [
         { value: 'claude', label: 'Anthropic (via Claude Code)' },
-        { value: 'opencode', label: 'opencode' },
+        { value: 'opencode', label: 'OpenCode' },
       ],
     })
 
@@ -826,7 +829,6 @@ describe('component mount smoke', () => {
         ...original.connections,
         claude: {
           ...original.connections.claude,
-          mcps: ['ciao-memory', 'github'],
           skills: ['frontend-design'],
           bundled_skills: ['code-review', 'dataviz'],
         },
@@ -848,17 +850,57 @@ describe('component mount smoke', () => {
       // Collapsed by default: the chip lists are there but folded away.
       for (const d of disclosures) {
         expect((d.element as HTMLDetailsElement).open).toBe(false)
-        expect(d.find('.provider-mcps-preview').exists()).toBe(true)
       }
       const claude = disclosures[0]!
-      expect(claude.find('summary').text()).toMatch(/What this CLI brings \(\d+ MCP servers?, 1 skill or plugin, 2 built in\)/)
+      expect(claude.find('summary').text()).toMatch(/What this CLI brings \(1 skill or plugin, 2 built in\)/)
       expect(claude.text()).toContain('frontend-design')
       expect(claude.text()).toMatch(/Built into .+ \(2\)/)
       expect(claude.text()).toContain('dataviz')
-      expect(disclosures[1]!.find('summary').text()).toContain('0 MCP servers, 0 skills & plugins)')
+      expect(disclosures[1]!.find('summary').text()).toContain('0 skills & plugins)')
       // The defaults and actions stay outside the disclosure.
       expect(wrapper.find('details.provider-brings .provider-inline-defaults').exists()).toBe(false)
       expect(wrapper.find('details.provider-brings .provider-connection-actions').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/settings/providers', original)
+    }
+  })
+
+  it('shows the Built into list only for a CLI that reports bundled skills', async () => {
+    const testApi = api as typeof api & {
+      setResponse: (path: string, value: unknown) => void
+      getResponse: (path: string) => unknown
+    }
+    const original = testApi.getResponse('/api/settings/providers') as {
+      connections: Record<string, Record<string, unknown>>
+    }
+    // The Claude CLI reports no bundled skills: the key is absent, not an empty list.
+    const { bundled_skills: _claudeBundled, ...claudeWithout } = original.connections.claude!
+    testApi.setResponse('/api/settings/providers', {
+      ...original,
+      connections: {
+        ...original.connections,
+        claude: claudeWithout,
+        opencode: { ...original.connections.opencode, ok: true, bundled_skills: [] },
+      },
+    })
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    try {
+      const disclosures = wrapper.findAll('.provider-connections details.provider-brings')
+      expect(disclosures).toHaveLength(2)
+      expect(disclosures[0]!.text()).not.toMatch(/Built into/)
+      expect(disclosures[0]!.text()).not.toMatch(/Listed after the next chat/)
+      expect(disclosures[1]!.text()).toMatch(/Built into .+ \(0\)/)
+      expect(disclosures[1]!.text()).toContain('None reported by this CLI')
     } finally {
       wrapper.unmount()
       testApi.setResponse('/api/settings/providers', original)
@@ -1002,20 +1044,6 @@ describe('component mount smoke', () => {
     }
   })
 
-  it('SettingsView says bundled Claude updates with Ciaobot and offers no claude update', async () => {
-    const { wrapper, restore } = await mountModelsWith({
-      claude: { state: 'bundled', tested: '2.1.301' },
-    })
-    try {
-      const row = providerRow(wrapper, /claude/i)
-      expect(row.text()).toContain('Bundled with Ciaobot')
-      expect(row.text()).not.toContain('claude update')
-    } finally {
-      wrapper.unmount()
-      restore()
-    }
-  })
-
   it('SettingsView provides manual sign-in without claiming OpenCode verification', async () => {
     const router = makeRouter()
     await router.push('/settings/providers')
@@ -1082,6 +1110,30 @@ describe('component mount smoke', () => {
     }
   })
 
+  it('shows Codex sign-in guidance with the command its own row reports', async () => {
+    const testApi = api as typeof api & { setResponse: (path: string, value: unknown) => void, getResponse: (path: string) => unknown }
+    const original = testApi.getResponse('/api/settings/providers') as { connections: Record<string, Record<string, unknown>> }
+    testApi.setResponse('/api/settings/providers', { connections: { ...original.connections, codex: {
+      name: 'codex', label: 'Codex', short_label: 'Codex', ok: false, auth: 'logged_out', command: 'codex login',
+      detail: 'Codex is installed but not signed in.',
+    } } })
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    try {
+      await flushPromises()
+      const row = wrapper.findAll('.provider-connections .credential-row').find(el => el.text().includes('Codex'))!
+      expect(row.find('details.provider-sign-in summary').text()).toBe('Connect Codex')
+      expect(row.find('details code').text()).toBe('codex login')
+      expect(row.text()).not.toContain('opencode auth login')
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/settings/providers', original)
+    }
+  })
+
   it.each([
     ['oauth', 'person@example.com', true],
     ['oauth', 'Claude OAuth', true],
@@ -1091,7 +1143,9 @@ describe('component mount smoke', () => {
     const testApi = api as typeof api & { setResponse: (path: string, value: unknown) => void, getResponse: (path: string) => unknown }
     const original = testApi.getResponse('/api/settings/providers') as { connections: Record<string, Record<string, unknown>> }
     testApi.setResponse('/api/settings/providers', { connections: { ...original.connections, claude: {
-      ...original.connections.claude, auth, account, ok: showAccount, command: 'install-command-not-login',
+      ...original.connections.claude, auth, account, ok: showAccount,
+      // The sign-in command comes from the payload; a missing CLI's payload command is its install line.
+      command: auth === 'not_installed' ? 'install-command-not-login' : 'claude auth login',
     } } })
     const router = makeRouter()
     await router.push('/settings/providers')
@@ -1104,7 +1158,12 @@ describe('component mount smoke', () => {
       const details = row.find('.provider-connection-detail').text()
       expect(details.includes(account)).toBe(showAccount)
       expect(details.includes('OAuth')).toBe(showAccount)
-      expect(row.find('details code').text()).toBe('claude auth login')
+      if (auth === 'not_installed') {
+        // The install line is never offered as a sign-in command.
+        expect(row.find('details.provider-sign-in').exists()).toBe(false)
+      } else {
+        expect(row.find('details code').text()).toBe('claude auth login')
+      }
       expect(runInTerminal).not.toHaveBeenCalled()
       expect(vi.mocked(api.post).mock.calls.some(([path]) => String(path).endsWith('/connect'))).toBe(false)
     } finally {

@@ -271,10 +271,11 @@ def test_update_package_installer_mode_points_at_installer(monkeypatch) -> None:
 
     assert result["ok"] is False
     assert result["mode"] == "installer"
-    # The engine-only installer, not the desktop one: an installer-managed
-    # engine has no Ciaobot.app to reinstall (#568).
-    assert "install-engine.sh" in result["command"]
-    assert "installer" in result["error"]
+    # install-engine.sh is deleted; an installer-managed engine updates through
+    # the engine's own verbs, and it has no Ciaobot.app to reinstall (#568).
+    assert result["command"] == "ciao update stage"
+    assert "Run `ciao update stage`, then `ciao update apply`" in result["error"]
+    assert "install-engine" not in result["command"] + result["error"]
 
 
 # Receipt ownership decides the answer, not the platform. A Linux

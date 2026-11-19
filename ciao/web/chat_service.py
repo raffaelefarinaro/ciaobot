@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -447,9 +448,7 @@ def _is_retryable_connection_error(text: str) -> bool:
         "connection timeout",
         "connection timed out",
         # Upstream API dropped the streaming connection mid-response. The CLI
-        # surfaces this as a banner; the Claude provider re-flags it as an
-        # error. Kept in sync with ``_CONNECTION_DROP_MARKERS`` in
-        # ``ciao/providers/claude.py``.
+        # surfaces this as a banner in the agent's own text.
         "connection closed mid-response",
         "response above may be incomplete",
     )
@@ -600,6 +599,31 @@ def _clean_llm_title(text: str | None) -> str | None:
     if len(title) > _TITLE_MAX_CHARS:
         title = title[: _TITLE_MAX_CHARS - 3].rstrip() + "..."
     return title or None
+
+
+def _clean_adapter_title(text: str | None) -> str | None:
+    """Reduce an agent-supplied session title to one short, printable line, or None.
+
+    The agent's title is untrusted text. Claude's fallback can be the raw first prompt, with
+    several paragraphs, terminal escapes or bidi overrides, and it must not reach the store or
+    the broadcast as it is. The first line that survives cleaning wins. Whitespace becomes a
+    space and runs collapse. Characters in the Unicode C categories (control, format including
+    bidi overrides, unassigned, surrogate, private use) are dropped. The result takes the same
+    cap as `_clean_llm_title`.
+    """
+    for line in (text or "").splitlines():
+        kept: list[str] = []
+        for ch in line:
+            if ch.isspace():
+                kept.append(" ")
+            elif not unicodedata.category(ch).startswith("C"):
+                kept.append(ch)
+        cleaned = " ".join("".join(kept).split())
+        if cleaned:
+            if len(cleaned) > _TITLE_MAX_CHARS:
+                cleaned = cleaned[: _TITLE_MAX_CHARS - 3].rstrip() + "..."
+            return cleaned
+    return None
 
 
 _FRONTMATTER_DELIM = "---"
@@ -908,10 +932,6 @@ class ScheduleRunOutcome:
     retry_pending: bool = False
     final_text: str = ""
     archived_to: str = ""
-    # True when the run dispatched background subagents that had not finished
-    # by the time we stopped waiting. Such a run is not "done" yet, so it must
-    # stay visible rather than auto-archive on a half-complete result.
-    subagents_pending: bool = False
 
 
 def _schedule_run_clean(outcome: ScheduleRunOutcome) -> bool:
@@ -922,7 +942,6 @@ def _schedule_run_clean(outcome: ScheduleRunOutcome) -> bool:
         and not outcome.question_requested
         and not outcome.stream_error
         and not outcome.retry_pending
-        and not outcome.subagents_pending
     )
 
 
@@ -933,10 +952,6 @@ def _schedule_dispatch_status(
 
     A pending retry means the provider deferred the work, such as after a
     quota rejection. It remains unclean and visible, but is not an app error.
-    Unsettled background subagents (or a run that ended on an interim message
-    with no synthesis turn) mean the work is not done yet either — not a
-    failure to report as such, but not a healthy run either: recording "ok"
-    would clear a previous error while the follow-up never completed.
     An invalidated OAuth grant gets the provider and "sign in again" appended.
     """
     if outcome.retry_pending:
@@ -945,8 +960,6 @@ def _schedule_dispatch_status(
         error = (outcome.final_text or "stream error")[:1000]
         return "error", annotate_reauth(error, provider, model)
     if outcome.permission_requested or outcome.question_requested:
-        return "skipped", None
-    if outcome.subagents_pending:
         return "skipped", None
     return "ok", None
 

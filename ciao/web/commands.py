@@ -241,25 +241,3 @@ async def list_commands_endpoint(request: Request) -> JSONResponse:
         "commands": [asdict(command) for command in commands],
         "skills": [asdict(skill) for skill in skills],
     })
-
-
-async def rate_limits_endpoint(request: Request) -> JSONResponse:
-    """GET /api/rate-limits — return the per-bucket subscription-limit snapshot.
-
-    Data is reactive: we only know a bucket's state once the SDK has emitted
-    a ``RateLimitEvent`` for it, so the payload starts empty after a fresh
-    deploy and fills in as turns happen.
-    """
-    from ciao.rate_limits import KNOWN_BUCKETS, RateLimitStore, default_store_path
-
-    try:
-        config = request.app.state.config
-        runtime_root = Path(config.state_path).parent
-        store = RateLimitStore(path=default_store_path(runtime_root))
-        payload = store.load()
-    except Exception:  # noqa: BLE001 — never 500 the settings page
-        logger.exception("reading rate_limits.json failed")
-        payload = {"buckets": {}, "last_updated": None}
-    # Surface the canonical bucket order so the Vue side can iterate deterministically.
-    payload["known_buckets"] = list(KNOWN_BUCKETS)
-    return JSONResponse(payload)

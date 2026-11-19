@@ -187,8 +187,7 @@ env -u PYTHONPATH .venv/bin/python -m ciao.release "$(pwd)" --bump <patch|minor|
 Read the plan. It is the last chance to catch a wrong bump.
 
 Also read the **Provider versions** block. It shows the OpenCode binary on this
-machine and the Claude CLI bundled in the installed `claude-agent-sdk`, each next
-to the latest published version. If it warns that OpenCode is behind latest, the
+machine and the `claude` CLI on PATH, each next to the latest published version. If it warns that OpenCode is behind latest, the
 maintainer decides: update OpenCode first and re-run the plan, or cut with the
 installed version recorded as tested.
 
@@ -215,8 +214,8 @@ What `--apply` does, in order: bumps `pyproject.toml`, `ciao/__init__.py`,
 in both `web/public/sw.js` and `ciao/web/static/sw.js`; writes the notes into
 `CHANGELOG.md` (or, without `--notes-file`, the commit list);
 auto-bumps `auto` dependencies; regenerates the packaged `gws-*` skills if the
-installed `gws` CLI differs from the pin; records the tested OpenCode and bundled
-Claude CLI versions in `ciao/stock/provider-versions.json` (fails on a missing,
+installed `gws` CLI differs from the pin; records the tested OpenCode and Claude
+CLI versions in `ciao/stock/provider-versions.json` (fails on a missing,
 dev, unpublished or unsupported OpenCode unless `--untested-provider opencode`);
 runs the full check suite; commits
 `release: prepare vX.Y.Z`; pushes; opens the PR into `main`.
@@ -314,9 +313,8 @@ findings land as inline comments.
 3. That fires `publish.yml`:
    - `build-engine` (macos) — builds the PWA and the engine wheel, verifies the
      wheel in a clean environment, signs the engine manifest with the release
-     minisign key, and attaches the wheel, the manifest and its signature, plus
-     the engine installer as both `install.sh` and `install-engine.sh` (the same
-     bytes under both names, #651).
+     minisign key, and attaches exactly three engine assets: the wheel, the
+     manifest and its signature.
      Since #653 there is no app archive, no updater feed, no native verifier and
      no bundled runtime.
    - `release-smoke` (macos) — installs the engine from the release's one-line
@@ -338,9 +336,7 @@ curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/
 `tests/test_ci_workflow.py::test_first_party_install_command_stays_install_sh`
 pins that exact command into this skill, `README.md`, `site/index.html`,
 `site/guide.html` and `docs/DEVELOPMENT.md`, and fails if any of them starts
-pointing a first-time user at `install-engine.sh` instead. The build attaches
-the installer under both names because the public one-liner kept `install.sh`
-while the hand-over path fetched `install-engine.sh` (#651) — but `install.sh` is
+pointing a first-time user at `install-engine.sh` instead. `install.sh` is
 the one a user runs.
 
 **Merging the release PR** is the one irreversible act in this skill. The

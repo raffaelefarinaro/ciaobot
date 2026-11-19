@@ -103,7 +103,7 @@ _SIX = [
     for msg in (_text_msg("user", f"question {n}"), _text_msg("assistant", f"answer {n}"))
 ]
 
-_SEGMENTS = {"sess-a": _SIX}
+_SEGMENTS = {"a0764c30-d9b6-57fb-a0ea-c0b1a04c9f50": _SIX}
 
 
 @pytest.mark.asyncio
@@ -113,13 +113,9 @@ async def test_no_params_keeps_legacy_flat_array(
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Legacy shape", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="legacy-shape")
-    chat.session_id = "sess-a"
+    chat.session_id = "a0764c30-d9b6-57fb-a0ea-c0b1a04c9f50"
     pcm._save()
-    monkeypatch.setitem(
-        sys.modules,
-        "claude_agent_sdk",
-        SimpleNamespace(get_session_messages=lambda session_id, directory: _SEGMENTS[session_id]),
-    )
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", lambda session_id, directory: _SEGMENTS[session_id])
 
     response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
     rows = json.loads(response.body.decode())
@@ -139,13 +135,9 @@ async def test_envelope_serves_newest_window(
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Envelope tail", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="envelope-tail")
-    chat.session_id = "sess-a"
+    chat.session_id = "a0764c30-d9b6-57fb-a0ea-c0b1a04c9f50"
     pcm._save()
-    monkeypatch.setitem(
-        sys.modules,
-        "claude_agent_sdk",
-        SimpleNamespace(get_session_messages=lambda session_id, directory: _SEGMENTS[session_id]),
-    )
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", lambda session_id, directory: _SEGMENTS[session_id])
 
     response = await chat_messages(
         _request(pcm, pcm._config, chat.chat_id, b"limit=2")
@@ -169,13 +161,9 @@ async def test_envelope_older_page_ends_with_has_more_false(
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Envelope older", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="envelope-older")
-    chat.session_id = "sess-a"
+    chat.session_id = "a0764c30-d9b6-57fb-a0ea-c0b1a04c9f50"
     pcm._save()
-    monkeypatch.setitem(
-        sys.modules,
-        "claude_agent_sdk",
-        SimpleNamespace(get_session_messages=lambda session_id, directory: _SEGMENTS[session_id]),
-    )
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", lambda session_id, directory: _SEGMENTS[session_id])
 
     response = await chat_messages(
         _request(pcm, pcm._config, chat.chat_id, b"offset=2&limit=8")
@@ -194,17 +182,13 @@ _LONG_THINKING = "x" * 1200
 async def test_envelope_prunes_long_thinking_with_lazy_marker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    segments = {"sess-think": [_thinking_msg(_LONG_THINKING)]}
+    segments = {"c37504ee-ea4d-5ce3-ac0b-f2b7770024ad": [_thinking_msg(_LONG_THINKING)]}
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Lazy think", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="lazy-think")
-    chat.session_id = "sess-think"
+    chat.session_id = "c37504ee-ea4d-5ce3-ac0b-f2b7770024ad"
     pcm._save()
-    monkeypatch.setitem(
-        sys.modules,
-        "claude_agent_sdk",
-        SimpleNamespace(get_session_messages=lambda session_id, directory: segments[session_id]),
-    )
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", lambda session_id, directory: segments[session_id])
 
     response = await chat_messages(
         _request(pcm, pcm._config, chat.chat_id, b"limit=10")
@@ -230,18 +214,14 @@ async def test_part_endpoint_returns_unpruned_row_by_index(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     segments = {
-        "sess-part": [_text_msg("user", "go"), _thinking_msg(_LONG_THINKING)],
+        "11b90425-0ba2-53f3-a491-345fb428c0cf": [_text_msg("user", "go"), _thinking_msg(_LONG_THINKING)],
     }
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Part fetch", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="part-fetch")
-    chat.session_id = "sess-part"
+    chat.session_id = "11b90425-0ba2-53f3-a491-345fb428c0cf"
     pcm._save()
-    monkeypatch.setitem(
-        sys.modules,
-        "claude_agent_sdk",
-        SimpleNamespace(get_session_messages=lambda session_id, directory: segments[session_id]),
-    )
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", lambda session_id, directory: segments[session_id])
 
     response = await chat_message_part(
         _part_request(pcm, pcm._config, chat.chat_id, b"i=1")
@@ -258,17 +238,13 @@ async def test_part_endpoint_returns_unpruned_row_by_index(
 async def test_part_endpoint_rejects_bad_indices(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    segments = {"sess-part2": [_text_msg("user", "only one")]}
+    segments = {"6dd33e63-cbbc-50a8-a09e-bd803417c72a": [_text_msg("user", "only one")]}
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("Part bounds", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="part-bounds")
-    chat.session_id = "sess-part2"
+    chat.session_id = "6dd33e63-cbbc-50a8-a09e-bd803417c72a"
     pcm._save()
-    monkeypatch.setitem(
-        sys.modules,
-        "claude_agent_sdk",
-        SimpleNamespace(get_session_messages=lambda session_id, directory: segments[session_id]),
-    )
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", lambda session_id, directory: segments[session_id])
 
     missing = await chat_message_part(
         _part_request(pcm, pcm._config, chat.chat_id, b"i=99")

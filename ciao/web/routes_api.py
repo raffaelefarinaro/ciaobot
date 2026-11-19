@@ -32,7 +32,6 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable
 # the annotations need the name at module scope.
 if TYPE_CHECKING:
     from ciao import operator_actions, update_tasks
-    from ciao.native_installer import NativeBootstrapContext
 
 from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID, uuid4
@@ -51,7 +50,6 @@ from ciao import proposal_predictions
 from ciao import service_backend
 from ciao import transcripts
 from ciao import backup_service
-from ciao import subagent_tracking
 from ciao import entity_types
 from ciao import provider_registry
 from ciao import repo_link
@@ -77,8 +75,8 @@ from ciao.config import (
     CiaoConfig,
     RESTART_EXIT_CODE,
     WorkspaceConfig,
-    default_agent_fs_scope,
 )
+from ciao.model_tiers import MAX_MODEL_ID_CHARS
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
     WORKSPACE_NAME_RE,
@@ -92,14 +90,8 @@ from ciao.workspaces import (
 # Kept as an alias: several call sites predate the shared module.
 _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.task_decisions import clean_reason
-from ciao.core_prompt import system_prompt_payload
+from ciao.core_prompt import unified_core
 from ciao.tool_path import resolve_command
-from ciao.providers.base import BaseProvider, live_for_session
-from ciao.native_task_types import is_process_task
-from ciao.providers.opencode import (
-    opencode_child_status,
-    running_opencode_child_ids,
-)
 from ciao.provider_service import capabilities_for, supported_providers
 from ciao.subprocess_step import run_step
 from ciao.schedule_command import normalize_schedule_command
@@ -128,7 +120,7 @@ from ciao.schedules import (
 )
 from ciao.setup_status import setup_status
 from ciao.cli import _auth_command_for_provider
-from ciao.install_discovery import trusted_registry
+from ciao.workspace_discovery import trusted_registry
 from ciao.skills_inventory import build_skill_inventory
 from ciao.vault_index import (
     Entry,
@@ -288,9 +280,6 @@ def _workspaces_payload(config) -> dict:
         # button rather than offering an action the server refuses.
         "primary": config.primary_workspace() or None,
         "provider_options": _workspace_provider_options(config),
-        # What a workspace that never chose a File access scope runs under on
-        # this engine. The PWA labels its "Default" option from this value.
-        "default_agent_fs_scope": default_agent_fs_scope(),
         # Catalog the Settings trim card renders; engine-owned so the PWA never restates defaults.
         "claude_trim_options": catalog_payload(),
     }
@@ -1081,22 +1070,16 @@ async def provider_connection_action(request: Request) -> JSONResponse:
     provider = request.path_params["provider"]
     action = request.path_params["action"]
     config = request.app.state.config
-    drop_account_evidence = None
-    if provider == "claude" and action in {"verify", "logout"}:
-        from ciao.providers.catalog_evidence import invalidate_claude_account_evidence
-
-        # Before the awaited sign-out work, so an in-flight connection cannot
-        # repopulate the previous account's models afterwards, and again on the
-        # way out to drop anything recorded while it ran.
-        invalidate_claude_account_evidence()
-        drop_account_evidence = invalidate_claude_account_evidence
     if not provider_registry.is_provider(provider):
         return JSONResponse({"error": "unsupported provider"}, status_code=404)
     if action == "connect":
         login_action = f"{provider}-login"
         if login_action not in host_terminal.ACTION_IDS:
             return JSONResponse({"error": "this provider has no sign-in action"}, status_code=404)
-        command = await asyncio.to_thread(host_terminal.action_command, login_action)
+        try:
+            command = await asyncio.to_thread(host_terminal.action_command, login_action)
+        except host_terminal.NotInstalled as exc:
+            return JSONResponse({"ok": False, "reason": "not_installed", "error": str(exc)}, status_code=409)
         if not host_browser_request(request):
             return JSONResponse(
                 {
@@ -1130,51 +1113,39 @@ async def provider_connection_action(request: Request) -> JSONResponse:
             )
         return JSONResponse({"ok": True, "launched": launched, "command": command}, status_code=202)
     if action == "verify":
-        try:
-            if provider == "claude":
-                from ciao.setup_status import clear_claude_discovery_cache
+        if provider == "claude":
+            from ciao.setup_status import clear_claude_discovery_cache
 
-                await asyncio.to_thread(clear_claude_discovery_cache)
-            if provider == "opencode":
-                from ciao.providers.opencode import invalidate_opencode_model_cache
-
-                invalidate_opencode_model_cache()
-                payload = await asyncio.to_thread(_provider_config_payload_with_inventory, config)
-                return JSONResponse(payload["connections"].get(provider, {}), headers={"Cache-Control": "no-store"})
-            payload = await asyncio.to_thread(_provider_config_payload, config)
-            return JSONResponse(payload["connections"].get(provider, {}))
-        finally:
-            # Cancellation or an error can leave a threaded sign-in probe
-            # running; drop evidence on every exit, not only on success.
-            if drop_account_evidence is not None:
-                drop_account_evidence()
+            await asyncio.to_thread(clear_claude_discovery_cache)
+        if provider == "opencode":
+            provider_registry.require(provider).factory().invalidate_model_catalog()
+            payload = await asyncio.to_thread(_provider_config_payload_with_inventory, config)
+            return JSONResponse(payload["connections"].get(provider, {}), headers={"Cache-Control": "no-store"})
+        payload = await asyncio.to_thread(_provider_config_payload, config)
+        return JSONResponse(payload["connections"].get(provider, {}))
     if action == "logout":
         try:
-            try:
-                # auth_command is `[binary, "auth", "login"]`, so dropping the last
-                # element yields `[binary, "auth", "logout"]`. `[:1] + ["logout"]`
-                # would run the obsolete top-level `claude logout`, which prints a
-                # "did you mean" hint and exits 0 without signing out.
-                logout_command = _auth_command_for_provider(provider)[:-1] + ["logout"]
-                run = await asyncio.to_thread(
-                    subprocess.run,
-                    logout_command,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    check=False,
-                )
-            except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
-                return JSONResponse({"error": str(exc)}, status_code=400)
-            if run.returncode != 0:
-                return JSONResponse(
-                    {"error": (run.stderr or run.stdout or "logout failed").strip()},
-                    status_code=400,
-                )
-            return JSONResponse({"ok": True})
-        finally:
-            if drop_account_evidence is not None:
-                drop_account_evidence()
+            # auth_command is `[binary, "auth", "login"]`, so dropping the last
+            # element yields `[binary, "auth", "logout"]`. `[:1] + ["logout"]`
+            # would run the obsolete top-level `claude logout`, which prints a
+            # "did you mean" hint and exits 0 without signing out.
+            logout_command = _auth_command_for_provider(provider)[:-1] + ["logout"]
+            run = await asyncio.to_thread(
+                subprocess.run,
+                logout_command,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if run.returncode != 0:
+            return JSONResponse(
+                {"error": (run.stderr or run.stdout or "logout failed").strip()},
+                status_code=400,
+            )
+        return JSONResponse({"ok": True})
     return JSONResponse({"error": "unsupported action"}, status_code=404)
 
 
@@ -2609,6 +2580,14 @@ async def chat_detail(request: Request) -> Response:
     # read as "no change" there.
     if "pin" in body:
         return await _chat_pin_patch(request, pcm, chat_id, body)
+    # A model id is user-controlled and can reach a status line, so it is bounded as a
+    # delegation's is. None leaves the chat's model alone.
+    model = body.get("model")
+    if isinstance(model, str) and len(model) > MAX_MODEL_ID_CHARS:
+        return JSONResponse(
+            {"error": f"model must be text of at most {MAX_MODEL_ID_CHARS} characters"},
+            status_code=400,
+        )
     try:
         chat = pcm.update_chat(
             chat_id,
@@ -2716,6 +2695,11 @@ async def chat_handover(request: Request) -> JSONResponse:
     body = await request.json()
     provider = str(body.get("provider", "")).strip()
     model = str(body.get("model", "")).strip()
+    if len(model) > MAX_MODEL_ID_CHARS:
+        return JSONResponse(
+            {"error": f"model must be text of at most {MAX_MODEL_ID_CHARS} characters"},
+            status_code=400,
+        )
     raw_messages = body.get("messages", [])
     messages = raw_messages if isinstance(raw_messages, list) else []
     try:
@@ -2990,59 +2974,6 @@ async def chat_stop(request: Request) -> JSONResponse:
     return JSONResponse({"stopped": stopped})
 
 
-async def chat_move_to_background(request: Request) -> JSONResponse:
-    """Move a running turn's foreground shell or subagent to the background (#1413).
-
-    OpenCode's Ctrl+B. 200 ``{"moved": true}`` when a running shell or
-    subagent was moved, ``{"moved": false}`` when nothing could move;
-    409 ``unsupported`` for a provider without the feature (Claude) and
-    ``not_running`` when the chat has no live provider; 502 when OpenCode
-    refused or could not be reached.
-    """
-    pcm = request.app.state.project_chat_manager
-    chat_id = request.path_params["chat_id"]
-    if pcm.get_chat(chat_id) is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    outcome = await pcm.move_chat_to_background(chat_id)
-    if outcome in {"moved", "nothing"}:
-        return JSONResponse({"moved": outcome == "moved"})
-    if outcome == "failed":
-        return JSONResponse(
-            {"error": "OpenCode did not accept the request"}, status_code=502
-        )
-    return JSONResponse({"error": outcome}, status_code=409)
-
-
-async def chat_background_task_stop(request: Request) -> JSONResponse:
-    """Stop one running native background task (Claude) or shell (OpenCode).
-
-    ``task_id`` is the bare id from the Processes row (``task:<id>`` or
-    ``shell:<id>`` with the prefix removed). 404 when the chat, its live
-    provider or the id is unknown; the row leaves ``/api/subagents/running``
-    once the provider reports the task finished. 502 when OpenCode cannot be
-    reached.
-    """
-    pcm = request.app.state.project_chat_manager
-    chat_id = request.path_params["chat_id"]
-    task_id = request.path_params["task_id"]
-    if pcm.get_chat(chat_id) is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    service = pcm._providers.get(chat_id)
-    provider = service.provider if service is not None else None
-    stopped = False
-    try:
-        if isinstance(provider, BaseProvider):
-            stopped = await provider.stop_background_task(task_id)
-    except Exception:  # noqa: BLE001 - a provider failure must answer, not 500
-        logger.warning("stopping background task %s failed", task_id, exc_info=True)
-        return JSONResponse(
-            {"error": "the provider could not be reached or refused"}, status_code=502
-        )
-    if not stopped:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return JSONResponse({"ok": True})
-
-
 async def chat_prompt(request: Request) -> JSONResponse:
     """Send a prompt to start a model turn in the chat (background task)."""
     from ciao.models import ImageAttachment
@@ -3314,428 +3245,6 @@ async def chat_message_part(request: Request) -> JSONResponse:
     row = dict(rows[idx])
     row["i"] = idx
     return JSONResponse(row)
-
-
-async def chat_subagents(request: Request) -> JSONResponse:
-    """Return subagent activity for this chat's session, if any.
-
-    Uses the SDK helpers added in ``claude-agent-sdk`` v0.1.60:
-    ``list_subagents`` to discover subagent ids, and ``get_subagent_messages``
-    to fetch each one's transcript. Returns an array shaped like:
-
-    ``[{"agent_id": str, "messages": [...same shape as /messages...]}]``
-
-    Each entry additionally carries dispatch metadata parsed from the parent
-    session JSONL when available (see ciao/subagent_tracking.py):
-    ``tool_use_id``, ``description``, ``subagent_type``, ``is_async``,
-    ``status`` ("running"/"completed"/"failed"/"stopped"), and ``turn_index`` —
-    the user turn that dispatched the agent, aligned with the ``turn_index``
-    stamped on user bubbles by /messages so the PWA can anchor the subagent
-    panel to the right turn.
-
-    Empty array when the chat has no session, no subagents were spawned, or
-    the SDK can't find the session on this machine (e.g. a remote chat that
-    hasn't been pulled locally).
-    """
-    pcm = request.app.state.project_chat_manager
-    chat_id = request.path_params["chat_id"]
-    chat = pcm.get_chat(chat_id)
-    if chat is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    if not chat.session_id:
-        return JSONResponse([])
-
-    # ``?agent_id=`` narrows the response to one agent. The read-only subagent
-    # view shows a single transcript and polls it while the agent works;
-    # without this it re-fetched and re-rendered every subagent the chat ever
-    # spawned on every tick. Narrowing skips the sibling transcript reads
-    # entirely rather than filtering after the fact.
-    # Normalised once, here. The SDK and the opencode tree key agents by the
-    # bare id while the local-transcript fallback uses the file stem
-    # ("agent-a319…"), and both forms reach the client — so a prefixed id
-    # arriving here matched nothing, the narrow SDK read came back empty, and
-    # the request fell through to the whole-directory fallback it exists to
-    # avoid, on every poll.
-    wanted_agent_id = (request.query_params.get("agent_id") or "").strip().removeprefix("agent-")
-
-    config = request.app.state.config
-    if getattr(chat, "provider", "claude") == "opencode":
-        opencode_entries: list[dict] = []
-        provider_service = pcm._providers.get(chat_id)
-        live_provider = provider_service.provider if provider_service is not None else None
-        if live_for_session(live_provider, chat.session_id):
-            # Metadata only, unless the caller asked for one child's
-            # transcript: the list is polled every few seconds, and reading
-            # every child's history on every poll is what made a chat with
-            # many background agents re-read every transcript every few
-            # seconds.
-            collab_tree = await live_provider.read_live_collab_tree(
-                include_messages=bool(wanted_agent_id),
-                only_child_id=wanted_agent_id or None,
-            )
-        else:
-            resolver = getattr(pcm, "_agent_root_for_chat", None)
-            root = resolver(chat_id) if resolver is not None else config.workspace_root
-            collab_tree = await provider_registry.require(chat.provider).factory().read_collab_tree(
-                root, chat.session_id
-            )
-        for item in collab_tree:
-            info = item.get("info")
-            info = info if isinstance(info, dict) else {}
-            agent_id = str(info.get("id") or "")
-            if not agent_id:
-                continue
-            if wanted_agent_id and agent_id.removeprefix("agent-") != wanted_agent_id:
-                continue
-            messages = item.get("messages")
-            messages = messages if isinstance(messages, list) else []
-            opencode_entries.append({
-                "agent_id": agent_id,
-                "parent_agent_id": str(info.get("parentID") or ""),
-                "messages": transcript_service._render_opencode_thread(item, chat, metadata=False),
-                "tool_use_id": "",
-                "description": str(info.get("title") or ""),
-                "subagent_type": "opencode",
-                "is_async": True,
-                # opencode's session objects carry no status field, but this
-                # endpoint is polled every few seconds while a turn streams —
-                # derive the lifecycle from the child's own messages and anchor
-                # it to the parent turn sent before the child was created.
-                "status": opencode_child_status(
-                    messages,
-                    info,
-                    item.get("active") if isinstance(item.get("active"), bool) else None,
-                ),
-                "turn_index": transcript_service._opencode_child_turn_index(info, chat),
-                # The list carries no transcript, so the run length comes from
-                # the child session's own timestamps.
-                "duration_ms": transcript_service._opencode_child_duration_ms(info),
-                "started_at": (info.get("time") or {}).get("created")
-                if isinstance(info.get("time"), dict) else None,
-            })
-        return JSONResponse(opencode_entries)
-
-    if getattr(chat, "provider", "claude") not in {"claude", "opencode"}:
-        return JSONResponse([])
-
-    workspace = str(config.workspace_root)
-    resolver = getattr(pcm, "_agent_root_for_chat", None)
-    agent_root = resolver(chat_id) if resolver is not None else None
-
-    async def _finalize(entries: list[dict]) -> JSONResponse:
-        # Catch-all for the local-transcript fallbacks, which read the whole
-        # session directory and cannot narrow at the source. Those entries are
-        # keyed by file stem ("agent-a319…") while the SDK and the route use
-        # the bare id, so compare on the bare form or the filter drops the
-        # agent it was asked for. `wanted_agent_id` is already bare.
-        if wanted_agent_id:
-            entries = [
-                e
-                for e in entries
-                if str(e.get("agent_id", "")).removeprefix("agent-") == wanted_agent_id
-            ]
-        # Off the loop: this walks the whole parent session JSONL, which on a
-        # long Claude chat is tens of MB, and the read-only subagent view polls
-        # this endpoint every 4 seconds. Done inline it stalled every in-flight
-        # stream for the length of the parse. `_running_subagent_rows` already
-        # does the identical work in a thread.
-        await asyncio.to_thread(
-            _merge_subagent_dispatch_meta,
-            entries,
-            chat.session_id,
-            Path(config.workspace_root),
-            agent_root=agent_root,
-        )
-        return JSONResponse(entries)
-
-    try:
-        from claude_agent_sdk import get_subagent_messages, list_subagents
-    except ImportError:
-        return await _finalize(
-            transcript_service._local_subagent_transcripts(
-                chat.session_id, Path(config.workspace_root), agent_root=agent_root
-            )
-        )
-
-    if wanted_agent_id:
-        # Skip discovery: the caller already knows the id, and list_subagents
-        # only exists to enumerate the siblings we are deliberately not reading.
-        agent_ids = [wanted_agent_id]
-    else:
-        try:
-            agent_ids = list_subagents(chat.session_id, directory=workspace)
-        except (FileNotFoundError, ValueError):
-            return await _finalize(
-                transcript_service._local_subagent_transcripts(
-                    chat.session_id, Path(config.workspace_root), agent_root=agent_root
-                )
-            )
-        except Exception:  # noqa: BLE001 — defensive against SDK surprises
-            return await _finalize(
-                transcript_service._local_subagent_transcripts(
-                    chat.session_id, Path(config.workspace_root), agent_root=agent_root
-                )
-            )
-
-    result: list[dict] = []
-    for agent_id in agent_ids:
-        try:
-            msgs = get_subagent_messages(
-                chat.session_id,
-                agent_id,
-                directory=workspace,
-            )
-        except (FileNotFoundError, ValueError):
-            continue
-        except Exception:  # noqa: BLE001 — defensive
-            continue
-
-        rendered = transcript_service._render_subagent_messages(msgs)
-        if not rendered and wanted_agent_id:
-            # An empty read is a miss, not an empty transcript. On installs
-            # whose CLI writes the nested "<session>/subagents/*.jsonl" layout,
-            # ``list_subagents`` returns [] and ``get_subagent_messages``
-            # answers any id with [] rather than raising. The unfiltered path
-            # survives that (no ids -> empty result -> local fallback), but the
-            # narrowed one skips discovery and asks for the id directly, so it
-            # built a row with no messages and that non-empty ``result``
-            # suppressed the very fallback that does find the transcript. The
-            # read-only subagent view then showed "No captured turns" for every
-            # Claude subagent while the in-chat panel had the full thread.
-            #
-            # Only the narrowed path skips: on the unfiltered one an empty
-            # render is usually a just-dispatched agent that has not written
-            # its first message yet, and dropping it would make its row
-            # flicker out of the in-chat panel. There the all-empty case
-            # already reaches the local fallback via the `not result` check.
-            continue
-        result.append({"agent_id": agent_id, "messages": rendered})
-
-    if not result:
-        result = transcript_service._local_subagent_transcripts(
-            chat.session_id, Path(config.workspace_root), agent_root=agent_root
-        )
-
-    return await _finalize(result)
-
-
-async def running_subagents(request: Request) -> JSONResponse:
-    """Subagents working right now, per chat, for the sidebar's subagent rows.
-
-    ``/api/chats/{id}/subagents`` is the transcript endpoint: it renders every
-    subagent a chat ever spawned, which is far too much to poll for a sidebar
-    that only shows live work. This returns dispatch metadata alone (no
-    messages) and only for chats the manager already considers active, so the
-    cost is one JSONL parse per working chat rather than one per chat in the
-    registry.
-
-    Shape: ``{"chats": {chat_id: [{agent_id, description, subagent_type,
-    status, is_async, turn_index}]}}``. Chats with nothing running are omitted
-    entirely, which is what lets the client drop their rows.
-
-    For Claude chats this is the set the parent session can name — in practice
-    background dispatches, because a foreground Task only appears in the parent
-    file once it has already finished (see
-    ``subagent_tracking.running_agents``). Foreground work is visible in the
-    chat's own live trace instead, since the turn that spawned it is still
-    streaming.
-    """
-    pcm = request.app.state.project_chat_manager
-    config = request.app.state.config
-    out: dict[str, list[dict]] = {}
-    scanned: list[tuple[str, Any]] = []
-    # A provider holding only a native shell has no stream, count or watcher,
-    # so it is absent from `active_chat_ids`; the feed lists it anyway.
-    for chat_id in sorted({*pcm.active_chat_ids(), *pcm.background_work_chat_ids()}):
-        chat = pcm.get_chat(chat_id)
-        if chat is None or chat.archived or not chat.session_id:
-            continue
-        scanned.append((chat_id, chat))
-    # Gathered, not awaited one at a time. Each scan is an independent thread
-    # hop over that chat's own session file (or an independent opencode read),
-    # so a serial loop cost N full parses of wall clock every four seconds
-    # while anything was working. `return_exceptions` preserves the per-chat
-    # tolerance the loop had: one unreadable session must not blank the
-    # sidebar for the others.
-    results = await asyncio.gather(
-        *(_running_subagent_rows(pcm, config, chat) for _cid, chat in scanned),
-        return_exceptions=True,
-    )
-    for (chat_id, _chat), rows in zip(scanned, results):
-        if isinstance(rows, BaseException):
-            logger.warning(
-                "running-subagent scan failed for chat %s", chat_id, exc_info=rows
-            )
-            continue
-        if rows:
-            out[chat_id] = rows
-    return JSONResponse({"chats": out})
-
-
-async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
-    """Live subagents for one chat, without loading any transcript."""
-    provider = getattr(chat, "provider", "claude")
-    if provider == "opencode":
-        provider_service = pcm._providers.get(chat.chat_id)
-        live_provider = provider_service.provider if provider_service is not None else None
-        if live_for_session(live_provider, chat.session_id):
-            collab_tree = await live_provider.read_live_collab_tree()
-        else:
-            # Sessions are cwd-scoped: a chat in a non-primary workspace was
-            # created under its agent root, not the install root. The
-            # live-provider path already uses that root; the ephemeral fallback
-            # must do the same, otherwise it returns no children and the sidebar
-            # drops still-running agents.
-            resolver = getattr(pcm, "_agent_root_for_chat", None)
-            agent_root = resolver(chat.chat_id) if resolver is not None else None
-            root = Path(agent_root) if agent_root else Path(config.workspace_root)
-            collab_tree = await provider_registry.require(chat.provider).factory().read_collab_tree(
-                root, chat.session_id
-            )
-        rows: list[dict] = []
-        running_ids = set(running_opencode_child_ids(collab_tree))
-        for item in collab_tree:
-            info = item.get("info")
-            info = info if isinstance(info, dict) else {}
-            agent_id = str(info.get("id") or "")
-            if agent_id not in running_ids:
-                continue
-            rows.append({
-                "agent_id": agent_id,
-                "description": str(info.get("title") or ""),
-                "subagent_type": "opencode",
-                "is_async": True,
-                "status": "running",
-                "turn_index": transcript_service._opencode_child_turn_index(info, chat),
-            })
-        if live_for_session(live_provider, chat.session_id):
-            # Background shells are processes, not agents: the composer lists
-            # them under Processes and never links them to a transcript.
-            for shell in live_provider.background_shell_rows():
-                rows.append({
-                    "agent_id": f"shell:{shell['id']}",
-                    "description": shell["command"] or "Background command",
-                    "subagent_type": "shell",
-                    "is_async": True,
-                    "status": "running",
-                    "turn_index": None,
-                    "started_at": _epoch_to_iso(shell["started_at"]),
-                    "stoppable": True,
-                })
-        return rows
-
-    if provider != "claude":
-        return []
-    resolver = getattr(pcm, "_agent_root_for_chat", None)
-    agent_root = resolver(chat.chat_id) if resolver is not None else None
-    path = subagent_tracking.find_parent_session_file(
-        chat.session_id, Path(config.workspace_root), agent_root=agent_root
-    )
-    # Native tasks (background Bash, Monitor) come from the loaded provider
-    # when there is one: its SDK-tracked set is the live truth and the only
-    # one that can be stopped. Without a loaded provider the parent JSONL's
-    # unfinished tasks stand in, listed but not stoppable. Never both, so a
-    # task is not listed twice.
-    provider_service = pcm._providers.get(chat.chat_id)
-    live_provider = provider_service.provider if provider_service is not None else None
-    live = live_provider if isinstance(live_provider, BaseProvider) else None
-    if path is None and live is None:
-        return []
-
-    def _scan() -> tuple[
-        list[subagent_tracking.SubagentInfo], list[subagent_tracking.SubagentInfo]
-    ]:
-        # Both halves belong off the event loop. running_agents() is not a
-        # cheap filter over the parsed state: it stats and tail-reads each
-        # running agent's own transcript, and this endpoint is polled by the
-        # sidebar for every working chat.
-        if path is None:
-            return [], []
-        state = subagent_tracking.parse_session_subagents(path)
-        agents = subagent_tracking.running_agents(path, state)
-        tasks = [] if live is not None else subagent_tracking.running_tasks(state)
-        return agents, tasks
-
-    agents, tasks = await asyncio.to_thread(_scan)
-    claude_rows: list[dict] = [
-        {
-            "agent_id": info.agent_id,
-            "description": info.description,
-            "subagent_type": info.subagent_type,
-            "is_async": info.is_async,
-            "status": info.status,
-            "turn_index": info.turn_index,
-        }
-        for info in agents
-    ]
-    # Processes rows reuse the shell row shape; `isShellRow` routes them.
-    claude_rows.extend(
-        {
-            "agent_id": f"task:{info.agent_id}",
-            "description": info.command or info.description or "Background task",
-            "subagent_type": "monitor" if info.subagent_type == "Monitor" else "shell",
-            "is_async": True,
-            "status": "running",
-            "turn_index": None,
-            "started_at": info.started_at,
-            "stoppable": False,
-        }
-        for info in tasks
-    )
-    if live is not None:
-        for task in live.background_shell_rows():
-            task_type = str(task["task_type"])
-            if not is_process_task(task):
-                # Background agents already have their own rows above.
-                continue
-            claude_rows.append({
-                "agent_id": f"task:{task['id']}",
-                "description": task["command"] or "Background task",
-                "subagent_type": "monitor" if "monitor" in task_type else "shell",
-                "is_async": True,
-                "status": "running",
-                "turn_index": None,
-                "started_at": _epoch_to_iso(task["started_at"]),
-                "stoppable": True,
-            })
-    return claude_rows
-
-
-def _epoch_to_iso(seconds: float) -> str:
-    """ISO 8601 UTC for epoch ``seconds``."""
-    return datetime.fromtimestamp(seconds, UTC).isoformat()
-
-
-def _merge_subagent_dispatch_meta(
-    entries: list[dict], session_id: str, workspace_root: Path, *, agent_root: Path | None = None
-) -> None:
-    """Attach dispatch metadata from the parent session JSONL in place."""
-    if not entries:
-        return
-    path = subagent_tracking.find_parent_session_file(
-        session_id, workspace_root, agent_root=agent_root
-    )
-    if path is None:
-        return
-    try:
-        state = subagent_tracking.parse_session_subagents(path)
-    except Exception:  # noqa: BLE001 — metadata is best-effort decoration
-        logger.exception("subagent dispatch-meta parse failed for %s", session_id)
-        return
-    for entry in entries:
-        # SDK ids are bare ("a319..."); the local-JSONL fallback uses the
-        # file stem ("agent-a319...").
-        agent_id = str(entry.get("agent_id", "")).removeprefix("agent-")
-        info = state.subagents.get(agent_id)
-        if info is None:
-            continue
-        entry["tool_use_id"] = info.tool_use_id
-        entry["description"] = info.description
-        entry["subagent_type"] = info.subagent_type
-        entry["is_async"] = info.is_async
-        entry["status"] = info.status
-        if info.turn_index is not None:
-            entry["turn_index"] = info.turn_index
 
 
 # ── Images ───────────────────────────────────────────────────────────────
@@ -4382,9 +3891,8 @@ async def workspace_dir(request: Request) -> Response:
 
 
 async def system_prompt(request: Request) -> Response:
-    """The text Ciaobot appends to every provider's system prompt (read-only)."""
-    payload = system_prompt_payload("") or {}
-    text = str(payload.get("append") or "")
+    """The Ciaobot core every provider receives in its context capsule (read-only)."""
+    text = unified_core()
     return JSONResponse({"text": text, "chars": len(text)})
 
 
@@ -6667,9 +6175,14 @@ async def schedule_detail(request: Request) -> JSONResponse:
 
 # ── Models ───────────────────────────────────────────────────────────────
 
+async def _acp_catalog(
+    descriptor: provider_registry.ProviderDescriptor, workspace_root: Path, refresh: bool
+) -> list[dict[str, Any]]:
+    return await descriptor.factory().model_catalog(workspace_root, force=refresh)
+
+
 async def list_models(request: Request) -> JSONResponse:
     config = request.app.state.config
-    from ciao.providers.catalog_evidence import claude_catalog_evidence, invalidate_claude_catalog
 
     workspace_name = request.query_params.get("workspace")
     if workspace_name:
@@ -6679,58 +6192,59 @@ async def list_models(request: Request) -> JSONResponse:
         workspace_root = config.agent_root(workspace_name)
     else:
         workspace_root = Path(config.workspace_root)
-    # `?refresh=1` bypasses the opencode catalog cache. The catalog is served on
+    # `?refresh=1` bypasses the ACP catalog cache. The catalog is served on
     # demand so a provider connected in another window shows up immediately.
     refresh = str(request.query_params.get("refresh", "")).strip().lower() in {
         "1", "true", "yes", "on",
     }
-    opencode_catalog = await provider_registry.require("opencode").factory().model_catalog(
-        workspace_root, force=refresh
+    # Every descriptor that runs over ACP reports its own catalog, opencode included. A probe
+    # that raises leaves that provider with an empty catalog; the exception is logged by type only.
+    acp_descriptors = [item for item in provider_registry.descriptors() if item.acp_spec_path]
+    acp_results = await asyncio.gather(
+        *(_acp_catalog(item, workspace_root, refresh) for item in acp_descriptors),
+        return_exceptions=True,
     )
-    if refresh:
-        invalidate_claude_catalog(workspace_root)
-    claude_evidence = claude_catalog_evidence(workspace_root)
-    opencode_evidence_models = [
-        {"id": str(item.get("model")), "label": str(item.get("label") or item.get("model"))}
-        for item in opencode_catalog if item.get("model")
-    ]
-    opencode_evidence = {
-        "status": "observed" if opencode_evidence_models else "unknown",
-        "source": "opencode_catalog" if opencode_evidence_models else None,
-        "models": opencode_evidence_models,
-        "reason": None if opencode_evidence_models else "no_models_reported",
-    }
-    opencode_models = [
-        str(item.get("model") or "") for item in opencode_catalog if item.get("model")
-    ]
-    opencode_operator_default = config.default_model_for_provider("opencode")
-    if opencode_operator_default in opencode_models:
-        opencode_default = opencode_operator_default
-    else:
-        opencode_default = opencode_models[0] if opencode_models else ""
-    # Per-model reasoning-effort variants for opencode.
-    opencode_reasoning_levels = {
-        str(item.get("model")): list(item.get("variants") or [])
-        for item in opencode_catalog
-        if item.get("model")
-    }
-    model_reasoning_levels = opencode_reasoning_levels
-    # Claude Code serves one upstream, so its models are a single list rather
-    # than the work/personal split the routing-backend era needed.
-    claude_models = list(CLAUDE_MODELS)
-    claude_default = config.default_model_for_provider("claude") or config.claude_default_model
+    acp_models: dict[str, list[str]] = {}
+    acp_defaults: dict[str, str] = {}
+    acp_evidence: dict[str, dict[str, Any]] = {}
+    acp_levels: dict[str, list[str]] = {}
+    for item, result in zip(acp_descriptors, acp_results, strict=True):
+        if isinstance(result, BaseException):
+            logger.warning("%s model catalog failed (%s).", item.id, type(result).__name__)
+        rows = result if isinstance(result, list) else []
+        models = [str(row["model"]) for row in rows if row.get("model")]
+        operator_default = config.default_model_for_provider(item.id)
+        acp_models[item.id] = models
+        acp_defaults[item.id] = (
+            operator_default if operator_default in models else (models[0] if models else "")
+        )
+        acp_evidence[item.id] = {
+            "status": "observed" if models else "unknown",
+            "source": "acp_config_options" if models else None,
+            "models": [
+                {"id": str(row["model"]), "label": str(row.get("label") or row["model"])}
+                for row in rows if row.get("model")
+            ],
+            "reason": None if models else "no_models_reported",
+        }
+        # Reasoning levels are keyed by bare model id, as the PWA reads them.
+        for row in rows:
+            if row.get("model"):
+                acp_levels.setdefault(str(row["model"]), list(row.get("variants") or []))
 
+    # The Claude catalog is the ACP one above. The top-level "models" and "default" are the
+    # tier list and the default the PWA reads when that catalog is empty.
+    claude_default = (
+        acp_defaults.get("claude")
+        or config.default_model_for_provider("claude")
+        or config.claude_default_model
+    )
+    opencode_models = acp_models.get("opencode", [])
     return JSONResponse({
         "models": list(CLAUDE_MODELS),
         "default": claude_default,
-        "provider_models": {
-            "claude": claude_models,
-            "opencode": opencode_models,
-        },
-        "provider_defaults": {
-            "claude": claude_default,
-            "opencode": opencode_default,
-        },
+        "provider_models": acp_models,
+        "provider_defaults": acp_defaults,
         "backends": {
             "anthropic": True,
             "opencode": bool(opencode_models),
@@ -6747,17 +6261,9 @@ async def list_models(request: Request) -> JSONResponse:
             }
             for item in provider_registry.descriptors()
         ],
-        "model_reasoning_levels": model_reasoning_levels,
+        "model_reasoning_levels": acp_levels,
         "thinking_levels": {k: list(v) for k, v in THINKING_LEVELS.items()},
-        "provider_catalog_evidence": {
-            "claude": {
-                "status": claude_evidence.status,
-                "source": claude_evidence.source,
-                "models": [{"id": model.id, "label": model.label} for model in claude_evidence.models],
-                "reason": claude_evidence.reason,
-            },
-            "opencode": opencode_evidence,
-        },
+        "provider_catalog_evidence": acp_evidence,
     })
 
 
@@ -6885,15 +6391,13 @@ async def settings_keyboard(request: Request) -> JSONResponse:
     def payload() -> dict[str, Any]:
         keyboard_shortcuts = app_settings.settings.keyboard_shortcuts or {}
         keyboard_send_mode = app_settings.settings.keyboard_send_mode or "modifier"
-        mid_turn_delivery = app_settings.settings.mid_turn_delivery or "queue"
         revision_source = json.dumps(
-            [keyboard_shortcuts, keyboard_send_mode, mid_turn_delivery],
+            [keyboard_shortcuts, keyboard_send_mode],
             sort_keys=True, separators=(",", ":"),
         ).encode("utf-8")
         return {
             "keyboard_shortcuts": keyboard_shortcuts,
             "keyboard_send_mode": keyboard_send_mode,
-            "mid_turn_delivery": mid_turn_delivery,
             "revision": hashlib.sha256(revision_source).hexdigest(),
         }
     if request.method == "PATCH":
@@ -6905,7 +6409,7 @@ async def settings_keyboard(request: Request) -> JSONResponse:
             return JSONResponse({"error": "expected an object"}, status_code=400)
         expected_revision = body.pop("revision", None)
         unknown = sorted(set(body) - {
-            "keyboard_shortcuts", "keyboard_send_mode", "mid_turn_delivery",
+            "keyboard_shortcuts", "keyboard_send_mode",
         })
         if unknown:
             return JSONResponse(
@@ -7148,9 +6652,6 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
 async def setup_status_endpoint(request: Request) -> JSONResponse:
     """Return first-run setup readiness for the onboarding wizard."""
     payload = await asyncio.to_thread(setup_status, request.app.state.config)
-    payload["native_bootstrap"] = (
-        getattr(request.app.state, "native_bootstrap", None) is not None
-    )
     return JSONResponse(payload)
 
 
@@ -7189,84 +6690,6 @@ def _schedule_launchd_server_handoff() -> bool:
     return True
 
 
-#: Body fields the native setup request may carry. The trust-critical paths
-#: (`python`, `launch_agents_dir`, `app_dir`) are in the set only so a client
-#: that sends them empty is not rejected; a non-empty value is refused above.
-_NATIVE_SETUP_FIELDS: frozenset[str] = frozenset(
-    {
-        "workspace",
-        "port",
-        "provider",
-        "vault_root",
-        "vault_mode",
-        "workspace_name",
-        "password",
-        "auth_token",
-        "restart",
-        "python",
-        "launch_agents_dir",
-        "app_dir",
-    }
-)
-#: String fields the native branch reads; anything else is a malformed body.
-_NATIVE_SETUP_STRING_FIELDS: tuple[str, ...] = (
-    "workspace",
-    "provider",
-    "vault_root",
-    "vault_mode",
-    "workspace_name",
-    "password",
-    "auth_token",
-)
-_NATIVE_SETUP_STATE_CHANGED = (
-    "the installer state changed while setup was open; nothing was written"
-)
-_NATIVE_SETUP_RESTART_REFUSED = (
-    "setup was recorded but the server could not be restarted; nothing was started"
-)
-_NATIVE_SETUP_ALREADY_CLAIMED = (
-    "setup already ran for this native bootstrap; nothing else was written"
-)
-_NATIVE_SETUP_WRITE_REFUSED = (
-    "setup could not write this install because the on-disk state differs from "
-    "the one the installer prepared; nothing was started"
-)
-_NATIVE_SETUP_RECORD_REFUSED = (
-    "setup wrote the workspace but could not record the native handoff result; "
-    "nothing was started"
-)
-
-
-def _request_native_failure_exit(request: Request) -> None:
-    """Stop a native bootstrap child after it already mutated the destination.
-
-    Retrying a setup that wrote a workspace, wrote a definition or recorded a
-    result could compound partial state, so the child asks the server to leave
-    with a nonzero code. The installer parent observes that as a failed run and
-    never activates. Only the native branch calls this. With no usable restart
-    hook the child exits right here: silently continuing would leave a
-    half-written bootstrap serving.
-    """
-    restart_fn = getattr(request.app.state, "request_restart", None)
-    if callable(restart_fn):
-        try:
-            restart_fn(1)
-            return
-        except Exception:
-            # A broken hook must not turn the failure into a 500 with the child
-            # still serving: fall through to the hard exit.
-            pass
-    os._exit(1)
-
-
-class _NativeFinishRefusal(Exception):
-    """A fixed refusal after the native claim; the handler maps it to its 409."""
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.message = message
-
-
 def _publish_setup_environment(workspace: Path, port: int, password: str) -> None:
     # Hand the chosen workspace to the relaunched process. A foreground
     # `ciao run` restarts by re-execing itself with the current environment,
@@ -7278,111 +6701,6 @@ def _publish_setup_environment(workspace: Path, port: int, password: str) -> Non
     # already in the environment, so a stale PWA_AUTH_TOKEN inherited from the
     # bootstrap process would outrank the password just written to .env.
     os.environ["PWA_AUTH_TOKEN"] = password
-
-
-async def _native_finish_write(
-    context: NativeBootstrapContext,
-    *,
-    workspace: Path,
-    setup_kwargs: dict[str, Any],
-    password: str,
-    port: int,
-    startup_id: str,
-    bootstrap_host: str,
-    bootstrap_port: int,
-) -> tuple[Path, list[Path]]:
-    """Everything the native bootstrap does after its single-flight claim.
-
-    Resolve, re-check the captured state, write, record and read back. Returns
-    the resolved workspace and what setup wrote. A refusal is raised as
-    :class:`_NativeFinishRefusal` with its fixed message; any other exception
-    propagates to the handler, which treats it the same way. The caller requests
-    the failure exit on every exception, so nothing here has to clean up.
-    """
-    from ciao import native_handoff
-    from ciao.cli import setup_workspace
-    from ciao.native_handoff import NativeHandoffError
-    from ciao.native_installer import NativeBootstrapError
-
-    resolved_workspace = workspace.resolve()
-    # Last read-only gate before the first destination write. It re-checks the
-    # host snapshot, the bootstrap directory identities, the private scratch
-    # chain, the absent live definition and handoff result, the chosen workspace
-    # and the engine interpreter. It runs off the event loop because the host
-    # check reads files and runs the codesign probe.
-    try:
-        resolved_workspace = await asyncio.to_thread(
-            context.assert_ready_to_write,
-            startup_id=startup_id,
-            workspace=resolved_workspace,
-            port=port,
-            engine_python=sys.executable,
-            config_host=bootstrap_host,
-            config_port=bootstrap_port,
-        )
-    except NativeBootstrapError:
-        raise _NativeFinishRefusal(_NATIVE_SETUP_STATE_CHANGED) from None
-
-    # setup_workspace only writes workspace files and the bundled-engine
-    # LaunchAgent. The release installer owns app downloads, so setup remains
-    # responsive and never reaches out to GitHub. The native branch never
-    # overwrites a definition: setup_kwargs carries exclusive_service_definition.
-    written = await asyncio.to_thread(
-        functools.partial(setup_workspace, str(resolved_workspace), **setup_kwargs)
-    )
-    _publish_setup_environment(resolved_workspace, port, password)
-
-    # The definition this setup wrote must be exactly the one the context
-    # proved absent before the write. Comparing the reported path catches a
-    # legacy override or a setup that wrote nowhere.
-    try:
-        written_definitions = [
-            Path(path).resolve()
-            for path in written
-            if Path(path).name == context.definition_path.name
-        ]
-    except OSError:
-        written_definitions = []
-    if written_definitions != [context.definition_path.resolve()]:
-        raise _NativeFinishRefusal(_NATIVE_SETUP_RECORD_REFUSED)
-    try:
-        # The schema-2 record binds the definition's digest, the executed
-        # program/interpreter identities and the environment. It is written
-        # off the event loop; the read-back below is the record identity check
-        # for this run and this child.
-        recorded = await asyncio.to_thread(
-            functools.partial(
-                native_handoff.record_setup_completion,
-                run_id=context.run_id,
-                startup_id=context.startup_id,
-                workspace=resolved_workspace,
-                written=written,
-                port=port,
-                engine_python=str(context.engine_python),
-            )
-        )
-        result = await asyncio.to_thread(
-            native_handoff.read_result,
-            expected_run_id=context.run_id,
-        )
-    except (NativeHandoffError, OSError, ValueError):
-        raise _NativeFinishRefusal(_NATIVE_SETUP_RECORD_REFUSED) from None
-    try:
-        identity_ok = (
-            Path(recorded).resolve() == context.handoff_path.resolve()
-            and result.run_id == context.run_id
-            and result.startup_id == context.startup_id
-            and result.workspace == resolved_workspace
-            and result.port == port
-            and result.service_backend == "macos"
-            and result.definition_path.resolve() == context.definition_path.resolve()
-            and Path(result.engine_python).resolve() == context.engine_python.resolve()
-        )
-    except OSError:
-        identity_ok = False
-    if not identity_ok:
-        raise _NativeFinishRefusal(_NATIVE_SETUP_RECORD_REFUSED)
-    return resolved_workspace, written
 
 
 async def setup_finish_endpoint(request: Request) -> JSONResponse:
@@ -7398,54 +6716,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         return JSONResponse({"error": "json object is required"}, status_code=400)
 
-    native_context: NativeBootstrapContext | None = getattr(
-        request.app.state, "native_bootstrap", None
-    )
-
-    # Decided before anything is written: the installer bootstrap completes by
-    # exiting, so a request that would leave it running must not provision the
-    # destination or the service first.
     restart = bool(body.get("restart", True))
-    installer_mode = bool(request.app.state.installer_bootstrap)
-    if installer_mode and not restart:
-        return JSONResponse(
-            {"error": "the installer bootstrap completes by exiting"},
-            status_code=400,
-        )
-    if native_context is not None and not installer_mode:
-        return JSONResponse(
-            {"error": "the native bootstrap state is inconsistent"},
-            status_code=409,
-        )
-    if native_context is not None:
-        # The body is untrusted browser input. In native mode the installer has
-        # already fixed where the definition and the engine live, so a request
-        # may choose only the destination and its own settings; an override of
-        # those trust seams is refused before any path is resolved.
-        unexpected = sorted(set(body) - _NATIVE_SETUP_FIELDS)
-        if unexpected:
-            return JSONResponse(
-                {"error": "the native setup request carries an unsupported field"},
-                status_code=400,
-            )
-        # Only absent, null or the empty string may reach the trust seams. A
-        # non-empty string is the explicit override refusal; any other value
-        # (0, false, [], {}) is refused as a state conflict, never coerced.
-        for key in ("launch_agents_dir", "app_dir", "python"):
-            value = body.get(key)
-            if value not in (None, ""):
-                return JSONResponse(
-                    {"error": f"the native setup request must not override {key}"},
-                    status_code=400 if type(value) is str else 409,
-                )
-        for key in _NATIVE_SETUP_STRING_FIELDS:
-            value = body.get(key)
-            if value is not None and type(value) is not str:
-                return JSONResponse(
-                    {"error": f"the native setup request field {key} must be a string"},
-                    status_code=400,
-                )
-
     # The wizard's primary question is the workspace: one root folder holding
     # the vault (memory-vault/ by default) plus app data, all one git repo.
     # vault_root is optional and only set when the second brain lives
@@ -7501,18 +6772,9 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             status_code=400,
         )
 
-    # The native branch resolves the workspace inside its guarded block, after
-    # the claim; the legacy path resolves it here as before.
-    resolved_workspace = Path(workspace).expanduser()
-    if native_context is None:
-        resolved_workspace = resolved_workspace.resolve()
-    tracker = getattr(request.app.state, "startup_tracker", None)
+    resolved_workspace = Path(workspace).expanduser().resolve()
     vault_root_arg = str(body.get("vault_root", "")).strip() or None
 
-    if native_context is not None and getattr(
-        request.app.state, "native_finish_claimed", False
-    ):
-        return JSONResponse({"error": _NATIVE_SETUP_ALREADY_CLAIMED}, status_code=409)
     # Read-only preflight: the same selection inspection reported. An ambiguous
     # or unusable location is refused here, before any claim, write or exit.
     # Nothing between this call and the claim below awaits, so the claim stays
@@ -7523,14 +6785,6 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-
-    if native_context is not None:
-        # Single flight: claimed synchronously before the first await in the
-        # guarded block and never released, so a second request, or a retry
-        # after a refusal, is refused rather than racing the non-exclusive
-        # workspace writes. Refusals before this line take no claim and exit
-        # nothing; every path after it ends in the failure exit or an ok.
-        request.app.state.native_finish_claimed = True
 
     # setup_workspace only writes workspace files and the bundled-engine
     # LaunchAgent. The release installer owns app downloads, so setup remains
@@ -7544,62 +6798,18 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         "port": port,
         "_vault_selection": selection,
     }
-    if native_context is None:
-        setup_kwargs["python_path"] = str(body.get("python", "")).strip() or None
-        setup_kwargs["launch_agents_dir"] = str(body.get("launch_agents_dir", "")).strip() or None
-        setup_kwargs["app_dir"] = str(body.get("app_dir", "")).strip() or None
-    else:
-        # The installer fixed the interpreter and the definition directory; the
-        # body is never read for these, so no request can move the trust seams.
-        setup_kwargs["python_path"] = None
-        setup_kwargs["launch_agents_dir"] = None
-        setup_kwargs["app_dir"] = None
-        # An existing definition is a refusal, not an overwrite. Only the
-        # native branch opts in; every legacy caller keeps `write_text`.
-        setup_kwargs["exclusive_service_definition"] = True
-        # Use the host snapshot this child proved at capture, not a second
-        # independent selection that could downgrade to the direct shape.
-        setup_kwargs["verified_host"] = native_context.expected_host
-    if native_context is not None:
-        try:
-            resolved_workspace, written = await _native_finish_write(
-                native_context,
-                workspace=resolved_workspace,
-                setup_kwargs=setup_kwargs,
-                password=password,
-                port=port,
-                startup_id=getattr(tracker, "startup_id", "") or "",
-                bootstrap_host=config.pwa_host,
-                bootstrap_port=config.pwa_port,
-            )
-        except _NativeFinishRefusal as finish_refusal:
-            # The claim is taken and something may already be on disk: the
-            # child leaves nonzero, the installer parent never activates.
-            _request_native_failure_exit(request)
-            return JSONResponse({"error": finish_refusal.message}, status_code=409)
-        except asyncio.CancelledError:
-            # A client disconnect or shutdown cancelled the awaited write. It is
-            # a BaseException, so it needs its own clause: exit closed, then let
-            # the cancellation propagate instead of answering the request.
-            _request_native_failure_exit(request)
-            raise
-        except Exception:
-            # Any other failure after the claim, including one raised before the
-            # write, ends the same way: a nonzero exit, never a served wizard.
-            _request_native_failure_exit(request)
-            return JSONResponse(
-                {"error": _NATIVE_SETUP_WRITE_REFUSED}, status_code=409
-            )
-    else:
-        try:
-            written = await asyncio.to_thread(
-                functools.partial(setup_workspace, str(resolved_workspace), **setup_kwargs)
-            )
-        except RuntimeError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=409)
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-        _publish_setup_environment(resolved_workspace, port, password)
+    setup_kwargs["python_path"] = str(body.get("python", "")).strip() or None
+    setup_kwargs["launch_agents_dir"] = str(body.get("launch_agents_dir", "")).strip() or None
+    setup_kwargs["app_dir"] = str(body.get("app_dir", "")).strip() or None
+    try:
+        written = await asyncio.to_thread(
+            functools.partial(setup_workspace, str(resolved_workspace), **setup_kwargs)
+        )
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    _publish_setup_environment(resolved_workspace, port, password)
     # Only the real per-user LaunchAgents dir may be registered with launchd —
     # scripted/test setups pass a custom dir and must not touch it. App mode is
     # the third exclusion: the Mac app owns the bundled engine, so setup must
@@ -7614,54 +6824,22 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         and not running_from_app_bundle()
     )
 
-    if native_context is None and installer_mode:
-        # The installer parent owns the service: this child records what setup
-        # wrote, exits 0, and the parent verifies and activates. This is the
-        # unchanged schema-1 legacy path.
-        from ciao.installer_handoff import HandoffError, record_setup_completion
-
-        try:
-            record_setup_completion(
-                run_id=request.app.state.installer_run_id,
-                startup_id=getattr(tracker, "startup_id", "") or "",
-                workspace=str(resolved_workspace),
-                written=written,
-                port=port,
-            )
-        except HandoffError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=409)
     # An interactive foreground `ciao run` (the documented install flow) hands
     # the server over to launchd instead of re-execing: a detached helper
     # loads the server agent once this process has exited and released the
     # port, and the wizard requests a clean exit (code 0, no relaunch). The
     # user can then close the terminal. Under launchd stderr is a log file,
-    # not a TTY, so a supervised server keeps the plain re-exec restart. The
-    # installer bootstrap never hands off to a supervisor at all: its parent
-    # activates the service after checking the handoff result.
+    # not a TTY, so a supervised server keeps the plain re-exec restart.
     handoff = (
-        not installer_mode
-        and restart
+        restart
         and real_launch_agents
         and _interactive_foreground_run()
         and _schedule_launchd_server_handoff()
     )
     if restart:
         restart_fn = getattr(request.app.state, "request_restart", None)
-        if native_context is not None:
-            # The setup is recorded, so a dead or missing restart must not leave
-            # this child serving; the parent never activates a run that ends
-            # this way. The fixed refusal is returned only if the exit returns.
-            try:
-                if not callable(restart_fn):
-                    raise RuntimeError("the native bootstrap has no restart hook")
-                restart_fn(0)
-            except Exception:
-                os._exit(1)
-                return JSONResponse(
-                    {"error": _NATIVE_SETUP_RESTART_REFUSED}, status_code=409
-                )
-        elif callable(restart_fn):
-            restart_fn(0 if (handoff or installer_mode) else RESTART_EXIT_CODE)
+        if callable(restart_fn):
+            restart_fn(0 if handoff else RESTART_EXIT_CODE)
 
     return JSONResponse({
         "ok": True,
@@ -9121,9 +8299,6 @@ async def local_backup_setup_chat(request: Request) -> JSONResponse:
         None,
     )
     if live is not None:
-        # A setup chat opened before the data-root grant existed gets it here,
-        # so the repository it is working on can be created.
-        pcm.grant_data_root(live.chat_id)
         # Re-arming a live chat is harmless: the answer is owed until the
         # repository actually verifies, and a retry must not consume it.
         service.begin_guided_setup()
@@ -9141,12 +8316,9 @@ async def local_backup_setup_chat(request: Request) -> JSONResponse:
     # and model, which is where the owner's configured agent already is. A
     # pinned Claude model would name a model the opencode backend does not
     # have, and setup is not the place to fail on that.
-    # The one chat that may write the data root: the repository the setup
-    # creates lives there, above every workspace folder the chat is confined to.
     chat = pcm.create_chat(
         project.project_id,
         title=backup_service.SETUP_CHAT_TITLE,
-        grants_data_root=True,
     )
     pcm.start_stream(chat.chat_id, backup_service.render_setup_prompt(config, context))
     service.begin_guided_setup()

@@ -292,10 +292,10 @@ def _seed_memory_md(config: CiaoConfig, name: str, rule: str) -> Path:
 def _deny_reads_under(
     monkeypatch: pytest.MonkeyPatch, *denied: Path
 ) -> list[Path]:
-    """Fail at the filesystem boundary a *Workspace only* sandbox denies.
+    """Fail at the filesystem boundary a foreign vault read is denied.
 
     Patched on ``Path.read_text`` rather than ``os_audit.read_source_text`` so
-    the denial lands where the sandbox actually raises, and every attempt is
+    the denial lands on the read, and every attempt is
     recorded: a scoped audit that never opens a foreign vault makes no attempts
     there at all.
     """

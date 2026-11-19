@@ -14,9 +14,6 @@ vi.mock('../../lib/api', () => ({
 function command(id: string, state: ChatAction['state'] = 'open'): ChatAction {
   return { id, kind: 'command', origin: 'engine', state, params: { command: `echo ${id}` }, error: '', created_at: 1 }
 }
-function signIn(id: string): ChatAction {
-  return { id, kind: 'mcp_auth', origin: 'engine', state: 'open', params: { server: id, provider: 'claude' }, error: '', created_at: 1 }
-}
 let wrapper: VueWrapper | null = null
 function mountStack(actions: ChatAction[]) {
   const pinia = createPinia()
@@ -61,22 +58,5 @@ describe('NeedsYouStack', () => {
     }
     expect(apiPost.mock.calls.map(c => c[0])).toEqual(['/api/chats/chat-1/actions/a1/dismiss', '/api/chats/chat-1/actions/a2/dismiss'])
     expect(w.text()).not.toContain('Not now for all')
-  })
-  it('ignores MCP-only input without posting', () => {
-    const w = mountStack([signIn('m1'), signIn('m2')])
-    expect(w.find('.needs-you-stack').exists()).toBe(false)
-    expect(apiPost).not.toHaveBeenCalled()
-  })
-  it('renders only generic controls from mixed input without mutating actions', async () => {
-    const actions = [signIn('m1'), command('a1'), signIn('m2'), command('a2')]
-    const before = JSON.stringify(actions)
-    const w = mountStack(actions)
-    expect(ids(w)).toEqual(['a1', 'a2'])
-    expect(JSON.stringify(actions)).toBe(before)
-    apiPost.mockResolvedValue({ actions: [] })
-    await w.find('[data-action-id="a2"] .needs-you-btn--quiet').trigger('click')
-    await flushPromises()
-    expect(apiPost.mock.calls.map(c => c[0])).toEqual(['/api/chats/chat-1/actions/a2/dismiss'])
-    expect(JSON.stringify(actions)).toBe(before)
   })
 })

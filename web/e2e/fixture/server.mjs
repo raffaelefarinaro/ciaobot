@@ -402,14 +402,11 @@ function setChatActionList(state, chatId, list) {
   for (const socket of state.sockets) socket.send({ type: 'chat_actions_changed', chat_id: chatId, actions: list })
 }
 
-/** The sign-in page an `mcp_auth` action opens. Not a live address. */
-const MCP_AUTH_FIXTURE_URL = 'https://auth.example.invalid/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%3A56446%2Fcallback&state=fixture'
-
 /**
- * A needs-you action's start, dismiss, continue or turn-off. An unknown id is a 409 with
+ * A needs-you action's start, dismiss or continue. An unknown id is a 409 with
  * the chat's list, as the engine answers a stale card. A start moves the action
- * on: `typed` runs it, `ran` finishes it, an `mcp_auth` waits on its sign-in
- * page, and any other kind is done. Dismiss and continue remove it; turn-off removes it like dismiss.
+ * on: `typed` runs it, `ran` finishes it, and any other kind is done.
+ * Dismiss and continue remove it.
  */
 function chatActionRoute(state, chatId, actionId, verb, body) {
   if (!CHATS.some(c => c.chat_id === chatId)) return { status: 404, body: { error: 'not found' } }
@@ -420,14 +417,12 @@ function chatActionRoute(state, chatId, actionId, verb, body) {
     let next
     if (body?.step === 'typed') next = { ...action, state: 'working' }
     else if (body?.step === 'ran') next = { ...action, state: 'done' }
-    else if (action.kind === 'mcp_auth') next = { ...action, state: 'waiting', params: { ...action.params, url: MCP_AUTH_FIXTURE_URL } }
     else next = { ...action, state: 'done' }
     setChatActionList(state, chatId, list.map(a => (a.id === actionId ? next : a)))
     return { status: 200, body: { action: next } }
   }
   const remaining = list.filter(a => a.id !== actionId)
   setChatActionList(state, chatId, remaining)
-  if (verb === 'turn-off') return { status: 200, body: { actions: remaining, reload: { reloaded: [], pending: [] } } }
   if (verb === 'continue') return { status: 200, body: { actions: remaining, delivery: 'started' } }
   return { status: 200, body: { actions: remaining } }
 }
@@ -627,7 +622,6 @@ const GET_ROUTES = {
   '/api/projects': (req) => sessionOf(req).projects || PROJECTS,
   '/api/chats': (req) => chatsForSession(sessionOf(req)),
   '/api/schedules': (req) => liveSchedules(sessionOf(req)),
-  '/api/subagents/running': () => ({ chats: {} }),
   '/api/housekeeping': (req) => ({ actions: sessionOf(req).actions ?? [] }),
   '/api/tasks': (req, url) => {
     const state = sessionOf(req)
@@ -697,9 +691,13 @@ const GET_ROUTES = {
         'claude-3-sonnet-20240229',
         'claude-3-haiku-20240307',
       ],
+      codex: ['gpt-5.5', 'gpt-5.4-mini'],
     },
     provider_defaults: { claude: 'synthetic-model' },
-    providers: [{ id: 'claude', label: 'Claude', short_label: 'Claude', capabilities: {} }],
+    providers: [
+      { id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude', capabilities: {} },
+      { id: 'codex', label: 'OpenAI (via Codex)', short_label: 'Codex', capabilities: {} },
+    ],
     thinking_levels: { claude: ['low', 'high'] },
   }),
   // Settings → Providers reads these. The real endpoints always send every
@@ -725,7 +723,7 @@ const GET_ROUTES = {
   }),
   '/api/settings/providers': () => ({
     connections: {
-      claude: { name: 'claude', label: 'Claude Code', short_label: 'Claude', ok: true, auth: 'ok', command: 'claude', version: '2.0.0', account: 'fixture@example.com' },
+      claude: { name: 'claude', label: 'Claude Code', short_label: 'Claude', ok: true, auth: 'ok', command: 'claude', mcp_command: 'claude mcp', version: '2.0.0', account: 'fixture@example.com' },
     },
   }),
   '/api/status': () => ({ active_model: 'synthetic-model', mode: 'auto', cost: 0 }),
@@ -812,7 +810,6 @@ const GET_PATTERNS = [
   // `env.items`. The transcript is per-session, so a spec opts in through
   // POST /__fixture__/transcript rather than giving every spec one.
   [/^\/api\/chats\/[^/]+\/messages$/, (req) => sessionOf(req).transcript || []],
-  [/^\/api\/chats\/[^/]+\/subagents$/, () => ({ subagents: [] })],
   // One chat's row, with this session's needs-you actions on it.
   [/^\/api\/chats\/[^/]+$/, (req, url) => chatDetail(sessionOf(req), decodeURIComponent(url.pathname.split('/')[3] || ''))],
   [/^\/api\/tasks\/[0-9a-f]{32}$/, (req, url) => {
@@ -1038,13 +1035,10 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, { ok: true, tasks: UPDATE_TASKS.length })
     }
     if (pathname === '/__fixture__/chat-frame') {
-      // Speak on a chat's own socket. The fixture is otherwise silent there,
-      // and #1413's move chip needs the frames a broker would send for an
-      // OpenCode foreground shell: a `tool_use` carrying `backgroundable`, then
-      // the `tool_result` and `result` that end it. Frames are just delivered,
-      // in order — what they mean is the spec's business. Held for the socket
-      // that opens next when none is up yet, so a spec may opt in before it
-      // navigates.
+      // Speak on a chat's own socket. The fixture is otherwise silent there.
+      // Frames are just delivered, in order — what they mean is the spec's
+      // business. Held for the socket that opens next when none is up yet, so
+      // a spec may opt in before it navigates.
       const body = await readBody(req)
       const chatId = String(body?.chat_id || '')
       const frames = Array.isArray(body?.frames) ? body.frames : []
@@ -1146,9 +1140,9 @@ const server = http.createServer(async (req, res) => {
       for (const socket of writer.sockets) socket.send({ type: 'chat_read', chat_id: chatId, last_read_at: lastReadAt })
       return sendJson(res, { ok: true })
     }
-    // A needs-you action's start, dismiss, continue or turn-off.
+    // A needs-you action's start, dismiss or continue.
     const actionRoute = req.method === 'POST'
-      ? /^\/api\/chats\/([^/]+)\/actions\/([^/]+)\/(start|dismiss|continue|turn-off)$/.exec(pathname)
+      ? /^\/api\/chats\/([^/]+)\/actions\/([^/]+)\/(start|dismiss|continue)$/.exec(pathname)
       : null
     if (actionRoute) {
       const answer = chatActionRoute(

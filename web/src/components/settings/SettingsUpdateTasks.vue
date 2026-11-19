@@ -151,6 +151,10 @@ async function load(): Promise<void> {
     // The previous rows stay: a failed refresh is not a cleared history, and an
     // empty one would claim nothing has ever happened.
     loadError.value = 'Could not read the update task history: ' + errorMessage(e, 'the request failed')
+    // A failed read has settled too. Leaving `loaded` false here kept the
+    // "Checking…" line on screen beside the error, so the panel claimed to be
+    // still checking after the check had already failed.
+    loaded.value = true
   } finally {
     if (seq === loadSeq) loading.value = false
   }

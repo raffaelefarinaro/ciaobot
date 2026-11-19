@@ -70,7 +70,16 @@ const ModelSelectorStub = defineComponent({
 const MODELS_RESPONSE = {
   models: ['haiku', 'sonnet', 'opus', 'fable'],
   default: 'sonnet',
-  provider_models: { claude: ['haiku', 'sonnet', 'opus', 'fable'] },
+  providers: [
+    { id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude', capabilities: {} },
+    { id: 'opencode', label: 'OpenCode', short_label: 'OpenCode', capabilities: {} },
+    { id: 'codex', label: 'OpenAI (via Codex)', short_label: 'Codex', capabilities: {} },
+  ],
+  provider_models: {
+    claude: ['haiku', 'sonnet', 'opus', 'fable'],
+    opencode: ['openai/gpt-5.6'],
+    codex: ['gpt-5.5'],
+  },
   provider_defaults: { claude: 'sonnet' },
   thinking_levels: { claude: ['low', 'medium', 'high'] },
   // opus cannot do 'high', fable can: the recovery validates a staged
@@ -166,7 +175,6 @@ async function mountPanel(options: MountOptions = {}): Promise<{
       stubs: {
         PaneHeader: PaneHeaderStub,
         ModelSelector: ModelSelectorStub,
-        SubagentPanel: ChildStub,
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,
         RouterLink: ChildStub,
@@ -938,12 +946,9 @@ describe('ChatPanel retry from error bubble', () => {
     store.messages['chat-1'] = [
       { role: 'user', content: 'Hi', timestamp: '2026-10-11T18:01:00Z', turn_index: 0 },
       { role: 'assistant', content: 'Error: connection refused', timestamp: '2026-10-11T18:01:01Z', is_error: true },
+      // A tool activity row after the error renders as a trace item.
+      { role: 'system', content: '· read a.md', timestamp: '2026-10-11T18:01:02Z', tool_name: '_activity' },
     ]
-    // A background subagent transcript with no turn lands as a trace item
-    // after the error.
-    store.subagents['chat-1'] = [
-      { agent_id: 'bg', messages: [], status: 'completed', turn_index: null },
-    ] as never
     await flushPromises()
     expect(wrapper.findAll('.retry-btn').map(b => b.text())).toContain('Retry')
     wrapper.unmount()
@@ -1849,6 +1854,20 @@ describe('ChatPanel recovery model picker', () => {
       mode: 'auto',
     })
     wrapper.unmount()
+  })
+
+  it('hands a registry provider\'s pick over to that provider, by its section or by its catalog', async () => {
+    const { wrapper, store } = await mountPanel({ chat: { session_id: 'sess-1' } })
+    const handover = vi.spyOn(store, 'handoverChat').mockResolvedValue(undefined as never)
+    // The section names the provider even for a model no catalog lists.
+    await openComposerPicker(wrapper)
+    await pickModel(wrapper, 'codex-preview', 'codex')
+    expect(handover).toHaveBeenLastCalledWith('chat-1', expect.objectContaining({ provider: 'codex', model: 'codex-preview' }))
+    // With no section named, the model's own provider catalog decides the route.
+    await openComposerPicker(wrapper)
+    await pickModel(wrapper, 'gpt-5.5', '')
+    expect(handover).toHaveBeenLastCalledWith('chat-1', expect.objectContaining({ provider: 'codex', model: 'gpt-5.5' }))
+    expect(handover).toHaveBeenCalledTimes(2)
   })
 
   it('handover completion cannot close a reopened picker', async () => {

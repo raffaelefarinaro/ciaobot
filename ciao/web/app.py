@@ -8,7 +8,6 @@ import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -24,19 +23,12 @@ from ciao.package_version import make_cached_package_status
 from ciao.provider_versions import make_cached_checks
 from ciao.terminal_auth import TerminalGrantStore
 from ciao.terminal_sessions import TerminalSessionManager
-from ciao.web.routes_agent import agent_dispatch_endpoint, agent_status_endpoint
+from ciao.web.routes_agent import agent_dispatch_endpoint, agent_status_endpoint, mcp_usage_endpoint
 from ciao.web.routes_chat_actions import (
     chat_action_callback,
     chat_action_continue,
     chat_action_dismiss,
     chat_action_start,
-    chat_action_turn_off,
-    chat_mcp_auth_request,
-)
-from ciao.web.routes_mcp import (
-    mcp_server_enabled_endpoint,
-    mcp_status_endpoint,
-    mcp_usage_endpoint,
 )
 from ciao.web.auth import AuthMiddleware, make_serializer
 from ciao.web.loop_watchdog import EventLoopWatchdog, InFlightRequests, RequestTimingMiddleware
@@ -53,7 +45,7 @@ from ciao.web.agent_assets import (
     workspace_health_endpoint,
     workspace_health_fix_endpoint,
 )
-from ciao.web.commands import list_commands_endpoint, rate_limits_endpoint
+from ciao.web.commands import list_commands_endpoint
 from ciao.web.routes_auth import (
     auth_check,
     auth_host_sign_in,
@@ -91,11 +83,7 @@ from ciao.web.routes_api import (
     chat_compact,
     chat_prompt,
     chat_stop,
-    chat_move_to_background,
-    chat_background_task_stop,
     chat_new_session,
-    chat_subagents,
-    running_subagents,
     chats_mark_all_read,
     usage_stats_endpoint,
     file_content,
@@ -270,9 +258,6 @@ from ciao.web.security import SecurityHeadersMiddleware
 
 logger = logging.getLogger(__name__)
 
-if TYPE_CHECKING:
-    from ciao.native_installer import NativeBootstrapContext
-
 STATIC_DIR = Path(__file__).parent / "static"
 
 
@@ -414,23 +399,7 @@ def _spa_catchall(request):
     return FileResponse(STATIC_DIR / "index.html", status_code=404, headers=headers)
 
 
-def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstrap: bool = False, installer_run_id: str | None = None, native_bootstrap: "NativeBootstrapContext | None" = None) -> Starlette:
-    import uuid
-    if installer_bootstrap and not config.bootstrap_mode:
-        raise ValueError("installer bootstrap requires bootstrap-mode config")
-    canonical_run_id: str | None = None
-    if installer_bootstrap:
-        try:
-            canonical_run_id = str(uuid.UUID(installer_run_id or ""))
-        except ValueError as exc:
-            raise ValueError("installer bootstrap requires a valid run id") from exc
-    elif installer_run_id is not None:
-        raise ValueError("installer run id requires installer bootstrap mode")
-    if native_bootstrap is not None:
-        if not installer_bootstrap:
-            raise ValueError("native bootstrap requires installer bootstrap mode")
-        if native_bootstrap.run_id != canonical_run_id:
-            raise ValueError("native bootstrap run id does not match the server run id")
+def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     serializer = make_serializer(config.pwa_auth_token)
 
     routes = [
@@ -486,24 +455,14 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         Route("/api/chats/{chat_id}/unread", chat_mark_unread, methods=["POST"]),
         Route("/api/chats/{chat_id}/retry", chat_retry, methods=["POST"]),
         Route("/api/chats/{chat_id}/stop", chat_stop, methods=["POST"]),
-        Route("/api/chats/{chat_id}/move-to-background", chat_move_to_background, methods=["POST"]),
         Route("/api/chats/{chat_id}/actions/{action_id}/start", chat_action_start, methods=["POST"]),
         Route("/api/chats/{chat_id}/actions/{action_id}/dismiss", chat_action_dismiss, methods=["POST"]),
         Route("/api/chats/{chat_id}/actions/{action_id}/continue", chat_action_continue, methods=["POST"]),
         Route("/api/chats/{chat_id}/actions/{action_id}/callback", chat_action_callback, methods=["POST"]),
-        Route("/api/chats/{chat_id}/actions/mcp-auth", chat_mcp_auth_request, methods=["POST"]),
-        Route("/api/chats/{chat_id}/actions/{action_id}/turn-off", chat_action_turn_off, methods=["POST"]),
-        Route(
-            "/api/chats/{chat_id}/background-tasks/{task_id}/stop",
-            chat_background_task_stop,
-            methods=["POST"],
-        ),
         Route("/api/chats/{chat_id}/prompt", chat_prompt, methods=["POST"]),
         Route("/api/chats/{chat_id}/compact", chat_compact, methods=["POST"]),
         Route("/api/chats/{chat_id}/messages", chat_messages, methods=["GET"]),
         Route("/api/chats/{chat_id}/messages/part", chat_message_part, methods=["GET"]),
-        Route("/api/chats/{chat_id}/subagents", chat_subagents, methods=["GET"]),
-        Route("/api/subagents/running", running_subagents, methods=["GET"]),
         Route("/api/chats/{chat_id}/images", chat_images, methods=["POST"]),
         Route("/api/chats/{chat_id}/attachments", chat_attachments_upload, methods=["POST"]),
         Route("/api/images/{ref}", image_blob, methods=["GET"]),
@@ -643,7 +602,6 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         Route("/api/agent-assets/commands/{name}", update_command_endpoint, methods=["PATCH"]),
         Route("/api/agent-assets/commands/{name}", delete_command_endpoint, methods=["DELETE"]),
         # Claude subscription rate-limit buckets (5h / weekly / overage)
-        Route("/api/rate-limits", rate_limits_endpoint, methods=["GET"]),
         # Models & Status
         Route("/api/models", list_models, methods=["GET"]),
         Route("/api/settings/routines", settings_routines, methods=["GET", "PATCH"]),
@@ -694,8 +652,6 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         Route("/api/workspace-move/plan", workspace_move_plan_endpoint, methods=["POST"]),
         Route("/api/stats", usage_stats_endpoint, methods=["GET"]),
         Route("/api/agent/status", agent_status_endpoint, methods=["GET"]),
-        Route("/api/mcp/status", mcp_status_endpoint, methods=["GET"]),
-        Route("/api/mcp/servers/enabled", mcp_server_enabled_endpoint, methods=["POST"]),
         Route("/api/mcp/usage", mcp_usage_endpoint, methods=["GET"]),
         # Push notifications
         Route("/api/push/public-key", push_public_key, methods=["GET"]),
@@ -851,10 +807,9 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
     async def _lifespan(_app):
         from ciao.setup_status import warm_claude_discovery_cache
 
-        # `claude mcp list` health-checks every connector and can take ~12s;
-        # warm the discovery cache at startup so the first Settings -> Models & providers
-        # visit serves a populated list instead of blocking on the probe.
-        warm_claude_discovery_cache(getattr(config, "workspace_root", None))
+        # Warm the Claude skill discovery cache at startup so the first
+        # Settings -> Models & providers visit does not block on it.
+        warm_claude_discovery_cache()
         # The first login-shell probe can take seconds; every chat start reads
         # this cached value, so pay for it here, off the event loop.
         from ciao.tool_path import login_shell_path
@@ -904,9 +859,6 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
     app.state.serializer = serializer
     app.state.in_flight_requests = in_flight_requests
     app.state.config = config
-    app.state.installer_bootstrap = installer_bootstrap
-    app.state.installer_run_id = installer_run_id
-    app.state.native_bootstrap = native_bootstrap
     app.state.terminal_clock = time.monotonic
     app.state.terminal_grants = TerminalGrantStore(clock=app.state.terminal_clock)
     # The one owner of every terminal shell the browser opens. It is built

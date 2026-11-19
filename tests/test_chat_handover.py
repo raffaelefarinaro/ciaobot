@@ -96,7 +96,7 @@ def test_handover_chat_switches_between_claude_and_opencode(tmp_path: Path) -> N
     assert updated.model == "anthropic/claude-sonnet-4-6"
     assert updated.thinking_level == ""
     assert updated.session_id == ""
-    assert "Claude / opus to opencode / anthropic/claude-sonnet-4-6" in updated.handover_messages[-1]["content"]
+    assert "Claude / opus to OpenCode / anthropic/claude-sonnet-4-6" in updated.handover_messages[-1]["content"]
 
 
 def test_handover_messages_are_injected_into_next_prompt_once(tmp_path: Path) -> None:
@@ -149,7 +149,10 @@ def test_handover_block_is_closed_and_message_text_cannot_end_it(tmp_path: Path)
     assert "&lt;/ciao-context>" in prefix and "&lt;/provider-handover>" in prefix
 
 
-def test_handover_chat_validates_and_canonicalizes_model(tmp_path: Path) -> None:
+def test_handover_chat_canonicalizes_and_passes_through_the_model(tmp_path: Path) -> None:
+    """The claude provider runs over ACP with a dynamic catalog, so Ciaobot does not
+    reject a well-formed id it has no list for: the adapter decides. Ciaobot still
+    canonicalizes the id and refuses a blank one."""
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("handover", workspace="personal")
     chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
@@ -162,13 +165,48 @@ def test_handover_chat_validates_and_canonicalizes_model(tmp_path: Path) -> None
     assert updated is not None
     assert updated.model == "sonnet"
 
-    with pytest.raises(ValueError, match="Unknown model"):
+    updated = pcm.handover_chat(
+        chat.chat_id,
+        provider="claude",
+        model="no-such-model",
+    )
+    assert updated is not None
+    assert updated.model == "no-such-model"
+    assert pcm.get_chat(chat.chat_id).model == "no-such-model"
+
+    with pytest.raises(ValueError, match="Model is required"):
         pcm.handover_chat(
             chat.chat_id,
             provider="claude",
-            model="no-such-model",
+            model="   ",
         )
-    assert pcm.get_chat(chat.chat_id).model == "sonnet"
+    assert pcm.get_chat(chat.chat_id).model == "no-such-model"
+
+
+def test_handover_route_refuses_a_model_id_over_the_bound(tmp_path: Path) -> None:
+    """The handover route bounds the model id like a delegation does: 201 is refused, 200 is taken."""
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ciao.web.routes_api import chat_handover
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("handover", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
+    app = Starlette(routes=[Route("/chats/{chat_id}/handover", chat_handover, methods=["POST"])])
+    app.state.project_chat_manager = pcm
+    client = TestClient(app, raise_server_exceptions=False)
+    url = f"/chats/{chat.chat_id}/handover"
+
+    refused = client.post(url, json={"provider": "claude", "model": "m" * 201})
+    assert refused.status_code == 400
+    assert "200 characters" in refused.json()["error"]
+    assert pcm.get_chat(chat.chat_id).model == "opus"
+
+    accepted = client.post(url, json={"provider": "claude", "model": "m" * 200})
+    assert accepted.status_code == 200
+    assert pcm.get_chat(chat.chat_id).model == "m" * 200
 
 
 def test_normalize_truncates_oversized_newest_message() -> None:

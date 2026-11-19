@@ -30,6 +30,11 @@ PLATFORM_MACOS, PLATFORM_LINUX, PLATFORM_OTHER = ("macos", "linux", "other")
 # also accepts the flag (documented under `allow-scripts`); an npm that predates it
 # only warns about an unknown config key and runs the scripts anyway.
 GWS_INSTALL_COMMAND = "npm install -g --allow-scripts=@googleworkspace/cli @googleworkspace/cli"
+# Both packages pinned: the adapter bundles @openai/codex ^0.166.0, and the CLI here must match
+# the one `codex login` writes credentials for. Bump deliberately with the adapter pin.
+CODEX_INSTALL_COMMAND = (
+    "npm install -g @openai/codex@0.166.0 @agentclientprotocol/codex-acp@2.7.0"
+)
 SKILLS_UPDATE_COMMAND = "npx skills update -g -y"
 
 
@@ -37,11 +42,17 @@ class NothingToUpdate(Exception):
     """An ``*-update`` action was requested but the provider is not older than tested."""
 
 
+class NotInstalled(Exception):
+    """An action needs a CLI that is not on this computer's terminal PATH, so there is no command to run."""
+
+
 ACTION_IDS: tuple[str, ...] = (
     "claude-install",
     "claude-login",
     "opencode-install",
     "opencode-login",
+    "codex-install",
+    "codex-login",
     "gws-install",
     "skills-update",
     "opencode-update",
@@ -195,13 +206,28 @@ def action_command(action: str) -> str:
     from ciao.providers import opencode
 
     if action == "claude-install":
-        return setup_status.claude_install_command()
+        # The ACP adapter Ciaobot runs chats through is always needed. The CLI installer
+        # runs only when no CLI resolves, so an existing install is not reinstalled.
+        adapter = setup_status.claude_adapter_install_command()
+        if setup_status.claude_cli_path():
+            return adapter
+        return f"{setup_status.claude_install_command()} && {adapter}"
     if action == "claude-login":
         return setup_status.claude_auth_command(setup_status.claude_cli_path())
     if action == "opencode-install":
         return opencode.opencode_install_command()
     if action == "opencode-login":
         return opencode.OPENCODE_LOGIN_COMMAND
+    if action == "codex-install":
+        return CODEX_INSTALL_COMMAND
+    if action == "codex-login":
+        from ciao.providers.acp import agents
+
+        try:
+            argv = agents.codex_auth_command()
+        except FileNotFoundError as exc:
+            raise NotInstalled(str(exc)) from exc
+        return shlex.join(argv)
     if action == "gws-install":
         return GWS_INSTALL_COMMAND
     return SKILLS_UPDATE_COMMAND

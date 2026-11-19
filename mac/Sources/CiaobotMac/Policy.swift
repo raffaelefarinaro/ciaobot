@@ -124,3 +124,7 @@ struct Origin {
         }
     }
 }
+
+extension Origin: Equatable {
+    static func == (lhs: Origin, rhs: Origin) -> Bool { lhs.canonicalKey == rhs.canonicalKey }
+}

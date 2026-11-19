@@ -48,7 +48,7 @@
       <component :is="hasTitle ? 'span' : 'h2'" v-if="pageTag" class="page-tag">{{ pageTag }}</component>
     </div>
     <div class="header-trail">
-      <div v-if="$slots.actions" class="header-actions" :key="activeBgAgents">
+      <div v-if="$slots.actions" class="header-actions">
         <slot name="actions" />
       </div>
       <!-- Phones only: the sidebar (and its bell) is a drawer there. The drawer
@@ -65,7 +65,6 @@ import NotificationBell from './NotificationBell.vue'
 import { useHistoryNav } from '../composables/useHistoryNav'
 
 const props = withDefaults(defineProps<{
-  activeBgAgents?: number
   /** Short marker for the current view: 'home', 'settings', 'automations', … */
   pageTag?: string
   /** Phones only: Back and the bell move into the view's own overflow menu, so
@@ -374,7 +373,7 @@ const hasCenter = computed(() => !!props.pageTag)
     text-align: left;
     min-width: 0;
   }
-  /* Nothing to centre (the chat, a subagent, a pinned file): row 1 would hold
+  /* Nothing to centre (the chat, a pinned file): row 1 would hold
      only the menu, Back and the actions around an empty middle, spending a
      whole row of a phone screen on chrome. One row instead - lead, title,
      actions - with the title taking the slack between them. */

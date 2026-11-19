@@ -12,21 +12,6 @@ from ciao.config import (
     _WORKSPACE_EVIDENCE_EXTRA_DIRS,
 )
 from ciao.entity_types import load_entity_types, stock_entity_type_registry
-from ciao.execution_modes import credential_path_deny_rules
-
-
-def _policy_denies(config: CiaoConfig, tools: list[str]) -> list[str]:
-    """The workspace-policy part of a denylist, without the credential denies.
-
-    ``credential_path_deny_rules`` is prepended unconditionally to every
-    workspace (covered by tests/test_credential_denies.py), so these
-    assertions strip it to keep testing what they are about: the harness
-    defaults, the per-workspace extras, and the derived ``mcp__<server>``
-    denies. The config is needed because the rules include patterns derived
-    from its resolved runtime root, not just the static names.
-    """
-    fixed = set(credential_path_deny_rules(config.state_path.parent))
-    return [tool for tool in tools if tool not in fixed]
 
 
 def _config(**overrides: str) -> CiaoConfig:
@@ -201,7 +186,7 @@ def test_workspace_registry_file_defines_named_workspaces(tmp_path: Path) -> Non
     assert config.workspace("home").gws_profile == "personal"
     assert config.default_provider_for_workspace("home") == "claude"
     # extras are additive, not a replacement
-    assert _policy_denies(config, config.disallowed_tools_for_workspace("home")) == [
+    assert config.disallowed_tools_for_workspace("home") == [
         *trim_tool_denies({}),
         "Bash",
         "mcp__example",
@@ -209,7 +194,7 @@ def test_workspace_registry_file_defines_named_workspaces(tmp_path: Path) -> Non
     assert config.default_provider_for_workspace("client") == "opencode"
     # A workspace with no explicit denylist gets the same defaults whatever it
     # is named — no branch on "personal"/"work" anywhere.
-    assert _policy_denies(config, config.disallowed_tools_for_workspace("client")) == (
+    assert config.disallowed_tools_for_workspace("client") == (
         trim_tool_denies({})
     )
 
@@ -250,7 +235,7 @@ def test_unknown_workspace_uses_global_defaults(tmp_path: Path) -> None:
     assert config.default_model_for_workspace("missing") == "opus"
     # A stale or renamed workspace name still gets the harness denies. Returning
     # [] made it the one input that reached the model with nothing denied.
-    assert _policy_denies(config, config.disallowed_tools_for_workspace("missing")) == (
+    assert config.disallowed_tools_for_workspace("missing") == (
         trim_tool_denies({})
     )
 

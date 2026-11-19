@@ -125,6 +125,10 @@ function statesOf(claims: ReadonlyMap<string, StoryClaim>, entryId: string): Sto
   return states
 }
 
+/** Row kinds whose covered states may claim stories. A composition row is a view
+ * composed of several components; its stories render the real composition. */
+const storyClaimingKinds: InventoryEntry['kind'][] = ['component', 'composition', 'inline']
+
 function assertCoverage(entries: InventoryEntry[]) {
   const ids = new Set<string>()
   for (const entry of entries) {
@@ -142,7 +146,7 @@ function assertCoverage(entries: InventoryEntry[]) {
     for (const state of entry.states) {
       expect(state.name.trim()).not.toBe(''); expect(state.note.trim()).not.toBe('')
       if (state.coverage !== 'covered' && state.storyIds.length) throw new Error(`Noncovered state has story IDs: ${entry.id}/${state.name}`)
-      if (state.coverage === 'covered' && entry.kind !== 'component') throw new Error(`Invalid covered state (kind ${entry.kind}): ${entry.id}/${state.name} may not claim story coverage`)
+      if (state.coverage === 'covered' && !storyClaimingKinds.includes(entry.kind)) throw new Error(`Invalid covered state (kind ${entry.kind}): ${entry.id}/${state.name} may not claim story coverage`)
     }
   }
 }
@@ -249,13 +253,22 @@ describe('production ownership', () => {
     assertCoverage(inventory)
   })
 
-  it('claims story coverage only from component rows', () => {
+  it('claims story coverage only from component, inline and composition rows', () => {
     const row = inventory.find((entry) => entry.id === 'components-confirm-dialog')!
-    for (const kind of ['css', 'inline', 'composition'] as const) {
-      const entry = { ...structuredClone(row), id: `fake-${kind}`, kind, rationale: 'Not a component owner' }
-      expect(() => assertCoverage([entry]), `Invalid covered state (kind ${kind})`).toThrow(`Invalid covered state (kind ${kind}): fake-${kind}/default`)
-    }
+    const css = { ...structuredClone(row), id: 'fake-css', kind: 'css' as const, rationale: 'Not a component owner' }
+    expect(() => assertCoverage([css]), 'Invalid covered state (kind css)').toThrow('Invalid covered state (kind css): fake-css/default')
     expect(() => assertCoverage([structuredClone(row)])).not.toThrow()
+    // A composition row may claim its own rendered stories, like a component row.
+    const composition = { ...structuredClone(row), id: 'fake-composition', kind: 'composition' as const, rationale: 'A view composed of several components' }
+    expect(() => assertCoverage([composition])).not.toThrow()
+    // The real composition row that claims its own rendered stories (MemoryMapView).
+    const memoryMap = inventory.find((entry) => entry.id === 'components-memory-map-view')!
+    expect(memoryMap.kind).toBe('composition')
+    expect(memoryMap.states.some((state) => state.coverage === 'covered' && state.storyIds.length > 0)).toBe(true)
+    // An inline family renders through its owner SFC (task sheets, the B12
+    // slice): its row is the one that can claim those states.
+    const inlineRow = inventory.find((entry) => entry.id === 'task-completion')!
+    expect(() => assertCoverage([structuredClone(inlineRow)])).not.toThrow()
   })
 
   describe('the CSF-derived story coverage guard', () => {
@@ -444,8 +457,10 @@ describe('production ownership', () => {
     for (const [name, symbols] of Object.entries(branchNotes)) {
       const state = entry.states.find((state) => state.name === name)
       expect(state, name).toBeDefined()
-      expect(state?.coverage, name).toBe('uncovered')
-      expect(state?.storyIds, name).toEqual([])
+      // The B12 slice renders one story per documented state and claims it:
+      // the coverage pins track the row now instead of the pre-slice registry.
+      expect(state?.coverage, name).toBe('covered')
+      expect(state?.storyIds, name).toEqual([`task-completion--${name}`])
       for (const symbol of symbols) {
         expect(state?.note, `${name}: ${symbol}`).toContain(symbol)
         expect(source, symbol).toContain(symbol)
@@ -456,19 +471,23 @@ describe('production ownership', () => {
   it('keeps mandatory inline ownership and important loading branches explicit', () => {
     const owners: Record<string, string> = {
       'global-buttons': 'styles/app.css', 'global-fields-forms': 'styles/app.css', 'global-badges': 'styles/app.css', 'global-surfaces': 'styles/app.css', 'global-page-layout': 'styles/app.css', 'global-typography': 'styles/app.css', 'global-focus': 'styles/app.css', 'global-modals': 'styles/app.css', 'global-terminal-branding': 'styles/app.css',
-      'chat-panel-messages': 'components/ChatPanel.vue', 'chat-panel-composer': 'components/ChatPanel.vue', 'chat-panel-question-capability': 'components/ChatPanel.vue', 'home-intake-composer': 'components/HomeIntake.vue', 'subagent-chat-messages': 'components/SubagentChatView.vue',
+      'chat-panel-messages': 'components/ChatPanel.vue', 'chat-panel-composer': 'components/ChatPanel.vue', 'chat-panel-question-capability': 'components/ChatPanel.vue', 'home-intake-composer': 'components/HomeIntake.vue',
       'task-board-cards': 'components/TaskWorkspaceSurface.vue', 'task-editor': 'components/TaskWorkspaceSurface.vue', 'task-completion': 'components/TaskWorkspaceSurface.vue', 'task-delegation': 'components/TaskWorkspaceSurface.vue', 'task-ordering': 'components/TaskWorkspaceSurface.vue', 'file-modal-preview-editor': 'components/FileViewerModal.vue', 'pinned-file-preview-editor': 'components/PinnedFilePanel.vue', 'memory-graph': 'components/MemoryMapView.vue', 'memory-list-selection': 'components/MemoryMapView.vue',
     }
     for (const [id, path] of Object.entries(owners)) expect(inventory.find((entry) => entry.id === id)?.owner.path).toBe(`web/src/${path}`)
     for (const id of ['components-skeleton-loader', 'components-sidebar-list-skeleton', 'components-chat-pane-skeleton', 'components-chat-panel', 'components-task-workspace-surface']) expect(inventory.find((entry) => entry.id === id)?.loading.status).toBe('known')
     const task = inventory.find((entry) => entry.id === 'components-task-workspace-surface')!
-    for (const name of ['firstLoad', 'loadFailed', 'loadStale', 'filteredEmpty', 'boardEmpty', 'ordering']) expect(task.states.some((state) => state.name === name && state.coverage === 'uncovered')).toBe(true)
+    // The board states the TaskWorkspaceSurface stories claim (#3296): each one
+    // is covered by exactly its own story, and the other surface states stay uncovered.
+    const claimed: Record<string, string> = { firstLoad: 'first-load', loadFailed: 'load-failed', loadStale: 'load-stale', filteredEmpty: 'filtered-empty', boardEmpty: 'board-empty', ordering: 'ordering' }
+    for (const [name, story] of Object.entries(claimed)) expect(task.states.find((state) => state.name === name)).toMatchObject({ coverage: 'covered', storyIds: [`task-workspace-surface--${story}`] })
+    expect(task.states.find((state) => state.name === 'missingTaskId')?.coverage).toBe('uncovered')
   })
 })
 
 describe('filtering and isolation', () => {
   it('searches all fields with trimmed case-insensitive AND terms in stable order', () => {
-    for (const query of ['  CHAT   COMPOSER ', 'TaskWorkspaceSurface', 'settings/SettingsMcpServers', 'onboarding/OnboardingButton', 'btn-primary']) expect(filterInventory(inventory, { ...defaults, query }).length, query).toBeGreaterThan(0)
+    for (const query of ['  CHAT   COMPOSER ', 'TaskWorkspaceSurface', 'settings/SettingsSwitch', 'onboarding/OnboardingButton', 'btn-primary']) expect(filterInventory(inventory, { ...defaults, query }).length, query).toBeGreaterThan(0)
     const row = inventory.find((entry) => entry.id === 'chat-panel-composer')!
     for (const query of [row.owner.path, row.owner.anchor, row.sources[0], row.variants[0], row.loading.detail, row.migration.note]) expect(filterInventory([row], { ...defaults, query })).toEqual([row])
     const consumer = inventory.find((entry) => entry.consumers.length)!

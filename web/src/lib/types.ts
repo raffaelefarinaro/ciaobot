@@ -26,9 +26,7 @@ export interface ProviderCapabilities {
   thinking_levels: boolean
   usage: boolean
   quota: boolean
-  subagents: boolean
   background_subagents: boolean
-  subagent_messages: boolean
   session_history: boolean
   schedule_unattended: boolean
 }
@@ -63,9 +61,8 @@ export interface ClaudeTrimOption {
   name: string
   label: string
   reason: string
-  group: string          // "scheduling" | "plan" | "notifications" | "design" | "review" | "skills" | "features" (open set)
+  group: string          // "scheduling" | "plan" | "notifications" | "design" | "review" | "skills" | "features" | "Connectors" (open set)
   default_trimmed: boolean
-  locked: boolean
 }
 
 export interface WorkspaceInfo {
@@ -73,16 +70,11 @@ export interface WorkspaceInfo {
   vault_root: string
   default_provider: WorkspaceProvider
   disallowed_tools?: string[] | null
-  // Whether the workspace's Claude chats load the claude.ai connectors. Missing → on.
-  claude_ai_connectors?: boolean
   /** Operator-only; absent or 'off': shadow verdicts only. */
   memory_handover?: MemoryHandover
   gws_profile: string
   // PWA accent preset: amber | pink | cyan | emerald | violet | blue | teal | lime | fuchsia. Missing → amber (Ciao orange).
   color?: string
-  // Filesystem scope for the agent and its shell. Absent or null: the workspace
-  // never chose one and runs under the engine's default_agent_fs_scope.
-  agent_fs_scope?: 'workspace' | 'machine' | null
   // Operator-only; sparse: {provider: {field: value}}. Missing = engine default.
   provider_overrides?: ProviderOverrides
   // Sparse Claude context-trim overrides: option key -> trimmed. Missing = catalog defaults.
@@ -95,8 +87,6 @@ export interface WorkspacesResponse {
   // The workspace that cannot be archived (the server refuses it).
   primary?: WorkspaceName | null
   provider_options?: WorkspaceProviderOption[]
-  // The scope a workspace with no File access choice runs under on this engine.
-  default_agent_fs_scope: 'workspace' | 'machine'
   // Catalog the Settings "Claude context trimming" card renders, in engine order.
   claude_trim_options?: ClaudeTrimOption[]
 }
@@ -126,70 +116,12 @@ export interface ArchivedWorkspacesResponse {
   archived: ArchivedWorkspace[]
 }
 
-export interface McpConnection {
-  state: 'connected' | 'failed' | 'disabled' | 'needs_auth' | 'unknown'
-  chat_id: string
-  error?: string
-}
-
-export interface McpNativeServer {
-  name: string
-  scope: string
-  source: string
-  kind?: string
-  enabled?: boolean // false = turned off; missing = on
-  applies_to?: string | null // where Turn off / Turn on writes; null = cannot be switched here
-  allowed: boolean | null
-  connections: McpConnection[]
-}
-
-export interface McpProviderInventory {
-  provider: 'claude' | 'opencode'
-  available: boolean
-  inventory_state: 'loaded' | 'unknown'
-  servers: McpNativeServer[]
-}
-
-export interface McpStatus {
-  workspace: string
-  agent_root: string
-  providers: McpProviderInventory[]
-  shell: { kind: 'posix'; cd_prefix: string }
-}
-
-export interface McpToggleResult {
-  workspace: string
-  provider: 'claude' | 'opencode'
-  server: string
-  enabled: boolean
-  changed: boolean
-  applies_to: string
-  warning: string | null
-  reload: { reloaded: string[]; pending: string[] }
-}
-
 /** Status of the agent CLI surface (Settings → Agent CLI), from /api/agent/status. */
 export interface AgentCliStatus {
   ready: boolean
   operations: string[]
   telemetry_path: string
   version: string
-}
-
-export interface McpToolUsage {
-  tool: string
-  calls: number
-  errors: number
-  avg_ms: number
-  providers: string[]
-  last_used: string
-}
-
-export interface McpUsage {
-  total_calls: number
-  total_errors: number
-  tool_count: number
-  tools: McpToolUsage[]
 }
 
 // ── Projects & Chats ────────────────────────────────────────────────────
@@ -379,7 +311,7 @@ export interface ChatPinState {
 }
 
 /** A needs-you kind the engine can raise on a chat. */
-export type ChatActionKind = 'mcp_auth' | 'command' | 'gws_auth' | 'permission_mode' | 'device_code' | 'system_setting' | 'restart' | 'limit'
+export type ChatActionKind = 'command' | 'gws_auth' | 'permission_mode' | 'device_code' | 'system_setting' | 'restart' | 'limit'
 
 /** Where a needs-you action is in its life. */
 export type ChatActionState = 'open' | 'working' | 'waiting' | 'done' | 'failed'
@@ -447,8 +379,6 @@ export interface ChatMessage {
   // typed. Drives the ↻ marker on the bubble, so a self-driven turn is not
   // mistaken for something the reader sent. Only present on user messages.
   unattended?: boolean
-  // Sent into the running turn instead of starting its own (steered).
-  steered?: boolean
   // Set when the engine wrote this user turn (wake, automation, webhook, ...); drawn as a notice card.
   origin?: TurnOrigin
   // Engine-recorded context pack a provider handover sent; on the handover marker only.
@@ -486,58 +416,7 @@ export interface ChatMessage {
   full_length?: number
 }
 
-// Subagent transcripts from /api/chats/{id}/subagents. One entry per subagent
-// spawned inside the chat's parent Claude session. Messages share the same
-// shape as /messages (role, content, tool_name for _activity rollups).
-// Dispatch metadata (tool_use_id, description, status, turn_index) is parsed
-// from the parent session JSONL and may be absent for sessions the server
-// can't inspect locally. `turn_index` matches the index stamped on user
-// bubbles by /messages, anchoring the panel to the dispatching turn.
-export interface SubagentTranscript {
-  agent_id: string
-  parent_agent_id?: string
-  messages: ChatMessage[]
-  tool_use_id?: string
-  description?: string
-  subagent_type?: string
-  is_async?: boolean
-  status?: 'running' | 'completed' | 'failed' | 'stopped' | ''
-  turn_index?: number
-  // Run length in milliseconds, when the provider can report it without the
-  // transcript (opencode child sessions carry their own timestamps).
-  duration_ms?: number | null
-  // Provider start time as Unix milliseconds, when available.
-  started_at?: number | null
-}
-
-// One live subagent from `/api/subagents/running`. Same dispatch metadata as
-// SubagentTranscript, minus the transcript: the sidebar only needs to name the
-// agent and say it is working, and polling full transcripts for every working
-// chat would be far more than that costs.
-export interface RunningSubagent {
-  agent_id: string
-  description?: string
-  subagent_type?: string
-  is_async?: boolean
-  status?: 'running' | 'completed' | 'failed' | ''
-  turn_index?: number | null
-  /** Process rows (`shell` / `monitor`): ISO start time, empty when unknown. */
-  started_at?: string
-  /** Process rows: the engine can stop it from the Processes list. */
-  stoppable?: boolean
-}
-
-/** `GET /api/subagents/running`. Chats with nothing running are omitted. */
-export interface RunningSubagentsResponse {
-  chats?: Record<string, RunningSubagent[]>
-}
-
 // ── WebSocket events ────────────────────────────────────────────────────
-
-// What a queued message will do: wait for the next turn, or be handed to the
-// running one through the provider's native steering.
-export type QueueDelivery = 'queue' | 'steer'
-export type SteerFallbackReason = 'no_turn' | 'not_running' | 'finished' | 'stopped' | 'send_id_limit'
 
 export type WsEvent =
   // parent_tool_use_id is set when the event came from inside a Task
@@ -558,9 +437,6 @@ export type WsEvent =
       parent_tool_use_id?: string;
       request_id?: string;
       session_id?: string;
-      // Set when the provider can move this running call to the background
-      // (OpenCode shell/subagent; POST /api/chats/{id}/move-to-background).
-      backgroundable?: boolean;
       // Set by the backend when the tool mutates a file on disk. The PWA
       // renders this as a standalone inline preview card instead of folding
       // it into the generic _activity row. Path may be workspace-relative
@@ -653,17 +529,12 @@ export type WsEvent =
       already_resolved?: boolean;
     }
   | { type: 'question_resolved'; request_id: string; session_id?: string }
-  | { type: 'queued'; id?: string; text: string; images?: string[]; delivery?: QueueDelivery; waiting?: boolean; send_id?: string }
-  | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[]; delivery?: QueueDelivery; steering?: boolean; waiting?: boolean }> }
+  | { type: 'queued'; id?: string; text: string; images?: string[]; waiting?: boolean; send_id?: string }
+  | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[]; waiting?: boolean }> }
   | { type: 'queue_take_result'; request_id: string; entry_id: string; ok: boolean; text: string; images: string[] }
-  // A steer reached the running turn: the entries leave the queue and the
-  // message becomes its own user turn.
-  | { type: 'steered'; entry_ids: string[]; text: string; images?: string[]; turn_index?: number; sent_at?: string; delivery_id?: string; origin?: TurnOrigin }
   // Stop cancelled a prompt before the provider picked it up: its user turn
   // never happened. The prompt comes back as a waiting queue entry.
   | { type: 'prompt_cancelled'; turn_index: number }
-  // A steer could not be delivered; the entries are back in the queue.
-  | { type: 'steer_fallback'; entry_ids: string[]; reason: SteerFallbackReason }
   | { type: 'error'; message: string }
   | { type: 'auth_required'; message?: string }
   // Server is draining for restart; client should show RestartNotice, not
@@ -677,8 +548,8 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string; background?: boolean }[]; background_agents?: Record<string, number>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; chat_actions?: Record<string, ChatAction[]>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; keyboard_revision?: string; appearance?: AppearancePayload | null }
-  | { type: 'keyboard_settings_changed'; keyboard_shortcuts: Record<string, string>; keyboard_send_mode: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; revision: string }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string; background?: boolean }[]; restarting?: boolean; chat_pins: Record<string, ChatPinState>; chat_actions?: Record<string, ChatAction[]>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; keyboard_revision?: string; appearance?: AppearancePayload | null }
+  | { type: 'keyboard_settings_changed'; keyboard_shortcuts: Record<string, string>; keyboard_send_mode: 'modifier' | 'enter'; revision: string }
   | ({ type: 'appearance_settings_changed' } & AppearancePayload)
   | { type: 'chat_pin_changed'; chat_id: string; path: string; dismissed_paths: string[]; revision: number }
   | { type: 'chat_actions_changed'; chat_id: string; actions: ChatAction[] }
@@ -687,7 +558,6 @@ export type EventsWsMessage =
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string; failure_id?: string; repo_location?: Partial<RepoLocation> }
   | { type: 'chat_repo_location'; chat_id: string; project_id: string; repo_location: Partial<RepoLocation> }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
-  | { type: 'chat_subagents_ready'; chat_id: string; project_id: string; remaining: number }
   | { type: 'chat_read'; chat_id: string; last_read_at: string }
   | { type: 'chat_unread'; chat_id: string; last_read_at: string }
   | { type: 'chat_title'; chat_id: string; title: string; status?: 'pending' | 'ready' }
@@ -802,13 +672,11 @@ export interface Schedule {
   // far too late to be actionable — see project_chats.dispatch_schedule.
   // 'skipped' is what the dispatcher records when a run reached the provider
   // but stopped short of a result (approval card, AskUserQuestion, deferred
-  // retry) — see project_chats._schedule_dispatch_status. 'unfinished' is the
-  // case split out of it where background subagents never settled: nothing in
-  // the chat is waiting on the user (schedules.RUN_STATUS_UNFINISHED).
+  // retry) — see project_chats._schedule_dispatch_status.
   // 'retrying' means the agent could not reach an external service and armed a
   // network retry in the run chat; the retried turn writes 'ok' or 'error'
   // (schedules.RUN_STATUS_RETRYING).
-  last_status?: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat' | 'skipped' | 'unfinished' | 'retrying'
+  last_status?: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat' | 'skipped' | 'retrying'
   day_of_month: number | null
   run_at_date: string | null
   web_chat_id: string | null
@@ -971,8 +839,6 @@ export interface ProviderCatalogEvidence {
   reason: 'not_observed' | 'expired' | 'invalid_response' | 'no_models_reported' | null
 }
 
-export interface MoveToBackgroundResponse { moved: boolean }
-
 // GET/PATCH /api/settings/routines — internal-routine model overrides and
 // model overrides (Settings → Providers tab).
 export interface RoutineSettings {
@@ -1047,7 +913,7 @@ export interface HostTerminalLaunchResult {
 
 /** What `ciao/provider_versions.py::release_check` says about an installed CLI. */
 export interface ProviderReleaseCheck {
-  state: 'untested' | 'bundled' | 'unsupported' | 'unknown' | 'below_tested' | 'current'
+  state: 'untested' | 'unsupported' | 'unknown' | 'below_tested' | 'current'
   tested?: string
   installed?: string
   command?: string
@@ -1077,7 +943,6 @@ export interface ProviderConnection {
     }[]
   }
   protocol?: string
-  mcps?: string[]
   skills?: string[]
   /** Skills that ship with the CLI itself; absent until the CLI has reported them. */
   bundled_skills?: string[]
@@ -1087,6 +952,8 @@ export interface ProviderConnection {
   path_command?: string
   /** Terminal action that runs the command shown for this row, when the engine offers one. */
   terminal_action?: HostTerminalAction
+  /** The agent CLI's own MCP command (`claude mcp`), typed into the in-app terminal. Absent when the CLI is not installed. */
+  mcp_command?: string
   /** How the installed CLI compares with the version this release was tested with. */
   release_check?: ProviderReleaseCheck
   /** Desktop app found while the CLI is missing. */
@@ -1328,14 +1195,11 @@ export interface SetupCheck {
 
 /** `/api/setup-status`, from ciao/setup_status.py::setup_status. */
 export interface SetupStatus {
-  native_bootstrap: boolean
   configured: boolean
   bootstrap: boolean
   mode: string
   workspace_root: string
   vault_root: string
-  /** The installer's folder suggestion on a fresh install; null otherwise. */
-  suggested_workspace: string | null
   checks: SetupCheck[]
   providers: Record<string, SetupProviderStatus>
   provider_ready: boolean

@@ -36,6 +36,7 @@ from ciao.web.routes_api import (
 from ciao.workspace_archive import (
     ARCHIVE_DIR_NAME,
     LAYOUT_SHARED,
+    METADATA_FILE,
     ArchiveTarget,
     WorkspaceArchiveError,
     archive_root,
@@ -598,15 +599,46 @@ def test_restore_round_trip(tmp_path, rerooted):
     assert client.get("/api/workspaces/archived").json()["archived"] == []
 
 
-def test_restore_carries_the_claude_ai_connectors_switch(tmp_path):
+def test_restore_converts_a_legacy_connectors_off_archive(tmp_path):
+    """An archive that still stores connectors off, and no trim key, restores trimmed.
+
+    The exported archive does not write the old field. A file from before the
+    trim option is edited here the way an old install left it.
+    """
     client, config, _pcm, _store = _app(tmp_path, rerooted=True)
-    config.workspaces["work"].claude_ai_connectors = False
     archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    folder = archive_root(config) / archived["id"]
+    meta_path = folder / METADATA_FILE
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert "claude_ai_connectors" not in meta["workspace"]
+    meta["workspace"].pop("claude_trim", None)
+    meta["workspace"]["claude_ai_connectors"] = False
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
 
     restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
 
     assert restored.status_code == 200, restored.json()
-    assert config.workspaces["work"].claude_ai_connectors is False
+    assert config.workspaces["work"].claude_trim == {"setting:claude_ai_connectors": True}
+    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
+    row = next(item for item in stored if item["name"] == "work")
+    assert "claude_ai_connectors" not in row
+    assert row["claude_trim"]["setting:claude_ai_connectors"] is True
+
+
+def test_restore_ignores_legacy_connectors_on_or_absent(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    folder = archive_root(config) / archived["id"]
+    meta_path = folder / METADATA_FILE
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["workspace"].pop("claude_trim", None)
+    meta["workspace"]["claude_ai_connectors"] = True
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    assert "setting:claude_ai_connectors" not in config.workspaces["work"].claude_trim
 
 
 def test_restore_carries_claude_trim(tmp_path):

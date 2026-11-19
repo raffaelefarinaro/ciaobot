@@ -252,8 +252,8 @@ architectures=$(lipo -archs "$app/Contents/MacOS/$executable" 2>/dev/null || tru
     || die "archive must be a thin arm64 build, got: '${architectures:-unknown}'"
 
 # A bundled engine (#3128 G) must be distribution-signed by this team before the
-# archive may be advertised: every non-vendor Mach-O with Developer ID, hardened
-# runtime and a secure timestamp, and the SDK's CLI still Anthropic's.
+# archive may be advertised: every Mach-O with Developer ID, hardened runtime and
+# a secure timestamp.
 engine=$app/Contents/Resources/engine
 if [ -e "$engine" ] || [ -L "$engine" ]; then
     [ -d "$engine" ] && [ ! -L "$engine" ] || die "archive's bundled engine is not a real directory"

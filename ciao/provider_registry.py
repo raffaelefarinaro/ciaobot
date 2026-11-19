@@ -1,7 +1,7 @@
 """Descriptors for the runtime agent providers Ciaobot can run.
 
 A *runtime provider* is a CLI or SDK that executes a whole agentic turn:
-``claude`` and ``opencode``. Every model Ciaobot can run belongs to
+``claude``, ``opencode`` and ``codex``. Every model Ciaobot can run belongs to
 one of them, and each authenticates itself -- there is no separate notion of a
 model-routing backend layered underneath.
 
@@ -23,6 +23,7 @@ from importlib import import_module
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from ciao.providers.acp.spec import AgentSpec
     from ciao.providers.base import BaseProvider
 
 
@@ -67,10 +68,19 @@ class ProviderDescriptor:
     # default model for this provider, when it has one. Takes precedence over
     # ``default_model``; empty means the provider has no such setting.
     default_model_config_key: str = ""
+    # module:attr of the AgentSpec when this provider runs over ACP.
+    acp_spec_path: str = ""
 
     def factory(self) -> type["BaseProvider"]:
         """Import and return the provider class."""
         module_name, _, attr = self.factory_path.partition(":")
+        return getattr(import_module(module_name), attr)  # type: ignore[no-any-return]
+
+    def acp_spec(self) -> "AgentSpec | None":
+        """Import and return the ACP ``AgentSpec``, or ``None`` when the provider is not ACP."""
+        if not self.acp_spec_path:
+            return None
+        module_name, _, attr = self.acp_spec_path.partition(":")
         return getattr(import_module(module_name), attr)  # type: ignore[no-any-return]
 
     def auth_command(self, *, device_auth: bool = False) -> list[str]:
@@ -108,19 +118,21 @@ _DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         label="Anthropic (via Claude Code)",
         short_label="Claude",
         cli_label="Claude Code",
-        factory_path="ciao.providers.claude:ClaudeProvider",
-        auth_command_path="ciao.providers.claude:auth_command",
+        factory_path="ciao.providers.acp.agents:ClaudeAcpProvider",
+        auth_command_path="ciao.providers.acp.agents:claude_auth_command",
         system_skills_path="ciao.setup_status:discover_claude_system_skills",
         status_probe_path="ciao.setup_status:claude_status_probe",
         thinking_levels=("low", "medium", "high", "xhigh", "max"),
         default_model_config_key="claude_default_model",
+        acp_spec_path="ciao.providers.acp.agents:CLAUDE",
     ),
     ProviderDescriptor(
         id="opencode",
-        label="opencode",
-        short_label="opencode",
+        label="OpenCode",
+        short_label="OpenCode",
         cli_label="opencode",
-        factory_path="ciao.providers.opencode:OpencodeProvider",
+        factory_path="ciao.providers.acp.agents:OpencodeAcpProvider",
+        acp_spec_path="ciao.providers.acp.agents:OPENCODE",
         auth_command_path="ciao.providers.opencode:auth_command",
         system_skills_path="ciao.providers.opencode:opencode_system_skills",
         status_probe_path="ciao.setup_status:opencode_status_probe",
@@ -131,6 +143,20 @@ _DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         thinking_levels=("low", "medium", "high", "max"),
         # Models come from the signed-in accounts' catalog; an empty default
         # lets opencode pick, and the chat records what it resolved.
+    ),
+    ProviderDescriptor(
+        id="codex",
+        label="OpenAI (via Codex)",
+        short_label="Codex",
+        cli_label="Codex",
+        factory_path="ciao.providers.acp.agents:CodexAcpProvider",
+        auth_command_path="ciao.providers.acp.agents:codex_auth_command",
+        status_probe_path="ciao.setup_status:codex_status_probe",
+        # UNVERIFIED DEFAULT: these names are not confirmed against a live codex-acp. codex-acp
+        # reads the efforts from its runtime model catalog, which narrows this per model. Confirm
+        # them at the real-Mac/live checkpoint; do not change them before that.
+        thinking_levels=("minimal", "low", "medium", "high", "xhigh"),
+        acp_spec_path="ciao.providers.acp.agents:CODEX",
     ),
 )
 

@@ -263,9 +263,6 @@ class AppSettings:
     # Browser keyboard behavior is engine-owned so a person's clients share it.
     keyboard_shortcuts: dict[str, str] | None = None
     keyboard_send_mode: str = ""
-    # What a message sent while a turn runs does by default: "" = queue (a
-    # follow-up turn), "steer" = injected into the running turn.
-    mid_turn_delivery: str = ""
     # Whether a chat whose turn a restart or crash cut off gets one "Continue
     # after restart" turn at the next start (#2128). Settings → General.
     resume_after_restart: bool = True
@@ -414,8 +411,6 @@ def _parse_settings(raw: object) -> AppSettings:
         "", "modifier", "enter"
     }:
         settings.keyboard_send_mode = ""
-    if settings.mid_turn_delivery != "steer":
-        settings.mid_turn_delivery = ""
     if settings.text_contrast != "soft":
         settings.text_contrast = ""
     if settings.body_font not in _BODY_FONTS:
@@ -643,11 +638,6 @@ class AppSettingsStore:
                 if not isinstance(value, str) or value not in {"modifier", "enter"}:
                     raise ValueError("keyboard_send_mode must be modifier or enter")
                 updated.keyboard_send_mode = "enter" if value == "enter" else ""
-                continue
-            if key == "mid_turn_delivery":
-                if not isinstance(value, str) or value not in {"queue", "steer"}:
-                    raise ValueError("mid_turn_delivery must be queue or steer")
-                updated.mid_turn_delivery = "steer" if value == "steer" else ""
                 continue
             if key == "text_contrast":
                 if not isinstance(value, str) or value not in {"normal", "soft"}:
