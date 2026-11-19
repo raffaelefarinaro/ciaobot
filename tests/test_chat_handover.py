@@ -96,7 +96,7 @@ def test_handover_chat_switches_between_claude_and_opencode(tmp_path: Path) -> N
     assert updated.model == "anthropic/claude-sonnet-4-6"
     assert updated.thinking_level == ""
     assert updated.session_id == ""
-    assert "Claude / opus to opencode / anthropic/claude-sonnet-4-6" in updated.handover_messages[-1]["content"]
+    assert "Claude / opus to OpenCode / anthropic/claude-sonnet-4-6" in updated.handover_messages[-1]["content"]
 
 
 def test_handover_messages_are_injected_into_next_prompt_once(tmp_path: Path) -> None:
