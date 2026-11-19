@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,7 +10,6 @@ import pytest
 
 from tests.test_chat_messages_interrupted import _make_manager, _Msg, _request
 from ciao.web.routes_api import chat_messages
-from ciao.web.transcript_service import _render_opencode_thread
 
 
 @pytest.mark.asyncio
@@ -39,27 +37,6 @@ async def test_legacy_steered_indexes_number_rows_without_a_steered_flag(
     users = [r for r in rows if r["role"] == "user"]
 
     assert [u["content"] for u in users] == ["first prompt", "steered words"]
-    assert [u["turn_index"] for u in users] == [0, 1]
-    assert all("steered" not in u for u in users)
-
-
-def test_legacy_steered_indexes_number_opencode_rows_without_a_steered_flag(
-    tmp_path: Path,
-) -> None:
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("Steer history oc", workspace="personal")
-    chat = pcm.create_chat(project.project_id, title="steer-history-oc")
-    chat.user_turn_steered = {"1": True}
-
-    def user(text: str) -> dict:
-        return {"info": {"role": "user"}, "parts": [{"type": "text", "text": text}]}
-
-    rows = _render_opencode_thread(
-        {"info": {}, "messages": [user("one"), user("two")]}, chat
-    )
-    users = [r for r in rows if r["role"] == "user"]
-
-    assert [u["content"] for u in users] == ["one", "two"]
     assert [u["turn_index"] for u in users] == [0, 1]
     assert all("steered" not in u for u in users)
 

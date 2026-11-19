@@ -33,10 +33,6 @@ def _manager(config=None, *, chats=None, projects=None) -> ProjectChatManager:
     manager._chats = chats or {}
     manager._save = lambda: None
     manager._titling = set()
-    # Production waits ~30s in total for the provider to publish its title.
-    # Keep the retry *shape* (so the give-up path is still exercised) without
-    # the wall-clock cost.
-    manager._TITLE_POLL_DELAYS = (0.0, 0.001, 0.001)
     return manager
 
 
@@ -867,7 +863,6 @@ async def test_claude_title_does_not_wait_for_native_poll(monkeypatch) -> None:
     from ciao.web import project_chats as pc
 
     manager = _manager(chats={"chat-1": _chat(provider="claude")})
-    manager._TITLE_POLL_DELAYS = (0.0, 60.0)
     native_reads = 0
     slept: list[float] = []
 
@@ -901,7 +896,6 @@ async def test_claude_fallback_title_is_not_held_behind_native_polls(monkeypatch
     from ciao.web import project_chats as pc
 
     manager = _manager(chats={"chat-1": _chat(provider="claude")})
-    manager._TITLE_POLL_DELAYS = (0.0, 60.0, 60.0)
     native_reads = 0
     slept: list[float] = []
 
@@ -934,7 +928,6 @@ async def test_claude_chat_reads_no_native_title_so_nothing_polls(monkeypatch) -
     from ciao.web import project_chats as pc
 
     manager = _manager(chats={"chat-1": _chat(provider="claude")})
-    manager._TITLE_POLL_DELAYS = (0.0, 60.0)
     published: list[dict] = []
     manager._events = SimpleNamespace(publish=published.append)
     reads = 0
@@ -969,7 +962,6 @@ async def test_claude_rename_during_the_titler_wins_over_the_fallback(monkeypatc
     """A rename made while the one-shot titler runs keeps the user's title; no fallback is written."""
     chat = _chat(provider="claude")
     manager = _manager(chats={"chat-1": chat})
-    manager._TITLE_POLL_DELAYS = (0.0, 0.001)
 
     async def rename_then_fail(*_args, **_kwargs):
         chat.title = "User Picked This"
@@ -1132,7 +1124,6 @@ async def test_acp_chat_title_is_read_once_with_no_wait_and_no_poll(monkeypatch)
     from ciao.web import project_chats as pc
 
     manager = _manager(chats={"chat-1": _chat(provider="opencode")})
-    manager._TITLE_POLL_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0)
     reads = 0
 
     class FakeAcpProvider:

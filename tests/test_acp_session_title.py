@@ -354,19 +354,19 @@ def test_control_and_format_characters_are_dropped_from_an_agent_title(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_a_claude_chat_takes_no_native_title_poll(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Claude's title arrives as an event; the native poll must not hold back the LLM title by
-    # the OpenCode schedule. Checked by the schedule handed to the poll, not by elapsed time.
+async def test_a_claude_chat_takes_no_native_title_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Claude's title arrives as an event, so the host never reads a native title for it, and
+    # the LLM title is not held back behind one.
     manager = _make_manager(tmp_path)
     _no_llm_title(manager, monkeypatch)
     chat = _chat(manager)
-    polled: list[tuple[float, ...]] = []
+    reads: list[str] = []
 
-    async def record(chat_id, delays, is_target):  # type: ignore[no-untyped-def]
-        polled.append(tuple(delays))
-        return False, None
+    async def record(_chat):  # type: ignore[no-untyped-def]
+        reads.append(_chat.chat_id)
+        return None
 
-    monkeypatch.setattr(manager, "_poll_native_title", record)
+    monkeypatch.setattr(manager, "_native_chat_title", record)
     await manager.auto_title_if_default(chat.chat_id, "Fix the login redirect bug")
 
-    assert polled == [()]
+    assert reads == []

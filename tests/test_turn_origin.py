@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,7 +17,7 @@ import pytest
 from ciao.models import ResultEvent
 from ciao.web.chat_broker import ChatStream, shared_origin
 from ciao.web.routes_api import chat_messages
-from ciao.web.transcript_service import _render_opencode_thread
+from ciao.web import transcript_service
 from tests.test_chat_messages_interrupted import _make_manager, _Msg, _request
 from tests.test_project_chats_queue import _wait_for
 
@@ -198,28 +197,34 @@ async def test_origin_on_claude_history_rows(
     assert users[1]["origin"] == "webhook"
 
 
-def test_origin_on_opencode_history_rows(tmp_path: Path) -> None:
-    pcm, chat = _setup(tmp_path)
+def test_origin_on_acp_journal_rows(tmp_path: Path) -> None:
+    _pcm, chat = _setup(tmp_path)
     chat.user_turn_origin = {"1": "webhook"}
+    journal = [
+        {"type": "user", "text": "one"},
+        {"type": "user", "text": "two"},
+    ]
 
-    def user(text: str) -> dict:
-        return {"info": {"role": "user"}, "parts": [{"type": "text", "text": text}]}
-
-    rows = _render_opencode_thread({"info": {}, "messages": [user("one"), user("two")]}, chat)
+    rows = transcript_service._render_acp_journal(
+        journal, chat, start_user_idx=0, workspace_root=None, agent_root=None
+    )
     users = [r for r in rows if r["role"] == "user"]
     assert "origin" not in users[0]
     assert users[1]["origin"] == "webhook"
 
 
 def test_origin_is_independent_of_unattended(tmp_path: Path) -> None:
-    pcm, chat = _setup(tmp_path)
+    _pcm, chat = _setup(tmp_path)
     chat.user_turn_unattended = {"0": True}
     chat.user_turn_origin = {"0": "schedule"}
 
-    def user(text: str) -> dict:
-        return {"info": {"role": "user"}, "parts": [{"type": "text", "text": text}]}
-
-    rows = _render_opencode_thread({"info": {}, "messages": [user("tick")]}, chat)
+    rows = transcript_service._render_acp_journal(
+        [{"type": "user", "text": "tick"}],
+        chat,
+        start_user_idx=0,
+        workspace_root=None,
+        agent_root=None,
+    )
     users = [r for r in rows if r["role"] == "user"]
     assert users[0]["unattended"] is True
     assert users[0]["origin"] == "schedule"

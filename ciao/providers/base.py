@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import math
-import os
 import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from ciao.models import (
     AgentRequest,
-    BridgeMode,
     StreamEvent,
 )
 
@@ -24,11 +21,6 @@ from ciao.models import (
 # from the idle reap, reload and restart gate, for up to this long. A task
 # that never reports a terminal state is forgotten after it.
 BACKGROUND_WORK_MAX_S = 24 * 3600
-
-
-def _legacy_workspace_context(raw: str | None) -> str:
-    value = (raw or "").strip()
-    return value if value in {"personal", "work"} else ""
 
 
 @dataclass(slots=True)
@@ -127,38 +119,6 @@ def prepend_stable_context(request: AgentRequest) -> None:
     # ``injected_context_prefix`` moves with the prompt instead of being
     # recomputed from delimiters later.
     request.injected_context_prefix = prefix + request.injected_context_prefix
-
-
-def build_runtime_context(request: AgentRequest) -> str:
-    """Compact per-request runtime context for system_prompt append.
-
-    Keeps the model in sync with today's date, active workspace, and
-    GWS profile without requiring the user to restate them in every prompt.
-    Returns "" when nothing meaningful can be derived, so the caller can
-    skip appending entirely.
-    """
-    env = {**os.environ, **(request.extra_env or {})}
-    lines: list[str] = []
-    lines.append(f"today={datetime.now(UTC).date().isoformat()}")
-    workspace = (
-        env.get("CIAO_ACTIVE_WORKSPACE")
-        or _legacy_workspace_context(env.get("CIAO_WORKSPACE"))
-        or env.get("GWS_PROFILE")
-    )
-    if workspace:
-        lines.append(f"workspace={workspace}")
-    gws_profile = env.get("GWS_PROFILE")
-    if gws_profile and gws_profile != workspace:
-        lines.append(f"gws_profile={gws_profile}")
-    project = env.get("CIAO_ACTIVE_PROJECT")
-    if project:
-        lines.append(f"active_project={project}")
-    chat = env.get("CIAO_CHAT_ID")
-    if chat:
-        lines.append(f"chat_id={chat}")
-    if len(lines) == 1:  # only today=
-        return lines[0]
-    return "\n".join(lines)
 
 
 class CleanupTimedOut(TimeoutError):
@@ -350,26 +310,3 @@ class BaseProvider(ABC):
     def seconds_since_activity(self) -> float:
         """Seconds since the provider last heard from its server."""
         return math.inf
-
-
-class BaseSDKProvider(BaseProvider):
-    """Shared settings-change tracking for providers that run an SDK-style session."""
-
-    def __init__(self, workspace_root: Path, *, config: object | None = None) -> None:
-        super().__init__(workspace_root, config=config)
-        self._current_model: str = ""
-        self._current_mode: BridgeMode = "auto"
-
-    def _settings_changed(self, request: AgentRequest) -> bool:
-        return (
-            request.model != self._current_model
-            or request.mode != self._current_mode
-        )
-
-    def _remember_settings(self, request: AgentRequest) -> None:
-        self._current_model = request.model
-        self._current_mode = request.mode
-
-    def _reset_settings(self) -> None:
-        self._current_model = ""
-        self._current_mode = "auto"
