@@ -27,7 +27,6 @@ from urllib.parse import urlsplit
 from ciao.execution_modes import MODE_RANK
 
 ActionKind = Literal[
-    "mcp_auth",
     "command",
     "gws_auth",
     "permission_mode",
@@ -45,7 +44,7 @@ ACTION_STATES: tuple[str, ...] = get_args(ActionState)
 #: The kinds an agent may raise with `ciao chat needs-action`. `limit` is the
 #: engine's own and is never agent-raisable.
 AGENT_ACTION_KINDS: frozenset[str] = frozenset(
-    {"command", "gws_auth", "permission_mode", "device_code", "system_setting", "restart", "mcp_auth"}
+    {"command", "gws_auth", "permission_mode", "device_code", "system_setting", "restart"}
 )
 
 ChatActionErrorReason = Literal[
@@ -60,18 +59,12 @@ ChatActionErrorReason = Literal[
     "invalid_body",          # a start/callback body the kind does not accept (E1 command steps)
     "invalid_state",         # start/continue/callback in the wrong state
     "not_local",             # J: a host-only start from a non-loopback caller
-    "already_used",          # D1: a second paste-back for the same action
     "no_pending_sign_in",    # F: gws paste-back with no pending sign-in
     "bad_callback_url",      # F: gws paste-back address with the wrong scheme/host/port
     "state_mismatch",        # F: gws paste-back address from a different sign-in
 ]
 
-#: The mcp_auth provider values the validator accepts.
-_MCP_PROVIDERS = ("claude", "opencode")
-
-#: Free-text bounds. A server name is a short identifier; a URL may be long.
-_SERVER_MAX = 128
-_PROVIDER_MAX = 16
+#: Free-text bounds. A URL may be long.
 _URL_MAX = 4096
 _SESSION_ID_MAX = 64
 _NOTE_MAX = 200
@@ -133,40 +126,8 @@ def _text(
     return stripped
 
 
-#: The helper terminal's id for a Claude sign-in: the engine writes it, never the agent.
+#: The helper terminal's id for a device-code sign-in: the engine writes it, never the agent.
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-
-
-def _validate_mcp_auth(raw: Mapping[str, object]) -> dict[str, str]:
-    if set(raw) - {"server", "provider", "url", "session_id", "callback_used"}:
-        raise ChatActionError("unknown_param")
-    server = _text(raw, "server", required=True, limit=_SERVER_MAX)
-    provider = _text(raw, "provider", required=True, limit=_PROVIDER_MAX)
-    if server is None or provider is None:
-        raise ChatActionError("missing_param")
-    if provider not in _MCP_PROVIDERS:
-        raise ChatActionError("invalid_param")
-    validated = {"server": server, "provider": provider}
-    url = _text(raw, "url", required=False, limit=_URL_MAX)
-    if url is not None:
-        parts = urlsplit(url)
-        if parts.scheme not in ("https", "http") or not parts.netloc:
-            raise ChatActionError("invalid_url")
-        validated["url"] = url
-    session_id = _text(raw, "session_id", required=False, limit=_SESSION_ID_MAX)
-    if session_id is not None:
-        if not _SESSION_ID_RE.match(session_id):
-            raise ChatActionError("invalid_param")
-        validated["session_id"] = session_id
-    if "callback_used" in raw:
-        # The engine's single-use mark for a pasted sign-in callback: "1" once used, "0" after a restart.
-        used = raw["callback_used"]
-        if not isinstance(used, str):
-            raise ChatActionError("invalid_type")
-        if used not in ("0", "1"):
-            raise ChatActionError("invalid_param")
-        validated["callback_used"] = used
-    return validated
 
 
 #: The largest command accepted, in UTF-8 bytes, before and after
@@ -382,7 +343,6 @@ def _validate_gws_auth(raw: Mapping[str, object]) -> dict[str, str]:
 
 
 _VALIDATORS: dict[str, Callable[[Mapping[str, object]], dict[str, str]]] = {
-    "mcp_auth": _validate_mcp_auth,
     "command": _validate_command,
     "restart": _validate_restart,
     "permission_mode": _validate_permission_mode,
@@ -391,7 +351,6 @@ _VALIDATORS: dict[str, Callable[[Mapping[str, object]], dict[str, str]]] = {
     "gws_auth": _validate_gws_auth,
 }
 _KEY_PARAMS: dict[str, tuple[str, ...]] = {
-    "mcp_auth": ("server",),
     "system_setting": ("setting",),
     "device_code": ("tool",),
     "gws_auth": ("profile",),
@@ -400,7 +359,6 @@ _KEY_PARAMS: dict[str, tuple[str, ...]] = {
 #: Params only the engine writes (through ``update_action``). The kind's
 #: validator accepts them; an agent raise may never carry them.
 ENGINE_ONLY_PARAMS: dict[str, frozenset[str]] = {
-    "mcp_auth": frozenset({"url", "session_id", "callback_used"}),
     "device_code": frozenset({"session_id", "code", "url", "entered"}),
     "gws_auth": frozenset({"url"}),
 }

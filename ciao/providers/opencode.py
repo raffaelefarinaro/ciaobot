@@ -51,7 +51,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
 import httpx
 
@@ -84,8 +84,6 @@ from ciao.models import (
 from ciao.providers.base import (
     ActiveHandle,
     BaseSDKProvider,
-    McpOAuthAttempt,
-    McpOAuthUnavailable,
     ProviderCapabilities,
     QuestionResponseResult,
     build_prompt,
@@ -1684,8 +1682,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._settled_tool_ids: set[str] = set()
         self._mcp_token: str = ""
         self._linked_repo: str = ""  # linked repo the live server was started with
-        # Serializes `_ensure_server` per chat: a turn and a sign-in card can both
-        # start this chat's server, and two unserialized starts orphan one process.
+        # Serializes `_ensure_server` per chat: two unserialized starts orphan one process.
         self._server_lock = asyncio.Lock()
         # Background work of this chat's session. It outlives a turn, so it is
         # not part of `_reset_turn_state`; only `disconnect` and the HTTP
@@ -1825,84 +1822,6 @@ class OpencodeProvider(BaseSDKProvider):
                     "needs_auth" if state == "needs_client_registration" else state
                 )
         return result
-
-    async def start_mcp_oauth(self, server: str) -> McpOAuthAttempt:
-        """Start the OAuth sign-in for one MCP server through the V2 integration API."""
-        client = self._client
-        if not self.is_connected or client is None:
-            raise McpOAuthUnavailable("not_running")
-        listing = await client.get("/api/mcp", timeout=2.0)
-        listing.raise_for_status()
-        body = listing.json()
-        rows = body.get("data") if isinstance(body, Mapping) else None
-        if not isinstance(rows, list):
-            raise ValueError("OpenCode MCP status response is malformed")
-        integration_id = ""
-        for row in rows:
-            if isinstance(row, Mapping) and str(row.get("name") or "").strip() == server:
-                integration_id = str(row.get("integrationID") or "")
-                break
-        if not integration_id:
-            raise McpOAuthUnavailable("no_integration")
-        base = f"/api/integration/{quote(integration_id, safe='')}"
-        info = await client.get(base, timeout=5.0)
-        if info.status_code == 404:
-            raise McpOAuthUnavailable("no_integration")
-        info.raise_for_status()
-        info_body = info.json()
-        data = info_body.get("data") if isinstance(info_body, Mapping) else None
-        methods = data.get("methods") if isinstance(data, Mapping) else None
-        method_id = ""
-        for method in methods if isinstance(methods, list) else []:
-            if isinstance(method, Mapping) and method.get("type") == "oauth" and method.get("id"):
-                method_id = str(method["id"])
-                break
-        if not method_id:
-            raise McpOAuthUnavailable("no_oauth_method")
-        started = await client.post(f"{base}/connect/oauth", json={"methodID": method_id}, timeout=10.0)
-        started.raise_for_status()
-        started_body = started.json()
-        attempt = started_body.get("data") if isinstance(started_body, Mapping) else None
-        if not isinstance(attempt, Mapping):
-            raise ValueError("OpenCode OAuth attempt response is malformed")
-        url = str(attempt.get("url") or "")
-        attempt_id = str(attempt.get("attemptID") or "")
-        if not url or not attempt_id:
-            raise ValueError("OpenCode OAuth attempt response is malformed")
-        return McpOAuthAttempt(integration_id, attempt_id, url, str(attempt.get("mode") or ""))
-
-    async def read_mcp_oauth_attempt(self, integration_id: str, attempt_id: str) -> tuple[str, str]:
-        """Read one attempt's status: ``(status, message)``. A 404 means it expired."""
-        client = self._client
-        if client is None:
-            raise McpOAuthUnavailable("not_running")
-        path = (
-            f"/api/integration/{quote(integration_id, safe='')}"
-            f"/connect/oauth/{quote(attempt_id, safe='')}"
-        )
-        response = await client.get(path, timeout=2.0)
-        if response.status_code == 404:
-            return ("expired", "")
-        response.raise_for_status()
-        body = response.json()
-        data = body.get("data") if isinstance(body, Mapping) else None
-        if not isinstance(data, Mapping):
-            raise ValueError("OpenCode OAuth status response is malformed")
-        status = str(data.get("status") or "")
-        if status not in {"pending", "complete", "failed", "expired"}:
-            raise ValueError("OpenCode OAuth status is not recognized")
-        return (status, str(data.get("message") or ""))
-
-    async def cancel_mcp_oauth(self, integration_id: str, attempt_id: str) -> None:
-        """Cancel one attempt. Returns at once when there is no client; the status is ignored."""
-        client = self._client
-        if client is None:
-            return
-        path = (
-            f"/api/integration/{quote(integration_id, safe='')}"
-            f"/connect/oauth/{quote(attempt_id, safe='')}"
-        )
-        await client.delete(path, timeout=2.0)
 
     @property
     def is_connected(self) -> bool:
@@ -2428,15 +2347,6 @@ class OpencodeProvider(BaseSDKProvider):
         """Start (or reuse) this chat's server; one caller at a time (see `_ensure_server_locked`)."""
         async with self._server_lock:
             return await self._ensure_server_locked(request)
-
-    async def ensure_server(self, request: AgentRequest) -> None:
-        """Start this chat's server for ``request`` without sending a prompt, or reuse the live one.
-
-        Used by the MCP sign-in card when the idle sweep stopped the server. ``request``
-        must come from ``ProjectChatManager.build_agent_request`` so the next turn's
-        reuse check matches and does not restart it.
-        """
-        await self._ensure_server(request)
 
     async def _ensure_server_locked(self, request: AgentRequest) -> httpx.AsyncClient:
         """Start (or reuse) this chat's server and return its HTTP client.

@@ -395,20 +395,6 @@ async def test_reload_workspace_providers_never_touches_a_running_chat(
     assert result == {"reloaded": [], "pending": sorted([a.chat_id, b.chat_id])}
 
 
-def test_forget_mcp_auth_decline(tmp_path: Path) -> None:
-    from ciao.chat_actions import action_key
-    from tests.test_chat_actions_runtime import make_manager
-
-    manager = make_manager(tmp_path)
-    key = action_key("mcp_auth", {"server": "notion"})
-    manager.declined_mcp_auth.add(("work", "claude", key))
-    manager.declined_mcp_auth.add(("work", "claude", action_key("mcp_auth", {"server": "linear"})))
-
-    manager.forget_mcp_auth_decline("work", "claude", "notion")
-
-    assert manager.declined_mcp_auth == {("work", "claude", action_key("mcp_auth", {"server": "linear"}))}
-
-
 def _turn_off_into(name: str, root: Path, errors: list[BaseException]) -> None:
     try:
         set_mcp_server_enabled(provider="claude", server=name, agent_root=root, enabled=False)

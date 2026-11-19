@@ -74,28 +74,6 @@ class QuestionResponseResult:
     already_resolved: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class McpOAuthAttempt:
-    """One OAuth sign-in attempt a provider started for an MCP server."""
-
-    integration_id: str
-    attempt_id: str
-    url: str
-    mode: str
-
-
-class McpOAuthUnavailable(Exception):
-    """A provider cannot offer an MCP sign-in here. ``reason`` names why.
-
-    ``reason`` is one of ``not_running``, ``no_integration``, ``no_oauth_method``
-    or ``unsupported``.
-    """
-
-    def __init__(self, reason: str) -> None:
-        super().__init__(reason)
-        self.reason = reason
-
-
 def build_prompt(request: AgentRequest) -> str:
     """Build the shared prompt text for a request.
 
@@ -379,14 +357,6 @@ class BaseProvider(ABC):
         """Per-server MCP state (``connected``, ``needs_auth``, ...) from a live connection; ``{}`` when none."""
         return {}
 
-    async def reconnect_mcp_server(self, server_name: str) -> bool:
-        """Reconnect one MCP server so a fresh sign-in takes effect; False when nothing was reconnected."""
-        return False
-
-    def mcp_sign_in_exempt(self, server: str) -> bool:
-        """True when ``server`` is signed in outside Ciao, so detection never raises a card for it."""
-        return False
-
     async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
         """Yield between-turn provider events until cancelled.
 
@@ -459,20 +429,6 @@ class BaseProvider(ABC):
         ``background_work_outstanding`` first.
         """
         return None
-
-    async def start_mcp_oauth(self, server: str) -> McpOAuthAttempt:
-        """Start the OAuth sign-in for one MCP server; unsupported by default."""
-        raise McpOAuthUnavailable("unsupported")
-
-    async def read_mcp_oauth_attempt(self, integration_id: str, attempt_id: str) -> tuple[str, str]:
-        """Read one sign-in attempt's ``(status, message)``; unsupported by default."""
-        raise McpOAuthUnavailable("unsupported")
-
-    async def cancel_mcp_oauth(self, integration_id: str, attempt_id: str) -> None:
-        """Cancel one sign-in attempt; a no-op for adapters without one."""
-
-    async def ensure_server(self, request: AgentRequest) -> None:
-        """Start the provider's server for ``request`` without a prompt; a no-op for adapters without a startable server."""
 
     @property
     def seconds_since_activity(self) -> float:

@@ -812,7 +812,7 @@ async def _op_chat_needs_action(
     """Ask the user, in the calling chat, to do something only they can do.
 
     ``kind`` is one of command, gws_auth, permission_mode, device_code,
-    system_setting, restart, mcp_auth. ``params`` holds that kind's values as
+    system_setting, restart. ``params`` holds that kind's values as
     strings (for command: ``command``, optional ``note``). Nothing is executed:
     the request becomes a card the user acts on. There is no chat argument; the
     request belongs to the calling chat. Values are plain strings on purpose, so

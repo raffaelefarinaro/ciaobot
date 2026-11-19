@@ -32,9 +32,9 @@ in the Ciaobot picker. Point users to the live
 [`INTEGRATIONS.md`](https://github.com/raffaelefarinaro/ciaobot/blob/main/INTEGRATIONS.md)
 for current commands; do not invent version-sensitive install or login syntax.
 
-For provider login or installation prefer the existing Settings flow. For chat MCP
-authentication use **Chat details → MCP → Sign in**; [MCP servers](/settings/mcp)
-also leads to chat recovery. Read `references/install-and-settings.md` for setup,
+For provider login or installation prefer the existing Settings flow. For MCP
+sign-in use **Chat details → MCP**, which runs the agent's own MCP command;
+[MCP servers](/settings/mcp) opens the same command. Read `references/install-and-settings.md` for setup,
 manual fallback and `ciao chat needs-action` details. For an operator-run command,
 offer a reviewed `ciao chat needs-action command --command-file FILE` suggestion
 or point to **Chat details → Open → Terminal**; the user runs it. See

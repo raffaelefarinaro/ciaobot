@@ -30,8 +30,6 @@ from ciao.web.routes_chat_actions import (
     chat_action_continue,
     chat_action_dismiss,
     chat_action_start,
-    chat_action_turn_off,
-    chat_mcp_auth_request,
 )
 from ciao.web.routes_mcp import (
     mcp_server_enabled_endpoint,
@@ -486,8 +484,6 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         Route("/api/chats/{chat_id}/actions/{action_id}/dismiss", chat_action_dismiss, methods=["POST"]),
         Route("/api/chats/{chat_id}/actions/{action_id}/continue", chat_action_continue, methods=["POST"]),
         Route("/api/chats/{chat_id}/actions/{action_id}/callback", chat_action_callback, methods=["POST"]),
-        Route("/api/chats/{chat_id}/actions/mcp-auth", chat_mcp_auth_request, methods=["POST"]),
-        Route("/api/chats/{chat_id}/actions/{action_id}/turn-off", chat_action_turn_off, methods=["POST"]),
         Route("/api/chats/{chat_id}/prompt", chat_prompt, methods=["POST"]),
         Route("/api/chats/{chat_id}/compact", chat_compact, methods=["POST"]),
         Route("/api/chats/{chat_id}/messages", chat_messages, methods=["GET"]),

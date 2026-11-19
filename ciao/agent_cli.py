@@ -218,7 +218,7 @@ def _verbs(parent: argparse.ArgumentParser, dest: str = "verb") -> argparse._Sub
 _NEEDS_ACTION_FLAG_PARAMS: tuple[tuple[str, str], ...] = (
     ("--command-file", "command"), ("--note", "note"), ("--profile", "profile"),
     ("--mode", "mode"), ("--tool", "tool"), ("--setting", "setting"),
-    ("--reason", "reason"), ("--server", "server"), ("--provider", "provider"),
+    ("--reason", "reason"),
 )
 #: The flags each agent-raisable kind accepts. Values are checked by the engine.
 _NEEDS_ACTION_FLAGS: dict[str, frozenset[str]] = {
@@ -228,7 +228,6 @@ _NEEDS_ACTION_FLAGS: dict[str, frozenset[str]] = {
     "device_code": frozenset({"--tool"}),
     "system_setting": frozenset({"--setting", "--note"}),
     "restart": frozenset({"--reason", "--note"}),
-    "mcp_auth": frozenset({"--server", "--provider"}),
 }
 assert set(_NEEDS_ACTION_FLAGS) == AGENT_ACTION_KINDS
 
@@ -390,8 +389,6 @@ def build_parser() -> argparse.ArgumentParser:
     needs.add_argument("--tool", default=None, help="device_code: gh or az.")
     needs.add_argument("--setting", default=None, help="system_setting: the macOS privacy setting.")
     needs.add_argument("--reason", default=None, help="restart: config or update.")
-    needs.add_argument("--server", default=None, help="mcp_auth: the MCP server to sign in to.")
-    needs.add_argument("--provider", default=None, help="mcp_auth: claude or opencode (defaults to this chat's).")
 
     project = _verbs(nouns.add_parser("project", help="Projects in the active workspace."))
     plist = project.add_parser("list", help="List projects.")

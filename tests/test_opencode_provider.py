@@ -7290,8 +7290,8 @@ async def test_concurrent_ensure_server_calls_start_one_server(tmp_path, monkeyp
     monkeypatch.setattr(OpencodeProvider, "_start_server_once", fake_start)
 
     await asyncio.gather(
-        provider.ensure_server(request),  # type: ignore[arg-type]
-        provider.ensure_server(request),  # type: ignore[arg-type]
+        provider._ensure_server(request),  # type: ignore[arg-type]
+        provider._ensure_server(request),  # type: ignore[arg-type]
     )
 
     assert len(starts) == 1
