@@ -3928,50 +3928,84 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ProposalHistoryList.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-history-list--default"
+        ],
+        "note": "ProposalHistoryList.stories.ts Default: one accepted and one dismissed decision with the production row layout."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-history-list--narrow"
+        ],
+        "note": "Viewport state: the decision list inside a 390px containing block."
       },
       {
         "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "ProposalHistoryList.vue implements the loading branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-history-list--loading"
+        ],
+        "note": "SkeletonLoader (label \"Loading history\") while the first history read is held."
       },
       {
         "name": "initial-error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "ProposalHistoryList.vue implements the initial-error branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-history-list--initial-error"
+        ],
+        "note": "historyError with no loaded page: role alert and no empty-state claim."
       },
       {
         "name": "stale",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "ProposalHistoryList.vue implements the stale branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-history-list--stale"
+        ],
+        "note": "Seeded page with a failing refresh: rows stay on screen under the role alert."
       },
       {
         "name": "filtered-empty",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "ProposalHistoryList.vue implements the filtered-empty branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-history-list--filtered-empty"
+        ],
+        "note": "filtersHideEverything branch: the action filter hides every loaded decision."
       },
       {
         "name": "empty",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "ProposalHistoryList.vue implements the empty branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-history-list--empty"
+        ],
+        "note": "Successful read with no decisions: \"No decisions yet.\" copy."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "load-more",
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-history-list--load-more"
+        ],
+        "note": "historyCanLoadMore branch: the server holds more decisions, so the \"show more\" control is offered (not clicked)."
+      },
+      {
+        "name": "change-disclosure",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "toggleChange(row) receipt disclosure (Show change, receipt diff, undo); needs a receipt GET fixture, not rendered in this slice."
+      },
+      {
+        "name": "verify-note-edit",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "row.note_edit verification details (before and after text, evidence); not rendered in this slice."
       }
     ],
     "loading": {
       "status": "known",
-      "detail": "ProposalHistoryList.vue distinguishes first loading, initial failure and stale refresh retaining rows."
+      "detail": "Initial loading shows the generic SkeletonLoader lines (label Loading history, 5 rows, ProposalHistoryList.vue:295); loaded decisions are multi-line rows with actor, time, text and a reason line, so the placeholder geometry does not match the loaded geometry. Recorded for the loading follow-up; the owner is not changed here. Initial failure (no page) and stale refresh (rows kept under the error) are both covered."
     },
     "migration": {
       "status": "unassessed",
@@ -3996,50 +4030,126 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in ProposalReviewPanel.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-review-panel--default"
+        ],
+        "note": "ProposalReviewPanel.stories.ts Default: the queue with two suggested memory rows, their previews and the row actions from the production template."
       },
       {
         "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "ProposalReviewPanel.vue implements the loading branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-review-panel--loading"
+        ],
+        "note": "Queue skeleton (SkeletonLoader cards, label \"Loading proposals\") while the first GET /api/proposals is held; the queueLoading branch."
       },
       {
         "name": "initial-error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "ProposalReviewPanel.vue implements the initial-error branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-review-panel--initial-error"
+        ],
+        "note": "queueFailed branch: no snapshot and a failed first read, role alert with Retry."
       },
       {
         "name": "stale",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "ProposalReviewPanel.vue implements the stale branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-review-panel--stale"
+        ],
+        "note": "Seeded snapshot with a failing refresh: the pr-stale status keeps the rows under \"Could not refresh\" with Retry."
       },
       {
         "name": "filtered-empty",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "ProposalReviewPanel.vue implements the filtered-empty branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-review-panel--filtered-empty"
+        ],
+        "note": "filtersHideEverything branch: a search that matches none of the scoped rows, with Clear filters."
       },
       {
         "name": "empty",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "ProposalReviewPanel.vue implements the empty branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-review-panel--empty"
+        ],
+        "note": "queueEmpty branch: a successful read with nothing in scope, \"All reviewed.\"."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-review-panel--narrow"
+        ],
+        "note": "Viewport state: the default queue inside a 390px containing block."
+      },
+      {
+        "name": "selection",
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-review-panel--selection"
+        ],
+        "note": "showChecks branch after Select: row checkboxes on, one ticked, batch bar counts \"1 selected\"."
+      },
+      {
+        "name": "preview-open",
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-review-panel--preview-open"
+        ],
+        "note": "isPreviewOpen branch: the row decision card opened from its accept verb, repeating the preview text."
+      },
+      {
+        "name": "preview-error",
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-review-panel--preview-error"
+        ],
+        "note": "store.previewErrors branch: each row's destination read fails, row says it could not read the destination with Retry."
+      },
+      {
+        "name": "history",
+        "coverage": "covered",
+        "storyIds": [
+          "proposal-review-panel--history"
+        ],
+        "note": "section=\"history\" branch: the panel renders its ProposalHistoryList child instead of the queue."
+      },
+      {
+        "name": "dismiss-confirm",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "isDismissOpen(row) branch renders the dismissal confirmation; no story clicks Dismiss, so it is not rendered in this slice."
+      },
+      {
+        "name": "skill-row",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "isSkill(row) branch (skill evidence, implement action, lifecycle); no skill proposal fixture in this slice."
+      },
+      {
+        "name": "rehome-row",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "isRehome(row) branch (move destinations and re-home bullets); no re-home fixture in this slice."
+      },
+      {
+        "name": "batch-summary",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "store.lastBatchSummary block after a bulk action (per-destination counts); not rendered in this slice."
+      },
+      {
+        "name": "conflict",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "store.conflictIds card alert (destination changed underneath the row); not rendered in this slice."
       }
     ],
     "loading": {
       "status": "known",
-      "detail": "ProposalReviewPanel.vue distinguishes first loading, initial failure and stale refresh retaining rows."
+      "detail": "Initial loading shows the generic SkeletonLoader cards variant (3 cards, ProposalReviewPanel.vue:1740); the loaded rows are multi-line cards with a change tag, a file line and action buttons, so the placeholder geometry does not match the loaded geometry. Recorded for the loading follow-up; the owner is not changed here. Initial failure (no snapshot) and stale refresh (rows kept, pr-stale status) are both covered."
     },
     "migration": {
       "status": "unassessed",
@@ -5436,44 +5546,106 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in VaultReviewPanel.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "vault-review-panel--default"
+        ],
+        "note": "VaultReviewPanel.stories.ts Default: the To revisit section with two candidate notes and their signals."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "vault-review-panel--narrow"
+        ],
+        "note": "Viewport state: the To revisit list inside a 390px containing block."
       },
       {
         "name": "loading",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "VaultReviewPanel.vue implements the loading branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "vault-review-panel--loading"
+        ],
+        "note": "showInitialLoading branch: the candidates SkeletonLoader (label \"Loading candidates\") while the read is held."
       },
       {
         "name": "initial-error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "VaultReviewPanel.vue implements the initial-error branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "vault-review-panel--initial-error"
+        ],
+        "note": "showInitialError branch: no snapshot and a failed read, role alert with Retry."
       },
       {
         "name": "stale",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "VaultReviewPanel.vue implements the stale branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "vault-review-panel--stale"
+        ],
+        "note": "showStaleError branch: a seeded snapshot with a failing refresh keeps the candidates under the stale status."
       },
       {
         "name": "empty",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "VaultReviewPanel.vue implements the empty branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "vault-review-panel--empty"
+        ],
+        "note": "hasCurrentSnapshot with no candidates: \"Nothing to revisit.\" copy."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "trash",
+        "coverage": "covered",
+        "storyIds": [
+          "vault-review-panel--trash"
+        ],
+        "note": "section=\"trash\" branch: one retired note listed with its original path."
+      },
+      {
+        "name": "trash-empty",
+        "coverage": "covered",
+        "storyIds": [
+          "vault-review-panel--trash-empty"
+        ],
+        "note": "section=\"trash\" with a successful empty read: \"Nothing retired yet.\" copy."
+      },
+      {
+        "name": "trash-loading",
+        "coverage": "covered",
+        "storyIds": [
+          "vault-review-panel--trash-loading"
+        ],
+        "note": "section=\"trash\" showInitialLoading branch: the retired-notes SkeletonLoader while the read is held."
+      },
+      {
+        "name": "trash-error",
+        "coverage": "covered",
+        "storyIds": [
+          "vault-review-panel--trash-error"
+        ],
+        "note": "section=\"trash\" showInitialError branch: role alert with the retired-notes copy."
+      },
+      {
+        "name": "cleared-list",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "visibleCleared <details> list of notes cleared with \"Still true\"; not rendered in this slice."
+      },
+      {
+        "name": "entry-findings",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "entryCoverageOf / entryGroups stale-entry and unverified-entry findings on a candidate; needs an entry-coverage fixture, not rendered in this slice."
+      },
+      {
+        "name": "complete-project",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "isCompletable(candidate) branch that offers Complete on a project candidate; not rendered in this slice."
       }
     ],
     "loading": {
       "status": "known",
-      "detail": "VaultReviewPanel.vue distinguishes first loading, initial failure and stale refresh retaining rows."
+      "detail": "Initial loading shows the candidates SkeletonLoader cards variant (3 cards, VaultReviewPanel.vue:660) and, for Trash, a generic 4-line SkeletonLoader (VaultReviewPanel.vue:1093). Loaded candidates are cards with signal evidence and actions, and loaded trash rows are title and path lines, so both placeholders do not match the loaded geometry. Recorded for the loading follow-up; the owner is not changed here. Initial failure, stale refresh and the trash states are covered."
     },
     "migration": {
       "status": "unassessed",
