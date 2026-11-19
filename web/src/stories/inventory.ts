@@ -2575,7 +2575,7 @@ export const inventory: InventoryEntry[] = [
     "id": "components-item-peek-host",
     "name": "ItemPeekHost",
     "family": "Tasks, projects and automations",
-    "kind": "composition",
+    "kind": "component",
     "owner": {
       "path": "web/src/components/ItemPeekHost.vue",
       "anchor": "<template>"
@@ -2589,26 +2589,37 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "closed",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "Closed: no peek target, so no overlay mounts. Blocked by the coverage guard: storybookInventory.test.ts assertCoverage admits covered states only on component and inline rows, and this row is composition. Left uncovered until the maintainer decides (change the row kind or let composition rows claim stories); the story was not committed because an unclaimed story fails the orphan check."
+        "coverage": "covered",
+        "storyIds": ["item-peek-host--closed"],
+        "note": "No peek target: the host mounts nothing, so no dialog or overlay is drawn. The story mounts the production host through mountConnected with an empty peek store."
       },
       {
         "name": "task-open",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "Task target mounts TaskWorkspaceSurface in overlay mode over the view; its close ends the target. Blocked by the same composition-coverage guard as closed. Draft stories (TaskOpen, TaskOpenLoading, TaskOpenFailed) are not committed."
+        "coverage": "covered",
+        "storyIds": ["item-peek-host--task-open"],
+        "note": "Task target mounts TaskWorkspaceSurface in overlay mode: a modal dialog with the board editor drawn over the view. Its close ends the target and the host unmounts it; the play closes it and asserts no dialog remains."
+      },
+      {
+        "name": "task-open-loading",
+        "coverage": "covered",
+        "storyIds": ["item-peek-host--task-open-loading"],
+        "note": "Task target whose locate read is held: the overlay shows the compact Loading task… status sheet and no editor body."
+      },
+      {
+        "name": "task-open-failed",
+        "coverage": "covered",
+        "storyIds": ["item-peek-host--task-open-failed"],
+        "note": "Task target whose locate read fails: the overlay shows Could not load task with the server message and a Retry button; Retry draws the editor."
       }
     ],
     "loading": {
       "status": "known",
-      "detail": "Initial: the overlay's Loading task… sheet, drawn by TaskWorkspaceSurface in overlay mode (covered by the task-editor row's OverlayLoading). Failure: Could not load task with Retry (task-editor OverlayFailed). The host has no refresh or stale state of its own. No story here, so the host's own render is unverified in the workshop."
+      "detail": "Initial: the Loading task… sheet (task-open-loading story). Failure: Could not load task with Retry (task-open-failed story). Both are drawn by TaskWorkspaceSurface in overlay mode. The host has no refresh or stale state of its own, so none is listed."
     },
     "migration": {
       "status": "unassessed",
       "note": "Inventory admission does not approve a design migration."
-    },
-    "rationale": "Connected route or host composition; isolate its seam before rendering it in the workshop."
+    }
   },
   {
     "id": "components-item-title-row",
