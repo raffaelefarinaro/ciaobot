@@ -1473,38 +1473,100 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HomeIntake.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "home-intake--default"
+        ],
+        "note": "<template> with no staged items and no model request: the composer, the workspace project chip and the New chat control."
       },
       {
         "name": "draft",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "HomeIntake.vue implements the draft branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "home-intake--draft"
+        ],
+        "note": "An unsent prompt, which the Send control names; a workspace switch keeps each workspace's draft."
       },
       {
         "name": "attachments",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "HomeIntake.vue implements the attachments branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "home-intake--attachments"
+        ],
+        "note": "Staged files render in the Attachments list and each one has a remove control."
       },
       {
         "name": "action-error",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "HomeIntake.vue implements the action-error branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "home-intake--action-error"
+        ],
+        "note": "The share-error alert, set from the ?share-error query on mount. A failed start reports through the app toast host, which this owner does not render, so it has no owner DOM here."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
+        "name": "incoming-share",
+        "coverage": "uncovered",
         "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "note": "The shared-content banner needs a shared item in IndexedDB keyed by the ?shared query. The workshop does not seed that store, so the banner cannot render in isolation."
+      },
+      {
+        "name": "model-error",
+        "coverage": "covered",
+        "storyIds": [
+          "home-intake--model-error"
+        ],
+        "note": "The model list failed on its first request: the alert names the failure and offers Retry."
+      },
+      {
+        "name": "models-loading",
+        "coverage": "covered",
+        "storyIds": [
+          "home-intake--models-loading"
+        ],
+        "note": "The model list request is in flight: the status line reads Loading new chat models."
+      },
+      {
+        "name": "models-loaded",
+        "coverage": "covered",
+        "storyIds": [
+          "home-intake--models-loaded"
+        ],
+        "note": "The model list loaded: the status line is visually hidden and reads that availability may be incomplete."
+      },
+      {
+        "name": "models-empty",
+        "coverage": "covered",
+        "storyIds": [
+          "home-intake--models-empty"
+        ],
+        "note": "The model list loaded with no models: the status line reads that availability is unknown."
+      },
+      {
+        "name": "model-stale",
+        "coverage": "uncovered",
+        "storyIds": [],
+        "note": "A refresh failure after a loaded list needs a second model fetch after the first one succeeded. This slice does not sequence that pair of responses, so the stale-with-failure line is not covered."
+      },
+      {
+        "name": "starting",
+        "coverage": "covered",
+        "storyIds": [
+          "home-intake--starting"
+        ],
+        "note": "A send is in flight: the start control reads Opening, is disabled, and the prompt is locked."
+      },
+      {
+        "name": "narrow",
+        "coverage": "covered",
+        "storyIds": [
+          "home-intake--narrow"
+        ],
+        "note": "The composer inside a 390px wrapper, with the form no wider than the wrapper."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HomeIntake.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial model loading is models-loading, loaded is models-loaded, empty is models-empty and initial failure is model-error. Refresh failure with a kept list is model-stale and is uncovered. The model status line is visually hidden once loaded and visible while loading or failed, so its placeholder geometry differs from the loaded geometry. Recorded for the loading follow-up; not fixed here."
     },
     "migration": {
       "status": "unassessed",
@@ -1736,50 +1798,62 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "<template> in HomeReviewSummary.vue implements this render; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "home-review-summary--default"
+        ],
+        "note": "<template> with a memory proposal row to review; the other sources are current and drop out of the list."
       },
       {
         "name": "checking",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "HomeReviewSummary.vue implements the checking branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "home-review-summary--checking"
+        ],
+        "note": "Sources not yet loaded: the rows read Checking and carry the loading class."
       },
       {
         "name": "current",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "HomeReviewSummary.vue implements the current branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "home-review-summary--current"
+        ],
+        "note": "Every source loaded with nothing to review: the owner renders only the Nothing to review line."
       },
       {
         "name": "stale",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "HomeReviewSummary.vue implements the stale branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "home-review-summary--stale"
+        ],
+        "note": "A refresh failed after a successful load: the last rows stay and carry the stale class with the last-load note."
       },
       {
         "name": "empty",
-        "coverage": "uncovered",
+        "coverage": "not-applicable",
         "storyIds": [],
-        "note": "HomeReviewSummary.vue implements the empty branch; no rendered-state story exists."
+        "note": "Empty and current are one branch: with no visible rows the template renders only the Nothing to review line, which the current state covers. There is no separate empty copy."
       },
       {
         "name": "failed",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "HomeReviewSummary.vue implements the failed branch; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "home-review-summary--failed"
+        ],
+        "note": "The first load failed with no rows: the row shows the error with the attention class."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "automation-attention",
+        "coverage": "covered",
+        "storyIds": [
+          "home-review-summary--automation-attention"
+        ],
+        "note": "A failed automation in the active workspace: the row carries the attention class and names the problem."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HomeReviewSummary.vue has not yet been audited."
+      "status": "known",
+      "detail": "Initial loading is checking, initial failure is failed and a refresh failure that keeps rows is stale. Loading rows use the loaded row markup; placeholder geometry was not measured in this slice."
     },
     "migration": {
       "status": "unassessed",
@@ -9630,44 +9704,48 @@ export const inventory: InventoryEntry[] = [
     "states": [
       {
         "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".home-intake-form in HomeIntake.vue implements this family; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "home-intake-composer--default"
+        ],
+        "note": ".home-intake-form with an empty prompt: the Start a new chat form, the New chat control and no send chord."
       },
       {
         "name": "prompt",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".home-intake-form in HomeIntake.vue includes prompt; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "home-intake-composer--prompt"
+        ],
+        "note": "A typed prompt: the control is named Send and its title carries the send chord."
       },
       {
         "name": "project",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".home-intake-form in HomeIntake.vue includes project; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "home-intake-composer--project"
+        ],
+        "note": "A workspace with no project: the project chip and the start control are disabled, with the prompt still editable."
       },
       {
         "name": "model",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".home-intake-form in HomeIntake.vue includes model; no rendered-state story exists."
+        "coverage": "covered",
+        "storyIds": [
+          "home-intake-composer--model"
+        ],
+        "note": "The model chip opens the picker; choosing a model renames the chip to that model."
       },
       {
         "name": "attachments",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".home-intake-form in HomeIntake.vue includes attachments; no rendered-state story exists."
-      },
-      {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further states have not yet been audited."
+        "coverage": "covered",
+        "storyIds": [
+          "home-intake-composer--attachments"
+        ],
+        "note": "Staged files appear in the form's Attachments list with a remove control."
       }
     ],
     "loading": {
-      "status": "unknown",
-      "detail": "Initial and refresh loading fidelity in HomeIntake.vue has not yet been audited."
+      "status": "none",
+      "detail": "The form has no fetch of its own. Model list loading is recorded on the HomeIntake row."
     },
     "migration": {
       "status": "unassessed",
