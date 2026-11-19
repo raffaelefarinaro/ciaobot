@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from ciao.config import CiaoConfig
-from ciao.providers.claude import ClaudeProvider
+from ciao.providers.acp.agents import ClaudeAcpProvider
 from ciao.providers.opencode import OpencodeProvider
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
@@ -735,7 +735,7 @@ def test_a_background_stream_does_not_count_as_a_live_turn(tmp_path: Path) -> No
 async def test_finish_background_stop_calls_abort_through_contract(tmp_path: Path) -> None:
     aborted: list[str] = []
 
-    class _Stub(ClaudeProvider):
+    class _Stub(ClaudeAcpProvider):
         @property
         def current_session_id(self) -> str | None:
             return "sess-abort-1"
@@ -749,7 +749,7 @@ async def test_finish_background_stop_calls_abort_through_contract(tmp_path: Pat
     assert aborted == ["sess-abort-1"]
 
     # A Claude-like provider keeps the base no-op abort: awaited without error.
-    class _ClaudeLike(ClaudeProvider):
+    class _ClaudeLike(ClaudeAcpProvider):
         @property
         def current_session_id(self) -> str | None:
             return "sess-claude-1"

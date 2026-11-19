@@ -114,21 +114,6 @@ def test_stale_thinking_level_falls_back_to_default(tmp_path: Path) -> None:
 
 # ── provider command construction ────────────────────────────────────────
 
-def test_claude_levels_match_sdk_effort_literal() -> None:
-    # Guard against SDK upgrades renaming/narrowing the effort values we
-    # surface in the picker. ``effort`` is typed as Optional[Literal[...]].
-    import typing
-
-    from claude_agent_sdk import ClaudeAgentOptions
-
-    hints = typing.get_type_hints(ClaudeAgentOptions)
-    literal = typing.get_args(hints["effort"])[0]
-    sdk_levels = set(typing.get_args(literal))
-    assert set(THINKING_LEVELS["claude"]) <= sdk_levels
-
-
-# ── models endpoint ──────────────────────────────────────────────────────
-
 def _models_body(monkeypatch, claude_catalog: list[dict]) -> dict:
     import asyncio
     from unittest.mock import AsyncMock

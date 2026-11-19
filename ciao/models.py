@@ -87,7 +87,7 @@ class ImageAttachment:
 
 # Native thinking/reasoning levels per provider, surfaced as-is in the PWA
 # model picker. Empty string = provider default: no flag/option is sent.
-# Claude's maps to ``ClaudeAgentOptions.effort``.
+# Claude's is sent to the claude-agent-acp adapter as its effort config option.
 #
 # Sourced from ``ciao.provider_registry`` so the level ladders live beside the
 # rest of each provider's static facts. Kept as a module-level dict because
@@ -119,8 +119,8 @@ class AgentRequest:
     fork_session: bool = False
     images: list[ImageAttachment] = field(default_factory=list)
     extra_env: dict[str, str] = field(default_factory=dict)
-    # Tools the spawned CLI must refuse to call. Forwarded to the SDK's
-    # ``ClaudeAgentOptions.disallowed_tools``. Lets per-workspace policy
+    # Tools the spawned CLI must refuse to call. Forwarded to the Claude adapter as
+    # ``_meta.claudeCode.options.disallowedTools``. Lets per-workspace policy
     # (the trim catalog denies plus workspace extras, e.g. ``Bash``) reach the subprocess
     # without leaking through ``extra_env``.
     disallowed_tools: list[str] = field(default_factory=list)

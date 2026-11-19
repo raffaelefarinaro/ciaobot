@@ -14,7 +14,8 @@ sparse ``claude_trim`` map of option key -> trimmed. Scheduling options are
 trimmed by default like the rest; un-trimming one lets Claude create its own
 routines and loops outside Ciaobot's schedules.
 
-Two levers apply to bundled skills. ``skillOverrides`` in the CLI settings layer
+Two levers apply to bundled skills. The adapter passes both to the CLI through
+``_meta.claudeCode.options``: ``skillOverrides`` in the settings layer
 hides a skill from the model's listing and slash-command picker. A
 ``Skill(<name>)`` deny rule blocks execution if one is re-enabled downstream;
 deny alone is not enough, because a denied skill still appears in the listing

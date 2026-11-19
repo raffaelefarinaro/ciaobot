@@ -37,7 +37,6 @@ from pathlib import Path
 from typing import Any
 
 CODESIGN = "/usr/bin/codesign"
-VENDOR_SIGNED = {"lib/python3.12/site-packages/claude_agent_sdk/_bundled/claude": "Q6L2SF6YDW"}
 REQUIRED_FILES = ("bin/ciao", "bin/python3.12", "provenance.json")
 CODESIGN_DEADLINE = 600
 MAX_PROVENANCE = 1024 * 1024
@@ -146,22 +145,7 @@ def signing_order(paths: list[str]) -> list[str]:
     return sorted(paths, key=lambda p: (-p.count("/"), p))
 
 
-def check_vendor(engine: Path, rel: str, team: str) -> None:
-    """The vendor-signed file must verify and still carry the vendor's Developer ID, team and runtime flag."""
-    path = os.fspath(engine / rel)
-    code, _out = _run([CODESIGN, "--verify", "--strict", f"-R={_vendor_requirement(team)}", path])
-    _require(code == 0)
-    code, out = _run([CODESIGN, "-d", "--verbose=4", path])
-    _require(code == 0)
-    lines = out.splitlines()
-    authorities = [line for line in lines if line.startswith("Authority=")]
-    _require(bool(authorities) and authorities[0].startswith("Authority=Developer ID Application:"))
-    _require(f"TeamIdentifier={team}" in lines)
-    flags = [line for line in lines if line.startswith("CodeDirectory ") and "flags=" in line]
-    _require(any("runtime" in line.split("flags=", 1)[1].split(" ", 1)[0] for line in flags))
-
-
-def _vendor_requirement(team: str) -> str:
+def _team_requirement(team: str) -> str:
     """A codesign requirement pinning the signer to Apple's CA chain, the Developer ID leaf and the team.
 
     Passed as ``-R=<requirement>`` so codesign itself validates the certificate chain; text-matching
@@ -170,15 +154,6 @@ def _vendor_requirement(team: str) -> str:
     return ('anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6]'
             ' and certificate leaf[field.1.2.840.113635.100.6.1.13]'
             f' and certificate leaf[subject.OU] = "{team}"')
-
-
-def _check_vendor_paths(engine: Path) -> None:
-    """Verify each present vendor file; a symlinked vendor path is a refusal."""
-    for rel, team in VENDOR_SIGNED.items():
-        vendor = engine / rel
-        _require(not vendor.is_symlink())
-        if vendor.is_file():
-            check_vendor(engine, rel, team)
 
 
 def _inventory(engine: Path) -> list[dict[str, Any]]:
@@ -190,7 +165,7 @@ def _inventory(engine: Path) -> list[dict[str, Any]]:
 
 def _check_distribution_file(path: str, team: str) -> None:
     """A distribution-signed file: this team's Developer ID, hardened runtime and a secure timestamp."""
-    code, _out = _run([CODESIGN, "--verify", "--strict", f"-R={_vendor_requirement(team)}", path])
+    code, _out = _run([CODESIGN, "--verify", "--strict", f"-R={_team_requirement(team)}", path])
     _require(code == 0)
     code, out = _run([CODESIGN, "-d", "--verbose=4", path])
     _require(code == 0)
@@ -205,11 +180,9 @@ def _check_distribution_file(path: str, team: str) -> None:
 
 
 def check(engine: Path, team: str | None = None) -> None:
-    """Every non-vendor Mach-O is signed (ad-hoc, or with ``team``'s distribution identity); the vendor rule holds."""
+    """Every Mach-O is signed: ad-hoc, or with ``team``'s distribution identity."""
     check_layout(engine)
     for rel in macho_files(engine):
-        if rel in VENDOR_SIGNED:
-            continue
         path = os.fspath(engine / rel)
         if team is not None:
             _check_distribution_file(path, team)
@@ -218,7 +191,6 @@ def check(engine: Path, team: str | None = None) -> None:
         _require(code == 0)
         code, out = _run([CODESIGN, "-d", "--verbose=4", path])
         _require(code == 0 and "Signature=adhoc" in out.splitlines())
-    _check_vendor_paths(engine)
 
 
 def _team_of(team: str, identity: str) -> None:
@@ -228,7 +200,7 @@ def _team_of(team: str, identity: str) -> None:
 
 
 def sign_engine(engine: Path, distribution: tuple[str, str] | None = None) -> list[str]:
-    """Sign every non-vendor Mach-O: ad-hoc, or ``distribution = (team, identity)`` with runtime and timestamp."""
+    """Sign every Mach-O: ad-hoc, or ``distribution = (team, identity)`` with runtime and timestamp."""
     if distribution is not None:
         _team_of(*distribution)
         sign_args = ["--force", "--sign", distribution[1], "--options", "runtime", "--timestamp"]
@@ -236,8 +208,7 @@ def sign_engine(engine: Path, distribution: tuple[str, str] | None = None) -> li
         sign_args = ["--force", "--sign", "-", "--timestamp=none"]
     check_layout(engine)
     before = _inventory(engine)
-    targets = signing_order([p for p in macho_files(engine) if p not in VENDOR_SIGNED])
-    _check_vendor_paths(engine)
+    targets = signing_order(macho_files(engine))
     for rel in targets:
         code, _out = _run([CODESIGN, *sign_args, os.fspath(engine / rel)])
         _require(code == 0)

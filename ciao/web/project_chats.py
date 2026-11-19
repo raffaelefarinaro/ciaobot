@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 if TYPE_CHECKING:
     from ciao.mcp_server import CiaoMcpService
@@ -156,7 +156,7 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 from ciao.os_support.media_types import guess_type as guess_media_type
-from ciao import cli_envelopes, repo_link, repo_location, vault_review, vault_verification
+from ciao import cli_envelopes, repo_link, repo_location, vault_review
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.config import (
     CLAUDE_MODELS,
@@ -197,7 +197,6 @@ from ciao.providers.base import (
     CleanupTimedOut,
     QuestionResponseResult,
 )
-from ciao.rate_limits import RateLimitStore, default_store_path
 from ciao.schedules import (
     ScheduleEntry,
     ScheduleStore,
@@ -210,7 +209,6 @@ from ciao.chat_actions import (
     ActionOrigin,
     ActionState,
     ChatAction,
-    ChatActionError,
     action_key,
     action_payload,
     check_agent_params,
@@ -319,8 +317,7 @@ _RESUME_CONTINUE_PROMPT = "continue"
 _MAX_CONNECTION_DROP_RETRIES = 6
 # Cap on quota retries: every usage-limit retry is hourly (_RETRY_INTERVAL_SECONDS),
 # so a week of attempts covers a weekly limit, and a limit that never clears
-# still stops. When Claude's saved rate-limit snapshot names the rejected
-# five-hour bucket's reset, the retry is pointed there instead (_quota_reset_at).
+# still stops.
 _MAX_QUOTA_RETRIES = 7 * 24
 # A retry that comes due while the chat is running a turn waits this long and
 # checks again, not a whole retry interval.
@@ -477,11 +474,6 @@ def _retry_cap(kind: str) -> int | None:
     return None
 
 
-# Claude rate-limit buckets whose rejection explains each quota retry kind.
-_QUOTA_RESET_BUCKETS = {
-    "quota": ("five_hour",),
-}
-
 _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # ── Idle provider reaping ────────────────────────────────────────────────
 # `self._providers` is keyed by chat id and, before this, was only ever
@@ -500,7 +492,7 @@ _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # `session_id` is persisted, so the next turn reconnects and resumes rather
 # than starting a new conversation — the same path a token rotation already
 # takes (ciao/providers/opencode.py::_ensure_server,
-# ciao/providers/claude.py::_ensure_connected).
+# ciao/providers/acp/provider.py::run_streaming).
 _PROVIDER_IDLE_TIMEOUT_SECONDS = 900.0
 # ACP agents (Claude today) are the exception to the timeout above. Each is one
 # agent process whose next turn resumes the same session, but rebuilding it pays a
@@ -7672,7 +7664,6 @@ class ProjectChatManager:
             prompt,
             image_refs=image_refs,
             reason=reason,
-            next_at=self._quota_reset_at(chat, kind),
             interval_seconds=interval,
             unattended=unattended,
             _owner=stream,
@@ -7682,41 +7673,6 @@ class ProjectChatManager:
         stream.publish({"type": "chat_retry", "status": "pending"})
         self._park_pending_for_retry(chat_id, stream)
         return True
-
-    def _quota_reset_at(self, chat: ChatInfo | None, kind: str) -> str | None:
-        """Return when the rejected Claude bucket behind a quota retry resets, plus a minute.
-
-        ``kind`` picks the buckets: the five-hour session window for "quota";
-        any other kind has none. The next attempt is pointed at the reset
-        instead of the hourly interval when the saved rate-limit snapshot names one. The file is user state,
-        so every field is type-checked and nothing here raises.
-        """
-        bucket_names = _QUOTA_RESET_BUCKETS.get(kind)
-        if bucket_names is None or chat is None or chat.provider != "claude":
-            return None
-        try:
-            payload = RateLimitStore(
-                path=default_store_path(self._runtime_root)
-            ).load()
-        except (OSError, ValueError):
-            return None
-        buckets = payload.get("buckets") if isinstance(payload, dict) else None
-        if not isinstance(buckets, dict):
-            return None
-        now = time.time()
-        resets = []
-        for name in bucket_names:
-            bucket = buckets.get(name)
-            if not isinstance(bucket, dict) or bucket.get("status") != "rejected":
-                continue
-            resets_at = bucket.get("resets_at")
-            if isinstance(resets_at, int) and not isinstance(resets_at, bool) and resets_at > now:
-                resets.append(resets_at)
-        if not resets:
-            return None
-        return datetime.fromtimestamp(min(resets) + 60, UTC).replace(
-            microsecond=0
-        ).isoformat().replace("+00:00", "Z")
 
     def recovery_status(self, chat_id: str) -> dict[str, Any] | None:
         """Read the authoritative registry after an uncertain scheduling result."""

@@ -778,7 +778,6 @@
                   </div>
                 </div>
                 <p v-else-if="conn.release_check?.state === 'current'" class="set-row-sub">Tested with {{ conn.release_check.tested }}</p>
-                <p v-else-if="conn.release_check?.state === 'bundled'" class="set-row-sub">Bundled with Ciaobot; updates with Ciaobot</p>
                 <div v-if="getProviderSection(String(connKey))" class="provider-inline-defaults">
                   <div class="set-subrow">
                     <span :id="`default-model-label-${connKey}`" class="ws-label set-subrow-label">Default model</span>
@@ -901,20 +900,23 @@
                       </template>
                     </div>
 
-                    <!-- Skills the CLI ships itself, not installed by the user -->
-                    <div class="ws-connectors-header" style="margin-top: 10px;">
-                      <span class="ws-label">Built into {{ conn.label || connKey }} ({{ conn.bundled_skills?.length ?? 0 }})</span>
-                    </div>
-                    <div class="workspace-connector-pills">
-                      <template v-if="conn.bundled_skills && conn.bundled_skills.length">
-                        <span v-for="skill in conn.bundled_skills" :key="skill" class="connector-pill connector-pill--enabled" :title="`Ships with ${conn.label || connKey}: ${skill}`">
-                          <span class="pill-dot"></span> {{ skill }}
+                    <!-- Skills the CLI ships itself, not installed by the user. Only providers that
+                         report them (OpenCode) get the block; the Claude CLI reports none. -->
+                    <template v-if="conn.bundled_skills !== undefined">
+                      <div class="ws-connectors-header" style="margin-top: 10px;">
+                        <span class="ws-label">Built into {{ conn.label || connKey }} ({{ conn.bundled_skills.length }})</span>
+                      </div>
+                      <div class="workspace-connector-pills">
+                        <template v-if="conn.bundled_skills.length">
+                          <span v-for="skill in conn.bundled_skills" :key="skill" class="connector-pill connector-pill--enabled" :title="`Ships with ${conn.label || connKey}: ${skill}`">
+                            <span class="pill-dot"></span> {{ skill }}
+                          </span>
+                        </template>
+                        <span v-else class="hint hint--compact">
+                          {{ !conn.ok ? 'Connect to discover' : 'None reported by this CLI' }}
                         </span>
-                      </template>
-                      <span v-else class="hint hint--compact">
-                        {{ !conn.ok ? 'Connect to discover' : conn.bundled_skills ? 'None reported by this CLI' : conn.skills ? 'Listed after the next chat with this CLI.' : 'Could not read this list. Press Verify to try again.' }}
-                      </span>
-                    </div>
+                      </div>
+                    </template>
                 </details>
               </div>
               <ProviderInventory v-if="!providerKeys.connections.opencode" :workspace="projectStore.activeWorkspace" />

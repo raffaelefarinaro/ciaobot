@@ -214,7 +214,6 @@ def test_tool_summary_ownership():
         "_summarize_opencode_tool_input",
     }
     for relative in (
-        ("ciao/providers/claude.py", "_summarize_tool_input"),
         ("ciao/providers/opencode.py", "_summarize_tool_input"),
         ("ciao/providers/opencode.py", "_file_touches"),
         ("ciao/web/transcript_service.py", "_summarize_tool_input"),
@@ -232,17 +231,15 @@ def test_tool_summary_ownership():
                 and node.id in old_names and isinstance(node.ctx, ast.Store))
             for node in ast.walk(tree)
         )
-    from ciao.providers import claude, opencode
+    from ciao.providers import opencode
     from ciao.web import transcript_service
 
     exports = {
         "ciao.tool_summary": importlib.import_module("ciao.tool_summary"),
-        "ciao.providers.claude": claude,
         "ciao.providers.opencode": opencode,
         "ciao.web.transcript_service": transcript_service,
     }
     bindings = {
-        ("ciao.providers.claude", "summarize_claude_tool_input"),
         ("ciao.providers.opencode", "summarize_opencode_tool_input"),
         ("ciao.providers.opencode", "opencode_file_touches"),
         ("ciao.web.transcript_service", "summarize_claude_tool_input"),

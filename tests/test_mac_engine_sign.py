@@ -17,17 +17,6 @@ SPEC.loader.exec_module(es)
 THIN = bytes.fromhex("cffaedfe") + b"\x0c\x00\x00\x01" + b"\0" * 40
 # A thin 64-bit Mach-O whose cputype is x86_64, so not an arm64 file.
 THIN_X86 = bytes.fromhex("cffaedfe") + (0x01000007).to_bytes(4, "little") + b"\0" * 40
-VENDOR = "lib/python3.12/site-packages/claude_agent_sdk/_bundled/claude"
-VENDOR_REQUIREMENT = (
-    "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6]"
-    " and certificate leaf[field.1.2.840.113635.100.6.1.13]"
-    ' and certificate leaf[subject.OU] = "Q6L2SF6YDW"'
-)
-GOOD_VENDOR = (
-    "CodeDirectory v=20500 size=623333 flags=0x10000(runtime) hashes=19468+7 location=embedded\n"
-    "Authority=Developer ID Application: Anthropic PBC (Q6L2SF6YDW)\nAuthority=Apple Root CA\n"
-    "TeamIdentifier=Q6L2SF6YDW\n"
-)
 ADHOC = "CodeDirectory v=20400 flags=0x2(adhoc)\nSignature=adhoc\nTeamIdentifier=not set\n"
 TEAM = "AXBFS96Y9F"
 IDENTITY = f"Developer ID Application: Someone Example ({TEAM})"
@@ -50,8 +39,6 @@ class Fake:
     def __init__(self, engine: Path):
         self.engine = engine
         self.calls: list[list[str]] = []
-        self.vendor_display = GOOD_VENDOR
-        self.vendor_verify = 0
         self.verify_fail: set[str] = set()
         self.display_override: dict[str, str] = {}
         self.default_display = ADHOC
@@ -68,12 +55,8 @@ class Fake:
                 self.also()
             return 0, ""
         if "--verify" in argv:
-            if rel == VENDOR:
-                return self.vendor_verify, ""
             return (1 if rel in self.verify_fail else 0), ""
         if "-d" in argv:
-            if rel == VENDOR:
-                return 0, self.vendor_display
             return 0, self.display_override.get(rel, self.default_display)
         raise AssertionError(argv)
 
@@ -85,7 +68,7 @@ def make_engine(tmp_path: Path) -> Path:
     engine = tmp_path / "Ciaobot.app/Contents/Resources/engine"
     for rel, data in {
         "bin/python3.12": THIN, "lib/x/deep/a.so": THIN, "lib/b.dylib": fat_arm64(),
-        "lib/fake.so": b"#!/bin/sh\nnot macho\n", "lib/mislabelled.txt": THIN, VENDOR: THIN + b"v",
+        "lib/fake.so": b"#!/bin/sh\nnot macho\n", "lib/mislabelled.txt": THIN,
     }.items():
         (engine / rel).parent.mkdir(parents=True, exist_ok=True)
         (engine / rel).write_bytes(data)
@@ -134,43 +117,6 @@ def test_adhoc_argv_is_exact(rig):
         assert not {"--deep", "--options", "runtime", "--entitlements"} & set(call)
 
 
-def test_vendor_binary_is_verified_not_signed(rig):
-    engine, fake = rig
-    assert es.main(["sign", "--adhoc", str(engine)]) == 0
-    vendor = str(engine / VENDOR)
-    assert vendor not in fake.signs()
-    assert any(c[-1] == vendor and "--verify" in c for c in fake.calls)
-    assert any(c[-1] == vendor and "-d" in c for c in fake.calls)
-
-
-def test_vendor_verify_pins_the_signer_to_apple_and_the_team(rig):
-    """codesign --verify --strict must carry the -R requirement: the pin is not a text match."""
-    engine, fake = rig
-    assert es.main(["sign", "--adhoc", str(engine)]) == 0
-    vendor = str(engine / VENDOR)
-    expected = [es.CODESIGN, "--verify", "--strict", "-R=" + VENDOR_REQUIREMENT, vendor]
-    # once in the sign flow and once in the final check
-    verify_calls = [c for c in fake.calls if c[-1] == vendor and "--verify" in c]
-    assert verify_calls == [expected, expected]
-
-
-@pytest.mark.parametrize("case", ["wrong-team", "adhoc", "no-runtime", "verify-fails", "not-developer-id"])
-def test_vendor_signature_must_match(rig, case):
-    engine, fake = rig
-    if case == "wrong-team":
-        fake.vendor_display = GOOD_VENDOR.replace("TeamIdentifier=Q6L2SF6YDW", "TeamIdentifier=ZZZZZZZZZZ")
-    elif case == "adhoc":
-        fake.vendor_display = ADHOC
-    elif case == "no-runtime":
-        fake.vendor_display = GOOD_VENDOR.replace("0x10000(runtime)", "0x0(none)")
-    elif case == "not-developer-id":
-        fake.vendor_display = GOOD_VENDOR.replace("Developer ID Application: Anthropic PBC (Q6L2SF6YDW)", "Someone")
-    else:
-        fake.vendor_verify = 1
-    assert es.main(["sign", "--adhoc", str(engine)]) == 1
-    assert fake.signs() == []
-
-
 def test_every_signed_file_is_verified(rig):
     engine, fake = rig
     fake.verify_fail = {"lib/b.dylib"}
@@ -179,7 +125,7 @@ def test_every_signed_file_is_verified(rig):
     assert str(engine / "lib/b.dylib") in verified
 
 
-@pytest.mark.parametrize("case", ["provenance-touched", "new-file", "vendor-touched", "target-symlinked"])
+@pytest.mark.parametrize("case", ["provenance-touched", "new-file", "target-symlinked"])
 def test_signing_may_change_only_signed_files(rig, case):
     engine, fake = rig
     step = [0]
@@ -190,9 +136,6 @@ def test_signing_may_change_only_signed_files(rig, case):
                 handle.write(" ")
         elif case == "new-file":
             (engine / "lib/a.so.cstemp").write_bytes(b"x")
-        elif case == "vendor-touched":
-            with open(engine / VENDOR, "ab") as handle:
-                handle.write(b"x")
         else:
             # A target that stops being a regular file mid-signing, with the symlink pointing at
             # an already-signed target: the path set stays the same, the codesign calls all
@@ -204,16 +147,6 @@ def test_signing_may_change_only_signed_files(rig, case):
 
     fake.also = sneaky
     assert es.main(["sign", "--adhoc", str(engine)]) == 1
-
-
-def test_symlinked_vendor_path_is_refused(rig):
-    engine, fake = rig
-    vendor = engine / VENDOR
-    vendor.unlink()
-    os.symlink("claude-elsewhere", vendor)
-    assert es.main(["sign", "--adhoc", str(engine)]) == 1
-    assert fake.signs() == []
-    assert es.main(["check", str(engine)]) == 1
 
 
 @pytest.mark.parametrize(
@@ -291,20 +224,6 @@ def test_check_refuses_an_unsigned_macho(rig):
     assert es.main(["check", str(engine)]) == 1
 
 
-@pytest.mark.parametrize("case", ["adhoc", "wrong-team", "verify-fails"])
-def test_check_refuses_a_swapped_vendor(rig, case):
-    """A swapped claude is caught in check mode by the vendor guard, not only by signing."""
-    engine, fake = rig
-    if case == "adhoc":
-        fake.vendor_display = ADHOC
-    elif case == "wrong-team":
-        fake.vendor_display = GOOD_VENDOR.replace("TeamIdentifier=Q6L2SF6YDW", "TeamIdentifier=ZZZZZZZZZZ")
-    else:
-        fake.vendor_verify = 1
-    assert es.main(["check", str(engine)]) == 1
-    assert fake.signs() == []
-
-
 def test_check_refuses_a_failing_verify_and_writes_nothing(rig):
     engine, fake = rig
     fake.verify_fail = {"lib/b.dylib"}
@@ -320,7 +239,7 @@ def test_inventory_prints_the_full_inventory(rig, capsys):
     assert captured.err == ""
     rows = json.loads(captured.out)
     paths = {row["path"]: row for row in rows}
-    for expected in ["bin/ciao", "bin/python3.12", "bin/python3", "lib/b.dylib", "provenance.json", VENDOR]:
+    for expected in ["bin/ciao", "bin/python3.12", "bin/python3", "lib/b.dylib", "provenance.json"]:
         assert expected in paths
     # Every regular file records its size and sha256, whatever its contents.
     python = paths["bin/python3.12"]
@@ -390,7 +309,6 @@ def test_distribution_argv_is_exact(rig):
         assert not {"--deep", "--entitlements", "--timestamp=none"} & set(call)
     assert rels(engine, [c[-1] for c in sign_calls]) == [
         "lib/x/deep/a.so", "bin/python3.12", "lib/b.dylib", "lib/mislabelled.txt"]
-    assert str(engine / VENDOR) not in fake.signs()
 
 
 def test_distribution_verification_pins_the_team(rig):
@@ -427,13 +345,6 @@ def test_distribution_check_refuses_a_weak_signature(rig, case):
 def test_adhoc_engine_fails_the_distribution_check(rig):
     engine, _fake = rig
     assert es.main(["check", str(engine)]) == 0
-    assert es.main(["check", "--distribution", TEAM, str(engine)]) == 1
-
-
-def test_distribution_check_still_guards_the_vendor_file(rig):
-    engine, fake = rig
-    fake.default_display = DIST
-    fake.vendor_display = ADHOC
     assert es.main(["check", "--distribution", TEAM, str(engine)]) == 1
 
 

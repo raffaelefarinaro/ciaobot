@@ -275,3 +275,36 @@ def test_notify_question_silent_for_memory_pass(tmp_path: Path) -> None:
 
     pcm._notify_question(ordinary.chat_id, payload)
     assert calls == [(ordinary.chat_id, "Which project?")]
+
+
+async def test_permission_push_is_resent_only_while_the_request_is_pending() -> None:
+    """One re-send during the first wait, while the request is still open; the user answers
+    during the second wait, so no further re-send goes out."""
+    from types import SimpleNamespace
+
+    from ciao.main import PERMISSION_REFIRE_DELAY_S, _refire_permission_push
+
+    pending = {"req-1"}
+    provider = SimpleNamespace(has_permission_request=lambda rid, session_id="": rid in pending)
+    providers = {"chat-1": SimpleNamespace(provider=provider)}
+    sent: list[dict] = []
+    waits: list[float] = []
+
+    async def answer_on_second_wait(delay: float) -> None:
+        waits.append(delay)
+        if len(waits) == 2:
+            pending.discard("req-1")
+
+    payload = {"title": "Ciaobot needs approval", "chat_id": "chat-1"}
+    await _refire_permission_push(
+        payload,
+        chat_id="chat-1",
+        request_id="req-1",
+        providers=providers,
+        focused_chats={},
+        dispatch=sent.append,
+        sleep=answer_on_second_wait,
+    )
+
+    assert sent == [payload]
+    assert waits == [PERMISSION_REFIRE_DELAY_S, PERMISSION_REFIRE_DELAY_S]

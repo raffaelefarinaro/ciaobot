@@ -86,6 +86,20 @@ def test_read_session_file_returns_the_jsonl_text(claude_home: Path) -> None:
     assert claude_sessions.read_session_file(SESSIONS["compact_summary"], CWD) is None
 
 
+def test_a_transcript_with_a_non_utf8_byte_keeps_its_history(claude_home: Path) -> None:
+    sid = SESSIONS["tool_use"]
+    target = claude_home / "projects" / SLUG / f"{sid}.jsonl"
+    first = b'{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"%s","message":{"role":"user","content":"hi"}}\n'
+    second = b'{"type":"user","uuid":"bad","parentUuid":"u1","sessionId":"%s","message":{"role":"user","content":"caf\xe9"}}\n'
+    target.write_bytes(first % sid.encode() + second % sid.encode())
+
+    content = claude_sessions.read_session_file(sid, CWD)
+    messages = claude_sessions.get_session_messages(sid, directory=CWD)
+
+    assert content is not None and "\ufffd" in content
+    assert [m.uuid for m in messages] == ["u1", "bad"]
+
+
 def test_corrupt_lines_are_skipped() -> None:
     content = '{"type":"user","uuid":"ok"}\nnot json\n{"type":"progress"}\n[1]\n'
     entries = claude_sessions.parse_transcript_entries(content)

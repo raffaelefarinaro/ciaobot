@@ -34,8 +34,7 @@ failure leaves nothing behind there.
 
 The bundle is copied into DIR, signed ad-hoc (Sparkle's nested helpers
 inside-out first, and the bundled engine's Mach-O files signed ad-hoc,
-inside-out, before the app; the SDK's vendor-signed CLI is verified, not
-re-signed), verified with codesign --verify --deep --strict,
+inside-out, before the app), verified with codesign --verify --deep --strict,
 archived without dereferencing symlinks, extracted again and verified,
 then described in MANIFEST.txt and SHA256SUMS. The bundle identifier,
 version, and architecture are read from the built app, so
@@ -201,8 +200,8 @@ if [ -d "$sparkle" ]; then
 fi
 
 # The bundled engine (#3128). Its Mach-O files are signed inside-out before the
-# app, so the app's seal covers already-signed code. The SDK's own CLI keeps its
-# vendor signature. Ad-hoc mode adds no hardened runtime and no entitlements.
+# app, so the app's seal covers already-signed code. Ad-hoc mode adds no hardened
+# runtime and no entitlements.
 engine=$bundle/Contents/Resources/engine
 [ -d "$engine" ] && [ ! -L "$engine" ] || die "the app has no bundled engine at Contents/Resources/engine"
 command -v python3 >/dev/null \

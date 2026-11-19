@@ -1480,7 +1480,6 @@ def test_provider_update_tile_for_below_tested_opencode(tmp_path: Path) -> None:
     "check",
     [
         {"state": "current", "installed": "2.1.0", "tested": "2.1.0"},
-        {"state": "bundled", "tested": "2.1.0"},
         {"state": "unsupported", "tested": "2.1.0"},
         {"state": "untested"},
     ],
@@ -1525,7 +1524,6 @@ def test_provider_update_dismissals_keep_other_providers_and_ignore_junk(tmp_pat
     [
         ({"state": "current"}, "current", "OpenCode is up to date."),
         (_below_tested(), "below_tested", "OpenCode 2.0.32 is still older than 2.1.0."),
-        ({"state": "bundled"}, "bundled", "OpenCode is bundled with Ciaobot."),
         ({"state": "unsupported"}, "unsupported", "OpenCode is not compatible with this Ciaobot version."),
         ({"state": "unknown"}, "unknown", "Could not verify OpenCode's version."),
         ({"state": "untested"}, "untested", "Could not verify OpenCode's version."),

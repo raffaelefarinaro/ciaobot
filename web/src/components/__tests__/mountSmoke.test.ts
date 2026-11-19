@@ -866,6 +866,47 @@ describe('component mount smoke', () => {
     }
   })
 
+  it('shows the Built into list only for a CLI that reports bundled skills', async () => {
+    const testApi = api as typeof api & {
+      setResponse: (path: string, value: unknown) => void
+      getResponse: (path: string) => unknown
+    }
+    const original = testApi.getResponse('/api/settings/providers') as {
+      connections: Record<string, Record<string, unknown>>
+    }
+    // The Claude CLI reports no bundled skills: the key is absent, not an empty list.
+    const { bundled_skills: _claudeBundled, ...claudeWithout } = original.connections.claude!
+    testApi.setResponse('/api/settings/providers', {
+      ...original,
+      connections: {
+        ...original.connections,
+        claude: claudeWithout,
+        opencode: { ...original.connections.opencode, ok: true, bundled_skills: [] },
+      },
+    })
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    try {
+      const disclosures = wrapper.findAll('.provider-connections details.provider-brings')
+      expect(disclosures).toHaveLength(2)
+      expect(disclosures[0]!.text()).not.toMatch(/Built into/)
+      expect(disclosures[0]!.text()).not.toMatch(/Listed after the next chat/)
+      expect(disclosures[1]!.text()).toMatch(/Built into .+ \(0\)/)
+      expect(disclosures[1]!.text()).toContain('None reported by this CLI')
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/settings/providers', original)
+    }
+  })
+
   async function mountModelsWith(releaseChecks: Record<string, Record<string, unknown>>) {
     const testApi = api as typeof api & {
       setResponse: (path: string, value: unknown) => void
@@ -997,20 +1038,6 @@ describe('component mount smoke', () => {
       const row = providerRow(wrapper, /opencode/i)
       expect(row.text()).toContain('Tested with 2.1.0')
       expect(row.text()).not.toContain('Older than')
-    } finally {
-      wrapper.unmount()
-      restore()
-    }
-  })
-
-  it('SettingsView says bundled Claude updates with Ciaobot and offers no claude update', async () => {
-    const { wrapper, restore } = await mountModelsWith({
-      claude: { state: 'bundled', tested: '2.1.301' },
-    })
-    try {
-      const row = providerRow(wrapper, /claude/i)
-      expect(row.text()).toContain('Bundled with Ciaobot')
-      expect(row.text()).not.toContain('claude update')
     } finally {
       wrapper.unmount()
       restore()
