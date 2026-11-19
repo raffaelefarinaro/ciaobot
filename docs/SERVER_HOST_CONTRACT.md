@@ -114,7 +114,7 @@ free-form allowlist.
 - a non-macOS platform, before any native probe runs;
 - a policy that does not exist: the signed revision without an explicit
   `DeveloperIDSigning`, a signing identity under any other revision, or any
-  revision/protocol pair that is neither the production one nor a superseded one;
+  revision/protocol pair other than the production one and the signed one;
 - a relative, symlinked or missing bundle, one not named `Ciaobot Server.app`,
   and a symlinked `Contents`;
 - a symlinked, special or unreadable file, an unlistable directory, a stray file
@@ -292,6 +292,12 @@ the two and no unknown extra key. `HostOwnership.to_record()` writes exactly the
 schema's field set, so a schema-1 document stays byte-shape-compatible with every
 record already on disk.
 
+The record is outside the sealed app on purpose: an engine update changes the
+engine and its sidecar files, never the host bytes, so the host keeps its CDHash
+and the user's Accessibility/Automation grants, which are tied to those signed
+bytes (see [`SERVER_HOST.md`](SERVER_HOST.md)). Only a new host revision replaces
+the bundle and its record together.
+
 ## Sidecar, defaults and the launchd bounds
 
 The service's disk-sidecar facts a consumer needs are constants here, so B2 does
@@ -314,42 +320,6 @@ There are no Ciaobot-specific environment variables and no compatibility shims.
 The defaults (`default_bundle_path()`, `default_ownership_path()`) are
 home-anchored and resolved at call time, like the install receipt's path; they
 follow `Path.home()` and nothing else.
-
-## The superseded host
-
-A host revision bump has to be able to replace the host an older install left
-behind, and it has to be able to refuse one it cannot prove is ours (#1659).
-
-`SUPERSEDED_HOST_PROTOCOLS` = `{2: 1, 3: 2}` maps each revision this engine
-supersedes (revision 2, the v1.6.0 host, and revision 3, the v1.6.1 host) to the
-protocol it spoke.
-`read_superseded_ownership` and `verify_superseded_host` are the same strict
-reader and the same exact record-and-bundle match as their current-revision
-counterparts, run against the revision the record names, each proven against its
-own pair; a revision outside the map (1, 5, the current one) is refused.
-Superseded records are the historical schema 1 only: a schema-2 or signed host is
-never accepted by the replacement path. `read_host_ownership` and
-`verify_owned_host` accept exactly the two current policies above (schema
-1/revision 4 and schema 2/revision 5): a revision-2 or -3 record is not proof that
-the installed bundle is the host this engine speaks to.
-
-`verify_superseded_host` answers one narrower question — *was this bundle
-ours?* — and it exists for one caller: the installer, which moves such a bundle
-aside, writes the new record, renames the new bundle in, and puts the old
-bundle and the old record back if anything fails. A bundle whose record names
-any other revision, a foreign bundle and a tampered one are all refused exactly
-as before, so the replacement path cannot be used to replace a host Ciaobot
-cannot prove it owns. Delete the revision-2 entry of
-`SUPERSEDED_HOST_PROTOCOLS` one release after revision 4 ships. Delete the map,
-`read_superseded_ownership` and `verify_superseded_host` once no supported
-install can still hold a revision-3 bundle, i.e. after a release that ships
-revision 4 has been out for a full release cycle.
-
-The record is outside the sealed app on purpose: an engine update changes the
-engine and its sidecar files, never the host bytes, so the host keeps its CDHash
-and the user's Accessibility/Automation grants, which are tied to those signed
-bytes (see [`SERVER_HOST.md`](SERVER_HOST.md)). Only a new host revision replaces
-the bundle and its record together.
 
 ## What a validated disk record does not say
 
