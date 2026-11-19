@@ -1179,6 +1179,7 @@ struct ConnectionView: View {
         discovery.invalidate()
         dropSession()
         modeStore?.mode = .local
+        modeStore?.rolledBackTakeovers = 0
         engineMode = .local
         localModel.reset()
         localPhase = .idle
@@ -1212,7 +1213,12 @@ struct ConnectionView: View {
     func applyTakeover(_ outcome: EngineTakeover.Outcome) {
         guard engineMode == .local else { return }
         takeoverNotice = TakeoverCopy.notice(for: outcome)
-        let saveChoice = EngineTakeover.savesExternalChoice(outcome)
+        // The second engine-level rollback in a row persists the external choice,
+        // so the launch after it does not repeat the move. The retry copy is the
+        // rolled-back notice, which already says to use Use Ciaobot on This Mac.
+        let streak = EngineTakeover.rolledBackStreak(after: outcome, previous: modeStore?.rolledBackTakeovers ?? 0)
+        modeStore?.rolledBackTakeovers = streak.count
+        let saveChoice = EngineTakeover.savesExternalChoice(outcome) || streak.persistsExternal
         switch outcome {
         case .notNeeded, .done:
             return
@@ -1305,6 +1311,7 @@ struct ConnectionView: View {
     func connectToAnotherServer() {
         if let supervisor { supervisor.stop {} }
         modeStore?.mode = .external
+        modeStore?.rolledBackTakeovers = 0
         engineMode = .external
         onModeChange?(.external)
         localModel.reset()

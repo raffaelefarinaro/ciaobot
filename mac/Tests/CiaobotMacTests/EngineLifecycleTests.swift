@@ -1053,12 +1053,14 @@ final class EngineLifecycleTests: XCTestCase {
     func testUseThisMacSwitchesToLocalAndStartsTheEngine() {
         let store = TransientEngineModeStore()
         store.mode = .external
+        store.rolledBackTakeovers = 2
         var changes: [EngineMode] = []
         let view = makeExternalView(supervisor: makeSupervisor(), modeStore: store) { changes.append($0) }
 
         XCTAssertTrue(view.offersThisMac)
         view.useThisMac()
         XCTAssertEqual(store.mode, .local)
+        XCTAssertEqual(store.rolledBackTakeovers, 0, "a mode pick starts a fresh streak")
         XCTAssertEqual(changes, [.local])
         XCTAssertEqual(processes.spawns.count, 1, "the supervisor starts after the mode is saved")
     }

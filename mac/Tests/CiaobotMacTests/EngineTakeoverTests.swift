@@ -521,9 +521,12 @@ final class EngineTakeoverTests: XCTestCase {
         XCTAssertEqual(TakeoverCopy.refused(code: "already_settled"), "The move into the app had already completed.")
         XCTAssertEqual(TakeoverCopy.refused(code: "plist_changed_stopped"), TakeoverCopy.plistChangedWhileStopped)
         XCTAssertEqual(TakeoverCopy.refused(code: "moved_not_ready"), TakeoverCopy.movedNotReady)
-        XCTAssertTrue(TakeoverCopy.plistChangedWhileStopped.contains("Use Ciaobot on This Mac"))
+        XCTAssertEqual(TakeoverCopy.refused(code: "plist_changed"), TakeoverCopy.plistChangedWhileRunning)
+        XCTAssertEqual(TakeoverCopy.refused(code: "cancelled_past_trash"), TakeoverCopy.cancelledPastTrash)
         XCTAssertFalse(TakeoverCopy.movedNotReady.contains("not changed"))
         XCTAssertFalse(TakeoverCopy.plistChangedWhileStopped.contains("not changed"))
+        XCTAssertFalse(TakeoverCopy.plistChangedWhileStopped.contains("Use Ciaobot on This Mac"))
+        XCTAssertFalse(TakeoverCopy.cancelledPastTrash.contains("could not start"))
     }
 
     /// The trimmed table: codes that can be transient races no longer persist the
@@ -547,6 +550,7 @@ final class EngineTakeoverTests: XCTestCase {
             .refused(code: "no_workspace", oldOrigin: nil),
             .rolledBack(code: "engine_not_ready", oldOrigin: nil),
             .rolledBack(code: "not_healthy", oldOrigin: nil),
+            .refused(code: "plist_changed_stopped", oldOrigin: nil),
         ]
         for outcome in persisting {
             XCTAssertTrue(EngineTakeover.savesExternalChoice(outcome), describe(outcome))
@@ -561,7 +565,8 @@ final class EngineTakeoverTests: XCTestCase {
             .refused(code: "state_unknown", oldOrigin: nil),
             .refused(code: "plan_failed", oldOrigin: nil),
             .refused(code: "moved_not_ready", oldOrigin: nil),
-            .refused(code: "plist_changed_stopped", oldOrigin: nil),
+            .refused(code: "plist_changed", oldOrigin: nil),
+            .refused(code: "cancelled_past_trash", oldOrigin: nil),
             .refused(code: "already_settled", oldOrigin: nil),
             .rolledBack(code: "cancelled", oldOrigin: nil),
             .rolledBack(code: "takeover_failed", oldOrigin: nil),
@@ -764,9 +769,39 @@ final class EngineTakeoverTests: XCTestCase {
             await MainActor.run { self?.current?.cancel() }
         }
         let outcome = await makeTakeover().runIfNeeded()
-        XCTAssertEqual(describe(outcome), "refused:moved_not_ready:-")
+        XCTAssertEqual(describe(outcome), "refused:cancelled_past_trash:-")
         XCTAssertEqual(log.events.filter { $0 == "start" }.count, 1, "only the first start ran")
         XCTAssertTrue(trash.trashed.isEmpty)
+        let text = try XCTUnwrap(TakeoverCopy.notice(for: outcome))
+        XCTAssertEqual(text, TakeoverCopy.cancelledPastTrash)
+        XCTAssertFalse(text.contains("could not start"), "a cancel is not a failure to start")
+        XCTAssertFalse(EngineTakeover.savesExternalChoice(outcome))
+    }
+
+    /// A lost rollback answer is asked once more, as finish is. The retry is refused
+    /// with `trash_offered` here, so the move is taken forward on the bundled engine.
+    func testALostRollbackIsAskedOnceMoreAndTheRetryIsUsed() async throws {
+        try answerHappyPath(trash: [candidate(envRoot)])
+        runner.engineJournalsTrash = true
+        runner.lostFirst = ["finish": 2, "rollback": 1]
+        let outcome = await makeTakeover().runIfNeeded()
+        XCTAssertEqual(describe(outcome), "done:0")
+        XCTAssertEqual(log.count(prefix: "cmd:rollback"), 2, "the lost rollback was asked again")
+        XCTAssertEqual(trash.trashed.map(\.path), [envRoot.path])
+    }
+
+    /// Both rollback answers lost: the state is unknown, the copy says so neutrally,
+    /// and nothing is trashed. The next launch's resume repairs it.
+    func testALostRollbackTwiceIsUnknownWithNeutralCopy() async throws {
+        try answerHappyPath(trash: [candidate(envRoot)])
+        runner.lostFirst = ["finish": 2, "rollback": 2]
+        let outcome = await makeTakeover().runIfNeeded()
+        XCTAssertEqual(describe(outcome), "refused:state_unknown:-")
+        XCTAssertEqual(log.count(prefix: "cmd:rollback"), 2)
+        XCTAssertTrue(trash.trashed.isEmpty)
+        XCTAssertEqual(TakeoverCopy.notice(for: outcome), TakeoverCopy.stateUnknown)
+        XCTAssertFalse(TakeoverCopy.stateUnknown.contains("kept for support"))
+        XCTAssertFalse(EngineTakeover.savesExternalChoice(outcome))
     }
 
     /// The engine's resume refusal for a journal whose hash differs carries an id
@@ -850,16 +885,80 @@ final class EngineTakeoverTests: XCTestCase {
         }
     }
 
-    /// The old service is down and its definition changed under it: the rollback
-    /// would refuse a changed definition, so none is attempted and the copy says why.
+    /// The old service is down (the plan says so) and its definition changed under
+    /// it: the rollback would refuse a changed definition, so none is attempted, the
+    /// copy says the old install must be restored, and the choice persists so the
+    /// next launch does not repeat the refusal.
     func testPlistChangedWhileTheOldEngineIsStoppedSaysSoAndNeverRollsBack() async {
-        runner.answers["plan"] = planJSON(action: "takeover", oldRunning: true)
+        runner.answers["plan"] = planJSON(action: "takeover", oldRunning: false)
         runner.answers["apply"] = json(["ok": false, "reason": "plist_changed", "id": "T1", "state": "stopping"])
         let outcome = await makeTakeover().runIfNeeded()
         XCTAssertEqual(describe(outcome), "refused:plist_changed_stopped:-")
-        XCTAssertEqual(TakeoverCopy.notice(for: outcome), TakeoverCopy.plistChangedWhileStopped)
+        let text = TakeoverCopy.notice(for: outcome)
+        XCTAssertEqual(text, TakeoverCopy.plistChangedWhileStopped)
+        XCTAssertFalse(text?.contains("continue") ?? true, "nothing here offers to continue the move")
+        XCTAssertTrue(text?.contains("restore") ?? false)
         XCTAssertEqual(log.count(prefix: "cmd:rollback"), 0)
         XCTAssertNil(log.index(of: "start"))
+        XCTAssertTrue(EngineTakeover.savesExternalChoice(outcome), "the next launch must not retry")
+    }
+
+    /// The definition changed while the old service still runs (a login brought it
+    /// back, or the stop never took): the app connects to that engine and does not
+    /// roll back or start the bundled one.
+    func testPlistChangedWhileTheOldEngineRunsConnectsToIt() async {
+        runner.answers["plan"] = planJSON(action: "resume", oldRunning: true, resumeId: "T1")
+        writeJournalOnDisk("T1")
+        runner.answers["apply"] = json(["ok": false, "reason": "plist_changed", "id": "T1", "state": "stopping"])
+        let outcome = await makeTakeover().runIfNeeded()
+        XCTAssertEqual(describe(outcome), "refused:plist_changed:\(oldOriginText)")
+        XCTAssertEqual(TakeoverCopy.notice(for: outcome), TakeoverCopy.plistChangedWhileRunning + " " + TakeoverCopy.connected)
+        XCTAssertEqual(log.count(prefix: "cmd:rollback"), 0)
+        XCTAssertNil(log.index(of: "start"))
+        XCTAssertFalse(EngineTakeover.savesExternalChoice(outcome))
+    }
+
+    /// The same apply answer, with the plan's old-engine verdict as the only difference.
+    func testPlistChangedInStoppingBranchesOnWhetherTheOldEngineRuns() async {
+        for oldRunning in [true, false] {
+            log.events = []
+            runner.calls = []
+            runner.answers["plan"] = planJSON(action: "takeover", oldRunning: oldRunning)
+            runner.answers["apply"] = json(["ok": false, "reason": "plist_changed", "id": "T1", "state": "stopping"])
+            let outcome = await makeTakeover().runIfNeeded()
+            let expected = oldRunning ? "refused:plist_changed:\(oldOriginText)" : "refused:plist_changed_stopped:-"
+            XCTAssertEqual(describe(outcome), expected, "oldRunning \(oldRunning)")
+            XCTAssertEqual(log.count(prefix: "cmd:rollback"), 0, "oldRunning \(oldRunning)")
+        }
+    }
+
+    /// The rolled-back streak: two engine-level rollbacks in a row persist external,
+    /// a completed takeover resets it, other outcomes leave it, and a bundled-engine
+    /// rollback (already persisting) or a cancel does not count.
+    func testTheRolledBackStreakPersistsExternalOnTheSecondLaunchInARow() {
+        let rolled = EngineTakeover.Outcome.rolledBack(code: "takeover_failed", oldOrigin: nil)
+        let first = EngineTakeover.rolledBackStreak(after: rolled, previous: 0)
+        XCTAssertEqual(first.count, 1)
+        XCTAssertFalse(first.persistsExternal)
+        let second = EngineTakeover.rolledBackStreak(after: rolled, previous: first.count)
+        XCTAssertEqual(second.count, 2)
+        XCTAssertTrue(second.persistsExternal)
+    }
+
+    func testTheRolledBackStreakResetsOnACompletedTakeoverAndIgnoresOtherOutcomes() {
+        XCTAssertEqual(EngineTakeover.rolledBackStreak(after: .done(left: []), previous: 1).count, 0)
+        let unchanged: [EngineTakeover.Outcome] = [
+            .deferred(origin: nil), .refused(code: "takeover_failed", oldOrigin: nil),
+            .rolledBack(code: "cancelled", oldOrigin: nil), .notNeeded,
+        ]
+        for outcome in unchanged {
+            let step = EngineTakeover.rolledBackStreak(after: outcome, previous: 1)
+            XCTAssertEqual(step.count, 1, describe(outcome))
+            XCTAssertFalse(step.persistsExternal, describe(outcome))
+        }
+        let persisted = EngineTakeover.rolledBackStreak(
+            after: .rolledBack(code: "engine_not_ready", oldOrigin: nil), previous: 1)
+        XCTAssertEqual(persisted.count, 1, "a bundled-engine rollback persists by itself and is not counted")
     }
 
     /// An apply refused because the move had already finished says so, and never
@@ -1137,7 +1236,9 @@ final class EngineTakeoverTests: XCTestCase {
 
     // MARK: Process runner: timeouts and the process group
 
-    private func scriptRunner(_ body: String, timeout: TimeInterval) throws -> FoundationTakeoverRunner {
+    private func scriptRunner(
+        _ body: String, timeout: TimeInterval, exitWait: TimeInterval = TakeoverTimeouts.exitGrace
+    ) throws -> FoundationTakeoverRunner {
         let script = tmp.appendingPathComponent("takeover-\(UUID().uuidString)")
         try "#!/bin/sh\n\(body)\n".write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
@@ -1145,8 +1246,31 @@ final class EngineTakeoverTests: XCTestCase {
             commandLine: { arguments in
                 TakeoverCommandLine(executable: script, arguments: arguments, environment: [:], workingDirectory: self.tmp)
             },
-            timeout: { _ in timeout }
+            timeout: { _ in timeout },
+            exitWait: exitWait
         )
+    }
+
+    /// A command that closes its stdout and keeps running is not waited for
+    /// forever: after the exit wait its group is SIGKILLed and it reads as a lost answer.
+    func testAChildThatClosesStdoutAndKeepsRunningIsKilledAfterTheExitWait() async throws {
+        let runner = try scriptRunner("exec >&-\n/bin/sleep 30", timeout: 60, exitWait: 0.3)
+        let started = Date()
+        let result = try await runner.run(["apply", "--json"])
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertLessThan(elapsed, 10, "the group is ended after the exit wait, not after the 30 s sleep")
+        XCTAssertEqual(result.status, 128 + SIGKILL, "the command was ended by SIGKILL")
+        XCTAssertNil(TakeoverAnswer.decode(result.json))
+    }
+
+    /// A command that exits on its own after closing stdout is reaped normally,
+    /// with its own status, and is never signalled.
+    func testAChildThatClosesStdoutAndExitsIsReapedWithItsOwnStatus() async throws {
+        let runner = try scriptRunner("exec >&-\nexit 7", timeout: 60, exitWait: 5)
+        let started = Date()
+        let result = try await runner.run(["apply", "--json"])
+        XCTAssertLessThan(Date().timeIntervalSince(started), 4)
+        XCTAssertEqual(result.status, 7)
     }
 
     func testARunPastItsLimitIsEndedAndReadsAsALostAnswer() async throws {
@@ -1218,12 +1342,14 @@ final class EngineTakeoverTests: XCTestCase {
         XCTAssertEqual(TakeoverAnswer.decode(result.json)?.ok, true)
     }
 
-    /// A descriptor the app holds without close-on-exec (as a concurrent spawn
-    /// elsewhere would leave it) is not handed to the command.
+    /// A descriptor the app holds without close-on-exec is not handed to the command.
+    /// The spawn sets POSIX_SPAWN_CLOEXEC_DEFAULT on every macOS the app supports,
+    /// the same as NativeInstaller, so this holds unconditionally.
     func testAnInheritableDescriptorOfTheAppIsNotHandedToTheCommand() async throws {
         let leaked = open("/dev/null", O_RDONLY)
         XCTAssertGreaterThan(leaked, 2)
         defer { close(leaked) }
+        XCTAssertEqual(fcntl(leaked, F_GETFD) & FD_CLOEXEC, 0, "the precondition: this descriptor is inheritable")
         let runner = try scriptRunner("if [ -e /dev/fd/\(leaked) ]; then printf leaked; else printf clean; fi", timeout: 10)
         let result = try await runner.run(["plan", "--json"])
         XCTAssertEqual(String(decoding: result.json, as: UTF8.self), "clean")

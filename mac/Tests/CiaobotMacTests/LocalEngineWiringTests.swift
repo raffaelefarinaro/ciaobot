@@ -530,13 +530,55 @@ final class LocalEngineWiringTests: XCTestCase {
     func testATransientOrUnknownFailureKeepsTheSavedLocalChoice() throws {
         let codes = [
             "plan_failed", "blockers_unavailable", "takeover_failed", "state_unknown", "rollback_failed", "sha_mismatch",
-            "foreign_listener", "no_registry", "unknown_version", "moved_not_ready", "plist_changed_stopped", "already_settled",
+            "foreign_listener", "no_registry", "unknown_version", "moved_not_ready", "already_settled",
         ]
         for code in codes {
             let store = savedLocal()
             try localView(store: store).applyTakeover(.refused(code: code, oldOrigin: nil))
             XCTAssertEqual(store.mode, .local, "\(code) must not persist external")
         }
+    }
+
+    /// An install changed while stopped persists external, and the next launch
+    /// reads that choice: the takeover is not run again, so the refusal is not repeated.
+    func testPlistChangedWhileStoppedPersistsExternalSoTheNextLaunchDoesNotRetry() throws {
+        let store = savedLocal()
+        let outcome = EngineTakeover.Outcome.refused(code: "plist_changed_stopped", oldOrigin: nil)
+        try localView(store: store).applyTakeover(outcome)
+        XCTAssertEqual(store.mode, .external)
+        XCTAssertEqual(TakeoverCopy.notice(for: outcome), TakeoverCopy.plistChangedWhileStopped)
+        XCTAssertEqual(EngineMode.initial(saved: store.mode?.rawValue, lastOrigin: nil, hostIsArm64: true), .external)
+    }
+
+    /// The engine-level rollback is retried once: the first launch keeps the local
+    /// choice, the second persists external and the next launch does not repeat it.
+    func testTwoRolledBackLaunchesInARowPersistExternal() throws {
+        let store = savedLocal()
+        let rolled = EngineTakeover.Outcome.rolledBack(code: "old_engine_did_not_stop", oldOrigin: nil)
+        try localView(store: store).applyTakeover(rolled)
+        XCTAssertEqual(store.mode, .local)
+        XCTAssertEqual(store.rolledBackTakeovers, 1)
+
+        try localView(store: store).applyTakeover(rolled)
+        XCTAssertEqual(store.mode, .external)
+        XCTAssertEqual(store.rolledBackTakeovers, 2)
+        XCTAssertTrue(TakeoverCopy.rolledBack.contains("Use Ciaobot on This Mac to try again"))
+    }
+
+    func testACompletedTakeoverResetsTheRolledBackStreak() throws {
+        let store = savedLocal()
+        store.rolledBackTakeovers = 1
+        try localView(store: store).applyTakeover(.done(left: []))
+        XCTAssertEqual(store.rolledBackTakeovers, 0)
+        XCTAssertEqual(store.mode, .local)
+    }
+
+    func testConnectingToAnotherServerResetsTheRolledBackStreak() throws {
+        let store = savedLocal()
+        store.rolledBackTakeovers = 1
+        try localView(store: store).connectToAnotherServer()
+        XCTAssertEqual(store.rolledBackTakeovers, 0)
+        XCTAssertEqual(store.mode, .external)
     }
 
     func testABundledFailureRollbackPersistsExternalSoTheUserRetriesFromThere() throws {

@@ -111,6 +111,9 @@ enum TakeoverTimeouts {
     static let rollback: TimeInterval = 180
     /// Between SIGTERM and SIGKILL when a command's process group is reaped.
     static let reapGrace: TimeInterval = 2
+    /// How long a command may keep running after it closed its stdout before its
+    /// process group is SIGKILLed and the command reaped.
+    static let exitGrace: TimeInterval = 5
 
     static func forCommand(_ arguments: [String]) -> TimeInterval {
         switch arguments.first {
@@ -124,9 +127,9 @@ enum TakeoverTimeouts {
 
 /// Ends one command's process group past its limit: SIGTERM, then SIGKILL after
 /// the reap grace. The SIGKILL is the dangerous step, because the group id is
-/// only ours until the leader is reaped. `finish()` is called once the reader
-/// has hit end of file and before the leader is waited for; it takes the same
-/// lock as every signal, so no signal can be sent after it returns.
+/// only ours until the leader is reaped. `finish()` is called once the leader
+/// has exited and before it is reaped; it takes the same lock as every signal,
+/// so no signal can be sent after it returns.
 final class ProcessGroupWatchdog {
     typealias Send = (pid_t, Int32) -> Void
 
@@ -176,22 +179,26 @@ final class ProcessGroupWatchdog {
 final class FoundationTakeoverRunner: TakeoverRunning {
     private let commandLine: ([String]) -> TakeoverCommandLine
     private let timeout: ([String]) -> TimeInterval
+    private let exitWait: TimeInterval
 
     init(
         commandLine: @escaping ([String]) -> TakeoverCommandLine,
-        timeout: @escaping ([String]) -> TimeInterval = TakeoverTimeouts.forCommand
+        timeout: @escaping ([String]) -> TimeInterval = TakeoverTimeouts.forCommand,
+        exitWait: TimeInterval = TakeoverTimeouts.exitGrace
     ) {
         self.commandLine = commandLine
         self.timeout = timeout
+        self.exitWait = exitWait
     }
 
     func run(_ arguments: [String]) async throws -> (status: Int32, json: Data) {
         let line = commandLine(arguments)
         let limit = timeout(arguments)
+        let wait = exitWait
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
-                    continuation.resume(returning: try Self.runGroup(line, timeout: limit))
+                    continuation.resume(returning: try Self.runGroup(line, timeout: limit, exitWait: wait))
                 } catch {
                     continuation.resume(throwing: error)
                 }
@@ -201,9 +208,12 @@ final class FoundationTakeoverRunner: TakeoverRunning {
 
     /// Spawns the command as the leader of a new process group, reads stdout to
     /// its end, and ends the group if the read is still blocked after `timeout`.
-    /// The watchdog is settled before the leader is reaped, so a group signal
+    /// The group stays armed after end of file until the leader has exited, and
+    /// the watchdog is settled before the leader is reaped, so a group signal
     /// can never reach a reused pid.
-    static func runGroup(_ line: TakeoverCommandLine, timeout: TimeInterval) throws -> (status: Int32, json: Data) {
+    static func runGroup(
+        _ line: TakeoverCommandLine, timeout: TimeInterval, exitWait: TimeInterval
+    ) throws -> (status: Int32, json: Data) {
         var fds: [Int32] = [-1, -1]
         guard pipe(&fds) == 0 else { throw posixFailure() }
         // Both ends are close-on-exec, so a child that another thread spawns while
@@ -236,14 +246,10 @@ final class FoundationTakeoverRunner: TakeoverRunning {
         sigemptyset(&unmasked)
         posix_spawnattr_setsigdefault(&attributes, &defaults)
         posix_spawnattr_setsigmask(&attributes, &unmasked)
-        var flags = POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK
-        if #available(macOS 26.0, *) {
-            // Every descriptor the app holds closes in the child except the ones the
-            // file actions give it. An older kernel rejects the unknown flag, so it
-            // is only set where it is understood; the close-on-exec pipe ends cover
-            // the case that matters on those systems.
-            flags |= POSIX_SPAWN_CLOEXEC_DEFAULT
-        }
+        // Every descriptor the app holds closes in the child except the ones the
+        // file actions give it, as NativeInstaller spawns its children. The
+        // close-on-exec pipe ends below are a second guard.
+        let flags = POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT
         posix_spawnattr_setflags(&attributes, Int16(flags))
         posix_spawnattr_setpgroup(&attributes, 0)
 
@@ -266,6 +272,9 @@ final class FoundationTakeoverRunner: TakeoverRunning {
         let watchdog = ProcessGroupWatchdog(pid: pid)
         watchdog.arm(after: timeout)
         let data = reader.readDataToEndOfFile()
+        // End of file means the command closed its stdout, not that it has exited.
+        // The group stays armed until the leader has exited.
+        awaitExit(pid, watchdog: watchdog, within: exitWait)
         // Settled before the leader is reaped: no group signal can follow the reap.
         watchdog.finish()
 
@@ -273,6 +282,35 @@ final class FoundationTakeoverRunner: TakeoverRunning {
         while waitpid(pid, &status, 0) == -1 && errno == EINTR {}
         let exit: Int32 = (status & 0x7f) == 0 ? (status >> 8) & 0xff : 128 + (status & 0x7f)
         return (exit, data)
+    }
+
+    /// Returns once the leader has exited, leaving it unreaped, so its pid and
+    /// process group are still ours. It polls for `exitWait`; then the group is
+    /// SIGKILLed under the watchdog's lock and the wait becomes blocking.
+    static func awaitExit(_ pid: pid_t, watchdog: ProcessGroupWatchdog, within exitWait: TimeInterval) {
+        let deadline = Date().addingTimeInterval(exitWait)
+        while !leaderExited(pid, blocking: false) {
+            if Date() >= deadline {
+                watchdog.forceKill()
+                _ = leaderExited(pid, blocking: true)
+                return
+            }
+            usleep(10_000)
+        }
+    }
+
+    /// `waitid` with WNOWAIT: the leader is observed, never reaped. A wait that
+    /// fails for any reason but EINTR reads as exited, so no signal is sent to a
+    /// pid that may no longer be the leader's.
+    private static func leaderExited(_ pid: pid_t, blocking: Bool) -> Bool {
+        var info = siginfo_t()
+        let options = WEXITED | WNOWAIT | (blocking ? 0 : WNOHANG)
+        while true {
+            if waitid(P_PID, id_t(pid), &info, options) == 0 {
+                return blocking || info.si_pid == pid
+            }
+            if errno != EINTR { return true }
+        }
     }
 
     private static func posixFailure() -> Error {
@@ -319,10 +357,17 @@ enum TakeoverCopy {
     static let retry = "Ciaobot could not be moved into the app just now. Your existing Ciaobot was not changed. Use Ciaobot on This Mac to try again."
     /// The journal says the move had already completed before this apply.
     static let alreadyCompleted = "The move into the app had already completed."
-    /// The old install changed while its service was stopped, so the rollback cannot restore it.
-    static let plistChangedWhileStopped = "Your previous install changed while it was stopped, so it could not be restored. Use Ciaobot on This Mac to continue."
+    /// The old install's definition changed while its service was stopped. The
+    /// rollback cannot restore it and the move cannot be resumed, so nothing here
+    /// offers to continue: the user restores or reinstalls the old install.
+    static let plistChangedWhileStopped = "Your previous Ciaobot was changed while it was stopped, so it could not be restored. Reinstall or restore your previous Ciaobot, or contact support. Your workspace data was not deleted."
+    /// The old service is still running and its definition changed before the move began.
+    static let plistChangedWhileRunning = "Your existing Ciaobot changed while the move was starting, so the move did not go ahead. Use Ciaobot on This Mac to try again."
     /// The old install's Trash step had been offered and the bundled engine did not come up.
     static let movedNotReady = "Ciaobot moved into the app but could not start, and your existing Ciaobot can no longer be restored. Nothing was deleted. Use Ciaobot on This Mac to try again."
+    /// The user left local mode after the Trash step was offered: the move is not
+    /// finished, and no engine is started until the next launch resumes it.
+    static let cancelledPastTrash = "Ciaobot moved into the app but did not start, because you left local mode. Your existing Ciaobot can no longer be restored. Nothing was deleted. Use Ciaobot on This Mac to continue."
 
     static func refused(code: String) -> String {
         switch code {
@@ -340,10 +385,14 @@ enum TakeoverCopy {
             return "The existing Ciaobot's data could not be found by this app. It stays in place."
         case "already_settled":
             return alreadyCompleted
+        case "plist_changed":
+            return plistChangedWhileRunning
         case "plist_changed_stopped":
             return plistChangedWhileStopped
         case "moved_not_ready":
             return movedNotReady
+        case "cancelled_past_trash":
+            return cancelledPastTrash
         default:
             return retry
         }
@@ -578,8 +627,9 @@ final class EngineTakeover: ObservableObject {
     /// is the only way forward, and a failure is reported as such.
     private func bundledTakeover(id: String, plan: TakeoverPlan, run: Int, pastTrash: Bool) async -> Outcome {
         // A user who left local mode is not given a local engine back; the next
-        // launch's resume finishes the move.
-        if pastTrash, isCancelled(run) { return .refused(code: "moved_not_ready", oldOrigin: nil) }
+        // launch's resume finishes the move. This is not a bundled-engine failure,
+        // so it gets its own code and copy.
+        if pastTrash, isCancelled(run) { return .refused(code: "cancelled_past_trash", oldOrigin: nil) }
         supervisor.start()
         guard await awaitRunning(run), readyWorkspaceMatches(plan) else {
             return await bundledFailed(id: id, plan: plan, run: run, code: "engine_not_ready", pastTrash: pastTrash)
@@ -622,8 +672,12 @@ final class EngineTakeover: ObservableObject {
             // (a watchdog ended apply after the unload), so that case rolls back.
             return .refused(code: code, oldOrigin: oldOrigin(plan))
         case "stopping" where code == "plist_changed":
-            // The old service is down and its definition changed under it. A
-            // rollback refuses a changed definition, so none is attempted.
+            // The definition changed under a move that had already stopped the old
+            // service. The plan says whether that service runs again (a login, or
+            // the stop never took). If it does, the app connects to it. If not, no
+            // rollback is attempted: it refuses a changed definition, so the old
+            // install needs restoring by hand.
+            if plan.oldRunning { return .refused(code: "plist_changed", oldOrigin: oldOrigin(plan)) }
             return .refused(code: "plist_changed_stopped", oldOrigin: nil)
         default:
             return await rollBack(id: id, plan: plan, code: code, run: run)
@@ -659,8 +713,13 @@ final class EngineTakeover: ObservableObject {
     /// engine is taken forward instead.
     private func rollBack(id: String, plan: TakeoverPlan, code: String, run: Int) async -> Outcome {
         await stopEngine()
-        guard let answer = await call(["rollback", "--json", "--id", id]) else {
-            return .refused(code: "rollback_failed", oldOrigin: await answeringOrigin(restoredOrigin(plan)))
+        // A lost answer is asked once more, as finish is. Still lost, the state is
+        // unknown: the next launch's resume repairs it, and nothing was trashed,
+        // since the Trash step runs only after a finish answer.
+        var answered = await call(["rollback", "--json", "--id", id])
+        if answered == nil { answered = await call(["rollback", "--json", "--id", id]) }
+        guard let answer = answered else {
+            return .refused(code: "state_unknown", oldOrigin: nil)
         }
         if answer.ok {
             return .rolledBack(code: code, oldOrigin: restoredOrigin(plan))
@@ -862,9 +921,33 @@ final class EngineTakeover: ObservableObject {
     /// outcome keeps the saved local choice.
     static func savesExternalChoice(_ outcome: Outcome) -> Bool {
         switch outcome {
-        case .refused(let code, _): return isDeliberateRefusal(code)
+        case .refused(let code, _):
+            // The old install changed while stopped: the move cannot resume, and a
+            // launch that tries again would only repeat the same refusal.
+            return isDeliberateRefusal(code) || code == "plist_changed_stopped"
         case .rolledBack(let code, _): return TakeoverRefusal.bundledFailure.contains(code)
         case .notNeeded, .done, .deferred: return false
+        }
+    }
+
+    /// Launches in a row that end rolled back by an engine-level refusal before the
+    /// external choice is persisted. The second one persists it, so a launch does
+    /// not bounce the old engine again; Use Ciaobot on This Mac retries.
+    static let rolledBackStreakLimit = 2
+
+    /// The streak after an outcome, and whether the saved choice must now persist
+    /// external. Only a rollback that does not persist by itself counts (a
+    /// bundled-engine failure already does), and a cancel is a user choice, not a
+    /// refusal. A completed takeover resets the streak; any other outcome leaves it.
+    static func rolledBackStreak(after outcome: Outcome, previous: Int) -> (count: Int, persistsExternal: Bool) {
+        switch outcome {
+        case .done:
+            return (0, false)
+        case .rolledBack(let code, _) where code != "cancelled" && !savesExternalChoice(outcome):
+            let count = previous + 1
+            return (count, count >= rolledBackStreakLimit)
+        case .rolledBack, .refused, .notNeeded, .deferred:
+            return (previous, false)
         }
     }
 
