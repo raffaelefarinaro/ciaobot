@@ -1,14 +1,4 @@
-"""Render the Ciaobot core into provider system prompts.
-
-Used by Claude and OpenCode at session start. Native provider guide
-loaders read ``AGENTS.md`` separately, bounded memory included,
-so nothing here renders the regions. The returned block is appended to Claude
-Code's default system prompt via the SDK's ``SystemPromptPreset`` ``append``
-field, and is passed as developer instructions to the other providers.
-
-Failure mode: any error in loading or formatting returns an empty string. We
-never want a malformed file to kill a chat.
-"""
+"""Render the Ciaobot core. ACP providers receive it inside the engine's context capsule, at the head of the first prompt of each session."""
 
 from __future__ import annotations
 
@@ -36,6 +26,11 @@ def _system_instructions() -> str:
     except Exception:  # noqa: BLE001
         logger.exception("core_prompt: failed to load %s", _SYSTEM_PROMPT_PATH)
         return ""
+
+
+def unified_core() -> str:
+    """The Ciaobot core for every provider: the capsule's ``core`` for ACP, unchanged."""
+    return _system_instructions()
 
 
 def system_prompt_payload(
