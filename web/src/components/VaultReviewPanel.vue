@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import SkeletonLoader from './SkeletonLoader.vue'
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import { useProjectStore } from '../stores/projects'
@@ -89,11 +89,25 @@ watch(
   { immediate: true },
 )
 
+// The queue is built on the server from the vault as it is now, so a backlink
+// added in a note or the CLI resolves a row while this panel sits open. Returning
+// to the window re-checks it; `ensureLoaded` re-reads only once the snapshot has aged.
+function revalidate() {
+  if (document.visibilityState === 'hidden' || !workspace.value) return
+  void store.ensureLoaded(workspace.value)
+}
+
 onMounted(() => {
   // `ensureLoaded`, not `fetch`: the panel is a `v-if` sibling of the
   // proposals panel, so every tab flip remounts it and a plain fetch would
   // rescan the whole vault each time.
   if (workspace.value) void store.ensureLoaded(workspace.value)
+  window.addEventListener('focus', revalidate)
+  document.addEventListener('visibilitychange', revalidate)
+})
+onUnmounted(() => {
+  window.removeEventListener('focus', revalidate)
+  document.removeEventListener('visibilitychange', revalidate)
 })
 watch(workspace, (ws) => {
   if (ws) void store.fetch(ws, { force: true })

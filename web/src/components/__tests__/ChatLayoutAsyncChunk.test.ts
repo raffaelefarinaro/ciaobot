@@ -13,15 +13,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { flushPromises, mount } from '@vue/test-utils'
-import { defineComponent, h } from 'vue'
+import { defineComponent, h, onMounted } from 'vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import { useTerminalStore } from '../../stores/terminal'
 import { api } from '../../lib/api'
 
 // A loader that never settles: the chunk is "in flight" for the whole test,
-// which is the window the skeleton exists to cover.
-const neverResolvingLoad = vi.fn(() => new Promise<never>(() => {}))
+// which is the window the skeleton exists to cover. The rise test swaps in one
+// resolution for a single mount.
+const neverResolvingLoad = vi.fn((): Promise<unknown> => new Promise(() => {}))
 
 vi.mock('../../lib/chatComponents', () => ({
   loadChatPanel: () => neverResolvingLoad(),
@@ -277,3 +278,91 @@ describe('workspace terminal lazy mount', () => {
     },
   )
 })
+
+// #3086: the 340 ms Home-to-chat rise starts when the real panel mounts, not
+// when the chat is selected. The stub follows the production contract: a
+// `rising` prop that puts `chat-rise` on its own root, and a `mounted` event
+// from its real mount hook.
+describe('chat rise waits for the real chat panel', () => {
+  const RealPanelStub = defineComponent({
+    name: 'RealPanelStub',
+    props: { chatId: { type: String, required: true }, rising: { type: Boolean, default: false } },
+    emits: ['mounted'],
+    setup(props, { emit }) {
+      onMounted(() => emit('mounted'))
+      return () => h('div', { class: ['chat-panel', { 'chat-rise': props.rising }] })
+    },
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  // delay 0: the chunk is ready at once. delay 1000: the chunk outlives the
+  // 340 ms window, which is the case that used to leave the panel unmarked.
+  it.each([0, 1000])('rises the real panel after a %i ms chunk wait', async (delay) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    vi.setSystemTime(new Date('2026-11-20T10:00:00Z'))
+    setActivePinia(createPinia())
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: EmptyStub },
+        { path: '/chat/:chatId?', component: EmptyStub },
+        { path: '/settings/:tab?', component: EmptyStub },
+      ],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{ project_id: 'project-1', name: 'General', workspace: 'personal' }] as unknown as typeof store.projects
+    store.chats = [{ chat_id: 'chat-1', project_id: 'project-1', title: 'Test chat' }] as unknown as typeof store.chats
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+    vi.spyOn(useTaskStore(), 'fetchSchedules').mockResolvedValue()
+
+    let releaseChunk!: (panel: typeof RealPanelStub) => void
+    neverResolvingLoad.mockImplementationOnce(() => new Promise(resolve => { releaseChunk = resolve }))
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ProjectSidebar: EmptyStub, ProjectView: EmptyStub, SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub, FileViewerModal: EmptyStub, PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub, HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    // Past the 800 ms bootstrap suppression, then select the chat from Home.
+    vi.advanceTimersByTime(900)
+    store.activeChatId = 'chat-1'
+    await router.push('/chat/chat-1')
+    await flushPromises()
+
+    expect(wrapper.find('[role="status"][aria-label="Loading conversation"]').exists()).toBe(true)
+    expect(wrapper.find('.chat-panel').exists()).toBe(false)
+
+    vi.advanceTimersByTime(delay)
+    releaseChunk(RealPanelStub)
+    await flushPromises()
+
+    expect(wrapper.find('.chat-panel').exists()).toBe(true)
+    expect(wrapper.find('.chat-panel.chat-rise').exists()).toBe(true)
+    vi.advanceTimersByTime(339)
+    await flushPromises()
+    expect(wrapper.find('.chat-panel.chat-rise').exists()).toBe(true)
+    vi.advanceTimersByTime(1)
+    await flushPromises()
+    expect(wrapper.find('.chat-panel.chat-rise').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})
+

@@ -1598,7 +1598,7 @@ export const inventory: InventoryEntry[] = [
         "name": "csv",
         "coverage": "covered",
         "storyIds": ["file-viewer-modal--csv"],
-        "note": "A CSV path renders CsvViewer read-only and commentable inside the modal, with a durable cell highlight and the cell-select mark. Its Comment trigger is not asserted: a click fires the document selectionchange handler, which clears the CSV cell anchor (useFileComments onSelectionChange). The comment compose and read flows are their own states below."
+        "note": "A CSV path renders CsvViewer read-only and commentable inside the modal, with a durable cell highlight and the cell-select mark. The play asserts the Comment trigger after a cell click: the selectionchange that click fires keeps the cell anchor (useFileComments onSelectionChange). The comment compose and read flows are their own states below."
       },
       {
         "name": "image",
@@ -5516,7 +5516,7 @@ export const inventory: InventoryEntry[] = [
         "name": "ready-no-phases",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": "Implemented prop combination that renders a contradictory pair: overallReady true keeps the 'Connected to Ciaobot' h1 while the empty-phases description still says 'Checking the connection to your workspace.' over the wait bar. Recorded as found, not fixed in this slice."
+        "note": "overallReady true with no phases: the h1 reads 'Connected to Ciaobot' and the description is empty, so the 'Checking the connection' copy no longer contradicts it. Component test in StartupView.test.ts; no story yet."
       },
       {
         "name": "narrow",
@@ -6159,7 +6159,7 @@ export const inventory: InventoryEntry[] = [
         "storyIds": [
           "terminal-pane--takeover"
         ],
-        "note": "Another connection takes the session (close 4409); the play clicks Take over and the takeover prompt goes while the shell comes back live. Known: the takeover notice stays as a stale alert after the reconnect because the store keeps it in its error ref; recorded, not fixed in this slice."
+        "note": "Another connection takes the session (close 4409); the play clicks Take over and the takeover prompt goes while the shell comes back live, and the takeover notice is gone once the reconnect is ready."
       },
       {
         "name": "ended",

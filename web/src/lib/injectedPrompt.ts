@@ -6,7 +6,7 @@
 import { classifyError } from './errorAttribution'
 import type { TurnOrigin } from './types'
 
-export type RunVerdict = 'ok' | 'cancelled' | 'failed'
+export type RunVerdict = 'ok' | 'cancelled' | 'failed' | 'unknown'
 export interface BackgroundRunEntry {
   label: string
   runId: string
@@ -38,7 +38,7 @@ export const BACKGROUND_WAKE_RE = /^\[Ciaobot\] (\d+) background runs? finished\
 // Chats recorded before 2.0 carry this envelope; the engine no longer sends it.
 export const CLI_TASK_WAKE_PREFIX = '[Ciaobot] Lost CLI tasks:'
 const CLI_TASK_WAKE_RE = /^\[Ciaobot\] Lost CLI tasks: (\d+) CLI tasks? /
-const RUN_HEAD_RE = /^— (.+) \(([^,()]+), (ok|CANCELLED|FAILED)(?:, exit (-?\d+))?\)$/
+const RUN_HEAD_RE = /^— (.+) \(([^,()]+), (ok|CANCELLED|FAILED|exit status unknown)(?:, exit (-?\d+))?\)$/
 const CLI_TASK_RE = /^— (.+?): (.*) \(task ([A-Za-z0-9_-]+)\)$/
 // Mirrors ciao/schedule_command.py CommandRun.compose_prompt + prompt_fence.fence:
 // the command may span lines and contain backticks, so match the whole
@@ -52,7 +52,12 @@ const HANDOVER_RE = /^Handed over from (.+?) to (.+)\.$/
 // Mirrors ciao/webhook_dispatch.py EVENT_PREAMBLE / EVENT_FENCE_OPEN / _neutralize.
 const WEBHOOK_PREAMBLE = 'The block between the webhook-event tags is the event text'
 
-const VERDICTS: Record<string, RunVerdict> = { ok: 'ok', CANCELLED: 'cancelled', FAILED: 'failed' }
+const VERDICTS: Record<string, RunVerdict> = {
+  ok: 'ok',
+  CANCELLED: 'cancelled',
+  FAILED: 'failed',
+  'exit status unknown': 'unknown',
+}
 
 /** Undo ciao/prompt_fence.py neutralize(): `&lt;tag` / `&lt;/tag` back to `<tag` / `</tag`. */
 export function unneutralize(tag: string, text: string): string {
@@ -60,10 +65,14 @@ export function unneutralize(tag: string, text: string): string {
 }
 
 // Run logs keep the colour codes test runners print; drawn as text they are noise.
+// An unterminated OSC is dropped to the end of its line, as the engine's sanitiser does.
 // eslint-disable-next-line no-control-regex -- matching ESC is the point
-const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
+const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\][^\n]*/g
+// Every Unicode category C character (controls, format, private use, unassigned) except newline and tab,
+// plus the line and paragraph separators: the same set the engine's sanitiser removes.
+const NON_PRINTING_RE = /(?![\n\t])\p{C}|\u2028|\u2029/gu
 function stripAnsi(text: string): string {
-  return text.replace(ANSI_RE, '')
+  return text.replace(ANSI_RE, '').replace(NON_PRINTING_RE, '')
 }
 
 function parseBackgroundRuns(content: string, count: number): InjectedPrompt {
@@ -248,7 +257,7 @@ export function runFailureHint(run: BackgroundRunEntry): string {
   return ''
 }
 
-const TONE_ORDER: RunVerdict[] = ['failed', 'cancelled', 'ok']
+const TONE_ORDER: RunVerdict[] = ['failed', 'cancelled', 'ok', 'unknown']
 
 export function summarizeInjectedPrompt(prompt: InjectedPrompt, chatTitle?: string): InjectedSummary {
   switch (prompt.kind) {

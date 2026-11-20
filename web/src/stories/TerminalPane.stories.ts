@@ -227,9 +227,9 @@ export const Takeover: Story = storyFor({
     const notice = 'Another connection took over this terminal session.'
     await waitFor(() => expect(canvas.getByText(notice, { selector: '.tp-takeover-text' })).toBeTruthy())
     await userEvent.click(canvas.getByRole('button', { name: 'Take over' }))
-    // The takeover prompt goes and the shell is live again. The takeover notice
-    // is not asserted here: the store keeps it as an error after the reconnect.
+    // The takeover prompt goes and the shell is live again, with no stale notice.
     await waitFor(() => expect(canvasElement.querySelector('.tp-takeover')).toBeNull())
+    await waitFor(() => expect(canvasElement.textContent).not.toContain(notice))
     await waitFor(() => expect(canvasElement.querySelector('.tp-surface .xterm')).not.toBeNull())
     await waitFor(() => expect(canvas.getByRole('tab', { name: /storybook-alpha/ })).toHaveAttribute('aria-selected', 'true'))
   },

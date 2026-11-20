@@ -400,6 +400,24 @@ class ContextCompactedEvent(StreamEvent):
 
 
 @dataclass(slots=True)
+class ShellFinishedEvent(StreamEvent):
+    """A background shell's process ended. Host bookkeeping: it wakes the chat, it is never shown.
+
+    ``exit_code`` is the real code when the provider sent one (Claude's ``terminal_exit``), and None
+    when it did not (a poll of the process table cannot tell how the shell ended).
+    ``output_tail`` holds the last lines of the shell's output file, already checked and cleaned.
+    """
+
+    tool_use_id: str = ""
+    command: str = ""
+    output_path: str = ""
+    duration_s: float = 0.0
+    exit_code: int | None = None
+    # None when the output file could not be read safely; an empty list when it had no output.
+    output_tail: list[str] | None = None
+
+
+@dataclass(slots=True)
 class ResultEvent(StreamEvent):
     """Terminal stream event."""
 

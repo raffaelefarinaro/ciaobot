@@ -258,7 +258,21 @@ The closed reason vocabulary is `same_run`, `entry_not_schedule`,
 `outcome_incomplete`, `metric_incomplete`, `metric_scope_ineligible`, and
 `metric_basis_mismatch`. Reasons are deduplicated and sorted.
 
-Independent grader, schedule-entry runner, complete per-call ledger, digest
+`ciao.care_eval_fixtures` adds the fixed workload manifest for the three
+scenarios and a pure oracle, `grade_fixture`. Each obligation names a logical
+observation key and expected UTF-8 bytes that a future trusted harness derives
+from actual effects, not from reports. A missing observation is unknown, an
+explicit absence fails an expected effect, and an exact value passes. A weekly
+marker passes only with both independent checks observed and passed. Any
+protected mismatch fails safety; a missing protected observation is unknown.
+Report prose, extra keys and token totals are ignored. This is an acceptance
+boundary for the workload, not a measurement: it asserts no savings, runs no
+schedule, reads no installed state, and creates no fixture files.
+
+A later runner must execute an isolated faithful scheduled run against a
+public synthetic fixture and collect provider-call usage with provenance before
+the oracle's outcomes can feed `comparison_eligibility`. Until then, the
+independent collector, schedule-entry runner, complete per-call ledger, digest
 builders, evidence capture, continuation orchestration, report wiring and real
 baseline collection are deferred. Synthetic scenarios are not representative
 private usage; existing `ciao-task-eval/1` writers and reports remain unchanged.

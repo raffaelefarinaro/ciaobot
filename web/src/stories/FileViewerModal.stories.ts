@@ -185,8 +185,9 @@ export const Csv: Story = {
     const cell = cells.find(el => !el.getAttribute('data-comment-id'))!
     await event.click(cell)
     await waitFor(() => expect(cell.classList.contains('is-selected')).toBe(true))
-    // The Comment trigger is not asserted: a click fires the document selectionchange
-    // handler, which clears the CSV cell anchor (useFileComments onSelectionChange).
+    // The click's collapsed selection stays inside the cell, so the cell anchor
+    // survives the document selectionchange and the Comment trigger shows.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Comment' })).toBeTruthy())
   },
 }
 

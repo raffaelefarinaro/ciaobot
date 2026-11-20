@@ -680,6 +680,17 @@ def read_sidecar(
         raise NoteEditSidecarError(
             f"unreadable note-edit proposal {path}: {exc}"
         ) from exc
+    return parse_sidecar_text(text, where=path, proposal_id=proposal_id)
+
+
+def parse_sidecar_text(text: str, *, where: Path, proposal_id: str) -> NoteEditProposal:
+    """The filed proposal a sidecar's text describes, or a refusal.
+
+    Pure: no filesystem access. ``where`` names the file in the refusals and is
+    not opened. Raises :class:`NoteEditSidecarError` for text that is not a
+    readable record filed under ``proposal_id``.
+    """
+    path = where
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:

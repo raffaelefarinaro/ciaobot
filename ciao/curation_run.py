@@ -225,6 +225,20 @@ def item_key(pass_id: str, subject: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class StaleNoteTarget:
+    """The note a stale-note item is about, by vault-relative path and revision.
+
+    Internal: it is not serialized, so the worklist's JSON is the same with or
+    without it. The revision is the note's :func:`ciao.memory_receipts.content_revision`
+    at discovery, which the evidence preparation compares against before it
+    hands anything on.
+    """
+
+    relative_path: str
+    revision: str
+
+
+@dataclass(frozen=True, slots=True)
 class WorklistItem:
     """One pass that has work, with the keys of the things to work on."""
 
@@ -233,6 +247,7 @@ class WorklistItem:
     reason: str
     keys: tuple[str, ...]
     weekly: bool = False
+    target: StaleNoteTarget | None = None
 
     @property
     def count(self) -> int:
@@ -792,6 +807,7 @@ def _stale_note_items(
                     f"{note.threshold_days}d horizon; revision {revision}"
                 ),
                 keys=(item_key(PASS_STALE_NOTE, note.relative),),
+                target=StaleNoteTarget(relative_path=note.relative, revision=revision),
             )
         )
     if capped:
@@ -1759,6 +1775,7 @@ def plan_run(worklist: Worklist, budget: RunBudget | None = None) -> RunPlan:
                 reason=item.reason,
                 keys=take,
                 weekly=item.weekly,
+                target=item.target,
             )
         )
         if rest:
@@ -1769,6 +1786,7 @@ def plan_run(worklist: Worklist, budget: RunBudget | None = None) -> RunPlan:
                     reason="budget reached; resumes next run",
                     keys=rest,
                     weekly=item.weekly,
+                    target=item.target,
                 )
             )
     return RunPlan(planned=tuple(planned), deferred=tuple(deferred), budget=budget)

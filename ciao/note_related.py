@@ -52,6 +52,9 @@ class RelatedNote:
     relations: tuple[str, ...]  # subset of (LINKS_TO, LINKED_FROM, MENTIONS), in that order
     revision: str  # memory_receipts.content_revision(full text)
     due: bool  # the nightly worklist would plan it: stale for its type and no check settles it
+    # An attended caller may re-verify it now despite the cooldown: its unverified
+    # check for this revision has no pending proposal (note_verification.reopens_unverified).
+    reopenable: bool
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +64,7 @@ class RelatedNote:
             "relations": list(self.relations),
             "revision": self.revision,
             "due": self.due,
+            "reopenable": self.reopenable,
         }
 
 
@@ -125,12 +129,22 @@ def _due(
     return nv.should_check(root, relative, revision, today=today)
 
 
+def _reopenable(check: nv.NoteCheck | None, revision: str, *, attended: bool) -> bool:
+    """Whether an attended verify would be accepted for this revision despite its cooldown."""
+    return (
+        check is not None
+        and check.content_revision == revision
+        and nv.reopens_unverified(check, attended=attended)
+    )
+
+
 def find_related_notes(
     vault_root: Path | str,
     relative_path: str,
     *,
     workspace: str,
     today: date,
+    attended: bool = False,
     limit: int = RELATED_NOTES_LIMIT,
 ) -> RelatedNotes:
     """The notes connected to ``relative_path``, link relations first.
@@ -147,6 +161,7 @@ def find_related_notes(
     bounded = max(1, min(_MAX_LIMIT, int(limit)))
 
     registry = load_entity_types(root)
+    checks = nv.read_note_checks(root)
     prefix = vault_index.VAULT_RENDER_PREFIX
     entries = vault_index.scan_vault(root, workspace=workspace, path_prefix=prefix)
     by_relative = {vault_index.vault_relative(entry.path_key, prefix): entry for entry in entries}
@@ -183,6 +198,7 @@ def find_related_notes(
             relations=tuple(relations),
             revision=revision,
             due=_due(root, relative, other, revision, today=today, registry=registry),
+            reopenable=_reopenable(checks.get(relative), revision, attended=attended),
         )
         linked = LINKS_TO in relations or LINKED_FROM in relations
         matches.append((0 if linked else 1, relative, note))

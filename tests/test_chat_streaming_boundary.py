@@ -384,6 +384,9 @@ class _DriveHost:
 class _TurnScriptHost(_DriveHost):
     """Serve one scripted event list per turn of a multi-turn drive."""
 
+    def _release_shell_finished_waiting(self, chat_id: str) -> None:
+        """A held shell notice is released when a pending question clears; this host holds none."""
+
     def __init__(
         self, scripts: list[list[StreamEvent]], workspace_root: Path
     ) -> None:
