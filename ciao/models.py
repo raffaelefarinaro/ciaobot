@@ -87,7 +87,7 @@ class ImageAttachment:
 
 # Native thinking/reasoning levels per provider, surfaced as-is in the PWA
 # model picker. Empty string = provider default: no flag/option is sent.
-# Claude's maps to ``ClaudeAgentOptions.effort``.
+# Claude's is sent to the claude-agent-acp adapter as its effort config option.
 #
 # Sourced from ``ciao.provider_registry`` so the level ladders live beside the
 # rest of each provider's static facts. Kept as a module-level dict because
@@ -119,17 +119,13 @@ class AgentRequest:
     fork_session: bool = False
     images: list[ImageAttachment] = field(default_factory=list)
     extra_env: dict[str, str] = field(default_factory=dict)
-    # Tools the spawned CLI must refuse to call. Forwarded to the SDK's
-    # ``ClaudeAgentOptions.disallowed_tools``. Lets per-workspace policy
+    # Tools the spawned CLI must refuse to call. Forwarded to the Claude adapter as
+    # ``_meta.claudeCode.options.disallowedTools``. Lets per-workspace policy
     # (the trim catalog denies plus workspace extras, e.g. ``Bash``) reach the subprocess
     # without leaking through ``extra_env``.
     disallowed_tools: list[str] = field(default_factory=list)
     # Claude CLI inline settings layer (skillOverrides + disable* keys) from the workspace's claude_trim; None = catalog defaults. Claude only.
     claude_settings: dict[str, Any] | None = None
-    # True for the end-of-conversation memory pass. Providers that have their
-    # own ruleset (opencode) select a stricter one; Claude already receives the
-    # extra denies through ``disallowed_tools``.
-    memory_pass: bool = False
     # Provider-native thinking/reasoning level (see THINKING_LEVELS).
     # Empty = provider default, nothing is forwarded.
     thinking_level: str = ""
@@ -159,26 +155,10 @@ class AgentRequest:
     # no user prompt, context capsule, file references or images: Claude sends
     # the bare ``/compact`` command, and opencode calls its compact endpoint.
     compact: bool = False
-    # Filesystem scope of the owning workspace ("machine" or "workspace", see
-    # ``ciao.fs_sandbox``). ``agent_roots`` are the resolved directories a
-    # workspace-scoped turn may read and write: the agent root first, then the
-    # workspace vault root, de-duplicated. Machine scope ignores both.
-    # ``agent_read_only`` are files a workspace-scoped turn may read but never
-    # write: the runtime's re-rooting receipt and workspace registry, so the
-    # agent's own `ciao` CLI resolves the same paths as the engine (#1945).
-    # Machine scope ignores it.
-    agent_fs_scope: str = "machine"
-    agent_roots: tuple[str, ...] = ()
-    agent_read_only: tuple[str, ...] = ()
-    # Workspace scope only (#1968): ``agent_denied`` is the resolved ``secrets``
-    # directory when it lies inside a granted root, hidden from the agent;
-    # ``agent_denied_except`` is the linked account's directory inside it,
-    # re-allowed read-write. Empty when ``secrets`` is not covered by a root.
-    agent_denied: tuple[str, ...] = ()
-    agent_denied_except: tuple[str, ...] = ()
+    # Automation-driven turn: the ACP layer rejects permission requests instead of raising a card.
+    unattended: bool = False
     # Resolved path of the project's linked git repository ("" = none). Both
-    # providers load its skills and allow it in every filesystem scope; it is
-    # fixed when the provider process starts.
+    # providers load its skills; it is fixed when the provider process starts.
     linked_repo: str = ""
 
     @property
@@ -273,12 +253,26 @@ class ToolUseEvent(StreamEvent):
     # raw input, which ``tool_input`` (a summary) does not carry.
     input_chars: int | None = None
     control_surface: str = ""
-    # True when the provider can move this call to the background while it
-    # runs (OpenCode's shell and subagent tools; see
-    # OpencodeProvider.move_to_background). Only set on a call, never a result.
-    backgroundable: bool = False
     # On a ``tool_result`` event: whether the call failed. ``None`` = unknown.
     is_error: bool | None = None
+    # On a ``tool_result`` for a backgrounded subagent: True when it only acknowledges the
+    # launch and the subagent keeps running. Its completion comes later as its own result.
+    background: bool = False
+    # On a ``tool_result`` that closes an OpenCode subagent: its terminal child status
+    # (``completed``, ``failed`` or ``interrupted``). Empty otherwise.
+    subagent_status: str = ""
+    # On a ``tool_use`` for a shell call (ACP ``execute`` kind): the call is a shell, and
+    # ``shell_background`` says it was started in the background. ``tool_input`` is its command.
+    shell: bool = False
+    shell_background: bool = False
+    # On a ``tool_result`` for a shell call: the shell's id and pid from its launch
+    # acknowledgement, the validated output path it writes to (never read by Ciaobot), the
+    # foreground exit code (None when the agent sends none), and a bounded output tail.
+    shell_id: str = ""
+    shell_pid: int | None = None
+    output_path: str = ""
+    exit_code: int | None = None
+    output_tail: str = ""
 
 
 _SHELL_TOOL_NAMES = frozenset({"Bash", "bash", "shell"})
@@ -355,6 +349,17 @@ class SystemStatusEvent(StreamEvent):
 
 
 @dataclass(slots=True)
+class SessionTitleEvent(StreamEvent):
+    """The agent's own session title (ACP ``session_info_update``).
+
+    Provisional: an agent may send several, and the host applies one only while the chat
+    still has a default or adapter-written title. A user rename is never replaced.
+    """
+
+    title: str = ""
+
+
+@dataclass(slots=True)
 class ModelChangedEvent(StreamEvent):
     """Emitted when the chat's model is switched during a capability fallback.
 
@@ -381,19 +386,41 @@ class TokenUsageEvent(StreamEvent):
 
 
 @dataclass(slots=True)
-class SteerDeliveredEvent(StreamEvent):
-    """A message sent with ``steer_turn`` reached the running turn."""
-
-    delivery_id: str = ""
-
-
-@dataclass(slots=True)
 class PromptCancelledEvent(StreamEvent):
     """Stop cancelled the turn's prompt before the provider ran it.
 
     Host bookkeeping: the drive loop puts the turn's prompt back in the
     chat's waiting queue so the user can resend it.
     """
+
+
+@dataclass(slots=True)
+class ContextCompactedEvent(StreamEvent):
+    """The agent compacted its session; the next prompt must carry the stable context again."""
+
+
+# The wake notice a provider's own continuation carries when nothing else names the turn.
+LATE_WAKE_NOTICE = "The agent continued after background work finished."
+
+
+@dataclass(slots=True)
+class ShellFinishedEvent(StreamEvent):
+    """A background shell's process ended. Host bookkeeping: it wakes the chat, it is never shown.
+
+    ``exit_code`` is the real code when the provider sent one (Claude's ``terminal_exit``), and None
+    when it did not (a poll of the process table cannot tell how the shell ended).
+    ``output_tail`` holds the last lines of the shell's output file, already checked and cleaned.
+    """
+
+    tool_use_id: str = ""
+    command: str = ""
+    output_path: str = ""
+    duration_s: float = 0.0
+    exit_code: int | None = None
+    # When the end was observed (``time.monotonic``): a continuation that started after it is its answer.
+    ended_at: float = 0.0
+    # None when the output file could not be read safely; an empty list when it had no output.
+    output_tail: list[str] | None = None
 
 
 @dataclass(slots=True)
@@ -415,7 +442,7 @@ class ResultEvent(StreamEvent):
     # True when the provider completed without a separate final-answer item
     # and the last substantive commentary was promoted as a visible fallback.
     fallback_final: bool = False
-    # True when this turn's degraded recovery (an SSE drop after the prompt was
+    # True when this turn's degraded recovery (a stream drop after the prompt was
     # accepted) re-emitted a permission or question request that is still
     # unanswered. The result is then published over a live card, so a watcher
     # reading it must not treat the attempt as finished work (#1111).

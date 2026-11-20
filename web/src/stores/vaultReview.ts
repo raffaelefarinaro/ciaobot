@@ -20,6 +20,18 @@ export type VaultReviewDisposition = 'keep'
  */
 type StampStatus = VaultReviewDecisionResult['stamp_status']
 
+/**
+ * How long a loaded snapshot counts as current for `ensureLoaded`. A backlink
+ * or edit made outside the panel resolves a candidate on the server without
+ * touching this store, so a snapshot held forever shows the resolved row.
+ * Short enough that a return to the panel after a real change re-reads; long
+ * enough that tab flips inside one visit do not rescan the vault.
+ */
+const LOADED_TTL_MS = 15_000
+
+/** What the panel says when an action names a candidate the queue no longer holds. */
+const STALE_ITEM_COPY = 'This item changed since the list was loaded, so the list was refreshed.'
+
 function reviewUrl(workspace: string, includeLists: boolean): string {
   const query = `workspace=${encodeURIComponent(workspace)}${includeLists ? '&include=trashed,cleared' : ''}`
   return `/api/vault/review?${query}`
@@ -56,6 +68,8 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
   // while `memory-audit` and the Memory Map badge kept flagging the note.
   const notice = ref('')
   const loadedWorkspace = ref<string | null>(null)
+  /** When `loadedWorkspace`'s snapshot was last adopted, for the TTL in `ensureLoaded`. */
+  let loadedAt = 0
   let fetchPromise: Promise<void> | null = null
   let fetchWorkspace: string | null = null
   /** Ticket for the newest in-flight list request; older responses are dropped. */
@@ -83,19 +97,21 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
   }
 
   /**
-   * Load the queue for one workspace unless it is already loaded.
+   * Load the queue for one workspace unless a fresh snapshot is already held.
    *
    * `fetch` only joins an *in-flight* request, so callers that fire on every
    * mount or view change (the Retirement badge watcher, the panel's own
    * `onMounted`) re-ran the heaviest read in the app each time — the endpoint
    * scans every note in the vault three times. The two panels are `v-if`
-   * siblings, so flipping tabs remounts and refetches. Mirrors
-   * `proposals.ensureLoaded()`; the refresh button and the workspace watch
-   * still force a real request.
+   * siblings, so flipping tabs remounts and refetches. The snapshot is reused
+   * only inside `LOADED_TTL_MS`: a note linked or edited elsewhere resolves a
+   * candidate without touching this store (issue #3020), so the panel's mount,
+   * focus and visibility returns re-read once it has aged. The refresh button
+   * and the workspace watch still force a real request.
    */
   async function ensureLoaded(workspace: string): Promise<void> {
     if (!workspace) return
-    if (loadedWorkspace.value === workspace) return
+    if (loadedWorkspace.value === workspace && Date.now() - loadedAt < LOADED_TTL_MS) return
     await fetch(workspace)
   }
 
@@ -122,6 +138,7 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
         trashed.value = data.trashed ?? []
         cleared.value = data.cleared ?? []
         loadedWorkspace.value = workspace
+        loadedAt = Date.now()
       } catch (e) {
         if (seq !== fetchSeq) return
         loadError.value = e instanceof Error ? e.message : 'Could not load retirement candidates'
@@ -199,6 +216,7 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
           trashed.value = data.trashed ?? []
           cleared.value = data.cleared ?? []
           loadedWorkspace.value = workspace
+          loadedAt = Date.now()
           loadError.value = ''
         } else if (loadedWorkspace.value === workspace || loadedWorkspace.value === null) {
           discardedSnapshotFor = workspace
@@ -229,7 +247,10 @@ export const useVaultReviewStore = defineStore('vaultReview', () => {
       // toast. Say what happened instead; an unrecognised message still passes
       // through unchanged, so nothing is lost to the mapping.
       errorDetail.value = detail
-      error.value = completionRefusalCopy(detail) || detail
+      // "candidate not found" is the engine's answer for a row resolved
+      // elsewhere since the list was built (issue #3020), not a failure.
+      error.value = completionRefusalCopy(detail)
+        || (detail.includes('candidate not found') ? STALE_ITEM_COPY : detail)
       return { ok: false, result: null }
     } finally {
       setBusy(id, false)

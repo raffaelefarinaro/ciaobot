@@ -99,9 +99,6 @@ class _ScheduleHost:
         self.prepared: list[tuple[str, str, str, str]] = []
         self.started: list[tuple[str, str, bool]] = []
         self.origins: list[str] = []
-        self.awaits: list[tuple[str, float | None]] = []
-        self.discarded: list[str] = []
-        self.drain_waits: list[str] = []
         self.needs_user_calls: list[ScheduleEntry] = []
         self.archives: list[str] = []
         self.postprocess: list[tuple[str, ArchiveOutcome]] = []
@@ -196,32 +193,12 @@ class _ScheduleHost:
         self.origins.append(origin)
         return cast(ChatStream, _Stream(self._stream_events))
 
-    async def _await_schedule_subagents(
-        self, chat_id: str, *, timeout_s: float = 900.0
-    ) -> tuple[bool, bool]:
-        self.awaits.append((chat_id, timeout_s))
-        return True, False
-
     async def _schedule_run_needs_user(
         self, entry: ScheduleEntry, outcome, *, chat_id: str = ""
     ) -> bool:
         del outcome
         self.needs_user_calls.append(entry)
         return False
-
-    async def _wait_for_drain_result(
-        self, chat_id: str, *, timeout_s: float = 180.0
-    ) -> tuple[str, bool] | None:
-        del timeout_s
-        self.drain_waits.append(chat_id)
-        return None
-
-    def _discard_schedule_drain_result(self, chat_id: str) -> None:
-        self.discarded.append(chat_id)
-
-    @staticmethod
-    def _is_interim_subagent_text(text: str) -> bool:
-        return "waiting on" in text.lower()
 
     async def archive_chat(self, chat_id: str) -> ArchiveOutcome | None:
         self.archives.append(chat_id)
@@ -306,12 +283,6 @@ async def test_dispatch_keeps_schedule_outcome_vocabulary(
     assert host.prepared == [("sched-contract", "Run the routine.", "opus", "claude")]
     assert host.started == [("chat-1", "Run the routine.", True)]
     assert host.origins == ["schedule"]
-    if expected_status == "ok":
-        assert host.awaits == [("chat-1", 900.0)]
-        assert host.discarded == ["chat-1", "chat-1"]
-    else:
-        assert host.awaits == []
-        assert host.discarded == []
     assert len(rows) == 1
 
 
@@ -368,10 +339,6 @@ async def test_manager_methods_are_thin_schedule_dispatch_delegates() -> None:
             calls.append(("prepare", args))
             return "chat-1"
 
-        async def _await_schedule_subagents(self, *args, **kwargs):
-            calls.append(("await", args))
-            return True, False
-
         async def _schedule_run_needs_user(self, *args, **kwargs):
             calls.append(("needs", args))
             return False
@@ -384,13 +351,12 @@ async def test_manager_methods_are_thin_schedule_dispatch_delegates() -> None:
     entry = _entry()
 
     assert manager.prepare_schedule_chat(entry, "p", "opus", "auto", "claude") == "chat-1"
-    assert await manager._await_schedule_subagents("chat-1", timeout_s=2) == (True, False)
     assert await manager._schedule_run_needs_user(entry, SimpleNamespace()) is False
     assert await manager.dispatch_schedule(entry, "p", "opus", "auto", "claude") == {
         "chat_id": "chat-1",
         "status": "ok",
     }
-    assert [name for name, _ in calls] == ["prepare", "await", "needs", "dispatch"]
+    assert [name for name, _ in calls] == ["prepare", "needs", "dispatch"]
 
 
 @pytest.mark.asyncio
@@ -408,11 +374,6 @@ async def test_dispatch_calls_manager_patches_instead_of_local_implementations(
         lambda row: None,
     )
 
-    async def patched_await(chat_id: str, *, timeout_s: float = 900.0):
-        host.awaits.append((chat_id, timeout_s))
-        return True, False
-
-    host._await_schedule_subagents = patched_await  # type: ignore[method-assign]
     monkeypatch.setattr(
         dispatcher,
         "prepare_schedule_chat",
@@ -420,16 +381,16 @@ async def test_dispatch_calls_manager_patches_instead_of_local_implementations(
     )
     monkeypatch.setattr(
         dispatcher,
-        "_await_schedule_subagents",
-        lambda *args, **kwargs: pytest.fail("local wait bypassed manager seam"),
+        "_schedule_run_needs_user",
+        lambda *args, **kwargs: pytest.fail("local classifier bypassed manager seam"),
     )
 
     result = await dispatcher.dispatch_schedule(
-        _entry(), "Run the routine.", "opus", "auto", "claude"
+        _entry(archive_policy="auto"), "Run the routine.", "opus", "auto", "claude"
     )
 
     assert result["status"] == "ok"
-    assert host.awaits == [("chat-1", 900.0)]
+    assert host.needs_user_calls == [_entry(archive_policy="auto")]
 
 
 def _curation_entry(*, archive_policy: str = "manual") -> ScheduleEntry:
@@ -522,6 +483,45 @@ async def test_curation_run_without_lease_records_error(
     assert row.status == "error"
     assert "curation lease was never taken" in row.error
     # An unclean run must stay visible, not be swept into the archive.
+    assert host.archives == []
+
+
+@pytest.mark.asyncio
+async def test_curation_with_uncertain_state_records_failure_and_does_not_autoarchive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _ScheduleHost(
+        tmp_path,
+        [{"type": "result", "text": "nothing happened", "is_error": False}],
+    )
+    state = curation_run.state_path(tmp_path / "vault")
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        '{"version":1,"done_keys":{},"lease":{},"last_run":{},"x":'
+        + "[" * 2000
+        + "0"
+        + "]" * 2000
+        + "}",
+        encoding="utf-8",
+    )
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+    rows: list[object] = []
+    monkeypatch.setattr(
+        "ciao.web.schedule_dispatch.job_runs.record_run",
+        lambda row: rows.append(row),
+    )
+
+    result = await dispatcher.dispatch_schedule(
+        _curation_entry(archive_policy="auto"),
+        "Run the routine.",
+        "opus",
+        "auto",
+        "claude",
+    )
+
+    assert result["status"] == "error"
+    assert len(rows) == 1 and rows[0].status == "error"
+    assert "curation state is uncertain" in rows[0].error
     assert host.archives == []
 
 

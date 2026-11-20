@@ -2,16 +2,15 @@
 
 ``ProjectChatManager`` remains the coordinator for projects, chats, archives, and
 persistence.  This collaborator owns the part of a schedule run that turns one
-stored :class:`~ciao.schedules.ScheduleEntry` into a stream, waits for any
-background work, grades the run, and decides whether the resulting chat can be
-auto-archived.  Target-chat preparation and the attention classifier live here
+stored :class:`~ciao.schedules.ScheduleEntry` into a stream, grades the run,
+and decides whether the resulting chat can be auto-archived.  Target-chat preparation and the attention classifier live here
 too because they are part of the same dispatch transaction; the memory pass
 and the rest of the archive pipeline deliberately remain manager concerns.
 
 The manager keeps delegating methods under their old names.  Calls back into
 those seams go through :class:`ScheduleDispatchHost`, rather than reaching into
 a second copy of the manager, so existing tests and integrations that patch
-``start_stream``, ``prepare_schedule_chat``, the subagent wait, or the classifier
+``start_stream``, ``prepare_schedule_chat``, or the classifier
 still patch the code that executes.  The protocol is deliberately typed: the
 collaborator has no ``Any``-based dependency contract.
 """
@@ -19,6 +18,7 @@ collaborator has no ``Any``-based dependency contract.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import re
@@ -27,14 +27,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
-from ciao import job_runs, subagent_tracking
+from ciao import job_runs
 from ciao import schedules as schedule_support
 from ciao.config import CiaoConfig
 from ciao.curation_run import unstarted_run_reason
 from ciao.error_log import clear_error_log, tail_error_log
 from ciao.models import BridgeMode, ImageAttachment
 from ciao.provider_service import ProviderService, supported_providers
-from ciao.providers.opencode import OpencodeProvider, opencode_collab_tree_counts
 from ciao.schedule_command import CommandRun, run_schedule_command
 from ciao.schedules import ScheduleEntry, ScheduleStore
 from ciao.web import chat_service
@@ -161,23 +160,10 @@ class ScheduleDispatchHost(Protocol):
         origin: str = ...,
     ) -> ChatStream: ...
 
-    async def _await_schedule_subagents(
-        self, chat_id: str, *, timeout_s: float = ...
-    ) -> tuple[bool, bool]: ...
-
     async def _schedule_run_needs_user(
         self, entry: ScheduleEntry, outcome: chat_service.ScheduleRunOutcome,
         *, chat_id: str = "",
     ) -> bool: ...
-
-    async def _wait_for_drain_result(
-        self, chat_id: str, *, timeout_s: float = ...
-    ) -> tuple[str, bool] | None: ...
-
-    def _discard_schedule_drain_result(self, chat_id: str) -> None: ...
-
-    @staticmethod
-    def _is_interim_subagent_text(text: str) -> bool: ...
 
     async def archive_chat(self, chat_id: str) -> ArchiveOutcome | None: ...
 
@@ -195,112 +181,6 @@ class ScheduleDispatcher:
 
     def __init__(self, host: ScheduleDispatchHost) -> None:
         self._host = host
-
-    async def _await_schedule_subagents(
-        self, chat_id: str, *, timeout_s: float = 900.0
-    ) -> tuple[bool, bool]:
-        """Block until the schedule chat's background subagents finish.
-
-        A schedule turn can delegate independent work to background subagents
-        and return before they finish.
-        The archive decision must not run against that half-complete state, so
-        we poll the parent session JSONL — the reliable running-count signal
-        (see ciao/subagent_tracking.py) — until it drains.
-
-        Returns ``(settled, had_async)``: ``settled`` is True when no
-        subagents remain running (or none were ever tracked), False when the
-        timeout elapses with agents still running; ``had_async`` is True when
-        the session ever dispatched a background subagent. Errors resolve to
-        ``(True, False)`` so a tracking failure never blocks the pipeline.
-        """
-        chat = self._host._chats.get(chat_id)
-        if chat is None or not chat.session_id:
-            return True, False
-        if chat.provider == "opencode":
-            deadline = time.perf_counter() + timeout_s
-            had_async = False
-            running = 0
-            while time.perf_counter() < deadline:
-                provider_service = self._host._providers.get(chat_id)
-                live_provider = (
-                    provider_service.provider
-                    if provider_service is not None
-                    else None
-                )
-                if (
-                    isinstance(live_provider, OpencodeProvider)
-                    and live_provider.has_live_server
-                    and live_provider.current_session_id == chat.session_id
-                ):
-                    tree = await live_provider.read_live_collab_tree()
-                else:
-                    tree = await OpencodeProvider.read_collab_tree(
-                        self._host._agent_root_for_chat(chat_id), chat.session_id
-                    )
-                running, had_now = opencode_collab_tree_counts(tree)
-                had_async = had_async or had_now
-                if running == 0:
-                    return True, had_async
-                await asyncio.sleep(3)
-            return running == 0, had_async
-        if chat.provider != "claude":
-            return True, False
-        try:
-            # Single-shot lookup: a miss reports the agents settled and can
-            # archive the chat, so force the lookup past the shared cache's
-            # rescan rate limit — see subagent_tracking.find_parent_session_file.
-            path = subagent_tracking.find_parent_session_file(
-                chat.session_id,
-                self._host._config.workspace_root,
-                agent_root=self._host._agent_root_for_chat(chat_id),
-                force_refresh=True,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("Subagent wait: session file lookup failed for %s", chat_id)
-            return True, False
-        if path is None:
-            return True, False
-
-        deadline = time.perf_counter() + timeout_s
-        last_size = -1
-        running = 0
-        had_async = False
-        state: subagent_tracking.SessionSubagentState | None = None
-        while time.perf_counter() < deadline:
-            try:
-                size = path.stat().st_size
-            except OSError:
-                return True, had_async
-            if size != last_size or state is None:
-                last_size = size
-                try:
-                    state = subagent_tracking.parse_session_subagents(path)
-                except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "Subagent wait: parse failed for %s", chat_id
-                    )
-                    return True, had_async
-                if not had_async:
-                    had_async = any(
-                        info.is_async and info.kind == "agent"
-                        for info in state.subagents.values()
-                    )
-            # Recomputed every tick, not just when the parent file grows: a
-            # completion the CLI never wrote there still shows up as the
-            # agent's own transcript going quiet (see the watcher above).
-            running = subagent_tracking.running_background_agents(path, state)
-            if running == 0:
-                return True, had_async
-            await asyncio.sleep(3)
-        if running:
-            logger.warning(
-                "Schedule chat %s still has %d background subagent(s) after %.0fs; "
-                "keeping chat visible",
-                chat_id,
-                running,
-                timeout_s,
-            )
-        return running == 0, had_async
 
     async def _schedule_run_needs_user(
         self, entry: ScheduleEntry, outcome: chat_service.ScheduleRunOutcome,
@@ -875,53 +755,6 @@ class ScheduleDispatcher:
             outcome.retry_pending = True
             network_retry = chat_state.retry_kind == "network"
 
-        # A clean parent turn may still have live background subagents. Wait for them to finish
-        # before the archive decision so the classifier judges the completed
-        # result — not an interim "dispatched, will report later" message. If
-        # they don't settle in time, mark the run pending so it stays visible.
-        if chat_service._schedule_run_clean(outcome):
-            # Drop any stale follow-up result before waiting so we only pick up
-            # the turn that runs when *these* subagents finish. The drain that
-            # captures it was started by start_stream's completion handler.
-            self._host._discard_schedule_drain_result(target_id)
-            settled, had_async = await self._host._await_schedule_subagents(target_id)
-            if not settled:
-                outcome.subagents_pending = True
-            elif had_async and chat_state is not None and chat_state.provider == "claude":
-                # Background subagents finished: the CLI runs a follow-up turn
-                # whose result the between-turns drain records. Feed that real
-                # summary to the archive classifier instead of the interim
-                # parent message. Bounded; exits as soon as the result lands.
-                synth = await self._host._wait_for_drain_result(target_id)
-                if synth is not None:
-                    synth_text, synth_error = synth
-                    if synth_text:
-                        outcome.final_text = synth_text
-                    if synth_error:
-                        outcome.is_error = True
-                    elif not synth_text:
-                        # A drain result that carries neither text nor error
-                        # says nothing; fall through to the interim-text
-                        # guard below with whatever the parent last said.
-                        pass
-                if not outcome.is_error and self._host._is_interim_subagent_text(
-                    outcome.final_text
-                ):
-                    # The follow-up turn the CLI runs when the agents finish
-                    # never happened, or the CLI died before writing one (the
-                    # 2026-08-30 daily-log run "ended" on an interim message).
-                    # The parent's data is un-synthesized
-                    # and whatever work was supposed to follow — writing the
-                    # log, committing — never ran. The run is not done: keep
-                    # the chat visible instead of archiving a stub.
-                    outcome.subagents_pending = True
-                    logger.warning(
-                        "Schedule chat %s ended on interim subagent text with "
-                        "no synthesis turn; keeping it visible",
-                        target_id,
-                    )
-            self._host._discard_schedule_drain_result(target_id)
-
         if (
             chat_service._schedule_run_clean(outcome)
             and schedule_support.system_base_id(_sched_schedule_id)
@@ -934,14 +767,12 @@ class ScheduleDispatcher:
                 unstarted_run_reason, vault, _sched_started
             )
             if reason:
-                # The agent ended its turn cleanly but never took the lease,
-                # so the nightly care did not run. Report it as the failure
-                # it is: unclean (the chat stays visible), status "error",
-                # and the reason lands in the job-run log (issue #866).
+                # A missing lease or uncertain state means the nightly care
+                # cannot be confirmed; report it as a failure and keep visible.
                 outcome.is_error = True
                 outcome.final_text = reason
                 logger.warning(
-                    "Schedule %s ended without taking the curation lease: %s",
+                    "Schedule %s curation completion could not be confirmed: %s",
                     _sched_schedule_id,
                     reason,
                 )
@@ -987,19 +818,7 @@ class ScheduleDispatcher:
         # classification back. "skipped" (a permission prompt or a deferred
         # retry) is not an error, but it is not a completed run either -- report
         # it as such rather than flattening it to "ok".
-        #
-        # The row splits one case out of "skipped": a run whose subagents never
-        # settled has nothing in its chat for the operator to answer, so it
-        # must not read as "needs you". The job-run log keeps "skipped".
         _row_status = _sched_status
-        if (
-            _sched_status == "skipped"
-            and outcome.subagents_pending
-            and not outcome.retry_pending
-            and not outcome.permission_requested
-            and not outcome.question_requested
-        ):
-            _row_status = schedule_support.RUN_STATUS_UNFINISHED
         if network_retry:
             # The agent could not reach an external service and armed a network
             # retry; the retried turn settles the row (ProjectChatManager.
@@ -1057,18 +876,21 @@ class ScheduleDispatcher:
     def _stamp_row_outcome(self, schedule_id: str, dispatch_id: str, status: str) -> None:
         """Write a run's outcome onto the stored row, if the row still names it."""
         if not schedule_id or status not in {
-            "error", "ok", "skipped", schedule_support.RUN_STATUS_UNFINISHED,
-            schedule_support.RUN_STATUS_RETRYING,
+            "error", "ok", "skipped", schedule_support.RUN_STATUS_RETRYING,
         }:
             return
         store = cast(ScheduleStore | None, getattr(self._host, "schedule_store", None))
         if store is None:
             return
         latest = store.get(schedule_id)
-        if latest is not None and schedule_support.stamp_run_outcome(
-            latest, dispatch_id, status
-        ):
-            store.replace(latest)
+        if latest is None:
+            return
+        base = dataclasses.replace(latest)
+        if schedule_support.stamp_run_outcome(latest, dispatch_id, status):
+            try:
+                store.replace(latest, base=base)
+            except schedule_support.ScheduleNotFound:
+                return
             # An open sidebar or Automations page only refetches on the
             # schedules_changed event; without publishing it the newly stamped
             # health (a failure that needs attention, or a skipped run waiting

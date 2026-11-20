@@ -26,7 +26,7 @@ from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
 from ciao.schedules import ScheduleManager, ScheduleStore
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
-from ciao.web.project_chats import ProjectChatManager
+from ciao.web.project_chats import _TEARDOWN_CONFLICT, ProjectChatManager
 from ciao.web.routes_api import (
     archive_workspace_setting,
     list_archived_workspaces,
@@ -36,6 +36,7 @@ from ciao.web.routes_api import (
 from ciao.workspace_archive import (
     ARCHIVE_DIR_NAME,
     LAYOUT_SHARED,
+    METADATA_FILE,
     ArchiveTarget,
     WorkspaceArchiveError,
     archive_root,
@@ -279,6 +280,26 @@ def test_archive_refuses_while_a_chat_in_the_workspace_is_running(tmp_path, monk
     assert config.workspace("work") is not None
     assert (tmp_path / "work").is_dir()
     assert pcm.get_chat(chat.chat_id) is not None
+
+
+def test_archive_refuses_with_409_while_a_chat_is_still_stopping(tmp_path, monkeypatch):
+    client, config, pcm, store = _app(tmp_path, rerooted=True)
+    general = next(p for p in pcm.list_projects("work") if p.is_auto)
+    chat = pcm.create_chat(general.project_id, title="stopping")
+    monkeypatch.setattr(
+        pcm._streaming, "teardown_unsettled", lambda chat_id: chat_id == chat.chat_id
+    )
+    before = _tree(tmp_path / "work")
+
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 409
+    assert response.json() == {"error": _TEARDOWN_CONFLICT}
+    # Refused before the folder moved: nothing was changed or rolled back.
+    assert config.workspace("work") is not None
+    assert _tree(tmp_path / "work") == before
+    assert pcm.get_chat(chat.chat_id) is not None
+    assert not (tmp_path / ARCHIVE_DIR_NAME).exists()
 
 
 def test_archive_takes_the_workspace_schedules_and_stops_its_routines(tmp_path):
@@ -578,15 +599,46 @@ def test_restore_round_trip(tmp_path, rerooted):
     assert client.get("/api/workspaces/archived").json()["archived"] == []
 
 
-def test_restore_carries_the_claude_ai_connectors_switch(tmp_path):
+def test_restore_converts_a_legacy_connectors_off_archive(tmp_path):
+    """An archive that still stores connectors off, and no trim key, restores trimmed.
+
+    The exported archive does not write the old field. A file from before the
+    trim option is edited here the way an old install left it.
+    """
     client, config, _pcm, _store = _app(tmp_path, rerooted=True)
-    config.workspaces["work"].claude_ai_connectors = False
     archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    folder = archive_root(config) / archived["id"]
+    meta_path = folder / METADATA_FILE
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert "claude_ai_connectors" not in meta["workspace"]
+    meta["workspace"].pop("claude_trim", None)
+    meta["workspace"]["claude_ai_connectors"] = False
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
 
     restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
 
     assert restored.status_code == 200, restored.json()
-    assert config.workspaces["work"].claude_ai_connectors is False
+    assert config.workspaces["work"].claude_trim == {"setting:claude_ai_connectors": True}
+    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
+    row = next(item for item in stored if item["name"] == "work")
+    assert "claude_ai_connectors" not in row
+    assert row["claude_trim"]["setting:claude_ai_connectors"] is True
+
+
+def test_restore_ignores_legacy_connectors_on_or_absent(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    folder = archive_root(config) / archived["id"]
+    meta_path = folder / METADATA_FILE
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["workspace"].pop("claude_trim", None)
+    meta["workspace"]["claude_ai_connectors"] = True
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    assert "setting:claude_ai_connectors" not in config.workspaces["work"].claude_trim
 
 
 def test_restore_carries_claude_trim(tmp_path):

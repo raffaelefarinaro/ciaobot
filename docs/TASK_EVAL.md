@@ -169,6 +169,119 @@ the task and the values (for example `candidate H1-multi-source-synthesis: model
 haiku,sonnet`). Pass `--allow-mixed` to pool them anyway. It prints the same
 list as a warning on stderr and adds provider and model columns for each side.
 
+## Workspace care equivalent-work contract (model-free; not collected yet)
+
+`ciao.task_eval_contract` defines a separate, versioned contract for a future
+privacy-minimized producer. It does not change this CLI, emit care records, run
+schedules, inspect a workspace, grade outcomes, calculate savings, or establish
+representativeness of private usage. Existing per-turn aggregates are not a
+per-call ledger; unknown usage is not zero.
+
+`validate_record` rebuilds the exact `ciao-care-measurement/1` shape.
+`public_record` is the publication seam for that already-minimized shape, not
+an arbitrary-data sanitizer. It rejects legacy rows and extra fields instead of
+dropping answers, traces, errors or paths. It cannot prevent covert payloads in
+identifiers/digests or prove producer assertions true. The producer, evidence,
+and independent grader must be outside the measured agent's writable workspace.
+
+This complete example uses invented synthetic identifiers and hashes for
+contract testing only; it is not a workload claim:
+
+```json
+{
+  "schema": "ciao-care-measurement/1",
+  "run_id": "00000000-0000-4000-8000-000000000001",
+  "scenario": "nightly",
+  "entry": "schedule",
+  "execution": {"status": "completed", "code_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "dirty": false},
+  "provenance": {
+    "fixture_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "workload_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "environment_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "harness_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "grader_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  },
+  "obligations": ["o001", "o002"],
+  "grade": {
+    "source": "independent",
+    "run_id": "00000000-0000-4000-8000-000000000001",
+    "fixture_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "workload_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "grader_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "observation_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "outcomes": {"o001": "passed", "o002": "passed"},
+    "safety": "passed"
+  },
+  "metrics": {
+    "input": {"value": 0, "status": "complete", "scope": "all_model_calls", "source": "provider_usage", "evidence_sha256": "2222222222222222222222222222222222222222222222222222222222222222", "reason": null},
+    "output": {"value": 0, "status": "complete", "scope": "all_model_calls", "source": "provider_usage", "evidence_sha256": "2222222222222222222222222222222222222222222222222222222222222222", "reason": null},
+    "cache_read": {"value": 0, "status": "complete", "scope": "all_model_calls", "source": "provider_usage", "evidence_sha256": "2222222222222222222222222222222222222222222222222222222222222222", "reason": null},
+    "cache_write": {"value": 0, "status": "complete", "scope": "all_model_calls", "source": "provider_usage", "evidence_sha256": "2222222222222222222222222222222222222222222222222222222222222222", "reason": null},
+    "model_calls": {"value": 0, "status": "complete", "scope": "all_model_calls", "source": "provider_usage", "evidence_sha256": "2222222222222222222222222222222222222222222222222222222222222222", "reason": null},
+    "cost_usd": {"value": 0, "status": "complete", "scope": "all_model_calls", "source": "provider_usage", "evidence_sha256": "2222222222222222222222222222222222222222222222222222222222222222", "reason": null},
+    "wall_s": {"value": 0, "status": "complete", "scope": "run", "source": "monotonic_clock", "evidence_sha256": "2222222222222222222222222222222222222222222222222222222222222222", "reason": null}
+  }
+}
+```
+
+The fixture digest identifies the immutable **public synthetic starting
+fixture**, including task overlays and initial seeded progress/weekly markers;
+no private vault is copied, hashed or sampled. The workload digest binds
+predeclared obligations and expected effects, safety invariants, due work,
+scenario/horizon, setup and budgets—not a planner's post-filter list. The
+environment digest covers fixed public configuration and loaded global inputs;
+unknown inherited inputs stay unknown. It deliberately excludes the engine
+revision varied between comparison sides and optimized engine-owned
+prompt/implementation artifacts, which are the code under test. Harness/grader
+digests bind the external measurement and oracle. The grade's observation
+digest identifies immutable synthetic after-state/evidence, including
+preservation and safety evidence and any before-state references the grader
+needs. Grade fields bind that observation to its run and workload. These
+declarations are not signatures. Different engine revisions are expected;
+missing or dirty revisions are not reproducible.
+
+`comparison_eligibility` requires distinct completed schedule runs, matching
+non-null workload/configuration/harness/grader identities, an independent bound
+grade with every obligation and safety check passed, and a complete eligible
+metric basis. It returns stable reasons, not savings. Eligibility is per
+metric: unknown cost can coexist with eligible wall time. Unknown and partial
+remain distinct from observed complete zero. Token/call/cost require
+`provider_usage` over `all_model_calls`; wall time requires a run-scoped
+monotonic clock. A turn aggregate is not whole-run usage. Budget continuation
+covers its entire predeclared horizon. Eligibility is necessary evidence only,
+not a savings, statistical, non-regression or publication claim.
+
+The closed reason vocabulary is `same_run`, `entry_not_schedule`,
+`execution_incomplete`, `revision_unverifiable`, `provenance_unknown`,
+`workload_mismatch`, `environment_mismatch`, `harness_mismatch`,
+`grader_mismatch`, `grade_not_independent`, `grade_unbound`,
+`outcome_incomplete`, `metric_incomplete`, `metric_scope_ineligible`, and
+`metric_basis_mismatch`. Reasons are deduplicated and sorted.
+
+`ciao.care_eval_fixtures` adds the fixed workload manifest for the three
+scenarios and a pure oracle, `grade_fixture`. Each obligation names a logical
+observation key and expected UTF-8 bytes that a future trusted harness derives
+from actual effects, not from reports. A missing observation is unknown, an
+explicit absence fails an expected effect, and an exact value passes. A weekly
+marker passes only with both independent checks observed and passed. Any
+protected mismatch fails safety; a missing protected observation is unknown.
+Report prose, extra keys and token totals are ignored. This is an acceptance
+boundary for the workload, not a measurement: it asserts no savings, runs no
+schedule, reads no installed state, and creates no fixture files.
+
+A later runner must execute an isolated faithful scheduled run against a
+public synthetic fixture and collect provider-call usage with provenance before
+the oracle's outcomes can feed `comparison_eligibility`. Until then, the
+independent collector, schedule-entry runner, complete per-call ledger, digest
+builders, evidence capture, continuation orchestration, report wiring and real
+baseline collection are deferred. Synthetic scenarios are not representative
+private usage; existing `ciao-task-eval/1` writers and reports remain unchanged.
+
+The schedule-run driver (`ciao/care_eval_run.py`) exists: it runs one materialized
+system schedule through the real schedule-run route of an engine the caller owns, pausing
+auto-fire first, and settles on the exact job-run row. Nothing collects usage yet; no
+savings claim is made.
+
 ## Permission mode
 
 The chats of a run start in a permission mode, and the default depends on the
@@ -177,7 +290,7 @@ provider:
 | Provider | Default | Why |
 | --- | --- | --- |
 | `claude` | `auto` | Claude's `auto` is classifier-backed and lets the eval's tool calls through. |
-| `opencode` | `bypass` | OpenCode's `auto` keeps every shell call behind an approval card (`_permissive_auto_rules` in `ciao/providers/opencode.py`). Nobody answers that card in an eval, so the turn hangs to its timeout with zero usage. The default matches a typical operator install, which pins `opencode: bypass`. |
+| `opencode` | `bypass` | OpenCode's `auto` keeps every shell call behind an approval card (its ACP mode map in `ciao/providers/acp/agents.py`). Nobody answers that card in an eval, so the turn hangs to its timeout with zero usage. The default matches a typical operator install, which pins `opencode: bypass`. |
 
 The defaults live in `DEFAULT_MODES` in `ciao/task_eval.py`. An explicit
 `--mode manual|auto|bypass` replaces the default for both providers' runs. The
@@ -218,7 +331,7 @@ Each task is `ciao/stock/evals/tasks/<task_id>/task.json`:
   `{"kind": "project", "name", "context"?}`.
 - `requires` lists capability names. `gws_fake` is the only one (see
   [Capabilities](#capabilities)). A task that names a capability the platform
-  lacks is recorded as skipped: `gws_fake` is skipped on Windows.
+  lacks is recorded as skipped.
 - An optional `overlay/` directory sits beside `task.json`. Its files are
   copied over `ws/personal/` before the engine starts, for example
   `overlay/memory-vault/People/x.md`.
@@ -345,8 +458,7 @@ When a run boots, the harness does the following:
   call returns, so the agent sees a connected account.
 
 The fake answers the Gmail calls the M4 task and its neighbours use, from the
-mailbox, and never contacts Google. The launcher is a POSIX shell script, so the
-capability is POSIX only. Windows skips tasks that require it.
+mailbox, and never contacts Google. The launcher is a POSIX shell script.
 
 The fake and its call log live in a folder the agent can write, so the eval is
 not tamper-proof: a deliberately adversarial agent could edit the log or the
@@ -420,7 +532,6 @@ match the fixture exactly. H4 overlays its own `guests.csv` with a filled dietar
 
 ## Known limits
 
-- The `gws_fake` capability is POSIX only; `run` skips M4 on Windows.
 - `--jobs` above 1 has a small port race: each engine's port is probed free when its harness object is created and bound only when the engine starts, so two concurrent boots can collide. Use `--jobs 1` for a run whose numbers you will compare.
 - Settling is inferred from the restart-blocker list, not from the transcript.
   A chat that stops producing turns without a blocker is treated as settled.

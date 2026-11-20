@@ -6,22 +6,16 @@ import json
 import os
 import plistlib
 import re
-import shutil
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Sequence
 from xml.parsers.expat import ExpatError
 
-from ciao.os_support.definition import (
-    MAX_DEFINITION_BYTES,
-    read_definition,
-)
 from ciao.port_in_use import (
     PORT_IN_USE_EXIT_CODE,
     clear_port_in_use,
@@ -32,12 +26,7 @@ from ciao.server_host import ServerHostError, parse_service_command
 from ciao.workspace_access import denial_path, read_denial
 
 SERVER_LABEL = "com.ciao.server"
-LEGACY_MENUBAR_LABEL = "com.ciao.menubar"
 DEFAULT_PORT = 8443
-MIGRATION_RECEIPT = "desktop-migration.json"
-DESKTOP_BUNDLE_ID = "local.ciaobot.app"
-DESKTOP_EXECUTABLE = "ciaobot-desktop"
-LEGACY_EXECUTABLE = "CiaobotServer"
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -69,14 +58,9 @@ START_POLL_INTERVAL_S = 0.5
 # in-memory registry; a launchd that does not answer is uncertainty, not
 # absence, and must not be waited on forever.
 JOB_PROBE_TIMEOUT_S = 10.0
-# How long one fresh `launchctl bootstrap` may take. It registers a job; it
-# never waits for the engine to come up (setup's RunAtLoad starts that, and the
-# caller verifies readiness separately), so this bounds a stuck launchd only.
-FRESH_ACTIVATION_TIMEOUT_S = 20.0
-# The system launchctl by absolute path. The new native activation paths use
-# this so a caller-controlled PATH cannot substitute another program; the
-# legacy load/reload path below is unchanged and still invokes ``launchctl`` by
-# name.
+# The system launchctl by absolute path, so a caller-controlled PATH cannot
+# substitute another program for the probes mac_takeover runs. The legacy
+# load/reload path below still invokes ``launchctl`` by name.
 LAUNCHCTL = "/bin/launchctl"
 SERVER_LOCK_NAME = "server.lock"
 # Test seam: the teardown poll sleeps through this, so tests run without waiting.
@@ -149,116 +133,6 @@ def load_agent(definition: Path) -> int:
         ["launchctl", "load", "-w", str(definition)],
         check=False,
     ).returncode
-
-
-def _definition_digest(definition: Path) -> str:
-    """The sha256 of exactly the regular file at ``definition``.
-
-    The read is :func:`ciao.os_support.definition.read_definition`, shared with
-    the native handoff so the two digests cannot drift: it is binary where the
-    platform has ``O_BINARY``, rejects a size that the read did not cover, and
-    refuses a missing, special, replaced or changed file.
-    """
-    return read_definition(definition, max_bytes=MAX_DEFINITION_BYTES).sha256
-
-
-def _require_definition_digest(definition: Path, expected_sha256: str) -> None:
-    if _definition_digest(definition) != expected_sha256:
-        raise RuntimeError(
-            f"the service definition changed after setup recorded it: {definition}"
-        )
-
-
-def load_fresh_agent(definition: Path, *, expected_sha256: str) -> int:
-    """Bootstrap the server job from exactly the definition the handoff recorded.
-
-    Fresh activation only. The job must be *proven* absent in this user's GUI
-    domain through :func:`server_job_absent` (the qualified
-    ``launchctl print gui/<uid>/<label>`` probe; ``launchctl list`` is
-    unqualified and its silence is not absence), so this never unloads, boots
-    out, reloads or kickstarts a job that is already registered — an
-    intervening job is a refusal, never something to replace. The definition
-    is digested before the first probe and again after all its probes,
-    immediately before submission, so changed bytes, a symlink, a FIFO or an
-    inode/mtime race refuse without a slow probe widening the gap between the
-    last check and launchd's open. A failed, unqualified or other-domain probe
-    answer, a nonzero bootstrap and a timeout refuse as well.
-
-    A launchd override that disables the label still answers "not found" to
-    the probe, so absence alone is not freshness. The read-only
-    ``launchctl print-disabled gui/<uid>`` listing is consulted before the
-    bootstrap: an explicit disabled label is existing service configuration, not
-    a fresh install, and clearing it is the operator's decision. This function
-    therefore never calls ``launchctl enable``; it refuses and names the action
-    for the operator. That is a deliberate limit of fresh-only activation, not a
-    transient failure to retry.
-
-    Atomicity limit: the digest check and launchd opening the pathname are two
-    separate steps. A same-UID writer can replace the bytes between the last
-    check and launchd's open, and launchd has no compare-and-bootstrap call, so
-    the check narrows that window and does not close it. Bootstrap-only
-    semantics are what keep a *concurrently registered* job from being
-    unloaded or replaced.
-
-    A success does not kickstart: setup's ``RunAtLoad`` starts the fresh job,
-    and the caller verifies the engine separately. Returns 0 on success.
-
-    Version note: the accepted absence answer and the ``print-disabled`` shape
-    were recorded from read-only probes on one current macOS. The readers pin
-    exactly what those probes printed and refuse everything else, but they have
-    not been validated against every macOS release. #2340 must exercise them on
-    the supported macOS range before native activation is wired in; until then
-    an unfamiliar answer is a refusal, never a guessed absence.
-    """
-    if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
-        raise ValueError(
-            "the expected service definition digest is not a lowercase sha256"
-        )
-    _require_definition_digest(definition, expected_sha256)
-    if not server_job_absent():
-        raise RuntimeError(f"{SERVER_LABEL} is already registered with launchd")
-    if launchd_override_disabled():
-        override = f"gui/{_getuid()}/{SERVER_LABEL}"
-        raise RuntimeError(
-            f"{SERVER_LABEL} is disabled in gui/{_getuid()} and fresh activation "
-            "will not change that override. Enable it yourself if that is what "
-            f"you want: launchctl enable {override}"
-        )
-    # Last, after all the probes: the override query may take ten seconds, so
-    # hashing before it would leave that whole window open before launchd
-    # opens the pathname. This check is the closest one to that open.
-    _require_definition_digest(definition, expected_sha256)
-    try:
-        completed = subprocess.run(
-            [LAUNCHCTL, "bootstrap", f"gui/{_getuid()}", str(definition)],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            timeout=FRESH_ACTIVATION_TIMEOUT_S,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(f"Could not bootstrap {SERVER_LABEL}: {exc}") from exc
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        if re.search(r"service is disabled\b", detail, re.IGNORECASE):
-            # A disabled override in the user's domain is existing service
-            # configuration. Fresh activation must not clear it with
-            # `launchctl enable` — that is the operator's decision — so it
-            # fails closed with the exact action they can take.
-            raise RuntimeError(
-                f"launchctl bootstrap failed: {detail}; {SERVER_LABEL} is "
-                f"disabled in gui/{_getuid()} and fresh activation will not "
-                "change that override. Enable it yourself if that is what you "
-                f"want: launchctl enable gui/{_getuid()}/{SERVER_LABEL}"
-            )
-        raise RuntimeError(
-            f"launchctl bootstrap failed: {detail}"
-            if detail
-            else f"launchctl bootstrap failed for {SERVER_LABEL}"
-        )
-    return 0
 
 
 def schedule_server_handoff() -> bool:
@@ -347,35 +221,13 @@ def hosted_service_python(arguments: object) -> str | None:
     return parsed.python if parsed.mode == "hosted" else None
 
 
-def host_interpreter_for(engine: str) -> str:
-    """The interpreter a verified host must serve, from the setup program.
-
-    ``ciao.cli._host_engine_interpreter`` applies exactly this rule when it
-    renders a hosted definition: a host cannot serve the ``ciao`` console —
-    its own parser demands a python executable — so setup renders this
-    process's interpreter for that one documented console name and passes
-    anything else through, where the host renderer refuses it with the reason.
-    This function is the same rule for the native handoff, which records the
-    interpreter the hosted definition actually serves.
-
-    The direct shape does not use this mapping. A direct console definition
-    runs the console script itself, and the kernel then runs the interpreter
-    named on its first line; :func:`ciao.native_handoff.resolve_console_interpreter`
-    reads that interpreter so the result can identify both files.
-    """
-    if Path(engine).name.lower() == "ciao":
-        return sys.executable
-    return engine
-
-
 def service_python_path(arguments: object) -> str:
     """The interpreter the service definition actually runs.
 
     A **hosted** definition (``Ciaobot Server serve --python <interpreter>``)
     runs the native host, which is not a Python interpreter: reporting its
-    executable as ``python_path`` would make ``update_engine``'s bundled-engine
-    check and every consumer that hands this value to a process start the wrong
-    thing. The hosted shape is recognised through
+    executable as ``python_path`` would make every consumer that hands this
+    value to a process start the wrong thing. The hosted shape is recognised through
     :func:`ciao.server_host.parse_service_command` and the answer is the
     interpreter the host was told to serve.
 
@@ -473,182 +325,6 @@ def _loaded_definition(uid: int, runner: Runner) -> tuple[bool, list[str] | None
     """
     loaded, arguments, _code = _loaded_job(uid, runner)
     return loaded, arguments
-
-
-_LAUNCHCTL_LIST_HEADER = ("pid", "status", "label")
-
-
-_SIGNED_STATUS = re.compile(r"-?\d+")
-
-
-def parse_launchctl_list(stdout: str) -> set[str]:
-    """Labels from ``launchctl list``; unrecognised output is an error.
-
-    ``launchctl list`` always prints the ``PID Status Label`` header, even with
-    no jobs loaded, so an empty or differently shaped response is not evidence
-    that nothing is registered. Rows are ``PID``, exit status (both ``-`` or a
-    number, and the status is negative when the job was killed by a signal) and
-    the label.
-    """
-    lines = [line for line in stdout.splitlines() if line.strip()]
-    if not lines or tuple(field.casefold() for field in lines[0].split()) != _LAUNCHCTL_LIST_HEADER:
-        raise RuntimeError("launchctl list returned unrecognised output")
-    labels: set[str] = set()
-    for line in lines[1:]:
-        fields = line.split()
-        if (
-            len(fields) != 3
-            or not (fields[0] == "-" or fields[0].isdigit())
-            or not (fields[1] == "-" or _SIGNED_STATUS.fullmatch(fields[1]))
-        ):
-            raise RuntimeError(f"launchctl list returned a malformed row: {line!r}")
-        labels.add(fields[2])
-    return labels
-
-
-def server_job_registered() -> bool:
-    """Strictly query launchd for the engine label; uncertainty is an error."""
-    try:
-        completed = subprocess.run(
-            ["launchctl", "list"], capture_output=True, text=True,
-            encoding="utf-8", errors="replace", check=False, timeout=10.0,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(f"Could not query launchd: {exc}") from exc
-    if completed.returncode != 0:
-        raise RuntimeError(f"launchctl list failed: {(completed.stderr or '').strip()}")
-    return SERVER_LABEL in parse_launchctl_list(completed.stdout or "")
-
-
-#: launchd's one recognized "this job is not here" answer. It names the job and
-#: the domain; anything else — a different label, a different or prefixed uid,
-#: a generic failure — is uncertainty, not absence.
-_ABSENT_JOB_LINE = re.compile(
-    r'Could not find service "(?P<label>[^"]+)" in domain for user gui: '
-    r"(?P<uid>\d+)"
-)
-
-#: The status launchd pairs with the absence line. A different status is a
-#: different fact even when the text looks right.
-_ABSENT_JOB_STATUS = 113
-
-#: The preamble a current macOS launchctl writes before the absence line. It is
-#: part of the exact answer, not tolerated noise: recorded from a read-only
-#: probe of a label that does not exist (`Bad request.` then the line, exit
-#: 113). An older launchctl writes the line alone.
-_ABSENT_JOB_PREFIXES = ("Bad request.\n", "")
-
-
-def _confirmed_absent_answer(
-    completed: subprocess.CompletedProcess[str], *, label: str, uid: int
-) -> bool:
-    """Whether this is exactly launchd's absence answer for label+uid.
-
-    The known answer is the absence line, optionally preceded by exactly one
-    ``Bad request.`` line, on stderr, with empty stdout and exit status 113.
-    A foreign label, a neighbouring or prefixed uid, an extra line, output on
-    the other stream and any other status all refuse.
-    """
-    if completed.returncode != _ABSENT_JOB_STATUS or (completed.stdout or "").strip():
-        return False
-    text = (completed.stderr or "").strip()
-    for prefix in _ABSENT_JOB_PREFIXES:
-        if not text.startswith(prefix):
-            continue
-        match = _ABSENT_JOB_LINE.fullmatch(text[len(prefix) :])
-        if (
-            match is not None
-            and match.group("label") == label
-            and int(match.group("uid")) == uid
-        ):
-            return True
-    return False
-
-
-def server_job_absent(*, uid: int | None = None) -> bool:
-    """Whether launchd proves the server job is absent from this user's domain.
-
-    ``launchctl print gui/<uid>/<label>`` asks the qualified question that
-    ``launchctl bootstrap gui/<uid>`` acts on. ``True`` is returned only for
-    launchd's exact absence answer for *this* label and *this* domain at its
-    known status 113: a current launchctl writes ``Bad request.`` then
-    ``Could not find service "<label>" in domain for user gui: <uid>``, an older
-    one the line alone. A job dump answers ``False`` (the job is there). Any
-    other status, a wrong label, a prefixed uid (``gui: 5010`` for 501), another
-    domain, extra or unrelated output, a failed query or a timeout raises:
-    uncertainty is not absence.
-    """
-    resolved_uid = _getuid() if uid is None else uid
-    try:
-        completed = subprocess.run(
-            [LAUNCHCTL, "print", f"gui/{resolved_uid}/{SERVER_LABEL}"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            timeout=JOB_PROBE_TIMEOUT_S,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(
-            f"Could not probe {SERVER_LABEL} in gui/{resolved_uid}: {exc}"
-        ) from exc
-    if completed.returncode == 0:
-        return False
-    if _confirmed_absent_answer(completed, label=SERVER_LABEL, uid=resolved_uid):
-        return True
-    detail = ((completed.stderr or "") + (completed.stdout or "")).strip()
-    raise RuntimeError(
-        f"launchd did not confirm {SERVER_LABEL} absent from gui/{resolved_uid}"
-        + (f": {detail}" if detail else "")
-    )
-
-
-def launchd_override_disabled(*, uid: int | None = None) -> bool:
-    """Whether launchd's user-domain override explicitly disables the job.
-
-    ``launchctl print-disabled gui/<uid>`` is the only query for the per-label
-    override, and it is read-only. A readable listing that does not name
-    :data:`SERVER_LABEL` answers ``False``; an explicit ``disabled``/``true``
-    entry answers ``True``. A failed query, a timeout, malformed output or a
-    label listed more than once raises: uncertainty is not an answer, and a
-    caller deciding whether a job may be started must not guess.
-
-    This function never enables, disables, loads, unloads or otherwise changes
-    the override; it only reads it.
-    """
-    resolved_uid = _getuid() if uid is None else uid
-    domain = f"gui/{resolved_uid}"
-    try:
-        completed = subprocess.run(
-            [LAUNCHCTL, "print-disabled", domain],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            timeout=JOB_PROBE_TIMEOUT_S,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(
-            f"Could not read launchd overrides for {domain}: {exc}"
-        ) from exc
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        raise RuntimeError(
-            f"launchctl print-disabled {domain} failed"
-            + (f": {detail}" if detail else "")
-        )
-    # Local import: service_login owns the one reader for the real output shape
-    # and imports this module at module level.
-    from ciao.service_login import strict_disabled_override
-
-    state = strict_disabled_override(completed.stdout or "", SERVER_LABEL)
-    if state is None:
-        raise RuntimeError(
-            f"launchctl print-disabled {domain} returned output that cannot be read"
-        )
-    return state
 
 
 def _loaded_job(
@@ -779,15 +455,33 @@ def discover_runtime(
     service definition by passing the label its receipt names.
     """
 
-    env = os.environ if environ is None else environ
     agents = (
         default_launch_agents_dir()
         if launch_agents_dir is None
         else Path(launch_agents_dir).expanduser()
     )
-    plist_path = agents / f"{label}.plist"
-    plist: dict[str, Any] = load_server_plist(agents, label) or {}
+    return runtime_from_plist(
+        load_server_plist(agents, label) or {},
+        plist_path=agents / f"{label}.plist",
+        environ=environ,
+    )
 
+
+def runtime_from_plist(
+    plist: dict[str, Any],
+    *,
+    plist_path: Path,
+    environ: dict[str, str] | None = None,
+    read_env: Callable[[Path], dict[str, str]] = read_dotenv,
+) -> DesktopRuntime:
+    """:func:`discover_runtime` over an already parsed plist.
+
+    A caller that has to hash, classify and resolve the *same* document (the
+    takeover plan) parses it once and passes it here, instead of letting a
+    second read race a rewrite. ``read_env`` reads the workspace ``.env``.
+    """
+
+    env = os.environ if environ is None else environ
     plist_env = plist.get("EnvironmentVariables")
     if not isinstance(plist_env, dict):
         plist_env = {}
@@ -798,7 +492,7 @@ def discover_runtime(
         or ""
     ).strip()
     workspace = Path(workspace_raw).expanduser().resolve() if workspace_raw else None
-    dotenv = read_dotenv(workspace / ".env") if workspace else {}
+    dotenv = read_env(workspace / ".env") if workspace else {}
 
     raw_port = str(
         dotenv.get("PWA_PORT")
@@ -897,7 +591,6 @@ def restart_blockers(port: int, *, timeout: float = 2.0) -> list[dict[str, Any]]
 _GATE_VERBS = {
     "stop": "stopping the engine",
     "restart": "restarting the engine",
-    "update-engine": "updating Ciaobot",
 }
 
 
@@ -1018,15 +711,24 @@ def _fresh_lock_owner(
     runtime: DesktopRuntime,
     previous_startup_id: str | None,
 ) -> dict[str, Any] | None:
-    """The lock owner, when it is a new run of *this* install's engine.
+    """The lock owner, when it is a new run of *this* install's engine."""
+    return lock_owner_is_fresh(read_lock_owner(runtime), runtime, previous_startup_id)
+
+
+def lock_owner_is_fresh(
+    owner: dict[str, Any] | None,
+    runtime: DesktopRuntime,
+    previous_startup_id: str | None,
+) -> dict[str, Any] | None:
+    """``owner``, when it is a run of *this* install's engine that is not the previous one.
 
     Fresh means: status ``running``, a ``startup_id`` that is not the one the
     previous run had, and the port and runtime directory this install is
     configured with. Another Ciaobot runtime that happens to be running, or
     the run that was there before the kickstart, is not evidence that the
-    engine just started.
+    engine just started. Split from the read so a caller with its own strict
+    reader (the takeover plan) applies the same rule.
     """
-    owner = read_lock_owner(runtime)
     if not owner or owner.get("status") != "running":
         return None
     startup_id = owner.get("startup_id")
@@ -1437,307 +1139,6 @@ def set_login_enabled(
         "login",
         f"Engine start at login {'enabled' if enabled else 'disabled'}.",
         {**asdict(runtime), "enabled": enabled},
-    )
-
-
-def update_engine(
-    *,
-    runtime: DesktopRuntime | None = None,
-    force: bool = False,
-    runner: Runner = subprocess.run,
-) -> ServiceResult:
-    from ciao.package_version import update_package
-
-    runtime = runtime or discover_runtime()
-    refusal = restart_gate(
-        runtime.port, "update-engine", force=force, details=asdict(runtime)
-    )
-    if refusal is not None:
-        return refusal
-    bundled_engine = bool(
-        runtime.python_path
-        and "Ciaobot.app/Contents/Resources/ciao-runtime"
-        in str(runtime.python_path)
-    )
-    if bundled_engine:
-        return ServiceResult(
-            False,
-            "update-engine",
-            "The bundled engine updates together with Ciaobot.app.",
-            {
-                **asdict(runtime),
-                "already_current": True,
-                "bundled": True,
-                "command": (
-                    "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/"
-                    "releases/latest/download/install.sh | sh"
-                ),
-            },
-        )
-    result = update_package()
-    if not result.get("ok"):
-        # A no-op upgrade is not a failure for callers that update the engine
-        # and the app together: the app half may still have work to do.
-        return ServiceResult(
-            False,
-            "update-engine",
-            str(result.get("error") or "Engine update failed."),
-            {
-                **asdict(runtime),
-                "already_current": bool(result.get("already_current")),
-                "update": result,
-            },
-        )
-    restarted = restart_service(runtime=runtime, force=True, runner=runner)
-    return ServiceResult(
-        restarted.ok,
-        "update-engine",
-        "Ciaobot engine updated and restarted." if restarted.ok else restarted.message,
-        {**asdict(runtime), "update": result},
-    )
-
-
-def _unique_destination(directory: Path, name: str) -> Path:
-    candidate = directory / name
-    if not candidate.exists():
-        return candidate
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    return directory / f"{candidate.stem}-{stamp}{candidate.suffix}"
-
-
-def _bundle_matches(app: Path, *, executable: str) -> bool:
-    """Return whether *app* is one of Ciaobot's expected signed bundle shapes."""
-
-    info_path = app / "Contents" / "Info.plist"
-    try:
-        with info_path.open("rb") as handle:
-            info = plistlib.load(handle)
-    except (OSError, plistlib.InvalidFileException):
-        return False
-    return (
-        isinstance(info, dict)
-        and info.get("CFBundleIdentifier") == DESKTOP_BUNDLE_ID
-        and info.get("CFBundleExecutable") == executable
-        and (app / "Contents" / "MacOS" / executable).is_file()
-    )
-
-
-def _browser_pwa_paths(running_app: Path | None = None) -> list[str]:
-    """Find browser-installed Ciaobot app shims without modifying them."""
-
-    candidates = (
-        Path.home() / "Applications" / "Chrome Apps.localized" / "Ciaobot.app",
-        Path.home() / "Applications" / "Ciaobot.app",
-    )
-    running = Path(running_app).resolve() if running_app is not None else None
-    return [
-        str(candidate)
-        for candidate in candidates
-        if candidate.is_dir()
-        and candidate.resolve() != running
-        and not _bundle_matches(candidate, executable=DESKTOP_EXECUTABLE)
-    ]
-
-
-def migrate_legacy_companion(
-    *,
-    runtime: DesktopRuntime | None = None,
-    running_app: Path | None = None,
-    launch_agents_dir: Path | None = None,
-    applications_dirs: Sequence[Path] | None = None,
-    trash_dir: Path | None = None,
-    uid: int | None = None,
-    runner: Runner = subprocess.run,
-) -> ServiceResult:
-    runtime = runtime or discover_runtime(launch_agents_dir=launch_agents_dir)
-    if running_app is not None:
-        resolved_app = Path(running_app).resolve()
-        allowed_roots = tuple(
-            Path(root).resolve()
-            for root in (
-                applications_dirs
-                or (Path("/Applications"), Path.home() / "Applications")
-            )
-        )
-        if (
-            not _bundle_matches(resolved_app, executable=DESKTOP_EXECUTABLE)
-            or resolved_app.name != "Ciaobot.app"
-            or resolved_app.parent not in allowed_roots
-        ):
-            return ServiceResult(
-                False,
-                "migrate",
-                "Migration must be started by the installed Ciaobot.app.",
-                {**asdict(runtime), "running_app": str(resolved_app)},
-            )
-    runtime_root = Path(runtime.runtime_root)
-    migration_dir = runtime_root / "migration"
-    migration_dir.mkdir(parents=True, exist_ok=True)
-    agents = (
-        default_launch_agents_dir()
-        if launch_agents_dir is None
-        else Path(launch_agents_dir)
-    )
-    old_plist = agents / f"{LEGACY_MENUBAR_LABEL}.plist"
-    backup_plist = migration_dir / old_plist.name
-    receipt_path = migration_dir / MIGRATION_RECEIPT
-    resolved_uid = _getuid() if uid is None else uid
-    existing_receipt: dict[str, Any] = {}
-    try:
-        loaded_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        if isinstance(loaded_receipt, dict):
-            existing_receipt = loaded_receipt
-    except (OSError, ValueError):
-        pass
-    already_migrated = bool(existing_receipt) and not old_plist.exists()
-    moved_app_from = str(existing_receipt.get("legacy_app_original") or "")
-    moved_app_to = str(existing_receipt.get("legacy_app_backup") or "")
-
-    try:
-        _launchctl(
-            ["bootout", f"gui/{resolved_uid}/{LEGACY_MENUBAR_LABEL}"],
-            runner=runner,
-        )
-        _launchctl(
-            ["disable", f"gui/{resolved_uid}/{LEGACY_MENUBAR_LABEL}"],
-            runner=runner,
-        )
-        if old_plist.exists():
-            if backup_plist.exists():
-                return ServiceResult(
-                    False,
-                    "migrate",
-                    "A legacy menubar plist backup already exists.",
-                    {**asdict(runtime), "backup": str(backup_plist)},
-                )
-            shutil.move(str(old_plist), str(backup_plist))
-
-        app_roots = list(applications_dirs or (Path("/Applications"), Path.home() / "Applications"))
-        desktop_installed = any(
-            _bundle_matches(root / "Ciaobot.app", executable=DESKTOP_EXECUTABLE)
-            for root in app_roots
-        )
-        old_app = next(
-            (
-                root / "Ciaobot Server.app"
-                for root in app_roots
-                if _bundle_matches(
-                    root / "Ciaobot Server.app",
-                    executable=LEGACY_EXECUTABLE,
-                )
-            ),
-            None,
-        )
-        if (
-            not moved_app_to
-            and desktop_installed
-            and old_app is not None
-            and server_reachable(runtime.port)
-        ):
-            trash = Path.home() / ".Trash" if trash_dir is None else Path(trash_dir)
-            trash.mkdir(parents=True, exist_ok=True)
-            destination = _unique_destination(trash, old_app.name)
-            shutil.move(str(old_app), str(destination))
-            moved_app_from = str(old_app)
-            moved_app_to = str(destination)
-
-        prefs = runtime_root / "menubar_prefs.json"
-        notifications_enabled: bool | None = None
-        if prefs.is_file():
-            try:
-                payload = json.loads(prefs.read_text(encoding="utf-8"))
-                value = payload.get("notifications_enabled")
-                if isinstance(value, bool):
-                    notifications_enabled = value
-            except (OSError, ValueError):
-                pass
-        receipt = {
-            "schema_version": 1,
-            "migrated_at": existing_receipt.get("migrated_at")
-            or datetime.now(UTC).isoformat(),
-            "legacy_plist_original": existing_receipt.get("legacy_plist_original")
-            or (str(old_plist) if backup_plist.exists() else ""),
-            "legacy_plist_backup": existing_receipt.get("legacy_plist_backup")
-            or (str(backup_plist) if backup_plist.exists() else ""),
-            "legacy_app_original": moved_app_from,
-            "legacy_app_backup": moved_app_to,
-            "notifications_enabled": (
-                existing_receipt.get("notifications_enabled")
-                if existing_receipt.get("notifications_enabled") is not None
-                else notifications_enabled
-            ),
-        }
-        temporary = receipt_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8", newline="")
-        os.replace(temporary, receipt_path)
-    except OSError as exc:
-        return ServiceResult(False, "migrate", str(exc), asdict(runtime))
-
-    return ServiceResult(
-        True,
-        "migrate",
-        (
-            "Legacy companion was already migrated."
-            if already_migrated and not moved_app_from
-            else "Legacy companion disabled and migration backup recorded."
-        ),
-        {
-            **asdict(runtime),
-            "receipt": str(migration_dir / MIGRATION_RECEIPT),
-            "already_migrated": already_migrated,
-            "browser_pwa_paths": _browser_pwa_paths(running_app),
-        },
-    )
-
-
-def rollback_legacy_companion(
-    *,
-    runtime: DesktopRuntime | None = None,
-    launch_agents_dir: Path | None = None,
-    uid: int | None = None,
-    runner: Runner = subprocess.run,
-) -> ServiceResult:
-    runtime = runtime or discover_runtime(launch_agents_dir=launch_agents_dir)
-    receipt_path = Path(runtime.runtime_root) / "migration" / MIGRATION_RECEIPT
-    try:
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return ServiceResult(
-            False,
-            "rollback",
-            "No valid desktop migration receipt was found.",
-            asdict(runtime),
-        )
-    try:
-        original_plist_raw = str(receipt.get("legacy_plist_original") or "")
-        backup_plist_raw = str(receipt.get("legacy_plist_backup") or "")
-        original_plist = Path(original_plist_raw) if original_plist_raw else None
-        backup_plist = Path(backup_plist_raw) if backup_plist_raw else None
-        if original_plist is not None and backup_plist is not None and backup_plist.is_file():
-            original_plist.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(backup_plist), str(original_plist))
-
-        original_app_raw = str(receipt.get("legacy_app_original") or "")
-        backup_app_raw = str(receipt.get("legacy_app_backup") or "")
-        original_app = Path(original_app_raw) if original_app_raw else None
-        backup_app = Path(backup_app_raw) if backup_app_raw else None
-        if original_app is not None and backup_app is not None and backup_app.is_dir():
-            original_app.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(backup_app), str(original_app))
-
-        # Deliberately not re-registering the menu-bar LaunchAgent. Its
-        # ProgramArguments exec `ciao menubar`, and both that subcommand and the
-        # rumps helper behind it were deleted in this release -- bootstrapping
-        # it would leave launchd retrying a command that exits non-zero forever.
-        # Rollback still restores the files from the backup so nothing is lost;
-        # only the agent is left unloaded.
-    except OSError as exc:
-        return ServiceResult(False, "rollback", str(exc), asdict(runtime))
-    return ServiceResult(
-        True,
-        "rollback",
-        "Legacy companion restored from the migration backup.",
-        {**asdict(runtime), "receipt": str(receipt_path)},
     )
 
 

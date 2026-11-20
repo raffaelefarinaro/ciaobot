@@ -10,10 +10,7 @@ opencode and the agent CLI transport) and on the one-shot env builder.
 The engine directory is ``sysconfig.get_path("scripts")``, deliberately not the
 resolved interpreter path: a venv's ``bin/python`` symlinks to the base
 interpreter, and resolving it names the base interpreter's bin dir — where no
-``ciao`` entry point lives. It is also not always ``Path(sys.executable).parent``:
-on a global Windows install the interpreter sits in ``...\\x64\\`` while the
-console script is written to the sibling ``...\\Scripts\\``. ``ciao/cli.py``
-documents the same rule.
+``ciao`` entry point lives.
 """
 
 from __future__ import annotations
@@ -44,14 +41,10 @@ def _make_manager(tmp_path: Path, *, gws_profile: str = "") -> ProjectChatManage
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
-        # These tests check the turn env, not the sandbox: whole-machine scope
-        # keeps the spawn unwrapped on every platform (Linux CI has no bwrap,
-        # Windows has no sandbox).
         workspaces={
             "personal": WorkspaceConfig(
                 name="personal",
                 vault_root="memory-vault/personal",
-                agent_fs_scope="machine",
                 gws_profile=gws_profile,
             )
         },
@@ -78,15 +71,12 @@ def _chat_extra_env(
 
 
 def test_engine_bin_dir_is_the_script_dir_not_the_resolved_base() -> None:
-    """Guard the venv-symlink trap and the global-Windows split.
+    """Guard the venv-symlink trap.
 
-    The directory is the scripts dir, not ``Path(sys.executable).parent``: a
-    global Windows install keeps the interpreter in ``...\\x64\\`` and writes the
-    ``ciao`` console script to the sibling ``...\\Scripts\\``. And it is not the
-    ``.resolve()``d base interpreter's dir either: a venv's ``bin/python``
-    symlinks to the base interpreter, and that base dir holds no ``ciao`` entry
-    point. ``sysconfig.get_path("scripts")`` is venv-aware and does not resolve
-    symlinks, so both rules hold at once.
+    And it is not the ``.resolve()``d base interpreter's dir either: a venv's
+    ``bin/python`` symlinks to the base interpreter, and that base dir holds no
+    ``ciao`` entry point. ``sysconfig.get_path("scripts")`` is venv-aware and
+    does not resolve symlinks, so both rules hold at once.
     """
     engine = Path(engine_bin_dir())
     assert engine == Path(sysconfig.get_path("scripts"))
@@ -105,7 +95,7 @@ def test_the_engine_bin_dir_holds_the_entry_point_when_it_exists() -> None:
     interpreter this skips rather than asserting a shape the machine does not
     have, which is the very case the CI background test now covers.
     """
-    engine_ciao = Path(engine_bin_dir()) / ("ciao.exe" if sys.platform == "win32" else "ciao")
+    engine_ciao = Path(engine_bin_dir()) / "ciao"
     if not engine_ciao.exists():
         pytest.skip("no ciao entry point beside the test interpreter")
     assert shutil.which("ciao", path=engine_bin_dir()) is not None
@@ -191,15 +181,13 @@ def test_engine_ciao_resolves_first_despite_a_decoy_on_the_inherited_path(
 
     The decoy stands in for ``~/.local/bin/ciao`` pointing at an older install.
     """
-    engine_ciao = Path(engine_bin_dir()) / (
-        "ciao.exe" if sys.platform == "win32" else "ciao"
-    )
+    engine_ciao = Path(engine_bin_dir()) / "ciao"
     if not engine_ciao.exists():
         pytest.skip("no ciao entry point beside the test interpreter")
 
     decoy_dir = tmp_path / "stale-bin"
     decoy_dir.mkdir()
-    decoy = decoy_dir / ("ciao.exe" if sys.platform == "win32" else "ciao")
+    decoy = decoy_dir / "ciao"
     decoy.write_text("#!/bin/sh\necho 1.0.1\n")
     monkeypatch.setenv("PATH", os.pathsep.join([str(decoy_dir), "/user/bin"]))
 
@@ -213,105 +201,6 @@ def test_engine_ciao_resolves_first_despite_a_decoy_on_the_inherited_path(
 # ── per-provider spawn sites ──────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_claude_sdk_env_carries_the_engine_first_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Claude passes ``request.extra_env`` straight to the SDK subprocess."""
-    from ciao.providers.claude import ClaudeProvider
-
-    captured: dict = {}
-
-    class FakeClient:
-        def __init__(self, options):
-            captured["options"] = options
-
-    monkeypatch.setenv("PATH", os.pathsep.join(["/stale", "/user/bin"]))
-    monkeypatch.setattr(
-        "ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude"
-    )
-    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
-
-    manager = _make_manager(tmp_path)
-    project = manager.create_project("path", workspace="personal")
-    chat = manager.create_chat(project.project_id, provider="claude")
-    request = manager.build_agent_request(chat, prompt="hi")
-
-    provider = ClaudeProvider(tmp_path)
-    await provider._ensure_connected(request)
-
-    assert captured["options"].env["PATH"].split(os.pathsep)[0] == engine_bin_dir()
-
-
-@pytest.mark.asyncio
-async def test_opencode_server_env_carries_the_engine_first_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The opencode server subprocess inherits the turn env with PATH promoted."""
-    from ciao.providers.opencode import OpencodeProvider
-
-    monkeypatch.setenv("PATH", os.pathsep.join(["/stale", "/user/bin"]))
-
-    class _NoOpTree:
-        def __init__(self, pid: int, *, dies_with_engine: bool = False) -> None:
-            self.pid = pid
-
-        def terminate(self) -> None:
-            pass
-
-        def kill(self) -> None:
-            pass
-
-        def kill_descendants(self) -> None:
-            pass
-
-        def close(self) -> None:
-            pass
-
-    monkeypatch.setattr("ciao.providers.opencode.ProcessTree", _NoOpTree)
-
-    provider = OpencodeProvider(tmp_path)
-    captured: dict = {}
-
-    class FakeProcess:
-        returncode = None
-        pid = 4242
-        stderr = None
-
-        def terminate(self):
-            self.returncode = 0
-
-        async def wait(self):
-            return 0
-
-    async def fake_exec(*_args, **kwargs):
-        captured.update(kwargs)
-        return FakeProcess()
-
-    monkeypatch.setattr(
-        "ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: "/bin/opencode"
-    )
-    monkeypatch.setattr("ciao.providers.opencode._free_port", lambda: 43123)
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
-
-    async def noop(*_args):
-        return None
-
-    monkeypatch.setattr(provider, "_await_health", noop)
-    monkeypatch.setattr(provider, "_verify_contract", noop)
-
-    manager = _make_manager(tmp_path)
-    project = manager.create_project("path", workspace="personal")
-    chat = manager.create_chat(project.project_id, provider="opencode")
-    request = manager.build_agent_request(chat, prompt="hi")
-
-    await provider._ensure_server(request)
-    try:
-        assert captured["env"]["PATH"].split(os.pathsep)[0] == engine_bin_dir()
-    finally:
-        await provider.disconnect()
-
-
 # ── one-shot env builder (both provider branches) ─────────────────────────
 
 
@@ -320,61 +209,43 @@ async def test_oneshot_claude_env_carries_the_engine_first_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import ciao.providers.oneshot as oneshot
+    from ciao import setup_status
+    from ciao.providers.acp import oneshot as acp_oneshot
 
     captured: dict = {}
 
-    async def fake_query(*, prompt: str, options):
-        captured["options"] = options
-        if False:  # pragma: no cover - make this an async generator
-            yield None
+    async def fake_run(spec, prompt, **kwargs):
+        captured["env"] = kwargs["env"]
+        return "ok"
 
-    monkeypatch.setattr(oneshot, "query", fake_query)
+    monkeypatch.setattr(acp_oneshot, "run_acp_oneshot", fake_run)
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "")
     monkeypatch.setenv("PATH", os.pathsep.join(["/stale", "/user/bin"]))
 
     await oneshot.run_oneshot("hi", system_prompt="s", model="haiku")
 
-    assert (
-        captured["options"].env["PATH"].split(os.pathsep)[0] == engine_bin_dir()
-    )
+    assert captured["env"]["PATH"].split(os.pathsep)[0] == engine_bin_dir()
 
 
 @pytest.mark.asyncio
 async def test_oneshot_opencode_env_carries_the_engine_first_path(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import ciao.providers.opencode as opencode_mod
     import ciao.providers.oneshot as oneshot
+    from ciao.providers.acp import oneshot as acp_oneshot
 
     captured: dict = {}
 
-    class FakeOpencodeProvider:
-        def __init__(self, workspace_root, **_kw):
-            pass
+    async def fake_run(spec, prompt, **kwargs):
+        captured["env"] = kwargs["env"]
+        return "ok"
 
-        async def run_streaming(self, request, register_handle):
-            captured["request"] = request
-            register_handle(None)
-            if False:  # pragma: no cover - async generator
-                yield None
-
-        async def disconnect(self):
-            pass
-
-        async def delete_current_session(self):
-            return True
-
-    monkeypatch.setattr(
-        opencode_mod, "OpencodeProvider", FakeOpencodeProvider
-    )
+    monkeypatch.setattr(acp_oneshot, "run_acp_oneshot", fake_run)
     monkeypatch.setenv("PATH", os.pathsep.join(["/stale", "/user/bin"]))
 
-    await oneshot.run_oneshot(
-        "hi", system_prompt="s", model="x/y", provider="opencode", cwd=tmp_path
-    )
+    await oneshot.run_oneshot("hi", system_prompt="s", model="x/y", provider="opencode")
 
-    assert (
-        captured["request"].extra_env["PATH"].split(os.pathsep)[0] == engine_bin_dir()
-    )
+    assert captured["env"]["PATH"].split(os.pathsep)[0] == engine_bin_dir()
 
 
 # ── the shared helper is the single definition ────────────────────────────

@@ -114,33 +114,21 @@ def test_stale_thinking_level_falls_back_to_default(tmp_path: Path) -> None:
 
 # ── provider command construction ────────────────────────────────────────
 
-def test_claude_levels_match_sdk_effort_literal() -> None:
-    # Guard against SDK upgrades renaming/narrowing the effort values we
-    # surface in the picker. ``effort`` is typed as Optional[Literal[...]].
-    import typing
-
-    from claude_agent_sdk import ClaudeAgentOptions
-
-    hints = typing.get_type_hints(ClaudeAgentOptions)
-    literal = typing.get_args(hints["effort"])[0]
-    sdk_levels = set(typing.get_args(literal))
-    assert set(THINKING_LEVELS["claude"]) <= sdk_levels
-
-
-# ── models endpoint ──────────────────────────────────────────────────────
-
-def test_list_models_exposes_thinking_levels(monkeypatch) -> None:
+def _models_body(monkeypatch, claude_catalog: list[dict]) -> dict:
     import asyncio
     from unittest.mock import AsyncMock
 
     from starlette.requests import Request
 
-    from ciao.providers.opencode import OpencodeProvider
+    from ciao.providers.acp.agents import ClaudeAcpProvider, CodexAcpProvider, OpencodeAcpProvider
     from ciao.web.routes_api import list_models
 
-    # A unit test must never start a real `opencode serve` (#803): the catalog
-    # it would fetch is not what this test is about.
-    monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[]))
+    # A unit test must never start a real ACP adapter (#803):
+    # the catalogs are stubbed, so the assertions are about what /api/models builds
+    # from them, not about what the installed CLIs happen to report.
+    monkeypatch.setattr(OpencodeAcpProvider, "model_catalog", AsyncMock(return_value=[]))
+    monkeypatch.setattr(ClaudeAcpProvider, "model_catalog", AsyncMock(return_value=claude_catalog))
+    monkeypatch.setattr(CodexAcpProvider, "model_catalog", AsyncMock(return_value=[]))
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
     config = CiaoConfig.from_env()
     config.claude_default_model = "opus"
@@ -155,7 +143,35 @@ def test_list_models_exposes_thinking_levels(monkeypatch) -> None:
     request = Request(scope)
     scope["app"] = _App
 
-    data = json.loads(asyncio.run(list_models(request)).body)
+    return json.loads(asyncio.run(list_models(request)).body)
+
+
+def test_list_models_exposes_thinking_levels(monkeypatch) -> None:
+    catalog = [
+        {"model": "sonnet", "label": "Sonnet", "variants": ["low", "high"]},
+        {"model": "opus", "label": "Opus", "variants": ["low", "medium", "high", "max"]},
+    ]
+    data = _models_body(monkeypatch, catalog)
+
+    # The static per-provider ladder is still what the PWA gets for Claude...
     assert data["thinking_levels"]["claude"] == list(THINKING_LEVELS["claude"])
-    assert data["default"] == "sonnet"
+    # ...and the per-model levels come from the adapter's own catalog, keyed by bare id.
+    assert data["model_reasoning_levels"]["sonnet"] == ["low", "high"]
+    assert data["model_reasoning_levels"]["opus"] == ["low", "medium", "high", "max"]
+    # The operator default is used when the adapter reports it.
+    assert data["provider_models"]["claude"] == ["sonnet", "opus"]
     assert data["provider_defaults"]["claude"] == "sonnet"
+    assert data["default"] == "sonnet"
+
+
+def test_list_models_falls_back_to_the_tier_default_when_the_adapter_reports_nothing(
+    monkeypatch,
+) -> None:
+    data = _models_body(monkeypatch, [])
+
+    # A failed or empty adapter probe leaves no per-model levels and no catalog default,
+    # while the Claude tier default still reaches the PWA through the top-level fields.
+    assert data["thinking_levels"]["claude"] == list(THINKING_LEVELS["claude"])
+    assert data["model_reasoning_levels"] == {}
+    assert data["provider_defaults"]["claude"] == ""
+    assert data["default"] == "sonnet"

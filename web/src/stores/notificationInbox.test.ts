@@ -125,6 +125,21 @@ describe('notification inbox store', () => {
     expect(inbox.count).toBe(1)
   })
 
+  it('any needs-you card keeps a read chat in needsYou', () => {
+    const { projects, signals, inbox } = setup()
+    setChats(projects, [makeChat('c1')])
+    markHealthy(projects, signals)
+    expect(inbox.rows).toHaveLength(0)
+    projects.chatActions = { c1: [{
+      id: 'card', kind: 'command', origin: 'engine', state: 'open',
+      params: { command: 'echo review-only' }, error: '', created_at: 1,
+    }] }
+    expect(inbox.rows).toHaveLength(1)
+    expect(inbox.rows[0].section).toBe('needsYou')
+    projects.chatActions = {}
+    expect(inbox.rows).toHaveLength(0)
+  })
+
   it('active_read_chat_keeps_permission', () => {
     const { projects, signals, inbox } = setup()
     setChats(projects, [makeChat('c1', { pending_permission: '{"tool":"Bash"}' })])

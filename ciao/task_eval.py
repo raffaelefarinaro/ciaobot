@@ -48,6 +48,7 @@ import yaml
 import ciao
 from ciao import agent_paths, behavioral_eval, gws_auth
 from ciao.config import PERMISSION_MODES
+from ciao.os_support.processes import isolated_probe_flags, python_isolation_flags
 from ciao.os_support.tool_path import dedupe_path
 from ciao.tool_path import common_tool_dirs
 
@@ -995,8 +996,27 @@ SETTLE_STABLE_POLLS = 2
 _PROCESS_STATE_LOCK = threading.Lock()
 
 
+def _error_object(raw: bytes) -> dict[str, Any] | None:
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
 class EngineAPIError(RuntimeError):
-    """The isolated engine answered an API call with an error status."""
+    """The isolated engine answered an API call with an error status.
+
+    ``status`` is the HTTP status; ``body`` is the decoded JSON object of the
+    error response, or None when the body was not a JSON object.
+    """
+
+    def __init__(
+        self, message: str, *, status: int = 0, body: Mapping[str, Any] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.body = body
 
 
 def engine_env(base_env: Mapping[str, str], workdir: Path, ws: Path) -> dict[str, str]:
@@ -1007,7 +1027,7 @@ def engine_env(base_env: Mapping[str, str], workdir: Path, ws: Path) -> dict[str
     storage roots are pointed into the throwaway ``workdir``. The queue-lock
     directory is left at its per-user temp default: the lock key hashes the
     (throwaway) vault path, so it cannot collide with the live install, and the
-    agent's sandbox can write there but not into ``workdir``.
+    agent can write there but not into ``workdir``.
     """
     env = _without_live_vars(base_env)
     env.update(
@@ -1155,7 +1175,7 @@ def prepare_workspace(
 
 
 def _stop_process_group(proc: subprocess.Popen[bytes]) -> None:
-    """Stop an engine and whatever it spawned (provider CLIs), on POSIX via its process group.
+    """Stop an engine and whatever it spawned (provider CLIs), via its process group.
 
     SIGTERM goes to the whole group while the engine is still alive, so its
     process-group id is reserved and the signal cannot reach an unrelated group.
@@ -1165,14 +1185,6 @@ def _stop_process_group(proc: subprocess.Popen[bytes]) -> None:
     engine some other path already reaped is not signalled at all.
     """
     if proc.returncode is not None:
-        return
-    if sys.platform == "win32":
-        proc.terminate()
-        try:
-            proc.wait(timeout=ENGINE_STOP_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=ENGINE_STOP_TIMEOUT_S)
         return
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(proc.pid, signal.SIGTERM)
@@ -1297,8 +1309,11 @@ class IsolatedEngine(EngineSession):
         self._mode = resolve_mode(provider, mode)
         self._log = self._log_path.open("wb")
         script = Path(sys.executable).with_name("ciao")
-        command = [str(script), "run"] if script.exists() else [sys.executable, "-m", "ciao", "run"]
-        group: dict[str, Any] = {"start_new_session": True} if sys.platform != "win32" else {}
+        command = (
+            [str(script), "run"]
+            if script.exists()
+            else [sys.executable, *python_isolation_flags(), "-m", "ciao", "run"]
+        )
         # engine_env drops every CIAO_* variable first; the fake's variables go in after it.
         env = engine_env(_BASE_ENV, self.workdir, self.ws)
         if task.gws_fake is not None:
@@ -1311,7 +1326,7 @@ class IsolatedEngine(EngineSession):
             env=env,
             stdout=self._log,
             stderr=subprocess.STDOUT,
-            **group,
+            start_new_session=True,
         )
         self._wait_ready()
         self.api("POST", "/api/auth", {"token": self.token})
@@ -1354,7 +1369,12 @@ class IsolatedEngine(EngineSession):
             with self._opener.open(request, timeout=60) as response:
                 raw: bytes = response.read()
         except urllib.error.HTTPError as exc:
-            raise EngineAPIError(f"{method} {path} -> {exc.code}: {exc.read()[:300]!r}") from exc
+            raw_error = exc.read()
+            raise EngineAPIError(
+                f"{method} {path} -> {exc.code}: {raw_error[:300]!r}",
+                status=exc.code,
+                body=_error_object(raw_error),
+            ) from exc
         return json.loads(raw) if raw else None
 
     def start_prompt(self, prompt: str, *, provider: str, model: str) -> str:
@@ -1526,12 +1546,12 @@ class IsolatedEngine(EngineSession):
 
 
 def available_capabilities() -> frozenset[str]:
-    """Capabilities this platform's harness can provide. The fake is a POSIX shell launcher."""
-    return frozenset({GWS_FAKE_CAPABILITY}) if sys.platform != "win32" else frozenset()
+    """Capabilities the harness can provide."""
+    return frozenset({GWS_FAKE_CAPABILITY})
 
 
 def gws_fake_bin_dir(ws: Path, profile: str) -> Path:
-    """The fake's folder, inside the profile's credential directory (the sandbox grants it)."""
+    """The fake's folder, inside the profile's credential directory."""
     return ws / "secrets" / f"gws-{profile}" / GWS_FAKE_DIRNAME
 
 
@@ -1647,7 +1667,7 @@ def read_gws_calls(log: Path) -> list[dict[str, Any]]:
     return rows
 
 
-# The fake's own code. Each call runs gws_fake_main inside the agent's sandbox.
+# The fake's own code. Each call runs gws_fake_main in the agent's process.
 # The launcher imports ciao.task_eval to reach it, which loads this module's
 # top-level imports (yaml and the ciao helpers above) before gws_fake_main runs.
 # gws_fake_main itself uses only the standard library and never imports ciao.cli.
@@ -2495,13 +2515,13 @@ def provider_version(provider: str) -> str | None:
 def cli_package_mismatch() -> str | None:
     """Why the ``ciao`` an agent would run is not this harness's package, or None.
 
-    The engine's sandbox only reads the package that is running it, so a
+    An agent only sees the package that is running it, so a
     ``ciao`` on the agent's PATH that imports a different checkout is refused.
     Isolated mode (``-I``) ignores PYTHONPATH, which is what the venv's ``ciao``
     script sees.
     """
     harness = Path(__file__).resolve().parent
-    probe = [sys.executable, "-I", "-c", "import ciao; print(ciao.__file__)"]
+    probe = [sys.executable, *isolated_probe_flags(), "-c", "import ciao; print(ciao.__file__)"]
     try:
         proc = subprocess.run(
             probe, capture_output=True, encoding="utf-8", errors="replace", timeout=60, check=False, env=_BASE_ENV
@@ -2516,7 +2536,7 @@ def cli_package_mismatch() -> str | None:
         return None
     return (
         f"CLI package mismatch: the `ciao` an agent runs imports {installed}, "
-        f"but this harness runs {harness}. The engine sandbox only reads the running "
+        f"but this harness runs {harness}. An agent only sees the running "
         "package, so the agent's ciao calls would be refused. Remedy: run the eval from "
         "an install of the checkout under test, e.g. `uv venv .venv-eval && uv pip install "
         "-p .venv-eval -e .` in that checkout, then `.venv-eval/bin/ciao eval tasks run ...`."

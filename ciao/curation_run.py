@@ -15,15 +15,17 @@ This module answers those questions in code. Three things come out of it:
 * a **budget**: a run takes at most ``max_items`` keys and lives at most
   ``max_seconds``. What the budget leaves behind is recorded, so the next run
   resumes instead of starting over at the top of pass 1;
-* a **lease**: one curation run per vault at a time, so two runs cannot
-  consolidate the same regions in each other's half-light.
+* a **lease**: successful acquisitions coordinate one curation run per vault,
+  while progress and finalization commits are fenced by the exact holder.
+  Category writes performed during begin planning are outside that fence.
 
 Why a lease rather than a lock held for the run's duration: a curation run is
 an agent turn spread over many separate CLI processes, so no single process
 lives long enough to hold an ``flock``. The lease is a TTL record instead,
 written under a short flock, and a run that crashes releases it by expiring.
-The TTL *is* the elapsed-time budget — one number, so a run cannot outlive the
-serialization it promised.
+The TTL is the elapsed-time budget and bounds how long a holder remains
+authorized. It does not prevent begin-time category writes from overlapping a
+later run after expiry.
 
 State lives at ``<vault>/Workspace/Curation-State.json``, beside the receipt
 journal, for the same reason that one is there: the cursor must survive a
@@ -39,13 +41,16 @@ import json
 import logging
 import os
 import socket
+import stat
+import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Iterator
 
-from ciao import decision_rules, skill_proposals
+from ciao import curation_logs, decision_rules, skill_proposals
 from ciao.entity_types import EntityTypeRegistry
 from ciao.vault_index import vault_relative
 from ciao.os_support.locks import lock_exclusive, unlock
@@ -221,6 +226,20 @@ def item_key(pass_id: str, subject: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class StaleNoteTarget:
+    """The note a stale-note item is about, by vault-relative path and revision.
+
+    Internal: it is not serialized, so the worklist's JSON is the same with or
+    without it. The revision is the note's :func:`ciao.memory_receipts.content_revision`
+    at discovery, which the evidence preparation compares against before it
+    hands anything on.
+    """
+
+    relative_path: str
+    revision: str
+
+
+@dataclass(frozen=True, slots=True)
 class WorklistItem:
     """One pass that has work, with the keys of the things to work on."""
 
@@ -229,6 +248,7 @@ class WorklistItem:
     reason: str
     keys: tuple[str, ...]
     weekly: bool = False
+    target: StaleNoteTarget | None = None
 
     @property
     def count(self) -> int:
@@ -275,6 +295,25 @@ class Worklist:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class WorklistViews:
+    discovered: Worklist
+    remaining: Worklist
+
+
+def remaining_items(
+    discovered: tuple[WorklistItem, ...],
+    done_keys: frozenset[str] | set[str] | None = None,
+) -> tuple[WorklistItem, ...]:
+    done = frozenset(done_keys or ())
+    remaining: list[WorklistItem] = []
+    for item in discovered:
+        keys = tuple(key for key in item.keys if key and key not in done)
+        if keys:
+            remaining.append(replace(item, keys=keys))
+    return tuple(remaining)
+
+
 def _read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
@@ -285,29 +324,18 @@ def _read_text(path: Path) -> str:
 def read_last_full_pass(curation_log: Path) -> str:
     """The ``last_full_pass: YYYY-MM-DD`` marker, or "" when unusable.
 
-    Deliberately a narrow scan of the frontmatter block rather than a YAML
-    parse: the log's body is agent-written prose that has no business being
-    parsed, and a malformed marker must read as "never ran" (weekly pass due)
-    rather than raise on the one run that would have fixed it.
+    Judged by the same frontmatter splitter the marker writer uses, so a
+    closer the writer accepts (``--- ``) is read too. A malformed or ambiguous
+    marker reads as "never ran" (weekly pass due) rather than raising.
     """
-    text = _read_text(curation_log)
-    if not text.startswith("---"):
+    stamp = curation_logs.marker_value(_read_text(curation_log))
+    if not stamp:
         return ""
-    _, _, rest = text.partition("\n")
-    block, sep, _ = rest.partition("\n---")
-    if not sep:
+    try:
+        date.fromisoformat(stamp)
+    except ValueError:
         return ""
-    for line in block.splitlines():
-        key, _, value = line.partition(":")
-        if key.strip() != "last_full_pass":
-            continue
-        stamp = value.strip().strip("\"'")
-        try:
-            date.fromisoformat(stamp)
-        except ValueError:
-            return ""
-        return stamp
-    return ""
+    return stamp
 
 
 def weekly_pass_due(last_full_pass: str, today: date) -> bool:
@@ -769,6 +797,7 @@ def _stale_note_items(
                     f"{note.threshold_days}d horizon; revision {revision}"
                 ),
                 keys=(item_key(PASS_STALE_NOTE, note.relative),),
+                target=StaleNoteTarget(relative_path=note.relative, revision=revision),
             )
         )
     if capped:
@@ -1243,8 +1272,27 @@ def _learnings_cleanup_items(
     return ([item] if item is not None else []), " ".join(notes)
 
 
+def _holder_live_unlocked(vault_root: Path, *, holder: str, now: datetime) -> bool:
+    """Whether *holder* owns a live lease. The caller holds the state lock."""
+    held = _live_lease(_load(state_path(vault_root)), now)
+    return held is not None and held.get("holder") == holder
+
+
+@contextmanager
+def _lease_guard(vault_root: Path, *, holder: str) -> Iterator[None]:
+    """Hold the state lock and require *holder* to own the live lease inside it.
+
+    Raises :class:`CurationBusy` without yielding when the lease is lost, so the
+    wrapped write never runs. The state lock is held for the body only.
+    """
+    with _state_lock(vault_root):
+        if not _holder_live_unlocked(vault_root, holder=holder, now=datetime.now(UTC)):
+            raise CurationBusy("this run no longer holds the curation lease")
+        yield
+
+
 def _category_cluster_items(
-    vault_root: Path, *, registry: EntityTypeRegistry
+    vault_root: Path, *, holder: str, registry_root: Path
 ) -> list[WorklistItem]:
     """File a ``[category]`` proposal per unlisted ``type:`` with a cluster.
 
@@ -1258,24 +1306,49 @@ def _category_cluster_items(
     nights running is one item rather than a new one each time, and a cluster
     the owner resolves makes its item disappear from the next worklist.
 
-    ``registry`` is the AGENT vault root's category list, not one loaded from
-    *vault_root*: on an install that has not re-rooted, ``entity-types.yaml`` is
-    a different directory from the notes, and reading the notes root left every
-    category the owner had just accepted looking unlisted — queued again the next
-    night, then refused as a duplicate on accept. It arrives from
-    :func:`build_worklist` rather than being loaded here for the same reason the
-    accept resolves its root through the config.
+    ``registry_root`` is the AGENT vault root, not *vault_root*: on an install
+    that has not re-rooted, ``entity-types.yaml`` is a different directory from
+    the notes, and reading the notes root left every category the owner had just
+    accepted looking unlisted — queued again the next night, then refused as a
+    duplicate on accept. The CLI passes the root it resolved.
+
+    This pass is advisory. Any failure other than a lost lease (a scan error, a
+    queue lock that cannot be taken, an unreadable queue, a write error) is logged
+    and the worklist is built without category items. Only :class:`CurationBusy`
+    propagates, because a holder that lost its lease must not go on to plan.
+
+    Two phases, so no lock is held across the vault scan. The scan is read-only.
+    Publication takes the proposal queue lock, then, around each replacement only,
+    the curation state lock, which re-checks *holder* against the live lease.
     """
+    from ciao.entity_types import load_entity_types
+    from ciao.memory_receipts import queue_lock
     from ciao.vocabulary_proposals import (
         CATEGORY_CLUSTER_THRESHOLD,
-        generate_category_proposals,
+        publish_category_candidates,
+        scan_category_candidates,
     )
 
     root = Path(vault_root)
     try:
-        queued = generate_category_proposals(root, registry=registry)
+        registry = load_entity_types(registry_root)
+        candidates = scan_category_candidates(root, registry=registry)
+        if not candidates:
+            return []
+        with queue_lock(root / PROPOSALS_RELATIVE):
+            queued = publish_category_candidates(
+                root,
+                candidates,
+                registry=load_entity_types(registry_root),
+                publish_guard=lambda: _lease_guard(root, holder=holder),
+            )
+    except CurationBusy:
+        raise
     except Exception:  # noqa: BLE001 — an advisory pass must not fail the plan
-        logger.warning("curation: category cluster scan failed", exc_info=True)
+        logger.warning(
+            "curation: category proposals were not filed; planning without them",
+            exc_info=True,
+        )
         return []
     if not queued:
         return []
@@ -1371,7 +1444,7 @@ def _log_items(vault_root: Path) -> list[WorklistItem]:
     return [
         WorklistItem(
             pass_id=PASS_LOGS,
-            label="Rotate the oversized logs",
+            label="Oversized logs (rotation blocked in this release)",
             reason=", ".join(f"{name} over {LOG_ROTATION_BYTES // 1024}KB" for name in oversized),
             keys=tuple(item_key(PASS_LOGS, name) for name in oversized),
         )
@@ -1387,20 +1460,20 @@ def _skill_proposal_items(vault_root: Path) -> list[WorklistItem]:
     queue's owner decides what is still open, so the worklist cannot drift from
     the review surface about which rows are waiting.
     """
-    names = skill_proposals.open_queue_names(vault_root)
-    if not names:
-        return []
+    # One item per named file: a budgeted key then means one proposal the run
+    # reports, and the label says which one. Reporting never settles it.
     return [
         WorklistItem(
             pass_id=PASS_SKILL_PROPOSALS,
-            label="Resolve the skill proposals queue",
-            reason=f"{len(names)} proposal(s) waiting on a decision",
-            keys=tuple(item_key(PASS_SKILL_PROPOSALS, name) for name in names),
+            label=f"Report skill proposal {name} (do not settle)",
+            reason="waiting on a decision; report it, do not settle it",
+            keys=(item_key(PASS_SKILL_PROPOSALS, name),),
         )
+        for name in skill_proposals.open_queue_names(vault_root)
     ]
 
 
-def build_worklist(
+def build_worklist_views(
     *,
     vault_root: Path,
     guide_path: Path,
@@ -1410,11 +1483,12 @@ def build_worklist(
     path_prefix: Path | None = None,
     today: date | None = None,
     done_keys: frozenset[str] | set[str] | None = None,
+    category_items: tuple[WorklistItem, ...] = (),
     memory_char_limit: int | None = None,
     user_char_limit: int | None = None,
     workspace: str | None,
     handover: str = "off",
-) -> Worklist:
+) -> WorklistViews:
     """Compute tonight's work from files alone.
 
     ``handover`` is the workspace's Memory handover setting (off, dismiss, all);
@@ -1469,7 +1543,6 @@ def build_worklist(
     guide_path = Path(guide_path)
     workspace_dir = Path(workspace_dir) if workspace_dir is not None else guide_path.parent
     today = today or datetime.now(UTC).date()
-    done = frozenset(done_keys or ())
     memory_limit = memory_char_limit if memory_char_limit is not None else DEFAULT_MEMORY_CHAR_LIMIT
     user_limit = user_char_limit if user_char_limit is not None else DEFAULT_USER_CHAR_LIMIT
 
@@ -1480,11 +1553,7 @@ def build_worklist(
         notes.append("no usable last_full_pass marker; the weekly pass counts as due")
 
     collected: list[WorklistItem] = []
-    # Collected FIRST because it is the one pass that writes: the bullets it
-    # files have to be on disk before `_proposal_items` reads the queue, or the
-    # run that proposes a category would not count the row it just proposed. The
-    # order the worklist is PRESENTED in is :data:`PASS_ORDER` either way.
-    collected.extend(_category_cluster_items(vault_root, registry=category_registry))
+    collected.extend(category_items)
     collected.extend(_proposal_items(vault_root, handover))
     collected.extend(
         _region_items(
@@ -1575,27 +1644,60 @@ def build_worklist(
     collected.extend(_skill_proposal_items(vault_root))
 
     order = {pass_id: index for index, pass_id in enumerate(PASS_ORDER)}
-    remaining: list[WorklistItem] = []
-    for item in sorted(collected, key=lambda i: order.get(i.pass_id, len(PASS_ORDER))):
-        keys = tuple(key for key in item.keys if key not in done)
-        if not keys:
-            continue
-        remaining.append(
-            WorklistItem(
-                pass_id=item.pass_id,
-                label=item.label,
-                reason=item.reason,
-                keys=keys,
-                weekly=item.weekly,
-            )
-        )
-    return Worklist(
-        items=tuple(remaining),
-        weekly_due=weekly_due,
-        last_full_pass=last_full_pass,
-        generated_at=_now_iso(),
-        notes=tuple(notes),
+    discovered_items = tuple(
+        sorted(collected, key=lambda i: order.get(i.pass_id, len(PASS_ORDER)))
     )
+    remaining = remaining_items(discovered_items, done_keys)
+    generated_at = _now_iso()
+    return WorklistViews(
+        discovered=Worklist(
+            items=discovered_items,
+            weekly_due=weekly_due,
+            last_full_pass=last_full_pass,
+            generated_at=generated_at,
+            notes=tuple(notes),
+        ),
+        remaining=Worklist(
+            items=remaining,
+            weekly_due=weekly_due,
+            last_full_pass=last_full_pass,
+            generated_at=generated_at,
+            notes=tuple(notes),
+        ),
+    )
+
+
+def build_worklist(
+    *,
+    vault_root: Path,
+    guide_path: Path,
+    category_registry: EntityTypeRegistry,
+    config: Any = None,
+    workspace_dir: Path | None = None,
+    path_prefix: Path | None = None,
+    today: date | None = None,
+    done_keys: frozenset[str] | set[str] | None = None,
+    category_items: tuple[WorklistItem, ...] = (),
+    memory_char_limit: int | None = None,
+    user_char_limit: int | None = None,
+    workspace: str | None,
+    handover: str = "off",
+) -> Worklist:
+    return build_worklist_views(
+        vault_root=vault_root,
+        guide_path=guide_path,
+        category_registry=category_registry,
+        config=config,
+        workspace_dir=workspace_dir,
+        path_prefix=path_prefix,
+        today=today,
+        done_keys=done_keys,
+        category_items=category_items,
+        memory_char_limit=memory_char_limit,
+        user_char_limit=user_char_limit,
+        workspace=workspace,
+        handover=handover,
+    ).remaining
 
 
 # ── Budget ────────────────────────────────────────────────────────────────
@@ -1619,6 +1721,9 @@ class RunPlan:
     planned: tuple[WorklistItem, ...]
     deferred: tuple[WorklistItem, ...]
     budget: RunBudget
+    # The subset of ``deferred`` that automation cannot run in this release.
+    # It never takes budget and never counts as planned.
+    blocked: tuple[WorklistItem, ...] = ()
 
     @property
     def planned_count(self) -> int:
@@ -1628,12 +1733,22 @@ class RunPlan:
     def deferred_count(self) -> int:
         return sum(item.count for item in self.deferred)
 
+    @property
+    def blocked_count(self) -> int:
+        return sum(item.count for item in self.blocked)
+
+    @property
+    def blocked_passes(self) -> list[str]:
+        return list(dict.fromkeys(item.pass_id for item in self.blocked))
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "planned": [item.as_dict() for item in self.planned],
             "deferred": [item.as_dict() for item in self.deferred],
             "planned_count": self.planned_count,
             "deferred_count": self.deferred_count,
+            "blocked_count": self.blocked_count,
+            "blocked_passes": self.blocked_passes,
             "budget": self.budget.as_dict(),
         }
 
@@ -1663,6 +1778,7 @@ def plan_run(worklist: Worklist, budget: RunBudget | None = None) -> RunPlan:
                 reason=item.reason,
                 keys=take,
                 weekly=item.weekly,
+                target=item.target,
             )
         )
         if rest:
@@ -1673,9 +1789,40 @@ def plan_run(worklist: Worklist, budget: RunBudget | None = None) -> RunPlan:
                     reason="budget reached; resumes next run",
                     keys=rest,
                     weekly=item.weekly,
+                    target=item.target,
                 )
             )
     return RunPlan(planned=tuple(planned), deferred=tuple(deferred), budget=budget)
+
+
+# Passes whose work automation cannot perform in this release. Their items are
+# still observed and reported, but they take no runnable budget: a log that
+# stays oversized must not starve the passes behind it on every night.
+BLOCKED_PASSES: frozenset[str] = frozenset({PASS_LOGS})
+BLOCKED_REASON = "automated rotation unavailable in this release; operator archival required"
+
+
+def plan_run_with_blocked(worklist: Worklist, budget: RunBudget | None = None) -> RunPlan:
+    """:func:`plan_run` over the runnable items, with blocked items reported beside them.
+
+    Blocked items keep their place in ``deferred`` in pass order, so the
+    overdue report is complete, but the budget is computed from the runnable
+    items alone.
+    """
+    runnable = tuple(item for item in worklist.items if item.pass_id not in BLOCKED_PASSES)
+    blocked = tuple(
+        replace(item, reason=f"{item.reason}; {BLOCKED_REASON}")
+        for item in worklist.items
+        if item.pass_id in BLOCKED_PASSES
+    )
+    plan = plan_run(replace(worklist, items=runnable), budget)
+    order = {pass_id: index for index, pass_id in enumerate(PASS_ORDER)}
+    deferred = tuple(
+        sorted((*plan.deferred, *blocked), key=lambda item: order.get(item.pass_id, len(order)))
+    )
+    return RunPlan(
+        planned=plan.planned, deferred=deferred, budget=plan.budget, blocked=blocked
+    )
 
 
 # ── Persisted state ───────────────────────────────────────────────────────
@@ -1710,24 +1857,121 @@ class CurationState:
         }
 
 
+class CurationStateError(RuntimeError):
+    """An existing curation state file cannot safely establish authority."""
+
+
+class _DuplicateStateKey(ValueError):
+    pass
+
+
+def _state_error(path: Path, reason: str) -> CurationStateError:
+    label = repr(str(path))
+    if len(label) > 120:
+        label = label[:117] + "..."
+    return CurationStateError(f"untrustworthy curation state at {label}: {reason}")
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateStateKey
+        result[key] = value
+    return result
+
+
+def _is_reliably_absent(path: Path) -> bool:
+    """Classify ENOENT without mistaking a dangling symlink ancestor for absence."""
+    current = path
+    while True:
+        try:
+            entry = current.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            raise _state_error(path, "cannot classify state entry") from None
+        else:
+            if stat.S_ISLNK(entry.st_mode):
+                try:
+                    current.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    raise _state_error(path, "state path contains an unresolved symlink") from None
+                if current == path:
+                    return False
+            elif current == path:
+                return False
+            elif current != path and not stat.S_ISDIR(entry.st_mode):
+                raise _state_error(path, "state path has a non-directory ancestor")
+        parent = current.parent
+        if parent == current:
+            return True
+        current = parent
+
+
 def state_path(vault_root: Path) -> Path:
     return Path(vault_root) / STATE_RELATIVE
 
 
 def _load(path: Path) -> CurationState:
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return CurationState()
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        if _is_reliably_absent(path):
+            return CurationState()
+        raise _state_error(path, "state entry is not readable") from None
+    except (OSError, UnicodeError):
+        raise _state_error(path, "state file cannot be read") from None
+    try:
+        raw = json.loads(text, object_pairs_hook=_unique_object)
+    except (_DuplicateStateKey, json.JSONDecodeError, RecursionError):
+        raise _state_error(path, "invalid JSON state document") from None
+    except (ValueError, TypeError):
+        raise _state_error(path, "invalid JSON state document") from None
     if not isinstance(raw, dict):
-        return CurationState()
+        raise _state_error(path, "state document must be an object")
+    if set(raw) != {"version", "done_keys", "lease", "last_run"}:
+        raise _state_error(path, "state document has missing or unknown fields")
+    if type(raw["version"]) is not int or raw["version"] != STATE_VERSION:
+        raise _state_error(path, "unsupported state version")
     done = raw.get("done_keys")
     lease = raw.get("lease")
     last_run = raw.get("last_run")
+    if not isinstance(done, dict) or not isinstance(lease, dict) or not isinstance(last_run, dict):
+        raise _state_error(path, "state fields have invalid types")
+    for key, value in done.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise _state_error(path, "done_keys entries have invalid types")
+        try:
+            parsed_date = date.fromisoformat(value)
+        except ValueError:
+            raise _state_error(path, "done_keys contains an invalid date") from None
+        if parsed_date.isoformat() != value:
+            raise _state_error(path, "done_keys contains a noncanonical date")
+    if lease:
+        holder = lease.get("holder")
+        started = lease.get("started_at")
+        expires = lease.get("expires_at")
+        if not isinstance(holder, str) or not holder.strip():
+            raise _state_error(path, "lease holder is invalid")
+        if not isinstance(started, str) or _parse_iso(started) is None:
+            raise _state_error(path, "lease start time is invalid")
+        if not isinstance(expires, str) or _parse_iso(expires) is None:
+            raise _state_error(path, "lease expiry is invalid")
+    if last_run:
+        if (
+            not isinstance(last_run.get("status"), str)
+            or not isinstance(last_run.get("finished_at"), str)
+            or _parse_iso(last_run["finished_at"]) is None
+            or any(type(last_run.get(field)) is not int for field in ("planned", "completed", "deferred"))
+            or not isinstance(last_run.get("reasons"), list)
+            or any(not isinstance(reason, str) for reason in last_run["reasons"])
+        ):
+            raise _state_error(path, "last_run summary is invalid")
     return CurationState(
-        done_keys={str(k): str(v) for k, v in done.items()} if isinstance(done, dict) else {},
-        lease=dict(lease) if isinstance(lease, dict) else {},
-        last_run=dict(last_run) if isinstance(last_run, dict) else {},
+        done_keys=dict(done),
+        lease=dict(lease),
+        last_run=dict(last_run),
     )
 
 
@@ -1739,7 +1983,7 @@ def _store(path: Path, state: CurationState) -> None:
 
 
 def load_state(vault_root: Path) -> CurationState:
-    """Read the persisted cursor. Never raises: a corrupt file reads as empty."""
+    """Read persisted state; only a genuinely absent file initializes as empty."""
     return _load(state_path(vault_root))
 
 
@@ -1796,11 +2040,10 @@ def _live_lease(state: CurationState, now: datetime) -> dict[str, Any] | None:
     lease = state.lease
     if not lease or not lease.get("holder"):
         return None
-    expires = _parse_iso(str(lease.get("expires_at", "")))
-    # An unreadable expiry is treated as expired rather than as forever: a
-    # hand-edited or truncated record must not be able to wedge every future
-    # nightly run out of its own vault.
-    if expires is None or expires <= now:
+    expires = _parse_iso(str(lease["expires_at"]))
+    if expires is None:
+        raise CurationStateError("invalid curation lease expiry")
+    if expires <= now:
         return None
     return dict(lease)
 
@@ -1825,7 +2068,10 @@ def unstarted_run_reason(
     ``since`` must be timezone-aware: the lease stamps are written in UTC and
     a naive ``since`` would compare against nothing.
     """
-    state = load_state(vault_root)
+    try:
+        state = load_state(vault_root)
+    except CurationStateError:
+        return "curation state is uncertain; unattended run status cannot be verified"
     floor = since.astimezone(UTC).replace(microsecond=0)
     for stamp in (state.lease.get("started_at"), state.last_run.get("finished_at")):
         parsed = _parse_iso(str(stamp or ""))
@@ -1847,9 +2093,9 @@ def begin_run(
     now: datetime | None = None,
 ) -> Lease:
     """Take this vault's curation lease, or raise :class:`CurationBusy`."""
-    now = now or datetime.now(UTC)
     holder = holder or f"{socket.gethostname()}:{os.getpid()}"
     with _state_lock(vault_root):
+        now = (now or datetime.now(UTC)).astimezone(UTC)
         state = _load(state_path(vault_root))
         held = _live_lease(state, now)
         if held is not None:
@@ -1859,7 +2105,7 @@ def begin_run(
                 f"{held.get('expires_at', 'its lease expires')}"
             )
         lease = Lease(
-            holder=holder,
+            holder=f"{holder}:{uuid.uuid4()}",
             started_at=now.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             expires_at=(now + timedelta(seconds=max(1.0, ttl_s)))
             .replace(microsecond=0)
@@ -1880,8 +2126,8 @@ def renew_run(
     now: datetime | None = None,
 ) -> bool:
     """Extend the lease held by ``holder``. False when it is no longer theirs."""
-    now = now or datetime.now(UTC)
     with _state_lock(vault_root):
+        now = (now or datetime.now(UTC)).astimezone(UTC)
         state = _load(state_path(vault_root))
         held = _live_lease(state, now)
         if held is None or held.get("holder") != holder:
@@ -1896,34 +2142,140 @@ def renew_run(
     return True
 
 
+def holder_is_live(
+    vault_root: Path, *, holder: str, now: datetime | None = None
+) -> bool:
+    """Check ownership under the state lock without renewing or changing state."""
+    with _state_lock(vault_root):
+        effective_now = (now or datetime.now(UTC)).astimezone(UTC)
+        held = _live_lease(_load(state_path(vault_root)), effective_now)
+        return held is not None and held.get("holder") == holder
+
+
 def record_done(
     vault_root: Path,
     keys: list[str] | tuple[str, ...],
     *,
     holder: str = "",
     today: date | None = None,
+    ttl_s: float | None = None,
+    now: datetime | None = None,
 ) -> int:
     """Mark keys finished so a later run does not redo them.
 
     Rejects keys when ``holder`` is given and no longer owns the lease: a run
-    whose lease expired has lost its serialization, and letting it keep
+    whose lease expired has lost authorization, and letting it keep
     stamping work done would tell the next run that items nobody verified were
     handled.
     """
-    stamp = (today or datetime.now(UTC).date()).isoformat()
+    if ttl_s is not None and not holder:
+        raise ValueError("a holder is required when renewing the lease")
     with _state_lock(vault_root):
+        effective_now = (now or datetime.now(UTC)).astimezone(UTC)
         state = _load(state_path(vault_root))
         if holder:
-            held = _live_lease(state, datetime.now(UTC))
+            held = _live_lease(state, effective_now)
             if held is None or held.get("holder") != holder:
                 raise CurationBusy("this run no longer holds the curation lease")
+        stamp = (today or effective_now.astimezone(UTC).date()).isoformat()
         added = 0
         for key in keys:
             if key not in state.done_keys:
                 added += 1
             state.done_keys[key] = stamp
+        if ttl_s is not None:
+            state.lease["expires_at"] = (
+                (effective_now + timedelta(seconds=max(1.0, ttl_s)))
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
         _store(state_path(vault_root), state)
     return added
+
+
+LOG_SELECTORS: dict[str, str] = {
+    "curation": CURATION_LOG_RELATIVE,
+    "weekly-review": WEEKLY_REVIEW_LOG_RELATIVE,
+}
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _recheck_clock(now: datetime | None, clock: Callable[[], datetime] | None) -> Callable[[], datetime]:
+    """The clock for the authority recheck: an injected one, else the caller's instant, else the wall clock."""
+    if clock is not None:
+        return clock
+    if now is not None:
+        return lambda: now
+    return _utc_now
+
+
+def _holds_live_lease_now(vault_root: Path, *, holder: str, clock: Callable[[], datetime]) -> bool:
+    """Re-read the lease with a fresh clock. The caller holds the state lock."""
+    held = _live_lease(_load(state_path(vault_root)), clock().astimezone(UTC))
+    return held is not None and held.get("holder") == holder
+
+
+def _other_curation_files(vault: Path, relative: str) -> list[Path]:
+    """The state file and the other decision log: nothing a log may alias."""
+    others = [state_path(vault)]
+    others += [vault / name for name in LOG_SELECTORS.values() if name != relative]
+    return others
+
+
+def append_log(
+    vault_root: Path,
+    *,
+    holder: str,
+    log: str,
+    payload: bytes,
+    now: datetime | None = None,
+    clock: Callable[[], datetime] | None = None,
+) -> dict[str, object]:
+    """Append *payload* to a packaged decision log, under the live lease.
+
+    The state lock is held for the whole read-check-publish. The lease is
+    checked at entry and again, with a fresh clock, immediately before the
+    publish: a lease that expired during a slow read refuses with nothing
+    published. The append neither renews the lease nor changes the state file.
+    A retry after an uncertain response can duplicate the report: nothing here
+    is exactly-once.
+    """
+    if log not in LOG_SELECTORS:
+        raise ValueError("log must be curation or weekly-review")
+    curation_logs.check_payload(payload)
+    relative = LOG_SELECTORS[log]
+    recheck = _recheck_clock(now, clock)
+    with _state_lock(Path(vault_root)):
+        effective_now = (now or recheck()).astimezone(UTC)
+        held = _live_lease(_load(state_path(vault_root)), effective_now)
+        if not holder or held is None or held.get("holder") != holder:
+            raise CurationBusy("this run no longer holds the curation lease")
+        try:
+            vault = curation_logs.canonical_vault(Path(vault_root))
+            path = vault / relative
+            curation_logs.refuse_identity_overlap(path, _other_curation_files(vault, relative))
+            curation_logs.ensure_workspace_dir(vault)
+            snapshot = curation_logs.read_log(path)
+            data = curation_logs.appended_bytes(
+                snapshot.data, payload, heading=curation_logs.LOG_HEADINGS[log]
+            )
+        except curation_logs.CurationLogError as exc:
+            raise CurationStateError(str(exc)) from None
+        if not _holds_live_lease_now(vault, holder=holder, clock=recheck):
+            raise CurationBusy("the curation lease expired while the log was read")
+        try:
+            curation_logs.publish_log(path, data, snapshot=snapshot)
+        except curation_logs.CurationLogError as exc:
+            raise CurationStateError(str(exc)) from None
+    return {
+        "status": "appended",
+        "log": log,
+        "bytes_appended": curation_logs.bytes_appended(payload),
+    }
 
 
 def end_run(
@@ -1939,6 +2291,7 @@ def end_run(
     advance_marker: bool = False,
     today: date | None = None,
     now: datetime | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
     """Release the lease and record what the run actually did.
 
@@ -1947,37 +2300,57 @@ def end_run(
     the vault, so keeping them would grow the cursor without bound and, worse,
     would suppress a later item that hashed to the same subject again.
 
-    ``advance_marker`` stamps ``last_full_pass`` here rather than in the
-    caller, under the same lock and *after* the ownership check. Stamping it
-    outside let a run whose lease had expired — one this call is about to
-    reject — still suppress the weekly hygiene passes for seven days. Returned
-    as ``full_pass_advanced``; the weekly checks gate it exactly as
-    :func:`advance_full_pass` does.
+    ``advance_marker`` stamps ``last_full_pass`` here, under the same lock and
+    after the ownership check, and the lease is checked again with a fresh
+    clock just before the log is published. When the marker cannot be written
+    safely (an ambiguous or oversized log, a symlink, a foreign ACL, an I/O
+    error) the end still releases the lease, records the run as ``failed``
+    with a bounded reason, and reports ``full_pass_advanced`` false. It never
+    reports success for a marker that was not written.
     """
-    now = now or datetime.now(UTC)
+    recheck = _recheck_clock(now, clock)
     with _state_lock(vault_root):
+        effective_now = (now or recheck()).astimezone(UTC)
         state = _load(state_path(vault_root))
-        held = _live_lease(state, now)
-        if holder and held is not None and held.get("holder") != holder:
+        held = _live_lease(state, effective_now)
+        if holder and (held is None or held.get("holder") != holder):
             raise CurationBusy("this run no longer holds the curation lease")
         advanced = False
+        marker_error = ""
+        reasons = list(reasons)
         if advance_marker and status == "ok" and REQUIRED_HYGIENE_KEYS <= set(state.done_keys):
-            _write_full_pass_marker(Path(vault_root), today=today)
-            advanced = True
+
+            def still_holder() -> None:
+                if holder and not _holds_live_lease_now(Path(vault_root), holder=holder, clock=recheck):
+                    raise CurationBusy("the curation lease expired before the marker was written")
+
+            try:
+                _write_full_pass_marker(
+                    Path(vault_root),
+                    today=today or effective_now.astimezone(UTC).date(),
+                    before_publish=still_holder,
+                )
+                advanced = True
+            except CurationStateError as exc:
+                marker_error = str(exc)[:200]
+                status = "failed"
+                reasons.append(f"weekly marker not advanced: {marker_error}")
         if live_keys is not None:
             state.done_keys = {k: v for k, v in state.done_keys.items() if k in live_keys}
         summary = {
             "status": status,
-            "finished_at": _now_iso(),
+            "finished_at": (
+                effective_now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            ),
             "planned": planned,
             "completed": completed,
             "deferred": deferred,
-            "reasons": list(reasons),
+            "reasons": reasons,
         }
         state.last_run = summary
         state.lease = {}
         _store(state_path(vault_root), state)
-    return {**summary, "full_pass_advanced": advanced}
+    return {**summary, "full_pass_advanced": advanced, "marker_error": marker_error}
 
 
 def hygiene_complete(vault_root: Path) -> bool:
@@ -2002,33 +2375,43 @@ def advance_full_pass(
     CLI goes through ``end_run(advance_marker=True)`` instead, which stamps the
     marker only after it has confirmed the caller still holds the lease.
     """
-    if not hygiene_complete(vault_root):
-        return False
-    _write_full_pass_marker(Path(vault_root), today=today)
-    return True
+    with _state_lock(Path(vault_root)):
+        if not _hygiene_complete_unlocked(Path(vault_root)):
+            return False
+        _write_full_pass_marker(Path(vault_root), today=today)
+        return True
 
 
-def _write_full_pass_marker(vault_root: Path, *, today: date | None = None) -> None:
-    """Write today's ``last_full_pass`` into the curation log's frontmatter."""
+def _hygiene_complete_unlocked(vault_root: Path) -> bool:
+    """Whether both required weekly checks are recorded. The caller holds the state lock."""
+    return REQUIRED_HYGIENE_KEYS <= set(_load(state_path(vault_root)).done_keys)
+
+
+def _write_full_pass_marker(
+    vault_root: Path,
+    *,
+    today: date | None = None,
+    before_publish: Callable[[], None] | None = None,
+) -> None:
+    """Write today's ``last_full_pass`` into the curation log's frontmatter.
+
+    Lock-assuming: the caller holds the canonical state lock. Reads the log
+    once, publishes only if it is still that file, and runs ``before_publish``
+    (the lease recheck) immediately before the publish. Any refusal raises
+    :class:`CurationStateError` with nothing published.
+    """
     stamp = (today or datetime.now(UTC).date()).isoformat()
-    log = Path(vault_root) / CURATION_LOG_RELATIVE
-    text = _read_text(log)
-    if text.startswith("---"):
-        _, _, rest = text.partition("\n")
-        block, sep, body = rest.partition("\n---")
-        if sep:
-            lines = [
-                line
-                for line in block.splitlines()
-                if line.partition(":")[0].strip() != "last_full_pass"
-            ]
-            lines.append(f"last_full_pass: {stamp}")
-            text = "---\n" + "\n".join(lines) + "\n---" + body
-        else:
-            text = f"---\nlast_full_pass: {stamp}\n---\n\n{text}"
-    else:
-        text = f"---\nlast_full_pass: {stamp}\n---\n\n{text}" if text else (
-            f"---\nlast_full_pass: {stamp}\n---\n\n# Curation log\n"
+    try:
+        vault = curation_logs.canonical_vault(Path(vault_root))
+        log = vault / CURATION_LOG_RELATIVE
+        curation_logs.refuse_identity_overlap(
+            log, _other_curation_files(vault, LOG_SELECTORS["curation"])
         )
-    log.parent.mkdir(parents=True, exist_ok=True)
-    log.write_text(text, encoding="utf-8", newline="")
+        snapshot = curation_logs.read_log(log)
+        result = curation_logs.with_full_pass_marker(snapshot.data, stamp)
+        curation_logs.ensure_workspace_dir(vault)
+        if before_publish is not None:
+            before_publish()
+        curation_logs.publish_log(log, result, snapshot=snapshot)
+    except curation_logs.CurationLogError as exc:
+        raise CurationStateError(str(exc)) from None

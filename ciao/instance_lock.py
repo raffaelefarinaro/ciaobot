@@ -10,7 +10,7 @@ import os
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, TextIO
+from typing import TextIO
 
 from ciao.os_support.locks import lock_exclusive, unlock
 
@@ -19,19 +19,6 @@ logger = logging.getLogger(__name__)
 
 def _now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _fchmod(fd: int, mode: int) -> None:
-    """Tighten one open descriptor, where the platform has ``fchmod``.
-
-    The lock is POSIX-only in practice, but this module is imported on Windows,
-    where ``os.fchmod`` does not exist. Read it through ``getattr`` and type the
-    result locally, the same seam ``ciao.server_host._getuid`` uses; a platform
-    without it is a no-op here because no Windows path reaches this call.
-    """
-    tighten: Callable[[int, int], None] | None = getattr(os, "fchmod", None)
-    if tighten is not None:
-        tighten(fd, mode)
 
 
 class WorkspaceAlreadyRunningError(RuntimeError):
@@ -70,13 +57,13 @@ class WorkspaceInstanceLock:
         # the mode tightening below would then apply to an unrelated file. The
         # descriptor is opened once, checked as a regular file, and only then
         # tightened, so the lock is private for this and every later run
-        # (#2330). Modes are POSIX-only; Windows has no equivalent here.
+        # (#2330).
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(self.path, flags, 0o600)
         try:
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 raise OSError(errno.EINVAL, "the runtime lock is not a regular file", str(self.path))
-            _fchmod(descriptor, 0o600)
+            os.fchmod(descriptor, 0o600)
             handle = os.fdopen(descriptor, "a+", encoding="utf-8", newline="")
         except BaseException:
             os.close(descriptor)

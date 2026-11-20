@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 /**
- * The needs-you card (an MCP sign-in, ...), where it sits in a chat.
+ * The needs-you card, where it sits in a chat.
  *
  * Like the suggested command, the card is contextual: it belongs to one chat,
  * sits above the composer's queue, and is not shown for a chat that is not on
@@ -55,8 +55,7 @@ const CommentPopoverStub = vi.hoisted(() => ({
     show: () => {},
   },
 }))
-vi.mock('../PaneHeader.vue', () => ({ default: NoopStub }))
-vi.mock('../SubagentPanel.vue', () => ({ default: NoopStub }))
+vi.mock('../PaneHeader.vue', () => ({ default: { template: '<header><slot name="title" /><slot name="actions" /></header>' } }))
 vi.mock('../ChatCommentPopover.vue', () => ({ default: CommentPopoverStub }))
 vi.mock('../CommentComposePopover.vue', () => ({ default: NoopStub }))
 
@@ -88,6 +87,7 @@ async function mountPanel(chatId = CHAT_ID, existing?: ReturnType<typeof createP
   setActivePinia(pinia)
   const store = useProjectStore()
   store.chats = [makeChat({ chat_id: chatId })]
+  store.projects = [{ project_id: 'proj-1', name: 'Test', workspace: 'personal' }] as never
   store.activeChatId = chatId
   store.messages = { [chatId]: [] }
   store.bootstrapped = true
@@ -120,10 +120,10 @@ afterEach(() => {
 
 const ACTION = {
   id: 'a1',
-  kind: 'mcp_auth',
+  kind: 'command',
   origin: 'engine',
   state: 'open',
-  params: { server: 'linear', provider: 'opencode' },
+  params: { command: 'echo review-only' },
   error: '',
   created_at: 1,
 } as const
@@ -135,12 +135,12 @@ describe('ChatPanel needs-you card', () => {
     await flushPromises()
 
     const card = panel.get('.needs-you-card').element
-    expect(panel.get('.needs-you-card-title').text()).toBe('Sign in to linear')
+    expect(panel.get('.needs-you-card-title').text()).toBe('Suggested command — review before running')
 
     const composer = panel.get('.chat-input').element
     expect(comesBefore(card, composer)).toBe(true)
 
-    store.queuedMessages[CHAT_ID] = [{ id: 'q1', text: 'one', delivery: 'queue', steering: false }] as never
+    store.queuedMessages[CHAT_ID] = [{ id: 'q1', text: 'one' }] as never
     await flushPromises()
     const queue = panel.get('.queued-messages').element
     expect(comesBefore(card, queue)).toBe(true)

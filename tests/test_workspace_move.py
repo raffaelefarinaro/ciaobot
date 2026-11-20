@@ -17,7 +17,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao import workspace_move
+from ciao import workspace_move, workspace_move_app
 from ciao.agent_paths import claude_project_slug
 from ciao.server_host import (
     BUNDLE_ID,
@@ -30,6 +30,7 @@ from ciao.server_host import (
 from ciao.web.routes_api import (
     workspace_move_dirs_endpoint,
     workspace_move_plan_endpoint,
+    workspace_move_start_endpoint,
     workspace_move_status_endpoint,
 )
 
@@ -76,7 +77,6 @@ def test_plan_refuses_a_protected_destination_or_source_without_a_host(
     assert not any("background job" in r for r in _plan(plain, home / "new", host=None).refusals)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the run-move argv is a POSIX launchd command")
 def test_plan_warns_and_allows_a_protected_folder_through_the_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -181,6 +181,7 @@ def test_plan_accepts_a_new_folder_and_an_empty_one(tmp_path: Path) -> None:
         ("new", {"registered": Path("/elsewhere")}, "runs the workspace at"),
         ("new", {"platform": "linux", "admin": False}, "the administrator moves"),
         ("new", {"platform": "freebsd14"}, "not supported"),
+        ("new", {"platform": "win32"}, "not supported"),
         ("new", {"update_in_flight": True}, "engine update"),
         ("new", {"engine_running": False}, "not running"),
         ("missing/new", {}, "does not exist"),
@@ -356,7 +357,7 @@ def test_links_are_repointed_after_the_folder_moves(tmp_path: Path) -> None:
     old, new = tmp_path / "old", tmp_path / "new"
     (old / "skills" / "remember").mkdir(parents=True)
     (old / ".claude" / "skills").mkdir(parents=True)
-    # Absolute, as sync-skills writes command mirrors (a junction on Windows).
+    # Absolute, as sync-skills writes command mirrors.
     links.link_dir(old / "skills" / "remember", old / ".claude" / "skills" / "remember")
     os.rename(old, new)
 
@@ -435,6 +436,14 @@ class _Service:
         pass
 
 
+class _Posts(list):
+    """The URLs posted, with the request bodies alongside."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.bodies: list[dict[str, Any] | None] = []
+
+
 def _run(
     tmp_path: Path,
     host: _Host,
@@ -454,14 +463,16 @@ def _run(
     state.mkdir()
     service = service_type(tmp_path / "definition", source)
     op = workspace_move.MoveOperation("op1", "queued", str(source), str(target), "", "", port=8443)
-    posts: list[str] = []
+    posts = _Posts()
+    bodies = posts.bodies
     clock = iter(range(0, 100_000, 10))
 
-    def post(url: str) -> dict[str, Any]:
+    def post(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         posts.append(url)
+        bodies.append(body)
         if post_override is not None:
             return post_override(url)
-        return {"active_chat_ids": [] if drained else ["busy"]}
+        return {"active_chat_ids": [] if drained else ["busy"], "schedule_work_count": 0}
 
     def get(url: str) -> dict[str, Any] | None:
         if get_override is not None:
@@ -520,7 +531,7 @@ def test_protected_destination_probe_denial_does_not_drain_or_stop(
         host=host,
         service=service,
         get=lambda _url: {"overall_ready": True},
-        post=lambda _url: {"active_chat_ids": []},
+        post=lambda _url, _body=None: {"active_chat_ids": [], "schedule_work_count": 0},
         sleep=lambda _seconds: None,
         clock=lambda: 0.0,
         platform="darwin",
@@ -559,7 +570,7 @@ def test_destination_probe_eacces_is_not_recorded_as_privacy_denial(
         host=host,
         service=service,
         get=lambda _url: {"overall_ready": True},
-        post=lambda _url: {"active_chat_ids": []},
+        post=lambda _url, _body=None: {"active_chat_ids": [], "schedule_work_count": 0},
         sleep=lambda _seconds: None,
         clock=lambda: 0.0,
         platform="darwin",
@@ -625,8 +636,7 @@ def test_stale_denial_does_not_fail_a_new_successful_move(
     denial = tmp_path / "denied.txt"
     monkeypatch.setattr(workspace_access, "denial_path", lambda: denial)
     workspace_access.record_denial("previous attempt", denial)
-    # The forward wait reads launchd's last exit code, and that read has no
-    # uid to build the domain from on Windows. The stale denial is the subject.
+    # The forward wait reads launchd's last exit code; the stale denial is the subject.
     monkeypatch.setattr(macos_service, "server_last_exit_code", lambda: 0)
 
     result, _service, _posts = _run(tmp_path, _Host(), platform="darwin")
@@ -815,11 +825,11 @@ def test_run_move_restarts_the_engine_when_it_will_not_stop(tmp_path: Path) -> N
 
 
 class _HalfRepointService(_Service):
-    """Rewrites the definition, then fails to register it (the Windows shape)."""
+    """Rewrites the definition, then fails to load it."""
 
     def repoint(self, old: Path, new: Path) -> None:
         super().repoint(old, new)
-        raise RuntimeError("schtasks /Create failed")
+        raise RuntimeError("launchctl bootstrap failed")
 
 
 def test_run_move_restores_a_definition_the_repoint_half_wrote(tmp_path: Path) -> None:
@@ -847,7 +857,6 @@ def test_run_move_does_not_move_back_under_an_engine_that_will_not_stop(tmp_path
     assert (tmp_path / "new" / ".env").is_file()
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="flock semantics")
 def test_run_move_waits_for_the_engine_to_release_its_lock(tmp_path: Path) -> None:
     from ciao.os_support.locks import lock_exclusive
 
@@ -872,15 +881,33 @@ def test_run_move_waits_for_the_engine_to_release_its_lock(tmp_path: Path) -> No
 # ── routes ───────────────────────────────────────────────────────────
 
 
-def _client(tmp_path: Path, *, peer: str) -> TestClient:
+def _client(
+    tmp_path: Path,
+    *,
+    peer: str,
+    pcm: Any = None,
+    schedules: Any = None,
+    restarts: Any = None,
+    workspace_root: Path | None = None,
+) -> TestClient:
+    """The move routes; the app-mode drain wiring arrives as its state."""
     app = Starlette(
         routes=[
             Route("/api/workspace-move", workspace_move_status_endpoint, methods=["GET"]),
             Route("/api/workspace-move/dirs", workspace_move_dirs_endpoint, methods=["GET"]),
             Route("/api/workspace-move/plan", workspace_move_plan_endpoint, methods=["POST"]),
+            Route("/api/workspace-move", workspace_move_start_endpoint, methods=["POST"]),
         ]
     )
-    app.state.config = SimpleNamespace(workspace_root=str(tmp_path), pwa_port=8443)
+    app.state.config = SimpleNamespace(
+        workspace_root=str(workspace_root or tmp_path), pwa_port=8443
+    )
+    if pcm is not None:
+        app.state.project_chat_manager = pcm
+    if schedules is not None:
+        app.state.schedule_manager = schedules
+    if restarts is not None:
+        app.state.request_restart = restarts
     return TestClient(app, base_url="http://localhost:8443", client=(peer, 50000))
 
 
@@ -899,7 +926,6 @@ def test_routes_are_for_this_computer_only(tmp_path: Path, monkeypatch: pytest.M
     assert listing.json()["path"] == str(tmp_path.resolve())
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the plan's service read is the macOS one here")
 def test_plan_route_returns_the_dry_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(workspace_move, "registered_workspace", lambda: tmp_path)
     monkeypatch.setattr(workspace_move, "update_in_flight", lambda: False)
@@ -913,6 +939,181 @@ def test_plan_route_returns_the_dry_run(tmp_path: Path, monkeypatch: pytest.Monk
     ).json()
     assert body["ok"] is False
     assert any("inside the current workspace" in r for r in body["refusals"])
+
+
+def test_status_route_reports_app_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(workspace_move, "default_state_dir", lambda: tmp_path / "state")
+    client = _client(tmp_path, peer="127.0.0.1")
+    monkeypatch.setattr("ciao.package_version.running_from_app_bundle", lambda: True)
+    assert client.get("/api/workspace-move").json()["app"] is True
+    monkeypatch.setattr("ciao.package_version.running_from_app_bundle", lambda: False)
+    assert client.get("/api/workspace-move").json()["app"] is False
+
+
+def test_start_route_app_mode_schedules_drain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In Ciaobot for Mac the route records the move and wires the engine's own drain."""
+    monkeypatch.setattr("ciao.package_version.running_from_app_bundle", lambda: True)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    ws = tmp_path / "ws"
+    (ws / ".runtime").mkdir(parents=True)
+    monkeypatch.setattr(workspace_move, "registered_workspace", lambda: ws)
+    monkeypatch.setattr(workspace_move, "update_in_flight", lambda: False)
+    monkeypatch.setattr(workspace_move, "engine_running", lambda: True)
+    monkeypatch.setattr(workspace_move, "default_state_dir", lambda: tmp_path / "state")
+    from ciao import app_engine
+
+    app_engine.write_pointer(ws, ws / ".runtime")
+    monkeypatch.setattr(
+        workspace_move,
+        "start",
+        lambda *args, **kwargs: pytest.fail("the launchd-job start must not run in app mode"),
+    )
+    monkeypatch.setattr(
+        workspace_move,
+        "_spawn_mac_job",
+        lambda *args, **kwargs: pytest.fail("no move job is ever installed in app mode"),
+    )
+    monkeypatch.setattr(
+        "ciao.macos_service._launchctl",
+        lambda *args, **kwargs: pytest.fail("launchctl is never called in app mode"),
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_drain(op: Any, handle: Any, **kwargs: Any) -> Any:
+        captured["op"] = op
+        captured["handle"] = handle
+        captured["pcm"] = kwargs["pcm"]
+        captured["schedules"] = kwargs["schedules"]
+        captured["request_restart"] = kwargs["request_restart"]
+
+        async def drained() -> None:
+            return None
+
+        return drained()
+
+    monkeypatch.setattr(workspace_move_app, "drain_then_restart", fake_drain)
+    pcm = SimpleNamespace(restart_draining=False)
+    schedules = SimpleNamespace(work_count=lambda: 0)
+    restarts: list[int] = []
+
+    def request_restart(code: int) -> None:
+        restarts.append(code)
+
+    response = _client(
+        tmp_path,
+        peer="127.0.0.1",
+        pcm=pcm,
+        schedules=schedules,
+        restarts=request_restart,
+        workspace_root=ws,
+    ).post("/api/workspace-move", json={"target": str(tmp_path / "moved")})
+
+    assert response.status_code == 202, response.json()
+    body = response.json()
+    assert body["operation"]["app"] is True
+    assert body["operation"]["phase"] == "queued"
+    # The record is on disk, written by `record`, and the move lock is held
+    # for the exec that ends the engine.
+    stored = workspace_move.read_operation(tmp_path / "state")
+    assert stored is not None and stored.app is True and stored.phase == "queued"
+    assert workspace_move.job_running(tmp_path / "state") is True
+    # The drain is wired to this engine's pieces; the restart request is the
+    # drain's (which has not run yet), not the route's.
+    assert captured["pcm"] is pcm
+    assert captured["schedules"] is schedules
+    assert captured["request_restart"] is request_restart
+    assert restarts == []
+    captured["handle"].close()
+
+
+def _app_route_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setattr("ciao.package_version.running_from_app_bundle", lambda: True)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    ws = tmp_path / "ws"
+    (ws / ".runtime").mkdir(parents=True)
+    monkeypatch.setattr(workspace_move, "registered_workspace", lambda: ws)
+    monkeypatch.setattr(workspace_move, "update_in_flight", lambda: False)
+    monkeypatch.setattr(workspace_move, "engine_running", lambda: True)
+    monkeypatch.setattr(workspace_move, "default_state_dir", lambda: tmp_path / "state")
+    return ws
+
+
+def test_start_route_app_mode_refuses_a_remote_browser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = _app_route_setup(tmp_path, monkeypatch)
+    response = _client(
+        tmp_path,
+        peer="203.0.113.9",
+        pcm=SimpleNamespace(restart_draining=False),
+        schedules=SimpleNamespace(work_count=lambda: 0),
+        restarts=lambda code: None,
+        workspace_root=ws,
+    ).post("/api/workspace-move", json={"target": str(tmp_path / "moved")})
+
+    assert response.status_code == 403
+    # Nothing was recorded and no lock was taken.
+    assert workspace_move.read_operation(tmp_path / "state") is None
+
+
+def test_start_route_app_mode_returns_409_when_another_move_holds_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = _app_route_setup(tmp_path, monkeypatch)
+    from ciao import app_engine
+
+    app_engine.write_pointer(ws, ws / ".runtime")
+    state = tmp_path / "state"
+    state.mkdir(parents=True)
+    held = workspace_move._lock(state)
+    try:
+        response = _client(
+            tmp_path,
+            peer="127.0.0.1",
+            pcm=SimpleNamespace(restart_draining=False),
+            schedules=SimpleNamespace(work_count=lambda: 0),
+            restarts=lambda code: None,
+            workspace_root=ws,
+        ).post("/api/workspace-move", json={"target": str(tmp_path / "moved")})
+    finally:
+        held.close()
+
+    assert response.status_code == 409
+    assert "pointer" not in response.json()["error"]
+    assert workspace_move.read_operation(state) is None
+
+
+def test_cli_apply_refused_in_app_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import cli
+
+    monkeypatch.setattr("ciao.package_version.running_from_app_bundle", lambda: True)
+    monkeypatch.setattr(
+        workspace_move,
+        "plan_for",
+        lambda source, target: workspace_move.MovePlan(
+            source=str(source), target=str(target)
+        ),
+    )
+    args = SimpleNamespace(
+        workspace=None, target=str(tmp_path / "moved"), apply=True, json=False
+    )
+
+    assert cli._workspace_move_command(args) == 1
+
+    captured_out, captured_err = capsys.readouterr()
+    # The plan still prints; the refusal is the app's Settings path.
+    assert "Move " in captured_out
+    assert (
+        "In Ciaobot for Mac, move the workspace from Settings → Ciaobot folder → Move…"
+        in captured_err
+    )
+    # Not `start`'s refusal: that would mean the launchd job was attempted.
+    assert "Error:" not in captured_err
+    assert "workspace_move_app" not in captured_err
 
 
 # ── Linux: the systemd unit ──────────────────────────────────────────
@@ -939,7 +1140,6 @@ def _calls() -> tuple[list[tuple[str, ...]], Any]:
     return calls, systemctl
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="systemd units hold POSIX paths")
 def test_linux_unit_reads_and_repoints_the_workspace(tmp_path: Path) -> None:
     unit = tmp_path / "ciaobot.service"
     unit.write_text(_UNIT, encoding="utf-8")
@@ -964,7 +1164,6 @@ def test_linux_unit_reads_and_repoints_the_workspace(tmp_path: Path) -> None:
     assert calls == [("daemon-reload",), ("daemon-reload",)]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="systemd units hold POSIX paths")
 def test_linux_unit_refuses_a_repoint_that_changes_nothing(tmp_path: Path) -> None:
     unit = tmp_path / "ciaobot.service"
     unit.write_text(_UNIT, encoding="utf-8")
@@ -986,7 +1185,6 @@ def test_linux_host_drives_systemctl_and_reads_the_port(tmp_path: Path) -> None:
     assert calls == [("start", "ciaobot.service"), ("stop", "ciaobot.service")]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="systemd units hold POSIX paths")
 def test_linux_unit_repoints_once_when_the_new_path_ends_with_the_old(tmp_path: Path) -> None:
     from ciao.linux_service import render_service
 
@@ -1009,7 +1207,6 @@ def test_linux_unit_repoints_once_when_the_new_path_ends_with_the_old(tmp_path: 
     assert definition.workspace() == Path("/home/srv/ciaobot")
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX accounts")
 def test_linux_unit_home_falls_back_to_the_service_account(tmp_path: Path) -> None:
     import getpass
     import pwd
@@ -1033,7 +1230,6 @@ def test_start_route_refuses_on_linux(tmp_path: Path, monkeypatch: pytest.Monkey
     assert "administrator" in response.json()["error"]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="systemd units hold POSIX paths")
 def test_linux_unit_finds_drop_ins_that_name_the_workspace(tmp_path: Path) -> None:
     unit = tmp_path / "ciaobot.service"
     unit.write_text(_UNIT, encoding="utf-8")
@@ -1050,7 +1246,7 @@ def test_linux_unit_finds_drop_ins_that_name_the_workspace(tmp_path: Path) -> No
 
 class _RefusingService(_Service):
     def preflight(self) -> None:
-        raise workspace_move.MoveError("Windows refused to update the Ciaobot logon task")
+        raise workspace_move.MoveError("refused to update the service definition")
 
 
 def test_run_move_stops_before_moving_when_the_definition_cannot_change(tmp_path: Path) -> None:
@@ -1082,8 +1278,7 @@ def test_rollback_keeps_going_when_a_step_fails(tmp_path: Path) -> None:
 
 
 def test_rollback_moves_the_folder_back_before_rewriting_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Windows links (hard links, junctions) need their target to exist, so the
-    # paths under the old root must be real again before they are rewritten.
+    # The paths under the old root must be real again before they are rewritten.
     seen: list[tuple[str, bool]] = []
     real = workspace_move.rewrite_workspace_state
 
@@ -1102,7 +1297,7 @@ class _RefusingHost(_Host):
 
     def start_engine(self) -> Any:
         self.calls.append("start")
-        return SimpleNamespace(ok=False, message="schtasks /Run failed")
+        return SimpleNamespace(ok=False, message="launchctl kickstart failed")
 
 
 def test_a_refusal_says_when_the_engine_did_not_start_again(tmp_path: Path) -> None:
@@ -1110,7 +1305,7 @@ def test_a_refusal_says_when_the_engine_did_not_start_again(tmp_path: Path) -> N
     result, _service, _posts = _run(tmp_path, host, service_type=_RefusingService)
     assert result.phase == "failed"
     assert "refused to update" in result.error
-    assert "did not start again: schtasks /Run failed" in result.error
+    assert "did not start again: launchctl kickstart failed" in result.error
 
 
 class _RollbackStopRaisesHost(_Host):
@@ -1147,22 +1342,8 @@ def test_rollback_does_not_start_the_engine_at_a_missing_folder(
     assert host.calls == ["stop", "start", "stop"]
 
 
-def test_windows_preflight_explains_a_refused_registration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from ciao import windows_service
-
-    def refuse(_definition: Path, name: str = "") -> None:
-        raise windows_service.WindowsServiceError("schtasks /Create failed: Access is denied.")
-
-    monkeypatch.setattr(windows_service, "register_task", refuse)
-    definition = workspace_move.WindowsServiceDefinition(tmp_path / "task.xml")
-    with pytest.raises(workspace_move.MoveError, match="elevated shell"):
-        definition.preflight()
-
-
 @pytest.mark.skipif(
-    sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    hasattr(os, "geteuid") and os.geteuid() == 0,
     reason="POSIX permission bits, not root",
 )
 @pytest.mark.parametrize("kind", ["mac", "linux"])
@@ -1209,8 +1390,7 @@ def test_the_mac_move_job_shares_the_engine_bundle_ids(tmp_path: Path, monkeypat
 # ── the move runs through the verified host ──────────────────────────
 
 
-#: The host the move runs under. The bundle path is a POSIX path, because the
-#: host's own argv rules are POSIX paths and a Windows ``tmp_path`` is not one.
+#: The host the move runs under, as a POSIX path (the host's own argv rules).
 _HOST_BUNDLE = "/Users/me/Applications/Ciaobot Server.app"
 #: The interpreter the host would run. It has to be a real, executable python:
 #: the host's own parser checks that, so a path that does not exist would be
@@ -1258,7 +1438,6 @@ def _spawn_mac_job_plist(
     return job
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the run-move argv is a POSIX launchd command")
 def test_the_mac_move_job_runs_through_the_verified_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1427,3 +1606,25 @@ def test_status_reports_cloud_sync_warning(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setattr(workspace_move, "default_state_dir", lambda: tmp_path / "state")
     status = _client(tmp_path, peer="127.0.0.1").get("/api/workspace-move").json()
     assert status["cloud_sync_warning"] == ""
+
+
+def test_every_drain_request_names_the_move_as_its_owner(tmp_path: Path) -> None:
+    result, _service, posts = _run(tmp_path, _Host(), drained=False)
+
+    assert result.phase == "failed"  # never drained, so the cancel was sent too
+    assert posts and all(body == {"owner": "move-op1"} for body in posts.bodies)
+    assert posts[-1].endswith("/api/admin/drain/cancel")
+
+
+def test_an_engine_that_does_not_report_scheduled_work_is_not_treated_as_idle(
+    tmp_path: Path,
+) -> None:
+    host = _Host()
+    result, _service, posts = _run(
+        tmp_path, host, post_override=lambda url: {"active_chat_ids": []}
+    )
+
+    assert result.phase == "failed"
+    assert "does not report scheduled work" in result.error
+    assert posts[-1].endswith("/api/admin/drain/cancel")
+    assert not host.stopped if hasattr(host, "stopped") else True

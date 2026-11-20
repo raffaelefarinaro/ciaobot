@@ -1,5 +1,5 @@
 // Pure helpers for the Settings "Claude context trimming" card. The engine owns
-// the catalog (labels, defaults, locks); this module only reads it. The map is
+// the catalog (labels, defaults); this module only reads it. The map is
 // sparse and key-sorted because JSON.stringify of the workspace form is the dirty check.
 import type { ClaudeTrimOption } from './types'
 
@@ -16,6 +16,7 @@ const GROUP_LABELS: Record<string, string> = {
   features: 'Features',
   review: 'Review',
   skills: 'Bundled skills',
+  Connectors: 'Connectors',
 }
 
 export interface ClaudeTrimGroup {
@@ -23,6 +24,15 @@ export interface ClaudeTrimGroup {
   label: string
   options: ClaudeTrimOption[]
   collapsible: boolean
+}
+
+// Shown under a group's title when un-trimming it has a consequence beyond context size.
+const GROUP_NOTES: Record<string, string> = {
+  scheduling: "Ciaobot's own schedules replace these, so they are hidden by default. Turn one on and Claude can create its own routines and loops outside Ciaobot's schedules, bypassing the PWA's scheduling and notifications.",
+}
+
+export function claudeTrimGroupNote(id: string): string {
+  return GROUP_NOTES[id] ?? ''
 }
 
 export function claudeTrimGroupLabel(id: string): string {
@@ -41,15 +51,13 @@ export function normalizeClaudeTrim(raw: unknown): ClaudeTrimOverrides {
   return out
 }
 
-/** Locked options are always trimmed; otherwise the override wins over the default. */
+/** The override wins over the default. */
 export function isTrimmed(option: ClaudeTrimOption, overrides: ClaudeTrimOverrides): boolean {
-  if (option.locked) return true
   return option.key in overrides ? overrides[option.key] : option.default_trimmed
 }
 
 /** A new normalized map. Only a difference from the default is stored. */
 export function setTrimmed(overrides: ClaudeTrimOverrides, option: ClaudeTrimOption, trimmed: boolean): ClaudeTrimOverrides {
-  if (option.locked) return normalizeClaudeTrim(overrides)
   const copy: ClaudeTrimOverrides = { ...overrides }
   if (trimmed === option.default_trimmed) delete copy[option.key]
   else copy[option.key] = trimmed

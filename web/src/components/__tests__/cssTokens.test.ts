@@ -56,7 +56,7 @@ function stripComments(text: string): string {
 
 function definedTokens(): Set<string> {
   const names = new Set<string>()
-  for (const file of ['App.vue', 'main.ts', 'style.css']) {
+  for (const file of ['App.vue', 'main.ts', 'style.css', 'styles/app.css']) {
     let text = ''
     try {
       text = readFileSync(join(SRC, file), 'utf8')
@@ -76,6 +76,12 @@ function definedTokens(): Set<string> {
   return names
 }
 
+/** Variables a UI library sets on its own elements at runtime; they are never in
+ * our palette and never in our source, so they are named here one by one. Reka's
+ * popper writes `--reka-popper-available-height` on the content element (the
+ * room left on the chosen side; ModelSelector bounds its popover with it). */
+const LIBRARY_PROVIDED = new Set(['--reka-popper-available-height'])
+
 function usedTokens(text: string): Set<string> {
   const body = stripComments(text)
   const used = new Set<string>()
@@ -84,6 +90,7 @@ function usedTokens(text: string): Set<string> {
   // literal — belongs to the component, not to the palette.
   for (const m of body.matchAll(/['"]?(--[a-z0-9-]+)['"]?\s*:/g)) used.delete(m[1])
   for (const m of body.matchAll(/setProperty\(\s*['"](--[a-z0-9-]+)/g)) used.delete(m[1])
+  for (const name of LIBRARY_PROVIDED) used.delete(name)
   return used
 }
 
@@ -91,7 +98,14 @@ describe('CSS custom properties', () => {
   const defined = definedTokens()
   const files = readdirSync(COMPONENTS).filter(f => f.endsWith('.vue'))
 
-  it('reads the palette out of App.vue', () => {
+  it('App loads the canonical global stylesheet', () => {
+    const app = readFileSync(join(SRC, 'App.vue'), 'utf8')
+    expect(app).toContain('<style src="./styles/app.css"></style>')
+    const styles = [...app.matchAll(/<style\b([^>]*)>/g)]
+    expect(styles.filter(m => !/\bscoped\b/.test(m[1]))).toHaveLength(1)
+  })
+
+  it('reads the palette out of the global stylesheet', () => {
     for (const token of ['--bg2', '--bg3', '--bg-elev', '--fg2', '--fg3', '--warning', '--error']) {
       expect(defined.has(token), token).toBe(true)
     }

@@ -20,6 +20,12 @@ from ciao.release import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _matching_uv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fixture trees pin uv 9.9.9; the machine's real uv is irrelevant."""
+    monkeypatch.setattr(release_mod, "_installed_uv_version", lambda root: "9.9.9")
+
+
 def test_resolve_source_prefers_remote_over_stale_local(tmp_path: Path, monkeypatch) -> None:
     # Cutting a release must use the freshly-fetched origin/<source>, not a
     # same-named local branch that may lag behind (which would silently ship a
@@ -63,7 +69,8 @@ def _write_release_tree(root: Path) -> None:
             encoding="utf-8",
         )
     (root / "pyproject.toml").write_text(
-        '[project]\nname = "ciao"\nversion = "0.2.0"\n',
+        '[project]\nname = "ciao"\nversion = "0.2.0"\n\n'
+        '[tool.uv]\nrequired-version = "==9.9.9"\n',
         encoding="utf-8",
     )
     (root / "ciao" / "__init__.py").write_text(
@@ -706,8 +713,8 @@ def test_release_commit_guard_is_skipped_under_allow_dirty(
 def _oc(**kw) -> release_mod.ProviderProbe:
     base = dict(
         provider="opencode",
-        installed="2.1.0",
-        latest="2.1.0",
+        installed="2.4.0",
+        latest="2.4.0",
         published=True,
         note="",
     )
@@ -722,7 +729,7 @@ def _claude(**kw) -> release_mod.ProviderProbe:
         latest=None,
         published=None,
         note="",
-        source="claude-agent-sdk 0.2.168",
+        source="claude 2.1.301",
     )
     base.update(kw)
     return release_mod.ProviderProbe(**base)
@@ -741,7 +748,7 @@ def _build(opencode, claude, untested=()) -> dict:
 def test_build_provider_record_tested() -> None:
     record = _build(_oc(), _claude())
     assert record["providers"]["opencode"]["status"] == "tested"
-    assert record["providers"]["opencode"]["version"] == "2.1.0"
+    assert record["providers"]["opencode"]["version"] == "2.4.0"
     assert record["providers"]["claude"]["status"] == "tested"
     assert record["providers"]["claude"]["version"] == "2.1.301"
     assert record["ciaobot"] == "1.6.1"
@@ -765,6 +772,8 @@ def test_build_provider_record_refuses_missing_opencode() -> None:
     [
         _oc(installed="0.0.0-dev-1"),
         _oc(installed="2.1.0-beta.1"),
+        _oc(installed="2.1.0"),
+        _oc(installed="2.3.1"),
         _oc(published=False),
         _oc(published=None),
         _oc(installed="1.14.0"),
@@ -794,7 +803,7 @@ def test_pr_body_lists_provider_versions() -> None:
     body = release_mod._pr_body("1.6.1", "notes", ["pytest"], provider_record=record)
     assert "## Provider versions tested" in body
     assert "OpenCode" in body
-    assert "2.1.0" in body
+    assert "2.4.0" in body
     skipped = release_mod._pr_body("1.6.1", "notes", [], provider_record=None)
     assert "Not re-recorded" in skipped
 
@@ -826,7 +835,7 @@ def test_main_apply_writes_and_stages_provider_record(
         else "",
     )
     monkeypatch.setattr(release_mod, "_probe_opencode", lambda: _oc())
-    monkeypatch.setattr(release_mod, "_probe_bundled_claude", lambda root: _claude())
+    monkeypatch.setattr(release_mod, "_probe_claude", lambda: _claude())
 
     result = release_mod.main(
         [
@@ -858,52 +867,71 @@ def test_main_apply_writes_and_stages_provider_record(
         )
     )
     assert record["ciaobot"] == "0.3.0"
-    assert record["providers"]["opencode"]["version"] == "2.1.0"
+    assert record["providers"]["opencode"]["version"] == "2.4.0"
 
 
-def test_probe_bundled_claude_reads_fresh_interpreter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_probe_claude_reads_the_cli_and_the_pinned_adapter(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import json
     import subprocess
-    import sys
-    import types
 
-    # Stale modules already imported in this process must be ignored.
-    for name, attr in (
-        ("claude_agent_sdk._version", "__version__"),
-        ("claude_agent_sdk._cli_version", "__cli_version__"),
-    ):
-        fake = types.ModuleType(name)
-        setattr(fake, attr, "0.0.1")
-        monkeypatch.setitem(sys.modules, name, fake)
-    (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "ciao"\nversion = "0.2.0"\n'
-        'dependencies = ["claude-agent-sdk[otel]==0.2.168"]\n',
-        encoding="utf-8",
+    from ciao import adapter_install, setup_status
+
+    pin = adapter_install.ADAPTERS[adapter_install.CLAUDE_ADAPTER].version
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: "ready")
+    monkeypatch.setattr(
+        "ciao.adapter_install.launch_argv", lambda name: ["/fake/node", "/fake/claude-agent-acp.js"]
     )
 
     def fake_run(cmd, **kwargs):
-        out = (
-            json.dumps({"sdk": "0.2.168", "cli": "2.1.301"})
-            if "-c" in cmd
-            else "2.1.301 (Claude Code)"
-        )
+        out = "2.1.301 (Claude Code)" if cmd[0] == "/fake/claude" else pin
         return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
 
     monkeypatch.setattr(release_mod.subprocess, "run", fake_run)
     monkeypatch.setattr(
-        "ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude"
+        "ciao.dependency_updates.get_latest_npm_version", lambda name: None
     )
+
+    probe = release_mod._probe_claude()
+
+    assert probe.installed == "2.1.301"
+    assert probe.note == ""
+    assert probe.source == "claude 2.1.301"
+
+
+@pytest.mark.parametrize("adapter", [None, "0.1.0"])
+def test_probe_claude_notes_a_missing_or_unpinned_adapter(
+    monkeypatch: pytest.MonkeyPatch, adapter: str | None
+) -> None:
+    import subprocess
+
+    from ciao import adapter_install, setup_status
+
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "/fake/claude")
+    monkeypatch.setattr(
+        "ciao.adapter_install.detect",
+        lambda name: "adapter_missing" if adapter is None else "ready",
+    )
+    monkeypatch.setattr(
+        "ciao.adapter_install.launch_argv", lambda name: ["/fake/node", "/fake/acp.js"]
+    )
+
+    def fake_run(cmd, **kwargs):
+        out = "2.1.301 (Claude Code)" if cmd[0] == "/fake/claude" else adapter
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(release_mod.subprocess, "run", fake_run)
     monkeypatch.setattr(
         "ciao.dependency_updates.get_latest_npm_version", lambda name: None
     )
 
-    probe = release_mod._probe_bundled_claude(tmp_path)
+    probe = release_mod._probe_claude()
 
     assert probe.installed == "2.1.301"
-    assert probe.note == ""
-    assert probe.source == "claude-agent-sdk 0.2.168"
+    assert "claude-agent-acp" in probe.note or "not installed" in probe.note
+    if adapter is None:
+        assert probe.note == adapter_install.describe(adapter_install.CLAUDE_ADAPTER, "adapter_missing")
 
 
 def test_main_rejects_refresh_with_skip_provider_versions(tmp_path: Path) -> None:
@@ -918,19 +946,79 @@ def test_main_rejects_refresh_with_skip_provider_versions(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize("failure", ["rc1", "timeout"])
-def test_probe_bundled_claude_reports_unreadable_sdk(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+def test_probe_claude_reports_an_unreadable_cli(
+    monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     import subprocess
 
+    from ciao import setup_status
+
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "/fake/claude")
+
     def fake_run(cmd, **kwargs):
         if failure == "timeout":
-            raise subprocess.TimeoutExpired(cmd, 30)
+            raise subprocess.TimeoutExpired(cmd, 10)
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
 
     monkeypatch.setattr(release_mod.subprocess, "run", fake_run)
 
-    probe = release_mod._probe_bundled_claude(tmp_path)
+    probe = release_mod._probe_claude()
 
     assert probe.installed is None
-    assert probe.note.startswith("claude_agent_sdk unreadable")
+    assert probe.note
+
+
+def _apply_args(tmp_path: Path) -> list[str]:
+    return [str(tmp_path), "--apply", "--skip-dep-check", "--skip-gws-skills",
+            "--skip-provider-versions", "--allow-dirty", "--no-branch"]
+
+
+def test_main_apply_refuses_a_different_uv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_release_tree(tmp_path)
+    (tmp_path / "web" / "package.json").write_text(
+        '{"name": "ciaobot-pwa", "version": "0.2.0"}', encoding="utf-8"
+    )
+    (tmp_path / "web" / "package-lock.json").write_text(
+        '{"name": "ciaobot-pwa", "version": "0.2.0",'
+        ' "packages": {"": {"name": "ciaobot-pwa", "version": "0.2.0"}}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(release_mod, "_installed_uv_version", lambda root: "9.9.8")
+    with pytest.raises(ReleaseError, match=r"uv 9\.9\.8 is installed.*pins uv 9\.9\.9"):
+        release_mod.main(_apply_args(tmp_path))
+
+
+def test_ensure_pinned_uv_accepts_the_pinned_uv(tmp_path: Path) -> None:
+    _write_release_tree(tmp_path)
+    release_mod._ensure_pinned_uv(tmp_path)  # autouse fixture reports 9.9.9
+
+
+@pytest.mark.parametrize("spec", ["", '>=0.13', '"==0.13"'])
+def test_pinned_uv_version_requires_an_exact_pin(tmp_path: Path, spec: str) -> None:
+    body = f'[tool.uv]\nrequired-version = {spec if spec.startswith(chr(34)) else chr(34) + spec + chr(34)}\n'
+    if not spec:
+        body = "[project]\nname = 'x'\n"
+    (tmp_path / "pyproject.toml").write_text(body, encoding="utf-8")
+    with pytest.raises(ReleaseError, match="pin uv exactly"):
+        release_mod.pinned_uv_version(tmp_path)
+
+
+def test_repo_pins_uv_and_ci_workflows_use_the_same_version() -> None:
+    """setup-uv `version:` in every workflow must equal pyproject's pin."""
+    repo = Path(__file__).resolve().parent.parent
+    pinned = release_mod.pinned_uv_version(repo)
+    workflows = sorted((repo / ".github" / "workflows").glob("*.yml"))
+    seen = 0
+    for wf in workflows:
+        lines = wf.read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines):
+            if "astral-sh/setup-uv@" not in line:
+                continue
+            seen += 1
+            window = "\n".join(lines[i + 1 : i + 4])
+            m = re.search(r"version:\s*[\"']?([^\s\"']+)", window)
+            assert m, f"{wf.name}:{i + 1} setup-uv has no version input"
+            assert m.group(1) == pinned, f"{wf.name}:{i + 1} pins {m.group(1)}, pyproject pins {pinned}"
+    assert seen >= 2  # publish.yml and release-smoke.yml; R1 removed the server-host rehearsal workflow that was the third

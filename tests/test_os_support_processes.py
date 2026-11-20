@@ -1,10 +1,8 @@
 """ciao.os_support.processes: a tree kill reaches grandchildren on every OS.
 
 The trees here are real: a Python leader that starts a Python grandchild,
-which proves it is alive by rewriting a heartbeat file. That works the same on
-POSIX and Windows, where ``os.kill(pid, 0)`` would itself terminate the pid.
-The platform tests pin each branch to its spawn options and, on POSIX, to the
-exact ``killpg`` calls the call sites made before the module existed.
+which proves it is alive by rewriting a heartbeat file. The POSIX tests pin
+the exact ``killpg`` calls the call sites made before the module existed.
 """
 
 from __future__ import annotations
@@ -21,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from ciao.os_support.processes import ProcessTree, tree_spawn_options
+
 
 _GRANDCHILD = textwrap.dedent(
     """
@@ -128,7 +127,6 @@ def test_terminate_does_not_raise_and_close_leaves_the_tree_running(tmp_path: Pa
         other.wait(timeout=15)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the POSIX branch is not defined on Windows")
 def test_posix_uses_the_same_session_and_killpg_calls_as_before(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -142,38 +140,6 @@ def test_posix_uses_the_same_session_and_killpg_calls_as_before(
     assert calls == [(4321, signal.SIGTERM), (4321, signal.SIGKILL)]
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Job Objects are the Windows branch")
-def test_windows_starts_a_new_process_group() -> None:
-    assert tree_spawn_options() == {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-
-
-@pytest.mark.skipif(sys.platform != "win32", reason="Job Objects are the Windows branch")
-@pytest.mark.parametrize("dies_with_engine", [False, True])
-def test_windows_a_child_that_already_exited_gives_an_empty_tree(dies_with_engine: bool) -> None:
-    child = subprocess.Popen(
-        [sys.executable, "-c", "pass"], **tree_spawn_options(dies_with_engine=dies_with_engine)
-    )
-    child.wait(timeout=30)
-    tree = ProcessTree(child.pid, dies_with_engine=dies_with_engine)  # used to raise WinError 5
-    tree.kill()  # empty job: no error
-    tree.close()
-
-
-@pytest.mark.skipif(sys.platform != "win32", reason="KILL_ON_JOB_CLOSE is the Windows branch")
-def test_windows_a_tree_that_dies_with_the_engine_ends_when_closed(tmp_path: Path) -> None:
-    """The engine exiting closes the job handle; that must end the tree."""
-    beat = tmp_path / "beat"
-    leader = subprocess.Popen(
-        _leader(beat, then="time.sleep(300)"), **tree_spawn_options(dies_with_engine=True)
-    )
-    tree = ProcessTree(leader.pid, dies_with_engine=True)
-    _wait_for_beat(beat)
-    tree.close()
-    leader.wait(timeout=15)  # it would sleep 300 s; the job's close ended it
-    assert _beats_stopped(beat), "the grandchild survived the job closing"
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="the POSIX branch is not defined on Windows")
 def test_posix_a_tree_that_dies_with_the_engine_stays_in_its_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -191,10 +157,8 @@ def test_posix_a_tree_that_dies_with_the_engine_stays_in_its_group(
     assert single == [(4321, signal.SIGTERM), (4321, signal.SIGKILL)]
 
 
-
 def test_hand_off_passes_the_programs_output_and_exit_code_through(tmp_path) -> None:
-    """A wrapper that hands off must report what the program did (#696 C6:
-    on Windows, os.execve exited 0 before `gws` had run)."""
+    """A wrapper that hands off must report what the program did."""
     script = tmp_path / "wrapper.py"
     script.write_text(
         "import os, sys\n"

@@ -297,9 +297,10 @@ describe('HomeIntake', () => {
     store.workspaces = [
       { name: 'personal', vault_root: '', default_provider: 'opencode', gws_profile: '' },
     ] as unknown as typeof store.workspaces
+    store.workspaceRegistryStatus = 'ready'
     store.workspaceProviderOptions = [
       { value: 'claude', label: 'Claude' },
-      { value: 'opencode', label: 'opencode' },
+      { value: 'opencode', label: 'OpenCode' },
     ] as unknown as typeof store.workspaceProviderOptions
     store.projects = [
       { project_id: 'general', name: 'General', workspace: 'personal', order: 0 },
@@ -317,7 +318,7 @@ describe('HomeIntake', () => {
 
     const wrapper = mount(HomeIntake, { attachTo: document.body })
     const trigger = wrapper.get('.home-intake-model-trigger')
-    expect(trigger.text()).toContain('opencode default')
+    expect(trigger.text()).toContain('OpenCode default')
     expect(wrapper.get('button[type="submit"]').attributes('aria-label')).toBe('New chat')
 
     await trigger.trigger('click')

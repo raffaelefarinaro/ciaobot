@@ -24,7 +24,6 @@ from ciao import cli_envelopes
 from ciao.models import AgentRequest, ChatContext
 from ciao.transcripts import TranscriptStore
 from ciao.web import app as web_app
-from ciao.providers.opencode import _projected_message, opencode_child_status
 from ciao.web import transcript_service
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -36,8 +35,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TRANSCRIPT_ROUTES = [
     ("/api/chats/{chat_id}/messages", "GET", "chat_messages"),
     ("/api/chats/{chat_id}/messages/part", "GET", "chat_message_part"),
-    ("/api/chats/{chat_id}/subagents", "GET", "chat_subagents"),
-    ("/api/subagents/running", "GET", "running_subagents"),
 ]
 
 
@@ -118,8 +115,9 @@ def test_nothing_was_left_behind_or_duplicated() -> None:
     assert service & routes == set()
     # Floor on what #498 actually moved out of routes_api. It dropped from 40
     # when #500 lifted the six CLI-envelope constants one level up into
-    # ciao/cli_envelopes.py, which subagent_tracking shares.
-    assert len(service) >= 34
+    # ciao/cli_envelopes.py, and by seven more when the subagent transcript
+    # renderers went with their routes.
+    assert len(service) >= 35
 
 
 # ------------------------------------------------------------------- fixtures
@@ -1082,140 +1080,23 @@ async def test_a_recorded_turn_that_is_still_streaming_is_not_dropped(
     assert rows[4]["sent_at"] == "2026-10-22T12:10:00Z"
 
 
-def test_subagent_rows_match_the_wire_contract() -> None:
-    rendered = transcript_service._render_subagent_messages(
-        [SDK_USER, SDK_ASSISTANT, SDK_RESULT]
+ACP_JOURNAL = [
+    {"type": "user", "text": "do it"},
+    {"type": "text_delta", "text": "working"},
+    {"type": "tool_use", "tool_name": "read", "tool_input": "/tmp/x"},
+]
+
+
+def test_acp_journal_rows_match_the_wire_contract() -> None:
+    rendered = transcript_service._render_acp_journal(
+        ACP_JOURNAL, _chat(), start_user_idx=0, workspace_root=None, agent_root=None
     )
 
     assert rendered == [
-        {"role": "user", "content": "hello there"},
-        {"role": "assistant", "content": "The answer"},
-        {"role": "system", "content": ACTIVITY_LINE, "tool_name": "_activity"},
+        {"role": "user", "content": "do it", "turn_index": 0, "sent_at": "2026-08-31T11:11:39Z"},
+        {"role": "assistant", "content": "working"},
+        {"role": "system", "content": "\u2699\ufe0f read /tmp/x", "tool_name": "_activity"},
     ]
-
-
-def test_subagent_rows_are_identical_for_sdk_objects_and_jsonl_dicts() -> None:
-    """Both shapes reach this renderer; they must render the same."""
-    objects = [SDK_USER, SDK_ASSISTANT, SDK_RESULT]
-    dicts = [{"type": m.type, "message": m.message} for m in objects]
-
-    assert transcript_service._render_subagent_messages(
-        objects
-    ) == transcript_service._render_subagent_messages(dicts)
-
-
-OPENCODE_THREAD = {
-    "info": {"id": "s1"},
-    "messages": [
-        {
-            "info": {"role": "user", "time": {"created": 1000}},
-            "parts": [{"type": "text", "text": "do it"}],
-        },
-        {
-            "info": {"role": "assistant", "time": {"created": 1100, "completed": 1200}},
-            "parts": [
-                {"type": "text", "text": "working"},
-                {
-                    "type": "tool",
-                    "tool": "read",
-                    "state": {"status": "completed", "input": {"filePath": "/tmp/x"}},
-                },
-            ],
-        },
-        {
-            "info": {"role": "assistant", "error": {"name": "boom"}, "time": {"created": 1300}},
-            "parts": [],
-        },
-    ],
-}
-
-
-def test_opencode_thread_rows_match_the_wire_contract() -> None:
-    rendered = transcript_service._render_opencode_thread(OPENCODE_THREAD, _chat())
-
-    assert rendered == [
-        {
-            "role": "user",
-            "content": "do it",
-            "turn_index": 0,
-            "sent_at": "2026-08-31T11:11:39Z",
-        },
-        {
-            "role": "assistant",
-            "content": "working",
-            "sent_at": "2026-08-31T11:13:15Z",
-            "duration_ms": 96000,
-        },
-        {
-            "role": "system",
-            "content": "⚙️ read /tmp/x",
-            "tool_name": "_activity",
-        },
-    ]
-
-
-def test_opencode_skill_input_keeps_the_id_in_the_activity_line() -> None:
-    """The reload path must hand the rail the skill's `id` unchanged (#2863).
-
-    `_projected_message` is what `read_thread` runs on every V2 wire message,
-    and `_render_opencode_thread` is the only renderer behind the chat
-    transcript, so this is the production reload path with no live service.
-    """
-    native = {
-        "type": "assistant",
-        "id": "msg-skill",
-        "content": [
-            {
-                "type": "tool",
-                "id": "call-skill",
-                "name": "skill",
-                "state": {
-                    "status": "completed",
-                    "input": {"id": "loop-engineering"},
-                },
-            },
-        ],
-    }
-    projected = _projected_message(native)
-    assert projected is not None
-    rendered = transcript_service._render_opencode_thread(
-        {"info": {"id": "s1"}, "messages": [projected]}, _chat()
-    )
-
-    activity = [row for row in rendered if row.get("tool_name") == "_activity"]
-    assert len(activity) == 1
-    assert activity[0]["content"] == '⚙️ skill {"id": "loop-engineering"}'
-
-
-def test_a_child_thread_keeps_its_own_turn_numbering() -> None:
-    """A child session restarts at turn 0, so the parent's metadata is off."""
-    rendered = transcript_service._render_opencode_thread(
-        OPENCODE_THREAD, _chat(), metadata=False, start_user_idx=3
-    )
-
-    assert rendered[0]["turn_index"] == 3
-    assert "sent_at" not in rendered[0]
-
-
-def test_opencode_child_status_reads_the_last_assistant_message() -> None:
-    messages = OPENCODE_THREAD["messages"]
-    assert opencode_child_status(messages) == "failed"
-    assert opencode_child_status(messages[:2]) == "completed"
-    assert (
-        opencode_child_status(
-            [{"info": {"role": "assistant", "time": {"created": 1}}}]
-        )
-        == "running"
-    )
-    assert opencode_child_status([]) == "completed"
-    # The active map describes the current execution, not Session.Info.outcome
-    # from the previous completed turn.
-    assert opencode_child_status(
-        [], {"outcome": "failed"}, active=True
-    ) == "running"
-    assert opencode_child_status(
-        [], {"outcome": "succeeded"}, active=False
-    ) == "completed"
 
 
 def test_prune_rows_for_wire_only_truncates_oversized_thinking() -> None:

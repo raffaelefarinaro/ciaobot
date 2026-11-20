@@ -6,9 +6,9 @@ conversation can cause **junk proposals**, and it cannot cause a durable memory
 write, a promotion, a delegation, a message or a command. Two things make that
 true and each is pinned here:
 
-* the turn has **no tools** — the first test patches ``query`` and asserts the
-  options the turn actually ran with (``tools == []``, ``setting_sources == []``,
-  ``strict_mcp_config is True``), which is why the ``options_hook`` seam exists;
+* the turn has **no tools** — the first test patches the ACP one-shot and asserts
+  the ``_meta`` the agent was sent (``tools == []``, ``settingSources == []``,
+  ``strictMcpConfig is True``);
 * the only write is ``append_proposals`` — the injection test poisons the region
   writer, the control plane and the learnings writer so a promotion is a test
   failure rather than an absence nobody checked, and then compares every other
@@ -28,9 +28,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock
-
-import ciao.providers.oneshot as oneshot
+from ciao import setup_status
+from ciao.providers.acp import oneshot as acp_oneshot
 from ciao.fact_candidates import PROVENANCE_UNKNOWN, candidate_from_proposal
 from ciao.import_decouple import (
     CIAO_CONTEXT_BEGIN,
@@ -224,9 +223,9 @@ async def test_extraction_runs_a_tool_less_turn_and_writes_only_proposals(
 ) -> None:
     """The boundary, as an enforcement result.
 
-    Only ``query`` is patched, so the real ``run_oneshot`` runs and the options
-    the turn was built with can be read off the object itself — the assertion is
-    on what the harness was given, not on what a prompt asked for.
+    Only the ACP one-shot is patched, so the real ``run_oneshot`` runs and the
+    ``_meta`` the turn was sent can be read off the call — the assertion is on
+    what the harness was given, not on what a prompt asked for.
     """
     vault, _ = _seed_vault(tmp_path)
     before = _snapshot(tmp_path)
@@ -234,15 +233,13 @@ async def test_extraction_runs_a_tool_less_turn_and_writes_only_proposals(
 
     captured: dict = {}
 
-    async def fake_query(*, prompt: str, options):
-        captured["options"] = options
+    async def fake_run(spec, prompt: str, **kwargs):
+        captured["session_meta"] = kwargs["session_meta"]
         captured["prompt"] = prompt
-        yield AssistantMessage(
-            content=[TextBlock(text=_reply("extraction_reply_valid.json"))],
-            model="haiku",
-        )
+        return _reply("extraction_reply_valid.json")
 
-    monkeypatch.setattr(oneshot, "query", fake_query)
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "")
+    monkeypatch.setattr(acp_oneshot, "run_acp_oneshot", fake_run)
 
     result = await extract_facts(
         _session(),
@@ -250,12 +247,11 @@ async def test_extraction_runs_a_tool_less_turn_and_writes_only_proposals(
         destination_workspace=vault,
     )
 
-    options: ClaudeAgentOptions = captured["options"]
-    assert options.tools == []
-    assert options.setting_sources == []
-    assert options.skills == []
-    assert options.strict_mcp_config is True
-    assert options.max_turns == 2
+    options = captured["session_meta"]["claudeCode"]["options"]
+    assert options["tools"] == []
+    assert options["settingSources"] == []
+    assert options["skills"] == []
+    assert options["strictMcpConfig"] is True
 
     assert result.proposals_filed == 3
     assert result.skipped == 0

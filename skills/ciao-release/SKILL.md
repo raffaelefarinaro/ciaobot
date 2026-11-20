@@ -29,6 +29,8 @@ Sibling skills this one calls into, rather than restating:
 catalog and `docs/UPKEEP.md` current — run those on their own cadence, not
 here. Read each at the point it is needed.
 
+The Mac app in `mac/` is released separately with **`/release-mac`** (`skills/release-mac/`); this skill never builds, signs or publishes it.
+
 Everything runs in **this checkout, in one session**. There is no worktree, no
 external tree, and no separate reviewer process. If you find yourself wanting a
 worktree, you are about to make a change, and changes do not belong here.
@@ -72,22 +74,11 @@ rtk proxy git status --short                          # must be empty
 A non-zero count means `develop` is ahead of the remote: push it, or stop. A
 dirty tree stops the cut (`--apply` refuses — see traps).
 
-**The post-merge CI run must be green on every platform.** A develop PR runs
-only Linux plus the fast Windows gates (imports, win32 mypy); the Windows
-pytest and vitest suites and the macOS job (browser tests, engine cold-start)
-run on the push to `develop` after merge. That push run is the only place
-those suites ran on what you are about to ship:
-
-```bash
-gh run list --repo raffaelefarinaro/ciaobot --workflow ci.yml --branch develop \
-  --event push --limit 1 --json headSha,status,conclusion,url
-```
-
-`headSha` must equal `git rev-parse origin/develop`, `status` must be
-`completed` and `conclusion` `success`. A run still in progress means wait; a
-red one stops the cut. File the failure as an issue, fix it on `develop`, and
-start again from the top of this step. The release PR into `main` re-runs the
-full matrix, but finding a Windows break there means fixing it mid-cut.
+Develop PRs run Linux gates; Python 3.14 and macOS coverage runs
+on the release PR. Inspect nightly CI for known failures, but an older green
+SHA is not proof of this candidate. Step 6 merges only when the release PR's
+required checks, including `linux-server-latest-python` (Python 3.14),
+`test` and `mac-app`, are green.
 
 **Decide scope with the user.** Run `gh pr list --state open` and
 `gh issue list --state open` on `raffaelefarinaro/ciaobot`, show the result, and
@@ -187,6 +178,23 @@ plainly and stop.
 
 ## Step 4 — Cut it
 
+**Rehearse first.** Dispatch `release-rehearsal.yml` from `develop` and read the
+run to green before cutting:
+
+```bash
+gh workflow run release-rehearsal.yml --ref develop
+```
+
+It builds the artifact set a release would publish (the engine wheel, the
+stamped `install.sh`, the signed engine manifest and its signature) and proves
+it on a clean Linux VM. It creates nothing and uploads to no release. Two
+preconditions. GitHub offers `workflow_dispatch` only for a workflow file on the
+default branch, `main`, so the run is unavailable until the file is there. The
+`release-signing` Environment must hold the signing secrets, with deployment
+restricted to `develop` and `main`. For 2.0.0, also verify once on the local
+Windows test VM that the 1.10 update rollback is clean; the maintainer accepted
+that risk on the condition that it is checked before the cut.
+
 Plan-only first. It writes nothing, so it is safe against a dirty tree:
 
 ```bash
@@ -196,8 +204,7 @@ env -u PYTHONPATH .venv/bin/python -m ciao.release "$(pwd)" --bump <patch|minor|
 Read the plan. It is the last chance to catch a wrong bump.
 
 Also read the **Provider versions** block. It shows the OpenCode binary on this
-machine and the Claude CLI bundled in the installed `claude-agent-sdk`, each next
-to the latest published version. If it warns that OpenCode is behind latest, the
+machine and the `claude` CLI on PATH, each next to the latest published version. If it warns that OpenCode is behind latest, the
 maintainer decides: update OpenCode first and re-run the plan, or cut with the
 installed version recorded as tested.
 
@@ -224,8 +231,8 @@ What `--apply` does, in order: bumps `pyproject.toml`, `ciao/__init__.py`,
 in both `web/public/sw.js` and `ciao/web/static/sw.js`; writes the notes into
 `CHANGELOG.md` (or, without `--notes-file`, the commit list);
 auto-bumps `auto` dependencies; regenerates the packaged `gws-*` skills if the
-installed `gws` CLI differs from the pin; records the tested OpenCode and bundled
-Claude CLI versions in `ciao/stock/provider-versions.json` (fails on a missing,
+installed `gws` CLI differs from the pin; records the tested OpenCode and Claude
+CLI versions in `ciao/stock/provider-versions.json` (fails on a missing,
 dev, unpublished or unsupported OpenCode unless `--untested-provider opencode`);
 runs the full check suite; commits
 `release: prepare vX.Y.Z`; pushes; opens the PR into `main`.
@@ -305,21 +312,6 @@ broken. Run both. Report what the tasks found; do not fix it here.
 `AGENTS.md` requires visual browser inspection before *pushing*. A release is
 the one moment where all of it is true at once, which is why these live here.
 
-### Windows smoke (#696 C10/C11)
-
-The macOS walk above does not touch the Windows engine, and `release-smoke` has no Windows job, so a release candidate still gets this manual check. Use the clean-install Windows 11 VM snapshot (or a fresh local Windows account) and run it over SSH or in the console. It needs the release candidate's files, so run it after `publish` has attached them, or build them locally the way the CI end-to-end step does and use `-ReleaseDir <folder> -Version <x.y.z>`:
-
-1. Restore the clean snapshot (or create a new account that has never had Ciaobot).
-2. Install: `irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex` (or the `-ReleaseDir`/`-Version` form for a candidate that is not published). Expect a sign-in URL and no error.
-3. In a **new** terminal: `uv tool list` shows `ciaobot v<candidate>`, and `ciao service status` reports the engine as running.
-4. Open the sign-in URL, sign in, and run one real chat turn with each installed provider.
-5. Settings -> Restart: the engine comes back (this is the exit-code-75 path under `ciao supervise`).
-6. Sign out and back in (or reboot and sign in): the engine starts by itself.
-7. Uninstall: run the installer with `-Uninstall`. Expect `Ciaobot is uninstalled.`, `schtasks /Query /TN \Ciaobot\Engine` failing, the PATH entry removed only if the installer added it and the tool bin directory is empty (a shared uv tools directory can keep it on PATH), and the workspace folder still present.
-8. Record the VM snapshot, the commit, the date and pass/fail per step in the #696 parity matrix. Anything broken becomes an issue; this skill does not fix it.
-
-Engine update and rollback are not part of this smoke until #857 lands; add them then.
-
 **Then ask the user to test.** Say plainly what is installed, what version, and
 that the engine is live on their real workspace. They are the only reviewer
 whose verdict covers "is this good", as opposed to "does this work".
@@ -331,26 +323,40 @@ Once the release PR is open, give its diff one more read before merging — the
 not in the Step 3 review. Prefer `/code-review --comment` on the open PR so
 findings land as inline comments.
 
-1. CI (`test`) must be green (`mergeStateStatus` CLEAN).
+1. CI must be green (`mergeStateStatus` CLEAN), including `linux-server-latest-python`, `test` and `mac-app`.
 2. Merge into `main`. This runs `.github/workflows/release-on-main.yml`, which
    creates the `vX.Y.Z` tag and GitHub release using `RELEASE_PAT` (a plain
    `GITHUB_TOKEN` release would **not** fire `release: published`).
 3. That fires `publish.yml`:
    - `build-engine` (macos) — builds the PWA and the engine wheel, verifies the
-     wheel in a clean environment, signs the engine manifest with the release
-     minisign key, and attaches the wheel, the manifest and its signature, plus
-     the engine installer as both `install.sh` and `install-engine.sh` (the same
-     bytes under both names, #651) and the Windows installer `install.ps1`.
-     Since #653 there is no app archive, no updater feed, no native verifier and
-     no bundled runtime.
-   - `release-smoke` (macos) — installs the engine from the release's one-line
-     installer with a restricted PATH, verifies the `ciao` entry point, the
-     install receipt and the LaunchAgent, checks the startup API, then reruns
-     the installer as an update/recovery test.
-4. A follow-up job merges `main` back into `develop`.
+     wheel in a clean environment, stamps the Linux `install.sh` with the wheel's
+     version and sha256, and attaches `install.sh` and the wheel to every
+     release. Since #653 there is no app archive, no updater feed, no native
+     verifier and no bundled runtime.
+     For 2.0.0 only (`LEGACY_MANIFEST_VERSION`) it also writes the 1.x engine
+     manifest, signs it with the release minisign key, and attaches the manifest
+     and its signature. It then checks the published files against the list the
+     release must hold: two assets on a normal release, four on 2.0.0.
+   - `release-smoke` (Linux, `ubuntu-24.04`; job `linux-install` in
+     `release-smoke.yml`, which `publish.yml` calls) runs the published
+     `install.sh` one-liner with a workspace, checks `ciao --version`, the
+     `ciaobot` systemd unit and `/api/startup-status`, then re-runs the same
+     one-liner with no flags as a same-version reinstall (not an upgrade) and
+     checks that the unit restarted under a new main PID.
+   - `legacy-update` (`macos-latest`, the second job in `release-smoke.yml`)
+     runs only for 2.0.0, where
+       `LEGACY_MANIFEST_VERSION` is set: it runs `scripts/legacy-update-gate.py`
+       from the tagged checkout against the published assets with the pinned 1.x
+       wheel. It stages the release and never applies it.
+4. **The Mac DMG, by hand.** Once `publish.yml` is green, the operator attaches
+   `Ciaobot-<version>.dmg` to the release and publishes the update feeds, in the
+   order `skills/release-mac/SKILL.md` section 6 gives. CI does not sign or
+   notarize the app, so 2.0.0 does not wait on CI signing.
+5. A follow-up job merges `main` back into `develop`.
 
 No manual tag, no `gh release create`, no tap push, no separate desktop release —
-one merge ships the engine.
+one merge ships the engine and `install.sh`. The DMG is the one artifact attached
+by hand.
 
 End users install it with the release URL, which does not change between
 releases — the same one-liner now installs the engine:
@@ -362,9 +368,7 @@ curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/
 `tests/test_ci_workflow.py::test_first_party_install_command_stays_install_sh`
 pins that exact command into this skill, `README.md`, `site/index.html`,
 `site/guide.html` and `docs/DEVELOPMENT.md`, and fails if any of them starts
-pointing a first-time user at `install-engine.sh` instead. The build attaches
-the installer under both names because the public one-liner kept `install.sh`
-while the hand-over path fetched `install-engine.sh` (#651) — but `install.sh` is
+pointing a first-time user at `install-engine.sh` instead. `install.sh` is
 the one a user runs.
 
 **Merging the release PR** is the one irreversible act in this skill. The
@@ -377,8 +381,8 @@ only spawns after `Release on main` finishes creating the tag, so you would
 watch the *previous* release's run. Wait for a `Release on main` run on the
 merge commit, then take the `publish` run newer than it.
 
-After it ships, confirm the tag, the GitHub release, the wheel, the signed
-manifest, both installer names and `install.ps1`. `pgrep` proves a process
+After it ships, confirm the tag, the GitHub release, the wheel and `install.sh`
+(plus the signed manifest and its signature on 2.0.0), then attach the DMG. `pgrep` proves a process
 exists, not that the engine runs — the smoke test checks the startup API and the
 installed `ciao`.
 
@@ -496,14 +500,32 @@ Release-cutting traps. Bugs in the code are not here — file them.
 - **Confirm which branch you are on before committing.** A long release session
   drifts. Check `git branch --show-current`. Renaming a local branch does **not**
   move an open PR's head — that needs a new PR.
-- **The installer must fail closed.** The engine manifest signature and the
-  wheel's digest are both verified before extraction. Never turn a verification
-  error into a warning or add an unsigned fallback.
-- **Engine cold start is the installer's job** — do not "fix" `release-smoke` by
-  adding `--load-launchd` to the workflow. That would hide a genuine cold-start
-  defect.
-- **Release propagation lag.** Verify the GitHub release contains the wheel, its
-  signed manifest, both installer names and `install.ps1` before diagnosing an
-  installer failure.
+- **The 1.x manifest must stay until the maintainer retires 1.x updates.** Only
+  the 2.0.0 release ships the 1.x engine manifest and its signature
+  (`LEGACY_MANIFEST_VERSION`, set in `publish.yml` and `release-smoke.yml`). A
+  1.10 install stages from that manifest, so removing it, or moving the value to
+  another version, strands every 1.x install still in use. Retiring it is the
+  maintainer's decision, not cleanup.
+- **The legacy gate is the proof.** A green `linux-install` shows the one-liner
+  works. It does not show that 1.x engines can reach 2.0.0. Only `legacy-update`
+  runs the pinned 1.x updater against the published files. If it is red, or
+  skipped on 2.0.0, the 1.x path is unproven whatever else is green.
+- **Release-on-main makes the release "latest" before the DMG exists.** Between
+  the merge and the DMG step, the download page points at a release with no
+  DMG. Attach the DMG before anyone is told the release is out.
+- **`publish-release.sh` ignores `--notes` on an existing release.** The release
+  already exists after `release-on-main`, so the DMG digest goes into the notes
+  by hand: `gh release edit vX.Y.Z --notes-file <file>`.
+- **A 0.5.x fix cut in the old repo never reaches 2.x clients.** 2.x clients read
+  the update feed in this repository, so a fix cut in `raffaelefarinaro/ciaobot-mac`
+  reaches only the clients that still read that feed. Cut 2.x fixes here (see
+  `skills/release-mac/SKILL.md`).
+- **Engine cold start is the installer's job** — if the Linux `release-smoke`
+  fails on the service or startup check, fix the installer or the unit, not the
+  workflow. Do not skip the installer's `ciao service install` step or add flags
+  the one-liner does not take. That would hide a genuine cold-start defect.
+- **Release propagation lag.** Verify the GitHub release contains `install.sh`
+  and the wheel (and, on 2.0.0, the signed manifest and its signature) before
+  diagnosing an installer failure.
 - **Absolute repo_root.** Pass an absolute path — shell cwd persistence between
   tool calls is unreliable.

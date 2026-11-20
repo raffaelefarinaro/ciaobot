@@ -70,7 +70,16 @@ const ModelSelectorStub = defineComponent({
 const MODELS_RESPONSE = {
   models: ['haiku', 'sonnet', 'opus', 'fable'],
   default: 'sonnet',
-  provider_models: { claude: ['haiku', 'sonnet', 'opus', 'fable'] },
+  providers: [
+    { id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude', capabilities: {} },
+    { id: 'opencode', label: 'OpenCode', short_label: 'OpenCode', capabilities: {} },
+    { id: 'codex', label: 'OpenAI (via Codex)', short_label: 'Codex', capabilities: {} },
+  ],
+  provider_models: {
+    claude: ['haiku', 'sonnet', 'opus', 'fable'],
+    opencode: ['openai/gpt-5.6'],
+    codex: ['gpt-5.5'],
+  },
   provider_defaults: { claude: 'sonnet' },
   thinking_levels: { claude: ['low', 'medium', 'high'] },
   // opus cannot do 'high', fable can: the recovery validates a staged
@@ -116,6 +125,8 @@ function makeChat(chatId: string, overrides: Partial<ChatInfo> = {}): ChatInfo {
 
 class MemoryStorage {
   private values = new Map<string, string>()
+  get length(): number { return this.values.size }
+  key(index: number): string | null { return [...this.values.keys()][index] ?? null }
   getItem(key: string): string | null { return this.values.get(key) ?? null }
   setItem(key: string, value: string): void { this.values.set(key, value) }
   removeItem(key: string): void { this.values.delete(key) }
@@ -125,21 +136,27 @@ class MemoryStorage {
 interface MountOptions {
   /** Overrides for the panel's chat (a locked bucket, an archived chat, ...). */
   chat?: Partial<ChatInfo>
+  chatId?: string
+  pinia?: ReturnType<typeof createPinia>
 }
 
 async function mountPanel(options: MountOptions = {}): Promise<{
   wrapper: VueWrapper
   store: ReturnType<typeof useProjectStore>
   sendMessage: ReturnType<typeof vi.spyOn>
+  pinia: ReturnType<typeof createPinia>
 }> {
-  const pinia = createPinia()
+  const pinia = options.pinia || createPinia()
   setActivePinia(pinia)
   const store = useProjectStore()
-  store.projects = [makeProject()]
-  store.chats = [makeChat('chat-1', options.chat)]
-  store.activeChatId = 'chat-1'
-  store.messages = { 'chat-1': [] }
-  store.bootstrapped = true
+  const chatId = options.chatId || 'chat-1'
+  if (!options.pinia) {
+    store.projects = [makeProject()]
+    store.chats = [makeChat(chatId, options.chat)]
+    store.activeChatId = chatId
+    store.messages = { [chatId]: [] }
+    store.bootstrapped = true
+  }
 
   const taskStore = useTaskStore()
   vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
@@ -152,13 +169,12 @@ async function mountPanel(options: MountOptions = {}): Promise<{
 
   const sendMessage = vi.spyOn(store, 'sendMessage')
   const wrapper = shallowMount(ChatPanel, {
-      props: { chatId: 'chat-1' },
+      props: { chatId },
     global: {
       plugins: [pinia],
       stubs: {
         PaneHeader: PaneHeaderStub,
         ModelSelector: ModelSelectorStub,
-        SubagentPanel: ChildStub,
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,
         RouterLink: ChildStub,
@@ -171,11 +187,30 @@ async function mountPanel(options: MountOptions = {}): Promise<{
     },
   })
   await flushPromises()
-  return { wrapper, store, sendMessage }
+  return { wrapper, store, sendMessage, pinia }
+}
+
+function verifyCurrentFailure(store: ReturnType<typeof useProjectStore>) {
+  let count = 0
+  const rows = store.messages['chat-1'].map((row, i) => ({
+    ...row, i, ...(row.role === 'user' ? { turn_index: count++ } : {}),
+  }))
+  Object.assign(store.chats[0], { failure_id: 'failure-1', recovery_eligible: true, user_turn_count: count })
+  vi.mocked(api.get).mockImplementation((path: string) => {
+    if (path.endsWith('/messages?limit=50')) return Promise.resolve({ items: rows }) as never
+    if (path === '/api/chats/chat-1') return Promise.resolve({ ...store.chats[0] }) as never
+    if (path === '/api/models') return Promise.resolve(MODELS_RESPONSE) as never
+    return Promise.resolve([]) as never
+  })
+  store.messages['chat-1'] = rows
+  return vi.spyOn(store, 'continueRecovery').mockResolvedValue(undefined as never)
 }
 
 describe('ChatPanel retry from error bubble', () => {
   beforeEach(() => {
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: {
+      request: async (_name: string, _options: unknown, callback: (lock: object) => Promise<unknown>) => callback({}),
+    } })
     Object.defineProperty(globalThis, 'localStorage', {
       configurable: true,
       value: new MemoryStorage(),
@@ -188,7 +223,292 @@ describe('ChatPanel retry from error bubble', () => {
     localStorage.clear()
   })
 
-  it('resends the prior turn text plus its images', async () => {
+  it('disables continuation actions until the displayed failure is verified, without blocking stop', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.chats[0].retry = { status: 'pending', mode: 'continue_recovery', next_at: '', last_error: 'manual', attempts: 0, interval_seconds: 3600 }
+    store.messages['chat-1'] = []
+    await flushPromises()
+    const card = wrapper.get('.injected-card--retry_scheduled')
+    const buttons = card.findAll('.retry-state-actions button')
+    expect(buttons[0].attributes('disabled')).toBeDefined()
+    expect(buttons[1].attributes('disabled')).toBeDefined()
+    expect(buttons[2].attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('uses the verified failure identity without resending the task or images', async () => {
+    const failed = makeChat('chat-1', { failure_id: 'failure-1', recovery_eligible: true, user_turn_count: 1 })
+    const { wrapper, store, sendMessage } = await mountPanel({ chat: failed })
+    const rows = [
+      { role: 'user', content: 'private task', images: ['private-image'], turn_index: 0, i: 0 },
+      { role: 'assistant', content: 'usage limit', is_error: true, i: 1 },
+    ]
+    vi.mocked(api.get).mockImplementation((path: string) => {
+      if (path.endsWith('/messages?limit=50')) return Promise.resolve({ items: rows }) as never
+      if (path === '/api/chats/chat-1') return Promise.resolve(failed) as never
+      return Promise.resolve([]) as never
+    })
+    const recover = vi.spyOn(store, 'continueRecovery').mockResolvedValue(failed)
+    store.messages['chat-1'] = rows as never
+    await flushPromises()
+    const retry = wrapper.findAll('button').find(button => button.text() === 'Retry')!
+    expect(retry.attributes('disabled')).toBeUndefined()
+    await retry.trigger('click')
+    expect(recover).toHaveBeenCalledWith('chat-1', 'failure-1', true)
+    expect(sendMessage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('verifies a failure when the last user turn is more than 50 rows back', async () => {
+    const failed = makeChat('chat-1', { failure_id: 'failure-1', recovery_eligible: true, user_turn_count: 1 })
+    const { wrapper, store } = await mountPanel({ chat: failed })
+    const user = { role: 'user', content: 'task', turn_index: 0, i: 0 }
+    const error = { role: 'assistant', content: 'usage limit', is_error: true, i: 101 }
+    const trace = Array.from({ length: 100 }, (_, i) => ({ role: 'assistant', content: 'tool output', tool_name: 'tool', i: i + 1 }))
+    vi.mocked(api.get).mockImplementation((path: string) => {
+      if (path.endsWith('/messages?limit=50')) return Promise.resolve({ items: [...trace.slice(51), error], total: 102, hasMore: true, nextOffset: 50 }) as never
+      if (path.endsWith('/messages?offset=50&limit=50')) return Promise.resolve({ items: trace.slice(1, 51), total: 102, hasMore: true, nextOffset: 100 }) as never
+      if (path.endsWith('/messages?offset=100&limit=50')) return Promise.resolve({ items: [user, trace[0]], total: 102, hasMore: false, nextOffset: null }) as never
+      if (path === '/api/chats/chat-1') return Promise.resolve(failed) as never
+      return Promise.resolve([]) as never
+    })
+    store.messages['chat-1'] = [user, error] as never
+    await flushPromises()
+    expect(wrapper.findAll('button').find(button => button.text() === 'Retry')!.attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('preserves the draft and staged attachments during verified recovery', async () => {
+    const failed = makeChat('chat-1', { failure_id: 'failure-1', recovery_eligible: true, user_turn_count: 1 })
+    const { wrapper, store, sendMessage } = await mountPanel({ chat: failed })
+    const rows = [
+      { role: 'user', content: 'original task', images: ['original.png'], turn_index: 0, i: 0 },
+      { role: 'assistant', content: 'Error: connection refused', is_error: true, i: 1 },
+    ]
+    vi.mocked(api.get).mockImplementation((path: string) => {
+      if (path.endsWith('/messages?limit=50')) return Promise.resolve({ items: rows }) as never
+      if (path === '/api/chats/chat-1') return Promise.resolve(failed) as never
+      return Promise.resolve([]) as never
+    })
+    const recover = vi.spyOn(store, 'continueRecovery').mockResolvedValue(failed)
+    store.messages['chat-1'] = rows as never
+    store.pendingImages = ['draft.png']
+    await wrapper.get('textarea.chat-input').setValue('unfinished draft')
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text() === 'Retry')!.trigger('click')
+    expect(recover).toHaveBeenCalledWith('chat-1', 'failure-1', true)
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect((wrapper.get('textarea.chat-input').element as HTMLTextAreaElement).value).toBe('unfinished draft')
+    expect(store.pendingImages).toEqual(['draft.png'])
+    wrapper.unmount()
+  })
+
+  it('keeps an older displayed error disabled when the authoritative identity changes', async () => {
+    const old = makeChat('chat-1', { failure_id: 'old', recovery_eligible: true, user_turn_count: 1 })
+    const { wrapper, store, sendMessage } = await mountPanel({ chat: old })
+    const rows = [
+      { role: 'user', content: 'task', turn_index: 0, i: 0 },
+      { role: 'assistant', content: 'usage limit', is_error: true, i: 1 },
+    ]
+    let chatReads = 0
+    vi.mocked(api.get).mockImplementation((path: string) => {
+      if (path.endsWith('/messages?limit=50')) return Promise.resolve({ items: rows }) as never
+      if (path === '/api/chats/chat-1') return Promise.resolve(++chatReads === 1 ? old : { ...old, failure_id: 'new' }) as never
+      return Promise.resolve([]) as never
+    })
+    store.messages['chat-1'] = rows as never
+    await flushPromises()
+    const retry = wrapper.findAll('button').find(button => button.text() === 'Retry')!
+    expect(retry.attributes('disabled')).toBeDefined()
+    expect(sendMessage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('shows the actual saved schedule and Stop after a recovery conflict', async () => {
+    const failed = makeChat('chat-1', { failure_id: 'failure-1', recovery_eligible: true, user_turn_count: 1 })
+    const { wrapper, store } = await mountPanel({ chat: failed })
+    const rows = [
+      { role: 'user', content: 'task', turn_index: 0, i: 0 },
+      { role: 'assistant', content: 'you have reached your weekly usage limit', is_error: true, i: 1 },
+    ]
+    let conflict = false
+    vi.mocked(api.get).mockImplementation((path: string) => {
+      if (path.endsWith('/messages?limit=50')) return Promise.resolve({ items: rows }) as never
+      if (path === '/api/chats/chat-1') return Promise.resolve(conflict ? {
+        ...failed, retry: { status: 'pending', mode: 'literal', last_error: 'manual', next_at: '', attempts: 0, interval_seconds: 3600 },
+      } : failed) as never
+      return Promise.resolve([]) as never
+    })
+    const post = vi.spyOn(api, 'post').mockImplementation(async (_path, body) => {
+      if ((body as { action: string }).action === 'issue_recovery_request') return { request_id: 'issued-id', expires: Date.now() / 1000 + 900 } as never
+      conflict = true
+      return { request_id: 'issued-id', status: 'completed', result: { http_status: 409 } } as never
+    })
+    store.messages['chat-1'] = rows as never
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text() === 'Retry every hour')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Stop trying')
+    expect(wrapper.text()).toContain('Run scheduled prompt')
+    expect(post).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('does not let an older history read enable recovery after a newer failure', async () => {
+    const old = makeChat('chat-1', { failure_id: 'old', recovery_eligible: true, user_turn_count: 1 })
+    const { wrapper, store } = await mountPanel({ chat: old })
+    const rows = [
+      { role: 'user', content: 'task', turn_index: 0, i: 0 },
+      { role: 'assistant', content: 'usage limit', is_error: true, i: 1 },
+    ]
+    let resolveHistory!: (value: unknown) => void
+    const oldHistory = new Promise(resolve => { resolveHistory = resolve })
+    let calls = 0
+    vi.mocked(api.get).mockImplementation((path: string) => {
+      if (path.endsWith('/messages?limit=50')) return (++calls === 1 ? oldHistory : Promise.resolve({ items: [] })) as never
+      if (path === '/api/chats/chat-1') return Promise.resolve(old) as never
+      return Promise.resolve([]) as never
+    })
+    store.messages['chat-1'] = rows as never
+    await flushPromises()
+    store.chats[0].failure_id = 'new'
+    await flushPromises()
+    resolveHistory({ items: rows })
+    await flushPromises()
+    const retry = wrapper.findAll('button').find(button => button.text() === 'Retry')!
+    expect(retry.attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
+  it.each(['manual', 'mcp', '', '  '])('shows a neutral standalone retry for %j', async reason => {
+    const { wrapper, store } = await mountPanel({ chat: { last_error: 'unrelated newer failure' } })
+    store.chats[0].retry = { status: 'pending', next_at: '2026-10-12T11:00:00Z', last_error: reason, attempts: 0, interval_seconds: 3600 }
+    await flushPromises()
+    const card = wrapper.get('.injected-card--retry_scheduled')
+    expect(card.attributes('aria-label')).toBe('Retry scheduled')
+    expect(card.text()).not.toMatch(/Unknown error|manual|mcp|unrelated newer failure/)
+    expect(card.get('.retry-state-title').text()).toBe('Retrying this turn every hour')
+    expect(card.findAll('.retry-state-actions .btn-small').map(b => b.text())).toEqual(['Run scheduled prompt', 'Stop trying'])
+    await card.get('.injected-card-toggle').trigger('click')
+    expect(card.text()).toContain('A retry is scheduled.')
+    expect(card.text()).not.toMatch(/Unknown error|manual|mcp|unrelated newer failure/)
+    wrapper.unmount()
+  })
+
+  it('keeps a standalone provider failure classified and visible', async () => {
+    const { wrapper, store } = await mountPanel()
+    const error = 'you have reached your weekly usage limit, upgrade for higher limits'
+    store.chats[0].retry = { status: 'pending', next_at: '2026-10-12T11:00:00Z', last_error: error, attempts: 1, interval_seconds: 3600 }
+    await flushPromises()
+    const card = wrapper.get('.injected-card--error')
+    expect(card.text()).toContain('Usage limit reached')
+    expect(card.text()).toContain(error)
+    wrapper.unmount()
+  })
+
+  it.each(['manual', 'mcp', '', ' \n '])('keeps an unrelated final error separate from a %j retry', async reason => {
+    const { wrapper, store } = await mountPanel({ chat: { last_error: 'unrelated newer failure' } })
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Hello', timestamp: '2026-10-11T18:01:00Z' },
+      { role: 'assistant', content: 'Error: unrelated provider failure', timestamp: '2026-10-11T18:01:01Z', is_error: true },
+    ]
+    store.chats[0].retry = { status: 'pending', next_at: '2026-10-12T11:00:00Z', last_error: reason, attempts: 0, interval_seconds: 3600 }
+    await flushPromises()
+    const error = wrapper.get('.injected-card--error')
+    const retry = wrapper.get('.injected-card--retry_scheduled')
+    expect(error.text()).toContain('unrelated provider failure')
+    expect(error.find('.retry-state-title').exists()).toBe(false)
+    expect(retry.text()).toContain('Retrying this turn every hour')
+    expect(retry.text()).not.toMatch(/unrelated|Unknown error|manual|mcp/)
+    await retry.get('.injected-card-toggle').trigger('click')
+    expect(retry.text()).toContain('A retry is scheduled.')
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['Error: strange failure 42', 'Fix this error'],
+    ['Error: this model does not support image input', 'Switch model'],
+    ['Not logged in · Please run /login', 'Retry'],
+    ['you have reached your weekly usage limit', 'Retry every hour'],
+  ])('suppresses error resend actions while a manual retry is pending: %s', async (content, action) => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Hello', timestamp: '2026-10-11T18:01:00Z' },
+      { role: 'assistant', content, timestamp: '2026-10-11T18:01:01Z', is_error: true },
+    ]
+    store.chats[0].retry = { status: 'pending', next_at: '2026-10-12T11:00:00Z', last_error: 'manual', attempts: 0, interval_seconds: 3600 }
+    await flushPromises()
+    const error = wrapper.get('.injected-card--error')
+    expect(error.findAll('button').map(b => b.text())).not.toContain('Retry')
+    if (action === 'Fix this error') expect(error.text()).toContain(action)
+    else expect(error.text()).not.toContain(action)
+    expect(error.findComponent({ name: 'ProviderSignInHint' }).exists()).toBe(false)
+    expect(wrapper.get('.injected-card--retry_scheduled').text()).toContain('Run scheduled prompt')
+    expect(sendMessage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('refuses stale error resend and hourly scheduling handlers when a retry is pending', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    const schedule = vi.spyOn(store, 'setChatRetry').mockResolvedValue(undefined as never)
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Hello', timestamp: '2026-10-11T18:01:00Z' },
+      { role: 'assistant', content: 'Error: failure', timestamp: '2026-10-11T18:01:01Z', is_error: true },
+    ]
+    store.chats[0].retry = { status: 'pending', next_at: '2026-10-12T11:00:00Z', last_error: 'manual', attempts: 0, interval_seconds: 3600 }
+    await flushPromises()
+    const panel = wrapper.vm as unknown as { retryFromError: (i: number) => void; retryHourlyFromError: (i: number) => Promise<void> }
+    panel.retryFromError(1)
+    await panel.retryHourlyFromError(1)
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(schedule).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('disables unguarded literal execution and stop', async () => {
+    const { wrapper, store } = await mountPanel()
+    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    const stop = vi.spyOn(store, 'stopChatRetry').mockResolvedValue(undefined as never)
+    store.chats[0].retry = { status: 'pending', next_at: '2026-10-12T11:00:00Z', last_error: 'manual', attempts: 0, interval_seconds: 3600 }
+    askConfirm.mockResolvedValue(true)
+    await flushPromises()
+    const buttons = wrapper.findAll('.retry-state-actions .btn-small')
+    await buttons[0].trigger('click')
+    await flushPromises()
+    expect(buttons[0].attributes('disabled')).toBeDefined()
+    expect(buttons[1].attributes('disabled')).toBeDefined()
+    await buttons[1].trigger('click')
+    expect(tryNow).not.toHaveBeenCalled()
+    expect(stop).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('It may still run at the scheduled time')
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['Run scheduled prompt', 'try_now'],
+    ['Stop trying', 'stop'],
+  ])('does not apply %s to a schedule replaced during confirmation', async (label, action) => {
+    const { wrapper, store } = await mountPanel()
+    const old = { status: 'pending', mode: 'literal', schedule_id: 'old', next_at: '', last_error: 'manual', attempts: 0, interval_seconds: 3600 } as const
+    const replacement = { ...old, schedule_id: 'new' }
+    store.chats[0].retry = old
+    let confirm!: (value: boolean) => void
+    askConfirm.mockReturnValueOnce(new Promise(resolve => { confirm = resolve }))
+    const post = vi.spyOn(api, 'post').mockRejectedValue(Object.assign(new Error('changed'), { status: 409 }))
+    vi.mocked(api.get).mockImplementation((path: string) => path === '/api/chats/chat-1'
+      ? Promise.resolve({ ...store.chats[0], retry: replacement }) as never : Promise.resolve([]) as never)
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text() === label)!.trigger('click')
+    store.chats[0].retry = replacement
+    confirm(true)
+    await flushPromises()
+    expect(post).toHaveBeenCalledTimes(1)
+    expect(post).toHaveBeenCalledWith('/api/chats/chat-1/retry', { action, schedule_id: 'old' })
+    expect(store.chats[0].retry?.schedule_id).toBe('new')
+    wrapper.unmount()
+  })
+
+  it('continues without resending the prior turn or its images', async () => {
     const { wrapper, store, sendMessage } = await mountPanel()
     store.messages['chat-1'] = [
       {
@@ -204,7 +524,7 @@ describe('ChatPanel retry from error bubble', () => {
         is_error: true,
       },
     ]
-    sendMessage.mockResolvedValue()
+    const recover = verifyCurrentFailure(store)
     await flushPromises()
 
     const retryBtn = wrapper.findAll('.retry-btn').find(b => b.text() === 'Retry')
@@ -212,21 +532,15 @@ describe('ChatPanel retry from error bubble', () => {
     await retryBtn!.trigger('click')
     await flushPromises()
 
-    expect(sendMessage).toHaveBeenCalledTimes(1)
-    const [, text, prepared] = sendMessage.mock.calls[0]
-    expect(text).toBe('Check the video')
-    // The prior bubble's images must travel with the retry, and the
-    // composer bucket must not be drained (no prepared message would
-    // touch pendingImages, but verify imageRefs on the payload).
-    expect(prepared).toBeDefined()
-    expect(prepared.imageRefs).toEqual(['web_5a4d7145.png'])
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(recover).toHaveBeenCalledWith('chat-1', 'failure-1', true)
 
     // The live composer stays untouched — a retry is not a fresh send.
     expect(store.pendingImages).toEqual([])
     wrapper.unmount()
   })
 
-  it('resends text only when the prior turn had no images', async () => {
+  it('continues without resending a text-only prior turn', async () => {
     const { wrapper, store, sendMessage } = await mountPanel()
     store.messages['chat-1'] = [
       {
@@ -241,7 +555,7 @@ describe('ChatPanel retry from error bubble', () => {
         is_error: true,
       },
     ]
-    sendMessage.mockResolvedValue()
+    const recover = verifyCurrentFailure(store)
     await flushPromises()
 
     const retryBtn = wrapper.findAll('.retry-btn').find(b => b.text() === 'Retry')
@@ -249,17 +563,12 @@ describe('ChatPanel retry from error bubble', () => {
     await retryBtn!.trigger('click')
     await flushPromises()
 
-    expect(sendMessage).toHaveBeenCalledTimes(1)
-    const [, text, prepared] = sendMessage.mock.calls[0]
-    expect(text).toBe('Just text this time')
-    expect(prepared.imageRefs).toBeUndefined()
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(recover).toHaveBeenCalledWith('chat-1', 'failure-1', true)
     wrapper.unmount()
   })
 
-  // A deliberate retry is a new turn the user asked for, so it is tagged as
-  // one: the engine records the tag per turn and the PWA can tell it apart
-  // from what the user typed. The tag is the only thing the client chooses.
-  it('tags the resend as a retry', async () => {
+  it('leaves the retry origin to the server instead of resending', async () => {
     const { wrapper, store, sendMessage } = await mountPanel()
     store.messages['chat-1'] = [
       {
@@ -275,7 +584,7 @@ describe('ChatPanel retry from error bubble', () => {
         is_error: true,
       },
     ]
-    sendMessage.mockResolvedValue()
+    const recover = verifyCurrentFailure(store)
     await flushPromises()
 
     const retryBtn = wrapper.findAll('.retry-btn').find(b => b.text() === 'Retry')
@@ -283,12 +592,8 @@ describe('ChatPanel retry from error bubble', () => {
     await retryBtn!.trigger('click')
     await flushPromises()
 
-    expect(sendMessage).toHaveBeenCalledTimes(1)
-    const [, text, prepared] = sendMessage.mock.calls[0]
-    expect(text).toBe('Check the video')
-    expect(prepared.origin).toBe('retry')
-    // The failed turn's images travel with the retry.
-    expect(prepared.imageRefs).toEqual(['web_5a4d7145.png'])
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(recover).toHaveBeenCalledWith('chat-1', 'failure-1', true)
     wrapper.unmount()
   })
 
@@ -311,7 +616,7 @@ describe('ChatPanel retry from error bubble', () => {
     // is not a fresh send, so it must not drain either.
     store.pendingImages = ['staged.png']
     await wrapper.get('textarea.chat-input').setValue('half typed')
-    sendMessage.mockResolvedValue()
+    const recover = verifyCurrentFailure(store)
     await flushPromises()
 
     const retryBtn = wrapper.findAll('.retry-btn').find(b => b.text() === 'Retry')
@@ -319,7 +624,8 @@ describe('ChatPanel retry from error bubble', () => {
     await retryBtn!.trigger('click')
     await flushPromises()
 
-    expect(sendMessage).toHaveBeenCalledTimes(1)
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(recover).toHaveBeenCalledWith('chat-1', 'failure-1', true)
     const draft = wrapper.get('textarea.chat-input').element as HTMLTextAreaElement
     expect(draft.value).toBe('half typed')
     expect(store.pendingImages).toEqual(['staged.png'])
@@ -391,15 +697,17 @@ describe('ChatPanel retry from error bubble', () => {
         is_error: true,
       },
     ]
+    const recover = verifyCurrentFailure(store)
     await flushPromises()
 
     const labels = wrapper.findAll('.retry-btn').map(b => b.text())
     expect(labels).toEqual(['Retry', 'Retry every hour'])
     await wrapper.findAll('.retry-btn')[1].trigger('click')
     await flushPromises()
-    expect(setRetry).toHaveBeenCalledWith('chat-1', 'Tidy my memory', [])
+    expect(recover).toHaveBeenCalledWith('chat-1', 'failure-1', false)
+    expect(setRetry).not.toHaveBeenCalled()
 
-    // Once the retry is armed the error card carries its state and actions.
+    // A manual schedule has no proven relation to the error, so it gets its own card.
     store.chats[0].retry = {
       status: 'pending',
       next_at: '2026-10-12T11:00:00Z',
@@ -409,14 +717,14 @@ describe('ChatPanel retry from error bubble', () => {
     }
     await flushPromises()
     expect(wrapper.findAll('.injected-card--error')).toHaveLength(1)
+    expect(wrapper.findAll('.injected-card--retry_scheduled')).toHaveLength(1)
     expect(wrapper.find('.retry-state-title').text()).toBe('Retrying this turn every hour')
     expect(wrapper.findAll('.retry-state-actions .btn-small').map(b => b.text()))
-      .toEqual(['Continue with...', 'Try now', 'Stop trying'])
-    expect(wrapper.findAll('.retry-btn')).toHaveLength(0)
+      .toEqual(['Run scheduled prompt', 'Stop trying'])
     wrapper.unmount()
   })
 
-  it('shows one card for a failed retry: no Retry started row, retry state inside', async () => {
+  it('shows a failed retry and its pending schedule as separate cards', async () => {
     const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = [
       { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T18:01:00Z' },
@@ -439,9 +747,10 @@ describe('ChatPanel retry from error bubble', () => {
 
     expect(wrapper.text()).not.toContain('Retry started')
     const cards = wrapper.findAll('.injected-card')
-    expect(cards).toHaveLength(1)
+    expect(cards).toHaveLength(2)
     expect(cards[0].find('.injected-card-facts').text()).toContain('Retry failed')
-    expect(cards[0].find('.retry-state-title').text()).toBe('Retrying this turn every hour')
+    expect(cards[0].find('.retry-state-title').exists()).toBe(false)
+    expect(cards[1].find('.retry-state-title').text()).toBe('Retrying this turn every hour')
     expect(wrapper.find('.retry-card').exists()).toBe(false)
     wrapper.unmount()
   })
@@ -465,23 +774,31 @@ describe('ChatPanel retry from error bubble', () => {
     wrapper.unmount()
   })
 
-  it('keeps one card when the retry reason differs from the row text', async () => {
+  it.each([
+    ['network unreachable', 'Error: you have reached your weekly usage limit', 'Usage limit reached'],
+    ['you have reached your weekly usage limit', 'Error: connection refused', 'Unknown error'],
+  ])('keeps provider reason %s separate from unrelated error %s', async (reason, error, errorLabel) => {
     const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = [
       { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T18:01:00Z' },
-      { role: 'assistant', content: 'Error: could not reach the provider', timestamp: '2026-10-11T18:01:01Z', is_error: true },
+      { role: 'assistant', content: error, timestamp: '2026-10-11T18:01:01Z', is_error: true },
     ]
     store.chats[0].retry = {
       status: 'pending',
       next_at: '2026-10-11T23:00:00Z',
-      last_error: 'network unreachable',
+      last_error: reason,
       attempts: 1,
       interval_seconds: 30,
     }
     await flushPromises()
     const cards = wrapper.findAll('.injected-card')
-    expect(cards).toHaveLength(1)
-    expect(cards[0].find('.retry-state-title').exists()).toBe(true)
+    expect(cards).toHaveLength(2)
+    expect(cards[0].text()).toContain(errorLabel)
+    expect(cards[0].text()).toContain(error.replace('Error: ', ''))
+    expect(cards[0].find('.retry-state-title').exists()).toBe(false)
+    expect(cards[1].text()).toContain(reason)
+    expect(cards[1].find('.retry-state-title').exists()).toBe(true)
+    expect(cards[1].findAll('.retry-state-actions button').map(b => b.text())).toEqual(['Run scheduled prompt', 'Stop trying'])
     wrapper.unmount()
   })
 
@@ -629,12 +946,9 @@ describe('ChatPanel retry from error bubble', () => {
     store.messages['chat-1'] = [
       { role: 'user', content: 'Hi', timestamp: '2026-10-11T18:01:00Z', turn_index: 0 },
       { role: 'assistant', content: 'Error: connection refused', timestamp: '2026-10-11T18:01:01Z', is_error: true },
+      // A tool activity row after the error renders as a trace item.
+      { role: 'system', content: '· read a.md', timestamp: '2026-10-11T18:01:02Z', tool_name: '_activity' },
     ]
-    // A background subagent transcript with no turn lands as a trace item
-    // after the error.
-    store.subagents['chat-1'] = [
-      { agent_id: 'bg', messages: [], status: 'completed', turn_index: null },
-    ] as never
     await flushPromises()
     expect(wrapper.findAll('.retry-btn').map(b => b.text())).toContain('Retry')
     wrapper.unmount()
@@ -693,7 +1007,7 @@ describe('ChatPanel retry from error bubble', () => {
         is_error: true,
       },
     ]
-    sendMessage.mockResolvedValue()
+    const recover = verifyCurrentFailure(store)
     await flushPromises()
 
     const hint = wrapper.findComponent({ name: 'ProviderSignInHint' })
@@ -702,8 +1016,8 @@ describe('ChatPanel retry from error bubble', () => {
     expect(hint.props('actionLabel')).toBe('Retry')
     hint.vm.$emit('action')
     await flushPromises()
-    expect(sendMessage).toHaveBeenCalledTimes(1)
-    expect(sendMessage.mock.calls[0][1]).toBe('Summarise my inbox')
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(recover).toHaveBeenCalledWith('chat-1', 'failure-1', true)
     wrapper.unmount()
   })
 
@@ -735,7 +1049,7 @@ describe('ChatPanel retry from error bubble', () => {
     expect(hint.props('actionLabel')).toBe('Try now')
     hint.vm.$emit('action')
     await flushPromises()
-    expect(tryNow).toHaveBeenCalledWith('chat-1')
+    expect(tryNow).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
@@ -847,8 +1161,10 @@ describe('ChatPanel recovery model picker', () => {
   }
 
   function armPendingRetry(store: ReturnType<typeof useProjectStore>) {
+    failWithUnsupportedModel(store)
     store.chats[0].retry = {
       status: 'pending',
+      mode: 'continue_recovery',
       next_at: '2026-10-22T10:00:00Z',
       last_error: 'weekly usage limit',
       attempts: 1,
@@ -857,20 +1173,30 @@ describe('ChatPanel recovery model picker', () => {
   }
 
   function failWithUnsupportedModel(store: ReturnType<typeof useProjectStore>) {
+    Object.assign(store.chats[0], { failure_id: 'failure-1', recovery_eligible: true, user_turn_count: 1 })
     store.messages['chat-1'] = [
       {
         role: 'user',
+        i: 0,
+        turn_index: 0,
         content: 'Check the video',
         timestamp: '2026-08-08T15:51:00Z',
         images: ['web_5a4d7145.png'],
       },
       {
         role: 'assistant',
+        i: 1,
         content: 'Error: this model does not support image input',
         timestamp: '2026-08-08T15:51:01Z',
         is_error: true,
       },
     ]
+    vi.mocked(api.get).mockImplementation((path: string) => {
+      if (path === '/api/models') return Promise.resolve(MODELS_RESPONSE) as never
+      if (path.endsWith('/messages?limit=50')) return Promise.resolve({ items: store.messages['chat-1'] }) as never
+      if (path === '/api/chats/chat-1') return Promise.resolve({ ...store.chats[0] }) as never
+      return Promise.resolve([]) as never
+    })
   }
 
   it('opens the recovery picker with its heading from the retry card', async () => {
@@ -880,18 +1206,32 @@ describe('ChatPanel recovery model picker', () => {
 
     await openCardRecovery(wrapper)
 
-    expect(wrapper.find('.model-picker-recovery__title').text()).toBe('Choose a model to retry immediately')
+    expect(wrapper.find('.model-picker-recovery__title').text()).toBe('Continue with the current model')
     expect(wrapper.find('.model-picker-recovery__note').text()).toContain('may incur usage charges')
-    // The note names the limit of a staged level: the chips are the current
-    // model's set, so a level the picked model does not offer is dropped.
     expect(wrapper.find('.model-picker-recovery__note').text()).toContain(
-      'A Thinking level you pick here applies to that retry, within the levels the current model offers.',
+      'Model and Thinking changes are unavailable during recovery.',
     )
     // The listbox is named by the heading and the search field describes
     // itself with the consequence, so the warning is not visual-only.
     const stub = wrapper.getComponent({ name: 'ModelSelectorStub' })
     expect(stub.attributes('aria-labelledby')).toBe('model-picker-recovery-title')
     expect(stub.attributes('aria-describedby')).toBe('model-picker-recovery-note')
+    wrapper.unmount()
+  })
+
+  it('does not apply an error recovery model or resend if a retry becomes pending while the picker is open', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    const update = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
+    const handover = vi.spyOn(store, 'handoverChat').mockResolvedValue(undefined as never)
+    failWithUnsupportedModel(store)
+    await flushPromises()
+    await openErrorRecovery(wrapper)
+    store.chats[0].retry = { status: 'pending', next_at: '2026-10-12T11:00:00Z', last_error: 'manual', attempts: 0, interval_seconds: 3600 }
+    await flushPromises()
+    await pickModel(wrapper, 'opus')
+    expect(update).not.toHaveBeenCalled()
+    expect(handover).not.toHaveBeenCalled()
+    expect(sendMessage).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
@@ -902,7 +1242,7 @@ describe('ChatPanel recovery model picker', () => {
 
     await openErrorRecovery(wrapper)
 
-    expect(wrapper.find('.model-picker-recovery__title').text()).toBe('Choose a model to retry immediately')
+    expect(wrapper.find('.model-picker-recovery__title').text()).toBe('Continue with the current model')
     expect(wrapper.find('.model-picker-recovery__note').text()).toContain('may incur usage charges')
     wrapper.unmount()
   })
@@ -922,27 +1262,24 @@ describe('ChatPanel recovery model picker', () => {
     wrapper.unmount()
   })
 
-  it('retries the deferred turn once when the recovery picker picks a model', async () => {
+  it('does not change model or retry when a different model is picked during recovery', async () => {
     const { wrapper, store } = await mountPanel()
     const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
-    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'continueRecovery').mockResolvedValue(undefined as never)
     armPendingRetry(store)
     await flushPromises()
 
     await openCardRecovery(wrapper)
     await pickModel(wrapper, 'opus')
 
-    expect(updateChat).toHaveBeenCalledTimes(1)
-    expect(updateChat.mock.calls[0][0]).toBe('chat-1')
-    expect(updateChat.mock.calls[0][1]).toMatchObject({ model: 'opus', provider: 'claude' })
-    expect(tryNow).toHaveBeenCalledTimes(1)
-    expect(tryNow).toHaveBeenCalledWith('chat-1')
+    expect(updateChat).not.toHaveBeenCalled()
+    expect(tryNow).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
   it('retries in a recovery even when the picked model is the one already in use', async () => {
     const { wrapper, store } = await mountPanel()
-    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'continueRecovery').mockResolvedValue(undefined as never)
     armPendingRetry(store)
     await flushPromises()
 
@@ -950,14 +1287,14 @@ describe('ChatPanel recovery model picker', () => {
     await pickModel(wrapper, 'sonnet')
 
     expect(tryNow).toHaveBeenCalledTimes(1)
-    expect(tryNow).toHaveBeenCalledWith('chat-1')
+    expect(tryNow).toHaveBeenCalledWith('chat-1', 'failure-1', true)
     wrapper.unmount()
   })
 
   it('never retries from the composer picker, even with a deferred retry waiting', async () => {
     const { wrapper, store, sendMessage } = await mountPanel()
     const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
-    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'continueRecovery').mockResolvedValue(undefined as never)
     armPendingRetry(store)
     await flushPromises()
 
@@ -973,7 +1310,7 @@ describe('ChatPanel recovery model picker', () => {
   it('does nothing when the composer picker picks the model already in use', async () => {
     const { wrapper, store } = await mountPanel()
     const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
-    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'continueRecovery').mockResolvedValue(undefined as never)
     armPendingRetry(store)
     await flushPromises()
 
@@ -985,53 +1322,78 @@ describe('ChatPanel recovery model picker', () => {
     wrapper.unmount()
   })
 
-  it('resends the failed turn when the error bubble recovery picks a model', async () => {
+  it('continues without replaying the failed turn when a model is picked', async () => {
     const { wrapper, store, sendMessage } = await mountPanel()
     vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
+    const recover = vi.spyOn(store, 'continueRecovery').mockResolvedValue(undefined as never)
     failWithUnsupportedModel(store)
     sendMessage.mockResolvedValue()
     await flushPromises()
 
     await openErrorRecovery(wrapper)
-    await pickModel(wrapper, 'opus')
+    await pickModel(wrapper, 'sonnet')
 
-    expect(sendMessage).toHaveBeenCalledTimes(1)
-    const [, text, prepared] = sendMessage.mock.calls[0]
-    expect(text).toBe('Check the video')
-    // The failed turn's images travel with the retry.
-    expect(prepared.imageRefs).toEqual(['web_5a4d7145.png'])
-    // The picker retries through the same helper, so the turn is tagged too.
-    expect(prepared.origin).toBe('retry')
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(recover).toHaveBeenCalledWith('chat-1', 'failure-1', true)
     // The composer is not drained by a recovery.
     expect(store.pendingImages).toEqual([])
     wrapper.unmount()
   })
 
-  it('asks before a handover and retries only after it succeeded', async () => {
+  it('does not mutate or recover when the displayed failure changes before selection', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    const update = vi.spyOn(store, 'updateChat')
+    const recover = vi.spyOn(store, 'continueRecovery').mockRejectedValue(new Error('stale'))
+    failWithUnsupportedModel(store)
+    await flushPromises()
+    await openErrorRecovery(wrapper)
+    store.chats[0].failure_id = 'failure-2'
+    picker(wrapper).vm.$emit('select', 'sonnet', 'anthropic')
+    await flushPromises()
+    expect(update).not.toHaveBeenCalled()
+    expect(recover).not.toHaveBeenCalled()
+    expect(sendMessage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('does not change model or recover if another client advances the failure while the picker is open', async () => {
+    const { wrapper, store } = await mountPanel()
+    const update = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
+    const handover = vi.spyOn(store, 'handoverChat').mockResolvedValue(undefined as never)
+    const recover = vi.spyOn(store, 'continueRecovery').mockResolvedValue(undefined as never)
+    failWithUnsupportedModel(store)
+    await flushPromises()
+    await openErrorRecovery(wrapper)
+    vi.mocked(api.get).mockImplementation((path: string) => path === '/api/chats/chat-1'
+      ? Promise.resolve({ ...store.chats[0], failure_id: 'newer-failure' }) as never : Promise.resolve([]) as never)
+    await pickModel(wrapper, 'opus')
+    expect(update).not.toHaveBeenCalled()
+    expect(handover).not.toHaveBeenCalled()
+    expect(recover).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('rejects cross-provider recovery before handover', async () => {
     const { wrapper, store } = await mountPanel({ chat: { session_id: 'sess-1' } })
     const handover = vi.spyOn(store, 'handoverChat').mockResolvedValue(undefined as never)
-    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'continueRecovery').mockResolvedValue(undefined as never)
     armPendingRetry(store)
     await flushPromises()
 
     await openCardRecovery(wrapper)
     await pickModel(wrapper, 'openai/gpt-5.6', 'opencode')
 
-    expect(askConfirm).toHaveBeenCalledTimes(1)
-    // The existing handover confirmation is kept.
-    expect(askConfirm.mock.calls[0][0]).toContain('Hand over this chat to')
-    expect(handover).toHaveBeenCalledTimes(1)
-    expect(handover.mock.calls[0][0]).toBe('chat-1')
-    expect(handover.mock.calls[0][1]).toMatchObject({ model: 'openai/gpt-5.6', provider: 'opencode' })
-    expect(tryNow).toHaveBeenCalledTimes(1)
+    expect(askConfirm).not.toHaveBeenCalled()
+    expect(handover).not.toHaveBeenCalled()
+    expect(tryNow).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
-  it('applies a staged thinking level after a handover, before retrying', async () => {
+  it('does not apply a staged thinking level or hand over for cross-provider recovery', async () => {
     const { wrapper, store } = await mountPanel({ chat: { session_id: 'sess-1' } })
     const handover = vi.spyOn(store, 'handoverChat').mockResolvedValue(undefined as never)
     const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
-    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'continueRecovery').mockResolvedValue(undefined as never)
     armPendingRetry(store)
     await flushPromises()
 
@@ -1040,18 +1402,17 @@ describe('ChatPanel recovery model picker', () => {
     await flushPromises()
     await pickModel(wrapper, 'openai/gpt-5.6', 'opencode')
 
-    // The handover route takes only the route; the level rides its own PATCH.
-    expect(handover.mock.calls[0][1]).toEqual({ provider: 'opencode', model: 'openai/gpt-5.6' })
-    expect(updateChat.mock.calls[0][1]).toMatchObject({ thinking_level: 'high' })
-    expect(updateChat.mock.invocationCallOrder[0]!).toBeLessThan(tryNow.mock.invocationCallOrder[0]!)
+    expect(handover).not.toHaveBeenCalled()
+    expect(updateChat).not.toHaveBeenCalled()
+    expect(tryNow).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
-  it('still retries at the provider default when the staged level cannot be saved', async () => {
+  it('does not retry after a handover when the staged level cannot be saved', async () => {
     const { wrapper, store } = await mountPanel({ chat: { session_id: 'sess-1' } })
     vi.spyOn(store, 'handoverChat').mockResolvedValue(undefined as never)
     vi.spyOn(store, 'updateChat').mockRejectedValue(new Error('engine refused'))
-    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'continueRecovery').mockResolvedValue(undefined as never)
     const toast = vi.spyOn(store, 'pushErrorToast')
     armPendingRetry(store)
     await flushPromises()
@@ -1062,8 +1423,7 @@ describe('ChatPanel recovery model picker', () => {
     await pickModel(wrapper, 'openai/gpt-5.6', 'opencode')
 
     expect(toast).toHaveBeenCalled()
-    // The retry is not lost to a failed level write.
-    expect(tryNow).toHaveBeenCalledTimes(1)
+    expect(tryNow).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
@@ -1071,7 +1431,7 @@ describe('ChatPanel recovery model picker', () => {
     const { wrapper, store, sendMessage } = await mountPanel({ chat: { session_id: 'sess-1' } })
     const handover = vi.spyOn(store, 'handoverChat').mockResolvedValue(undefined as never)
     const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
-    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'continueRecovery').mockResolvedValue(undefined as never)
     askConfirm.mockResolvedValue(false)
     armPendingRetry(store)
     await flushPromises()
@@ -1079,7 +1439,7 @@ describe('ChatPanel recovery model picker', () => {
     await openCardRecovery(wrapper)
     await pickModel(wrapper, 'openai/gpt-5.6', 'opencode')
 
-    expect(askConfirm).toHaveBeenCalledTimes(1)
+    expect(askConfirm).not.toHaveBeenCalled()
     expect(handover).not.toHaveBeenCalled()
     expect(updateChat).not.toHaveBeenCalled()
     expect(tryNow).not.toHaveBeenCalled()
@@ -1090,7 +1450,7 @@ describe('ChatPanel recovery model picker', () => {
   it('sends nothing when the handover fails', async () => {
     const { wrapper, store, sendMessage } = await mountPanel({ chat: { session_id: 'sess-1' } })
     const handover = vi.spyOn(store, 'handoverChat').mockRejectedValue(new Error('engine refused'))
-    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'continueRecovery').mockResolvedValue(undefined as never)
     const toast = vi.spyOn(store, 'pushErrorToast')
     armPendingRetry(store)
     await flushPromises()
@@ -1098,7 +1458,7 @@ describe('ChatPanel recovery model picker', () => {
     await openCardRecovery(wrapper)
     await pickModel(wrapper, 'openai/gpt-5.6', 'opencode')
 
-    expect(handover).toHaveBeenCalledTimes(1)
+    expect(handover).not.toHaveBeenCalled()
     expect(tryNow).not.toHaveBeenCalled()
     expect(sendMessage).not.toHaveBeenCalled()
     // The failure is reported, not swallowed.
@@ -1109,24 +1469,26 @@ describe('ChatPanel recovery model picker', () => {
   it('sends the turn once when the recovery is picked twice in a row', async () => {
     const { wrapper, store, sendMessage } = await mountPanel()
     vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
+    const recover = vi.spyOn(store, 'continueRecovery').mockResolvedValue(undefined as never)
     failWithUnsupportedModel(store)
     sendMessage.mockResolvedValue()
     await flushPromises()
 
     await openErrorRecovery(wrapper)
     const selector = picker(wrapper)
-    selector.vm.$emit('select', 'opus', 'anthropic')
-    selector.vm.$emit('select', 'opus', 'anthropic')
+    selector.vm.$emit('select', 'sonnet', 'anthropic')
+    selector.vm.$emit('select', 'sonnet', 'anthropic')
     await flushPromises()
 
-    expect(sendMessage).toHaveBeenCalledTimes(1)
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(recover).toHaveBeenCalledTimes(1)
     wrapper.unmount()
   })
 
   it('drops the captured recovery when the chat changes', async () => {
     const { wrapper, store, sendMessage } = await mountPanel()
     const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
-    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'continueRecovery').mockResolvedValue(undefined as never)
     failWithUnsupportedModel(store)
     sendMessage.mockResolvedValue()
     await flushPromises()
@@ -1149,16 +1511,17 @@ describe('ChatPanel recovery model picker', () => {
     wrapper.unmount()
   })
 
-  it('stages a thinking level and applies it when the chosen model supports it', async () => {
+  it('disables thinking changes and rejects another model during recovery', async () => {
     const { wrapper, store } = await mountPanel()
     const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
-    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'continueRecovery').mockResolvedValue(undefined as never)
     armPendingRetry(store)
     await flushPromises()
 
     await openCardRecovery(wrapper)
     const high = wrapper.findAll('.thinking-chip').find(c => c.text() === 'High')
     expect(high).toBeTruthy()
+    expect(high!.attributes('disabled')).toBeDefined()
     await high!.trigger('click')
     await flushPromises()
 
@@ -1169,12 +1532,12 @@ describe('ChatPanel recovery model picker', () => {
 
     await pickModel(wrapper, 'fable')
 
-    expect(updateChat.mock.calls[0][1]).toMatchObject({ model: 'fable', thinking_level: 'high' })
-    expect(tryNow).toHaveBeenCalledTimes(1)
+    expect(updateChat).not.toHaveBeenCalled()
+    expect(tryNow).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
-  it('falls back to the provider default when the chosen model cannot do the staged level', async () => {
+  it('does not change the model or thinking level during recovery', async () => {
     const { wrapper, store } = await mountPanel()
     const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
     armPendingRetry(store)
@@ -1187,13 +1550,13 @@ describe('ChatPanel recovery model picker', () => {
 
     await pickModel(wrapper, 'opus')
 
-    expect(updateChat.mock.calls[0][1]).toMatchObject({ model: 'opus', thinking_level: '' })
+    expect(updateChat).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
-  it('staged thinking level unsupported by the target model falls back to the provider default', async () => {
+  it('blocks even a programmatically staged thinking level during recovery', async () => {
     const { wrapper, store } = await mountPanel({ chat: { model: 'sonnet' } })
-    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'continueRecovery').mockResolvedValue(undefined as never)
     const patch = vi.spyOn(api, 'patch').mockImplementation(async (path: string, body?: unknown) => {
       if (path === '/api/chats/chat-1') {
         const updates = (body ?? {}) as Partial<ChatInfo>
@@ -1219,9 +1582,8 @@ describe('ChatPanel recovery model picker', () => {
     await pickModel(wrapper, 'haiku')
 
     const call = patch.mock.calls.find(c => c[0] === '/api/chats/chat-1')
-    expect(call).toBeTruthy()
-    expect(call![1]).toMatchObject({ model: 'haiku', thinking_level: '' })
-    expect(tryNow).toHaveBeenCalledTimes(1)
+    expect(call).toBeUndefined()
+    expect(tryNow).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
@@ -1237,6 +1599,424 @@ describe('ChatPanel recovery model picker', () => {
 
     expect(updateChat).toHaveBeenCalledWith('chat-1', { thinking_level: 'high' })
     wrapper.unmount()
+  })
+
+  it('shows confirmed permission modes and exact engine mappings', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    const updateChat = vi.spyOn(store, 'updateChat').mockImplementation(async (_chatId, updates) => {
+      Object.assign(store.chats[0], updates)
+    })
+    const handover = vi.spyOn(store, 'handoverChat')
+    await openComposerPicker(wrapper)
+    for (const [name, description] of [
+      ['Manual', 'ask for every action'],
+      ['Auto', 'allow safe work, ask on risky'],
+      ['Bypass', 'allow everything'],
+      ['Plan', 'read and propose only, change nothing'],
+    ]) {
+      expect(wrapper.text()).toContain(name)
+      expect(wrapper.text()).toContain(description)
+    }
+    expect(wrapper.findAll('.permission-mode[aria-pressed="true"]').map(button => button.text())).toHaveLength(1)
+    for (const [name, value] of [['Auto', 'auto'], ['Bypass', 'bypass'], ['Plan', 'plan'], ['Manual', 'normal']]) {
+      await wrapper.findAll('.permission-mode').find(button => button.text().includes(name))!.trigger('click')
+      await flushPromises()
+      expect(updateChat).toHaveBeenLastCalledWith('chat-1', { mode: value })
+    }
+    expect(updateChat).toHaveBeenCalledTimes(4)
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(handover).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('keeps a pending mode unconfirmed and reports a failed write', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    let rejectWrite!: (error: Error) => void
+    vi.spyOn(api, 'patch').mockReturnValue(new Promise((_, reject) => { rejectWrite = reject }) as never)
+    sendMessage.mockResolvedValue()
+    store.pendingImages = ['staged.png']
+    await wrapper.get('.chat-input').setValue('keep this draft')
+    await openComposerPicker(wrapper)
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    expect(store.pendingChatModeWrites['chat-1']).toBe(1)
+    expect(wrapper.text()).toContain('Saving permission mode… Sending from this composer is paused.')
+    expect(wrapper.findAll('.permission-mode[aria-pressed="true"]').map(button => button.text()).join()).toContain('Manual')
+    expect(wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    expect(wrapper.findAll('.thinking-chip').filter(button => ['Auto', 'Low', 'Medium', 'High'].includes(button.text())).every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    rejectWrite(new Error('connection lost'))
+    await flushPromises()
+    expect(store.pendingChatModeWrites['chat-1']).toBeUndefined()
+    expect(store.toasts.at(-1)).toMatchObject({
+      title: 'Could not change permission mode',
+      body: 'connection lost The server may have saved it. Reopen the chat to check.',
+    })
+    expect(wrapper.get<HTMLTextAreaElement>('.chat-input').element.value).toBe('keep this draft')
+    expect(store.pendingImages).toEqual(['staged.png'])
+    expect(sendMessage).not.toHaveBeenCalled()
+    await wrapper.get('.send-btn').trigger('click')
+    expect(sendMessage).toHaveBeenCalledWith('chat-1', 'keep this draft', undefined, expect.any(Function))
+    wrapper.unmount()
+  })
+
+  it('unknown mode selects no option', async () => {
+    const { wrapper } = await mountPanel({ chat: { mode: 'future-mode' } })
+    await openComposerPicker(wrapper)
+    expect(wrapper.text()).toContain('Current mode is unknown.')
+    expect(wrapper.findAll('.permission-mode[aria-pressed="true"]')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('blocks button and keyboard composer sends while mode is pending but not Stop', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    let resolveWrite!: (chat: ChatInfo) => void
+    vi.spyOn(api, 'patch').mockReturnValue(new Promise(resolve => { resolveWrite = resolve }) as never)
+    await openComposerPicker(wrapper)
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    const textarea = wrapper.get<HTMLTextAreaElement>('.chat-input')
+    await textarea.setValue('preserved draft')
+    await wrapper.get('.send-btn').trigger('click')
+    await textarea.trigger('keydown', { key: 'Enter', ctrlKey: true })
+    const panel = wrapper.vm as unknown as { handleSendShortcut: () => boolean }
+    expect(panel.handleSendShortcut()).toBe(false)
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(textarea.element.value).toBe('preserved draft')
+    expect(wrapper.get('.send-btn').attributes('title')).toBe('Wait for the permission mode to save')
+    resolveWrite({ ...store.chats[0], mode: 'auto' })
+    await flushPromises()
+    await wrapper.get('.send-btn').trigger('click')
+    expect(sendMessage).toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('keeps Stop available during a pending mode write', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    store.streaming['chat-1'] = true
+    store.pendingChatModeWrites['chat-1'] = 1
+    const stopChat = vi.spyOn(store, 'stopChat').mockResolvedValue(undefined as never)
+    await flushPromises()
+    const send = wrapper.get<HTMLButtonElement>('.send-btn')
+    expect(send.attributes('disabled')).toBeUndefined()
+    expect(send.attributes('aria-label')).toBe('Stop generation')
+    await send.trigger('click')
+    expect(stopChat).toHaveBeenCalledWith('chat-1')
+    expect(sendMessage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('mcp shortcut remains available while a mode write is pending', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    let resolveWrite!: (chat: ChatInfo) => void
+    vi.spyOn(api, 'patch').mockReturnValue(new Promise(resolve => { resolveWrite = resolve }) as never)
+    await openComposerPicker(wrapper)
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    const textarea = wrapper.get<HTMLTextAreaElement>('.chat-input')
+    await textarea.setValue('/mcp')
+    await wrapper.get('.send-btn').trigger('click')
+    expect((wrapper.vm as unknown as { detailsTarget: string }).detailsTarget).toBe('mcp')
+    expect(sendMessage).not.toHaveBeenCalled()
+    resolveWrite({ ...store.chats[0], mode: 'auto' })
+    await flushPromises()
+    wrapper.unmount()
+  })
+
+  it('recovery remains usable while a mode write is pending', async () => {
+    const { wrapper, store } = await mountPanel()
+    failWithUnsupportedModel(store)
+    await flushPromises()
+    let resolveModeWrite!: (chat: ChatInfo) => void
+    const patch = vi.spyOn(api, 'patch').mockReturnValue(new Promise(resolve => { resolveModeWrite = resolve }) as never)
+    await openComposerPicker(wrapper)
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    expect(store.pendingChatModeWrites['chat-1']).toBe(1)
+    const continueRecovery = vi.spyOn(store, 'continueRecovery').mockResolvedValue(undefined as never)
+    const switchModel = wrapper.findAll('.retry-btn').find(button => button.text() === 'Switch model')
+    expect(switchModel).toBeTruthy()
+    await switchModel!.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.permission-modes').exists()).toBe(false)
+    expect(wrapper.findAll('.thinking-chip').some(button => button.attributes('disabled') !== undefined)).toBe(true)
+    await pickModel(wrapper, 'sonnet')
+    expect(continueRecovery).toHaveBeenCalled()
+    expect(patch).toHaveBeenCalledTimes(1)
+    resolveModeWrite({ ...store.chats[0], mode: 'auto' })
+    await flushPromises()
+    expect(store.pendingChatModeWrites['chat-1']).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('mode write follows its chat across A B A and two panels', async () => {
+    const { wrapper, store, pinia } = await mountPanel()
+    store.chats.push(makeChat('chat-2'))
+    store.messages['chat-2'] = []
+    const secondPanel = await mountPanel({ pinia, chatId: 'chat-1' })
+    let resolveChatA!: (chat: ChatInfo) => void
+    const patch = vi.spyOn(api, 'patch').mockImplementation((path: string, body?: unknown) => {
+      if (path === '/api/chats/chat-1') {
+        return new Promise(resolve => { resolveChatA = resolve }) as never
+      }
+      return Promise.resolve({ ...makeChat('chat-2'), ...(body as Partial<ChatInfo>) }) as never
+    })
+    await openComposerPicker(wrapper)
+    await openComposerPicker(secondPanel.wrapper)
+    expect(secondPanel.wrapper.findAll('.permission-mode')).toHaveLength(4)
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    expect(patch).toHaveBeenCalledTimes(1)
+    expect(patch).toHaveBeenCalledWith('/api/chats/chat-1', { mode: 'auto' })
+    expect(store.pendingChatModeWrites['chat-1']).toBe(1)
+    expect(wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    expect(secondPanel.wrapper.findAll('.permission-mode')).toHaveLength(4)
+    expect(secondPanel.wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    await secondPanel.wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    expect(patch).toHaveBeenCalledTimes(1)
+    await wrapper.setProps({ chatId: 'chat-2' })
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    expect(patch).toHaveBeenCalledWith('/api/chats/chat-2', { mode: 'auto' })
+    expect(store.chats.find(chat => chat.chat_id === 'chat-2')?.mode).toBe('auto')
+    await wrapper.setProps({ chatId: 'chat-1' })
+    expect(wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    resolveChatA({ ...makeChat('chat-1'), mode: 'auto' })
+    await flushPromises()
+    expect(store.pendingChatModeWrites['chat-1']).toBeUndefined()
+    expect(store.chats.find(chat => chat.chat_id === 'chat-1')?.mode).toBe('auto')
+    expect(secondPanel.wrapper.findAll('.permission-mode')).toHaveLength(4)
+    expect(secondPanel.wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') === undefined)).toBe(true)
+    expect(picker(wrapper).exists()).toBe(true)
+    expect(wrapper.get('.model-picker-wrap.composer-model .composer-chip').attributes('aria-expanded')).toBe('true')
+    secondPanel.wrapper.unmount()
+    wrapper.unmount()
+  })
+
+  it('keeps an unmounted panel mode write tracked until its API response settles', async () => {
+    const { wrapper, store, pinia } = await mountPanel()
+    const secondPanel = await mountPanel({ pinia, chatId: 'chat-1' })
+    let resolveModeWrite!: (chat: ChatInfo) => void
+    const patch = vi.spyOn(api, 'patch').mockReturnValue(new Promise(resolve => { resolveModeWrite = resolve }) as never)
+    await openComposerPicker(wrapper)
+    await openComposerPicker(secondPanel.wrapper)
+    expect(secondPanel.wrapper.findAll('.permission-mode')).toHaveLength(4)
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    expect(store.pendingChatModeWrites['chat-1']).toBe(1)
+    wrapper.unmount()
+    expect(secondPanel.wrapper.findAll('.permission-mode')).toHaveLength(4)
+    expect(secondPanel.wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    resolveModeWrite({ ...store.chats[0], mode: 'auto' })
+    await flushPromises()
+    expect(store.pendingChatModeWrites['chat-1']).toBeUndefined()
+    expect(store.chats[0].mode).toBe('auto')
+    expect(patch).toHaveBeenCalledTimes(1)
+    expect(secondPanel.wrapper.findAll('.permission-mode')).toHaveLength(4)
+    expect(secondPanel.wrapper.findAll('.permission-mode').every(button => button.attributes('disabled') === undefined)).toBe(true)
+    secondPanel.wrapper.unmount()
+  })
+
+  it('thinking completion cannot close a reopened or different chat picker', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.chats.push(makeChat('chat-2'))
+    store.messages['chat-2'] = []
+    let resolveThinking!: (chat: ChatInfo) => void
+    let serverChat = { ...store.chats[0] }
+    const patch = vi.spyOn(api, 'patch').mockImplementation((_path: string, body?: unknown) => {
+      const updates = body as Partial<ChatInfo>
+      if (updates.thinking_level !== undefined) {
+        return new Promise(resolve => { resolveThinking = resolve }) as never
+      }
+      serverChat = { ...serverChat, ...updates }
+      return Promise.resolve(serverChat) as never
+    })
+    await openComposerPicker(wrapper)
+    await wrapper.findAll('.thinking-chip').find(button => button.text() === 'High')!.trigger('click')
+    await flushPromises()
+    expect(patch).toHaveBeenCalledWith('/api/chats/chat-1', { thinking_level: 'high' })
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    expect(store.pendingChatModeWrites['chat-1']).toBe(1)
+    expect(patch).toHaveBeenCalledTimes(1)
+    picker(wrapper).vm.$emit('close', 'other')
+    await wrapper.get('.model-picker-wrap.composer-model .composer-chip').trigger('click')
+    await wrapper.setProps({ chatId: 'chat-2' })
+    await wrapper.setProps({ chatId: 'chat-1' })
+    serverChat = { ...makeChat('chat-1'), thinking_level: 'high' }
+    resolveThinking(serverChat)
+    await flushPromises()
+    expect(patch).toHaveBeenCalledTimes(2)
+    expect(picker(wrapper).exists()).toBe(true)
+    expect(wrapper.get('.model-picker-wrap.composer-model .composer-chip').attributes('aria-expanded')).toBe('true')
+    expect(store.chats.find(chat => chat.chat_id === 'chat-1')).toMatchObject({
+      thinking_level: 'high',
+      mode: 'auto',
+    })
+    wrapper.unmount()
+  })
+
+  it('hands a registry provider\'s pick over to that provider, by its section or by its catalog', async () => {
+    const { wrapper, store } = await mountPanel({ chat: { session_id: 'sess-1' } })
+    const handover = vi.spyOn(store, 'handoverChat').mockResolvedValue(undefined as never)
+    // The section names the provider even for a model no catalog lists.
+    await openComposerPicker(wrapper)
+    await pickModel(wrapper, 'codex-preview', 'codex')
+    expect(handover).toHaveBeenLastCalledWith('chat-1', expect.objectContaining({ provider: 'codex', model: 'codex-preview' }))
+    // With no section named, the model's own provider catalog decides the route.
+    await openComposerPicker(wrapper)
+    await pickModel(wrapper, 'gpt-5.5', '')
+    expect(handover).toHaveBeenLastCalledWith('chat-1', expect.objectContaining({ provider: 'codex', model: 'gpt-5.5' }))
+    expect(handover).toHaveBeenCalledTimes(2)
+  })
+
+  it('handover completion cannot close a reopened picker', async () => {
+    const { wrapper, store } = await mountPanel({ chat: { session_id: 'sess-1' } })
+    store.chats.push(makeChat('chat-2'))
+    store.messages['chat-2'] = []
+    let resolveHandover!: (value: unknown) => void
+    const post = vi.spyOn(api, 'post').mockReturnValue(new Promise(resolve => { resolveHandover = resolve }) as never)
+    let serverChat = { ...store.chats[0] }
+    const patch = vi.spyOn(api, 'patch').mockImplementation(async (_path: string, body?: unknown) => {
+      serverChat = { ...serverChat, ...(body as Partial<ChatInfo>) }
+      return serverChat as never
+    })
+    await openComposerPicker(wrapper)
+    picker(wrapper).vm.$emit('select', 'openai/gpt-5.6', 'opencode')
+    await flushPromises()
+    expect(post).toHaveBeenCalledWith('/api/chats/chat-1/handover', expect.objectContaining({
+      provider: 'opencode',
+      model: 'openai/gpt-5.6',
+    }))
+    picker(wrapper).vm.$emit('close', 'other')
+    await wrapper.get('.model-picker-wrap.composer-model .composer-chip').trigger('click')
+    await wrapper.setProps({ chatId: 'chat-2' })
+    await wrapper.setProps({ chatId: 'chat-1' })
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    expect(store.pendingChatModeWrites['chat-1']).toBe(1)
+    expect(patch).not.toHaveBeenCalled()
+    serverChat = { ...store.chats[0], provider: 'opencode', model: 'openai/gpt-5.6' }
+    resolveHandover(serverChat)
+    await flushPromises()
+    expect(patch).toHaveBeenCalledWith('/api/chats/chat-1', { mode: 'auto' })
+    expect(picker(wrapper).exists()).toBe(true)
+    expect(wrapper.get('.model-picker-wrap.composer-model .composer-chip').attributes('aria-expanded')).toBe('true')
+    expect(store.chats.find(chat => chat.chat_id === 'chat-1')).toMatchObject({
+      provider: 'opencode',
+      model: 'openai/gpt-5.6',
+      mode: 'auto',
+    })
+    wrapper.unmount()
+  })
+
+  it('handover failure cannot close a reopened picker', async () => {
+    const { wrapper, store } = await mountPanel({ chat: { session_id: 'sess-1' } })
+    store.chats.push(makeChat('chat-2'))
+    store.messages['chat-2'] = []
+    let rejectHandover!: (error: Error) => void
+    const post = vi.spyOn(api, 'post').mockReturnValue(new Promise((_, reject) => { rejectHandover = reject }) as never)
+    await openComposerPicker(wrapper)
+    picker(wrapper).vm.$emit('select', 'openai/gpt-5.6', 'opencode')
+    await flushPromises()
+    expect(post).toHaveBeenCalledTimes(1)
+    picker(wrapper).vm.$emit('close', 'other')
+    await wrapper.get('.model-picker-wrap.composer-model .composer-chip').trigger('click')
+    await wrapper.setProps({ chatId: 'chat-2' })
+    await wrapper.setProps({ chatId: 'chat-1' })
+    rejectHandover(new Error('network failure'))
+    await flushPromises()
+    expect(picker(wrapper).exists()).toBe(true)
+    expect(wrapper.get('.model-picker-wrap.composer-model .composer-chip').attributes('aria-expanded')).toBe('true')
+    expect(store.toasts.at(-1)?.body).toContain('network failure')
+    wrapper.unmount()
+  })
+
+  it('streaming explains subsequent turns and the queued-turn limitation', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    store.streaming['chat-1'] = true
+    const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
+    await openComposerPicker(wrapper)
+    expect(wrapper.text()).toContain('Changes apply to subsequent turns, not the reply already running. Already queued or external turns may start before a change is saved.')
+    await wrapper.findAll('.permission-mode').find(button => button.text().includes('Auto'))!.trigger('click')
+    await flushPromises()
+    expect(updateChat).toHaveBeenCalledTimes(1)
+    expect(sendMessage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('restores focus only to the initiating normal composer trigger on Escape', async () => {
+    const { wrapper } = await mountPanel()
+    document.body.appendChild(wrapper.element)
+    await openComposerPicker(wrapper)
+    const trigger = wrapper.get<HTMLButtonElement>('.model-picker-wrap.composer-model .composer-chip')
+    const child = picker(wrapper)
+    child.vm.$emit('close', 'escape')
+    await flushPromises()
+    expect(document.activeElement).toBe(trigger.element)
+
+    await openComposerPicker(wrapper)
+    const textarea = wrapper.get<HTMLTextAreaElement>('.chat-input')
+    textarea.element.focus()
+    picker(wrapper).vm.$emit('close', 'other')
+    await flushPromises()
+    expect(document.activeElement).not.toBe(trigger.element)
+
+    await openComposerPicker(wrapper)
+    picker(wrapper).vm.$emit('close', 'escape')
+    trigger.element.click()
+    textarea.element.focus()
+    await flushPromises()
+    expect(document.activeElement).toBe(textarea.element)
+    wrapper.unmount()
+  })
+
+  it('does not steal focus from a textarea focused after Escape before nextTick', async () => {
+    const { wrapper } = await mountPanel()
+    document.body.appendChild(wrapper.element)
+    await openComposerPicker(wrapper)
+    const textarea = wrapper.get<HTMLTextAreaElement>('.chat-input')
+
+    picker(wrapper).vm.$emit('close', 'escape')
+    textarea.element.focus()
+    await flushPromises()
+
+    expect(document.activeElement).toBe(textarea.element)
+    wrapper.unmount()
+  })
+
+  it('does not restore composer focus when Escape starts with focus outside the picker', async () => {
+    const { wrapper } = await mountPanel()
+    document.body.appendChild(wrapper.element)
+    await openComposerPicker(wrapper)
+    const textarea = wrapper.get<HTMLTextAreaElement>('.chat-input')
+    textarea.element.focus()
+
+    picker(wrapper).vm.$emit('close', 'escape')
+    await flushPromises()
+
+    expect(document.activeElement).toBe(textarea.element)
+    wrapper.unmount()
+  })
+
+  it('does not restore composer focus on recovery Escape or unmount', async () => {
+    const { wrapper, store } = await mountPanel()
+    document.body.appendChild(wrapper.element)
+    failWithUnsupportedModel(store)
+    await flushPromises()
+    await openErrorRecovery(wrapper)
+    const trigger = wrapper.get<HTMLButtonElement>('.model-picker-wrap.composer-model .composer-chip')
+    const textarea = wrapper.get<HTMLTextAreaElement>('.chat-input')
+    textarea.element.focus()
+    picker(wrapper).vm.$emit('close', 'escape')
+    await flushPromises()
+    expect(document.activeElement).toBe(textarea.element)
+
+    await openComposerPicker(wrapper)
+    picker(wrapper).vm.$emit('close', 'escape')
+    wrapper.unmount()
+    await flushPromises()
+    expect(trigger.element.isConnected).toBe(false)
   })
 })
 
@@ -1341,7 +2121,7 @@ describe('ChatPanel retry turn rendering', () => {
     wrapper.unmount()
   })
 
-  it('finds the request and its images after an earlier retry notice', async () => {
+  it('continues the latest failure after an earlier retry notice without replay', async () => {
     const { wrapper, store, sendMessage } = await mountPanel()
     store.messages['chat-1'] = [
       {
@@ -1372,7 +2152,7 @@ describe('ChatPanel retry turn rendering', () => {
         is_error: true,
       },
     ]
-    sendMessage.mockResolvedValue()
+    const recover = verifyCurrentFailure(store)
     await flushPromises()
 
     const retryBtns = wrapper.findAll('.retry-btn').filter(b => b.text() === 'Retry')
@@ -1382,11 +2162,8 @@ describe('ChatPanel retry turn rendering', () => {
     await retryBtns[0]!.trigger('click')
     await flushPromises()
 
-    expect(sendMessage).toHaveBeenCalledTimes(1)
-    const [, text, prepared] = sendMessage.mock.calls[0]
-    expect(text).toBe(ORIGINAL)
-    expect(prepared.imageRefs).toEqual([IMAGE])
-    expect(prepared.origin).toBe('retry')
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(recover).toHaveBeenCalledWith('chat-1', 'failure-1', true)
     wrapper.unmount()
   })
 })

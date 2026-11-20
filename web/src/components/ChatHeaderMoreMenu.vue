@@ -86,9 +86,10 @@ const triggerEl = ref<HTMLButtonElement | null>(null)
 const bell = ref<InstanceType<typeof NotificationBell> | null>(null)
 let sheetRequested = false
 
-const triggerLabel = computed(() => (
-  inbox.count > 0 ? `More chat actions, ${inbox.count} unread notifications` : 'More chat actions'
-))
+const triggerLabel = computed(() => [
+  'More chat actions',
+  inbox.count > 0 ? `${inbox.count} unread notifications` : '',
+].filter(Boolean).join(', '))
 
 // Choosing Notifications closes the menu. Reka would then return focus to the
 // trigger, which would take it off the sheet that opens next, so that focus
@@ -112,6 +113,7 @@ defineExpose({ focusTrigger })
 </script>
 
 <style scoped>
+.chat-more-btn { position: relative; }
 /* The dot hangs off the glyph's top-right corner: the trigger is 44px with the
    18px icon centred, so the glyph corner sits 13px in from the box edge. */
 .chat-more-dot {

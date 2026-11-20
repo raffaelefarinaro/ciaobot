@@ -1,39 +1,45 @@
 name: Ciao CI
 
 on:
-  push:
-    branches: [ develop ]
   pull_request:
     branches: [ develop, main ]
+  workflow_dispatch:
 
 # The suite only needs to check out code and run tests; the GITHUB_TOKEN never
 # needs to write anything.
 permissions:
   contents: read
 
+# A newer PR head supersedes its older run; full manual runs remain independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Linux is the gate every PR waits on, split into two parallel jobs:
 # `linux-server` (mypy, pytest -n auto, package smoke) and `linux-web` (vitest
-# and the PWA build). A develop PR whose diff changes `web/` also waits on
-# `linux-e2e`, which builds and tests this checkout in Chromium. The detector
+# and the PWA build). `linux-install-smoke` also runs on every PR: it builds
+# the PWA and the wheel this checkout would publish and installs that wheel
+# with `scripts/install.sh` inside a clean `ubuntu:24.04` container (#3131),
+# then re-checks the planned service unit with `systemd-analyze verify` on the
+# host. A develop PR whose diff changes `web/` also waits on
+# `linux-e2e`, which builds and tests this checkout in Chromium alongside the
+# unit/build job, after the fast `web-scope` detector. The detector
 # uses the PR's base/head commits and full history from the merge checkout.
+# `mac-app` builds and tests the Swift Mac app in `mac/` on macOS 15; on
+# develop PRs only when the diff changes `mac/`, `pyproject.toml`, `uv.lock` or
+# the engine colour table it pins (the `mac-scope` detector), and always on
+# release PRs and manual runs. The app bundle includes the full engine, so
+# `mac-app` builds it whenever it runs on macOS. Changes under `ciao/` or
+# `web/` alone do not trigger `mac-app` on a develop PR (#3128 M4); the engine
+# build of such changes runs on release PRs and manual dispatch.
 # `linux-server-latest-python` runs the same backend gates
-# on the newest Python `requires-python` admits (3.14); it runs on every PR in
-# parallel but is not a required check. `test` is the full macOS job —
+# on the newest Python `requires-python` admits (3.14) on release and manual
+# runs; it is a required check on main. `test` is the macOS job —
 # coverage, browser tests, the launchd service, and an engine wheel built from
 # this branch, installed into a throwaway venv and cold-started. It is the only
 # place the launchd, installer, engine-update and migration machinery runs on
-# the real platform, and nothing here needs a diff to decide that: it runs on
-# every push to develop and on every PR to main (release cuts). Its browser
-# coverage remains on those runs; web changes in develop PRs are also covered
-# before merge by `linux-e2e`.
-#
-# `windows` follows the same split. On a develop PR it runs only the fast
-# gates — every module imports and `mypy ciao` passes natively on win32, which
-# is where POSIX-only calls get caught — in about two minutes. The Windows
-# pytest and vitest suites and the install.ps1 checks take over a quarter of an
-# hour on a hosted runner, so they run on the post-merge push to develop, on
-# release PRs into main, and on a develop PR labelled `windows-full`.
-# /ciao-release refuses to cut while that push run is red.
+# the real platform. It runs on release PRs and manual runs. Web changes in develop PRs are covered by
+# `linux-e2e`.
 jobs:
   linux-server:
     runs-on: ubuntu-24.04
@@ -55,6 +61,7 @@ jobs:
   # Ciaobot supports. A separate job (not a matrix) keeps the required
   # `linux-server` check name unchanged.
   linux-server-latest-python:
+    if: github.event_name == 'workflow_dispatch' || github.base_ref == 'main'
     runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v7
@@ -69,9 +76,8 @@ jobs:
     - name: Linux backend tests
       run: pytest -n auto tests/
 
-  # The package smoke installs the wheel and serves the packaged PWA, so it
-  # runs here, after the build has written ciao/web/static.
-  linux-web:
+  # Detection is independent of unit/build work so Chromium starts immediately.
+  web-scope:
     outputs:
       web_changed: ${{ steps.web-changes.outputs.web_changed }}
     runs-on: ubuntu-24.04
@@ -79,15 +85,6 @@ jobs:
     - uses: actions/checkout@v7
       with:
         fetch-depth: 0
-    - uses: actions/setup-python@v7
-      with:
-        python-version: '3.12'
-        cache: 'pip'
-    - uses: actions/setup-node@v7
-      with:
-        node-version: '22'
-        cache: 'npm'
-        cache-dependency-path: web/package-lock.json
     - name: Detect web changes
       id: web-changes
       if: github.event_name == 'pull_request' && github.base_ref == 'develop'
@@ -114,6 +111,21 @@ jobs:
         else
           printf 'web_changed=false\n' >> "$GITHUB_OUTPUT"
         fi
+
+  # Package smoke needs the PWA built here; e2e builds its own tested bundle.
+  linux-web:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-python@v7
+      with:
+        python-version: '3.12'
+        cache: 'pip'
+    - uses: actions/setup-node@v7
+      with:
+        node-version: '22'
+        cache: 'npm'
+        cache-dependency-path: web/package-lock.json
     - name: Install frontend dependencies
       working-directory: web
       run: npm ci
@@ -128,9 +140,15 @@ jobs:
     - name: Smoke-test installed package
       run: ciao package-smoke --skip-frontend
 
-  linux-e2e:
-    needs: linux-web
-    if: github.event_name == 'pull_request' && github.base_ref == 'develop' && needs.linux-web.outputs.web_changed == 'true'
+  # The wheel is the release, so every PR proves the Linux one-line installer
+  # still installs it (#3131): the PWA and the wheel of this checkout are
+  # built up front, then a plain `ubuntu:24.04` container installs that wheel
+  # with `scripts/install.sh` as an unprivileged account (`--no-service`, so
+  # the container never asks for sudo). The service path is exercised as a
+  # dry run whose planned unit the host re-checks with `systemd-analyze
+  # verify`: the unit is what `sudo sh -c` feeds systemd on a real install,
+  # and the runner's systemd is the system that must accept it.
+  linux-install-smoke:
     runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v7
@@ -142,10 +160,104 @@ jobs:
     - name: Install frontend dependencies
       working-directory: web
       run: npm ci
+    - name: Build PWA
+      working-directory: web
+      run: npm run build
+    # The uv version the installer and the release pipeline pin (pyproject's
+    # `[tool.uv] required-version`).
+    - uses: astral-sh/setup-uv@v10.3.3
+      with:
+        version: "0.13.8"
+    - name: Build engine wheel
+      run: uv build --wheel --out-dir dist
+    - name: Install the wheel with scripts/install.sh in a clean container
+      run: |
+        ls dist/ciaobot-*.whl
+        mkdir -p "$RUNNER_TEMP/smoke-out"
+        docker run --rm -i \
+          -v "$PWD:/src:ro" \
+          -v "$RUNNER_TEMP/smoke-out:/src-out" \
+          ubuntu:24.04 sh -es <<'EOS'
+        set -eu
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y curl ca-certificates
+        useradd -m smoke
+        su smoke -c 'sh /src/scripts/install.sh --wheel /src/dist/ciaobot-*.whl --no-service --workspace /home/smoke/ws'
+        version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' /src/pyproject.toml)
+        case "$version" in
+          ''|*[!0-9.]*)
+            echo "pyproject does not carry a plain version: '$version'" >&2
+            exit 1
+            ;;
+        esac
+        [ "$(su smoke -c '"$HOME/.local/bin/ciao" --version')" = "ciao $version" ]
+        su smoke -c '"$HOME/.local/bin/ciao" service install --dry-run --workspace /home/smoke/ws' > /src-out/unit.txt
+        EOS
+    - name: Verify the planned unit with systemd-analyze
+      run: |
+        unit="$RUNNER_TEMP/smoke-out/unit.txt"
+        test -s "$unit"
+        [ "$(grep -c '^# would run:' "$unit")" -eq 4 ]
+        grep -q '^User=' "$unit"
+        grep -q '^ExecStart=' "$unit"
+        # The dry run names the container's account (smoke) and its
+        # interpreter, both absent on the host: rewrite them to what this host
+        # has before verifying, since systemd-analyze refuses an ExecStart
+        # whose interpreter it cannot find. The `# would run:` lines are the
+        # dry run's notes, not unit syntax.
+        sed -e '/^# would run:/d' \
+            -e 's/^User=.*/User=runner/' \
+            -e 's|^ExecStart=.* -m ciao\.cli run$|ExecStart=/usr/bin/python3 -m ciao.cli run|' \
+            "$unit" > "$RUNNER_TEMP/smoke-out/ciaobot.service"
+        checked="$RUNNER_TEMP/smoke-out/ciaobot.service"
+        [ "$(sed -n 's/^User=//p' "$checked")" = runner ]
+        grep -q '^ExecStart=/usr/bin/python3 -m ciao\.cli run$' "$checked"
+        systemd-analyze verify "$checked"
+
+  linux-e2e:
+    needs: web-scope
+    if: ${{ always() && github.event_name == 'pull_request' && github.base_ref == 'develop' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+    - name: Require successful web scope detection
+      env:
+        SCOPE_RESULT: ${{ needs.web-scope.result }}
+      run: test "$SCOPE_RESULT" = success
+    - uses: actions/checkout@v7
+      if: needs.web-scope.outputs.web_changed == 'true'
+    - uses: actions/setup-node@v7
+      if: needs.web-scope.outputs.web_changed == 'true'
+      with:
+        node-version: '22'
+        cache: 'npm'
+        cache-dependency-path: web/package-lock.json
+    - name: Install frontend dependencies
+      if: needs.web-scope.outputs.web_changed == 'true'
+      working-directory: web
+      run: npm ci
     - name: Install Chromium
+      if: needs.web-scope.outputs.web_changed == 'true'
       working-directory: web
       run: npx playwright install --with-deps chromium
+    # The workshop's gates ride the job that already holds node_modules and
+    # Chromium: `build-storybook` also runs the story-index check, and
+    # `test-storybook` executes every story and its play function in the same
+    # browser. They are independent signals, so the runner runs even when the
+    # build failed (`!cancelled()`) and one failure cannot mask the other;
+    # the job still fails. They stay out of linux-web so backend-only PRs
+    # pay none of it.
+    - name: Build Storybook
+      if: needs.web-scope.outputs.web_changed == 'true'
+      working-directory: web
+      run: npm run build-storybook
+    - name: Run Storybook browser runner
+      if: ${{ needs.web-scope.outputs.web_changed == 'true' && !cancelled() }}
+      working-directory: web
+      run: npm run test-storybook
     - name: Run browser suite
+      if: needs.web-scope.outputs.web_changed == 'true'
       working-directory: web
       run: npm run test:e2e
     - name: Upload Playwright traces
@@ -157,323 +269,112 @@ jobs:
         retention-days: 7
         if-no-files-found: ignore
 
-  windows:
-    runs-on: windows-latest
-    # A normal run takes about 16 minutes. A step that waits on input it will
-    # never get (a fresh install.ps1 serving the setup wizard) must not hold
-    # the runner for GitHub's six-hour default.
-    timeout-minutes: 45
-    env:
-      # 'true' on pushes, release PRs into main, and develop PRs labelled windows-full; 'false' on other develop PRs.
-      WINDOWS_FULL: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-full') }}
-    defaults:
-      run:
-        shell: bash
+  # Detection is separate so a develop PR that does not touch mac/,
+  # pyproject.toml or uv.lock never waits for a macOS runner. Release PRs and manual runs always build it.
+  mac-scope:
+    outputs:
+      mac_changed: ${{ steps.mac-changes.outputs.mac_changed || steps.mac-full.outputs.mac_changed }}
+    runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+    - name: Detect mac changes
+      id: mac-changes
+      if: github.event_name == 'pull_request' && github.base_ref == 'develop'
+      shell: bash
+      env:
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        set -euo pipefail
+        for name in PR_BASE_SHA PR_HEAD_SHA; do
+          value="${!name:-}"
+          if [[ ! "$value" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::${name} must be a full 40-character commit SHA" >&2
+            exit 1
+          fi
+          if ! git cat-file -e "${value}^{commit}"; then
+            echo "::error::${name} is unavailable as a commit in this checkout" >&2
+            exit 1
+          fi
+        done
+        mac_paths="$(git diff --no-renames --name-only "${PR_BASE_SHA}...${PR_HEAD_SHA}" -- mac/ web/src/lib/workspaceColors.ts pyproject.toml uv.lock)"
+        if [[ -n "$mac_paths" ]]; then
+          printf 'mac_changed=true\n' >> "$GITHUB_OUTPUT"
+        else
+          printf 'mac_changed=false\n' >> "$GITHUB_OUTPUT"
+        fi
+    - name: Release and manual runs always build the Mac app
+      id: mac-full
+      if: ${{ !(github.event_name == 'pull_request' && github.base_ref == 'develop') }}
+      run: printf 'mac_changed=true\n' >> "$GITHUB_OUTPUT"
+
+  # Stable required check. Without a mac/, pyproject.toml or uv.lock change it
+  # runs only the scope check, on Linux, so it never queues for a macOS runner.
+  mac-app:
+    needs: mac-scope
+    if: ${{ !cancelled() }}
+    runs-on: ${{ needs.mac-scope.outputs.mac_changed == 'true' && 'macos-15' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    steps:
+    - name: Require successful mac scope detection
+      env:
+        SCOPE_RESULT: ${{ needs.mac-scope.result }}
+      run: test "$SCOPE_RESULT" = success
+    - uses: actions/checkout@v7
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      with:
+        persist-credentials: false
+    - name: Require an Apple silicon runner
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      run: test "$(uname -m)" = arm64
     - uses: actions/setup-python@v7
+      if: needs.mac-scope.outputs.mac_changed == 'true'
       with:
         python-version: '3.12'
-        cache: 'pip'
     - uses: actions/setup-node@v7
-      if: env.WINDOWS_FULL == 'true'
+      if: needs.mac-scope.outputs.mac_changed == 'true'
       with:
         node-version: '22'
-        cache: 'npm'
-        cache-dependency-path: web/package-lock.json
-    # uv before the suite: tests/test_windows_update_real.py skips without it,
-    # and skipped is how its offline-reinstall test went stale unnoticed.
-    - name: Install Python dependencies
-      run: python -m pip install -e '.[test]' uv
-    # Blocking since C9 (#696): every module imports, mypy's win32 pass is
-    # clean, and (WINDOWS_FULL only) the backend and frontend suites pass.
-    # `--durations=30` lists where the suite's time goes. Each gate writes its log
-    # and the job fails on it; the steps after a gate run on `!cancelled()`, so
-    # one red gate does not hide the others' results.
-    - name: Import every ciao module
-      run: |
-        set -o pipefail
-        python - <<'EOF' | tee windows-imports.txt
-        import importlib, pkgutil, traceback
-        import ciao
-        failed = 0
-        names = sorted(m.name for m in pkgutil.walk_packages(ciao.__path__, "ciao."))
-        for name in names:
-            try:
-                importlib.import_module(name)
-            except BaseException as exc:  # noqa: BLE001 - report every failure
-                failed += 1
-                last = traceback.extract_tb(exc.__traceback__)[-1]
-                print(f"FAIL {name}: {type(exc).__name__}: {exc} ({last.filename}:{last.lineno})")
-        print(f"imported {len(names) - failed}/{len(names)} modules")
-        raise SystemExit(1 if failed else 0)
-        EOF
-    - name: Python static type check (win32)
-      if: ${{ !cancelled() }}
-      run: |
-        set -o pipefail
-        python -m mypy ciao 2>&1 | tee windows-mypy.txt
-    # The ConPTY adapter only exists on Windows, and only a Windows runner can
-    # prove that a real pseudoconsole works. This step runs on every PR, not
-    # only on the ones that run the whole Windows suite, so the native binding
-    # is exercised before the change is merged instead of after it.
-    # The timeout is a bound, not a hope: a terminal test that hangs on a
-    # pipe must fail the job rather than hold the runner for six hours.
-    - name: Windows ConPTY terminal tests
-      if: ${{ !cancelled() }}
-      timeout-minutes: 15
-      run: |
-        set -o pipefail
-        python -m pytest -q -rfE tests/test_os_terminal_windows.py 2>&1 | tee windows-terminal.txt
-    - name: Windows backend tests
-      if: ${{ !cancelled() && env.WINDOWS_FULL == 'true' }}
-      run: |
-        set -o pipefail
-        python -m pytest -n auto -q -rfE --durations=30 tests/ 2>&1 | tee windows-pytest.txt
-    - name: Windows frontend tests
-      if: ${{ !cancelled() && env.WINDOWS_FULL == 'true' }}
-      working-directory: web
-      env:
-        NO_COLOR: '1'
-      run: |
-        set -o pipefail
-        { npm ci && npm test; } 2>&1 | tee ../windows-vitest.txt
-    # The install.ps1 steps below stay advisory: they record what the runner
-    # did, and a hosted runner with no interactive logon is not a verdict on
-    # the installer (see the end-to-end step).
-    - name: Build install.ps1 offline fixture
-      if: ${{ !cancelled() && env.WINDOWS_FULL == 'true' }}
-      run: |
-        python - <<'EOF' || true
-        import pathlib, re, shutil, sys
-        sys.path.insert(0, ".")
-        from tests.test_engine_installer import VERSION, WHEEL_BYTES, WHEEL_NAME, _manifest_bytes
-        from tests.test_release_manifest import _keypair, _sign
-        out = pathlib.Path("ps1-fixture"); release = out / "release"
-        release.mkdir(parents=True, exist_ok=True)
-        raw = _manifest_bytes()
-        private_key, public_key, key_id = _keypair()
-        (release / "ciaobot-engine-manifest.json").write_bytes(raw)
-        (release / "ciaobot-engine-manifest.json.sig").write_text(_sign(raw, private_key, key_id), encoding="utf-8")
-        (release / WHEEL_NAME).write_bytes(WHEEL_BYTES)
-        text = pathlib.Path("scripts/install.ps1").read_text(encoding="utf-8")
-        text = re.sub(r"(\$ReleasePublicKey = ')[^']*(')", lambda m: m.group(1) + public_key + m.group(2), text)
-        (out / "install.ps1").write_text(text, encoding="utf-8")
-        print("fixture version", VERSION)
-        EOF
-    - name: Build install.ps1 end-to-end fixture
-      if: ${{ !cancelled() && env.WINDOWS_FULL == 'true' }}
-      run: |
-        python - <<'EOF' || true
-        # The offline fixture above is the bytes `the signed wheel`, which
-        # `uv tool install` cannot install. This one is a real wheel built from
-        # this checkout, so the advisory step below can run the installer all
-        # the way through: tool, receipt, PATH, workspace, task, start, URL.
-        import hashlib, json, pathlib, re, subprocess, sys
-        sys.path.insert(0, ".")
-        from ciao.release_manifest import build_manifest
-        from tests.test_release_manifest import _keypair, _sign
-        out = pathlib.Path("ps1-e2e"); release = out / "release"
-        release.mkdir(parents=True, exist_ok=True)
-        built = subprocess.run(
-            [sys.executable, "-m", "pip", "wheel", ".", "--no-deps", "-w", str(release)],
-            capture_output=True, text=True, check=False,
-        )
-        wheels = sorted(release.glob("*.whl"))
-        if built.returncode != 0 or len(wheels) != 1:
-            print("no buildable wheel:", built.stdout[-2000:], built.stderr[-2000:])
-            raise SystemExit(0)
-        wheel = wheels[0]
-        # ciaobot-<version>-py3-none-any.whl -> <version>
-        version = wheel.name.split("-")[1]
-        payload = wheel.read_bytes()
-        raw = json.dumps(build_manifest(version, [{
-            "filename": wheel.name, "kind": "wheel", "platform": "any", "arch": "any",
-            "sha256": hashlib.sha256(payload).hexdigest(), "size": len(payload),
-        }], created="2026-10-01T00:00:00+00:00")).encode()
-        private_key, public_key, key_id = _keypair()
-        (release / "ciaobot-engine-manifest.json").write_bytes(raw)
-        (release / "ciaobot-engine-manifest.json.sig").write_text(_sign(raw, private_key, key_id), encoding="utf-8")
-        text = pathlib.Path("scripts/install.ps1").read_text(encoding="utf-8")
-        text = re.sub(r"(\$ReleasePublicKey = ')[^']*(')", lambda m: m.group(1) + public_key + m.group(2), text)
-        (out / "install.ps1").write_text(text, encoding="utf-8")
-        print("e2e fixture", version, wheel.name)
-        EOF
-    - name: install.ps1 offline verification and analyzer (advisory)
-      if: ${{ !cancelled() && env.WINDOWS_FULL == 'true' }}
-      run: |
-        {
-          echo "--- pwsh, file form ---"
-          pwsh -NoProfile -File ./ps1-fixture/install.ps1 -Version 1.2.3 -ReleaseDir ./ps1-fixture/release -DryRun
-          echo "pwsh exit $?"
-          echo "--- Windows PowerShell 5.1, file form ---"
-          powershell -NoProfile -ExecutionPolicy Bypass -File ./ps1-fixture/install.ps1 -Version 1.2.3 -ReleaseDir ./ps1-fixture/release -DryRun
-          echo "powershell exit $?"
-          echo "--- Windows PowerShell 5.1, iex script-block form ---"
-          powershell -NoProfile -Command "& ([scriptblock]::Create((Get-Content -Raw ./ps1-fixture/install.ps1))) -Version 1.2.3 -ReleaseDir ./ps1-fixture/release -DryRun"
-          echo "powershell iex exit $?"
-          echo "--- tampered manifest must be refused ---"
-          sed -i 's/"1.2.3"/"9.9.9"/' ./ps1-fixture/release/ciaobot-engine-manifest.json
-          pwsh -NoProfile -File ./ps1-fixture/install.ps1 -Version 1.2.3 -ReleaseDir ./ps1-fixture/release -DryRun
-          echo "tampered exit $? (expected non-zero)"
-          echo "--- PSScriptAnalyzer ---"
-          pwsh -NoProfile -Command "if (Get-Command Invoke-ScriptAnalyzer -ErrorAction SilentlyContinue) { Invoke-ScriptAnalyzer -Path scripts/install.ps1 -Severity Warning,Error | Format-Table -AutoSize | Out-String -Width 200 } else { 'PSScriptAnalyzer not installed' }"
-          echo "--- both hosts must parse the file ---"
-          pwsh -NoProfile -Command "[scriptblock]::Create((Get-Content -Raw ./scripts/install.ps1)) | Out-Null; 'pwsh parse ok'"
-          powershell -NoProfile -Command "[scriptblock]::Create((Get-Content -Raw ./scripts/install.ps1)) | Out-Null; 'powershell parse ok'"
-        } > windows-install-ps1.txt 2>&1 || true
-    # Advisory by construction: an InteractiveToken task may not register or
-    # start on a hosted runner with no interactive logon, and a "no" there is the
-    # datum this step exists to produce, not a failure. Nothing below can fail
-    # the job, and the workspace is a throwaway under RUNNER_TEMP.
-    - name: install.ps1 end-to-end install and uninstall (advisory)
-      if: ${{ !cancelled() && env.WINDOWS_FULL == 'true' }}
-      # The step's shell is Git Bash, whose MSYS path conversion turns a
-      # `/Query`, `/TN`, `/v` or `/End` argument into a Windows path before the
-      # program ever sees it: `schtasks` and `reg` were being asked to read
-      # paths, reported nothing, and every "no" below was the shell talking
-      # rather than the installer. MSYS_NO_PATHCONV=1 turns that off for this
-      # step; without it the probes test the shell, not the machine.
-      env:
-        MSYS_NO_PATHCONV: '1'
-      run: |
-        {
-          # basename, not the whole path: `cut -d- -f2` on
-          # `ps1-e2e/release/ciaobot-1.2.3-py3-none-any.whl` yields
-          # `e2e/release/ciaobot`, which the installer refuses as an invalid
-          # version - the run then "passes" having installed nothing.
-          version=$(basename "$(ls ps1-e2e/release/*.whl 2>/dev/null | head -1)" | cut -d- -f2)
-          if [ -z "$version" ]; then
-            echo "no end-to-end wheel was built; skipping the run"
-          else
-            workspace="$RUNNER_TEMP/ps1-e2e-ws"
-            bin_dir="$(uv tool dir --bin 2>/dev/null)"
-            echo "--- install ---"
-            # The one-time setup URL is a credential, and Q3 keeps it out of the
-            # log. `::add-mask::` with no value masks the empty string and hides
-            # nothing, and the token is only known after the installer prints it,
-            # so the install output is redacted on its way into this file (which
-            # is uploaded as an artifact) instead of masked afterwards.
-            # A fresh install serves the browser setup wizard and waits for it,
-            # so the step finishes the wizard over HTTP the way the page does:
-            # wait for the bootstrap to answer, then POST /api/setup/finish.
-            # Bounded, so a wizard that never comes up fails the step instead
-            # of hanging the job.
-            install_log="$RUNNER_TEMP/ps1-e2e-install.log"
-            powershell -NoProfile -ExecutionPolicy Bypass -File ./ps1-e2e/install.ps1 -Version "$version" -ReleaseDir ps1-e2e/release -Workspace "$workspace" > "$install_log" 2>&1 &
-            installer=$!
-            python - "$workspace" <<'EOF'
-        import json, sys, time, urllib.error, urllib.request
-        base = "http://127.0.0.1:8443"
-        deadline = time.time() + 600
-        while True:
-            try:
-                urllib.request.urlopen(base + "/api/setup-status", timeout=5).read()
-                break
-            except (OSError, urllib.error.URLError):
-                if time.time() > deadline:
-                    print("wizard: never answered")
-                    raise SystemExit(0)
-                time.sleep(3)
-        body = json.dumps({
-            "workspace": sys.argv[1], "workspace_name": "personal", "port": 8443,
-            "password": "ci-e2e-password", "provider": "claude", "restart": True,
-        }).encode()
-        request = urllib.request.Request(
-            base + "/api/setup/finish", data=body,
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                print("wizard: finished", response.status)
-        except urllib.error.HTTPError as exc:
-            print("wizard: refused", exc.code, exc.read()[:500])
-        EOF
-            for _ in $(seq 1 180); do kill -0 "$installer" 2>/dev/null || break; sleep 5; done
-            if kill -0 "$installer" 2>/dev/null; then
-              echo "installer still running after the wizard; stopping it"
-              taskkill /F /T /PID "$(cat /proc/$installer/winpid)" >/dev/null 2>&1 || kill "$installer"
-            fi
-            wait "$installer"
-            install_exit=$?
-            sed -E 's#(Open Ciaobot: ).*#\1[redacted]#' "$install_log"
-            echo "install exit $install_exit"
-            # Four markers, one word each, so the Summarize step and a human
-            # reading the artifact can tell an installer that ran from one that
-            # refused before it started. "installed" is the engine's own entry
-            # point on disk, which is the first thing a failed run does not leave.
-            test -f "$bin_dir/ciao.exe" && echo "installed: yes" || echo "installed: no"
-            schtasks /Query /TN '\Ciaobot\Engine' >/dev/null 2>&1 && echo "task existed after install: yes" || echo "task existed after install: no"
-            port="$(awk -F= '/^PWA_PORT=/{gsub(/"/,"",$2); print $2}' "$workspace/.env" 2>/dev/null | tail -1)"
-            [ -n "$port" ] || port=8443
-            curl -fsS "http://localhost:$port/api/startup-status" >/dev/null 2>&1 && echo "engine reachable: yes" || echo "engine reachable: no"
-            test -f "$USERPROFILE/.local/state/ciaobot/install-receipt.json" && echo "receipt present: yes" || echo "receipt present: no"
-            reg query 'HKCU\Environment' /v Path 2>/dev/null | grep -qiF "$bin_dir" && echo "bin dir on user PATH: yes" || echo "bin dir on user PATH: no"
-            echo "--- uninstall ---"
-            powershell -NoProfile -ExecutionPolicy Bypass -File ./ps1-e2e/install.ps1 -Uninstall
-            echo "uninstall exit $?"
-            uv tool list 2>/dev/null | grep -qE '^[[:space:]]*-[[:space:]]+ciaobot([[:space:]]|$)' && echo "uninstalled: no (expected no)" || echo "uninstalled: yes (expected yes)"
-            schtasks /Query /TN '\Ciaobot\Engine' >/dev/null 2>&1 && echo "task gone after uninstall: no (expected yes)" || echo "task gone after uninstall: yes (expected yes)"
-            test -f "$USERPROFILE/.local/state/ciaobot/install-receipt.json" && echo "receipt present: yes (expected no)" || echo "receipt present: no (expected no)"
-            test -d "$workspace" && echo "workspace kept: yes (expected yes)" || echo "workspace kept: no (expected yes)"
-            echo "--- -NoStart registers nothing ---"
-            powershell -NoProfile -ExecutionPolicy Bypass -File ./ps1-e2e/install.ps1 -Version "$version" -ReleaseDir ps1-e2e/release -Workspace "$RUNNER_TEMP/ps1-e2e-ws2" -NoStart
-            echo "no-start exit $?"
-            schtasks /Query /TN '\Ciaobot\Engine' >/dev/null 2>&1 && echo "task registered after -NoStart: yes (expected no)" || echo "task registered after -NoStart: no (expected no)"
-            powershell -NoProfile -ExecutionPolicy Bypass -File ./ps1-e2e/install.ps1 -Uninstall
-          fi
-        } > windows-install-e2e.txt 2>&1 || true
-    - name: Summarize
-      if: always()
-      run: |
-        # `tests/` keeps captured log lines that also start with ERROR out.
-        # The terminal file names its tests as `tests/test_...`, so the same
-        # grep covers the focused native step: a red ConPTY step has to name
-        # the tests that failed, not only the count.
-        grep -E '^(FAILED|ERROR) tests/' windows-pytest.txt windows-terminal.txt 2>/dev/null | sed -E 's/ - .*//' | sed -E 's#^[^(]*tests/#tests/#' | sort -u > windows-failures.txt || true
-        {
-          echo "### Windows (#696)"
-          echo
-          [ "$WINDOWS_FULL" = true ] || echo "Develop PR: imports, mypy and the ConPTY terminal tests only; the suites run after merge."
-          echo "- imports: $(tail -1 windows-imports.txt 2>/dev/null)"
-          echo "- mypy: $(tail -1 windows-mypy.txt 2>/dev/null)"
-          echo "- ConPTY terminal: $(tail -1 windows-terminal.txt 2>/dev/null)"
-          # The interrupt measurements are reported as warnings, and the
-          # summary has to carry them: the log of a step nobody reads is
-          # not where a measurement belongs.
-          grep -hE 'UserWarning: #1721 ' windows-terminal.txt 2>/dev/null | sed -E 's/^.*UserWarning: //' | sed 's/^/- /' || true
-          echo "- pytest: $(tail -1 windows-pytest.txt 2>/dev/null)"
-          echo "- npm test: $(grep -E '^ *(Test Files|Tests) ' windows-vitest.txt 2>/dev/null | tr -s ' ' | paste -sd ';' -)"
-          echo "- install.ps1: $(grep -E 'exit ' windows-install-ps1.txt 2>/dev/null | paste -sd ';' -)"
-          echo "- install.ps1 end-to-end: $(grep -oE '^(installed|task existed after install|uninstalled|task gone after uninstall): (yes|no)' windows-install-e2e.txt 2>/dev/null | paste -sd',' - | sed -E 's#,#, #g')"
-          echo
-          echo "Full logs and the failing-test list are in the \`windows-results\` artifact."
-          if [ -s windows-failures.txt ]; then
-            echo
-            echo "Failing tests:"
-            echo
-            sed 's/^/- /' windows-failures.txt
-          fi
-        } >> "$GITHUB_STEP_SUMMARY"
-        # The gates above already fail the job; this names the tests that did.
-        if [ -s windows-failures.txt ]; then
-          echo "::error::$(wc -l < windows-failures.txt) Windows test(s) failed; see the job summary"
-          exit 1
-        fi
-    - name: Upload results
-      if: always()
-      uses: actions/upload-artifact@v7
+    - name: Restore the engine wheelhouse
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      uses: actions/cache@v6
       with:
-        name: windows-results
-        path: windows-*.txt
-        retention-days: 14
-        if-no-files-found: ignore
+        path: mac/.build/engine-cache
+        key: mac-engine-wheelhouse-${{ hashFiles('pyproject.toml', 'uv.lock', 'mac/engine-runtime.json', 'mac/engine-build-inputs.json') }}
+    - name: Toolchain
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      working-directory: mac
+      run: |
+        xcodebuild -version
+        swift --version
+    - name: Swift tests
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      working-directory: mac
+      run: swift test
+    - name: Swift build
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      working-directory: mac
+      run: swift build
+    - name: Build local app bundle
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      working-directory: mac
+      run: scripts/build-app.sh
+    - name: Verify packaged assets and icon
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      working-directory: mac
+      run: swift test --filter AppAssetsTests --filter BundledEngineTests
+    - name: Validate bundle metadata
+      if: needs.mac-scope.outputs.mac_changed == 'true'
+      working-directory: mac
+      run: plutil -lint .build/Ciaobot.app/Contents/Info.plist
 
   test:
     # Engine-only coverage that only the real platform can give. This job runs
-    # on the post-merge push to develop and on release cuts into main; browser
-    # tests for changed web paths also run pre-merge in linux-e2e.
-    if: github.event_name != 'pull_request' || github.base_ref == 'main'
+    # on release PRs into main. Browser tests for changed web paths also run
+    # pre-merge in linux-e2e.
+    if: github.event_name == 'workflow_dispatch' || github.base_ref == 'main'
     runs-on: macos-latest
     steps:
     - uses: actions/checkout@v7
@@ -569,6 +470,8 @@ jobs:
 
     - name: Set up uv
       uses: astral-sh/setup-uv@v10.3.3
+      with:
+        version: "0.13.8"
 
     # The release ships the engine wheel and nothing else (#653), so the
     # macOS-only coverage is the engine too: build the wheel this branch would
@@ -584,8 +487,8 @@ jobs:
         uv pip install --python "$engine_venv/bin/python" dist/ciaobot-*.whl
         test -x "$engine"
         mkdir -p "${RUNNER_TEMP}/ci-workspace"
-        # `--load-launchd` and `--python` are what scripts/install-engine.sh
-        # passes: the LaunchAgent has to name this venv's ciao, and launchd has
+        # `--load-launchd` and `--python` are what the retired installer script
+        # passed: the LaunchAgent has to name this venv's ciao, and launchd has
         # to drop any job definition it already holds before service start.
         "$engine" setup --workspace "${RUNNER_TEMP}/ci-workspace" --app-dir "${RUNNER_TEMP}/ci-apps" --python "$engine" --load-launchd
         "$engine" service start --workspace "${RUNNER_TEMP}/ci-workspace"

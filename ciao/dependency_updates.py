@@ -19,9 +19,10 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# The Claude SDK tracks the bundled CLI shipped by the app, so same-major
-# updates can be applied by the release workflow without model deliberation.
-AUTO_UPDATE_KEYS = ("claude-agent-sdk",)
+# Dependencies the release workflow may apply without review. None today: the
+# Claude SDK that once tracked the bundled CLI is gone (#3138 C2b), and the ACP
+# adapters are pinned in setup_status instead.
+AUTO_UPDATE_KEYS: tuple[str, ...] = ()
 
 
 def parse_dependency_spec(dep_str: str) -> tuple[str | None, str]:

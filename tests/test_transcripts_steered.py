@@ -17,7 +17,7 @@ import pytest
 async def test_queued_command_attachment_is_a_user_message(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from claude_agent_sdk._internal.sessions import project_key_for_directory
+    from ciao.claude_sessions import project_key_for_directory
 
     from ciao.transcripts import get_session_messages_full
 
@@ -26,7 +26,7 @@ async def test_queued_command_attachment_is_a_user_message(
     project_dir = tmp_path / ".claude" / "projects" / key
     project_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(
-        "claude_agent_sdk._internal.sessions._get_projects_dir",
+        "ciao.claude_sessions._get_projects_dir",
         lambda: tmp_path / ".claude" / "projects",
     )
 

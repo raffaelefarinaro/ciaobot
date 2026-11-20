@@ -24,7 +24,6 @@ from ciao import install_receipt, macos_service, update_host
 from ciao.engine_update import (
     PREVIOUS_ENV_NAME,
     UpdateError,
-    apply_update,
     read_operation,
     recover_apply,
     recover_interrupted_apply,
@@ -40,7 +39,6 @@ from ciao.update_host import (
 from tests.test_engine_update import (
     FROM_VERSION,
     TO_VERSION,
-    _apply,
     _broken_probe,
     _env_version,
     _FakeClock,
@@ -60,95 +58,6 @@ UPDATER = "com.ciao.updater"
 RECOVER = "com.ciao.recover"
 SERVER = "com.ciao.server"
 DOMAIN = "gui/501"
-
-
-# ── apply_update: the foreground half, on the real macOS path ───────────
-
-
-# MacUpdateHost: launchd's gui/<uid> domain (os.getuid), SIGHUP, and the POSIX
-# shebang entry-point shims a macOS env carries. These tests patch
-# sys.platform to darwin to drive it from any OS; on Windows those calls do not
-# exist. The Windows update host (#857) carries its own tests.
-mac_update_host = pytest.mark.skipif(
-    sys.platform == "win32", reason="drives MacUpdateHost (launchd gui/<uid>, SIGHUP, shebang shims)"
-)
-
-
-def test_macos_apply_update_runs_exactly_these_launchctl_calls(tmp_path: Path) -> None:
-    _, state, _, engine = _staged(tmp_path)
-
-    result = _apply(engine, state)
-
-    assert result.phase == "applying"
-    # Two jobs, each booted out before it is bootstrapped, and nothing else: the
-    # engine is still serving, so the transaction has touched no file.
-    assert engine.launchctl_calls == [
-        ["bootout", f"{DOMAIN}/{UPDATER}"],
-        ["bootstrap", DOMAIN, str(state / UPDATER_PLIST)],
-        ["bootout", f"{DOMAIN}/{RECOVER}"],
-        ["bootstrap", DOMAIN, str(state / RECOVER_PLIST)],
-    ]
-
-
-def test_macos_apply_update_writes_the_updater_plist(tmp_path: Path) -> None:
-    op, state, _, engine = _staged(tmp_path)
-
-    _apply(engine, state)
-
-    assert plistlib.loads((state / UPDATER_PLIST).read_bytes()) == {
-        "Label": UPDATER,
-        "ProgramArguments": [
-            op.env_python,
-            "-I",
-            "-m",
-            "ciao.engine_update",
-            "run-apply",
-            "--operation",
-            op.id,
-        ],
-        "RunAtLoad": True,
-        "KeepAlive": False,
-        "AbandonProcessGroup": True,
-        "StandardOutPath": str(Path(op.stage_dir) / "updater.log"),
-        "StandardErrorPath": str(Path(op.stage_dir) / "updater.log"),
-    }
-
-
-def test_macos_apply_update_writes_the_recover_plist(tmp_path: Path) -> None:
-    op, state, _, engine = _staged(tmp_path)
-
-    _apply(engine, state)
-
-    # The same job on a timer, and from the staged interpreter: the net is only
-    # worth anything if its program is an env the swap does not consume.
-    assert plistlib.loads((state / RECOVER_PLIST).read_bytes()) == {
-        "Label": RECOVER,
-        "ProgramArguments": [
-            op.env_python,
-            "-I",
-            "-m",
-            "ciao.engine_update",
-            "run-recover",
-            "--operation",
-            op.id,
-        ],
-        "RunAtLoad": True,
-        "KeepAlive": False,
-        "AbandonProcessGroup": True,
-        "StandardOutPath": str(Path(op.stage_dir) / "recover.log"),
-        "StandardErrorPath": str(Path(op.stage_dir) / "recover.log"),
-        "StartInterval": 30,
-    }
-
-
-def test_macos_apply_update_writes_the_record_phases_in_order(
-    tmp_path: Path, phases: list[str]
-) -> None:
-    _, state, _, engine = _staged(tmp_path)
-
-    _apply(engine, state)
-
-    assert phases == ["draining", "applying"]
 
 
 # ── run_apply: the detached half, in every outcome ──────────────────────
@@ -351,7 +260,6 @@ def test_macos_recover_apply_writes_the_record_phases_in_order(
 # ── the seam itself: selection, and what `MacUpdateHost` forwards ───────
 
 
-@mac_update_host
 def test_current_update_host_is_macos_on_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "darwin")
 
@@ -360,7 +268,6 @@ def test_current_update_host_is_macos_on_darwin(monkeypatch: pytest.MonkeyPatch)
     assert isinstance(host, MacUpdateHost)
 
 
-@mac_update_host
 def test_current_update_host_reads_platform_on_every_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -378,21 +285,11 @@ def test_current_update_host_reads_platform_on_every_call(
     assert first is not second
 
 
-def test_current_update_host_is_windows_on_win32(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ciao.windows_update import WindowsUpdateHost
-
-    monkeypatch.setattr(sys, "platform", "win32")
-
-    assert isinstance(current_update_host(), WindowsUpdateHost)
-    assert isinstance(update_host.default_update_host(), WindowsUpdateHost)
-
-
-def test_default_update_host_is_the_macos_host_off_windows(
+def test_default_update_host_is_the_macos_host_on_linux(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Linux CI drives the transaction through the macOS host and a fake
-    # launchctl, as it did before Windows had a host: the caller's launchctl and
-    # uid are the host's.
+    # launchctl: the caller's launchctl and uid are the host's.
     calls: list[list[str]] = []
 
     def launchctl(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -408,7 +305,7 @@ def test_default_update_host_is_the_macos_host_off_windows(
     assert calls == [["bootout", "gui/777/com.ciao.server"]]
 
 
-@pytest.mark.parametrize("platform", ["linux", "cygwin", "freebsd14"])
+@pytest.mark.parametrize("platform", ["linux", "win32", "cygwin", "freebsd14"])
 def test_current_update_host_refuses_a_platform_with_no_host(
     platform: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -617,13 +514,11 @@ def test_mac_update_host_stop_engine_runs_the_wait_it_is_given() -> None:
     assert host.stop_engine() is True
 
 
-@mac_update_host
 def test_mac_update_host_interrupt_signals_are_term_and_hup() -> None:
     host = MacUpdateHost(launchctl=lambda args: subprocess.CompletedProcess(args, 0), uid=501)
 
     # The two ways a ten-minute drain really ends besides Ctrl-C: the terminal
-    # closing, and a supervisor stopping the process. `SIGHUP` is an
-    # `AttributeError` on Windows, which is why the set comes from the host.
+    # closing, and a supervisor stopping the process.
     assert host.interrupt_signals() == (signal.SIGTERM, signal.SIGHUP)
 
 
@@ -717,7 +612,6 @@ def _record_label_calls(calls: list[list[str]]) -> Callable[[list[str]], subproc
     return launchctl
 
 
-@mac_update_host
 def test_host_uses_the_receipt_label(monkeypatch: pytest.MonkeyPatch) -> None:
     # An isolated install registers its own LaunchAgent and records its label.
     # Every job the update transaction touches has to be that one: the operator's
@@ -977,18 +871,6 @@ def _run_with_host(
     )
 
 
-def _apply_with_host(engine: Any, state: Path, host: Any, **kwargs: Any) -> Any:
-    """``apply_update`` with the host as its only platform seam."""
-    return apply_update(
-        state_dir=state,
-        http_post=engine.post,
-        sleep=lambda seconds: None,
-        clock=_FakeClock(),
-        host=host,
-        **kwargs,
-    )
-
-
 def _recover_with_host(
     engine: Any, op: Any, state: Path, receipt_path: Path, host: Any, **kwargs: Any
 ) -> Any:
@@ -1149,47 +1031,6 @@ def test_fake_host_run_apply_asks_the_host_for_the_whole_forward_path(
     ]
 
 
-def test_fake_host_apply_update_hands_the_swap_to_the_host(
-    tmp_path: Path,
-) -> None:
-    op, state, _, engine = _staged(tmp_path)
-    host = FakeHost(engine)
-
-    result = _apply_with_host(engine, state, host)
-
-    assert result.phase == "applying"
-    assert [call[0] for call in host.calls] == [
-        "engine_port",
-        "spawn_updater",
-        "install_recovery_agent",
-    ]
-    # The updater runs from the staged env, and the net is installed behind it
-    # from the same interpreter: the swap is handed over before anything is
-    # stopped, and both jobs name an env the swap has not consumed.
-    assert host.calls[1][2] == op.env_python
-    assert host.calls[2][1] == op.env_python
-
-
-def test_fake_host_apply_update_reopens_admission_when_the_handoff_fails(
-    tmp_path: Path,
-) -> None:
-    _, state, _, engine = _staged(tmp_path)
-    host = FakeHost(engine, updater_error=UpdateError("the job would not start"))
-
-    with pytest.raises(UpdateError, match="the job would not start"):
-        _apply_with_host(engine, state, host)
-
-    record = read_operation(state)
-    assert record is not None
-    assert record.phase == "failed"
-    assert "the job would not start" in record.error
-    # The drain was closed by the foreground half and nothing else reopens it.
-    assert engine.posts[-1].endswith("/api/admin/drain/cancel")
-    # The net is never installed behind a swap that was not handed over, and the
-    # engine was never stopped: `fail()` reopens admission and returns.
-    assert [call[0] for call in host.calls] == ["engine_port", "spawn_updater"]
-
-
 def test_fake_host_recover_interrupted_apply_asks_the_host(tmp_path: Path) -> None:
     op, state, _, engine = _interrupted(tmp_path, "swapping")
     host = FakeHost(engine)
@@ -1298,9 +1139,8 @@ def test_fake_host_run_apply_refuses_a_wheel_that_no_longer_matches_its_digest(
 ) -> None:
     op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
     host = FakeHost(engine, program=engine.live_env / "bin" / "python")
-    # The wheel changed on disk after staging verified it. A host that rebuilds
-    # the env installs from this file (Windows, #857), so the check is shared
-    # and runs before the engine is stopped.
+    # The wheel changed on disk after staging verified it; the check runs
+    # before the engine is stopped.
     with Path(op.wheel).open("ab") as handle:
         handle.write(b"tampered")
 

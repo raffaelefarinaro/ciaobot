@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from contextlib import aclosing
 import logging
 import math
 from pathlib import Path
@@ -12,7 +13,7 @@ from ciao.config import BridgeConfig
 from ciao.models import AgentRequest, StreamEvent
 from ciao.memory_tool import prune_expired_entries
 from ciao.providers.base import (
-    ActiveHandle, BaseProvider, MoveToBackgroundOutcome, ProviderCapabilities,
+    ActiveHandle, BaseProvider, ProviderCapabilities,
 )
 from ciao.workspace_guide import guide_path
 
@@ -154,24 +155,16 @@ class ProviderService:
         async for event in provider.run_streaming(request, self._register_handle):
             yield event
 
-    async def steer_turn(self, request: AgentRequest) -> str | None:
-        """Inject a user message into the live foreground turn; None = cannot."""
-        if self._provider is None:
-            return None
-        delivery_id: str | None = await self._provider.steer_turn(request)
-        return delivery_id
-
-    async def move_to_background(self) -> MoveToBackgroundOutcome:
-        """Background the live turn's foreground tools; ``not_running`` without a provider."""
-        if self._provider is None:
-            return "not_running"
-        outcome: MoveToBackgroundOutcome = await self._provider.move_to_background()
-        return outcome
-
     @property
     def can_drain(self) -> bool:
-        """True when the provider has a live client to drain between turns."""
-        return bool(self._provider is not None and getattr(self._provider, "can_drain", False))
+        """True when the live provider currently permits a between-turn reader."""
+        return self._provider is not None and self._provider.can_drain
+
+    @property
+    def continues_after_shell(self) -> bool:
+        """Whether the live provider resumes a session on its own when a background shell ends."""
+        spec = getattr(self._provider, "spec", None)
+        return bool(getattr(spec, "continues_after_shell", False))
 
     @property
     def background_work_outstanding(self) -> bool:
@@ -187,24 +180,36 @@ class ProviderService:
 
     @property
     def cli_connected(self) -> bool:
-        """True while the provider's persistent CLI subprocess is alive.
+        """True while the provider's persistent CLI subprocess owner is healthy.
 
-        Providers without the concept (they keep no long-lived subprocess)
-        report True so callers only react to a genuinely gone CLI.
+        Asymmetric no-owner semantics: a service with no provider instance
+        reports False; a provider that tracks no long-lived subprocess
+        inherits the base default of True, so only a genuinely tracked CLI
+        loss is reported. Nothing here implies server liveness.
         """
         if self._provider is None:
             return False
-        return bool(getattr(self._provider, "cli_connected", True))
+        return self._provider.cli_connected
 
     async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
-        """Yield between-turns provider events (see ClaudeProvider.drain_events / OpencodeProvider.drain_events)."""
+        """Forward the live provider's shared between-turn events unchanged.
+
+        Every provider exposes ``drain_events`` through the base contract;
+        adapters without a between-turn reader yield nothing. Events keep
+        their identity and order, and exceptions and cancellation propagate
+        exactly as raised — no buffering, translation or suppression.
+        Eligibility is the host's decision (``can_drain``): this iterator
+        never re-checks it, so an explicit caller may collect events even
+        when ineligible.
+        """
         if self._provider is None:
             return
-        drain = getattr(self._provider, "drain_events", None)
-        if not callable(drain):
-            return
-        async for event in drain():
-            yield event
+        # Close the provider's generator here, not at GC: a caller that
+        # closes this one (break, cancellation) must release the reader
+        # (the Claude consume task, an ACP event reader) before it returns.
+        async with aclosing(self._provider.drain_events()) as inner:
+            async for event in inner:
+                yield event
 
     @property
     def provider(self) -> ProviderImpl | None:
@@ -221,7 +226,7 @@ class ProviderService:
         """Session id as currently known to the underlying provider."""
         if self._provider is None:
             return None
-        return getattr(self._provider, "current_session_id", None)
+        return self._provider.current_session_id
 
     async def disconnect(self) -> None:
         """Disconnect the provider (e.g. SDK client)."""

@@ -538,6 +538,36 @@ def test_resolution_helper_archives_only_after_target_leaves_queue(
     archive_mock.assert_awaited_once_with(chat.chat_id)
 
 
+def test_resolution_helper_is_not_archived_while_background_work_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Reviews", workspace="work")
+    chat = manager.create_chat(
+        project.project_id,
+        helper={
+            "kind": "proposal",
+            "intent": "resolve",
+            "proposal_ids": ["proposal-1"],
+            "archive_policy": "when_resolved",
+        },
+    )
+    chat.last_response = "Merged the fact."
+    chat.last_response_status = "success"
+    monkeypatch.setattr(
+        "ciao.proposal_tracking.pending_proposal_ids", lambda _config: set()
+    )
+    archive_mock = AsyncMock()
+    monkeypatch.setattr(manager, "archive_chat", archive_mock)
+    # The provider still reports background work the helper dispatched.
+    manager._providers[chat.chat_id] = SimpleNamespace(  # type: ignore[assignment]
+        background_work_outstanding=True, background_activity_age=0.0
+    )
+
+    assert asyncio.run(manager._maybe_archive_proposal_helper(chat.chat_id)) is False
+    archive_mock.assert_not_awaited()
+
+
 def test_review_helper_never_auto_archives(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

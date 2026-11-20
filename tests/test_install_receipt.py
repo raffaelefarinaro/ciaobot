@@ -211,6 +211,18 @@ def test_write_rejects_invalid_backend(tmp_path: Path) -> None:
     assert not target.exists()
 
 
+def test_a_windows_task_receipt_is_rejected(tmp_path: Path) -> None:
+    assert (
+        read_receipt(
+            _write_json(tmp_path / "r.json", _payload(service_backend="windows-task"))
+        )
+        is None
+    )
+
+    with pytest.raises(ValueError, match="Unknown service backend: 'windows-task'"):
+        write_receipt(_receipt(service_backend="windows-task"), tmp_path / "w.json")
+
+
 def test_matches_running_same_interpreter() -> None:
     assert receipt_matches_running(_receipt()) is True
 

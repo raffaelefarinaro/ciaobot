@@ -32,7 +32,7 @@ from ciao.os_support.files import replace_file
 from ciao.os_support.private import make_private, make_private_dir, mkstemp_private
 
 SCHEMA_VERSION = 1
-SERVICE_BACKENDS = ("launchd", "systemd-user", "windows-task", "none")
+SERVICE_BACKENDS = ("launchd", "systemd-user", "none")
 
 # Fields every receipt must carry as a string. `previous_*` and `schema` are
 # optional; the rest describe the install itself and a receipt missing any of
@@ -165,7 +165,7 @@ def write_receipt(receipt: InstallReceipt, path: Path | None = None) -> Path:
     target = path or default_receipt_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     make_private_dir(target.parent)
-    # Created 0600 (a private DACL on Windows), so it is never briefly readable.
+    # Created 0600, so it is never briefly readable.
     fd, tmp_name = mkstemp_private(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
@@ -241,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     write.add_argument(
         "--service-label",
         default="",
-        help="launchd label, systemd unit, or Task Scheduler task name",
+        help="launchd label or systemd unit",
     )
     write.add_argument("--previous-version", default="", help="release being replaced")
     write.add_argument(

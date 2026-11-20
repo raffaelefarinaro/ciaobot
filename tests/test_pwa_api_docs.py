@@ -38,10 +38,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
         "sign-in tab on the host, returns no credential"
     ),
     "/api/auth/logout": "browser logout; clears the session cookie",
-    "/api/chats/{chat_id}/background-tasks/{task_id}/stop": (
-        "Processes Stop button for a running native shell or Monitor; the agent that "
-        "started the task stops it from its own session"
-    ),
     "/api/chats/{chat_id}/actions/{action_id}/start": (
         "Needs-you card buttons (Sign in / Not now / Continue); signed session, browser-only. "
         "Agents raise actions with `ciao chat needs-action` but never start, dismiss or continue them"
@@ -55,16 +51,8 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
         "Agents raise actions with `ciao chat needs-action` but never start, dismiss or continue them"
     ),
     "/api/chats/{chat_id}/actions/{action_id}/callback": (
-        "Needs-you card paste-back field; signed session, browser-only. Replays a pasted loopback OAuth "
-        "callback only to the pending flow's own 127.0.0.1 listener, once; the agent never holds the callback URL"
-    ),
-    "/api/chats/{chat_id}/actions/mcp-auth": (
-        "Settings MCP Sign in; signed session, browser-only. Raises the chat's own mcp_auth card, "
-        "which the browser then starts; agents raise cards with `ciao chat needs-action`"
-    ),
-    "/api/chats/{chat_id}/actions/{action_id}/turn-off": (
-        "Needs-you sign-in card's Turn off; signed session, browser-only. Agents turn servers off "
-        "with POST /api/mcp/servers/enabled, never through a card"
+        "Needs-you card paste-back field; signed session, browser-only. Finishes a pending gws_auth sign-in "
+        "in process from the pasted loopback redirect; no request is made, and the agent never holds the callback URL"
     ),
     "/api/auth/settings": "browser Settings auth form; enable/disable or change PWA password",
     "/api/setup/finish": "browser first-run setup handoff; writes local config and requests restart",
@@ -88,7 +76,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/admin/drain": "update coordinator drain (loopback-only CLI)",
     "/api/admin/drain/cancel": "update coordinator drain (loopback-only CLI)",
     "/api/package/update": "browser update action; production engine updates through the signed one-line installer",
-    "/api/update/start": "browser Settings update card; stages then applies a release for an installer-managed engine in one background job",
     "/api/workspace-health/fix": "browser Settings health Fix button; creates missing scaffold files and re-links skills",
     "/api/workspace-open": "browser file-viewer Open-in-default-app button; hidden and refused unless the PWA runs on the engine's own machine",
     "/api/workspaces": "browser workspaces list config",
@@ -102,10 +89,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/integrations/gws/profiles/add": "browser Settings action; registers a Google account for linking",
     "/api/integrations/gws/profiles/remove": "browser Settings action; deletes a Google account and its local credentials",
     "/api/import/preview": "browser Memory import selection; reads the chosen conversations on the engine host to state what would be processed",
-    "/api/update/settings": (
-        "browser Settings switch/Not now for the automatic updater; signed session, "
-        "writes only the policy or the hold, never starts an update"
-    ),
 }
 
 
@@ -132,11 +115,6 @@ def test_pwa_api_documents_all_explicit_app_routes() -> None:
     repo = Path(__file__).resolve().parents[1]
     app_source = (repo / "ciao" / "web" / "app.py").read_text(encoding="utf-8")
     api_doc = (repo / "PWA_API.md").read_text(encoding="utf-8")
-
-    setup_status_row = next(
-        line for line in api_doc.splitlines() if "`/api/setup-status`" in line
-    )
-    assert "native_bootstrap" in setup_status_row
 
     route_paths = re.findall(r'(?:Route|WebSocketRoute)\("([^"]+)"', app_source)
     missing = [

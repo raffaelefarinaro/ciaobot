@@ -26,8 +26,6 @@ def _default_runner(cmd: list[str], *, cwd: Path, env: dict[str, str] | None = N
 
 
 def _venv_python(venv_dir: Path) -> Path:
-    if os.name == "nt":
-        return venv_dir / "Scripts" / "python.exe"
     return venv_dir / "bin" / "python"
 
 

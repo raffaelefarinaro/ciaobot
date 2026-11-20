@@ -9,10 +9,9 @@ recovery interpreter lives are all questions this module answers, so that
 
 One protocol, one implementation per platform. :class:`MacUpdateHost` wraps
 launchd, LaunchAgents and the POSIX environment layout exactly as `engine_update`
-did before the seam existed, and :class:`ciao.windows_update.WindowsUpdateHost`
-does the same for Task Scheduler (#857). :func:`current_update_host` picks the
-host for this machine the way :func:`ciao.service_backend.current_backend` picks
-a service backend. Any platform without a host raises
+did before the seam existed. :func:`current_update_host` picks the host for
+this machine the way :func:`ciao.service_backend.current_backend` picks a
+service backend. Any platform without a host raises
 :class:`UnsupportedPlatformError`: that is the honest answer until one is
 written, not a fallback to the macOS one.
 """
@@ -110,10 +109,8 @@ class UpdateHost(Protocol):
         """Stop the engine service, then answer "is it gone?".
 
         ``wait`` is the transaction's own loopback probe, passed in rather than
-        reimplemented here: it is the same question on every platform. A host
-        that needs its own evidence the process has released its files (Windows'
-        runtime lock) does that first and then runs ``wait``; the rollback calls
-        this with no ``wait`` at all, because it waits as a step of its own.
+        reimplemented here: it is the same question on every platform. The rollback
+        calls this with no ``wait`` at all, because it waits as a step of its own.
         """
         ...
 
@@ -775,7 +772,7 @@ class MacUpdateHost:
         Which is why ``python`` is an explicit argument and not read off ``op``: the
         net is only worth anything if its program is a file that exists, so every
         caller has to place it in an env the swap does not *consume*.
-        :func:`ciao.engine_update.apply_update` installs it while the live env is
+        The 1.x apply installs it while the live env is
         still intact, from the staged interpreter; ``run_apply`` re-points it at
         the previous env the moment the live one is renamed aside, because the swap
         then moves the staged env into the live env's place and the agent's program
@@ -994,10 +991,7 @@ class MacUpdateHost:
 
     def interrupt_signals(self) -> tuple[signal.Signals, ...]:
         """``SIGTERM`` and ``SIGHUP``: the two ways a ten-minute drain really ends."""
-        # `SIGHUP` does not exist on Windows, where this module is imported;
-        # read through `getattr` so mypy's win32 pass checks this file too.
-        sighup: signal.Signals = getattr(signal, "SIGHUP")
-        return (signal.SIGTERM, sighup)
+        return (signal.SIGTERM, signal.SIGHUP)
 
     def redirect_detached_stdio(self, root: Path) -> None:
         """Nothing to do: each job's plist names its own log file.
@@ -1013,15 +1007,9 @@ def current_update_host() -> UpdateHost:
     """The update host for this platform. Reads ``sys.platform`` on every call."""
     if sys.platform == "darwin":
         return MacUpdateHost()
-    if sys.platform == "win32":
-        # Imported here: `windows_update` imports `engine_update`, which imports
-        # this module.
-        from ciao.windows_update import WindowsUpdateHost
-
-        return WindowsUpdateHost()
     raise UnsupportedPlatformError(
         f"Ciaobot has no update host for platform {sys.platform!r}; "
-        "the engine update transaction runs on macOS and Windows only."
+        "the engine update transaction runs on macOS only."
     )
 
 
@@ -1032,13 +1020,10 @@ def default_update_host(
 
     A ``launchctl``, ``uid`` or ``label`` is a request for the launchd host by
     name, so it gets the macOS host on any OS: that is how the transaction's
-    macOS tests drive it on Linux and Windows CI. An empty ``label`` is
+    macOS tests drive it on Linux CI. An empty ``label`` is
     resolved from the install receipt by :class:`MacUpdateHost` itself.
-    Otherwise Windows gets its own host, and every other platform the macOS
-    host, exactly as before Windows had one.
+    Otherwise it is the macOS host on every platform.
     """
     if launchctl is not None or uid is not None or label:
         return MacUpdateHost(launchctl=launchctl, uid=uid, label=label)
-    if sys.platform == "win32":
-        return current_update_host()
     return MacUpdateHost()

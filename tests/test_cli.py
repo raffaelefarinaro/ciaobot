@@ -19,28 +19,8 @@ from ciao import cli
 
 
 def _fake_python(tmp_path: Path) -> str:
-    """The interpreter setup points its service at.
-
-    POSIX setup only writes the path into the plist, so a made-up one will do.
-    Windows' Task Scheduler renderer accepts only python.exe/pythonw.exe and
-    checks pythonw.exe is really there (the task runs hidden), so on Windows it
-    is a pair of empty files under ``tmp_path``.
-    """
-    if sys.platform != "win32":
-        return "/opt/ciao/bin/python"
-    bin_dir = tmp_path / "fake-python"
-    bin_dir.mkdir(exist_ok=True)
-    for name in ("python.exe", "pythonw.exe"):
-        (bin_dir / name).write_bytes(b"")
-    return str(bin_dir / "python.exe")
-
-# setup's launchd backend: the plist and the ~/Applications bundle clean-up run
-# only there. On Windows setup writes a Task Scheduler definition instead, which
-# tests/test_windows_service.py covers.
-launchd_setup_only = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="the launchd plist and ~/Applications clean-up are setup's macOS backend",
-)
+    """The interpreter setup points its service at; setup only writes the path into the plist, so a made-up one will do."""
+    return "/opt/ciao/bin/python"
 
 
 def test_cli_run_dispatches_server(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -127,6 +107,21 @@ def test_run_supervised_returns_restart_code_without_execv(
 
 def test_run_parser_accepts_supervised_flag() -> None:
     assert cli.build_parser().parse_args(["run", "--supervised"]).supervised is True
+
+
+def test_run_has_no_installer_flags() -> None:
+    """The installer bootstrap is gone: each removed flag, and the `installer`
+    command, is an unknown argument to argparse (exit 2)."""
+    parser = cli.build_parser()
+    for argv in (
+        ["run", "--installer-bootstrap"],
+        ["run", "--installer-run-id", "run-1"],
+        ["run", "--installer-suggest-workspace", "/tmp/elsewhere"],
+        ["installer", "activate", "--run-id", "run-1"],
+    ):
+        with pytest.raises(SystemExit) as caught:
+            parser.parse_args(argv)
+        assert caught.value.code == 2, argv
 
 
 def test_run_server_passes_supervised_to_the_server(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -570,20 +565,18 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     )
     assert registry[0]["name"] == "research"
     assert registry[0]["vault_root"] == "research/memory-vault"
-    # The platform's own service definition: the plist here, the Task Scheduler
-    # XML on Windows, whose fields tests/test_windows_service.py pins.
+    # The service definition: the plist.
     service = cli._service_definition(launch_agents)
     assert service is not None and service.is_file()
-    if sys.platform != "win32":
-        plist_text = service.read_text(encoding="utf-8")
-        assert "<string>/opt/ciao/bin/python</string>" in plist_text
-        assert "<string>run</string>" in plist_text
-        assert f"<string>{workspace.resolve()}</string>" in plist_text
-        assert "<string>9443</string>" in plist_text
-        assert f"<string>{workspace.resolve()}/.runtime/ciao.stdout.log</string>" in plist_text
-        # Login Items still groups the server agent under the desktop app.
-        assert "<key>AssociatedBundleIdentifiers</key>" in plist_text
-        assert "<string>local.ciaobot.app</string>" in plist_text
+    plist_text = service.read_text(encoding="utf-8")
+    assert "<string>/opt/ciao/bin/python</string>" in plist_text
+    assert "<string>run</string>" in plist_text
+    assert f"<string>{workspace.resolve()}</string>" in plist_text
+    assert "<string>9443</string>" in plist_text
+    assert f"<string>{workspace.resolve()}/.runtime/ciao.stdout.log</string>" in plist_text
+    # Login Items still groups the server agent under the desktop app.
+    assert "<key>AssociatedBundleIdentifiers</key>" in plist_text
+    assert "<string>local.ciaobot.app</string>" in plist_text
     # No menu-bar agent and no launcher bundle: Ciaobot.app is the menu bar
     # now, and nothing writes the retired rumps helper.
     assert not (launch_agents / "com.ciao.menubar.plist").exists()
@@ -646,7 +639,6 @@ def test_setup_exits_zero_without_warning_on_the_normal_path(
     assert "memory regions not set up" not in capsys.readouterr().err
 
 
-@launchd_setup_only
 def test_setup_uses_bundled_launcher_when_python_is_not_explicit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -667,7 +659,6 @@ def test_setup_uses_bundled_launcher_when_python_is_not_explicit(
     assert "CIAO_NATIVE_SIDECAR" not in plist["EnvironmentVariables"]
 
 
-@launchd_setup_only
 def test_setup_uses_python_module_invocation_for_python_path(tmp_path: Path) -> None:
     launch_agents = tmp_path / "LaunchAgents"
 
@@ -741,12 +732,6 @@ def test_setup_refuses_source_checkout(tmp_path: Path, capsys) -> None:
 def test_setup_refuses_to_repoint_existing_workspace(
     tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    if sys.platform == "win32":
-        # The Windows guard asks Task Scheduler whether the task exists before
-        # trusting the XML (a stale file is not a task); stand in for it here.
-        from ciao import windows_service
-
-        monkeypatch.setattr(windows_service, "task_exists", lambda: True)
     launch_agents = tmp_path / "LaunchAgents"
     apps = tmp_path / "Applications"
     first = tmp_path / "ws-one"
@@ -1089,6 +1074,20 @@ class _PlatformShim:
         return getattr(self._real, name)
 
 
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_setup_load_launchd_is_refused_off_macos(
+    platform: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    monkeypatch.setattr(cli, "sys", _PlatformShim(sys, platform))
+
+    assert cli.main(["setup", "--workspace", str(tmp_path / "ws"), "--load-launchd"]) == 2
+    assert "requires macOS. On Linux" in capsys.readouterr().err
+    assert not (tmp_path / "ws").exists(), "the refusal must come before any setup work"
+
+
 def _plist_with_workspace(workspace: Path) -> str:
     return (
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
@@ -1152,9 +1151,7 @@ def test_setup_workspace_does_not_ask_for_a_backend_on_linux(
 def test_setup_workspace_asks_the_backend_where_a_service_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """macOS and Windows both have a background service, so setup writes its
-    definition by default (#845) and the definition dir comes from the backend.
-    """
+    """macOS has a background service, so setup writes its definition by default (#845) and the definition dir comes from the backend."""
     monkeypatch.setattr(cli.sys, "platform", "darwin")
     monkeypatch.delenv("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", raising=False)
     agents = tmp_path / "LaunchAgents"
@@ -1181,7 +1178,6 @@ def test_setup_workspace_asks_the_backend_where_a_service_exists(
     assert plist.is_file()
 
 
-@launchd_setup_only
 def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:
     apps = tmp_path / "Applications"
     ours = apps / "Ciao.app" / "Contents"
@@ -1208,7 +1204,6 @@ def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:
     assert not foreign.exists()  # untouched (never created); guard for typos
 
 
-@launchd_setup_only
 def test_setup_migrates_native_ciaobot_app_without_removing_pwa(tmp_path: Path) -> None:
     apps = tmp_path / "Applications"
     legacy = apps / "Ciaobot.app" / "Contents"
@@ -1263,7 +1258,6 @@ def test_setup_keeps_browser_pwa_named_ciaobot_app(tmp_path: Path) -> None:
     assert not (apps / "Ciaobot Server.app").exists()
 
 
-@launchd_setup_only
 def test_setup_skips_legacy_companion_when_the_app_is_installed(
     tmp_path: Path,
 ) -> None:
@@ -1292,7 +1286,6 @@ def test_default_app_dir_matches_the_release_installer() -> None:
     assert cli._default_app_dir() == Path.home() / "Applications"
 
 
-@launchd_setup_only
 def test_setup_cleans_our_bundles_from_home_applications(tmp_path: Path, monkeypatch) -> None:
     home_apps = tmp_path / "home" / "Applications"
     for name, bundle_id in (("Ciao.app", "local.ciao.app"), ("Ciaobot.app", "local.ciaobot.app")):
@@ -1416,14 +1409,7 @@ def test_path_export_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     bin_dir = Path(cli.sys.executable).parent
     monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
     hint = cli._path_export_hint()
-    if sys.platform == "win32":
-        # A persistent user-PATH update through the registry, not `export`
-        # (the full line is pinned in tests/test_os_support_shell_hints.py).
-        assert hint is not None
-        assert hint.startswith("$k = [Microsoft.Win32.Registry]::CurrentUser")
-        assert f"'{bin_dir}'" in hint
-    else:
-        assert hint == f'export PATH="{bin_dir}:$PATH"'
+    assert hint == f'export PATH="{bin_dir}:$PATH"'
     monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", str(bin_dir)]))
     assert cli._path_export_hint() is None
 
@@ -1437,8 +1423,8 @@ def test_path_export_hint_names_the_installed_launcher_dir(
     # PATH; `ciao` is the launcher in uv's bin dir, which the installer adds.
     launcher_dir = tmp_path / "First Last" / ".local" / "bin"
     install_receipt.write_receipt(install_receipt.InstallReceipt(
-        version="1.2.3", executable=str(launcher_dir / "ciao.exe"), python=sys.executable,
-        service_backend="windows-task", service_label="\\Ciaobot\\Engine",
+        version="1.2.3", executable=str(launcher_dir / "ciao"), python=sys.executable,
+        service_backend="launchd", service_label="com.ciao.server",
         installed_at="2026-10-05T00:00:00+00:00",
     ))
     monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", str(launcher_dir)]))
@@ -1457,25 +1443,7 @@ def test_path_export_hint_uses_the_helper(monkeypatch: pytest.MonkeyPatch) -> No
     assert cli._path_export_hint() == "HINT"
 
 
-def test_setup_summary_prints_the_windows_note(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-) -> None:
-    workspace = tmp_path / "workspace"
-    token_path = workspace / ".runtime" / "setup-token"
-    token_path.parent.mkdir(parents=True)
-    token_path.write_text("tok\n", encoding="utf-8")
-    monkeypatch.setattr(cli, "_path_export_hint", lambda: "LINE")
-    monkeypatch.setattr(cli, "path_hint_note", lambda: "NOTE")
-
-    cli._print_setup_summary(workspace, 9443)
-
-    out = capsys.readouterr().out
-    # Windows writes the user PATH, which the terminal that ran it cannot see,
-    # so the note has to sit directly under the line it is about.
-    assert "  LINE\n  NOTE" in out
-
-
-def test_setup_summary_prints_no_note_without_a_hint(
+def test_setup_summary_prints_no_path_line_without_a_hint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -1483,15 +1451,11 @@ def test_setup_summary_prints_no_note_without_a_hint(
     token_path.parent.mkdir(parents=True)
     token_path.write_text("tok\n", encoding="utf-8")
     monkeypatch.setattr(cli, "_path_export_hint", lambda: None)
-    monkeypatch.setattr(cli, "path_hint_note", lambda: "NOTE")
 
     cli._print_setup_summary(workspace, 9443)
 
     out = capsys.readouterr().out
-    # Nothing was added to PATH, so there is no change to wait for: the note
-    # must not hang on its own.
     assert "PATH" not in out
-    assert "NOTE" not in out
 
 
 def test_setup_url_rotates_token_by_default(tmp_path: Path, capsys) -> None:
@@ -1591,7 +1555,7 @@ def test_auth_print_only_outputs_terminal_command(capsys) -> None:
 
 
 def test_auth_print_only_opencode_does_not_require_installation(monkeypatch, capsys) -> None:
-    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda: None)
+    monkeypatch.setattr("ciao.opencode_cli.resolve_opencode_binary", lambda: None)
 
     assert cli.main(["auth", "opencode", "--print-only"]) == 0
 
@@ -1604,12 +1568,9 @@ def test_auth_rejects_a_non_runtime_provider(capsys) -> None:
         cli.main(["auth", "ollama", "--print-only"])
 
 
-def test_auth_claude_uses_bundled_cli(monkeypatch) -> None:
+def test_auth_claude_uses_the_resolved_cli(monkeypatch) -> None:
     calls: list[list[str]] = []
-    monkeypatch.setattr(
-        "ciao.providers.claude.get_bundled_claude_path",
-        lambda: "/opt/ciao/claude",
-    )
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "/opt/ciao/claude")
     monkeypatch.setattr(
         cli.subprocess,
         "run",
@@ -1697,24 +1658,6 @@ def test_create_chat_command_uses_active_workspace_without_name_clamp(
     assert "Workspace: client" in capsys.readouterr().out
 
 
-
-
-def test_desktop_uninstall_reports_when_nothing_is_installed(
-    tmp_path: Path, capsys
-) -> None:
-    assert cli.main(["desktop", "uninstall", "--app-dir", str(tmp_path)]) == 0
-    assert "Nothing to remove" in capsys.readouterr().out
-
-
-def test_desktop_uninstall_json_reports_a_refusal(tmp_path: Path, capsys) -> None:
-    pwa = tmp_path / "Ciaobot.app" / "Contents" / "MacOS"
-    pwa.mkdir(parents=True)
-    (pwa / "app_mode_loader").write_text("chrome pwa", encoding="utf-8")
-
-    assert cli.main(["desktop", "uninstall", "--app-dir", str(tmp_path), "--json"]) == 1
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is False
-    assert "not the Ciaobot desktop app" in payload["error"]
 
 
 def test_setup_does_not_download_or_install_the_desktop_app(
@@ -4136,6 +4079,63 @@ def test_an_unattended_run_cannot_file_create_or_settle_through_the_cli(
     assert all(row["lifecycle"] == "pending" for row in rows)
 
 
+def test_uncertain_state_cli_preflight_refuses_before_draft_actions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import upstream_drafts
+    from ciao.curation_run import state_path
+
+    reached: list[str] = []
+    monkeypatch.setattr(
+        upstream_drafts, "create_issue", lambda **_kwargs: reached.append("create")
+    )
+    monkeypatch.setattr(
+        upstream_drafts,
+        "search_existing_issues",
+        lambda **_kwargs: reached.append("search"),
+    )
+    workspace = _draft_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    config = _workspace_config(workspace)
+    stock = json.loads(_run_draft_add(capsys, _draft_payload(tmp_path)))["id"]
+    new = json.loads(
+        _run_draft_add(
+            capsys,
+            _draft_payload(
+                tmp_path,
+                target="new_skill",
+                skill="invoice-recon",
+                body="",
+                change="Create skills/invoice-recon with a trigger and one step.",
+            ),
+        )
+    )["id"]
+    content = tmp_path / "SKILL.md"
+    content.write_text("---\nname: invoice-recon\n---\n\nOne step.\n", encoding="utf-8")
+    path = state_path(Path(config.workspace_vault_root("personal")))
+    path.write_text('{"version":', encoding="utf-8")
+    before = path.read_bytes()
+
+    assert cli.main(["skill-draft-approve", stock, "--json"]) == cli.UNATTENDED_REFUSED_EXIT
+    assert "uncertain" in capsys.readouterr().err
+    assert cli.main(
+        ["skill-draft-approve", new, "--content-file", str(content), "--json"]
+    ) == cli.UNATTENDED_REFUSED_EXIT
+    assert "uncertain" in capsys.readouterr().err
+    assert cli.main(["skill-draft-reject", new, "--reason", "no"]) == cli.UNATTENDED_REFUSED_EXIT
+    assert "uncertain" in capsys.readouterr().err
+
+    assert reached == []
+    assert not (workspace / "skills" / "invoice-recon").exists()
+    assert path.read_bytes() == before
+    assert cli.main(["skill-drafts", "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)["drafts"]
+    assert sorted(row["id"] for row in rows) == sorted([stock, new])
+    assert all(row["lifecycle"] == "pending" for row in rows)
+
+
 
 def _workspace_config(root: Path):
     """The config the CLI itself would build for ``root``, for a direct assertion."""
@@ -4279,6 +4279,137 @@ def _stale_fact_note(vault: Path) -> Path:
     return note
 
 
+def test_curation_plan_retains_discovery_but_budgets_only_remaining_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import curation_run as cr
+
+    root, vault = _registered_install(tmp_path)
+    (vault / cr.CURATION_LOG_RELATIVE).write_text(
+        f"---\nlast_full_pass: {date.today().isoformat()}\n---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+    completed = "synthetic:completed"
+    pending_a = "synthetic:pending-a"
+    pending_b = "synthetic:pending-b"
+    cr._store(cr.state_path(vault), cr.CurationState(done_keys={completed: "2026-11-15"}))
+    state_path = cr.state_path(vault)
+    log_path = vault / cr.CURATION_LOG_RELATIVE
+    before_state, before_log = state_path.read_bytes(), log_path.read_bytes()
+    original_load = cr.load_state
+    loads = 0
+
+    def count_loads(vault_root: Path):
+        nonlocal loads
+        loads += 1
+        return original_load(vault_root)
+
+    monkeypatch.setattr(cr, "load_state", count_loads)
+    category_items = (
+        cr.WorklistItem(
+            "synthetic",
+            "Synthetic pass",
+            "three discovered keys",
+            (completed, pending_a, pending_b),
+        ),
+    )
+
+    result = cli._curation_plan(
+        _curation_args(max_items=1),
+        category_items=category_items,
+        category_generation_attempted=True,
+    )
+
+    assert loads == 1
+    synthetic_discovered = next(
+        item for item in result.discovered.items if item.pass_id == "synthetic"
+    )
+    synthetic_remaining = next(
+        item for item in result.remaining.items if item.pass_id == "synthetic"
+    )
+    assert synthetic_discovered.keys == (completed, pending_a, pending_b)
+    assert synthetic_remaining.keys == (pending_a, pending_b)
+    assert [
+        (item["pass"], item["keys"]) for item in result.payload["planned"]
+    ] == [("synthetic", [pending_a])]
+    assert [
+        (item["pass"], item["keys"]) for item in result.payload["deferred"]
+    ] == [("synthetic", [pending_b])]
+    assert result.payload["remaining_observed_count"] == 2
+    assert result.payload["counts_complete"] is False
+    assert "discovered" not in result.payload
+    assert completed not in json.dumps(result.payload)
+    assert state_path.read_bytes() == before_state
+    assert log_path.read_bytes() == before_log
+
+
+def test_curation_end_prunes_only_remaining_keys_and_forwards_run_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import curation_run as cr
+
+    root, vault = _registered_install(tmp_path)
+    _stale_fact_note(vault)
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+    lease = cr.begin_run(vault, holder="nightly")
+    discovered = cr.Worklist(
+        (cr.WorklistItem("synthetic", "Synthetic", "found", ("done", "keep-a", "keep-b")),),
+        False,
+        "",
+        "now",
+    )
+    remaining = cr.Worklist(
+        (cr.WorklistItem("synthetic", "Synthetic", "found", ("keep-a", "keep-b")),),
+        False,
+        "",
+        "now",
+    )
+    payload = {
+        "deferred_count": 2,
+        "remaining_observed_count": 2,
+        "coverage_notes": ["incomplete"],
+    }
+    monkeypatch.setattr(
+        cli,
+        "_curation_plan",
+        lambda _args: cli._CurationPlanningResult(payload, discovered, remaining),
+    )
+    seen: dict[str, Any] = {}
+
+    def end_spy(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
+        seen.update(kwargs)
+        return {"full_pass_advanced": False}
+
+    monkeypatch.setattr(cr, "end_run", end_spy)
+
+    assert cli._curation_end_command(
+        _curation_args(
+            holder=lease.holder,
+            status="ok",
+            planned=7,
+            completed=5,
+            reason=["reported reason"],
+            json=True,
+        )
+    ) == 0
+
+    assert seen == {
+        "holder": lease.holder,
+        "status": "ok",
+        "planned": 7,
+        "completed": 5,
+        "deferred": 2,
+        "reasons": ["reported reason"],
+        "live_keys": frozenset({"keep-a", "keep-b"}),
+        "advance_marker": True,
+    }
+
+
 def test_the_curation_workspace_name_is_the_registry_s_not_the_directory_s(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4307,7 +4438,8 @@ def test_the_curation_workspace_name_is_the_registry_s_not_the_directory_s(
     assert name != resolved.name, "the directory's name is the guess this replaces"
     # And the plan it produces is keyed on identities minted under that name —
     # the one a managed `entry verify` call can actually resolve.
-    payload, _worklist = cli._curation_plan(_curation_args())
+    result = cli._curation_plan(_curation_args())
+    payload = result.payload
     entries = [
         item for item in payload["items"] if item["pass"] == "stale_entry"
     ]
@@ -4366,7 +4498,8 @@ def test_a_rerooted_curation_plan_reads_the_workspace_guide_not_the_install_root
 
     assert name == "personal"
     assert guide == root / "personal" / "AGENTS.md"
-    payload, _worklist = cli._curation_plan(_curation_args())
+    result = cli._curation_plan(_curation_args())
+    payload = result.payload
     assert any(item["pass"] == "regions" for item in payload["items"]), payload["items"]
 
 
@@ -4647,7 +4780,8 @@ def test_curation_plan_with_a_per_root_vault_root_folds_under_the_owner(
 
     monkeypatch.setattr(cli, "_curation_config", _spy)
 
-    payload, _worklist = cli._curation_plan(_curation_args(vault_root=str(vault)))
+    result = cli._curation_plan(_curation_args(vault_root=str(vault)))
+    payload = result.payload
 
     # Fails first on the unfixed code, so the identity check below is only
     # reached once the plan is known to have been keyed by the owner.
@@ -4695,7 +4829,8 @@ def test_a_run_with_no_registered_name_plans_no_entries_and_says_so(
     )
 
     assert name is None, "there is no registry to ask and no --vault-root to read"
-    payload, _worklist = cli._curation_plan(_curation_args())
+    result = cli._curation_plan(_curation_args())
+    payload = result.payload
     assert [i for i in payload["items"] if i["pass"] == "stale_entry"] == []
     assert any("stale-entry pass was not planned" in n for n in payload["notes"]), (
         payload["notes"]
@@ -4712,7 +4847,6 @@ def test_a_run_with_no_registered_name_plans_no_entries_and_says_so(
     assert entry.verified == date(2024, 1, 5)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
 def test_rotate_setup_token_writes_an_owner_only_file(tmp_path):
     from ciao.os_support.private import is_private
 
@@ -4742,7 +4876,6 @@ def test_setup_url_reports_a_token_create_race_without_a_traceback(
     assert "setup token" in err
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
 def test_ensure_setup_token_tightens_an_older_world_readable_file(tmp_path: Path) -> None:
     from ciao.os_support.private import is_private
 
@@ -4755,7 +4888,6 @@ def test_ensure_setup_token_tightens_an_older_world_readable_file(tmp_path: Path
     assert is_private(token_path)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="renders a macOS hosted plist")
 def test_setup_command_prints_the_macos_access_note(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4847,3 +4979,424 @@ def test_curation_plan_text_prints_the_handover_line(
 
     assert rc == 0
     assert "Handover: all" in capsys.readouterr().out
+
+
+def test_cli_root_version_prints_version_without_side_effects(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import ciao
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    assert cli.main(["--version"]) == 0
+    assert capsys.readouterr().out == f"ciao {ciao.__version__}\n"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cli_root_version_module_entry(tmp_path: Path) -> None:
+    import os
+    import subprocess
+    import sys
+
+    import ciao
+
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-m", "ciao", "--version"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONPATH": str(root), "HOME": str(tmp_path), "USERPROFILE": str(tmp_path)},
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"ciao {ciao.__version__}\n"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cli_version_flag_after_subcommand_keeps_routing(monkeypatch: pytest.MonkeyPatch) -> None:
+    gws: list[list[str]] = []
+    rel: list[list[str]] = []
+    monkeypatch.setattr(cli.gws_wrapper, "main", lambda argv: gws.append(argv) or 0)
+    monkeypatch.setattr(cli.release, "main", lambda argv: rel.append(argv) or 0)
+
+    assert cli.main(["gws", "--version"]) == 0
+    assert cli.main(["prepare-release", "--version", "1.2.3"]) == 0
+    assert gws == [["--version"]]
+    assert rel == [["--version", "1.2.3"]]
+
+
+# ── curation-log-append (#3101, A1) ───────────────────────────────────────
+
+
+def _append_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    vault = tmp_path / "vault"
+    (vault / "Workspace").mkdir(parents=True)
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path / "ws"))
+    monkeypatch.delenv("CIAO_ACTIVE_WORKSPACE", raising=False)
+    return vault
+
+
+def _append(vault: Path, *extra: str, holder: str, text: bytes, tmp_path: Path) -> int:
+    body = tmp_path / "report.md"
+    body.write_bytes(text)
+    argv = ["curation-log-append", "--vault-root", str(vault), "--log", "curation", "--text-file", str(body), "--json"]
+    if holder:
+        argv += ["--holder", holder]
+    return cli.main([*argv, *extra])
+
+
+def test_curation_log_append_help_warns_that_a_retry_can_duplicate(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["curation-log-append", "--help"])
+    assert raised.value.code == 0
+    assert "duplicate" in capsys.readouterr().out
+
+
+def test_curation_log_append_requires_holder_as_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _append_install(tmp_path, monkeypatch)
+    body = tmp_path / "report.md"
+    body.write_bytes(b"x")
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["curation-log-append", "--vault-root", str(vault), "--log", "curation", "--text-file", str(body)])
+    assert raised.value.code == 2
+
+
+def test_curation_log_append_success_prints_the_bounded_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    lease = cr.begin_run(vault, holder="nightly")
+    capsys.readouterr()
+
+    assert _append(vault, holder=lease.holder, text=b"report body", tmp_path=tmp_path) == 0
+
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"status": "appended", "log": "curation", "bytes_appended": 2 + len(b"report body")}
+
+
+def test_curation_log_append_lost_lease_exits_75_and_prints_no_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    cr.begin_run(vault, holder="nightly")
+    capsys.readouterr()
+
+    assert _append(vault, holder="someone-else", text=b"SECRET-PAYLOAD", tmp_path=tmp_path) == 75
+    captured = capsys.readouterr()
+    assert "appended" not in captured.out
+    assert "SECRET-PAYLOAD" not in captured.err
+    assert not (vault / "Workspace" / "Curation-Log.md").exists()
+
+
+def test_curation_log_append_refuses_an_empty_payload_with_exit_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    lease = cr.begin_run(vault, holder="nightly")
+
+    assert _append(vault, holder=lease.holder, text=b"", tmp_path=tmp_path) == 2
+    assert not (vault / "Workspace" / "Curation-Log.md").exists()
+
+
+def test_curation_log_append_refuses_a_symlinked_log_with_exit_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    target = tmp_path / "elsewhere.md"
+    target.write_text("keep", encoding="utf-8")
+    (vault / "Workspace" / "Curation-Log.md").symlink_to(target)
+    lease = cr.begin_run(vault, holder="nightly")
+    capsys.readouterr()
+
+    assert _append(vault, holder=lease.holder, text=b"x", tmp_path=tmp_path) == 1
+    assert target.read_text(encoding="utf-8") == "keep"
+    assert "appended" not in capsys.readouterr().out
+
+
+def test_curation_plan_reports_oversized_logs_as_blocked_without_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+
+    vault = _append_install(tmp_path, monkeypatch)
+    (vault / "Workspace" / "Curation-Log.md").write_bytes(b"x" * (64 * 1024 + 1))
+    capsys.readouterr()
+
+    rc = cli.main(["curation-plan", "--vault-root", str(vault), "--json"])
+    captured = capsys.readouterr()
+    assert rc == 0, captured.err
+
+    payload = json.loads(captured.out)
+    assert payload["blocked_count"] == 1
+    assert payload["blocked_passes"] == ["logs"]
+    assert all(item["pass"] != "logs" for item in payload["planned"])
+    assert payload["planned_count"] + payload["deferred_count"] == payload["remaining_observed_count"]
+    blocked = [item for item in payload["deferred"] if item["pass"] == "logs"]
+    assert len(blocked) == 1
+    assert "operator archival required" in blocked[0]["reason"]
+
+
+# ── Round 2: report-file safety, backstops, warnings, lifecycle (#3101) ──
+
+
+@pytest.mark.parametrize("kind", ["fifo", "symlink", "directory"])
+def test_curation_log_append_refuses_a_non_regular_report_file_with_exit_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    import signal
+
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    lease = cr.begin_run(vault, holder="nightly")
+    target = tmp_path / "report.md"
+    if kind == "fifo":
+        os.mkfifo(target)
+    elif kind == "symlink":
+        real = tmp_path / "real.md"
+        real.write_text("x", encoding="utf-8")
+        target.symlink_to(real)
+    else:
+        target.mkdir()
+
+    def give_up(signum: int, frame: object) -> None:
+        raise TimeoutError("the report file open blocked")
+
+    previous = signal.signal(signal.SIGALRM, give_up)
+    signal.alarm(10)
+    try:
+        code = cli.main(
+            ["curation-log-append", "--vault-root", str(vault), "--log", "curation",
+             "--text-file", str(target), "--holder", lease.holder]
+        )
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    assert code == 2
+    assert not (vault / "Workspace" / "Curation-Log.md").exists()
+
+
+def test_curation_log_append_checks_the_lease_before_opening_the_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    cr.begin_run(vault, holder="nightly")
+    fifo = tmp_path / "report.md"
+    os.mkfifo(fifo)
+    capsys.readouterr()
+
+    code = cli.main(
+        ["curation-log-append", "--vault-root", str(vault), "--log", "curation",
+         "--text-file", str(fifo), "--holder", "someone-else"]
+    )
+    assert code == 75
+
+
+def test_an_unexpected_os_error_in_the_append_handler_is_a_bounded_exit_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    lease = cr.begin_run(vault, holder="nightly")
+    body = tmp_path / "report.md"
+    body.write_bytes(b"report")
+
+    def broken(*args: object, **kwargs: object) -> dict[str, object]:
+        raise OSError(28, f"No space left on device {tmp_path}")
+
+    monkeypatch.setattr(cr, "append_log", broken)
+    capsys.readouterr()
+    code = cli.main(
+        ["curation-log-append", "--vault-root", str(vault), "--log", "curation",
+         "--text-file", str(body), "--holder", lease.holder]
+    )
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "Traceback" not in captured.err and str(tmp_path) not in captured.err
+
+
+def test_blocked_oversized_logs_print_a_warning_line_in_text_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from datetime import UTC, datetime
+
+    vault = _append_install(tmp_path, monkeypatch)
+    today = datetime.now(UTC).date().isoformat()
+    head = f"---\nlast_full_pass: {today}\n---\n\n# Curation log\n".encode()
+    (vault / "Workspace" / "Curation-Log.md").write_bytes(head + b"x" * (64 * 1024))
+    capsys.readouterr()
+
+    assert cli.main(["curation-plan", "--vault-root", str(vault)]) == 0
+    out = capsys.readouterr().out
+    assert "WARNING: 1 oversized log item(s) are blocked" in out
+
+
+def test_deferred_skill_proposals_get_one_aggregate_line_in_text_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from datetime import UTC, datetime
+
+    vault = _append_install(tmp_path, monkeypatch)
+    today = datetime.now(UTC).date().isoformat()
+    (vault / "Workspace" / "Curation-Log.md").write_bytes(
+        f"---\nlast_full_pass: {today}\n---\n\n# Curation log\n".encode()
+    )
+    queue = vault / "Workspace" / "Skill-Proposals"
+    queue.mkdir()
+    for name in ("alpha.md", "bravo.md", "charlie.md"):
+        (queue / name).write_text("x", encoding="utf-8")
+    capsys.readouterr()
+
+    assert cli.main(["curation-plan", "--vault-root", str(vault), "--max-items", "1"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("skill proposal(s) deferred to a later run") == 1
+    assert "2 skill proposal(s) deferred" in out
+    assert "bravo.md" not in out and "charlie.md" not in out
+
+
+def _night(vault: Path, capsys: pytest.CaptureFixture[str]) -> dict[str, object]:
+    import json
+
+    capsys.readouterr()
+    assert cli.main(["curation-begin", "--vault-root", str(vault), "--json"]) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_blocked_only_nights_discover_the_same_overdue_log_and_record_no_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from datetime import UTC, datetime
+
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    today = datetime.now(UTC).date().isoformat()
+    log = vault / "Workspace" / "Curation-Log.md"
+    log.write_bytes(f"---\nlast_full_pass: {today}\n---\n\n# Curation log\n".encode() + b"x" * (64 * 1024))
+    before = log.read_bytes()
+
+    for _night_number in range(2):
+        payload = _night(vault, capsys)
+        assert payload["empty"] is False
+        assert payload["blocked_count"] == 1
+        assert payload["planned_count"] == 0
+        holder = payload["lease"]["holder"]
+        assert cli.main(
+            ["curation-end", "--vault-root", str(vault), "--holder", holder, "--status", "ok",
+             "--planned", "0", "--completed", "0", "--json"]
+        ) == 0
+        assert log.read_bytes() == before
+    assert "logs" not in cr.load_state(vault).done_keys
+
+
+def test_operator_archival_removes_the_overdue_item_without_a_progress_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from datetime import UTC, datetime
+
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    today = datetime.now(UTC).date().isoformat()
+    log = vault / "Workspace" / "Curation-Log.md"
+    log.write_bytes(f"---\nlast_full_pass: {today}\n---\n\n# Curation log\n".encode() + b"x" * (64 * 1024))
+    payload = _night(vault, capsys)
+    assert payload["blocked_count"] == 1
+    assert cli.main(
+        ["curation-end", "--vault-root", str(vault), "--holder", payload["lease"]["holder"],
+         "--status", "ok", "--json"]
+    ) == 0
+
+    # The operator archives the log by hand; the live file is now small.
+    log.write_bytes(f"---\nlast_full_pass: {today}\n---\n\n# Curation log\nfresh\n".encode())
+    payload = _night(vault, capsys)
+    assert payload["blocked_count"] == 0
+    assert payload["empty"] is True
+    assert "logs" not in cr.load_state(vault).done_keys
+
+
+def test_one_combined_lifecycle_begin_append_progress_end_through_the_real_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+    from datetime import UTC, datetime
+
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    payload = _night(vault, capsys)
+    assert payload["empty"] is False
+    holder = payload["lease"]["holder"]
+    planned_keys = {key for item in payload["planned"] for key in item["keys"]}
+    assert {cr.HYGIENE_INDEX_KEY, cr.HYGIENE_AUDIT_KEY} <= planned_keys
+
+    report = tmp_path / "report.md"
+    report.write_text("## Pass report\nhygiene checked\n", encoding="utf-8")
+    assert cli.main(
+        ["curation-log-append", "--vault-root", str(vault), "--log", "curation",
+         "--text-file", str(report), "--holder", holder]
+    ) == 0
+    capsys.readouterr()
+
+    assert cli.main(
+        ["curation-progress", "--vault-root", str(vault), "--holder", holder,
+         "--key", cr.HYGIENE_INDEX_KEY, "--key", cr.HYGIENE_AUDIT_KEY]
+    ) == 0
+    capsys.readouterr()
+    assert cli.main(
+        ["curation-end", "--vault-root", str(vault), "--holder", holder, "--status", "ok",
+         "--planned", "2", "--completed", "2", "--json"]
+    ) == 0
+    summary = json.loads(capsys.readouterr().out)
+
+    assert summary["full_pass_advanced"] is True
+    assert summary["status"] == "ok"
+    log_text = (vault / "Workspace" / "Curation-Log.md").read_text(encoding="utf-8")
+    assert "hygiene checked" in log_text
+    assert f"last_full_pass: {datetime.now(UTC).date().isoformat()}" in log_text
+    assert cr.load_state(vault).lease == {}
+
+
+def test_curation_end_with_a_refused_marker_releases_the_lease_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    lease = cr.begin_run(vault, holder="nightly")
+    cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS), holder=lease.holder)
+    (vault / "Workspace" / "Curation-Log.md").write_bytes(
+        b"---\nlast_full_pass: 2026-09-01\nlast_full_pass: 2026-09-02\n---\n\n# Curation log\n"
+    )
+    capsys.readouterr()
+
+    code = cli.main(
+        ["curation-end", "--vault-root", str(vault), "--holder", lease.holder,
+         "--status", "ok", "--planned", "1", "--completed", "1", "--json"]
+    )
+    summary = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert summary["full_pass_advanced"] is False
+    assert summary["status"] == "failed"
+    assert cr.load_state(vault).lease == {}

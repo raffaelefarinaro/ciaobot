@@ -1,8 +1,7 @@
 """The "background runs finished" notice text for provider-native work.
 
-Shared by the OpenCode shell wake and the transcript's notice for finished
-shells, so the two cannot drift from the frontend parser
-(``parseInjectedPrompt``).
+Used by the transcript's notice for finished shells, so it cannot drift from the
+frontend parser (``parseInjectedPrompt``).
 """
 
 from __future__ import annotations
@@ -11,15 +10,16 @@ from typing import Any
 
 from ciao.prompt_fence import fence
 
+# Verdict of a run whose exit status the engine cannot know (a background shell).
+UNKNOWN_VERDICT = "exit status unknown"
+
 
 def format_finished_runs(
     entries: list[dict[str, Any]], *, tail_lines: int
 ) -> tuple[str, bool]:
     """Header and per-run blocks of a "background runs finished" notice.
 
-    Returns ``(text, any_failed)``. Shared by the OpenCode shell wake and
-    the transcript's notice for provider-native shells, so the two cannot
-    drift from the frontend parser (``parseInjectedPrompt``).
+    Returns ``(text, any_failed)``, the format ``parseInjectedPrompt`` reads.
     """
     lines = [
         f"[Ciaobot] {len(entries)} background run"
@@ -32,6 +32,9 @@ def format_finished_runs(
             verdict = "ok"
         elif status == "cancelled":
             verdict = "CANCELLED"
+        elif status == "unknown":
+            # A background shell's exit status is not on the wire: it is not a failure.
+            verdict = UNKNOWN_VERDICT
         else:
             verdict = "FAILED"
             any_failed = True

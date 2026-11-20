@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
+import os
 import re
+import subprocess
+import sys
+import tempfile
+import urllib.request
 
 from ciao.os_support.limits import SERVER_NOFILE_TARGET
 from ciao.os_support.tool_path import dedupe_path
@@ -13,6 +20,8 @@ from ciao.os_support.tool_path import dedupe_path
 # Where docs/LINUX.md installs the unit, and the only owner whose copy is trusted.
 UNIT_PATH = Path("/etc/systemd/system/ciaobot.service")
 TRUSTED_UNIT_UID = 0
+# The stamped installer of the newest stable release (scripts/install.sh).
+LATEST_INSTALLER_URL = "https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh"
 
 
 def _unquote(value: str) -> str:
@@ -97,3 +106,192 @@ def render_service(*, workspace: Path, user: str, home: Path, python: Path) -> s
         python=_quoted(str(python)).replace("$", "$$"),
         nofile=SERVER_NOFILE_TARGET,
     )
+
+
+INSTALL_SCRIPT = (  # constant: no user data is ever interpolated; the unit arrives on stdin
+    'umask 022; stage=$(mktemp -d) || exit 1; '
+    'cat > "$stage/ciaobot.service" && '
+    'systemd-analyze verify "$stage/ciaobot.service" && '
+    'install -m 644 "$stage/ciaobot.service" /etc/systemd/system/ciaobot.service; '
+    'rc=$?; rm -rf "$stage"; exit $rc'
+)
+
+
+class UnitConflict(ValueError):
+    """An existing unit runs another interpreter (a source install)."""
+
+
+@dataclass(frozen=True)
+class ServicePlan:
+    """The rendered unit and the privileged commands that install it."""
+
+    unit: str
+    commands: tuple[tuple[tuple[str, ...], str | None], ...]  # (argv, stdin)
+
+
+def _first_exec_token(value: str) -> str | None:
+    """The value's first ExecStart token, keeping a quoted token whole."""
+    if value.startswith('"'):
+        escaped = False
+        for index, char in enumerate(value[1:], start=1):
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                return value[: index + 1]
+        return None
+    return next(iter(value.split()), None)
+
+
+def installed_unit_python(path: Path = UNIT_PATH) -> Path | None:
+    """The interpreter in the unit's ExecStart (first token, `_unquote`d, `$$`→`$`), or None."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    for line in text.splitlines():
+        key, sep, value = line.strip().partition("=")
+        if not sep or key.strip() != "ExecStart":
+            continue
+        token = _first_exec_token(value.strip())
+        if token is None:
+            return None
+        return Path(_unquote(token).replace("$$", "$"))
+    return None
+
+
+def _unit_user(path: Path) -> str | None:
+    """The last ``User=`` assignment in the unit, ``None`` when unreadable."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    found: str | None = None
+    for line in text.splitlines():
+        key, sep, value = line.strip().partition("=")
+        if not sep or key.strip() != "User":
+            continue
+        found = _unquote(value.strip())
+    return found
+
+
+def _existing_unit(path: Path) -> bool:
+    """Whether ``path`` names anything, counting a dangling symlink.
+
+    ``Path.exists`` follows the link and answers False when it dangles, but a
+    link sitting at the unit path still blocks a fresh install, so this probes
+    the link itself (``lstat`` never follows symlinks). A permission failure is
+    not "absent": refusing beats planning an install this account cannot inspect.
+    """
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except PermissionError as exc:
+        raise ValueError(
+            f"Cannot check {path}: permission denied. Refusing to install over a "
+            "unit this account cannot inspect."
+        ) from exc
+    return True
+
+
+def _readable(value: object) -> str:
+    """A conflict message's rendering of a recorded value that may be unreadable."""
+    return "nothing readable" if value is None else str(value)
+
+
+def plan_install(*, workspace: Path, user: str, home: Path, python: Path,
+                 replace: bool = False, start: bool = True,
+                 unit_path: Path = UNIT_PATH) -> ServicePlan:
+    """Render the unit for the invoking account and plan its privileged install.
+
+    Raises :class:`UnitConflict` when ``unit_path`` exists, ``replace`` is not
+    set, and the existing unit is not what this install would write: either its
+    ``ExecStart`` interpreter is not this env's ``python`` (a source install),
+    or, with the same interpreter, it records a different ``CIAO_WORKSPACE`` or
+    ``User``. Taking such a unit over silently would strand an install people
+    already have (#3131 D3).
+    """
+    unit = render_service(workspace=workspace, user=user, home=home, python=python)
+    if _existing_unit(unit_path) and not replace:
+        installed = installed_unit_python(unit_path)
+        if installed != python:
+            shown = str(installed) if installed else "an interpreter that cannot be read"
+            raise UnitConflict(
+                f"{unit_path} exists and runs Ciaobot with {shown}, but this "
+                f"install runs {python}: that unit belongs to a source install, "
+                "and installing over it would break that install. See "
+                "docs/LINUX.md#existing-source-installs, or pass --replace to "
+                "take the unit over."
+            )
+        recorded_workspace = unit_workspace(unit_path)
+        recorded_user = _unit_user(unit_path)
+        differences: list[str] = []
+        if recorded_workspace != workspace:
+            differences.append(
+                f"its CIAO_WORKSPACE is {_readable(recorded_workspace)} but this "
+                f"install would write CIAO_WORKSPACE={workspace}"
+            )
+        if recorded_user != user:
+            differences.append(
+                f"its User is {_readable(recorded_user)} but this install would "
+                f"write User={user}"
+            )
+        if differences:
+            raise UnitConflict(
+                f"{unit_path} exists and already runs {python}, but "
+                + "; ".join(differences)
+                + ". Installing over it would repoint that install. See "
+                "docs/LINUX.md#existing-source-installs, or pass --replace to "
+                "take the unit over."
+            )
+    commands: list[tuple[tuple[str, ...], str | None]] = [
+        (("sudo", "sh", "-c", INSTALL_SCRIPT), unit),
+        (("sudo", "systemctl", "daemon-reload"), None),
+        (("sudo", "systemctl", "enable", "ciaobot.service"), None),
+    ]
+    if start:
+        commands.append((("sudo", "systemctl", "restart", "ciaobot.service"), None))
+    return ServicePlan(unit=unit, commands=tuple(commands))
+
+
+def run_plan(plan: ServicePlan, *, run: Callable[[Sequence[str], str | None], None]) -> None:
+    """Run the plan's commands in order; ``run`` receives ``(argv, stdin)``."""
+    for argv, stdin in plan.commands:
+        run(argv, stdin)
+
+
+def _download(url: str, dest: Path) -> None:
+    """Fetch ``url`` into ``dest``. Only https is accepted, as in the installer itself."""
+    if not url.startswith("https://"):
+        raise ValueError(f"refusing to fetch a non-https installer: {url}")
+    with urllib.request.urlopen(url, timeout=60) as response:
+        dest.write_bytes(response.read())
+
+
+def _run(argv: Sequence[str]) -> int:
+    return subprocess.call(list(argv))
+
+
+def run_update(
+    argv: Sequence[str],
+    *,
+    fetch: Callable[[str, Path], None] = _download,
+    run: Callable[[Sequence[str]], int] = _run,
+) -> int:
+    """Update a Linux install by re-running the latest stamped installer as this account.
+
+    The installer is the update: it re-downloads the release wheel, checks it
+    against the digest stamped into the script, refreshes the uv tool env and
+    re-installs the unit. ``argv`` (for example ``--no-service``) is passed
+    through to it. The child's exit status is the answer.
+    """
+    with tempfile.TemporaryDirectory(prefix="ciaobot-update-") as tmp:
+        script = Path(tmp) / "install.sh"
+        try:
+            fetch(LATEST_INSTALLER_URL, script)
+        except (OSError, ValueError) as exc:
+            print(f"ciao update: could not download the installer: {exc}", file=sys.stderr)
+            return 1
+        return run(["sh", str(script), *argv])

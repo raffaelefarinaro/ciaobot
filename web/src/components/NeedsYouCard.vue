@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * A needs-you card: something this chat is blocked on until the user acts
- * (for now, signing in to an MCP server that needs OAuth).
+ * (a device-code or Google sign-in, a command to run, a setting to change).
  *
  * The engine owns the action and sends it; the card holds a copy and is keyed
  * by the action id in ChatPanel, so a replaced action is a new card. The card
@@ -13,7 +13,7 @@ import ActivityGlyph from './ActivityGlyph.vue'
 import AppIcon from './AppIcon.vue'
 import { NEEDS_YOU_BODIES, NEEDS_YOU_ICONS } from './needs-you/registry'
 import { actionCopy } from '../lib/chatActions'
-import { shouldRestoreFocus } from '../lib/moveToBackground'
+import { shouldRestoreFocus } from '../lib/focusRestore'
 import { useProjectStore } from '../stores/projects'
 import type { ChatAction, ChatActionKind } from '../lib/types'
 

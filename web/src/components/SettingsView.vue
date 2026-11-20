@@ -1,33 +1,9 @@
 <template>
   <div class="settings-pane">
-    <!-- One overlay at a time. The package-update path owns it while it runs;
-         otherwise an in-flight engine update does, driven by its record rather
-         than by a timer, so it never claims progress nobody made. A settled
-         record is the card's business, not a full-screen takeover.
-
-         Only the applying half of an engine update gets it: that run takes the
-         engine down, so the overlay is the whole window and is modal — this is
-         its inert boundary, and `useModalFocus` below moves focus into the
-         overlay's status region, so Tab can no longer reach Restart or Deploy
-         underneath it, then hands focus back to the card once the record
-         settles. Staging is the card's own inline progress instead, because
-         nothing goes down while it runs. -->
-    <UpdateProgressView
-      v-if="packageUpdating"
-      :version="packageStatus?.latest_version"
-    />
-    <div
-      v-else-if="engineUpdateOverlayOpen"
-      ref="engineUpdateOverlay"
-      class="engine-update-overlay"
-    >
-      <UpdateProgressView
-        ref="engineUpdateOverlayView"
-        :version="engineUpdateVersion"
-        :phase="engineUpdateOperation?.phase"
-        :error="engineUpdateOperation?.error"
-      />
-    </div>
+    <!-- The package update's progress view. While `/api/package/update` runs
+         it is the whole window; a failed run returns to the card, and a
+         settled one hands over to the app-level restart notice. -->
+    <UpdateProgressView v-if="packageUpdating" :version="packageStatus?.latest_version" />
     <PaneHeader :page-tag="pageTag" @open-sidebar="emit('open-sidebar')" />
     <div ref="bodyEl" class="pane-body" @scroll.passive="onBodyScroll">
       <div class="page-grid settings-grid">
@@ -44,16 +20,11 @@
               <p class="section-title">Updates</p>
               <p v-if="!updatesCompact" class="hint">
                 <template v-if="packageStatus?.mode === 'bundled_app'">
-                  This app updates by re-running the one-line installer.
-                  <code>curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh</code>
-                </template>
-                <template v-else-if="packageStatus?.mode === 'installer' && engineUpdateEnabled">
-                  Installed with the Ciaobot engine installer. Updating downloads and verifies the release
-                  while Ciaobot keeps running, then restarts it once.
+                  Ciaobot for Mac updates this engine together with the app.
                 </template>
                 <template v-else-if="packageStatus?.mode === 'installer'">
-                  Installed with the Ciaobot engine installer. To update, run it again:
-                  <code>curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install-engine.sh | sh</code>
+                  This engine was installed by the old Ciaobot installer and no longer updates
+                  itself. Install Ciaobot for Mac to keep it up to date.
                 </template>
                 <template v-else>
                   Check the installed package version and upgrade this local app.
@@ -61,17 +32,22 @@
               </p>
             </div>
             <div v-if="packageStatus && !['bundled_app', 'installer'].includes(packageStatus.mode ?? '') && packageStatus.update_available" class="settings-card-header-actions">
+              <!-- Disabled only while a run is in flight: opening the panel must not
+                   disable the button that opened it, or focus falls to the body. -->
               <button
+                ref="updateTriggerEl"
                 class="btn-primary btn-small"
                 @click="openUpdatePanel"
-                :disabled="packageUpdating || showUpdatePanel"
+                :disabled="packageUpdating"
               >
                 {{ `Update to ${packageStatus.latest_version}` }}
               </button>
             </div>
             <!-- Nothing to do: the status sits in the corner as a badge. -->
-            <span v-else-if="updatesCompact" class="badge badge--success">Up to date<template v-if="packageStatus?.current_version"> · {{ packageStatus.current_version }}</template></span>
+            <span v-else-if="upToDate" class="badge badge--success">Up to date<template v-if="packageStatus?.current_version"> · {{ packageStatus.current_version }}</template></span>
           </div>
+          <!-- Inside Ciaobot for Mac the card leads with the app's own updater. -->
+          <SettingsMacUpdates v-if="desktopClient" />
           <SkeletonLoader v-if="packageLoading && !packageStatus" label="Checking package status" :count="2" />
           <div v-else-if="packageStatus">
             <div v-if="packageStatus.error" class="hint hint--warn hint--spaced">
@@ -111,187 +87,6 @@
             </div>
           </div>
 
-          <!-- The engine update job (#608). One distinct panel per record state,
-               every word of it read off the persisted operation; nothing here
-               invents progress. A sibling of the package block because it is
-               driven by a different route, and either may fail alone. -->
-          <div v-if="engineUpdateVisible" ref="engineUpdatePanel" class="settings-form-panel engine-update-panel" tabindex="-1">
-            <p class="section-title">Engine update</p>
-
-            <!-- A coordinator refusal that wrote no record of its own: a release
-                 lookup, a lock, an engine already on the target. Nothing will
-                 ever arrive on a poll for a run that left no record, so the
-                 card says why and offers the action the record allows. Text
-                 alone would be a dead end until the page reloaded. A refusal
-                 parked against an existing record answers here too: the served
-                 reason is always the newer one, because the parked reason is
-                 only served while the record it was parked against is
-                 unchanged. -->
-            <template v-if="updateStatus?.error">
-              <p class="hint hint--warn hint--spaced">{{ updateStatus.error }}</p>
-              <!-- Parking a reason changes nothing about the record it was
-                   parked against, so a rollback is still a rollback and the
-                   version it went back to is still the one now running. -->
-              <p v-if="engineUpdateRolledBack && engineUpdateOperation?.from_version" class="hint hint--spaced">
-                Back on v{{ engineUpdateOperation.from_version }}.
-              </p>
-              <div class="action-row settings-actions">
-                <!-- One action whatever the record is: `/api/update/start` applies
-                     a `staged` record itself and stages a terminal or absent one,
-                     so the panel never has to pick the half. The parked reason
-                     lives on the server, so a reload keeps it; the button is the
-                     way out of it. -->
-                <button
-                  class="btn-primary"
-                  @click="doEngineUpdate"
-                  :disabled="updateActionPending || updatePolling"
-                >
-                  {{ updateActionPending ? 'Updating…' : (packageStatus?.update_available || engineUpdateStage === 'staged' ? 'Update & restart' : 'Try again') }}
-                </button>
-              </div>
-            </template>
-
-            <!-- Staging runs while the engine keeps serving, so it is not a
-                 takeover: the same progress rows the overlay would carry, in
-                 the card, with the rest of the app usable and reachable. The
-                 poll keeps running, so this moves on its own. -->
-            <UpdateProgressView
-              v-else-if="engineUpdateStagingNow"
-              ref="engineUpdateInlineView"
-              inline
-              :version="engineUpdateVersion"
-              :phase="engineUpdateOperation?.phase"
-              :error="engineUpdateOperation?.error"
-            />
-
-            <!-- Applying: the engine is replacing itself and the connection is
-                 about to drop, so the full-window overlay above carries the rows
-                 and this only names the phase it is in. -->
-            <p v-else-if="engineUpdateBusy" class="hint hint--spaced">
-              {{ engineUpdatePhaseText }}<template v-if="engineUpdateOperation"> · v{{ engineUpdateOperation.to_version }}</template>
-            </p>
-
-            <!-- Staged is not a failure: a release left downloaded and verified
-                 (by an older engine, or a run whose apply refused). The same
-                 button applies it. -->
-            <template v-else-if="engineUpdateStage === 'staged'">
-              <p class="hint hint--spaced">
-                v{{ engineUpdateOperation?.to_version || packageStatus?.latest_version }} is downloaded and verified.
-                Updating restarts Ciaobot.
-              </p>
-              <div class="action-row settings-actions">
-                <button class="btn-primary" @click="doEngineUpdate" :disabled="updateActionPending || updatePolling">
-                  {{ updateActionPending ? 'Updating…' : 'Update & restart' }}
-                </button>
-              </div>
-            </template>
-
-            <!-- Applied, and still the newest release: the record stays on disk
-                 after a successful apply, so an engine that has updated once
-                 would answer every later release with "up to date" and never
-                 offer an update again. -->
-            <template v-else-if="engineUpdateStage === 'done' && !engineUpdateStaleApplied">
-              <p class="hint hint--spaced">ciaobot is up to date.</p>
-            </template>
-
-            <template v-else-if="engineUpdateFailed">
-              <p class="hint hint--warn hint--spaced">{{ engineUpdateFailureText }}</p>
-              <p v-if="engineUpdateRolledBack && engineUpdateOperation?.from_version" class="hint hint--spaced">
-                Back on v{{ engineUpdateOperation.from_version }}.
-              </p>
-              <div class="action-row settings-actions">
-                <button class="btn-primary" @click="doEngineUpdate" :disabled="updateActionPending || updatePolling">
-                  {{ updateActionPending ? 'Updating…' : (engineUpdateStage === 'rolled_back' ? 'Try again' : 'Retry') }}
-                </button>
-              </div>
-            </template>
-
-            <template v-else-if="packageStatus?.update_available">
-              <p class="hint hint--spaced">
-                v{{ packageStatus.latest_version }} is available. Ciaobot keeps running while it downloads,
-                then restarts once.
-              </p>
-              <div class="action-row settings-actions">
-                <button class="btn-primary" @click="doEngineUpdate" :disabled="updateActionPending || updatePolling">
-                  {{ updateActionPending ? 'Updating…' : 'Update & restart' }}
-                </button>
-              </div>
-            </template>
-          </div>
-
-          <!-- Automatic updates (#2240). The policy, the installed version and
-               the last attempt are the card's own business, so they stay on
-               screen when the engine is up to date: turning automatic updates
-               off is a decision about this install, not about one run. An
-               automatic claim closes admission exactly like a Settings restart,
-               so the restart overlay above is the only one this path shows. -->
-          <div v-if="autoUpdate" class="auto-update-panel">
-            <div class="settings-switch-row">
-              <div class="auto-update-copy">
-                <span class="auto-update-title">Automatic updates</span>
-                <span id="auto-update-detail" class="auto-update-detail">
-                  Install new releases on a schedule, then restart Ciaobot once.
-                </span>
-              </div>
-              <button
-                type="button"
-                class="settings-switch"
-                role="switch"
-                :aria-checked="autoUpdateOn ? 'true' : 'false'"
-                aria-label="Automatic updates"
-                :aria-describedby="autoUpdateSupported ? 'auto-update-detail' : 'auto-update-detail auto-update-unsupported'"
-                :disabled="!autoUpdateSupported || autoUpdateWritePending"
-                @click="toggleAutoUpdate"
-              >
-                <span class="switch-word">{{ autoUpdateOn ? 'On' : 'Off' }}</span>
-                <span class="switch-track" aria-hidden="true"></span>
-              </button>
-            </div>
-
-            <p class="auto-update-meta">
-              Installed version
-              <span class="auto-update-version">{{ installedVersion || 'unknown' }}</span>
-            </p>
-
-            <!-- Not running in this engine, or an install it cannot update:
-                 the switch is flipped off and this is why. The route would
-                 accept the write anyway; the card owns the state. -->
-            <p v-if="autoUpdateUnsupportedReason" id="auto-update-unsupported" class="auto-update-note">
-              {{ autoUpdateUnsupportedReason }}
-            </p>
-
-            <!-- The settings file could not be read, or the last attempt left a
-                 reason. It is the explanation for the policy above, so it is
-                 not tucked away in a disclosure. -->
-            <p v-if="autoUpdate.error" class="auto-update-error" role="alert">{{ autoUpdate.error }}</p>
-
-            <p v-if="autoUpdateOutcomeLabel" class="auto-update-meta">
-              Last automatic attempt: {{ autoUpdateOutcomeLabel }}<template v-if="autoUpdateAttemptText"> &middot; {{ autoUpdateAttemptText }}</template><template v-if="autoUpdateRestartedAfterUpdate">. Ciaobot restarted after updating.</template>
-            </p>
-
-            <p v-if="autoUpdateWriteError" class="auto-update-error" role="alert">{{ autoUpdateWriteError }}</p>
-
-            <div v-if="autoUpdateSupported && !autoUpdateSnoozed" class="action-row settings-actions">
-              <button
-                type="button"
-                class="btn-secondary btn-small"
-                :disabled="autoUpdateWritePending"
-                @click="snoozeAutoUpdate"
-              >Not now (24 hours)</button>
-            </div>
-            <p v-else-if="autoUpdateSupported && autoUpdateSnoozed" class="auto-update-meta" role="status">
-              Snoozed until {{ autoUpdateSnoozeText }}.
-            </p>
-
-            <div v-if="autoUpdateWriteError && autoUpdateFailedWrite" class="action-row settings-actions">
-              <button
-                type="button"
-                class="btn-secondary btn-small"
-                :disabled="autoUpdateWritePending"
-                @click="retryAutoUpdateWrite"
-              >Try again</button>
-            </div>
-          </div>
           <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
         </div>
 
@@ -309,20 +104,16 @@
           </div>
         </div>
 
-        <!-- Installing is optional and the guidance is permanent: the Home setup
-             reminder can be closed for good, so Settings keeps the steps. -->
-        <SettingsAppInstall :expand-steps="route.hash === '#install-app'" />
+        <!-- Installing is optional and the guidance is permanent in a browser: the
+             Home setup reminder can be closed for good, so Settings keeps the
+             steps. Ciaobot for Mac is the installed app, so it shows no card. -->
+        <SettingsAppInstall v-if="!desktopClient" :expand-steps="route.hash === '#install-app'" />
 
         <!-- Notifications. -->
         <SettingsNotifications />
 
         <SettingsKeyboardShortcuts />
         <SettingsRestartResume
-          :routines="routines"
-          :routines-saving="routinesSaving"
-          :save-routines="saveRoutines"
-        />
-        <SettingsVaultCheck
           :routines="routines"
           :routines-saving="routinesSaving"
           :save-routines="saveRoutines"
@@ -489,13 +280,18 @@
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">This host</p>
-              <p class="hint">
+              <p v-if="canSyncProgram" class="hint">
                 The Ciaobot program on this computer: send pending changes to its repository, or
                 restart to update it. Your memory and notes are backed up separately, below.
+              </p>
+              <p v-else class="hint">
+                Restart the engine to reload the Ciaobot program on this computer. Updates come with
+                Ciaobot for Mac on macOS; on Linux, see docs/LINUX.md. Your memory and notes are backed up separately, below.
               </p>
             </div>
             <div class="settings-card-header-actions">
               <button
+                v-if="canSyncProgram"
                 class="btn-secondary btn-small"
                 @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()"
                 :disabled="!!actionPending"
@@ -653,7 +449,7 @@
           </div>
         </div>
         <template v-else-if="providerKeysError">
-          <div class="card"><p class="hint hint--warn">{{ providerKeysError }}</p></div>
+          <div class="card"><p class="hint hint--warn">{{ providerKeysError }}</p><button type="button" class="set-link" @click="fetchProviderKeys">Retry</button></div>
         </template>
         <template v-else-if="providerKeys">
           <div id="chat-providers" class="card">
@@ -661,7 +457,7 @@
               <div>
                 <p class="section-title">Chat providers</p>
                 <p class="hint">
-                  Each provider CLI manages its own login and credentials. Ciaobot verifies every connection.
+                  Each provider CLI manages its own login and credentials. OpenCode configuration does not verify upstream credentials.
                   The defaults below apply to new chats; any chat can override them from the picker.
                   Session insights is the model that reads chats into memory and names them. On Automatic it
                   is the chat's own model: a closed project uses its last-active chat, and a task resolution or
@@ -677,6 +473,7 @@
             </div>
 
             <p v-if="workspaceModelsError" class="hint hint--warn" role="alert">{{ workspaceModelsError }}</p>
+            <button v-if="workspaceModelsError" type="button" class="set-link" @click="fetchWorkspaceModels()">Retry model options</button>
             <div v-if="providerKeys.connections" class="provider-connections set-list">
               <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="credential-row set-row">
                 <div class="set-row-head provider-row-head">
@@ -684,32 +481,13 @@
                     <span class="routine-name set-row-title">{{ conn.label || connKey }}</span>
                     <p class="set-row-sub provider-connection-detail">
                       <span v-if="conn.version">{{ conn.version }}</span>
-                      <span v-if="conn.account">{{ conn.account }}</span>
-                      <span v-if="!conn.version && conn.detail">{{ conn.detail }}</span>
+                      <span v-if="connKey === 'claude' && conn.auth === 'oauth'">OAuth</span>
+                      <span v-if="connKey === 'claude' && conn.auth === 'oauth' && conn.account">{{ conn.account }}</span>
+                      <span v-if="connKey !== 'opencode' && !conn.version && conn.detail">{{ conn.detail }}</span>
                     </p>
-                    <p v-if="conn.auth === 'not_installed'" class="set-row-sub">
-                      {{ conn.detail }}
-                      Install it with <code>{{ conn.command }}</code>
-                      <template v-if="conn.path_command">
-                        , then put it on your PATH with
-                        <code>{{ conn.path_command }}</code>
-                      </template>&nbsp;<a
-                        v-if="conn.install_url"
-                        :href="conn.install_url"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >installation guide ↗</a>
-                    </p>
-                    <p v-if="(conn.auth === 'not_installed' || conn.auth === 'unsupported_version') && conn.terminal_action" class="set-row-sub">
-                      <HostTerminalButton
-                        :action="conn.terminal_action"
-                        variant="small"
-                        :aria-label="`Install ${conn.label || connKey} in Terminal`"
-                        label="Install in Terminal"
-                      />
-                    </p>
+                    <ProviderInstallBlock :conn-key="String(connKey)" :conn="conn" />
                     <p
-                      v-if="conn.auth !== 'not_installed' && conn.path_command"
+                      v-if="!isMissingInstall(conn.state) && conn.path_command"
                       class="set-row-sub"
                     >
                       Your terminal cannot find this CLI yet — put it on your PATH with
@@ -717,18 +495,7 @@
                     </p>
                   </div>
                   <div class="set-row-actions provider-connection-actions">
-                    <span class="settings-conn-state" :class="conn.ok ? 'settings-conn-state--ok' : 'settings-conn-state--error'">
-                      {{ conn.ok ? 'Connected' : 'Not connected' }}
-                    </span>
-                    <!-- Connect is the row's one primary only while it is needed;
-                         once connected, the rare Reconnect / Log out live in the menu. -->
-                    <button
-                      v-if="!conn.ok"
-                      type="button"
-                      class="btn-primary btn-small"
-                      :disabled="providerConnectionPending === connKey"
-                      @click="providerConnectionAction(String(connKey), 'connect')"
-                    >Connect</button>
+                    <ProviderStateBadge :conn-key="String(connKey)" :state="conn.state" />
                     <button
                       type="button"
                       class="set-link"
@@ -751,9 +518,6 @@
                       </DropdownMenuTrigger>
                       <DropdownMenuContent as-child align="end" :side-offset="4" :collision-padding="8">
                         <div class="settings-menu" @keydown.esc="closeSettingsMenuOnEscape">
-                          <DropdownMenuItem as-child @select="providerConnectionAction(String(connKey), 'connect')">
-                            <button type="button" class="settings-menu-item">Reconnect</button>
-                          </DropdownMenuItem>
                           <DropdownMenuItem as-child @select="providerConnectionAction(String(connKey), 'logout')">
                             <button type="button" class="settings-menu-item settings-menu-item--danger">Log out</button>
                           </DropdownMenuItem>
@@ -762,6 +526,12 @@
                     </DropdownMenuRoot>
                   </div>
                 </div>
+                <ProviderInventory v-if="connKey === 'opencode'" :inventory="conn.credential_inventory" :command="conn.command" :workspace="projectStore.activeWorkspace" />
+                <!-- Not for a missing CLI: its payload command is the install line, not a sign-in. -->
+                <details v-if="connKey !== 'opencode' && !isMissingInstall(conn.state)" class="provider-sign-in">
+                  <summary>{{ conn.ok ? `Reconnect ${conn.label || connKey}` : `Connect ${conn.label || connKey}` }}</summary>
+                  <ProviderSignInGuidance :command="conn.command" :context="conn.label || String(connKey)" :workspace="projectStore.activeWorkspace" />
+                </details>
                 <!-- Full width, after the head: inside .set-row-main it shares a line with Connected / Verify and clips at phone width. -->
                 <div v-if="conn.release_check?.state === 'below_tested'" class="set-row-sub provider-release-check">
                   <p class="provider-release-note">Older than {{ conn.release_check.tested }}, the version this Ciaobot release was tested with. Update with:</p>
@@ -775,6 +545,7 @@
                     <HostTerminalButton
                       v-if="conn.release_check.terminal_action"
                       :action="conn.release_check.terminal_action"
+                      safe-errors
                       variant="small"
                       label="Update in Terminal"
                       :aria-label="`Update ${conn.label || connKey} in Terminal`"
@@ -784,7 +555,6 @@
                   </div>
                 </div>
                 <p v-else-if="conn.release_check?.state === 'current'" class="set-row-sub">Tested with {{ conn.release_check.tested }}</p>
-                <p v-else-if="conn.release_check?.state === 'bundled'" class="set-row-sub">Bundled with Ciaobot; updates with Ciaobot</p>
                 <div v-if="getProviderSection(String(connKey))" class="provider-inline-defaults">
                   <div class="set-subrow">
                     <span :id="`default-model-label-${connKey}`" class="ws-label set-subrow-label">Default model</span>
@@ -831,6 +601,15 @@
                       </option>
                     </select>
                   </label>
+                  <p class="hint hint--compact set-subrow-hint" data-testid="permission-note">
+                    {{ BYPASS_NOTE }}
+                    <a
+                      v-if="permissionDocsFor(String(connKey))"
+                      :href="permissionDocsFor(String(connKey))!.href"
+                      target="_blank"
+                      rel="noopener"
+                    >{{ permissionDocsFor(String(connKey))!.label }}</a>
+                  </p>
                   <div class="set-subrow">
                     <span :id="`thinking-label-${connKey}`" class="ws-label set-subrow-label">Default thinking</span>
                     <div class="set-subrow-control">
@@ -877,28 +656,10 @@
                 </div>
                 <!-- What the CLI brings on its own. Long chip lists, so they sit
                      behind a disclosure, collapsed by default. -->
-                <details class="provider-brings">
+                <details v-if="conn.auth !== 'not_installed'" class="provider-brings">
                   <summary>
-                    What this CLI brings ({{ providerBringsCounts(String(connKey), conn) }})
+                    What this CLI brings ({{ providerBringsCounts(conn) }})
                   </summary>
-                  <div class="provider-mcps-preview">
-                    <div class="ws-connectors-header">
-                      <span class="ws-label">Configured MCP Servers &amp; Connectors ({{ connectionMcps(String(connKey)).length }})</span>
-                    </div>
-                    <div class="workspace-connector-pills">
-                      <template v-if="connectionMcps(String(connKey)).length">
-                        <span
-                          v-for="mcpName in connectionMcps(String(connKey))"
-                          :key="mcpName"
-                          class="connector-pill connector-pill--enabled"
-                          :title="`${mcpName} configured for ${conn.label || connKey}`"
-                        >
-                          <span class="pill-dot"></span> {{ mcpName }}
-                        </span>
-                      </template>
-                      <span v-else class="hint hint--compact">No MCP servers enabled</span>
-                    </div>
-
                     <!-- Platform System Skills -->
                     <div class="ws-connectors-header" style="margin-top: 10px;">
                       <span class="ws-label">Platform System Skills &amp; Plugins ({{ (conn.skills && conn.skills.length) ? conn.skills.length : 0 }})</span>
@@ -916,29 +677,43 @@
                       </template>
                     </div>
 
-                    <!-- Skills the CLI ships itself, not installed by the user -->
-                    <div class="ws-connectors-header" style="margin-top: 10px;">
-                      <span class="ws-label">Built into {{ conn.label || connKey }} ({{ conn.bundled_skills?.length ?? 0 }})</span>
-                    </div>
-                    <div class="workspace-connector-pills">
-                      <template v-if="conn.bundled_skills && conn.bundled_skills.length">
-                        <span v-for="skill in conn.bundled_skills" :key="skill" class="connector-pill connector-pill--enabled" :title="`Ships with ${conn.label || connKey}: ${skill}`">
-                          <span class="pill-dot"></span> {{ skill }}
+                    <!-- Skills the CLI ships itself, not installed by the user. Only providers that
+                         report them (OpenCode) get the block; the Claude CLI reports none. -->
+                    <template v-if="conn.bundled_skills !== undefined">
+                      <div class="ws-connectors-header" style="margin-top: 10px;">
+                        <span class="ws-label">Built into {{ conn.label || connKey }} ({{ conn.bundled_skills.length }})</span>
+                      </div>
+                      <div class="workspace-connector-pills">
+                        <template v-if="conn.bundled_skills.length">
+                          <span v-for="skill in conn.bundled_skills" :key="skill" class="connector-pill connector-pill--enabled" :title="`Ships with ${conn.label || connKey}: ${skill}`">
+                            <span class="pill-dot"></span> {{ skill }}
+                          </span>
+                        </template>
+                        <span v-else class="hint hint--compact">
+                          {{ !conn.ok ? 'Connect to discover' : 'None reported by this CLI' }}
                         </span>
-                      </template>
-                      <span v-else class="hint hint--compact">
-                        {{ !conn.ok ? 'Connect to discover' : conn.bundled_skills ? 'None reported by this CLI' : conn.skills ? 'Listed after the next chat with this CLI.' : 'Could not read this list. Press Verify to try again.' }}
-                      </span>
-                    </div>
-                  </div>
+                      </div>
+                    </template>
                 </details>
               </div>
-              <div v-if="providerConnectionResult" class="action-result">{{ providerConnectionResult }}</div>
+              <ProviderInventory v-if="!providerKeys.connections.opencode" :workspace="projectStore.activeWorkspace" />
             </div>
+            <ProviderInventory v-else :workspace="projectStore.activeWorkspace" />
+            <button
+              v-if="!providerKeys.connections?.opencode"
+              type="button"
+              class="set-link"
+              :disabled="!!providerConnectionPending"
+              @click="providerConnectionAction('opencode', 'verify')"
+            >Refresh after sign-in</button>
+            <div v-if="providerConnectionResult" class="action-result" role="status">{{ providerConnectionResult }}</div>
           </div>
         </template>
 
-        <div v-if="routinesError" class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
+        <div v-if="routinesError" class="card">
+          <p class="hint hint--warn" role="alert">{{ routinesError }}</p>
+          <button type="button" class="set-link" @click="fetchRoutines">Retry model settings</button>
+        </div>
       </template>
 
       <!-- WORKSPACE OVERVIEW TAB (the active workspace's cards, then every workspace; /settings/workspace) -->
@@ -1329,9 +1104,15 @@
         </div>
       </template>
 
-      <!-- Native provider MCP inventory, scoped to the selected workspace. -->
+      <!-- One button per installed agent. The command comes from the provider row. -->
       <template v-if="currentTab === 'mcp'">
-        <SettingsMcpServers :mcp="mcp" :default-provider="mcpDefaultProvider" @ask-ciao="createAssetViaChat('mcp')" />
+        <div class="card">
+          <p class="hint">Each agent manages its own MCP servers and sign-ins.</p>
+          <template v-for="(conn, id) in providerKeys?.connections" :key="id">
+            <ProviderMcpButton v-if="conn.mcp_command" :connection="conn" />
+          </template>
+          <button class="set-link set-link--quiet" type="button" @click="createAssetViaChat('mcp')">Ask Ciao to add one</button>
+        </div>
       </template>
       </div>
 
@@ -1363,7 +1144,7 @@
           <div class="rail-kvs">
             <div v-for="(conn, connKey) in providerKeys?.connections" :key="`rail-${connKey}`" class="rail-kv">
               <span>{{ conn.label || connKey }}</span>
-              <strong :class="{ 'rail-attention': !conn.ok }">{{ conn.ok ? 'Connected' : 'Not connected' }}</strong>
+              <strong :class="{ 'rail-attention': conn.state === 'failed' || conn.state === 'adapter_missing' }">{{ providerStateView(String(connKey), conn.state).label }}</strong>
             </div>
           </div>
         </section>
@@ -1394,14 +1175,14 @@
 <script setup lang="ts">
 import CiaoMark from './CiaoMark.vue'
 import SkeletonLoader from './SkeletonLoader.vue'
+import UpdateProgressView from './UpdateProgressView.vue'
 import SettingsAllWorkspaces from './settings/SettingsAllWorkspaces.vue'
-import { formatConnectorLabel } from '../lib/mcpLabels'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch, provide } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
+import { isDesktopClient } from '../lib/pwaPlatform'
 import { describeInterruptedCards, type RestartBlocker } from '../lib/restartBlockers'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
-import { formatRelative, formatTime } from '../lib/time'
 import {
   DEFAULT_FONT_SCALE,
   FONT_SCALE_STEP,
@@ -1409,7 +1190,6 @@ import {
   MIN_FONT_SCALE,
   useFontScale,
 } from '../composables/useFontScale'
-import { useModalFocus } from '../composables/useModalFocus'
 import { useAppearanceSettings } from '../composables/useAppearanceSettings'
 import { readLocalTheme, type Theme } from '../lib/appearance'
 import type {
@@ -1431,19 +1211,8 @@ import type {
   PackageStatus,
   PackageChangelog,
   PackageUpdateResult,
-  EngineUpdateStatus,
-  AutoUpdateStatus,
-  ProviderActionResult,
   LocalHandbackResult,
 } from '../lib/types'
-import {
-  updateFailed,
-  updateFailureText,
-  updateInFlight,
-  updatePhaseLabel,
-  updateStage,
-  updateStageInFlight,
-} from '../lib/engineUpdate'
 import { askConfirm } from '../lib/confirm'
 import { GWS_ACCOUNTS_KEY, useGwsAccounts } from '../composables/useGwsAccounts'
 import {
@@ -1452,6 +1221,8 @@ import {
 } from '../composables/useWorkspaceAdmin'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
+import { useTaskStore } from '../stores/tasks'
+import { invalidateProviderReads, providerGeneration, providerMutation, providerMutationIsCurrent, providerRead, providerReadIsCurrent, subscribeProviderRefresh, waitForProviderMutation } from '../lib/providerOperations'
 import { useHousekeepingStore } from '../stores/housekeeping'
 import {
   DropdownMenuContent,
@@ -1462,8 +1233,11 @@ import {
 import PaneHeader from './PaneHeader.vue'
 import HostTerminalButton from './HostTerminalButton.vue'
 import { useCommandCopy } from '../composables/useCommandCopy'
-import { useRunInTerminal } from '../composables/useRunInTerminal'
-import UpdateProgressView from './UpdateProgressView.vue'
+import ProviderInventory from './settings/ProviderInventory.vue'
+import ProviderSignInGuidance from './settings/ProviderSignInGuidance.vue'
+import ProviderInstallBlock from './settings/ProviderInstallBlock.vue'
+import ProviderStateBadge from './settings/ProviderStateBadge.vue'
+import { isMissingInstall, providerStateView } from '../lib/providerState'
 import WorkspaceMoveDialog from './WorkspaceMoveDialog.vue'
 import ModelSelector from './ModelSelector.vue'
 import {
@@ -1479,11 +1253,11 @@ import SettingsDevices from './settings/SettingsDevices.vue'
 import SettingsServer from './settings/SettingsServer.vue'
 import SettingsAppInstall from './settings/SettingsAppInstall.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
+import SettingsMacUpdates from './settings/SettingsMacUpdates.vue'
 import SettingsKeyboardShortcuts from './settings/SettingsKeyboardShortcuts.vue'
 import SettingsRestartResume from './settings/SettingsRestartResume.vue'
-import SettingsVaultCheck from './settings/SettingsVaultCheck.vue'
 import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
-import SettingsMcpServers from './settings/SettingsMcpServers.vue'
+import ProviderMcpButton from './ProviderMcpButton.vue'
 import SettingsAppearance from './settings/SettingsAppearance.vue'
 import SettingsRadioGroup from './settings/SettingsRadioGroup.vue'
 import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'
@@ -1492,22 +1266,21 @@ import type { ModelSection } from '../lib/modelSections'
 import { modelDisplayName } from '../lib/modelLabels'
 import { settingsTabLabel } from '../lib/settingsNav'
 import { workspaceLabel } from '../lib/workspaceLabel'
-import { parseWorkspaceFileAccessHref } from '../lib/appLinks'
-import { useMcpServers } from '../composables/useMcpServers'
+import { BYPASS_NOTE, permissionDocsFor } from '../lib/permissionDocs'
 import { assetOriginClass, assetOriginLabel, commandOrigin, subagentOrigin } from '../lib/assetOrigin'
 
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
 const route = useRoute()
+/** Read once: the marker never changes while the page lives. */
+const desktopClient = isDesktopClient()
 const router = useRouter()
 const fileViewer = useFileViewerStore()
 const projectStore = useProjectStore()
+const taskStore = useTaskStore()
 const housekeeping = useHousekeepingStore()
 
-// Native MCP inventory follows the sidebar's selected workspace.
-const mcp = useMcpServers({ api, workspace: () => projectStore.activeWorkspace })
-const mcpDefaultProvider = computed(() => projectStore.workspaceOptions.find(w => w.name === projectStore.activeWorkspace)?.default_provider)
 const currentTab = computed(() => {
   const tab = (route.params.tab as string) || 'home'
   return tab
@@ -1821,8 +1594,9 @@ function onWorkspaceMoveStarted() {
 async function fetchRoutines() {
   try {
     routines.value = await api.get<RoutineSettings>('/api/settings/routines')
-  } catch (e) {
-    routinesError.value = `Failed to load model settings: ${errorMessage(e)}`
+    routinesError.value = ''
+  } catch {
+    routinesError.value = 'Failed to load model settings.'
   }
 }
 
@@ -1831,9 +1605,8 @@ async function saveRoutines(patch: Record<string, unknown>) {
   try {
     routines.value = await api.patch<RoutineSettings>('/api/settings/routines', patch)
     notifySaved('Model settings saved.')
-  } catch (e) {
-    const detail = errorMessage(e)
-    notifyFailed('Could not save model settings', detail)
+  } catch {
+    notifyFailed('Could not save model settings', 'Please try again.')
   } finally {
     routinesSaving.value = false
   }
@@ -1932,18 +1705,46 @@ const providerKeysError = ref('')
 const providersStatusRail = computed(() => currentTab.value === 'providers' && !!providerKeys.value?.connections)
 const providerConnectionPending = ref('')
 const providerConnectionResult = ref('')
+let providerEpoch = 0
+let workspaceTransition = 0
+let settingsModelEpoch = 0
+let providerViewAlive = true
+let providerPendingOwner: symbol | null = null
+let deferredProviderRead: Promise<void> | null = null
+const unsubscribeProviderRefresh = subscribeProviderRefresh(() => {
+  if (!providerViewAlive) return
+  for (const key of tabLoads.keys()) {
+    if (key.startsWith('providers:')) tabLoads.delete(key)
+  }
+  if (currentTab.value === 'providers') void fetchProviderKeys()
+  else providerKeysLoaded.value = false
+})
+onUnmounted(() => { providerViewAlive = false; providerPendingOwner = null; providerEpoch++; settingsModelEpoch++; unsubscribeProviderRefresh() })
 const gwsAccounts = useGwsAccounts({ notifySaved, notifyFailed })
 const { gwsProfileOptions, fetchGwsIntegration } = gwsAccounts
 provide(GWS_ACCOUNTS_KEY, gwsAccounts)
 
-async function fetchProviderKeys() {
-  try {
-    const res = await api.get<ProviderConfigSettings>('/api/settings/providers')
-    providerKeys.value = res
-  } catch (e) {
-    providerKeysError.value = `Failed to load provider keys: ${errorMessage(e)}`
-  } finally {
+async function fetchProviderKeys(): Promise<void> {
+  const pending = waitForProviderMutation()
+  if (pending) {
+    if (!deferredProviderRead) {
+      deferredProviderRead = pending.then(() => {
+        deferredProviderRead = null
+        if (providerViewAlive) return fetchProviderKeys()
+      })
+    }
+    return deferredProviderRead
+  }
+  const epoch = ++providerEpoch
+  const result = await providerRead(() => api.get<ProviderConfigSettings>('/api/settings/providers'))
+  if (providerViewAlive && epoch === providerEpoch && providerReadIsCurrent(result.generation)) {
     providerKeysLoaded.value = true
+    if (!result.value) {
+      providerKeysError.value = 'Could not load provider status.'
+      return
+    }
+    providerKeys.value = result.value
+    providerKeysError.value = ''
   }
 }
 
@@ -1953,13 +1754,20 @@ async function fetchProviderKeys() {
 // view stays mounted across tabs). Scroll on the first load and on each
 // navigation to the anchor — not after every refetch, or Verify/Connect would
 // yank the page back to the top of the card.
+let providerAnchorNavigation = 0
+let providerAnchorScrolled = -1
 function scrollToChatProvidersIfLinked(): void {
   if (route.hash !== '#chat-providers') return
+  const navigation = providerAnchorNavigation
   void nextTick(() => {
-    document.getElementById('chat-providers')?.scrollIntoView?.({ block: 'start' })
+    if (navigation !== providerAnchorNavigation || providerAnchorScrolled === navigation) return
+    const card = document.getElementById('chat-providers')
+    if (!card) return
+    providerAnchorScrolled = navigation
+    card.scrollIntoView?.({ block: 'start' })
   })
 }
-watch(() => route.fullPath, scrollToChatProvidersIfLinked)
+watch(() => route.fullPath, () => { providerAnchorNavigation++; scrollToChatProvidersIfLinked() }, { flush: 'sync' })
 
 // Home links land on these cards (#install-app on General from the setup
 // card's "How to install", #other-devices on Access & devices from "Phone
@@ -1982,24 +1790,26 @@ watch(
   { immediate: true },
 )
 
+/** Sync with the program's repository is for a developer's checkout: dev mode,
+ *  or an install that is an editable deployable checkout. A packaged install
+ *  (the Mac app, the installer, a plain package) only restarts. Fails closed
+ *  while the host state is unknown. */
+const canSyncProgram = computed(() => localStatus.value?.dev_mode === true || localStatus.value?.restart_only === false)
+
 /** Summary line for the collapsed "What this CLI brings" disclosure. */
-function providerBringsCounts(providerId: string, conn: ProviderConnection): string {
-  const mcps = connectionMcps(providerId).length
+function providerBringsCounts(conn: ProviderConnection): string {
   const skills = conn.skills?.length ?? 0
-  const mcpLabel = `${mcps} MCP ${mcps === 1 ? 'server' : 'servers'}`
   const skillLabel = conn.ok && !conn.skills
     ? 'skills not read'
     : `${skills} ${skills === 1 ? 'skill or plugin' : 'skills & plugins'}`
   const bundled = conn.bundled_skills?.length
-  return bundled ? `${mcpLabel}, ${skillLabel}, ${bundled} built in` : `${mcpLabel}, ${skillLabel}`
+  return bundled ? `${skillLabel}, ${bundled} built in` : skillLabel
 }
 
 
 
 const providerCommandCopy = useCommandCopy()
-const providerTerminal = useRunInTerminal()
-
-async function providerConnectionAction(provider: string, action: 'connect' | 'verify' | 'logout') {
+async function providerConnectionAction(provider: string, action: 'verify' | 'logout') {
   if (action === 'logout' && !await askConfirm(`Log out of ${provider === 'opencode' ? 'opencode' : 'Claude Code'} on this computer?`, {
     title: 'Log out',
     confirmLabel: 'Log out',
@@ -2007,39 +1817,61 @@ async function providerConnectionAction(provider: string, action: 'connect' | 'v
   })) {
     return
   }
-  const providerName = provider === 'opencode' ? 'opencode' : 'Claude Code'
-  providerConnectionPending.value = provider
-  providerConnectionResult.value = ''
-  try {
-    const result = await api.post<ProviderActionResult>(`/api/settings/providers/${provider}/${action}`)
-    if (action === 'connect') {
-      providerConnectionResult.value = `Opened the ${providerName} sign-in in ${result.launched || 'a terminal'}.`
-    } else if (action === 'logout') {
-      providerConnectionResult.value = 'Logged out.'
-    } else {
-      providerConnectionResult.value = result.ok ? `Connection verified (${result.auth}).` : result.detail || 'Not connected.'
-    }
-    await fetchProviderKeys()
-  } catch (e) {
-    // Connect answers a browser that is not on the engine's computer (or a host that
-    // cannot open a terminal) with the engine-built sign-in command. Type it into the
-    // Ciao terminal, a shell on the engine's computer; copy or show it when that fails.
-    const command = errorPayload(e)?.command
-    if (action === 'connect' && typeof command === 'string' && command) {
-      const typed = await providerTerminal.run(command)
-      if (typed === 'typed') {
-        providerConnectionResult.value = `Started the ${providerName} sign-in in the Ciao terminal. Finish it there, then press Verify.`
-      } else if (typed === 'copied') {
-        providerConnectionResult.value = `Copied the command. ${errorMessage(e)}`
-      } else {
-        providerConnectionResult.value = errorMessage(e)
-      }
-    } else {
-      providerConnectionResult.value = `Error: ${errorMessage(e)}`
-    }
-  } finally {
-    providerConnectionPending.value = ''
+  const workspace = projectStore.activeWorkspace
+  if (provider === 'opencode' && action === 'verify'
+    && (!workspace || !projectStore.workspaces.some(item => item.name === workspace))) {
+    providerConnectionResult.value = 'Select a registered workspace before refreshing.'
+    return
   }
+  const transition = workspaceTransition
+  const taskTransition = taskStore.modelTransition
+  const operation = providerMutation(async () => {
+    const epoch = ++providerEpoch
+    const sharedGeneration = providerGeneration()
+    const owner = Symbol('provider mutation')
+    const current = () => providerViewAlive && epoch === providerEpoch
+      && transition === workspaceTransition && workspace === projectStore.activeWorkspace
+      && taskTransition === taskStore.modelTransition
+      && providerMutationIsCurrent(sharedGeneration)
+    providerConnectionPending.value = provider
+    providerPendingOwner = owner
+    providerConnectionResult.value = ''
+    try {
+      const result = await api.post<ProviderConnection>(`/api/settings/providers/${provider}/${action}`)
+      if (!current()) return
+      if (action === 'verify' && providerKeys.value?.connections) {
+        providerKeys.value = { ...providerKeys.value, connections: { ...providerKeys.value.connections, [provider]: result } }
+      }
+      if (action === 'verify' && provider === 'opencode') {
+        if (!current()) return
+        const [settingsResult, sharedResult] = await Promise.all([fetchWorkspaceModels(false, workspace), taskStore.fetchModels(workspace)])
+        if (!current()) return
+        if (settingsResult === 'superseded' || sharedResult.status === 'superseded') {
+          providerConnectionResult.value = 'Model reads were superseded. Please try again.'
+          return
+        }
+        providerConnectionResult.value = settingsResult === 'success' && sharedResult.status === 'success'
+          ? 'Provider and model reads completed. Catalog availability and credential verification are unknown.'
+          : 'Model reads failed or are stale. Please try again.'
+      } else {
+        providerConnectionResult.value = action === 'logout' ? 'Logged out.'
+          : result.ok ? 'Claude Code connection verified.' : 'Claude Code is not connected.'
+      }
+    } catch {
+      if (current()) providerConnectionResult.value = 'Could not update provider status. Please try again.'
+    } finally {
+      if (providerViewAlive && providerPendingOwner === owner) {
+        providerPendingOwner = null
+        providerConnectionPending.value = ''
+      }
+      if (providerViewAlive) void fetchProviderKeys()
+    }
+  })
+  if (!operation) {
+    providerConnectionResult.value = 'Another provider operation is in progress. Please try again.'
+    return
+  }
+  await operation
 }
 
 // The skills, commands, subagents and MCP servers below belong to ONE
@@ -2579,11 +2411,8 @@ const workspaceAdmin = useWorkspaceAdmin({
 })
 const {
   workspacesLoaded,
-  workspacesError,
   showNewWorkspace,
-  workspaceForms,
   workspaceLinkStatus,
-  workspaceLinkTarget,
   fetchWorkspacesList,
   fetchArchivedWorkspaces,
 } = workspaceAdmin
@@ -2622,117 +2451,42 @@ function closeSettingsMenuOnEscape(event: KeyboardEvent): void {
 }
 provide(WORKSPACE_ADMIN_KEY, { ...workspaceAdmin, settingsMenu, setSettingsMenu, closeSettingsMenuOnEscape })
 
-// Bumped on every route resolution so a delayed list load from a superseded
-// link cannot open, scroll to or focus the wrong row.
-let workspaceLinkRequest = 0
-const WORKSPACE_LINK_OFFSET = 16
-
-function scrollToWorkspaceFileAccess(name: string): void {
-  const body = bodyEl.value
-  if (!body) return
-  // Scope both lookups to the owning pane, and measure the field row itself:
-  // the card header can be in view while the File access control is still
-  // below the fold.
-  const row = body.querySelector<HTMLElement>(`#workspace-file-access-row-${name}`)
-  const control = body.querySelector<HTMLElement>(`#workspace-file-access-${name}`)
-  if (!row || !control) return
-  // Only the settings pane scrolls. Its scrollTop is the truth; a measured
-  // offset keeps this correct whatever else has rendered above the row.
-  // scrollIntoView is deliberately not used: on a nested pane iOS Safari can
-  // scroll the wrong ancestor.
-  const offset = row.getBoundingClientRect().top - body.getBoundingClientRect().top
-  const top = Math.max(0, body.scrollTop + offset - WORKSPACE_LINK_OFFSET)
-  const reduce = typeof window.matchMedia === 'function'
-    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  body.scrollTo({ top, behavior: reduce ? 'auto' : 'smooth' })
-  control.focus({ preventScroll: true })
-  workspaceLinkTarget.value = name
-}
-
-async function applyWorkspaceFileAccessLink(fullPath: string): Promise<void> {
-  const request = ++workspaceLinkRequest
-  // A navigation clears what an earlier link said; a missing target and the
-  // row it pointed at must not outlive the address that produced them.
-  workspaceLinkStatus.value = ''
-  workspaceLinkTarget.value = null
-  const name = parseWorkspaceFileAccessHref(fullPath)
-  if (!name || currentTab.value !== 'workspace') return
-  await loadSettingsTab('workspace')
-  if (request !== workspaceLinkRequest) return
-  await nextTick()
-  if (request !== workspaceLinkRequest) return
-  // A failed load is an error, not a claim that the workspace is missing.
-  if (workspacesError.value) return
-  const form = workspaceForms.value.find(f => f.name === name)
-  if (!form) {
-    workspaceLinkStatus.value = `No workspace named "${name}" exists. No settings changed.`
-    return
-  }
-  // The page shows one workspace, so the link makes the named one active. It
-  // never selects a value or saves. Leaving a draft with unsaved edits asks
-  // first (the store's switch guard); declining keeps the user where they are.
-  await projectStore.switchWorkspace(name, { transition: false })
-  if (request !== workspaceLinkRequest) return
-  if (projectStore.activeWorkspace !== name) {
-    workspaceLinkStatus.value =
-      `File access for "${name}" was not opened: your unsaved changes to "${projectStore.activeWorkspace}" were kept.`
-    return
-  }
-  await router.replace({ path: '/settings/workspace', hash: '#file-access' })
-}
-
-// The Overview page is the active workspace's editor. A File access link lands
-// here with #file-access: scroll to and focus the selector once the list is in.
-// While the link still carries ?workspace=NAME, applyWorkspaceFileAccessLink
-// owns it: it switches to NAME and then drops the query, which re-runs this
-// watcher on the right workspace (scrolling now would hit the previous one).
+// The Overview page is the active workspace's editor. A #workspace-name link
+// (Rename) focuses the Name field once the list is in.
 watch(
-  [() => route.hash, currentTab, workspacesLoaded, () => route.query.workspace],
-  async ([hash, tab, loaded, linked]) => {
-    if (tab !== 'workspace' || !loaded || linked) return
+  [() => route.hash, currentTab, workspacesLoaded],
+  async ([hash, tab, loaded]) => {
+    if (tab !== 'workspace' || !loaded) return
     await nextTick()
-    if (hash === '#file-access') scrollToWorkspaceFileAccess(projectStore.activeWorkspace)
-    else if (hash === '#workspace-name') document.getElementById('workspace-name-input')?.focus()
+    if (hash === '#workspace-name') document.getElementById('workspace-name-input')?.focus()
   },
   { immediate: true },
 )
-
-// Platform MCP list only — exclude Ciaobot project servers from .mcp.json
-// (n8n_mcp, notion, ciaobot), which have their own MCP status section.
-const EXCLUDED_PLATFORM_MCPS = new Set(['n8n_mcp', 'notion', 'ciaobot', 'ciaobot-fastmcp'])
-
-/**
- * Platform MCP servers a provider's CLI reports.
- *
- * Keyed by provider id rather than written per provider, so a provider added
- * to the backend registry gets a correct card without another branch here.
- * Reports only what the CLI actually discovered — an empty result means
- * "none reported", not a guess, since a placeholder here would be
- * indistinguishable from a real connection.
- */
-function connectionMcps(providerId: string): string[] {
-  const discovered = providerKeys.value?.connections?.[providerId]?.mcps || []
-  const result: string[] = []
-  for (const mcpName of discovered) {
-    if (EXCLUDED_PLATFORM_MCPS.has(mcpName)) continue
-    const label = formatConnectorLabel(mcpName)
-    if (!result.includes(label)) result.push(label)
-  }
-  return result
-}
 
 // `force` bypasses the provider catalog caches, which costs a provider process
 // spawn. Opening Settings is exactly the moment a user has just connected a
 // provider elsewhere, so the tab does refresh -- but it renders from cache first
 // and lets the forced fetch land after, rather than holding the page on it.
-async function fetchWorkspaceModels(force = false) {
+async function fetchWorkspaceModels(force = false, workspace = projectStore.activeWorkspace): Promise<'success' | 'error' | 'superseded'> {
+  if (!workspace || workspace !== projectStore.activeWorkspace) return 'superseded'
+  const generation = ++settingsModelEpoch
+  const transition = workspaceTransition
+  const current = () => providerViewAlive && generation === settingsModelEpoch
+    && transition === workspaceTransition && workspace === projectStore.activeWorkspace
+  const query = new URLSearchParams({ workspace })
+  if (force) query.set('refresh', '1')
   try {
-    workspaceModels.value = await api.get<ModelsResponse>(
-      force ? '/api/models?refresh=1' : '/api/models',
-    )
+    const result = await api.get<ModelsResponse>(`/api/models?${query}`)
+    if (!current()) return 'superseded'
+    workspaceModels.value = result
     workspaceModelsError.value = ''
-  } catch (e) {
-    workspaceModelsError.value = `Could not load model and effort options: ${errorMessage(e)}`
+    return 'success'
+  } catch {
+    if (!current()) return 'superseded'
+    workspaceModelsError.value = workspaceModels.value
+      ? 'Could not load model and effort options; showing stale options.'
+      : 'Could not load model and effort options.'
+    return 'error'
   }
 }
 
@@ -2757,9 +2511,9 @@ function loadSettingsTab(tab: string): Promise<void> {
   let reads: Promise<unknown>[]
   switch (tab) {
     case 'home':
-      // The Updates card reads the package and update status; Session
-      // insights reads the routines.
-      reads = [fetchPackageStatus(), fetchUpdateStatus(), fetchRoutines()]
+      // The Updates card reads the package status; Session insights reads the
+      // routines.
+      reads = [fetchPackageStatus(), fetchRoutines()]
       break
     case 'appearance':
       // The card is local: loadAppearanceSettings() runs on mount.
@@ -2779,7 +2533,7 @@ function loadSettingsTab(tab: string): Promise<void> {
       }), fetchRoutines(), fetchWorkspaceMove(), fetchAgentAssets()]
       break
     case 'providers':
-      reads = [fetchRoutines(), fetchProviderKeys().then(scrollToChatProvidersIfLinked), mcp.fetchStatus(), fetchWorkspaceModels()]
+      reads = [fetchRoutines(), fetchProviderKeys().then(scrollToChatProvidersIfLinked), fetchWorkspaceModels()]
       break
     case 'workspace':
       // Not scoped: the list covers every workspace. Handover and Update tasks
@@ -2796,7 +2550,7 @@ function loadSettingsTab(tab: string): Promise<void> {
       reads = [fetchAgentAssets()]
       break
     case 'mcp':
-      reads = [mcp.fetchStatus()]
+      reads = [fetchProviderKeys()]
       break
     default:
       reads = []
@@ -2806,15 +2560,9 @@ function loadSettingsTab(tab: string): Promise<void> {
   return request
 }
 
-// File access links are checked on every navigation, including the direct load
-// of one. `loadSettingsTab` is cached, so a link that arrives with the tab
-// costs no second fetch, and a link that arrives before the first list does
-// waits for that same load instead of opening a row that is not there yet.
-watch(
-  () => route.fullPath,
-  path => { void applyWorkspaceFileAccessLink(path) },
-  { immediate: true },
-)
+// The workspace notice (a created workspace that could not be opened) is
+// stale as soon as the user navigates.
+watch(() => route.fullPath, () => { workspaceLinkStatus.value = '' })
 
 onMounted(() => {
   loadAppearanceSettings()
@@ -2830,9 +2578,23 @@ watch(() => projectStore.workspaceRegistryRevision, () => {
 })
 
 watch(() => projectStore.activeWorkspace, () => {
-  // "Settings ↑" and Create and open land at the top. Only a File access deep
-  // link keeps its own scroll target; every other switch returns to the top.
-  if (currentTab.value === 'workspace' && route.hash !== '#file-access') bodyEl.value?.scrollTo({ top: 0, behavior: 'auto' })
+  workspaceTransition++
+  providerEpoch++
+  settingsModelEpoch++
+  workspaceModels.value = null
+  workspaceModelsError.value = ''
+  providerKeys.value = null
+  providerKeysLoaded.value = false
+  providerKeysError.value = ''
+  providerConnectionPending.value = ''
+  providerPendingOwner = null
+  providerConnectionResult.value = ''
+  invalidateProviderReads()
+}, { flush: 'sync' })
+
+watch(() => projectStore.activeWorkspace, () => {
+  // "Settings ↑" and Create and open land at the top.
+  if (currentTab.value === 'workspace') bodyEl.value?.scrollTo({ top: 0, behavior: 'auto' })
   // Asset refs hold one workspace's data, so invalidate cached scope keys:
   // returning to an earlier root must never show a different root's rows.
   for (const key of tabLoads.keys()) {
@@ -2846,7 +2608,7 @@ watch(() => projectStore.activeWorkspace, () => {
     // unscoped: its other reads do not belong to a workspace.
     void fetchAgentAssets()
   }
-})
+}, { flush: 'sync' })
 
 
 async function doSnapshot(confirmWarnings = false) {
@@ -3001,7 +2763,7 @@ const debugSummary = computed(() => {
   const r = debugIssues.value
   if (!r) return ''
   if (!r.has_issues) return 'No runtime issues logged.'
-  return `${r.failed_jobs.length} failed job run(s), ${r.error_log_lines} error-log line(s).`
+  return `${r.failed_jobs.length} failed job run(s), ${r.error_log_records} error record(s).`
 })
 
 async function refreshDebugIssues() {
@@ -3197,7 +2959,10 @@ async function fetchPackageStatus() {
   }
 }
 
+const updateTriggerEl = ref<HTMLButtonElement | null>(null)
+
 async function openUpdatePanel() {
+  if (showUpdatePanel.value || packageUpdating.value) return
   showUpdatePanel.value = true
   changelogLoading.value = true
   changelog.value = { commits: [], compare_url: '', error: '' }
@@ -3211,8 +2976,10 @@ async function openUpdatePanel() {
 }
 
 async function doPackageUpdate() {
+  if (packageUpdating.value) return
   packageUpdating.value = true
   packageResult.value = 'Updating Ciaobot and restarting...'
+  let failed = false
   try {
     const res = await api.post<PackageUpdateResult>('/api/package/update')
     if (res.ok) {
@@ -3220,493 +2987,44 @@ async function doPackageUpdate() {
       packageResult.value = ''
       await restartAndReload('Update complete. Restarting Ciaobot with the latest version…')
     } else {
+      failed = true
       packageResult.value = `Update failed: ${res.error || 'unknown error'}`
       await fetchPackageStatus()
     }
   } catch (e) {
+    failed = true
     packageResult.value = `Update failed: ${errorMessage(e, 'unknown error')}`
     await fetchPackageStatus()
   } finally {
     packageUpdating.value = false
   }
+  // The progress overlay has just unmounted and handed focus back where it
+  // could. A failed run lands on the card's own button, so keyboard users are
+  // where they were before the run started.
+  if (failed) {
+    await nextTick()
+    updateTriggerEl.value?.focus()
+  }
 }
 
-// ── Engine update job (#608) ───────────────────────────────────────────────────
-// The persisted operation record is the only source of truth here. The card
-// keeps no local guess about how far a run got, so an engine restarted
-// mid-apply — or a Settings tab opened after the fact — shows what the record
-// says rather than what this session remembers doing.
-const updateStatus = ref<EngineUpdateStatus | null>(null)
-const updatePolling = ref(false)
-const updateActionPending = ref(false)
-// 2s. Staging is a download plus a wheel build, the apply tens of seconds more;
-// faster buys nothing a reader can use, only request volume.
-const UPDATE_POLL_MS = 2000
-let updatePollTimer: number | null = null
-// A 202 says the coordinator owns the run; only the record says how far it got,
-// and `stage_update` writes nothing until it has taken the lock, resolved the
-// release over the network and removed any previous staged environment. For the
-// first seconds of a run, then, the status route can only serve the record the
-// card was already holding — the previous run's. `updateRunStarted` says this
-// session asked for a run, `updateRunSeenInFlight` says it has since seen that
-// run's own record in flight: together they are the difference between the
-// previous run's outcome and this one's, and a poll that cannot tell them apart
-// ends a run that is still going.
-let updateRunStarted = false
-// The restart overlay is requested once per run, when the record first shows
-// the applying half. The server chains both halves, so the click that started
-// the run is long past by then.
-let updateRestartRequested = false
-let updateRunSeenInFlight = false
-let updateRunStartedAt = 0
-// The refusal the card was already holding when it asked for this run. A parked
-// reason lives on the server and is served for as long as the record it was
-// parked against is unchanged, so the previous run's refusal is still on the
-// wire during this run's pre-record window and is not this run's answer. Empty
-// when the card held no refusal, which makes any served error this run's own.
-let updateRunErrorAtStart = ''
-// A ceiling on the pre-record window, never the end condition: a run that lands
-// no record and refuses nothing must not leave the card polling forever, but a
-// slow link, a cold DNS or a re-stage of a version whose environment is still on
-// disk all have to be waited out rather than given up on.
-const UPDATE_RUN_GRACE_MS = 60_000
-
-const engineUpdateOperation = computed(() => updateStatus.value?.operation ?? null)
-const engineUpdateStage = computed(() => updateStage(engineUpdateOperation.value))
-// `applied` is the last run's outcome, not a job: nothing ever unlinks the
-// record, so a machine that has updated once would answer every later release
-// with "up to date" and never offer an update again. The release page and the
-// installed version are read independently of it, so a newer release is
-// exactly the signal that the record is history rather than the answer.
-const engineUpdateStaleApplied = computed(
-  () => engineUpdateStage.value === 'done' && !!packageStatus.value?.update_available,
-)
-const engineUpdateBusy = computed(() => updateInFlight(engineUpdateOperation.value))
-const engineUpdateFailed = computed(() => updateFailed(engineUpdateOperation.value))
-const engineUpdateRolledBack = computed(() => engineUpdateStage.value === 'rolled_back')
-const engineUpdatePhaseText = computed(() => updatePhaseLabel(engineUpdateOperation.value))
-const engineUpdateFailureText = computed(() => updateFailureText(engineUpdateOperation.value))
-// Only an installer engine has an install to swap, so only it gets the job
-// surface. Every other mode keeps the guidance the card has always shown.
-const engineUpdateEnabled = computed(
-  () => !!updateStatus.value && updateStatus.value.install_mode === 'installer' && updateStatus.value.can_update,
-)
-// The panel is for the states that need an action or an answer. Idle and up to
-// date is a status, and the header already says so.
-const engineUpdateVisible = computed(
-  () => engineUpdateEnabled.value
-    && (engineUpdateStage.value !== 'idle'
-      || !!updateStatus.value?.error
-      || !!packageStatus.value?.update_available),
-)
-const engineUpdateVersion = computed(
-  () => engineUpdateOperation.value?.to_version || packageStatus.value?.latest_version,
-)
-// The compact Updates state: the installed version is known to be the newest,
-// and nothing is staged, running, done or failed, so the section is only its
-// title with an "Up to date" status. A version check that never answered, or
-// that answered with a rate limit, has said nothing about the installed version,
-// so it is never compact: "Up to date" over "Update check failed" would be the
-// card asserting what it does not know. A `done` record is not compact either,
-// so the applied outcome keeps its own line in the panel. Staging before its
-// first record is written reads as idle, which is why an in-flight poll or
-// action also keeps the full card.
-const updatesCompact = computed(() => {
+// The up-to-date state: the installed version is known to be the newest and
+// nothing is in flight. A version check that never answered, or that answered
+// with a rate limit, has said nothing about the installed version, so it is
+// never up to date: "Up to date" over "Update check failed" would be the card
+// asserting what it does not know.
+const upToDate = computed(() => {
   const status = packageStatus.value
   if (!status || status.error || status.update_available) return false
-  if (packageUpdating.value || updatePolling.value || updateActionPending.value) return false
-  if (updateStatus.value?.error) return false
-  if (engineUpdateEnabled.value) return engineUpdateStage.value === 'idle'
-  return true
+  return !packageUpdating.value
 })
 
-// ── Automatic update policy (#2240) ───────────────────────────────────────────
-// The card draws the standing decision, the installed version and the last
-// automatic attempt. It stays visible when the engine is up to date, because
-// turning automatic updates off is a decision about this install rather than
-// about one run. The server is the source of truth: a write is drawn
-// optimistically, then replaced by the answer, and a failed write puts the last
-// confirmed state back instead of keeping a decision that was never taken.
-const autoUpdateConfirmed = ref<AutoUpdateStatus | null>(null)
-const autoUpdateState = ref<AutoUpdateStatus | null>(null)
-const autoUpdateWritePending = ref(false)
-const autoUpdateWriteError = ref('')
-// The write a "Try again" repeats, kept only while it has not succeeded.
-const autoUpdateFailedWrite = ref<AutoUpdateWrite | null>(null)
-// An expired snooze re-enables the button on a page that stays open past the
-// hold. `snooze_until` is compared with now rather than read as "active while
-// non-empty": the server serves past stamps too.
-const autoUpdateNow = ref(Date.now())
-const autoUpdateClock = window.setInterval(() => { autoUpdateNow.value = Date.now() }, 30_000)
-onUnmounted(() => window.clearInterval(autoUpdateClock))
-
-type AutoUpdateWrite = { enabled: boolean } | { snooze: true }
-
-const AUTO_UPDATE_SNOOZE_MS = 24 * 3600 * 1000
-
-/** The short wording for each outcome; "" while an attempt is in flight. */
-const AUTO_UPDATE_OUTCOME_LABEL: Record<string, string> = {
-  applied: 'Updated',
-  rolled_back: 'Rolled back',
-  rollback_failed: 'Rolled back, then the rollback failed',
-  failed: 'Failed',
-  check_failed: 'Could not check for a release',
-  stage_failed: 'Could not prepare the release',
-  unknown: 'Ended without a known outcome',
-}
-
-const autoUpdate = computed(() => autoUpdateState.value)
-// A missing `supported` is an older answer, not a refusal: the switch still
-// works and the engine decides.
-const autoUpdateSupported = computed(() => autoUpdate.value?.supported !== false)
-// An unsupported install has no policy to be "on": the enabled default the
-// server serves with its refusal is not a fact about this engine.
-const autoUpdateOn = computed(() => autoUpdateSupported.value && autoUpdate.value?.enabled === true)
-const autoUpdateUnsupportedReason = computed(() => {
-  if (!autoUpdate.value || autoUpdateSupported.value) return ''
-  return autoUpdate.value.unsupported_reason?.trim() || 'Automatic updates are not running in this engine.'
+// The compact Updates state is an up-to-date install whose copy is not needed.
+// An engine that updates through the Mac app or the old installer always
+// explains where its updates come from, so it is never collapsed.
+const updatesCompact = computed(() => {
+  if (!upToDate.value) return false
+  return !['bundled_app', 'installer'].includes(packageStatus.value?.mode ?? '')
 })
-const installedVersion = computed(
-  () => updateStatus.value?.current_version || packageStatus.value?.current_version || '',
-)
-const autoUpdateSnoozeUntilMs = computed(() => {
-  const at = autoUpdate.value?.snooze_until?.trim() || ''
-  if (!at) return 0
-  const ms = Date.parse(at)
-  return Number.isFinite(ms) ? ms : 0
-})
-const autoUpdateSnoozed = computed(() => autoUpdateSnoozeUntilMs.value > autoUpdateNow.value)
-const autoUpdateSnoozeText = computed(() => formatTime(autoUpdate.value?.snooze_until))
-const autoUpdateOutcomeLabel = computed(() => {
-  const outcome = autoUpdate.value?.outcome?.trim() || ''
-  if (!outcome) return ''
-  return AUTO_UPDATE_OUTCOME_LABEL[outcome] ?? outcome
-})
-const autoUpdateRestartedAfterUpdate = computed(() => autoUpdate.value?.outcome === 'applied')
-const autoUpdateAttemptText = computed(() => {
-  const at = autoUpdate.value?.attempted_at?.trim() || ''
-  if (!at) return ''
-  const relative = formatRelative(at)
-  const exact = formatTime(at)
-  return relative && exact ? `${relative} (${exact})` : relative || exact
-})
-
-async function writeAutoUpdateSetting(body: AutoUpdateWrite) {
-  if (autoUpdateWritePending.value) return
-  autoUpdateFailedWrite.value = body
-  autoUpdateWriteError.value = ''
-  autoUpdateWritePending.value = true
-  // Optimistic: the switch moves before the round trip. The response below
-  // replaces the guess, so nothing here is kept once the engine answers.
-  if (autoUpdateState.value) {
-    autoUpdateState.value = 'enabled' in body
-      ? { ...autoUpdateState.value, enabled: body.enabled }
-      : { ...autoUpdateState.value, snooze_until: new Date(Date.now() + AUTO_UPDATE_SNOOZE_MS).toISOString() }
-  }
-  try {
-    const next = await api.patch<AutoUpdateStatus>('/api/update/settings', body)
-    autoUpdateConfirmed.value = next
-    autoUpdateState.value = next
-    autoUpdateFailedWrite.value = null
-  } catch (e) {
-    // A write that failed changed nothing on the engine, so the card goes back
-    // to the state it last confirmed rather than showing a decision nobody took.
-    autoUpdateState.value = autoUpdateConfirmed.value
-    autoUpdateWriteError.value = apiErrorMessage(e, 'Could not save the automatic update setting.')
-  } finally {
-    autoUpdateWritePending.value = false
-  }
-}
-
-function toggleAutoUpdate() {
-  if (!autoUpdateSupported.value) return
-  void writeAutoUpdateSetting({ enabled: !autoUpdateOn.value })
-}
-
-function snoozeAutoUpdate() {
-  if (!autoUpdateSupported.value) return
-  void writeAutoUpdateSetting({ snooze: true })
-}
-
-function retryAutoUpdateWrite() {
-  if (!autoUpdateFailedWrite.value) return
-  void writeAutoUpdateSetting(autoUpdateFailedWrite.value)
-}
-
-async function fetchUpdateStatus() {
-  try {
-    const next = await api.get<EngineUpdateStatus>('/api/update/status')
-    updateStatus.value = next
-    const confirmed = next.auto_update ?? null
-    autoUpdateConfirmed.value = confirmed
-    // A poll must not overwrite a write that has not answered yet; once it has,
-    // the response (or the confirmed state after a failure) is the answer.
-    if (!autoUpdateWritePending.value) autoUpdateState.value = confirmed
-    reconcileUpdatePoll()
-  } catch {
-    // best-effort, exactly like the package status: an engine too old to have
-    // the route keeps the guidance it always had.
-  }
-}
-
-/**
- * The poll's own end condition, checked after every read.
- *
- * What ends a poll is "nothing this run can still do", and a record the card
- * was already holding when it asked for the run is not that: the coordinator
- * writes its first record only after the lock, the release lookup and the
- * removal of any previous staged environment, so for the first seconds the
- * status route can only serve the previous run's outcome. Reading that as the
- * end of this run stopped the poll while the run went on staging invisibly,
- * leaving a settled-looking panel with a re-enabled button and nothing left
- * watching. So the record is only believed once this session has seen one in
- * flight.
- */
-function reconcileUpdatePoll() {
-  // A record in flight is a run that still moves on its own, and the first time
-  // one is seen the card can trust the record from then on.
-  if (engineUpdateBusy.value) {
-    updateRunSeenInFlight = true
-    return
-  }
-  const status = updateStatus.value
-  if (!status) return
-  // The job is between its halves (the record sits on the non-in-flight
-  // `staged` phase) or before its first record: it is not over, so keep polling.
-  if (status.running) return
-  // A served error is this run's own answer only if it is not the one the card
-  // was already holding when it asked: a parked reason is served for as long as
-  // the record it was parked against is unchanged, so the previous run's refusal
-  // is still on the wire during this run's pre-record window. Reading that as
-  // the end of this run stopped the poll while it staged invisibly, behind a
-  // panel showing the previous run's reason with a re-enabled button — and that
-  // button's second click is a 409, because by then the run really is in flight.
-  if (status.error && status.error !== updateRunErrorAtStart) {
-    updateRunStarted = false
-    updateRunSeenInFlight = false
-    updateRunErrorAtStart = ''
-    stopUpdatePoll()
-    return
-  }
-  // Once the record has been seen in flight, a record that is no longer in
-  // flight is that run's outcome and nothing will move it.
-  if (updateRunSeenInFlight) {
-    updateRunStarted = false
-    updateRunSeenInFlight = false
-    updateRunErrorAtStart = ''
-    stopUpdatePoll()
-    return
-  }
-  // Otherwise this session asked for a run whose record may not be on disk yet,
-  // so keep polling. The grace bound is a ceiling on that window and nothing
-  // more: past it, a run that has produced neither a record nor a refusal is
-  // not going to, and the card would otherwise hold every button disabled until
-  // the page reloaded.
-  if (updateRunStarted && Date.now() - updateRunStartedAt >= UPDATE_RUN_GRACE_MS) {
-    updateRunStarted = false
-    updateRunErrorAtStart = ''
-    stopUpdatePoll()
-  }
-}
-
-/**
- * Record that a 202 has started a run the card is now watching.
- *
- * Only the two 202 paths call this, never `startUpdatePoll` — the tab watcher
- * starts polls too, and it is not the card asking for anything. The
- * seen-in-flight flag resets with it: a new run has to look for its own record,
- * so a flag left over from an earlier run must not end this one on its first
- * read. The refusal the card is holding is captured for the same reason: it is
- * the previous run's until a different one arrives. Neither flag is cleared by
- * `stopUpdatePoll`, so a Settings tab that is left and reopened during the
- * pre-record window keeps watching the run.
- */
-function beginUpdateRun() {
-  updateRunStarted = true
-  updateRunStartedAt = Date.now()
-  updateRunSeenInFlight = false
-  updateRestartRequested = false
-  updateRunErrorAtStart = updateStatus.value?.error || ''
-}
-
-function stopUpdatePoll() {
-  if (updatePollTimer !== null) {
-    window.clearInterval(updatePollTimer)
-    updatePollTimer = null
-  }
-  updatePolling.value = false
-}
-
-function startUpdatePoll() {
-  if (updatePollTimer !== null) return
-  updatePolling.value = true
-  updatePollTimer = window.setInterval(() => { void fetchUpdateStatus() }, UPDATE_POLL_MS)
-}
-
-async function doEngineUpdate() {
-  // A run the coordinator already owns: the 202 has not become a record yet, so
-  // the record alone cannot say the job is over. The backend refuses a second
-  // run with a 409, and the button is already disabled; both say the same thing.
-  if (updatePolling.value) return
-  updateActionPending.value = true
-  packageResult.value = ''
-  try {
-    await api.post('/api/update/start')
-    // 202: the server owns both halves from here and the record is its progress.
-    // Its first record is written only after the lock, the release lookup and
-    // the removal of any previous staged environment, so the reads that follow
-    // can still be serving the last run's outcome; `beginUpdateRun` is what
-    // keeps the poll alive across them.
-    startUpdatePoll()
-    beginUpdateRun()
-    packageResult.value = 'Updating. Ciaobot keeps running while the release downloads, then restarts once.'
-  } catch (e) {
-    // One action, one line. The 400/409 the route answers with is a reason to
-    // read, not a stream of toasts.
-    packageResult.value = `Could not update: ${apiErrorMessage(e, 'unknown error')}`
-    await fetchUpdateStatus()
-  } finally {
-    updateActionPending.value = false
-  }
-}
-
-// The apply drains and reboots the engine, so the restart overlay is the one a
-// Settings restart already uses: it covers the downtime and reloads the tab onto
-// the new version. A drain the engine gives up on cancels it through
-// `server_restart_cancelled`, and the card re-reads the record. Only a run this
-// session started asks for it, so a run begun on the CLI or another device does
-// not reload this tab.
-watch(engineUpdateStage, (stage) => {
-  if (stage !== 'applying' || !updateRunStarted || updateRestartRequested) return
-  updateRestartRequested = true
-  restartAndReload('Updating Ciaobot… the engine will restart')
-})
-
-// Poll only while a run is in flight, and only on the tab that shows the card:
-// a Settings tab left open on an idle engine must not poll forever. A run this
-// session asked for counts as in flight for this purpose too: staging is not a
-// takeover, so leaving the Updates tab mid-download and coming back has to find
-// the run still being watched rather than a card frozen on the last record.
-watch([currentTab, engineUpdateBusy], ([tab, busy]) => {
-  if (tab === 'home' && (busy || updateRunStarted)) startUpdatePoll()
-  else stopUpdatePoll()
-}, { immediate: true })
-
-// The overlay is the whole window while it is up, so it is modal: focus moves
-// into its status region, the Settings behind it go inert so Tab cannot reach
-// Restart or Deploy under the overlay, and the card takes focus back when the
-// record settles.
-const engineUpdateOverlay = ref<HTMLElement | null>(null)
-const engineUpdateOverlayView = ref<InstanceType<typeof UpdateProgressView> | null>(null)
-const engineUpdatePanel = ref<HTMLElement | null>(null)
-const engineUpdateInlineView = ref<InstanceType<typeof UpdateProgressView> | null>(null)
-// The two halves of a run are not the same thing to the app, and `useModalFocus`
-// makes the background inert up to `document.body`, so which one is up decides
-// whether the whole app is locked while it runs.
-//
-// Staging (`resolving|downloading|verifying|staging`) is a release lookup, a
-// download and a wheel build, and the engine keeps serving through all of it —
-// the card's own copy says so. Taking the window over for minutes of that is
-// the plan contradicting itself, so staging is the card's business: the same
-// progress rows rendered inline below, with nothing inert anywhere.
-//
-// Applying (`draining|applying|stopping|swapping|starting|verifying_start`, and
-// the `rolling_back` that answers a failed swap) is the engine replacing itself.
-// It goes down, the connection drops, and nothing comes back until the new one
-// is up, so there the takeover is exactly right and the copy stays.
-const engineUpdateStagingNow = computed(() => engineUpdateStage.value === 'staging')
-const engineUpdateOverlayOpen = computed(
-  () => engineUpdateBusy.value && !engineUpdateStagingNow.value && engineUpdateEnabled.value,
-)
-// The overlay's own status region, not the inert boundary: a focus target with
-// a visible ring (DESIGN) beats an invisible full-window box.
-const engineUpdateStatusRegion = computed(() => engineUpdateOverlayView.value?.statusRegion ?? null)
-// The in-card region's own focus target, for the same reason on the staging half.
-const engineUpdateInlineStatusRegion = computed(() => engineUpdateInlineView.value?.statusRegion ?? null)
-
-useModalFocus(engineUpdateOverlay, engineUpdateOverlayOpen, {
-  initialFocus: engineUpdateStatusRegion,
-  // The card owns the way back, below: the control that started the run is
-  // usually replaced by its outcome, so the captured opener is often gone.
-  restoreFocus: false,
-  // Escape is claimed and does nothing on purpose: the run under this overlay is
-  // the engine replacing itself, and no key leaves it running. Letting the key
-  // through would hand it to a global shortcut, which is worse than swallowing
-  // it.
-  onEscape: () => {
-    // Intentionally inert.
-  },
-})
-
-// Staging takes over nothing, but the control that started it is replaced by the
-// progress that replaced it, and focus left on nothing at all is worse than
-// focus on the region that now describes the run. Nothing is inert here: this is
-// a move into the card, not a claim on the window, and Tab leaves it for the
-// rest of the app like any other. Only a run this session asked for counts — a
-// run that started on the CLI or on another device must not pull focus out of
-// wherever this tab was left — and only when that control's focus is what the
-// replacement took with it.
-watch(engineUpdateStagingNow, async (staging) => {
-  if (!staging || !updateRunStarted) return
-  await nextTick()
-  const active = document.activeElement
-  if (active && active !== document.body && !engineUpdatePanel.value?.contains(active)) return
-  engineUpdateInlineStatusRegion.value?.focus()
-})
-
-// Focus comes back to the card when the overlay closes. What the run produced is
-// what the card now offers — Update & restart for a staged release, Retry for a failure —
-// so that is where focus goes: never onto a control the record has replaced,
-// and never onto nothing at all. An `applied` record offers no control, so the
-// panel itself is the target — it carries `tabindex="-1"` and states its own
-// focus ring below, because a region has no ring of its own.
-watch(engineUpdateOverlayOpen, async (open) => {
-  if (open) return
-  await nextTick()
-  focusEngineUpdatePanel()
-})
-
-function focusEngineUpdatePanel() {
-  const panel = engineUpdatePanel.value
-  if (!panel) return
-  const control = panel.querySelector<HTMLElement>('button:not([disabled])')
-  const target = control ?? panel
-  target.focus()
-}
-
-/**
- * Focus that fell on the document is not focus anyone put there.
- *
- * A re-render that removes the focused control drops focus on `body`, and the
- * card can do that to itself: a record that settles on `applied` re-reads the
- * version check, and a machine now on the release that check named has no
- * control left in the panel — so the control the focus return just landed on is
- * gone by the next answer. Focus the user moved themselves is left alone.
- */
-function reclaimEngineUpdatePanelFocus() {
-  const active = document.activeElement
-  if (active && active !== document.body) return
-  focusEngineUpdatePanel()
-}
-
-// Applied: the record says the new version is running, so the package status is
-// re-read too and its "Up to date" is the engine's own answer.
-watch(() => engineUpdateStage.value, (stage, previous) => {
-  // "Updating…" describes a run that is in flight. Once the record
-  // settles it is the last thing that happened rather than the state, and would
-  // otherwise sit under the panel that replaced it.
-  if (updateStageInFlight(previous) && !updateStageInFlight(stage)) packageResult.value = ''
-  if (stage !== 'done' || previous === 'done') return
-  void (async () => {
-    await Promise.all([fetchPackageStatus(), fetchUpdateStatus()])
-    // Those reads can replace the control the focus return landed on with a
-    // panel that has none, which is focus falling on the document rather than
-    // anywhere. The card takes it back; see `reclaimEngineUpdatePanelFocus`.
-    reclaimEngineUpdatePanelFocus()
-  })()
-})
-
-onUnmounted(stopUpdatePoll)
 
 </script>
 
@@ -3723,63 +3041,6 @@ onUnmounted(stopUpdatePoll)
   height: 100%;
   min-width: 0;
   container-type: inline-size;
-}
-
-/* The engine update's inert boundary: an empty full-window layer the overlay
-   paints into, so the Settings behind it can be made inert while it is up. */
-.engine-update-overlay {
-  position: fixed;
-  inset: 0;
-}
-
-/* The card's own focus target, for the run that leaves it with nothing to
-   click: the app's focus ring (DESIGN: 2px accent) does not reach a region, so
-   the panel states one exactly as the overlay's status region does. */
-.engine-update-panel:focus { outline: none; }
-.engine-update-panel:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-/* Automatic updates (#2240). A policy block, not a `.settings-form-panel`: the
-   compact Updates state is a title and a badge, and this row stays under it. */
-.auto-update-panel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
-}
-.auto-update-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.auto-update-title {
-  color: var(--fg);
-  font-size: var(--text-base, 14px);
-  font-weight: 600;
-}
-.auto-update-detail,
-.auto-update-note,
-.auto-update-meta {
-  margin: 0;
-  color: var(--fg3);
-  font-size: var(--text-sm);
-  line-height: 1.5;
-}
-.auto-update-meta { color: var(--fg2); }
-/* The installed version is technical metadata: mono, like an ID. */
-.auto-update-version {
-  color: var(--fg);
-  font-family: var(--font-mono);
-}
-/* A written setting that failed is an error, not a hint. */
-.auto-update-error {
-  margin: 0;
-  color: var(--error);
-  font-size: var(--text-sm);
-  line-height: 1.5;
 }
 
 .shortcut-list {
@@ -3885,26 +3146,6 @@ onUnmounted(stopUpdatePoll)
     min-height: var(--touch);
   }
 }
-
-/* Connection state as text with a leading dot, not a mono pill. */
-.settings-conn-state {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  white-space: nowrap;
-}
-.settings-conn-state::before {
-  content: '';
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: currentColor;
-}
-.settings-conn-state--ok::before { background: var(--success); }
-.settings-conn-state--error { color: var(--error); }
 
 .settings-main :deep(:is(.btn-primary, .btn-secondary, .btn-caution, .btn-small)) {
   white-space: nowrap;
@@ -4680,6 +3921,13 @@ a.btn-secondary {
 /* "What this CLI brings": the per-provider MCP and skill chip lists, folded
    away by default so the providers tab stays scannable. The summary is the whole
    touch target, so it keeps the 44px minimum. */
+@media (pointer: coarse) {
+  .provider-sign-in > summary {
+    min-height: var(--touch);
+    min-width: var(--touch);
+    align-content: center;
+  }
+}
 .provider-brings > summary {
   display: inline-flex;
   align-items: center;
@@ -4715,18 +3963,6 @@ a.btn-secondary {
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
-.provider-brings[open] > .provider-mcps-preview { margin-top: var(--space-1); }
-
-/* Provider & Workspace MCP Connectors Bar */
-.provider-mcps-preview {
-  margin-top: var(--space-3);
-  margin-bottom: var(--space-3);
-  padding: var(--space-3);
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-
 .workspace-connectors-preview {
   grid-column: 1 / -1;
   background: var(--bg2);
@@ -4789,111 +4025,6 @@ a.btn-secondary {
   height: 6px;
   border-radius: 50%;
   background-color: var(--fg3);
-}
-
-/* MCP Inspector */
-.mcp-inspector-bar {
-  display: flex;
-  gap: var(--space-4);
-  margin-bottom: var(--space-4);
-}
-
-.mcp-inspector-field {
-  flex: 1;
-  max-width: 250px;
-}
-
-.mcp-inspector-panels {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-4);
-}
-
-@media (max-width: 768px) {
-  .mcp-inspector-panels {
-    grid-template-columns: 1fr;
-  }
-}
-
-.mcp-inspector-panel {
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: var(--space-3);
-}
-
-.panel-header {
-  margin-bottom: var(--space-3);
-}
-
-.panel-title-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 2px;
-}
-
-.panel-title {
-  font-weight: 600;
-  font-size: var(--text-sm);
-}
-
-
-
-
-
-
-
-.mcp-tag--active {
-  background: rgba(46, 160, 67, 0.1);
-  color: var(--fg);
-  border-color: rgba(46, 160, 67, 0.4);
-}
-
-.mcp-tag--active .pill-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background-color: #2ea44f;
-}
-
-.mcp-tag--blocked {
-  background: var(--bg);
-  color: var(--fg3);
-  opacity: 0.5;
-  text-decoration: line-through;
-}
-
-.badge--compact {
-  font-size: 10px;
-  padding: 1px 6px;
-}
-
-.mcp-server-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: var(--space-3);
-  margin-top: var(--space-2);
-}
-
-.mcp-server-card {
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: var(--space-3);
-}
-
-.mcp-server-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: var(--space-2);
-}
-
-.mcp-server-name {
-  font-weight: 600;
-  font-size: var(--text-sm);
-  margin-right: var(--space-2);
 }
 
 

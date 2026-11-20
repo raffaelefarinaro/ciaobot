@@ -243,6 +243,37 @@ describe('HousekeepingStrip', () => {
     wrapper.unmount()
   })
 
+  it('leads the Mac app switch with its download link and keeps Not now in the menu', async () => {
+    const store = useHousekeepingStore()
+    store.actions = [action({
+      id: 'mac-app-switch',
+      kind: 'mac-app-switch',
+      workspace: '',
+      title: 'Switch to the new Ciaobot app',
+      detail: 'Your workspaces, chats and settings are kept. Install Ciaobot for Mac on the computer running Ciaobot and it takes over from this install.',
+      link_label: 'Download for Mac',
+      link_url: 'https://github.com/raffaelefarinaro/ciaobot/releases/latest',
+      dismiss_label: 'Not now',
+    })]
+    const dismissSpy = vi.spyOn(store, 'dismiss').mockResolvedValue({ ok: true, summary: '' })
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia] } })
+    await nextTick()
+
+    const [row] = rows(wrapper)
+    const [link] = leads(row)
+    expect(link.element.tagName).toBe('A')
+    expect(link.attributes('href')).toBe('https://github.com/raffaelefarinaro/ciaobot/releases/latest')
+    expect(link.attributes('target')).toBe('_blank')
+    expect(link.attributes('rel')).toContain('noopener')
+    expect(link.text()).toBe('Download for Mac')
+    // Link-only: the menu holds the dismissal and the in-memory hide, no run.
+    expect(await menuLabels(row)).toEqual(['Not now', 'Hide for now'])
+
+    await pick(row, 'Not now')
+    expect(dismissSpy).toHaveBeenCalledWith('mac-app-switch')
+    wrapper.unmount()
+  })
+
   it('shows a thank-you toast when the star nudge run succeeds', async () => {
     const store = useHousekeepingStore()
     store.actions = [action({

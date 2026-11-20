@@ -100,7 +100,6 @@ function registry(links: Record<string, string>): WorkspacesResponse {
     })),
     active: 'work',
     primary: 'work',
-    default_agent_fs_scope: 'workspace',
     provider_options: [{ value: 'claude', label: 'Claude' }],
   } as WorkspacesResponse
 }
@@ -117,7 +116,7 @@ async function mountOverview() {
   const { default: SettingsView } = await import('../SettingsView.vue')
   const wrapper = mount(SettingsView, {
     attachTo: document.body,
-    global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: Stub } },
+    global: { plugins: [router], stubs: { Teleport: true } },
   })
   await flushPromises()
   await nextTick()

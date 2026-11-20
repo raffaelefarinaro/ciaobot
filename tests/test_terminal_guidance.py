@@ -116,26 +116,28 @@ def _terminal_button_label() -> str:
     return str(labels[0]).strip()
 
 
-def _inventory_command_names() -> set[str]:
-    """The MCP command names the Settings inventory puts in front of the user.
+def _inventory_command_names(monkeypatch: pytest.MonkeyPatch) -> set[str]:
+    """The MCP command names the Settings MCP buttons type for the user.
 
-    Derived from the inventory rather than listed here, so a command it
-    starts handing out has to be documented, and one it stops handing out
-    does not have to be un-documented.
+    Taken from the backend constants the buttons use, so a command the
+    buttons start typing has to be documented.
     """
-    # The Settings page builds its commands in the PWA (web/src/lib/shellQuote.ts,
-    # `mcpCommand`); the inventory only supplies the `cd` prefix.
-    builder = (REPO / "web" / "src" / "lib" / "shellQuote.ts").read_text(encoding="utf-8")
-    names = set(re.findall(r"\b((?:claude|opencode) mcp [a-z][a-z-]*)", builder))
-    assert {"claude mcp add", "opencode mcp add"} <= names, (
-        "shellQuote.ts no longer parses into MCP commands"
-    )
-    return names
+    # Settings -> MCP servers and Chat details render one button per agent that
+    # types the agent's own MCP command (`mcp_command` in /api/settings/providers).
+    from ciao import setup_status
+    from ciao import opencode_cli as opencode
+
+    # The bare form, as the server hands it out when the user's terminal
+    # resolves the binary.
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: f"/usr/bin/{cmd}")
+    return {setup_status.claude_mcp_command(""), opencode.OPENCODE_MCP_COMMAND}
 
 
-def test_settings_inventory_commands_are_the_ones_the_guidance_names() -> None:
+def test_settings_inventory_commands_are_the_ones_the_guidance_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The guidance must name the commands the Settings panel hands out."""
-    emitted = _inventory_command_names()
+    emitted = _inventory_command_names(monkeypatch)
     assert emitted, "the inventory hands out no MCP command"
     guidance = _reference("install-and-settings.md")
     missing = sorted(command for command in emitted if command not in guidance)
@@ -262,6 +264,12 @@ def test_the_offer_takes_a_command_file_and_nothing_else() -> None:
     ), "the offer takes no positional text"
 
 
+def test_the_cli_takes_no_mcp_auth_kind_and_no_server_flag() -> None:
+    assert _refused(["chat", "needs-action", "mcp_auth", "--server", "linear"])
+    assert _refused(["chat", "needs-action", "restart", "--reason", "config", "--server", "linear"])
+    assert _refused(["chat", "needs-action", "restart", "--reason", "config", "--provider", "claude"])
+
+
 def test_the_offer_reaches_the_calling_chat_only(tmp_path: Path) -> None:
     """The parsed form resolves to the operation the guidance names."""
     command_file = tmp_path / "command.txt"
@@ -303,11 +311,127 @@ def test_chat_mcp_setup_runs_in_the_workspace_folder() -> None:
     """
     guidance = _reference("install-and-settings.md")
     assert "cd -- '<workspace folder>' && " in guidance
-    assert "Set-Location -LiteralPath '<workspace folder>'; " in guidance
     assert "never the linked repository" in guidance
 
-    # The prefix forms the server builds (ciao/web/mcp_inventory.py `_shell_prefix`);
-    # the source text is checked, not the helper, so both platforms see the same forms.
-    server = (REPO / "ciao" / "web" / "mcp_inventory.py").read_text(encoding="utf-8")
-    assert 'f"cd -- {shlex.quote(root)} && "' in server
-    assert "f\"Set-Location -LiteralPath '{_double_ps_quotes(root)}'; \"" in server
+
+def _assert_mcp_recovery_location(index: str, settings: str, cli: str) -> None:
+    settings_mcp = "\n".join(
+        line for line in settings.splitlines()
+        if line.startswith((
+            "- **Asked in a chat", "- **Say the next step", "- **MCP servers in Settings",
+            "- **Adding a server", "- **Claude Code**", "- **OpenCode**",
+            "- **A workspace's `.mcp.json`", "- **Reloading after a change",
+            "- **Chat MCP navigation", "- **The manual bridge", "- **Never report a step",
+        ))
+    )
+    reload = cli.split("## Reloading tools", 1)[1].split("## Projects", 1)[0]
+    row = next(line for line in cli.splitlines() if line.startswith("| `chat needs-action KIND"))
+    intro = row.split(" `command --command-file", 1)[0]
+    for text in (index, settings_mcp, reload):
+        assert "Chat details → MCP" in text
+    for text in (index, settings_mcp, reload, intro):
+        assert not re.search(
+            r"(?:mcp|sign[ -]in|auth(?:entication)?).{0,60}"
+            r"(?:card|tile|above the composer|fold(?:ed|s|ing)?)\b",
+            text, re.IGNORECASE,
+        )
+    assert "mcp_auth" not in row
+    assert "actions show as a card above the composer" in intro
+    assert "device_code" in row
+
+
+def _assert_manual_bridge_claims_no_managed_sign_in(text: str) -> None:
+    assert "no managed MCP sign-in" in text
+    assert "no callback paste-back" in text
+    assert "signing in is the CLI's own" in text
+    assert "manually pastes and runs" in text
+    assert not re.search(r"Managed remote OAuth", text, re.IGNORECASE)
+    assert not re.search(r"supports callback paste-back", text, re.IGNORECASE)
+
+
+def _assert_mcp_shortcut_contract(text: str) -> None:
+    assert re.search(r"Standalone case-insensitive `/mcp` opens the current chat's MCP sidebar only for an actual Claude or OpenCode chat with a resolved owning workspace", text)
+    assert re.search(r"unsupported provider or unresolved workspace the app shows a local reason, preserves raw text and staged state, and sends no turn", text)
+    assert re.search(r"`/mcp ARG` and other arguments are ordinary prompts, not native TUI commands", text)
+
+
+def _mcp_sources() -> tuple[str, str, str]:
+    return (
+        _section(_skill(), "Connecting providers"),
+        _reference("install-and-settings.md"),
+        agent_cli._help_text("chat"),
+    )
+
+
+def test_guidance_places_mcp_signin_in_chat_details_not_inline_cards() -> None:
+    _assert_mcp_recovery_location(*_mcp_sources())
+
+
+@pytest.mark.parametrize(("source", "old", "new"), [
+    (0, "sign-in use **Chat details → MCP**, which runs", "sign-in use **Chat details → MCP**; MCP authentication card above the composer, which runs"),
+    (1, "A server that still needs a sign-in is signed in with the CLI's own MCP command.", "A server that still needs a sign-in is signed in with the CLI's own MCP command. Sign-in requests fold under one row."),
+    (2, " `permission_mode --mode", " `mcp_auth --server NAME`: ask the user to sign in to an MCP server. `permission_mode --mode"),
+    (2, "direct the user to Chat details → MCP, which runs the agent's own MCP command", "direct the user to the MCP authentication card above the composer, which runs the agent's own MCP command"),
+])
+def test_mcp_location_contract_rejects_inline_mutations(source: int, old: str, new: str) -> None:
+    texts = list(_mcp_sources())
+    assert old in texts[source]
+    texts[source] = texts[source].replace(old, new)
+    with pytest.raises(AssertionError):
+        _assert_mcp_recovery_location(*texts)
+
+
+def test_sidebar_terminal_guidance_keeps_user_control_boundaries() -> None:
+    terminal = _reference("terminal.md")
+    for fact in ("Chat details → Open → Terminal", "Open in Terminal", "engine runs as", "agent cannot drive", "cannot read", "bypass permissions", "Repository", "Workspace", "repository is not required"):
+        assert fact in terminal
+
+
+def test_mcp_shortcut_guidance_is_app_navigation_for_supported_providers() -> None:
+    guidance = _reference("install-and-settings.md")
+    _assert_mcp_shortcut_contract(next(line for line in guidance.splitlines() if line.startswith("- **Chat MCP navigation.")))
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("preserves raw text and staged state", "discards raw text and staged state"),
+    ("preserves raw text and staged state", "preserves raw text but discards staged state"),
+    ("sends no turn", "sends a turn"),
+    ("unsupported provider or unresolved workspace", "unsupported provider and resolved workspace"),
+    ("ordinary prompts, not native TUI commands", "native TUI commands, not ordinary prompts"),
+])
+def test_mcp_shortcut_contract_rejects_opposite_outcomes(old: str, new: str) -> None:
+    guidance = _reference("install-and-settings.md")
+    navigation = next(line for line in guidance.splitlines() if line.startswith("- **Chat MCP navigation."))
+    assert old in navigation
+    with pytest.raises(AssertionError):
+        _assert_mcp_shortcut_contract(navigation.replace(old, new))
+
+
+def test_manual_bridge_claims_no_managed_mcp_sign_in() -> None:
+    guidance = _reference("install-and-settings.md")
+    bridge = next(line for line in guidance.splitlines() if line.startswith("- **The manual bridge.**"))
+    _assert_manual_bridge_claims_no_managed_sign_in(bridge)
+
+
+def test_mcp_recovery_copies_only_and_requires_user_terminal_step() -> None:
+    guidance = _reference("install-and-settings.md")
+    bridge = next(line for line in guidance.splitlines() if line.startswith("- **The manual bridge.**"))
+    for fact in ("Terminal recovery", "copies only", "Chat details → Open → Terminal",
+                 "Workspace if offered", "review, paste and run", "never types"):
+        assert fact in bridge
+    offer = next(line for line in guidance.splitlines() if line.startswith("- **The agent offers, the user runs.**"))
+    assert "suggestion card types" in offer
+
+
+@pytest.mark.parametrize(("old", "new"), [
+    ("no managed MCP sign-in", "managed MCP sign-in"),
+    ("no callback paste-back", "callback paste-back"),
+    ("signing in is the CLI's own", "signing in is Ciaobot's own"),
+    ("manually pastes and runs", "never pastes or runs"),
+])
+def test_manual_bridge_contract_rejects_contradictions(old: str, new: str) -> None:
+    guidance = _reference("install-and-settings.md")
+    bridge = next(line for line in guidance.splitlines() if line.startswith("- **The manual bridge.**"))
+    assert old in bridge
+    with pytest.raises(AssertionError):
+        _assert_manual_bridge_claims_no_managed_sign_in(bridge.replace(old, new))

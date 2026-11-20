@@ -52,7 +52,8 @@ import json
 import logging
 import os
 import re
-from collections.abc import Collection
+from collections.abc import Callable, Collection
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -697,13 +698,21 @@ def read_category_sidecar(vault_root: Path, category_id: str) -> dict[str, Any] 
     return payload
 
 
-def write_category_sidecar(vault_root: Path, payload: dict[str, Any]) -> Path:
+def write_category_sidecar(
+    vault_root: Path,
+    payload: dict[str, Any],
+    *,
+    publish_guard: Callable[[], AbstractContextManager[object]] | None = None,
+) -> Path:
     """Write one category proposal beside the queue; return the path.
 
     Atomic for the same reason the queue is: the accept reads this file to learn
     which notes to retype, and a half-written one is not "the previous list" but
     a truncated one, which would silently retype a subset of the notes the owner
     ticked.
+
+    ``publish_guard`` wraps only the replacement; raising from it leaves any
+    earlier sidecar for this id untouched and removes the staged file.
     """
     path = category_sidecar_path(vault_root, str(payload["id"]))
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -713,9 +722,14 @@ def write_category_sidecar(vault_root: Path, payload: dict[str, Any]) -> Path:
             json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
             encoding="utf-8", newline="",
         )
-        os.replace(tmp, path)
-    except OSError:
-        tmp.unlink(missing_ok=True)
+        with publish_guard() if publish_guard is not None else nullcontext():
+            os.replace(tmp, path)
+    except BaseException:
+        # Clean the staged file on a refusal too, without masking the error.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
         raise
     return path
 
@@ -729,13 +743,25 @@ def decline_category(vault_root: Path, category_id: str) -> Path:
     live queue, and the moment the row is dismissed there is nothing left to
     match. Without this flag the same cluster is queued again the next night,
     forever.
+
+    Read-modify-write under the proposal queue lock, the only other production
+    writer of a category sidecar besides the publisher. A lock that cannot be
+    taken is reported as a :class:`CategorySidecarError`, the refusal the callers
+    already handle.
     """
-    payload = read_category_sidecar(vault_root, category_id)
-    if payload is None:
-        raise CategorySidecarError(
-            f"no category proposal on record for {category_id!r} in {vault_root}"
-        )
-    return write_category_sidecar(vault_root, {**payload, "declined": True})
+    from ciao.memory_receipts import QueueLockError, queue_lock
+    from ciao.memory_proposals import _PROPOSALS_RELATIVE
+
+    try:
+        with queue_lock(Path(vault_root) / _PROPOSALS_RELATIVE):
+            payload = read_category_sidecar(vault_root, category_id)
+            if payload is None:
+                raise CategorySidecarError(
+                    f"no category proposal on record for {category_id!r} in {vault_root}"
+                )
+            return write_category_sidecar(vault_root, {**payload, "declined": True})
+    except QueueLockError as exc:
+        raise CategorySidecarError(str(exc)) from exc
 
 
 def declined_category_ids(vault_root: Path) -> set[str]:
@@ -779,48 +805,78 @@ def _queued_category_ids(vault_root: Path) -> set[str]:
     }
 
 
-def generate_category_proposals(
+def scan_category_candidates(
     vault_root: Path,
     *,
     registry: EntityTypeRegistry,
     threshold: int = CATEGORY_CLUSTER_THRESHOLD,
 ) -> list[dict[str, Any]]:
-    """Queue a ``[category …]`` bullet per unlisted ``type:`` with a cluster.
+    """The category clusters this vault has, not yet declined. Read-only.
 
-    One mechanical pass, no model: the trigger is a count, so the nightly
-    curation can file these itself and the skill's "do not touch vocabulary
-    proposals" clause stays true for the agent. Returns the candidates it
-    queued, in the order they were written.
-
-    The sidecar is written BEFORE the bullet, deliberately. A sidecar with no
-    bullet is litter the next pass overwrites; a bullet with no sidecar is a row
-    whose accept refuses and keeps, which is the direction that fails safe.
+    This is the one vault-wide scan of the category path, so it must run outside
+    the proposal queue lock and the curation state lock. Nothing is written here.
+    Queue membership is not checked: that is decided at publication, under the
+    lock, by :func:`publish_category_candidates`.
 
     ``registry`` is required, and it is NOT ``load_entity_types(vault_root)``:
     *vault_root* is where this workspace's NOTES live, while
-    ``entity-types.yaml`` belongs to the AGENT vault root (``agent_vault_root``)
-    — the same file the accept appends to and ``GET``/``PATCH
-    /api/memory/entity-types`` reads and writes. On an install that has not
-    re-rooted those are different directories, and reading the notes root left
-    detection blind to every category the owner had just accepted: the id stayed
-    unlisted, so it was queued again, and accepting that row 400'd on a duplicate
-    it could never resolve. The caller resolves the root
-    (``ciao/curation_run.py`` threads the one the CLI resolved) and this function
-    never guesses it.
+    ``entity-types.yaml`` belongs to the AGENT vault root. The caller resolves the
+    root (``ciao/curation_run.py`` threads the one the CLI resolved) and this
+    function never guesses it.
     """
-    from ciao.memory_proposals import MemoryProposal, append_proposals
-
     root = Path(vault_root)
     if not root.is_dir():
         return []
-    candidates = category_candidates(
+    return category_candidates(
         vault_index.scan_vault(root, registry=registry),
         threshold=threshold,
         declined=declined_category_ids(root),
         registry=registry,
     )
+
+
+def publish_category_candidates(
+    vault_root: Path,
+    candidates: list[dict[str, Any]],
+    *,
+    registry: EntityTypeRegistry,
+    publish_guard: Callable[[], AbstractContextManager[object]] | None = None,
+) -> list[dict[str, Any]]:
+    """Queue a ``[category …]`` bullet per candidate still wanted; return those queued.
+
+    The write half of :func:`scan_category_candidates`. The caller holds the
+    proposal queue lock. The queue and declined set are re-read here, before any
+    lock beyond that is taken, rather than trusted from the scan. A candidate
+    already queued, already declined, or already a known category in *registry*
+    is dropped.
+
+    ``publish_guard`` is entered around each file replacement (each sidecar, then
+    the queue append) and around one check before anything is staged. A guard that
+    raises refuses that write, so a run whose lease expired during the scan
+    publishes nothing. A sidecar written before a refusal stays: the sidecar is
+    written before its bullet by design, and a retry by a live run rewrites the
+    same id and appends its bullet once.
+    """
+    from ciao.memory_proposals import MemoryProposal, append_proposals
+
+    def guard() -> AbstractContextManager[object]:
+        return publish_guard() if publish_guard is not None else nullcontext()
+
+    root = Path(vault_root)
+    if not root.is_dir():
+        return []
+    declined = declined_category_ids(root)
     queued = _queued_category_ids(root)
-    fresh = [c for c in candidates if c["type_id_suggestion"] not in queued]
+    fresh = [
+        c
+        for c in candidates
+        if c["type_id_suggestion"] not in queued
+        and c["type_id_suggestion"] not in declined
+        and registry.get(c["type_id_suggestion"]) is None
+    ]
+    # Unconditional, so a lost lease is reported even when nothing is left to file.
+    with guard():
+        pass
     if not fresh:
         return []
     for candidate in fresh:
@@ -835,6 +891,7 @@ def generate_category_proposals(
                 "paths": list(candidate["paths"]),
                 "declined": False,
             },
+            publish_guard=publish_guard,
         )
     append_proposals(
         [
@@ -853,6 +910,7 @@ def generate_category_proposals(
             for candidate in fresh
         ],
         root,
+        publish_guard=publish_guard,
     )
     # Read back rather than assumed from the call: ``append_proposals`` dedupes
     # on the bullet TEXT against the decision history as well as the live queue,

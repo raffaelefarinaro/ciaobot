@@ -13,14 +13,17 @@ pin request cannot close a newer file preview.
 Completed final assistant bubbles also link an untouched mention (a filename or relative path the reply names that no tool touched) only after `POST /api/chats/{chat_id}/file-paths/resolve` confirms it (`composables/useFileMentions.ts`). The lookup is browser-only and bounded per generation: 100 examined message revisions, 262,144 content characters, 200 candidates and 20 requests, in batches of 50 items or 32 KiB. It covers only the history already loaded, and it never searches by basename. A missing, ambiguous, failed or over-budget mention stays plain, with no toast. Discovery pauses while streaming. A context change clears the confirmed links at once; a finished turn, a reopened chat or `invalidate()` starts a new generation and keeps the links until its answer arrives. Before the re-rooting, only vault-relative or in-vault absolute spellings link; an install-relative spelling stays plain. Explicit Markdown links, tool-touched paths and the viewer policy are unchanged.
 
 The chat panel and pinned-file panel load when their views need them; a direct
-chat or subagent link starts the chat download alongside bootstrap data. The
+chat link starts the chat download alongside bootstrap data. The
 file viewer loads on first open and stays mounted afterward so dialog focus
 restoration and edit state keep their normal lifecycle. The item peek host
 (`ItemPeekHost.vue`, which mounts `TaskWorkspaceSurface.vue` in its overlay
 mode) loads the same way, on the first task link opened over a chat; Back
 closes it through `useOverlayBackEntry`. Home does
 not fetch
-these optional modules. The engine status request is bounded and shared between
+these optional modules. The chat rise starts when the real main chat panel
+has mounted and the route has reached that chat, not when the chat is selected,
+so a slow chunk leaves the skeleton unmarked and the panel rises when it arrives.
+A navigation elsewhere, or one the router refuses, cancels the pending rise. The engine status request is bounded and shared between
 startup progress and outage monitoring; a ready response within the brief
 startup display delay avoids showing the curtain on a warm load.
 
@@ -30,14 +33,22 @@ with click, Enter, or Space to inspect the complete scrolling timeline; the
 expanded choice is preserved at turn completion. New activity slides within
 the preview, except when reduced motion is requested.
 
-A running background subagent stays visible while its chat is idle. The engine's
-`chat_subagents_ready` count and the `/api/subagents/running` list are separate
-sources and the store never writes one into the other. When the list names a
-running child of the active chat while the count is 0, the store refetches that
-chat's full subagent list once and keeps both polls going, within the existing
-90-second drain, until a successful list no longer names it. A failed request
-keeps the rows, and a dedicated single-agent view still suppresses the full-list
-poll.
+Failure recovery sends a server-guarded “continue”, not the request or its
+attachments. Controls wait for matching fresh chat metadata and indexed history;
+an unavailable or stale snapshot disables continuation actions but still allows
+the observed schedule to be stopped. A conflicting saved retry is
+shown separately and is never automatically stopped or replaced. An uncertain
+outcome is retained across reloads, requires a disk-backed check of each exact
+server-issued receipt ID and explicit reconciliation, and is never automatically
+resubmitted. The receipt is saved locally before dispatch; a status check cancels
+an issued but unsubmitted request before its marker can be cleared.
+Creating a literal schedule from the sidebar requires the server to atomically
+verify an empty slot; a conflict refreshes the displayed schedule. Running or
+stopping a literal schedule requires confirmation and its observed server
+identity; a conflict refreshes the schedule without acting again. If no identity
+is available, these controls are disabled and it can still run on schedule.
+Recovery rejects model and thinking changes until the server can atomically
+guard them against a newer failure, and rejects provider handovers.
 
 Production hashed JavaScript and CSS under `/assets` use negotiated gzip above
 500 bytes. Other static files, API responses, and chat streams keep their
@@ -48,7 +59,7 @@ The chat rail uses Option/Alt+Left and Right to move through the current workspa
 
 ## Dev workflow
 
-The embedded LoginView keeps terminal guidance and the six-item product tour for ordinary CLI bootstrap. Native installer bootstrap uses the same setup form and provider diagnostics without the terminal shell, first-launch note, or tour; installer workspace suggestions remain authoritative until the user types or selects a folder.
+The embedded LoginView keeps terminal guidance and the six-item product tour for the CLI bootstrap.
 
 ```bash
 cd web
@@ -62,18 +73,122 @@ npm run test:e2e     # Playwright browser suite (see Testing below)
 
 Type-checking runs via `vue-tsc --noEmit` as part of `npm run build`. PR-blocking minimum: `npm run build` passes.
 
+The component workshop runs without an engine: `npm run storybook` serves it at
+`http://127.0.0.1:6006`, and `npm run build-storybook` writes the ignored
+`web/dist/storybook` output. It imports production components and CSS directly
+and does not load the app bootstrap or public assets. `npm test` remains the
+separate application suite. Open **Inventory / UI inventory** (`inventory--all`)
+to search the production owner catalogue: one row per SFC, plus inline and
+shared CSS families. Search intersects with family, coverage and migration
+filters.
+
+**Coverage rules.** Per-owner state lists belong in the inventory rows, not here.
+
+- An inventory row is not a story or a migration approval. Adding an SFC needs its
+  own row (and a rationale for a composition), not a complete story suite.
+- **Covered** means a rendered-state story exists, not that interaction is verified.
+  **Uncovered** means an implemented state has no story; **unknown** means the state
+  or loading fidelity is unaudited; **not applicable** means it is known not to apply.
+  Summary categories overlap. Migration starts unassessed unless a decision says otherwise.
+- A story does not imply connected-caller, loading-fidelity, keyboard,
+  reduced-motion, responsive or migration coverage. Those stay unassessed until the row says otherwise.
+- Stories preserve current production behaviour, even where it differs from the
+  desired contract. Record the difference in the row; do not fix it in the story.
+- Direct consumers are production import/include sites. Support sources may use
+  classes or host a composition without importing the owner. Composition rows
+  render the real composition; CSS rows claim no stories.
+- Node inventory tests derive coverage from each story file's CSF index, not a
+  hand-written list: every covered state's story IDs must exist there, every story
+  except the inventory page is claimed by exactly one row state, and each claimed
+  story file must render that owner.
+
+**Connected fixtures.** A story that renders an owner which transports data declares
+what it may reach; nothing else is reachable.
+
+- `src/stories/fixtureBoundary.ts`: `installFixtureBoundary({ routes: [{ method,
+  path, respond }], sockets: [{ path, script }] })`. Only exact declared reads and
+  writes are answered in memory (path is pathname + search + hash; a body on GET or
+  HEAD is a violation). Every other fetch, new XMLHttpRequest, WebSocket,
+  EventSource or beacon is rejected with no native fallback; existing XHR open/send
+  and WebSocket send stay fenced.
+- A route whose `respond()` never resolves holds the request until teardown.
+  Teardown unmounts the isolated app, disposes its Pinia, settles held requests and
+  restores transport descriptors. The boundary mounts once: concurrent or
+  inline-docs mounts are refused, and connected owners stay excluded from autodocs.
+- It is a trusted-component harness, not a security sandbox. DOM resource loads,
+  workers and native references saved outside the fixture are not fenced.
+- `src/stories/mountConnected.ts`: `mountConnected(host, { component, routes,
+  routerRoutes, seed })` mounts the owner into a separate Vue app with a fresh memory
+  router and fresh Pinia. It seeds store state only, never app orchestration, and
+  starts no engine, provider or bootstrap.
+- Declared app sockets never open natively. The story gets an in-memory fake (send,
+  close, readyState, the ready-state constants, `instanceof WebSocket`) whose far end
+  is its `script` (`serverOpen`, `serverMessage`, `serverError`, `serverClose`).
+  Deliveries flush on the next microtask, after the component assigned its handlers;
+  a faulty script fails construction. Declared sockets must be same-origin at an
+  exact path; anything else, including the engine's `/ws/events`, is refused.
+- The preview decorator installs the boundary for every story and docs page from
+  `parameters.fixture`, a typed `{ routes, sockets }` config (empty when absent).
+  There is no skip flag. A connected story declares its routes there, e.g.
+  `parameters: { fixture: { routes: statsRoutes('default') } }`. `mountConnected`
+  mounts into the boundary the preview built and throws when none is active.
+- Duplicate routes or socket paths, a malformed config and a non-array routes list
+  are `TypeError`s. Docs mode shares one empty boundary across stories, so a docs
+  story that declares routes or sockets is refused.
+- Violations are asserted at teardown: the preview's global `afterEach` fails the
+  story when the boundary recorded any violation, even if the component swallowed
+  the error (`fetch(...).catch(() => {})`, a try/catch around XHR, WebSocket or
+  beacon). Play functions assert the violation ledger stays empty.
+- Owners with singleton request state (for example `askConfirm`, `askPrompt`) cancel
+  outstanding requests on teardown and are excluded from inline Docs.
+- Not fenced: `localStorage`, `sessionStorage`, IndexedDB and service workers. A
+  story that touches them is not isolated by this boundary.
+- The only native sends allowed are: Vite's HMR ping on its established same-origin
+  `vite-hmr` socket; render lifecycle and heartbeat events plus preview keyboard
+  reports (`previewKeydown`) on `/storybook-server-channel` with its exact preview
+  page and token; and, only under `npm run test-storybook`, the vitest browser
+  runner's control socket (`/__vitest_browser_api__`) for birpc requests, events
+  (no `i`) and optional calls (`o:true`) whose method is on the runner's page-side
+  allow-list, plus responses. Custom, invoke and save events are not allowed.
+  Module and asset loading is infrastructure, not an API fixture.
+- Use synthetic fixture names (`storybook-alpha`, `storybook-beta`). No real paths,
+  tokens or user text.
+
+**Checks.**
+
+- `npm run build-storybook` runs `scripts/check-storybook-index.ts` after building.
+  Every registry-linked ID must exist as a story (not Docs or the inventory page);
+  missing or malformed output fails the command. Run the check alone with
+  `node --experimental-strip-types web/scripts/check-storybook-index.ts` from the
+  repository root.
+- `npm run test-storybook` runs the browser interaction runner (@storybook/addon-vitest,
+  vitest browser mode with the Playwright provider): every story renders in headless
+  Chromium and its `play` functions execute there. Chromium must be installed locally
+  (`npx playwright install chromium`).
+- Node tests check data and filters, not Vue interactions or manager links.
+
+**Visual check.** Filtering, keyboard access, narrow and zoom layouts and story links
+are checked by hand in both the development (`npm run storybook`) and built workshop,
+in a browser. Record screenshots and network evidence with the change. Use 390px and
+1280px, dark and light (once the appearance toolbar exists), and 200% zoom for one
+story; check keyboard focus and 44px touch targets. A 390px container is not a
+narrow viewport: still verify an actual narrow viewport and browser zoom.
+
 After changes that touch running static assets (anything that lands in `ciao/web/static/`), redeploy via the PWA's Settings → Deploy. **Do not restart the ciao service yourself**: you'd sever the PWA session the agent is talking through.
 
 ## Layout
 
-Onboarding's Access & memory stage treats filesystem scope and runtime approval mode as separate choices. It writes only explicit changes through workspace settings; an unset permission mode remains unknown/engine default and is never presented as a known guarantee.
+The expanded sidebar places the six destinations above one contextual scroller (including Settings and Memory filters), with workspace selection in a fixed footer. Its upward menu is bounded by the visible viewport; an exceptionally short sidebar lets the header scroll to preserve access to the footer.
+
+Onboarding's Access & memory stage chooses the runtime approval mode and states, with the agent CLI's permission-docs link, that bypass is full user access (`lib/permissionDocs.ts`). It writes only explicit changes through workspace settings; an unset permission mode remains unknown/engine default and is never presented as a known guarantee.
 
 ```
 web/
   index.html              entry HTML, viewport meta, PWA manifest link
   src/
     main.ts               Vue bootstrap + iOS viewport / keyboard / zoom plumbing
-    App.vue               root component, global CSS tokens (--bg, --fg, --accent; `data-text-contrast="soft"` on `<html>` lowers --fg; `data-body-font` swaps --font), wordmark + caret, shared focus utilities
+    App.vue               root component; loads the global stylesheet
+    styles/app.css        global CSS tokens (--bg, --fg, --accent; `data-text-contrast="soft"` on `<html>` lowers --fg; `data-body-font` swaps --font), caret, shared focus utilities
     router.ts             routes: /login, /, /chat/:id, /project/:id, /schedules, /tasks,
                            /memory, /stats, /settings, /settings/:tab
     components/           one Vue SFC per feature pane (including HomeIntake, HomeReviewSummary, UsageView (the /stats Usage page; data from lib/usageStats.ts),
@@ -114,8 +229,6 @@ web/
                            swatch group both use: five base presets plus a dashed "+" disclosure for
                            blue, teal, lime and fuchsia), plus the
                            scoped CSS they share with it
-    components/settings/SettingsVaultCheck.vue  the Check vault answers switch card (engine-wide, stored as verify_vault_answers)
-    components/TurnVerificationBadge.vue  the always-visible Vault n/m toggle under a turn's footer, with its claim list (ChatPanel renders it on the closing bubble; the pure helpers are lib/turnVerification.ts)
     components/TitleRail.vue  the swipeable title rail of an open chat's, automation's or project's header (ChatPanel's `plainHeader` prop turns it off);
                            railMotion.css is the lean/arrival motion of the body under it
     components/SidebarRow.vue  the sidebar's one list row: chat rows, automation rows and the Settings and
@@ -146,7 +259,7 @@ web/
     composables/          reactive logic shared between components, and behaviour lifted
                           out of oversized panes (useHoverPinPopover, useChatComposer, useTitleRail (the generic rail model: items in sidebar order, an order frozen across rail switches, the arrival side),
                           useChatRail, useScheduleRail and useProjectRail (the chat, automation and project rails over it), usePullToClose (pull a title down to close),
-                          useMcpServers, useModalFocus, useOverlayBackEntry (one history entry per open
+                          useModalFocus, useOverlayBackEntry (one history entry per open
                           overlay; Back closes it), useWorkspaceAdmin, useProviderChoices,
                           useGwsAccounts, useHomeNoticeWindows, useDragSort: the pointer drag-sort engine
                           for the task lanes and the sidebar's project list; there is no drag handle, so
@@ -189,7 +302,7 @@ Mac/Windows, Edge on Windows, Safari on iPhone/iPad, Chrome on Android) behind
 one disclosure, each row linking the vendor's own guide. It reports the reader's
 current platform as a highlight, never a filter: all five rows are always on the
 page, and it only claims what this window can see (`isStandalone`), because a
-browser tab cannot know whether the app is installed on the device. Inside Ciaobot for Mac, which sets `window.__CIAOBOT_DESKTOP__` (`isDesktopClient()` in `lib/pwaPlatform.ts`), the card names the Mac app and drops the address row, the notifications card says the Mac app handles notifications, and the Home setup reminder is not shown.
+browser tab cannot know whether the app is installed on the device. Inside Ciaobot for Mac, which sets `window.__CIAOBOT_DESKTOP__` (`isDesktopClient()` in `lib/pwaPlatform.ts`), the install card is not shown, the Home setup reminder is not shown, and the notifications card mirrors the menu bar's Settings → Chat Notifications row through the `ciaobotAppSettings` bridge (`lib/macAppSettings.ts`, the only reader of that handler): a switch drives the same row, or a button opens System Settings when macOS blocks it, and the card re-reads on the app's `ciaobot-app-settings-changed` event. A Mac app without the bridge keeps the static "Handled by the Mac app" text. The Updates card leads with a **Ciaobot for Mac** row (`components/settings/SettingsMacUpdates.vue`): the app's status, a switch for Install Updates Automatically and a Check for Updates… button, the same actions as the tray. When updates are unavailable the native reason is shown as text and both controls are disabled. A Mac app without the Updates block shows no such row and keeps the engine's own text.
 
 The one-time *Your Ciaobot* card on Home (`components/HomeWelcomeCard.vue`,
 state in `composables/useWelcome.ts`) shows the workspace folder, the generated
@@ -198,6 +311,16 @@ exists. The password is fetched only when the user presses Show or Copy, lives
 only in the component's state and is cleared on dismiss and unmount. Only the
 engine decides `on_host` (from `GET /api/welcome`); the PWA never infers it.
 The X dismisses engine-wide through `/api/welcome/dismiss`, not per browser.
+
+The *Switch to the new Ciaobot app* row in *Needs you* is an engine operator
+action (`mac-app-switch`, `ciao/operator_actions.py`): only an installer-managed
+engine on an Apple-silicon Mac emits it, so a Linux engine, the app's bundled
+engine and a checkout never do, and the PWA never decides its eligibility. The
+PWA does not filter the row either: a 0.5.x Mac app user viewing their old
+engine's PWA is exactly its audience, so the row shows there too. *Not now*
+snoozes it engine-wide through `/api/housekeeping/mac-app-switch/dismiss` for 30
+days, and the *Download for Mac* link is `MAC_APP_DOWNLOAD_URL` in
+`ciao/package_version.py`.
 
 Phone setup lives permanently in Settings → Access & devices → Other devices
 (`settings/SettingsDevices.vue`, anchor `#other-devices` on `/settings/access`); on the computer running
@@ -229,6 +352,7 @@ the scrim's colour when the menu opens.
 - All of this lives in `lib/viewport.ts` (`installViewportPlumbing()`, called once from `main.ts`, idempotent) and is pinned by `lib/viewport.test.ts`. Add a test there for any change to the measurement rules. The module also exports `viewportHeight()` / `viewportWidth()` (the size a `position: fixed` element should measure against) and `onViewportChange()`, wrapped for components by `composables/useViewportHeight.ts`.
 - Viewport meta in `index.html` carries `interactive-widget=resizes-content` on purpose. With that flag, when the iOS keyboard opens the layout viewport shrinks alongside the visual viewport. The keyboard-open detection relies on this: it tracks the tallest viewport height seen per orientation and toggles `html.keyboard-open` when the current `visualViewport.height` drops below ~85% of that max.
 - `--app-h` is set to `window.visualViewport.height` (falling back to `innerHeight`) only while the keyboard is open, so the chat layout snaps instantly when it opens. When it closes the property is removed and the layout falls back to `100dvh`, the full screen in an installed PWA; a pixel height left behind there is the dead band under the composer. Plain `100dvh` alone is not enough while the keyboard is up on iOS Safari; it does not update until the user interacts with the page.
+- Fixed phone sheets that must remain reachable above the keyboard use `--app-h` (falling back to `100dvh`) for their available height, rather than assuming the full screen is visible.
 - `visualViewport` `scroll` events are intentionally NOT listened to. iOS fires them while the page shifts to keep the caret visible during multi-line typing, and re-reading `vv.height` there can latch a stale/smaller value, collapsing the messages area.
 - The viewport is re-measured on `visibilitychange` (visible) and `pageshow`, each time as a short burst (0/50/200/500ms) rather than a single read. iOS suspends JS while the PWA is backgrounded, and if the keyboard was open it gets dismissed during the suspension with no `resize` ever reaching the page, so the keyboard-open state (and the `--app-h` pinning the layout to the shrunken viewport) stays latched and the layout keeps a dead zone under the input bar. The burst exists because `vv.height` still reports the stale value at the instant of resume. The resume path deliberately does NOT reset the tallest-seen height: if the keyboard is genuinely still up at resume, that would record the shrunken height as the maximum and keyboard-open would never be detected again.
 - When the keyboard closes while a text field still holds focus (the user swiped it away), the field is blurred and the viewport re-measured. iOS otherwise keeps the page shifted for the focused field, leaving a status-bar-high gap above the pane header until focus moves.
@@ -247,7 +371,7 @@ additional convenience, not a replacement for browser zoom.
 
 iOS Safari auto-zooms the viewport when an input/textarea/select gets focus
 if its computed `font-size` is below 16px. The global input rule in
-`App.vue` already pins mobile inputs at `16px * var(--font-scale)`, and a
+`src/styles/app.css` already pins mobile inputs at `16px * var(--font-scale)`, and a
 `@media (pointer: coarse)` carve-out re-pins them to a flat `16px` so
 component-level overrides (markdown editor, comment compose) cannot drop
 back below the zoom threshold. The chat composer is the one exception: it is
@@ -266,6 +390,10 @@ Comment highlights inside an HTML artifact are painted with the CSS Custom Highl
 ### WebSocket suspension
 
 iOS Safari suspends JS and WebSockets when the PWA is backgrounded. On resume, `readyState` may still report `OPEN` while no events flow. Listen for `visibilitychange` (visible) and `pageshow` (bfcache restore) on any view that depends on a WebSocket, and force-disconnect + reconnect.
+
+### Chat permission mode picker
+
+The normal chat composer model picker changes the saved permission mode for that chat through the existing chat update API. Changes apply to subsequent turns, not a reply already running; queued or external turns may start before the write settles. While pending, ordinary sends from that composer are paused without clearing the draft, while `/mcp`, Stop and recovery remain available. `touch-targets.spec.ts` covers the picker at constrained viewport sizes and touch targets; component coverage lives in `ChatPanelRetry.test.ts` and `ModelSelector.test.ts`.
 
 ### The browser terminal
 
@@ -411,9 +539,21 @@ It sits behind the file viewer, which loads it with `defineAsyncComponent`.
 
 ### Layout traps
 
+`PaneHeader.vue` owns the shared page-chrome rule: at viewport widths ≥769px,
+`.chat-layout.sidebar-open` compacts page-tag headers that have no item-title
+slot. Their h2 stays in the accessibility tree using visually hidden CSS,
+never `display:none` or an `aria-hidden` ancestor. Actionless headers have no
+layout footprint; an actions slot retains a compact trailing toolbar with the
+page inset (Tasks' New task), including 44px coarse-pointer targets. Closing
+the sidebar restores the full desktop header. Widths ≤768px keep the existing
+mobile grid/lead/Back, with the bell still limited to ≤767px; item titles,
+detail actions and automation forms are unchanged. Wrap the entire
+ancestor/root/descendant selector in `:global(...)` inside scoped CSS: partial
+global selectors can lose their descendants during Vue compilation.
+
 - **Do not use `scrollIntoView` on nested scrollable containers.** iOS Safari can scroll the wrong ancestor. Compute `offsetTop` relative to the scroll container and call `scrollTo({ top, behavior: 'smooth' })` directly. See `scrollToHighlight` / `scrollSidebarToCard` in `ChatPanel.vue`.
 - **Flex children with unbreakable content need `min-width: 0`.** Without it, a long unbreakable string (a URL, a model identifier, etc.) forces the flex parent wider than the viewport and breaks horizontal layout.
-- **Tap targets** must hit the `--touch: 44px` minimum (declared in `App.vue`) on every coarse-pointer layout, not only below a viewport breakpoint. Icon-only buttons use `.btn-icon` or another expanded-hit utility. Visually small actions can wrap a 44px hit area around an 18px glyph instead of resizing the glyph. The browser suite measures all visible interactive controls on Home and Chat, not only controls carrying a utility class.
+- **Tap targets** must hit the `--touch: 44px` minimum (declared in `src/styles/app.css`) on every coarse-pointer layout, not only below a viewport breakpoint. Icon-only buttons use `.btn-icon` or another expanded-hit utility. Visually small actions can wrap a 44px hit area around an 18px glyph instead of resizing the glyph. The browser suite measures all visible interactive controls on Home and Chat, not only controls carrying a utility class.
 - **`position: fixed` popovers clamp through `lib/popoverAnchor.ts`**, against the *visual* viewport (`lib/viewport.ts`), not `window.innerHeight`. Anything a fixed popover pushes off screen is unreachable, because scrolling does not move it. A popover that focuses an input must also clamp *reactively*, via `useViewportHeight()`: the keyboard opens a moment after the box is placed, and a one-time measurement leaves it stranded behind the keyboard. `CommentComposePopover.vue` is the reference.
 
 The app-wide task read keeps delegation and manual links separate: `taskForChat`
@@ -424,17 +564,17 @@ archive, Needs you and closure logic continue to use delegation alone.
 
 ## Design system
 
-CSS custom properties live in `App.vue` as `:root` declarations. The system is opinionated:
+CSS custom properties live in `src/styles/app.css` as `:root` declarations, loaded globally by `App.vue`. The system is opinionated:
 
 - **Color**: Deep blue-violet surfaces (`--bg #1a1a2e`, `--bg2 #1f2240`, `--bg3 #2a2e54`, `--bg-elev #23264a`), orange accent (`--accent #fb923c`, `--accent-strong #ea580c`; per-workspace presets override it, and `neutral` grey stands in until the workspace's colour is known; labels on accent fills use `--on-accent #1a1a2e`), violet secondary (`--accent2 #6a47b8`). A clean light theme is supported via `.theme-light` overrides.
 - **Type**: Body font (Settings > Appearance: System, Serif or Mono) sets `data-body-font` on `<html>`, which swaps `--font`; components use `var(--font)`, never `var(--font-sans)`. Hybrid system: proportional system sans for prose and controls; monospace (SF Mono, Fira Code, Cascadia Code) for code, commands, IDs, schedules, timestamps, and technical labels. Base scale: 11/12/14/16px (`--text-xs`, `--text-sm`, `--text-base`, `--text-lg`), dynamically adjusted via the client-side `--font-scale` multiplier (from 0.8x to 1.5x, configured under Settings > Appearance).
 - **Geometry**: 10/6/14px radii (`--radius`, `--radius-sm`, `--radius-lg`). Spacing scale `--space-1` through `--space-6`.
 - **Motion**: `--ease: cubic-bezier(0.2, 0.8, 0.2, 1)`.
-- **Wordmark**: `BrandMark.vue` uses the supplied full wordmark in the sidebar and pane header, with a variant for each theme. The terminal-style `.wordmark` (with size modifier `--lg|--md|--sm`) renders `› word` in StartupView, UpdateProgressView, and LoginView.
+- **Brand mark and wordmark**: `BrandMark.vue` renders the Ciaobot C as inline SVG at 30×30px: the C follows `currentColor` and its two dots use the selected `--accent`. `CiaoMark.vue` shares that vector mark in Settings; neither surface is a control or has cache/service-worker side effects. Only the expanded sidebar owns the navigation mark. `PaneHeader.vue` has no mark or `brand` prop; it retains page tags, title/actions slots and mobile controls. A collapsed sidebar or closed phone drawer needs no logo: its toggle or hamburger still opens navigation. `Wordmark.vue` renders the supplied wordmark image (`web/public/brand/`): ink on light themes, off-white on dark ones, switched by the `theme-light` class. It is used by StartupView, UpdateProgressView, LoginView and RestartNotice.
 - **Caret**: `.caret` is a blinking accent terminal caret. Pair it with the wordmark for "live" surfaces (login prompt, idle empty state).
 - **Body and scroll:** the normal app surface is clean (no CRT grain); startup/update/native surfaces retain the terminal texture. Scrollbars are thin and visible so long files, tables, tabs, and settings panes never hide the fact that more content exists. The chat footer's turn-facts strip is the one exception: it scrolls sideways without a visible bar, because a bar under a reply reads as a rule across the transcript.
 
-Shared utility classes (defined globally in `App.vue`): `.btn-primary`, `.btn-small`, `.btn-icon`, `.btn-chip`, `.badge` (with `--accent|--accent2|--muted|--success|--warn|--error|--dot`), `.page`, `.card`, `.form-grid`, `.form-group`, `.form-actions`, `.hint`, `.checkbox-pill`, `.modal-backdrop`, `.modal-sheet`, `.sr-only`. Modal-like surfaces use `composables/useModalFocus.ts` for initial focus, Tab containment, Escape capture, inert background content, and opener restoration; do not add a second window-level Enter shortcut that can confirm while Cancel is focused.
+Shared utility classes (defined globally in `src/styles/app.css`): `.btn-primary`, `.btn-small`, `.btn-icon`, `.btn-chip`, `.badge` (with `--accent|--accent2|--muted|--success|--warn|--error|--dot`), `.page`, `.card`, `.form-grid`, `.form-group`, `.form-actions`, `.hint`, `.checkbox-pill`, `.modal-backdrop`, `.modal-sheet`, `.sr-only`. Modal-like surfaces use `composables/useModalFocus.ts` for initial focus, Tab containment, Escape capture, inert background content, and opener restoration; do not add a second window-level Enter shortcut that can confirm while Cancel is focused.
 
 Prefer the utility classes over re-inventing the same button/badge/card per component.
 
@@ -449,9 +589,9 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 - The core work model is **request → run → output → durable knowledge**. `HomeIntake.vue` starts an ordinary project chat and preserves unsent text per workspace; `HomeReviewSummary.vue` uses active-workspace counts and labels checking/current/stale/empty/failed state explicitly and, on Home, is one docked window in the `.home-workbench` side rail beside the request column (stacking below it under a 940px pane), with `HomeTodayStats.vue`'s Today counts from `GET /api/stats` under its queues; `ChatPanel.vue` keeps the transcript dominant and opens a conditional, keyboard-operable Context / Activity / Output inspector. New UI should reinforce those relationships rather than introduce another top-level inbox or artifact silo.
 - **A memory pass is not a chat row.** It is an app-owned chat in a hidden project, and it used to be listed twice for one archived conversation: once in Home's tiers under its own internal title (`Memory pass · …`), once as the conversation it works on. It is now one row, in the `memory insights` section `HomeRecentChats.vue` renders below the tiers, and the store filters a declared pass out of `activeChatsAll`, `projectChats`, `totalUnread`, the sidebar and every schedule target. Put the whole derivation — one row per archived conversation, the archive pipeline and the pass joined, every phase and its wording — in `lib/memoryInsights.ts`, not in the component; only the signals come from the store (`memoryInsightRows`). `ChatPanel.vue` names the source conversation above the transcript (and at the top of the Chat details rail, which shows it instead) and links the archived transcript, so an opened pass says what it is. `lib/memoryPass.ts` stays the only reader of the `memory_pass` helper kind, with the Memory project kind as the fallback for a helper that failed closed. The fallback is deliberately visible in `activeChatsAll` and `projectChats`: it has no memory-insight row, so its ordinary chat row is the only way back to its pending question. It is silent on every notification surface — toasts, the notification inbox, the bell and OS badge, the menu bar, `projectNeedsInput` and unread — even when blocked. The project kind is the app's own signal, so the engine keeps it to passes only: the Memory project holds the engine's own passes and nothing else, the create route refuses a client-supplied `memory_pass` helper, and the schedule and webhook pickers do not offer it as a target. A routine bound to it (or to a pass) is refused with a message that names the reason, and an existing one can still be paused or retargeted.
 - Project, Memory, and file rows are native buttons or links whenever they perform work. Context menus use `role="menu"` / `role="menuitem"`, open focus on the first action, support Arrow/Home/End/Escape, and restore the trigger. Pointer-only rows and right-click-only actions are not acceptable.
-- Markdown rendering goes through `lib/safeMarkdown.ts` (DOMPurify + marked + highlight.js). Never `v-html` raw user content. User chat bubbles use `renderUserMarkdown`, which escapes raw HTML (except the comment-context tags) so typed text shows as typed; assistant output uses `renderMarkdown`. `ChatPanel` passes `fileMentionTargets` only from the final reply bubble (`renderAssistantMarkdown`); no other surface opts in. A message that names a conversation the reader knows links to it under its human title (`lib/chatLinks.ts`): a bare id or the app's own `@chat/<id>` mention is linked, only for an id in the reader's own openable chat list, the raw id stays in the tooltip and in `data-chat-id`, and the label is built as text, so a title can never become markup. An image an assistant message embeds by workspace-relative path (`![shot](memory-vault/x.png)`) is served from `/api/workspace-image?path=…&chat_id=…`, which anchors the relative path to that chat's agent and vault roots (exact match, no fuzzy walk, so a message of made-up paths costs no directory walks; it anchors, it does not sandbox); left as written, the src resolved against the `/chat/...` route and loaded the app shell, a broken image. `ChatPanel` and `SubagentChatView` pass `{ chatId }` to `renderMarkdown` for it; web URLs and root paths (`/api/images/...`) stay as written.
-- **After sanitization an anchor has a target or it is not an anchor.** The sanitizer drops a `file:`, `javascript:` or `data:` href, and the anchor used to survive it: still painted with the accent colour and an underline, still swallowing the click, pointing nowhere. `lib/safeMarkdown.ts` now renders such a link as inert text — a `<span class="markdown-dead-link">`, never an `<a>` — with the label and its inline formatting intact, and a file path kept visible as copyable text (a network path keeps its authority: `file://server/share` reads `//server/share`). The sanitizer's own URI policy decides (`DOMPurify.isValidAttribute`), so the two cannot drift apart, and the policy is not widened. One exception to the inert text: a local file path, in a surface that opted in and on the engine's own machine. A pane opts in by passing `{ openLocal: true }` to `renderMarkdown`/`renderUserMarkdown` (the chat bubbles in `ChatPanel`) or `renderVaultMarkdown(..., true)` (the file viewer and the pinned-file panel), and it may only ever opt in if its click chain acts on the button — the delegated `handleOpenLocalFileClick` handler. There the dead link becomes a real `<button class="markdown-dead-link--openable" data-local-path="...">` (the label and the visible, copyable path), and the handler asks the engine to open that path with the OS default application through `POST /api/workspace-open` (`lib/openWorkspaceFile.ts`). Every other markdown surface (`TaskNoteFeed`, `TaskWorkspaceSurface`, `SubagentChatView`, …) renders the dead local link as inert copyable text, because a clickable-looking control whose click goes nowhere is the very defect this bullet fixes. Off the engine's own machine — a phone or another computer on the LAN — the button is not rendered either, and the link stays inert text, because `/api/workspace-open` is loopback-gated on the TCP peer. `file://` navigation still never happens: there is no anchor left, and the engine request carries only the path. The neutralising pass runs last, after `linkifyHtml`, because that pass skips the content of an anchor and a dead link's label must not be turned into a workspace file link; it walks anchors only, so the openable button is left alone. This holds for `renderMarkdown`, `renderUserMarkdown` and `renderFileMarkdown` alike.
-- **A link into the app navigates in place.** `lib/appLinks.ts` is the one allowlist: `/`, `/tasks`, `/schedules`, `/automations`, `/memory` and its review/map/categories/import/retired/history sections, `/settings`, `/settings/home` and the tabs in `SETTINGS_NAV`, the documented anchors (`#install-app`, `/settings/providers#chat-providers`, `/settings/workspace#new-workspace`), one task record by its full 32-hex id, and one conversation by its own id (`/chat/chat-0123abcd`, the shape the engine mints). It also accepts exactly one workspace File access target, `/settings/workspace?workspace=NAME#file-access`, where `NAME` is an engine-accepted workspace name (`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`). `parseWorkspaceFileAccessHref` exports that parse for `SettingsView`, and the whole address is validated: one `workspace` parameter, the literal `#file-access` fragment, no extra or duplicate parameter, no other path, hash or origin. On arrival `SettingsView` expands that row, scrolls the settings pane itself (measured from its `scrollTop`, never `scrollIntoView`), focuses the File access select with `preventScroll`, and briefly tints the row. Reduced motion drops the tint and keeps the focus ring. This is navigation only: it never chooses or saves a value, issues no write, and never switches the active workspace. A missing workspace is named in a status that says nothing changed; a different row with unsaved edits stays open, its single name draft untouched, and the status asks the user to save or discard before the linked workspace is opened. A load failure stays the tab's error, not a missing-workspace claim. Renderers leave those anchors without `target="_blank"`, and the delegated handlers (`ChatPanel`, `PinnedFilePanel`, `FileViewerModal`) push the route in the same window, so Back and an unsent draft survive. A plain click on a task address (`/tasks/<id>`) from a chat, a pinned file, the file viewer or the delegated-chat note opens that task's full editor over the current view through `ItemPeekHost.vue` and `stores/itemPeek.ts`, with no URL change and one history entry at the same address (`useOverlayBackEntry`), so Back closes it through the same save; on `/tasks` routes, and for a task already open on the board, it pushes as before. The overlay is the board's own editor: a close, a route change or a workspace switch awaits `requestClose()`, so a blank title, a refused or incomplete save, or a busy nested sheet cancels the action and leaves the draft on screen. `parseTaskHref` and `isPlainLeftClick` in `lib/appLinks.ts` are the shared parse and modifier check. Modified clicks and the middle button stay the browser's (new tab/window), and a dirty dialog's refused close cancels the navigation. Every other href — an unknown path, an extra query, a different hash, `/api`, `/ws`, a protocol-relative or external URL — stays an ordinary link in a new tab. File links are separate: opening a file still goes through `data-file-path` to the viewer, not through a page address.
+- Markdown rendering goes through `lib/safeMarkdown.ts` (DOMPurify + marked + highlight.js). Never `v-html` raw user content. User chat bubbles use `renderUserMarkdown`, which escapes raw HTML (except the comment-context tags) so typed text shows as typed; assistant output uses `renderMarkdown`. `ChatPanel` passes `fileMentionTargets` only from the final reply bubble (`renderAssistantMarkdown`); no other surface opts in. A message that names a conversation the reader knows links to it under its human title (`lib/chatLinks.ts`): a bare id or the app's own `@chat/<id>` mention is linked, only for an id in the reader's own openable chat list, the raw id stays in the tooltip and in `data-chat-id`, and the label is built as text, so a title can never become markup. An image an assistant message embeds by workspace-relative path (`![shot](memory-vault/x.png)`) is served from `/api/workspace-image?path=…&chat_id=…`, which anchors the relative path to that chat's agent and vault roots (exact match, no fuzzy walk, so a message of made-up paths costs no directory walks; it anchors, it does not sandbox); left as written, the src resolved against the `/chat/...` route and loaded the app shell, a broken image. `ChatPanel` passes `{ chatId }` to `renderMarkdown` for it; web URLs and root paths (`/api/images/...`) stay as written.
+- **After sanitization an anchor has a target or it is not an anchor.** The sanitizer drops a `file:`, `javascript:` or `data:` href, and the anchor used to survive it: still painted with the accent colour and an underline, still swallowing the click, pointing nowhere. `lib/safeMarkdown.ts` now renders such a link as inert text — a `<span class="markdown-dead-link">`, never an `<a>` — with the label and its inline formatting intact, and a file path kept visible as copyable text (a network path keeps its authority: `file://server/share` reads `//server/share`). The sanitizer's own URI policy decides (`DOMPurify.isValidAttribute`), so the two cannot drift apart, and the policy is not widened. One exception to the inert text: a local file path, in a surface that opted in and on the engine's own machine. A pane opts in by passing `{ openLocal: true }` to `renderMarkdown`/`renderUserMarkdown` (the chat bubbles in `ChatPanel`) or `renderVaultMarkdown(..., true)` (the file viewer and the pinned-file panel), and it may only ever opt in if its click chain acts on the button — the delegated `handleOpenLocalFileClick` handler. There the dead link becomes a real `<button class="markdown-dead-link--openable" data-local-path="...">` (the label and the visible, copyable path), and the handler asks the engine to open that path with the OS default application through `POST /api/workspace-open` (`lib/openWorkspaceFile.ts`). Every other markdown surface (`TaskNoteFeed`, `TaskWorkspaceSurface`, …) renders the dead local link as inert copyable text, because a clickable-looking control whose click goes nowhere is the very defect this bullet fixes. Off the engine's own machine — a phone or another computer on the LAN — the button is not rendered either, and the link stays inert text, because `/api/workspace-open` is loopback-gated on the TCP peer. `file://` navigation still never happens: there is no anchor left, and the engine request carries only the path. The neutralising pass runs last, after `linkifyHtml`, because that pass skips the content of an anchor and a dead link's label must not be turned into a workspace file link; it walks anchors only, so the openable button is left alone. This holds for `renderMarkdown`, `renderUserMarkdown` and `renderFileMarkdown` alike.
+- **A link into the app navigates in place.** `lib/appLinks.ts` is the one allowlist: `/`, `/tasks`, `/schedules`, `/automations`, `/memory` and its review/map/categories/import/retired/history sections, `/settings`, `/settings/home` and the tabs in `SETTINGS_NAV`, the documented anchors (`#install-app`, `/settings/providers#chat-providers`, `/settings/workspace#new-workspace`), one task record by its full 32-hex id, and one conversation by its own id (`/chat/chat-0123abcd`, the shape the engine mints). Renderers leave those anchors without `target="_blank"`, and the delegated handlers (`ChatPanel`, `PinnedFilePanel`, `FileViewerModal`) push the route in the same window, so Back and an unsent draft survive. A plain click on a task address (`/tasks/<id>`) from a chat, a pinned file, the file viewer or the delegated-chat note opens that task's full editor over the current view through `ItemPeekHost.vue` and `stores/itemPeek.ts`, with no URL change and one history entry at the same address (`useOverlayBackEntry`), so Back closes it through the same save; on `/tasks` routes, and for a task already open on the board, it pushes as before. The overlay is the board's own editor: a close, a route change or a workspace switch awaits `requestClose()`, so a blank title, a refused or incomplete save, or a busy nested sheet cancels the action and leaves the draft on screen. `parseTaskHref` and `isPlainLeftClick` in `lib/appLinks.ts` are the shared parse and modifier check. Modified clicks and the middle button stay the browser's (new tab/window), and a dirty dialog's refused close cancels the navigation. Every other href — an unknown path, an extra query, a different hash, `/api`, `/ws`, a protocol-relative or external URL — stays an ordinary link in a new tab. File links are separate: opening a file still goes through `data-file-path` to the viewer, not through a page address.
 - **A proposal review link opens its exact question, or says why it cannot.** `/memory/review?show=suggested&workspace=<registered name>&proposal=prv_<64 hex>` (the `review_path` the listing and `ciao memory-proposals` return, parsed by `parseProposalReviewHref` so a canonical link in chat or note text also navigates in place) is resolved by `MemoryMapView.vue`, not by the route. It waits for workspace bootstrap, requires a registered workspace, switches scope through the store's guards with `switchWorkspace(name, { transition: false, isCurrent })`, loads the queue with a fresh `proposals.fetch()` (never `ensureLoaded`), then matches `review_key` within that workspace (the first pending equivalent row) and hands the row to `proposals.revealRow`, which clears the kind, decide and search filters. `isCurrent` is the scope-cancellation seam: it is checked before any switch and again after the guards answer, so a superseded link can never apply its workspace late. Every await re-checks a generation, so a route change, an unmount or a workspace change the resolver did not make withdraws the run and takes back only the reveal it handed off; `ProposalReviewPanel.revealRow` has its own generation, so a stale frame loop never focuses or clears a newer request. Outcomes are distinct: a malformed key or declined guard (refused), an unknown workspace (unavailable), a failed list request (**Could not load the proposal** with Retry, never a missing-state claim) and a key not in the pending queue (**This proposal is no longer pending.** with a `/memory/history` link). The link performs no decision and conveys no authentication: it needs a normal signed session.
 - Chat Markdown tables use the renderer's `.markdown-table-scroll` region so compact tables shrink-wrap and wide tables scroll independently at narrow widths. Keep the region keyboard focusable and preserve readable key columns.
 - DOM manipulation that needs to bypass Vue's scoped attribute (e.g. inline highlight spans inserted into rendered markdown) uses `:deep(...)` in the scoped stylesheet.
@@ -524,7 +664,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   second `defineStore` would have put a proxy and a second `$state` in between.
   `stores/chatAnnotations.test.ts` drives it with a bare `ref` for the active
   chat — no Pinia, no mount.
-  **Needs-you actions are engine-owned and transient** (`ChatInfo.actions`, `chat_actions_changed`, the snapshot's `chat_actions`, kept in `stores/projects.ts`'s `chatActions` under the same read-start watermark and clock as the chat reads; `startChatAction`/`dismissChatAction`/`continueChatAction`/`submitChatActionCallback`; a 409 adopts the engine's list). ChatPanel renders them through `NeedsYouStack.vue`, which caps the region's height and folds two or more untouched sign-ins under one row (Show, Not now for all) in a single keyed list, so a card is never rebuilt when it leaves the fold. When a card appears or changes state the stack scrolls itself (never the page, never the focus) to that card's `data-needs-you-primary` element, else its `.needs-you-btn--primary`; `CallbackPasteField` and the device code carry the marker. `NeedsYouCard.vue` owns Not now and Continue, a per-kind body in `components/needs-you/` owns the primary control, and `CallbackPasteField.vue` is the shared paste-back field for a sign-in that ends on an unreachable loopback page, and `lib/chatActions.ts` owns the copy (`actionCopy` returns null for a kind with no UI yet, and such actions are not shown).
+  **Needs-you actions are engine-owned and transient** (`ChatInfo.actions`, `chat_actions_changed`, the snapshot's `chat_actions`, kept in `stores/projects.ts`'s `chatActions` under the same read-start watermark and clock as the chat reads; `startChatAction`/`dismissChatAction`/`continueChatAction`/`submitChatActionCallback`; a 409 adopts the engine's list). ChatPanel renders every action in the bounded keyed `NeedsYouStack.vue`, and any held action counts as attention along with failed turns, questions, permission and task blockers. When a card appears or changes state the stack scrolls itself (never the page, never the focus) to that card's `data-needs-you-primary` element, else its `.needs-you-btn--primary`; `CallbackPasteField` and the device code carry the marker. `NeedsYouCard.vue` owns Not now and Continue, a per-kind body in `components/needs-you/` owns the primary control, and `CallbackPasteField.vue` is the shared paste-back field for a sign-in that ends on an unreachable loopback page, and `lib/chatActions.ts` owns the copy (`actionCopy` returns null for a kind with no UI yet, and such actions are not shown).
 
   Pure logic the store hands over whole lives in `lib/`, Vue-free and directly
   testable: `lib/chatHistory.ts` (history normalising, server-row mapping, turn
@@ -588,9 +728,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   it, so the Overview cards and the All workspaces card share one load. Overview
   also renders `SettingsAllWorkspaces.vue`, the list of every workspace. A workspace switch
   drops the previous draft; one started from the UI while the draft is dirty
-  asks first through `projectStore.setWorkspaceSwitchGuard`. A File access link
-  (`/settings/workspace?workspace=NAME#file-access`) switches to NAME and lands
-  on Overview with the selector focused; it never saves.
+  asks first through `projectStore.setWorkspaceSwitchGuard`.
   `SettingsWorkspaceModels.vue` (Chats and models) edits the same form: the
   default provider switch and, for the selected provider, the workspace's
   `provider_overrides` (model, thinking, permission mode, session insights
@@ -641,31 +779,26 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   1-9 shortcuts read `store.workspaceOptions` in that order. Providers is one card, so its page rail
   shows Status only, with no "On this page" list.
   The "On this page" navigation is built from the rendered sections in DOM order,
-  so it follows that order. The MCP tab shows the provider inventory plus an
-  "Ask Ciao" entry (a chat titled "Add an MCP server"), per-CLI tabs built on
-  `TabBar` (the workspace's default provider first), a command builder (name
-  and URL inputs, shell-quoted, with the engine's `cd` prefix from
-  `/api/mcp/status` `shell`) and "Run in terminal", which types the command into
-  the in-app terminal via `composables/useRunInTerminal.ts` and falls back to
-  copying it when the terminal is locked or unavailable. The Providers tab's Connect does the same with the sign-in command the engine returns to a browser that is not on its computer (403 `not_on_host`), then the user presses Verify. `composables/useMcpServers.ts`
-  owns status and usage reads and `setEnabled` (Turn off / Turn on, `POST /api/mcp/servers/enabled`, row patched in place), while `components/settings/SettingsMcpServers.vue`
-  renders provider configuration and per-chat connection states.
-  Settings edits native MCP configuration only to turn one server off or on
-  (`POST /api/mcp/servers/enabled`); it never handles secret values or probes
-  servers; commands run only in the terminal the user is watching. A server that
-  needs a sign-in in an open chat gets **Sign in** instead of **Sign in in
-  terminal** (which stays in the ··· menu): `store.requestMcpAuth` raises that
-  chat's `mcp_auth` card (`POST /api/chats/{chat_id}/actions/mcp-auth`),
-  `store.startChatAction` starts it as the card's own button does (for OpenCode
-  this may start the chat's server), the sign-in page opens and the page goes to
-  the chat. A terminal sign-in cannot update a running chat: OpenCode V2 has no
-  reconnect route. The selected workspace scopes
-  `/api/mcp/status`; only already running chats in that workspace contribute
-  connection states. An empty connections list means unchecked, and unreadable
-  configuration/provider state is unknown. Claude's workspace server allowlist
-  remains authoritative and is never broadened by Settings. Add/authenticate
-  servers with `claude mcp add` / `claude mcp login` or `opencode mcp add` /
-  `opencode mcp auth` from that workspace's directory.
+  so it follows that order. The MCP tab is one button per installed agent
+  (`ProviderMcpButton.vue`). The button is labelled "Open MCP settings in {cli}"
+  and types that agent's server-built `mcp_command` into the in-app terminal via
+  `composables/useRunInTerminal.ts`, falling back to a copy when the terminal is
+  not ready. *Ask Ciao to add one* still starts a chat titled "Add an MCP server".
+  Changes apply to new chats; a running chat loads them after `ciao chat reload`.
+  The page does not read MCP servers or turn them on or off. The Providers tab instead shows generic sign-in commands for the user to copy or type manually, and opens the selected workspace's browser terminal without sending input. Verify rereads provider and model information; OpenCode configuration is not credential verification and completed model reads do not prove catalog availability.
+  Chat details has an MCP section that holds the same `ProviderMcpButton.vue`
+  for the chat's own agent. ChatPanel reads `/api/settings/providers` once, the
+  first time the details rail or drawer opens, and keeps the row for that pane;
+  a failed read shows a one-line alert. There is no health observer, no
+  connection marker on the details trigger or the ⋯ menu, and no sign-in card:
+  signing in happens in the agent's own MCP command. The standalone trimmed,
+  case-insensitive `/mcp` opens Chat details on the MCP heading and sends
+  nothing; when the agent's row has no `mcp_command` it shows why instead.
+  Arguments are ordinary messages. Opening clears only text, preserving all
+  four staged arrays, history, queue, offline state and uploads. While
+  streaming Stop remains primary with a separate Open action; IME, picker,
+  touch and pane guards still apply.
+
   Shared settings styling lives in `components/settings/settingsPanels.css`,
   loaded by both sides with `<style scoped src>` — a parent's scoped rules
   never reach a child, and the alternative is silently unstyled markup. New
@@ -704,7 +837,6 @@ establish:
 | `touch-targets.spec.ts` | Home, chat, tasks, automations, every Memory section, the project, schedule and task detail pages and every Settings tab under iPhone touch emulation: every control at least 44×44px. It also clicks each menu, popover and dialog trigger and measures what opens (model pickers, the workspace form, chat details), and checks `.field-info` panels stay inside the viewport and beside their glyph. Measures buttons, links, ARIA widgets, inputs (checkboxes and radios through their label), `summary` and opened `<details>`; inline prose links and visually hidden keyboard controls are exempt. jsdom applies no CSS, so only a real engine under `(pointer: coarse)` can measure it. |
 | `events-reconnect.spec.ts` | That the *browser* notices a severed `/ws/events` socket, re-dials, and applies the snapshot the new socket carries. A vitest fake can only close itself. |
 | `archived-chat.spec.ts` | That an archived chat opens read-only from a deep link: no composer, and no chat socket opened for a session the provider has already reclaimed. And that a project's archived list opens the transcript in the file viewer, with its "Continue this chat", instead of the chat's pinned side tile: the split view exists only in a real layout, so jsdom cannot see the tile the project route must not have. |
-| `workspace-deep-links.spec.ts` | That a chat's workspace File access link reveals the right row, focuses its select inside the settings pane and issues no workspace write, at desktop, under direct load and on a phone with reduced motion. Row visibility, pane scrolling, the 44px touch target and 200% reflow are layout facts jsdom cannot see. |
 | `workbench-layout.spec.ts` | That Home's review rail sits beside the command surface, that the expanded sidebar stacks workspace scope, New chat and the destinations without overlap, and that every boundary between Home's sections is the same gap token at desktop and at 390px (a per-section `margin-top` under a shared `gap` reads as a doubled gap, which no unit test can see). |
 | `chat-loading-layout.spec.ts` | That the held history-loading skeleton has separated rows within the chat pane at desktop and phone widths. |
 | `reply-not-folded.spec.ts` | That a short closing reply followed by a reasoning-only step renders as a bubble after a phase-less history replay (OpenCode shape) instead of being folded into the collapsed Activity trace (#630). The fold is a render heuristic, so only a real render shows it. |
@@ -765,15 +897,13 @@ package (~18 MB of `node_modules`), not the browser.
 CI runs it on Linux for develop PRs whose three-dot diff changes `web/`; the
 job checks out the PR merge ref and runs `npm run test:e2e`, whose npm prehook
 builds both the PWA and terminal harness from that checkout. The macOS `test`
-job retains browser coverage on develop pushes and PRs into `main`.
+job runs on release PRs into `main`.
 
 ### Still manual
 
 Browser automation does not reproduce iOS PWA suspension, the software
 keyboard, or native-shell behaviour. The device checklist in "iOS PWA gotchas"
 above still has to be walked by hand on a real phone before a release.
-
-The MCP Settings panel shows provider-native configuration separately from per-chat connection states returned by `/api/mcp/status`. No running observable session means connection not checked, and unreadable configuration/provider status is unknown.
 
 Onboarding's care stage (`components/onboarding/OnboardingCareStage.vue`) asks when the host is usually available, then lets the operator edit the installed workspace-care routine's local time and IANA timezone. It updates only that existing row through the schedules API, and only for a time or zone the operator edited, when Continue commits it through the stage's exposed `save()`; unchanged fields write nothing. No routine is created when the workspace has none.
 

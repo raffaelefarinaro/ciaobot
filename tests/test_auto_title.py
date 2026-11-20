@@ -1,9 +1,26 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
+from pathlib import Path
 from types import SimpleNamespace
 
+from ciao.providers.base import BaseProvider
+from ciao.providers.acp.agents import OpencodeAcpProvider
+from ciao.providers.acp.agents import OpencodeAcpProvider
 from ciao.web.project_chats import ProjectChatManager
+
+
+def _acp_candidates(read_thread):
+    """An ACP candidate reader answering with the title a read_thread-shaped fake holds."""
+
+    async def candidates(_cls, workspace, session_id, *, runtime_root):
+        thread = await read_thread(workspace, session_id, runtime_root=runtime_root)
+        title = (thread.get("info") or {}).get("title")
+        return (title,) if isinstance(title, str) and title else ()
+
+    return classmethod(candidates)
 
 
 def _manager(config=None, *, chats=None, projects=None) -> ProjectChatManager:
@@ -16,10 +33,6 @@ def _manager(config=None, *, chats=None, projects=None) -> ProjectChatManager:
     manager._chats = chats or {}
     manager._save = lambda: None
     manager._titling = set()
-    # Production waits ~30s in total for the provider to publish its title.
-    # Keep the retry *shape* (so the give-up path is still exercised) without
-    # the wall-clock cost.
-    manager._TITLE_POLL_DELAYS = (0.0, 0.001, 0.001)
     return manager
 
 
@@ -29,6 +42,7 @@ def _config(roots: dict[str, str] | None = None, *, primary: str = "personal"):
 
     return SimpleNamespace(
         workspace_root="/tmp",
+        state_path=Path("/runtime/state.json"),
         workspace_names=lambda: tuple(roots) or (primary,),
         primary_workspace=lambda: primary,
         agent_root=lambda name: roots.get(name, "/tmp"),
@@ -47,6 +61,8 @@ def _chat(chat_id="chat-1", *, provider="claude", session_id="sess-1", title="Ne
         model="opus" if provider == "claude" else "vendor/chat-model",
         session_id=session_id,
         title=title,
+        # A chat named by hand is user-owned, so titling must leave it alone.
+        title_origin="default" if title == "New Chat" else "user",
     )
 
 
@@ -56,10 +72,10 @@ async def test_native_title_opencode(monkeypatch) -> None:
 
     manager = _manager(chats={"chat-1": _chat(provider="opencode")})
 
-    async def fake_read_thread(_workspace, _sid):
+    async def fake_read_thread(_workspace, _sid, **_kwargs):
         return {"info": {"title": "How hash tables work"}, "messages": []}
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeAcpProvider, "native_title_candidates", _acp_candidates(fake_read_thread))
     assert await manager._native_chat_title(manager._chats["chat-1"]) == "How hash tables work"
 
 
@@ -69,94 +85,42 @@ async def test_native_title_opencode_missing(monkeypatch) -> None:
 
     manager = _manager(chats={"chat-1": _chat(provider="opencode")})
 
-    async def fake_read_thread(_workspace, _sid):
+    async def fake_read_thread(_workspace, _sid, **_kwargs):
         return {"info": {"title": ""}, "messages": []}
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeAcpProvider, "native_title_candidates", _acp_candidates(fake_read_thread))
     assert await manager._native_chat_title(manager._chats["chat-1"]) is None
 
 
 @pytest.mark.asyncio
 async def test_native_title_opencode_placeholder_is_not_final(monkeypatch) -> None:
-    """opencode's default 'New session - <timestamp>' must not be accepted.
+    """opencode's default 'New session - <timestamp>' must not be accepted as the chat title.
 
-    The provider seeds the session with that placeholder and only later writes
-    the generated title; accepting it would leave the sidebar stuck on it.
+    opencode chats run over ACP (OpencodeAcpProvider), whose candidates are read through
+    ``native_title_candidates``. The placeholder reaches the chat only if ``_real_title``
+    lets it through, so the test makes the ACP candidate the placeholder and fails when that
+    guard is removed.
     """
-    from ciao.web import project_chats as pc
+    from ciao.providers.acp.agents import OpencodeAcpProvider
 
     manager = _manager(chats={"chat-1": _chat(provider="opencode")})
+    placeholder = "New session - 2026-08-18T12:20:10.198Z"
 
-    async def fake_read_thread(_workspace, _sid):
-        return {"info": {"title": "New session - 2026-08-18T12:20:10.198Z"}, "messages": []}
+    async def placeholder_candidates(_cls, _workspace, _sid, *, runtime_root):
+        return (placeholder,)
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(
+        OpencodeAcpProvider, "native_title_candidates", classmethod(placeholder_candidates)
+    )
     assert await manager._native_chat_title(manager._chats["chat-1"]) is None
 
 
-@pytest.mark.asyncio
-async def test_native_title_claude_rejects_leaked_context_capsule(monkeypatch) -> None:
-    """A provider summarizer that echoes the injected capsule must not win.
+def test_real_title_refuses_the_opencode_placeholder() -> None:
+    """The guard itself: the placeholder is refused, a real title is kept."""
+    from ciao.web import chat_service
 
-    Some providers' own titlers degrade on occasion and echo the literal
-    first session message back as the "title" - which carries our injected
-    [CIAO_CONTEXT_BEGIN] capsule. Accepting it verbatim would leak internal
-    routing state into the sidebar. A clean summary should still win when
-    only the custom title is contaminated.
-    """
-    from ciao.web import project_chats as pc
-
-    manager = _manager(chats={"chat-1": _chat(provider="claude")})
-
-    class FakeInfo:
-        custom_title = "[CIAO_CONTEXT_BEGIN]\n[Chat ID: \"chat-1\"]\n[CIAO_CONTEXT_END]\n\nWhat's the weather?"
-        summary = "Claude Summary"
-
-    monkeypatch.setattr(pc, "get_session_info", lambda _sid, directory=None: FakeInfo())
-    assert await manager._native_chat_title(manager._chats["chat-1"]) == "Claude Summary"
-
-
-@pytest.mark.asyncio
-async def test_native_title_claude_rejects_leaked_context_capsule_in_both(monkeypatch) -> None:
-    from ciao.web import project_chats as pc
-
-    manager = _manager(chats={"chat-1": _chat(provider="claude")})
-    leaked = "[CIAO_CONTEXT_BEGIN]\n[Chat ID: \"chat-1\"]\n[CIAO_CONTEXT_END]\n\nWhat's the weather?"
-
-    class FakeInfo:
-        custom_title = leaked
-        summary = leaked
-
-    monkeypatch.setattr(pc, "get_session_info", lambda _sid, directory=None: FakeInfo())
-    assert await manager._native_chat_title(manager._chats["chat-1"]) is None
-
-
-@pytest.mark.asyncio
-async def test_native_title_claude(monkeypatch) -> None:
-    from ciao.web import project_chats as pc
-
-    manager = _manager(chats={"chat-1": _chat(provider="claude")})
-
-    class FakeInfo:
-        custom_title = "Claude AI Title"
-        summary = "Claude Summary"
-
-    monkeypatch.setattr(pc, "get_session_info", lambda _sid, directory=None: FakeInfo())
-    assert await manager._native_chat_title(manager._chats["chat-1"]) == "Claude AI Title"
-
-
-@pytest.mark.asyncio
-async def test_native_title_claude_falls_back_to_summary(monkeypatch) -> None:
-    from ciao.web import project_chats as pc
-
-    manager = _manager(chats={"chat-1": _chat(provider="claude")})
-
-    class FakeInfo:
-        custom_title = None
-        summary = "Claude Summary"
-
-    monkeypatch.setattr(pc, "get_session_info", lambda _sid, directory=None: FakeInfo())
-    assert await manager._native_chat_title(manager._chats["chat-1"]) == "Claude Summary"
+    assert chat_service._real_title("New session - 2026-08-18T12:20:10.198Z") is None
+    assert chat_service._real_title("How hash tables work") == "How hash tables work"
 
 
 @pytest.mark.asyncio
@@ -164,7 +128,6 @@ async def test_native_title_claude_missing(monkeypatch) -> None:
     from ciao.web import project_chats as pc
 
     manager = _manager(chats={"chat-1": _chat(provider="claude")})
-    monkeypatch.setattr(pc, "get_session_info", lambda _sid, directory=None: None)
     assert await manager._native_chat_title(manager._chats["chat-1"]) is None
 
 
@@ -174,10 +137,10 @@ async def test_auto_title_if_default_sets_native_title(monkeypatch) -> None:
 
     manager = _manager(chats={"chat-1": _chat(provider="opencode")})
 
-    async def fake_read_thread(_workspace, _sid):
+    async def fake_read_thread(_workspace, _sid, **_kwargs):
         return {"info": {"title": "Native Title"}, "messages": []}
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeAcpProvider, "native_title_candidates", _acp_candidates(fake_read_thread))
     assert await manager.auto_title_if_default("chat-1", "hello") == "Native Title"
     assert manager._chats["chat-1"].title == "Native Title"
 
@@ -188,10 +151,10 @@ async def test_auto_title_if_default_skips_when_not_default(monkeypatch) -> None
 
     manager = _manager(chats={"chat-1": _chat(title="Already Named")})
 
-    async def fake_read_thread(_workspace, _sid):
+    async def fake_read_thread(_workspace, _sid, **_kwargs):
         return {"info": {"title": "Native Title"}, "messages": []}
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeAcpProvider, "native_title_candidates", _acp_candidates(fake_read_thread))
     assert await manager.auto_title_if_default("chat-1", "hello") is None
     assert manager._chats["chat-1"].title == "Already Named"
 
@@ -202,13 +165,13 @@ async def test_auto_title_if_default_skips_without_session(monkeypatch) -> None:
 
     manager = _manager(chats={"chat-1": _chat(session_id="")})
 
-    async def fake_read_thread(_workspace, _sid):
+    async def fake_read_thread(_workspace, _sid, **_kwargs):
         return {"info": {"title": "Native Title"}, "messages": []}
 
     async def failing_oneshot(*_args, **_kwargs):
         raise RuntimeError("model unavailable")
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeAcpProvider, "native_title_candidates", _acp_candidates(fake_read_thread))
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
     # No session_id throughout the poll window -> native never reachable, and
     # the one-shot titler fails, so the deterministic fallback is used instead
@@ -223,13 +186,13 @@ async def test_auto_title_if_default_skips_when_native_missing(monkeypatch) -> N
 
     manager = _manager(chats={"chat-1": _chat(provider="opencode")})
 
-    async def fake_read_thread(_workspace, _sid):
+    async def fake_read_thread(_workspace, _sid, **_kwargs):
         return {"info": {"title": ""}, "messages": []}
 
     async def failing_oneshot(*_args, **_kwargs):
         raise RuntimeError("model unavailable")
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeAcpProvider, "native_title_candidates", _acp_candidates(fake_read_thread))
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
     # Native title never arrives within the poll window and the one-shot
     # titler fails -> fallback from the prompt so the sidebar doesn't stay
@@ -383,68 +346,20 @@ async def test_drive_overwrites_title_when_assistant_framing_disagrees(
 
 
 @pytest.mark.asyncio
-async def test_auto_title_waits_for_late_provider_title(monkeypatch) -> None:
-    """The provider writes its title *after* the turn, so the first read finds
-    nothing. Every previous test handed the title back on read #1, which is why
-    the suite stayed green while every real chat sat on "New Chat"."""
-    from ciao.web import project_chats as pc
+async def test_auto_title_rename_during_the_native_read_wins(monkeypatch) -> None:
+    """A rename that lands while the one native read is in flight must win over the provider's title.
 
-    manager = _manager(chats={"chat-1": _chat(provider="opencode")})
-
-    reads = 0
-
-    async def fake_read_thread(_workspace, _sid):
-        nonlocal reads
-        reads += 1
-        # opencode's title agent has not run yet on the first two reads.
-        title = "Late Native Title" if reads >= 3 else ""
-        return {"info": {"title": title}, "messages": []}
-
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
-    assert await manager.auto_title_if_default("chat-1", "hello") == "Late Native Title"
-    assert manager._chats["chat-1"].title == "Late Native Title"
-    assert reads == 3
-
-
-@pytest.mark.asyncio
-async def test_auto_title_polls_until_session_exists(monkeypatch) -> None:
-    """The first-message trigger fires before the provider session exists. A
-    missing session_id must retry, not abandon titling for the whole chat."""
-    from ciao.web import project_chats as pc
-
-    chat = _chat(provider="opencode", session_id="")
-    manager = _manager(chats={"chat-1": chat})
-
-    async def fake_read_thread(_workspace, _sid):
-        return {"info": {"title": "Arrived Late"}, "messages": []}
-
-    # The turn assigns the session while the poller is waiting.
-    async def grant_session(*_args, **_kwargs):
-        chat.session_id = "sess-late"
-
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
-    monkeypatch.setattr(pc.asyncio, "sleep", grant_session)
-
-    assert await manager.auto_title_if_default("chat-1", "hello") == "Arrived Late"
-    assert chat.title == "Arrived Late"
-
-
-@pytest.mark.asyncio
-async def test_auto_title_stops_when_user_renames_mid_poll(monkeypatch) -> None:
-    """A rename during the poll window must win over the provider's title."""
-    from ciao.web import project_chats as pc
-
+    ACP chats read once with no wait, so the rename can only land inside that read.
+    """
     chat = _chat(provider="opencode")
     manager = _manager(chats={"chat-1": chat})
 
-    async def fake_read_thread(_workspace, _sid):
-        return {"info": {"title": ""}, "messages": []}
-
-    async def rename_during_wait(*_args, **_kwargs):
+    async def rename_then_answer(_workspace, _sid, **_kwargs):
         chat.title = "User Picked This"
+        chat.title_origin = "user"  # what update_chat records for a rename
+        return {"info": {"title": "Provider Title"}, "messages": []}
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
-    monkeypatch.setattr(pc.asyncio, "sleep", rename_during_wait)
+    monkeypatch.setattr(OpencodeAcpProvider, "native_title_candidates", _acp_candidates(rename_then_answer))
 
     assert await manager.auto_title_if_default("chat-1", "hello") is None
     assert chat.title == "User Picked This"
@@ -484,53 +399,17 @@ async def test_auto_title_and_publish_runs_once_per_chat(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_native_title_reads_the_chats_own_agent_root(monkeypatch) -> None:
-    """A chat outside the primary workspace must be looked up in ITS root.
-
-    Both readers are root-scoped — Claude Code keys sessions by directory — and
-    the provider that created the session was handed the chat's agent root. The
-    title reader used `config.workspace_root` instead, so after the re-rooting
-    every chat in a non-primary workspace looked up a directory its session was
-    never written under: no native title, ever, and the sidebar sat on the
-    deterministic fallback or "New Chat".
-    """
-    from ciao.web import project_chats as pc
-
-    seen: list[str | None] = []
-
-    class FakeInfo:
-        custom_title = "Work Chat Title"
-        summary = None
-
-    def fake_get_session_info(_sid, directory=None):
-        seen.append(directory)
-        # Only the chat's own root holds the session.
-        return FakeInfo() if directory == "/roots/work" else None
-
-    monkeypatch.setattr(pc, "get_session_info", fake_get_session_info)
-
-    manager = _manager(
-        config=_config({"personal": "/roots/personal", "work": "/roots/work"}),
-        chats={"chat-1": _chat(provider="claude")},
-        projects={"project-1": SimpleNamespace(project_id="project-1", workspace="work")},
-    )
-
-    assert await manager._native_chat_title(manager._chats["chat-1"]) == "Work Chat Title"
-    assert seen == ["/roots/work"]
-
-
-@pytest.mark.asyncio
 async def test_native_title_opencode_also_reads_the_chats_agent_root(monkeypatch) -> None:
     """`read_thread` caches on (workspace_root, session_id), so it is root-scoped too."""
     from ciao.web import project_chats as pc
 
     seen: list[str] = []
 
-    async def fake_read_thread(workspace, _sid):
+    async def fake_read_thread(workspace, _sid, **_kwargs):
         seen.append(str(workspace))
         return {"info": {"title": "Opencode Work Title"}}
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeAcpProvider, "native_title_candidates", _acp_candidates(fake_read_thread))
 
     manager = _manager(
         config=_config({"personal": "/roots/personal", "work": "/roots/work"}),
@@ -543,6 +422,409 @@ async def test_native_title_opencode_also_reads_the_chats_agent_root(monkeypatch
         == "Opencode Work Title"
     )
     assert seen == ["/roots/work"]
+
+
+# ── Shared native-title contract (adapter level) ─────────────────────────
+#
+# Native titles read through `BaseProvider.native_title_candidates` on the
+# adapter class: ordered candidate titles in provider-preference order, `()`
+# when the provider has none. The host keeps all validation (see the
+# `_real_title` oracles above); the adapter only knows its own storage.
+
+
+@pytest.mark.asyncio
+async def test_base_provider_native_title_default_without_construction() -> None:
+    """The optional contract's default is () and must never build a provider."""
+    from pathlib import Path
+
+    from ciao.providers.base import BaseProvider
+
+    entries: list[str] = []
+
+    class MinimalProvider(BaseProvider):
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("native_title_candidates must not construct a provider")
+
+        def run_streaming(self, request, register_handle):
+            entries.append("run_streaming")
+            return
+            yield  # pragma: no cover - empty async generator
+
+    assert await MinimalProvider.native_title_candidates(Path("/ws"), "sess-1", runtime_root=Path("/runtime")) == ()
+    assert entries == []
+    assert MinimalProvider.capabilities == BaseProvider.capabilities
+
+
+# ── Manager dispatch through the provider registry ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_registered_third_adapter_supplies_native_title(monkeypatch) -> None:
+    """A registered non-builtin adapter feeds candidates through the same seam.
+
+    `auto_title_if_default` hands the chat's own agent root to the adapter
+    through the provider registry and validates the ordered candidates at the
+    shared `_real_title` seam; it reads no native storage, constructs no
+    provider, and never reaches the one-shot titler. The one-shot spy
+    records instead of raising: a raise would land in `_llm_chat_title`'s
+    `except Exception` and could not fail the test.
+    """
+    from ciao import provider_registry
+    from ciao.web import project_chats as pc
+
+    reads: list[tuple[str, str]] = []
+    oneshot_calls: list[int] = []
+    title_calls: list[str] = []
+
+    class ThirdProvider(BaseProvider):
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("native title reads must not construct a provider")
+
+        def run_streaming(self, request, register_handle):
+            raise AssertionError("run_streaming must not be entered")
+            yield  # pragma: no cover
+
+        @classmethod
+        async def native_title_candidates(cls, workspace_root, session_id, **_kwargs):
+            reads.append((str(workspace_root), session_id))
+            return (
+                "",
+                "New session - temporary",
+                "[CIAO_CONTEXT_BEGIN] private",
+                "  Clean summary  ",
+                "Later title",
+            )
+
+    class Descriptor:
+        acp_spec_path = ""
+
+        def factory(self):
+            return ThirdProvider
+
+    monkeypatch.setattr(
+        provider_registry, "get", lambda pid: Descriptor() if pid == "synth" else None
+    )
+
+    async def recording_oneshot(*_args, **_kwargs):
+        oneshot_calls.append(1)
+        return ""
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", recording_oneshot)
+
+    real_real_title = pc.chat_service._real_title
+
+    def spying_real_title(title):
+        title_calls.append(title)
+        return real_real_title(title)
+
+    monkeypatch.setattr(pc.chat_service, "_real_title", spying_real_title)
+
+    manager = _manager(
+        config=_config({"personal": "/roots/personal", "work": "/roots/work"}),
+        chats={"chat-1": _chat(provider="synth")},
+        projects={
+            "project-1": SimpleNamespace(project_id="project-1", workspace="work")
+        },
+    )
+    result = await manager.auto_title_if_default("chat-1", "hello")
+    assert result == "Clean summary"
+    assert manager._chats["chat-1"].title == "Clean summary"
+    # The adapter saw the chat's OWN agent root, not the install root.
+    assert reads == [("/roots/work", "sess-1")]
+    assert oneshot_calls == []
+    # Candidates reach the rejection seam in order; the first clean one wins
+    # and the later title is never examined.
+    assert title_calls == [
+        "",
+        "New session - temporary",
+        "[CIAO_CONTEXT_BEGIN] private",
+        "  Clean summary  ",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unsupported_adapter_returns_none_without_construction(monkeypatch) -> None:
+    """An adapter that inherits the contract default yields no title, never a build.
+
+    Factory access is recorded and observed: spies that raised here would be
+    swallowed by the manager's `except Exception` and could not fail the test.
+    """
+    from ciao import provider_registry
+
+    factory_calls: list[int] = []
+    built: list[str] = []
+
+    class DefaultProvider(BaseProvider):
+        def __init__(self, *args, **kwargs):
+            built.append("constructed")
+
+        def run_streaming(self, request, register_handle):
+            raise AssertionError("run_streaming must not be entered")
+            yield  # pragma: no cover
+
+    class Descriptor:
+        acp_spec_path = ""
+
+        def factory(self):
+            factory_calls.append(1)
+            return DefaultProvider
+
+    monkeypatch.setattr(
+        provider_registry, "get", lambda pid: Descriptor() if pid == "synth" else None
+    )
+    manager = _manager(chats={"chat-1": _chat(provider="synth")})
+    assert await manager._native_chat_title(manager._chats["chat-1"]) is None
+    # The registry resolved the adapter class exactly once; the read never
+    # constructed it.
+    assert factory_calls == [1]
+    assert built == []
+
+
+@pytest.mark.asyncio
+async def test_unregistered_provider_id_returns_none_without_any_read(monkeypatch) -> None:
+    """An id with no descriptor returns None with no factory or storage access.
+
+    Every spy records and is asserted after the call rather than raising: a
+    raise would land inside the manager's `except Exception` and could not
+    fail the test. The registry seam is watched at three levels so any
+    fallback factory resolution is caught — id lookups (`get`), a
+    `require`-based fallback, and `.factory()` itself on any registered
+    descriptor however it was obtained.
+    """
+    from ciao import provider_registry
+
+    get_calls: list[str] = []
+    require_calls: list[str] = []
+    factory_calls: list[str] = []
+    read_calls: list[int] = []
+
+    real_get = provider_registry.get
+    real_require = provider_registry.require
+    real_factory = provider_registry.ProviderDescriptor.factory
+
+    def spying_get(provider):
+        get_calls.append(provider)
+        return real_get(provider)
+
+    def spying_require(provider):
+        require_calls.append(provider)
+        return real_require(provider)
+
+    def spying_factory(descriptor_self):
+        factory_calls.append(descriptor_self.id)
+        return real_factory(descriptor_self)
+
+    async def recording_read(_workspace_root, _session_id, **_kwargs):
+        read_calls.append(1)
+
+    monkeypatch.setattr(provider_registry, "get", spying_get)
+    monkeypatch.setattr(provider_registry, "require", spying_require)
+    monkeypatch.setattr(provider_registry.ProviderDescriptor, "factory", spying_factory)
+    monkeypatch.setattr(OpencodeAcpProvider, "native_title_candidates", _acp_candidates(recording_read))
+    manager = _manager(chats={"chat-1": _chat(provider="elsewhere")})
+    assert await manager._native_chat_title(manager._chats["chat-1"]) is None
+    # One registry lookup, no descriptor, therefore no `require` fallback and
+    # no `.factory()` on any registered descriptor — and no storage read.
+    assert get_calls == ["elsewhere"]
+    assert require_calls == []
+    assert factory_calls == []
+    assert read_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_read_failure_keeps_failure_log(monkeypatch, caplog) -> None:
+    """Adapter failures degrade to None behind the manager's failure log."""
+    import logging
+
+    from ciao import provider_registry
+
+    built: list[str] = []
+
+    class ExplodingProvider(BaseProvider):
+        def __init__(self, *args, **kwargs):
+            built.append("constructed")
+
+        def run_streaming(self, request, register_handle):
+            raise AssertionError("must not stream")
+            yield  # pragma: no cover
+
+        @classmethod
+        async def native_title_candidates(cls, workspace_root, session_id, **_kwargs):
+            raise RuntimeError("adapter storage unreadable")
+
+    class Descriptor:
+        acp_spec_path = ""
+
+        def factory(self):
+            return ExplodingProvider
+
+    monkeypatch.setattr(
+        provider_registry, "get", lambda pid: Descriptor() if pid == "synth" else None
+    )
+    manager = _manager(chats={"chat-1": _chat(provider="synth")})
+    with caplog.at_level(logging.INFO, logger="ciao.web.project_chats"):
+        assert await manager._native_chat_title(manager._chats["chat-1"]) is None
+    assert built == []
+    # The chat id, not any candidate text, is what fails into the log.
+    records = [
+        r
+        for r in caplog.records
+        if r.getMessage() == "Native title read failed for chat-1"
+    ]
+    assert records
+    assert records[0].exc_info is not None
+
+
+@pytest.mark.asyncio
+async def test_factory_resolution_failure_keeps_failure_log(monkeypatch, caplog) -> None:
+    """A broken factory import also lands behind the same failure boundary."""
+    import logging
+
+    from ciao import provider_registry
+
+    class Descriptor:
+        acp_spec_path = ""
+
+        def factory(self):
+            raise RuntimeError("factory import cannot resolve")
+
+    monkeypatch.setattr(
+        provider_registry, "get", lambda pid: Descriptor() if pid == "synth" else None
+    )
+    manager = _manager(chats={"chat-1": _chat(provider="synth")})
+    with caplog.at_level(logging.INFO, logger="ciao.web.project_chats"):
+        assert await manager._native_chat_title(manager._chats["chat-1"]) is None
+    records = [
+        r
+        for r in caplog.records
+        if r.getMessage() == "Native title read failed for chat-1"
+    ]
+    assert records
+    assert records[0].exc_info is not None
+
+
+@pytest.mark.asyncio
+async def test_native_title_cancellation_propagates(monkeypatch) -> None:
+    """Cancellation must not be converted into a missing title."""
+    import asyncio
+
+    from ciao import provider_registry
+
+    built: list[str] = []
+
+    class CancellingProvider(BaseProvider):
+        def __init__(self, *args, **kwargs):
+            built.append("constructed")
+
+        def run_streaming(self, request, register_handle):
+            raise AssertionError("must not stream")
+            yield  # pragma: no cover
+
+        @classmethod
+        async def native_title_candidates(cls, workspace_root, session_id, **_kwargs):
+            raise asyncio.CancelledError()
+
+    class Descriptor:
+        acp_spec_path = ""
+
+        def factory(self):
+            return CancellingProvider
+
+    monkeypatch.setattr(
+        provider_registry, "get", lambda pid: Descriptor() if pid == "synth" else None
+    )
+    manager = _manager(chats={"chat-1": _chat(provider="synth")})
+    with pytest.raises(asyncio.CancelledError):
+        await manager._native_chat_title(manager._chats["chat-1"])
+    assert built == []
+
+
+@pytest.mark.asyncio
+async def test_rename_during_third_adapter_read_wins(monkeypatch) -> None:
+    """A rename landing while the adapter read is parked must survive the poll."""
+    import asyncio
+
+    from ciao import provider_registry
+
+    reached = asyncio.Event()
+    release = asyncio.Event()
+
+    class PausingProvider(BaseProvider):
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("must not be constructed")
+
+        def run_streaming(self, request, register_handle):
+            raise AssertionError("must not stream")
+            yield  # pragma: no cover
+
+        @classmethod
+        async def native_title_candidates(cls, workspace_root, session_id, **_kwargs):
+            reached.set()
+            await release.wait()
+            return ("Clean summary",)
+
+    class Descriptor:
+        acp_spec_path = ""
+
+        def factory(self):
+            return PausingProvider
+
+    monkeypatch.setattr(
+        provider_registry, "get", lambda pid: Descriptor() if pid == "synth" else None
+    )
+    chat = _chat(provider="synth")
+    manager = _manager(chats={"chat-1": chat})
+
+    task = asyncio.ensure_future(manager.auto_title_if_default("chat-1", "hello"))
+    await asyncio.wait_for(reached.wait(), 2)
+    chat.title = "User Picked This"
+    chat.title_origin = "user"  # what update_chat records for a rename
+    release.set()
+    assert await asyncio.wait_for(task, 2) is None
+    assert manager._chats["chat-1"].title == "User Picked This"
+
+
+@pytest.mark.asyncio
+async def test_removed_chat_during_third_adapter_read_is_not_resurrected(monkeypatch) -> None:
+    """A chat deleted mid-read stays deleted; the native read must not rewrite it."""
+    import asyncio
+
+    from ciao import provider_registry
+
+    reached = asyncio.Event()
+    release = asyncio.Event()
+
+    class PausingProvider(BaseProvider):
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("must not be constructed")
+
+        def run_streaming(self, request, register_handle):
+            raise AssertionError("must not stream")
+            yield  # pragma: no cover
+
+        @classmethod
+        async def native_title_candidates(cls, workspace_root, session_id, **_kwargs):
+            reached.set()
+            await release.wait()
+            return ("Clean summary",)
+
+    class Descriptor:
+        acp_spec_path = ""
+
+        def factory(self):
+            return PausingProvider
+
+    monkeypatch.setattr(
+        provider_registry, "get", lambda pid: Descriptor() if pid == "synth" else None
+    )
+    manager = _manager(chats={"chat-1": _chat(provider="synth")})
+
+    task = asyncio.ensure_future(manager.auto_title_if_default("chat-1", "hello"))
+    await asyncio.wait_for(reached.wait(), 2)
+    manager._chats.pop("chat-1")
+    release.set()
+    assert await asyncio.wait_for(task, 2) is None
+    assert "chat-1" not in manager._chats
 
 
 # ── LLM title fallback (tier 2) ──────────────────────────────────────────
@@ -565,10 +847,6 @@ async def test_llm_fallback_titles_chat_when_native_never_lands(monkeypatch) -> 
         calls.append({"prompt": prompt, "system_prompt": system_prompt, "model": model})
         return "Zendesk Ticket Thread Follow-Up"
 
-    def missing_session_info(_sid, directory=None):
-        return None
-
-    monkeypatch.setattr(pc, "get_session_info", missing_session_info)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
     title = await manager.auto_title_if_default("chat-1", "Check Zendesk ticket 152025")
@@ -581,34 +859,119 @@ async def test_llm_fallback_titles_chat_when_native_never_lands(monkeypatch) -> 
 
 @pytest.mark.asyncio
 async def test_claude_title_does_not_wait_for_native_poll(monkeypatch) -> None:
+    """The fallback title is never held behind the native polls: none is slept on before it returns."""
     from ciao.web import project_chats as pc
 
     manager = _manager(chats={"chat-1": _chat(provider="claude")})
-    manager._TITLE_POLL_DELAYS = (0.0, 60.0)
     native_reads = 0
+    slept: list[float] = []
 
-    def missing_session_info(_sid, directory=None):
+    async def counting_native_title(_chat):
         nonlocal native_reads
         native_reads += 1
         return None
 
-    async def unexpected_sleep(_delay):
-        pytest.fail("Claude titling must not wait through the native poll")
+    async def recording_sleep(delay):
+        slept.append(delay)
 
     async def fake_oneshot(*_args, **_kwargs):
         return "System One Decision Models"
 
-    monkeypatch.setattr(pc, "get_session_info", missing_session_info)
-    monkeypatch.setattr(pc.asyncio, "sleep", unexpected_sleep)
+    manager._native_chat_title = counting_native_title
+    monkeypatch.setattr(pc.asyncio, "sleep", recording_sleep)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
-    assert (
-        await manager.auto_title_if_default(
-            "chat-1", "I want to find out where System One models help"
-        )
-        == "System One Decision Models"
+    title = await manager.auto_title_if_default(
+        "chat-1", "I want to find out where System One models help"
     )
-    assert native_reads == 1
+    assert title == "System One Decision Models"
+    # ACP Claude chats have no native read: the adapter's title arrives as an event.
+    assert native_reads == 0
+    assert slept == []
+
+
+@pytest.mark.asyncio
+async def test_claude_fallback_title_is_not_held_behind_native_polls(monkeypatch) -> None:
+    """With no native title and no model title, the fallback comes back at once, and no poll is waited on."""
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(provider="claude")})
+    native_reads = 0
+    slept: list[float] = []
+
+    async def counting_native_title(_chat):
+        nonlocal native_reads
+        native_reads += 1
+        return None
+
+    async def recording_sleep(delay):
+        slept.append(delay)
+
+    async def failing_oneshot(*_args, **_kwargs):
+        raise RuntimeError("model unavailable")
+
+    manager._native_chat_title = counting_native_title
+    monkeypatch.setattr(pc.asyncio, "sleep", recording_sleep)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
+
+    assert await manager.auto_title_if_default("chat-1", "Check Zendesk ticket 152025") == (
+        "Check Zendesk ticket 152025"
+    )
+    assert manager._chats["chat-1"].title == "Check Zendesk ticket 152025"
+    assert native_reads == 0
+    assert slept == []
+
+
+@pytest.mark.asyncio
+async def test_claude_chat_reads_no_native_title_so_nothing_polls(monkeypatch) -> None:
+    """The fallback stands: an ACP Claude chat has no native read to poll, so nothing runs after it."""
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(provider="claude")})
+    published: list[dict] = []
+    manager._events = SimpleNamespace(publish=published.append)
+    reads = 0
+    slept: list[float] = []
+
+    async def late_native_title(_chat):
+        # Would land on the second read if the poll ran; it must never be asked.
+        nonlocal reads
+        reads += 1
+        return "Claude Late Title" if reads >= 2 else None
+
+    async def recording_sleep(delay):
+        slept.append(delay)
+
+    async def failing_oneshot(*_args, **_kwargs):
+        raise RuntimeError("model unavailable")
+
+    manager._native_chat_title = late_native_title
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
+    monkeypatch.setattr(pc.asyncio, "sleep", recording_sleep)
+
+    assert await manager.auto_title_if_default("chat-1", "hello") == "hello"
+
+    assert reads == 0
+    assert slept == []
+    assert manager._chats["chat-1"].title == "hello"
+    assert published == []
+
+
+@pytest.mark.asyncio
+async def test_claude_rename_during_the_titler_wins_over_the_fallback(monkeypatch) -> None:
+    """A rename made while the one-shot titler runs keeps the user's title; no fallback is written."""
+    chat = _chat(provider="claude")
+    manager = _manager(chats={"chat-1": chat})
+
+    async def rename_then_fail(*_args, **_kwargs):
+        chat.title = "User Picked This"
+        chat.title_origin = "user"  # what update_chat records for a rename
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", rename_then_fail)
+
+    assert await manager.auto_title_if_default("chat-1", "hello") is None
+    assert chat.title == "User Picked This"
 
 
 @pytest.mark.asyncio
@@ -625,10 +988,6 @@ async def test_llm_fallback_prompt_carries_assistant_reply(monkeypatch) -> None:
         prompts.append(prompt)
         return "Automation Page Job Log"
 
-    def missing_session_info(_sid, directory=None):
-        return None
-
-    monkeypatch.setattr(pc, "get_session_info", missing_session_info)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
     title = await manager.auto_title_if_default(
@@ -649,10 +1008,6 @@ async def test_llm_fallback_failure_still_applies_deterministic_fallback(
     async def failing_oneshot(*_args, **_kwargs):
         raise RuntimeError("usage limit reached")
 
-    def missing_session_info(_sid, directory=None):
-        return None
-
-    monkeypatch.setattr(pc, "get_session_info", missing_session_info)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
 
     assert await manager.auto_title_if_default("chat-1", "hello") == "hello"
@@ -673,10 +1028,6 @@ async def test_llm_fallback_rejects_contaminated_title(monkeypatch) -> None:
     async def leaking_oneshot(*_args, **_kwargs):
         return leaked
 
-    def missing_session_info(_sid, directory=None):
-        return None
-
-    monkeypatch.setattr(pc, "get_session_info", missing_session_info)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", leaking_oneshot)
 
     manager = _manager(chats={"chat-1": _chat(provider="claude")})
@@ -698,10 +1049,10 @@ async def test_llm_fallback_not_called_when_native_title_lands(monkeypatch) -> N
         oneshot_calls.append(1)
         return "Should Not Be Used"
 
-    async def fake_read_thread(_workspace, _sid):
+    async def fake_read_thread(_workspace, _sid, **_kwargs):
         return {"info": {"title": "Native Title"}, "messages": []}
 
-    monkeypatch.setattr(pc.OpencodeProvider, "read_thread", fake_read_thread)
+    monkeypatch.setattr(OpencodeAcpProvider, "native_title_candidates", _acp_candidates(fake_read_thread))
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", unexpected_oneshot)
 
     assert await manager.auto_title_if_default("chat-1", "hello") == "Native Title"
@@ -718,12 +1069,9 @@ async def test_llm_fallback_respects_manual_rename_during_call(monkeypatch) -> N
 
     async def slow_oneshot(*_args, **_kwargs):
         chat.title = "User Picked This"
+        chat.title_origin = "user"  # what update_chat records for a rename
         return "Model's Title"
 
-    def missing_session_info(_sid, directory=None):
-        return None
-
-    monkeypatch.setattr(pc, "get_session_info", missing_session_info)
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", slow_oneshot)
 
     assert await manager.auto_title_if_default("chat-1", "hello") is None
@@ -762,3 +1110,43 @@ def test_fallback_title_strips_leading_url() -> None:
     bare = _fallback_title("https://example.com/very/long/path/segments")
     assert bare is not None and bare.startswith("https://")
     assert _fallback_title("plain words only here") == "plain words only here"
+
+
+@pytest.mark.asyncio
+async def test_acp_chat_title_is_read_once_with_no_wait_and_no_poll(monkeypatch) -> None:
+    """An ACP chat's native title is read once, with no wait: the fallback is written at once.
+
+    ACP agents forward (or do not forward) their title in the protocol; a second read after the
+    fallback would be polling, which the maintainer decision rules out.
+    """
+    from ciao import provider_registry
+    from ciao.web import chat_service
+    from ciao.web import project_chats as pc
+
+    manager = _manager(chats={"chat-1": _chat(provider="opencode")})
+    reads = 0
+
+    class FakeAcpProvider:
+        @classmethod
+        async def native_title_candidates(cls, _workspace, _sid, *, runtime_root):
+            nonlocal reads
+            reads += 1
+            return ("New session - 2026-08-18T12:20:10.198Z",)
+
+    descriptor = SimpleNamespace(id="opencode", acp_spec_path="tests:SPEC", factory=lambda: FakeAcpProvider)
+    monkeypatch.setattr(provider_registry, "get", lambda _provider: descriptor)
+    slept: list[float] = []
+
+    async def recording_sleep(delay):
+        slept.append(delay)
+
+    async def failing_oneshot(*_args, **_kwargs):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(pc.asyncio, "sleep", recording_sleep)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
+
+    prompt = "Check the hash table notes"
+    assert await manager.auto_title_if_default("chat-1", prompt) == chat_service._fallback_title(prompt)
+    assert reads == 1
+    assert slept == []

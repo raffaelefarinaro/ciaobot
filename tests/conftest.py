@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 
 # A Ciaobot chat (or the bundled app's launcher) exports its own CIAO_*
-# settings - vault root, workspace, agent token, CIAO_BUNDLED_APP - and
+# settings - vault root, workspace, agent token - and
 # PWA_AUTH_TOKEN to every command it runs, this suite included. Drop them
 # before any `ciao` module is imported, so code reading them at import time
 # sees a clean environment too; pytest-xdist workers inherit the cleaned one.
@@ -127,7 +127,18 @@ def _no_installed_opencode(monkeypatch: pytest.MonkeyPatch) -> None:
     CI has no OpenCode installed, so this is what CI already sees. A test that
     wants a binary sets ``CIAO_OPENCODE_BIN``, which is resolved first.
     """
-    monkeypatch.setattr("ciao.providers.opencode.resolve_tool", lambda name: None)
+    monkeypatch.setattr("ciao.opencode_cli.resolve_tool", lambda name: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_installed_codex(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never find the developer's own ``codex`` on ``PATH``.
+
+    The Codex status probe runs ``codex login status`` against whatever it finds, so a test
+    that reaches Settings would otherwise run the real CLI. A test that needs a binary patches
+    ``ciao.providers.acp.agents.codex_binary`` itself.
+    """
+    monkeypatch.setattr("ciao.providers.acp.agents.codex_binary", lambda: None)
 
 
 @pytest.fixture(autouse=True)
@@ -178,8 +189,8 @@ def _restore_ciao_env(monkeypatch: pytest.MonkeyPatch) -> None:
     ``monkeypatch`` cannot undo a key it never saw set. A later test's implicit
     workspace resolution then skipped install discovery, because a workspace was
     already named, and read an unregistered root: ``memory-proposals`` listed
-    nothing, but only in the serial full run, where ``test_installer_handoff``
-    precedes ``test_memory_proposal_cli``.
+    nothing, but only in the serial full run, where an earlier driven setup
+    left the variables behind.
 
     Depends on ``monkeypatch`` so it is torn down before it: both then restore
     to the same pre-test state.
@@ -322,24 +333,6 @@ def _isolate_job_runs(tmp_path: Path) -> None:
     jr._runtime_dir_override = None
 
 
-@pytest.fixture(autouse=True)
-def _isolate_gh(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the host's gh login out of every test (#1961).
-
-    A workspace-scoped request would otherwise read ``~/.config/gh`` and run
-    ``gh auth token`` on the machine running the suite. Tests of the real
-    functions import them directly from ``ciao.fs_sandbox``, which this patch
-    does not touch.
-    """
-    from ciao import fs_sandbox
-
-    fs_sandbox.clear_gh_token_cache()
-    monkeypatch.setattr("ciao.fs_sandbox.gh_token_for_sandbox", lambda *a, **k: None)
-    monkeypatch.setattr("ciao.fs_sandbox.gh_config_read_root", lambda env: None)
-    yield
-    fs_sandbox.clear_gh_token_cache()
-
-
 def attach_stub_mcp(manager):
     """Give a test-built ``ProjectChatManager`` a stub agent control plane.
 
@@ -392,3 +385,27 @@ def _fail_on_unretrieved_task_exceptions() -> Any:
             + "\n".join(handler.messages),
             pytrace=False,
         )
+
+
+class RealRunnerReached(BaseException):
+    """A takeover test reached the real ``subprocess.run`` launchctl runner.
+
+    A ``BaseException`` on purpose: ``mac_takeover.run_cli`` turns every
+    ``Exception`` into an error document, which would swallow the guard.
+    """
+
+
+@pytest.fixture(autouse=True)
+def never_the_real_launchctl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A takeover test that forgets to inject its runner must fail, not drive launchd.
+
+    Every public entry point and every helper resolves a missing runner through
+    ``mac_takeover._default_runner``, the one place the real ``subprocess.run``
+    is chosen; replacing it covers helper-built runners too.
+    """
+    from ciao import mac_takeover
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise RealRunnerReached(f"a test reached the real subprocess runner: {args}")
+
+    monkeypatch.setattr(mac_takeover, "_default_runner", lambda: refuse)

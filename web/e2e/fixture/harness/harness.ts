@@ -13,6 +13,9 @@
 import { TerminalRenderer } from '../../../src/lib/terminalRenderer'
 import type { TerminalHarness } from './types'
 
+if (new URLSearchParams(location.search).get('workspace-terminal') === '1') {
+  void import('./workspace-terminal')
+} else {
 const host = document.getElementById('terminal')
 if (!host) throw new Error('The terminal harness needs a #terminal element to mount on.')
 
@@ -73,3 +76,4 @@ Object.defineProperty(window, '__terminal', {
   configurable: true,
   value: harness,
 })
+}

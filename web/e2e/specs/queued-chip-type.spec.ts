@@ -22,7 +22,6 @@ type Control = { cls: string; width: number; height: number; glyph: number }
 
 type Measurement = {
   queuedText: number
-  queuedMode: number | null
   waitingLabel: number | null
   sendNow: number | null
   controls: Control[]
@@ -43,7 +42,6 @@ async function measure(page: Page): Promise<Measurement> {
     const q = <T extends Element>(sel: string) => document.querySelector<T>(sel)
     return {
       queuedText: px(q('.queued-text')) ?? 0,
-      queuedMode: px(q('.queued-mode-option')),
       waitingLabel: px(q('.queued-label')),
       sendNow: px(q('.queued-send-now')),
       controls: Array.from(document.querySelectorAll<HTMLElement>('.queued-chip .queued-action, .queued-chip .queued-remove'))
@@ -71,18 +69,13 @@ function expectControlTargets(m: Measurement) {
 }
 
 /** Setting the Appearance scale moves the chip instead of leaving it behind. */
-async function expectFollowsScale(page: Page, before: Measurement, modeOptions: boolean) {
+async function expectFollowsScale(page: Page, before: Measurement) {
   const factor = 1.5 / before.fontScale
   await page.evaluate(() => document.documentElement.style.setProperty('--font-scale', '1.5'))
   const grown = await measure(page)
   const textGrowth = grown.queuedText / before.queuedText
   expect(textGrowth, 'queued text grows with --font-scale').toBeGreaterThan(factor - 0.1)
   expect(textGrowth, 'queued text grows with --font-scale').toBeLessThan(factor + 0.1)
-  if (modeOptions && before.queuedMode !== null && grown.queuedMode !== null) {
-    const modeGrowth = grown.queuedMode / before.queuedMode
-    expect(modeGrowth, 'Queue/Steer labels grow with --font-scale').toBeGreaterThan(factor - 0.1)
-    expect(modeGrowth, 'Queue/Steer labels grow with --font-scale').toBeLessThan(factor + 0.1)
-  }
 }
 
 test('a parked queued message is set in the composer type scale', async ({ page }, testInfo) => {
@@ -100,20 +93,24 @@ test('a parked queued message is set in the composer type scale', async ({ page 
   await expect(page.locator('.queued-chip')).toBeVisible()
 
   const m = await measure(page)
-  // 14px × the Appearance scale, not a literal.
+  // 14px × the Appearance scale, not a literal. This is the composer's
+  // body token (`--text-base`); the phone composer field itself is floored
+  // at 16px, so the chip is compared to the token, not the textarea.
   expect(m.queuedText).toBeCloseTo(14 * m.fontScale, 1)
-  // 11px × scale for the "Waiting" micro label.
-  expect(m.waitingLabel).toBeCloseTo(11 * m.fontScale, 1)
+  // Idle chips show Send now and no status label. Queued/Waiting is only
+  // rendered while a turn is running (the next test).
+  expect(m.waitingLabel).toBeNull()
   // 12px × scale for "Send now".
-  if (m.sendNow !== null) expect(m.sendNow).toBeCloseTo(12 * m.fontScale, 1)
+  expect(m.sendNow, 'Send now is shown while the chat is idle').not.toBeNull()
+  expect(m.sendNow!).toBeCloseTo(12 * m.fontScale, 1)
   expectControlTargets(m)
   await page.screenshot({ path: testInfo.outputPath('queued-parked.png') })
 
-  await expectFollowsScale(page, m, false)
+  await expectFollowsScale(page, m)
   await page.screenshot({ path: testInfo.outputPath('queued-parked-scaled.png') })
 })
 
-test('a steerable queued message keeps readable controls on a phone', async ({ page }, testInfo) => {
+test('a queued message keeps readable controls on a phone', async ({ page }, testInfo) => {
   await isolate(page, `queued-type-live-${testInfo.workerIndex}`)
   await boot(page, `/chat/${CHAT_ID}`, COMPOSER)
   await page.evaluate(async (chatId) => {
@@ -131,15 +128,12 @@ test('a steerable queued message keeps readable controls on a phone', async ({ p
   await expect(page.locator('.queued-chip')).toBeVisible()
 
   const m = await measure(page)
-  expect(m.queuedMode).not.toBeNull()
-  expect(m.queuedMode!).toBeCloseTo(12 * m.fontScale, 1)
-  const modeBoxes = await page.locator('.queued-mode-option').evaluateAll(els =>
-    els.map(el => Math.round(el.getBoundingClientRect().height)))
-  expect(modeBoxes.length).toBeGreaterThan(0)
-  for (const height of modeBoxes) expect(height).toBeGreaterThanOrEqual(44)
+  // While a turn runs the chip has a status label and no send button.
+  expect(m.waitingLabel).toBeCloseTo(11 * m.fontScale, 1)
+  expect(m.sendNow).toBeNull()
   expectControlTargets(m)
   await page.screenshot({ path: testInfo.outputPath('queued-live.png') })
 
-  await expectFollowsScale(page, m, true)
+  await expectFollowsScale(page, m)
   await page.screenshot({ path: testInfo.outputPath('queued-live-scaled.png') })
 })

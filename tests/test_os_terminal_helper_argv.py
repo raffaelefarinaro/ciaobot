@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import sys
 import time
 from pathlib import Path
 
 import pytest
 
 from ciao.os_support.terminal import spawn_terminal
-
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX pty")
 
 
 def test_spawn_runs_the_given_program(tmp_path: Path) -> None:

@@ -12,7 +12,6 @@ from starlette.testclient import TestClient
 
 from ciao.claude_trim import trim_tool_denies
 from ciao.config import CiaoConfig
-from ciao.execution_modes import credential_path_deny_rules
 from ciao.web.routes_api import (
     archive_workspace_setting,
     gws_integration_settings,
@@ -29,18 +28,168 @@ from ciao.web.routes_api import (
 from ciao.os_support.private import is_private
 
 
-def _policy_denies(config: CiaoConfig, tools: list[str]) -> list[str]:
-    """The workspace-policy part of a denylist, without the credential denies.
+@pytest.fixture(autouse=True)
+def _stub_auth_list(monkeypatch):
+    monkeypatch.setattr("ciao.opencode_cli.bounded_output", lambda *a, **k: (0, b"[]"))
 
-    ``credential_path_deny_rules`` is prepended unconditionally to every
-    workspace (covered by tests/test_credential_denies.py), so these
-    assertions strip it to keep testing what they are about: the harness
-    defaults, the per-workspace extras, and the derived ``mcp__<server>``
-    denies. The config is needed because the rules include patterns derived
-    from its resolved runtime root, not just the static names.
-    """
-    fixed = set(credential_path_deny_rules(config.state_path.parent))
-    return [tool for tool in tools if tool not in fixed]
+
+def test_settings_and_verify_expose_safe_opencode_inventory(tmp_path, monkeypatch):
+    from itsdangerous import URLSafeTimedSerializer
+    from starlette.middleware import Middleware
+    from types import SimpleNamespace
+    from ciao.web import routes_api
+    from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
+
+    monkeypatch.setattr(routes_api, "_provider_config_payload", lambda config: {
+        "connections": {"opencode": {"ready": True}, "claude": {"ready": False}}
+    })
+    monkeypatch.setattr("ciao.opencode_cli.resolve_opencode_binary", lambda: "fake")
+    rows = [{"id": "ollama", "name": "Ollama", "connections": [
+        {"type": "credential", "method": "key", "token": "hidden-sentinel"}]}]
+    calls = []
+    monkeypatch.setattr("ciao.opencode_cli.bounded_output",
+                        lambda *a, **k: (calls.append(1) or (0, json.dumps(rows).encode())))
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(routes=[
+        Route("/api/settings/providers", routes_api.provider_config_settings),
+        Route("/api/settings/providers/{provider}/{action}", routes_api.provider_connection_action, methods=["POST"]),
+    ], middleware=[Middleware(AuthMiddleware, serializer=serializer)])
+    app.state.config = SimpleNamespace(workspace_root=tmp_path, state_path=tmp_path / "state.json")
+    client = TestClient(app, base_url="http://localhost:8443", client=("127.0.0.1", 50000))
+    path = "/api/settings/providers"
+    assert client.get(path).status_code == 401
+    assert client.post(path + "/opencode/verify", headers={"Origin": "http://localhost:8443"}).status_code == 401
+    assert calls == []
+    headers = {"Cookie": f"{SESSION_COOKIE}={serializer.dumps({'user': 'owner'})}",
+               "Origin": "http://localhost:8443"}
+    get = client.get(path, headers=headers)
+    verify = client.post(path + "/opencode/verify", headers=headers)
+    assert get.status_code == verify.status_code == 200
+    assert get.headers["cache-control"] == verify.headers["cache-control"] == "no-store"
+    assert get.json()["connections"]["claude"] == {"ready": False}
+    inventory = get.json()["connections"]["opencode"]["credential_inventory"]
+    assert inventory == verify.json()["credential_inventory"]
+    assert inventory["providers"][0]["auth_types"] == ["api_key"]
+    assert "hidden-sentinel" not in get.text + verify.text
+    assert len(calls) == 2
+
+
+def test_verify_inventory_is_fresh_during_older_inflight_get(tmp_path, monkeypatch):
+    import threading
+    from types import SimpleNamespace
+    from itsdangerous import URLSafeTimedSerializer
+    from starlette.middleware import Middleware
+    from ciao.web import routes_api
+    from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
+
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def collector(*args, **kwargs):
+        number = len(calls)
+        calls.append(number)
+        if number == 0:
+            entered.set()
+            assert release.wait(5)
+        name = "old" if number == 0 else "new"
+        return 0, json.dumps([{"id": name, "name": name, "connections": [{"type": "env"}]}]).encode()
+
+    monkeypatch.setattr(routes_api, "_provider_config_payload", lambda config: {"connections": {"opencode": {}}})
+    monkeypatch.setattr("ciao.opencode_cli.resolve_opencode_binary", lambda: "fake")
+    monkeypatch.setattr("ciao.opencode_cli.bounded_output", collector)
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(routes=[
+        Route("/api/settings/providers", routes_api.provider_config_settings),
+        Route("/api/settings/providers/{provider}/{action}", routes_api.provider_connection_action, methods=["POST"]),
+    ], middleware=[Middleware(AuthMiddleware, serializer=serializer)])
+    app.state.config = SimpleNamespace(workspace_root=tmp_path, state_path=tmp_path / "state.json")
+    headers = {"Cookie": f"{SESSION_COOKIE}={serializer.dumps({'user': 'owner'})}",
+               "Origin": "http://localhost:8443"}
+    path = "/api/settings/providers"
+    responses = []
+    errors = []
+
+    def old_get():
+        try:
+            with TestClient(app, base_url="http://localhost:8443", client=("127.0.0.1", 50000)) as client:
+                responses.append(client.get(path, headers=headers))
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=old_get)
+    thread.start()
+    try:
+        assert entered.wait(5)
+        with TestClient(app, base_url="http://localhost:8443", client=("127.0.0.1", 50000)) as client:
+            verify = client.post(path + "/opencode/verify", headers=headers)
+            release.set()
+            thread.join(5)
+            fresh = client.get(path, headers=headers)
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive() and not errors
+    assert responses[0].json()["connections"]["opencode"]["credential_inventory"]["providers"][0]["id"] == "old"
+    assert verify.json()["credential_inventory"]["providers"][0]["id"] == "new"
+    assert fresh.json()["connections"]["opencode"]["credential_inventory"]["providers"][0]["id"] == "new"
+
+
+def test_opencode_verify_refreshes_models_for_default_and_named_workspaces(tmp_path, monkeypatch):
+    """Verify drops the ACP catalog cache, so the next /api/models probes each workspace again."""
+    from types import SimpleNamespace
+    from itsdangerous import URLSafeTimedSerializer
+    from starlette.middleware import Middleware
+    from ciao.providers.acp.agents import OpencodeAcpProvider
+    from ciao.providers.acp.provider import invalidate_acp_catalog as acp_invalidate
+    from ciao.web import routes_api
+    from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
+    import ciao.opencode_cli as mod
+
+    roots = [tmp_path / "default", tmp_path / "named"]
+    versions = {root: "old" for root in roots}
+    counts = {root: 0 for root in roots}
+
+    async def fake_probe(cls, workspace_root):
+        # The real model_catalog cache sits in front of this probe.
+        assert workspace_root in roots
+        counts[workspace_root] += 1
+        return [{"model": f"opencode/{workspace_root.name}-{versions[workspace_root]}",
+                 "label": "m", "variants": []}]
+
+    monkeypatch.setattr(OpencodeAcpProvider, "_probe_catalog", classmethod(fake_probe))
+    config = SimpleNamespace(
+        workspace_root=roots[0], state_path=tmp_path / "state.json",
+        workspace=lambda name: object() if name == "named" else None,
+        agent_root=lambda name: roots[1],
+        default_model_for_provider=lambda provider: "",
+        claude_default_model="",
+    )
+    monkeypatch.setattr(routes_api, "_provider_config_payload", lambda config: {"connections": {"opencode": {}}})
+    monkeypatch.setattr(mod, "opencode_credential_inventory", lambda: {"status": "complete", "providers": []})
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(routes=[
+        Route("/api/models", routes_api.list_models),
+        Route("/api/settings/providers/{provider}/{action}", routes_api.provider_connection_action, methods=["POST"]),
+    ], middleware=[Middleware(AuthMiddleware, serializer=serializer)])
+    app.state.config = config
+    headers = {"Cookie": f"{SESSION_COOKIE}={serializer.dumps({'user': 'owner'})}",
+               "Origin": "http://localhost:8443"}
+    urls = ["/api/models", "/api/models?workspace=named"]
+    try:
+        with TestClient(app, base_url="http://localhost:8443", client=("127.0.0.1", 50000)) as client:
+            for url, root in zip(urls, roots):
+                body = client.get(url, headers=headers).json()
+                assert body["provider_models"]["opencode"] == [f"opencode/{root.name}-old"]
+            for root in roots:
+                versions[root] = "new"
+            assert client.post("/api/settings/providers/opencode/verify", headers=headers).status_code == 200
+            for url, root in zip(urls, roots):
+                body = client.get(url, headers=headers).json()
+                expected = [f"opencode/{root.name}-new"]
+                assert body["provider_models"]["opencode"] == expected
+        assert counts == {roots[0]: 2, roots[1]: 2}
+    finally:
+        acp_invalidate("opencode")
 
 
 class _PCM:
@@ -56,6 +205,9 @@ class _PCM:
 
     def workspace_busy_chat_ids(self, workspace: str) -> list[str]:
         return []
+
+    def refuse_workspace_teardown(self, workspace: str) -> None:
+        return None
 
     def archive_workspace_projects(self, workspace: str) -> dict[str, int]:
         self.archived.append(workspace)
@@ -161,7 +313,7 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
     # default (claude_default_model).
     assert config.default_model_for_workspace("client-a") == "opus"
     # extras are added on top of the trim defaults
-    assert _policy_denies(config, config.disallowed_tools_for_workspace("client-a")) == [
+    assert config.disallowed_tools_for_workspace("client-a") == [
         *trim_tool_denies({}),
         "mcp__claude_ai_Slack",
         "Bash",
@@ -169,7 +321,8 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
     assert pcm.refresh_count == 1
     assert data["provider_options"] == [
         {"value": "claude", "label": "Anthropic (via Claude Code)"},
-        {"value": "opencode", "label": "opencode"},
+        {"value": "opencode", "label": "OpenCode"},
+        {"value": "codex", "label": "OpenAI (via Codex)"},
     ]
 
     stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
@@ -179,7 +332,6 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "vault_root": "memory-vault/client-a",
         "default_provider": "claude",
         "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
-        "claude_ai_connectors": True,
         "gws_profile": "work",
         "color": "amber",
         "memory_handover": "all",
@@ -198,9 +350,7 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
         json={"disallowed_tools": "mcp__example,Bash"},
     )
     assert patch.status_code == 200
-    assert _policy_denies(
-        config, config.disallowed_tools_for_workspace("client-a")
-    ) == [*trim_tool_denies({}), "mcp__example", "Bash"]
+    assert config.disallowed_tools_for_workspace("client-a") == [*trim_tool_denies({}), "mcp__example", "Bash"]
 
     delete = client.delete("/api/workspaces/client-a")
     assert delete.status_code == 200
@@ -215,7 +365,6 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "vault_root": "memory-vault/personal",
             "default_provider": "claude",
             "disallowed_tools": None,
-            "claude_ai_connectors": True,
             "gws_profile": "personal",
             "color": "amber",
         },
@@ -371,7 +520,8 @@ def test_workspace_provider_options_are_the_runtime_providers(tmp_path):
     data = client.get("/api/workspaces").json()
     assert data["provider_options"] == [
         {"value": "claude", "label": "Anthropic (via Claude Code)"},
-        {"value": "opencode", "label": "opencode"},
+        {"value": "opencode", "label": "OpenCode"},
+        {"value": "codex", "label": "OpenAI (via Codex)"},
     ]
 
     resp = client.post(
@@ -493,7 +643,7 @@ def test_connectors_always_allowed_and_extras_honored(tmp_path):
     )
     assert resp.status_code == 200
     effective = config.disallowed_tools_for_workspace("personal")
-    assert _policy_denies(config, effective) == [*trim_tool_denies({}), "mcp__n8n_mcp"]
+    assert effective == [*trim_tool_denies({}), "mcp__n8n_mcp"]
     assert "mcp__claude_ai_Airtable" not in effective
 
     # Persisted to disk without the (removed) claude_ai_mcps field.
@@ -503,32 +653,22 @@ def test_connectors_always_allowed_and_extras_honored(tmp_path):
     assert personal_stored["disallowed_tools"] == ["mcp__n8n_mcp"]
 
 
-def test_claude_ai_connectors_switch_saves_persists_and_validates(tmp_path):
+def test_retired_connectors_field_is_not_read_on_save(tmp_path):
+    """A PATCH that still sends the old field does not trim connectors or persist it."""
     client, config, _pcm = _client(tmp_path)
     client.post("/api/workspaces", json={"name": "client-a", "vault_root": "client-a"})
-    assert config.workspace("client-a").claude_ai_connectors is True
 
-    off = client.patch("/api/workspaces/client-a", json={"claude_ai_connectors": False})
-    assert off.status_code == 200
-    assert any(
-        w["name"] == "client-a" and w["claude_ai_connectors"] is False
-        for w in off.json()["workspaces"]
+    ignored = client.patch("/api/workspaces/client-a", json={"claude_ai_connectors": False})
+    assert ignored.status_code == 200
+    assert "setting:claude_ai_connectors" not in config.workspace("client-a").claude_trim
+    assert all(
+        "claude_ai_connectors" not in w for w in ignored.json()["workspaces"]
     )
-    assert config.workspace("client-a").claude_ai_connectors is False
-
-    # A save that leaves the switch out keeps it.
-    kept = client.patch("/api/workspaces/client-a", json={"color": "cyan"})
-    assert kept.status_code == 200
-    assert config.workspace("client-a").claude_ai_connectors is False
 
     stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
-    assert next(w for w in stored if w["name"] == "client-a")["claude_ai_connectors"] is False
-
-    # Only a real boolean is accepted; a string would otherwise be read as truthy.
-    bad = client.patch("/api/workspaces/client-a", json={"claude_ai_connectors": "false"})
-    assert bad.status_code == 400
-    assert "claude_ai_connectors" in bad.json()["error"]
-    assert config.workspace("client-a").claude_ai_connectors is False
+    row = next(w for w in stored if w["name"] == "client-a")
+    assert "claude_ai_connectors" not in row
+    assert "setting:claude_ai_connectors" not in row.get("claude_trim", {})
 
 
 def test_claude_trim_saves_persists_and_validates(tmp_path):
@@ -546,13 +686,16 @@ def test_claude_trim_saves_persists_and_validates(tmp_path):
     }
     assert config.workspace("client-a").claude_trim == {"tool:ReportFindings": True}
 
-    # Locked scheduling options cannot be un-trimmed.
-    locked = client.patch(
+    # Scheduling options are trimmed by default, but the user can un-trim them.
+    assert "CronCreate" in config.disallowed_tools_for_workspace("client-a")
+    untrimmed = client.patch(
         "/api/workspaces/client-a",
         json={"claude_trim": {"tool:CronCreate": False}},
     )
-    assert locked.status_code == 400
-    assert config.workspace("client-a").claude_trim == {"tool:ReportFindings": True}
+    assert untrimmed.status_code == 200
+    assert config.workspace("client-a").claude_trim == {"tool:CronCreate": False}
+    assert "CronCreate" not in config.disallowed_tools_for_workspace("client-a")
+    assert "CronDelete" in config.disallowed_tools_for_workspace("client-a")
 
     # An empty object resets to the catalog defaults.
     reset = client.patch("/api/workspaces/client-a", json={"claude_trim": {}})
@@ -572,7 +715,8 @@ def test_workspaces_payload_includes_trim_catalog(tmp_path):
     data = client.get("/api/workspaces").json()
     options = {option["key"]: option for option in data["claude_trim_options"]}
     assert options["tool:NotebookEdit"]["default_trimmed"] is True
-    assert options["tool:NotebookEdit"]["locked"] is False
+    assert options["tool:CronCreate"]["default_trimmed"] is True
+    assert all("locked" not in option for option in options.values())
 
 
 def test_workspace_color_defaults_persists_and_validates(tmp_path):
@@ -645,7 +789,7 @@ def test_provider_config_offers_no_api_keys(tmp_path, monkeypatch):
     # CLI, so there are no API keys to report or edit.
     assert set(data) == {"connections"}
     assert "sk-anthropic" not in json.dumps(data)
-    assert set(data["connections"]) == {"claude", "opencode"}
+    assert set(data["connections"]) == {"claude", "opencode", "codex"}
     assert client.patch("/api/settings/providers", json={}).status_code == 405
 
 
@@ -687,12 +831,9 @@ def _fake_gws_package(root, *, with_binary: bool):
     launcher = package / "run.js"
     launcher.write_text("#!/usr/bin/env node\n", encoding="utf-8")
     if with_binary:
-        (package / "bin" / ("gws.exe" if sys.platform == "win32" else "gws")).write_text("x", encoding="utf-8")
+        (package / "bin" / "gws").write_text("x", encoding="utf-8")
     shim = root / "bin-shim-gws"
-    try:
-        shim.symlink_to(launcher)
-    except OSError:  # Windows without symlink rights: the launcher itself is the command
-        shim = launcher
+    shim.symlink_to(launcher)
     return shim
 
 
@@ -1789,7 +1930,7 @@ def test_patch_rename_without_the_key_keeps_provider_overrides(tmp_path):
         {"default_provider": "invalid"},
         {"color": "chartreuse"},
         {"disallowed_tools": 123},
-        {"provider_overrides": {"claude": {"model": "gpt-9"}}},
+        {"provider_overrides": {"opencode": {"model": 7}}},
     ],
 )
 def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
@@ -1892,56 +2033,6 @@ def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
     assert not (tmp_path / "beta").exists()
 
 
-def test_agent_fs_scope_round_trips_and_rejects_unknown(tmp_path, monkeypatch):
-    """The workspace filesystem scope persists, rejects unknowns, and defaults."""
-    monkeypatch.setattr(sys, "platform", "linux")
-    client, config, _pcm = _client(tmp_path)
-
-    assert config.workspace("personal").agent_fs_scope is None
-    assert config.workspace("personal").effective_agent_fs_scope() == "workspace"
-    listed = client.get("/api/workspaces").json()
-    personal = next(w for w in listed["workspaces"] if w["name"] == "personal")
-    assert personal["agent_fs_scope"] is None
-
-    patched = client.patch(
-        "/api/workspaces/personal",
-        json={"agent_fs_scope": "workspace"},
-    )
-    assert patched.status_code == 200
-    updated = next(
-        w for w in patched.json()["workspaces"] if w["name"] == "personal"
-    )
-    assert updated["agent_fs_scope"] == "workspace"
-    assert config.workspace("personal").agent_fs_scope == "workspace"
-
-    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
-    assert next(w for w in stored if w["name"] == "personal")["agent_fs_scope"] == "workspace"
-
-    bad = client.patch(
-        "/api/workspaces/personal",
-        json={"agent_fs_scope": "telepathy"},
-    )
-    assert bad.status_code == 400
-
-    runtime = tmp_path / ".runtime"
-    (runtime / "workspaces.json").write_text(
-        json.dumps(
-            [{"name": "personal", "vault_root": "memory-vault/personal"}]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    fresh = CiaoConfig.from_env(
-        {
-            "PWA_AUTH_TOKEN": "t",
-            "CIAO_WORKSPACE": str(tmp_path),
-            "CIAO_RUNTIME_ROOT": str(runtime),
-        }
-    )
-    assert fresh.workspace("personal").agent_fs_scope is None
-    assert fresh.workspace("personal").effective_agent_fs_scope() == "workspace"
-
-
 def test_workspace_memory_handover_defaults_off_persists_and_validates(tmp_path):
     """The handover is operator-set per workspace, stored only when not off."""
     client, config, _pcm = _client(tmp_path)
@@ -2019,8 +2110,6 @@ def test_workspace_provider_overrides_persist_validate_and_clear(tmp_path):
         {"claude": {"default_model": "sonnet"}},
         {"claude": {"permission_mode": "plan"}},
         {"claude": {"thinking": "extreme"}},
-        {"claude": {"model": "gpt-9"}},
-        {"claude": {"insights_model": "gpt-9"}},
         [],
     ):
         refused = client.patch("/api/workspaces/personal", json={"provider_overrides": bad})
@@ -2046,106 +2135,6 @@ def test_workspace_provider_overrides_persist_validate_and_clear(tmp_path):
     assert config.workspace("fresh").provider_overrides == {"claude": {"thinking": "low"}}
 
 
-def test_missing_agent_fs_scope_loads_as_workspace(tmp_path, monkeypatch):
-    """A registry row with no agent_fs_scope loads unset (workspace here); a stored machine stays machine."""
-    monkeypatch.setattr(sys, "platform", "linux")
-    runtime = tmp_path / ".runtime"
-    runtime.mkdir(parents=True, exist_ok=True)
-    (runtime / "workspaces.json").write_text(
-        json.dumps(
-            [
-                {"name": "personal", "vault_root": "memory-vault/personal"},
-                {
-                    "name": "work",
-                    "vault_root": "memory-vault/work",
-                    "agent_fs_scope": "machine",
-                },
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    config = CiaoConfig.from_env(
-        {
-            "PWA_AUTH_TOKEN": "t",
-            "CIAO_WORKSPACE": str(tmp_path),
-            "CIAO_RUNTIME_ROOT": str(runtime),
-        }
-    )
-    assert config.workspace("personal").agent_fs_scope is None
-    assert config.workspace("personal").effective_agent_fs_scope() == "workspace"
-    assert config.workspace("work").agent_fs_scope == "machine"
-
-
-@pytest.mark.parametrize("platform", ["linux", "darwin"])
-def test_missing_agent_fs_scope_defaults_to_workspace_off_windows(tmp_path, monkeypatch, platform):
-    """Off Windows the sandbox exists, so a workspace with no stored scope is workspace-only."""
-    monkeypatch.setattr(sys, "platform", platform)
-    runtime = tmp_path / ".runtime"
-    runtime.mkdir(parents=True, exist_ok=True)
-    (runtime / "workspaces.json").write_text(
-        json.dumps([{"name": "personal", "vault_root": "memory-vault/personal"}]) + "\n",
-        encoding="utf-8",
-    )
-    config = CiaoConfig.from_env(
-        {
-            "PWA_AUTH_TOKEN": "t",
-            "CIAO_WORKSPACE": str(tmp_path),
-            "CIAO_RUNTIME_ROOT": str(runtime),
-        }
-    )
-    assert config.workspace("personal").agent_fs_scope is None
-    assert config.workspace("personal").effective_agent_fs_scope() == "workspace"
-
-
-def test_missing_agent_fs_scope_defaults_to_machine_on_windows(tmp_path, monkeypatch):
-    """Windows has no sandbox, so a missing scope loads as whole machine, not a refusing workspace scope."""
-    monkeypatch.setattr(sys, "platform", "win32")
-    runtime = tmp_path / ".runtime"
-    runtime.mkdir(parents=True, exist_ok=True)
-    (runtime / "workspaces.json").write_text(
-        json.dumps([{"name": "personal", "vault_root": "memory-vault/personal"}]) + "\n",
-        encoding="utf-8",
-    )
-    config = CiaoConfig.from_env(
-        {
-            "PWA_AUTH_TOKEN": "t",
-            "CIAO_WORKSPACE": str(tmp_path),
-            "CIAO_RUNTIME_ROOT": str(runtime),
-        }
-    )
-    assert config.workspace("personal").agent_fs_scope is None
-    assert config.workspace("personal").effective_agent_fs_scope() == "machine"
-
-
-def test_stored_agent_fs_scope_is_kept_on_windows(tmp_path, monkeypatch):
-    """An explicit stored workspace scope survives the Windows default."""
-    monkeypatch.setattr(sys, "platform", "win32")
-    runtime = tmp_path / ".runtime"
-    runtime.mkdir(parents=True, exist_ok=True)
-    (runtime / "workspaces.json").write_text(
-        json.dumps(
-            [
-                {
-                    "name": "personal",
-                    "vault_root": "memory-vault/personal",
-                    "agent_fs_scope": "workspace",
-                }
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    config = CiaoConfig.from_env(
-        {
-            "PWA_AUTH_TOKEN": "t",
-            "CIAO_WORKSPACE": str(tmp_path),
-            "CIAO_RUNTIME_ROOT": str(runtime),
-        }
-    )
-    assert config.workspace("personal").agent_fs_scope == "workspace"
-
-
 def _stored_workspace(tmp_path: Path, name: str) -> dict:
     stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
     return next(w for w in stored if w["name"] == name)
@@ -2161,93 +2150,34 @@ def _reload_config(tmp_path: Path) -> CiaoConfig:
     )
 
 
-def test_workspace_create_without_fs_scope_stores_no_scope_on_windows(tmp_path, monkeypatch):
-    """A create with no agent_fs_scope key stores no scope; Windows then reads it as whole machine."""
-    monkeypatch.setattr(sys, "platform", "win32")
-    client, _config, _pcm = _client(tmp_path)
-
-    response = client.post("/api/workspaces", json={"name": "Research"})
-
-    assert response.status_code == 201
-    created = next(w for w in response.json()["workspaces"] if w["name"] == "Research")
-    assert created["agent_fs_scope"] is None
-    assert "agent_fs_scope" not in _stored_workspace(tmp_path, "Research")
-
-
-@pytest.mark.parametrize(("platform", "expected"), [("win32", "machine"), ("darwin", "workspace")])
-def test_unset_agent_fs_scope_is_not_frozen_by_saves(tmp_path, monkeypatch, platform, expected):
-    """A workspace that never chose keeps no stored key through later saves and reloads as the platform default."""
-    monkeypatch.setattr(sys, "platform", "darwin")
-    client, _config, _pcm = _client(tmp_path)
-    assert client.post("/api/workspaces", json={"name": "research"}).status_code == 201
-    patch = client.patch("/api/workspaces/research", json={"disallowed_tools": "Bash"})
-    assert patch.status_code == 200
-
-    assert "agent_fs_scope" not in _stored_workspace(tmp_path, "research")
-    monkeypatch.setattr(sys, "platform", platform)
-    reloaded = _reload_config(tmp_path)
-    assert reloaded.workspace("research").agent_fs_scope is None
-    assert reloaded.workspace("research").effective_agent_fs_scope() == expected
-
-
-def test_explicit_agent_fs_scope_is_persisted(tmp_path, monkeypatch):
-    """A scope the user picked is stored and wins over the platform default on reload."""
-    monkeypatch.setattr(sys, "platform", "win32")
-    client, _config, _pcm = _client(tmp_path)
-
-    response = client.post(
-        "/api/workspaces",
-        json={"name": "research", "agent_fs_scope": "workspace"},
-    )
-
-    assert response.status_code == 201
-    assert _stored_workspace(tmp_path, "research")["agent_fs_scope"] == "workspace"
-    assert _reload_config(tmp_path).workspace("research").effective_agent_fs_scope() == "workspace"
-
-
-def test_choosing_default_clears_an_explicit_scope(tmp_path, monkeypatch):
-    """Sending null for File access returns the workspace to the platform default and drops the stored key."""
-    monkeypatch.setattr(sys, "platform", "linux")
-    client, config, _pcm = _client(tmp_path)
-    assert client.patch("/api/workspaces/personal", json={"agent_fs_scope": "machine"}).status_code == 200
-    assert _stored_workspace(tmp_path, "personal")["agent_fs_scope"] == "machine"
-
-    cleared = client.patch("/api/workspaces/personal", json={"agent_fs_scope": None})
-
-    assert cleared.status_code == 200
-    assert config.workspace("personal").agent_fs_scope is None
-    assert "agent_fs_scope" not in _stored_workspace(tmp_path, "personal")
-
-
-def test_stored_agent_fs_scope_survives_unrelated_saves(tmp_path, monkeypatch):
-    """A scope stored by an earlier version is an explicit choice: saving another field keeps it."""
-    monkeypatch.setattr(sys, "platform", "linux")
+def test_a_stored_scope_is_ignored_and_dropped_on_save(tmp_path: Path) -> None:
+    """A stored file-access scope is not a setting: load ignores it and the next save drops it."""
     runtime = tmp_path / ".runtime"
-    runtime.mkdir(parents=True, exist_ok=True)
+    runtime.mkdir()
     (runtime / "workspaces.json").write_text(
-        json.dumps([{"name": "personal", "vault_root": "memory-vault/personal", "agent_fs_scope": "machine"}])
-        + "\n",
+        json.dumps([{
+            "name": "personal",
+            "vault_root": "memory-vault/personal",
+            "agent_fs_scope": "workspace",
+        }]),
         encoding="utf-8",
     )
     client, _config, _pcm = _client(tmp_path)
+    listed = client.get("/api/workspaces")
+    assert listed.status_code == 200
+    payload = listed.json()
+    assert "default_agent_fs_scope" not in payload
+    assert "agent_fs_scope" not in payload["workspaces"][0]
 
-    assert client.patch("/api/workspaces/personal", json={"disallowed_tools": "Bash"}).status_code == 200
+    color = client.patch("/api/workspaces/personal", json={"color": "cyan"})
+    assert color.status_code == 200
+    assert "agent_fs_scope" not in _stored_workspace(tmp_path, "personal")
 
-    assert _stored_workspace(tmp_path, "personal")["agent_fs_scope"] == "machine"
-    assert _reload_config(tmp_path).workspace("personal").agent_fs_scope == "machine"
-
-
-@pytest.mark.parametrize(("platform", "expected"), [("win32", "machine"), ("linux", "workspace")])
-def test_workspaces_payload_carries_engine_default(tmp_path, monkeypatch, platform, expected):
-    """/api/workspaces reports the default a workspace with no choice runs under, for the PWA to label."""
-    monkeypatch.setattr(sys, "platform", platform)
-    client, _config, _pcm = _client(tmp_path)
-
-    listed = client.get("/api/workspaces").json()
-
-    assert listed["default_agent_fs_scope"] == expected
-    personal = next(w for w in listed["workspaces"] if w["name"] == "personal")
-    assert personal["agent_fs_scope"] is None
+    bogus = client.patch("/api/workspaces/personal", json={"agent_fs_scope": "bogus"})
+    assert bogus.status_code == 200
+    stored = _stored_workspace(tmp_path, "personal")
+    assert "agent_fs_scope" not in stored
+    assert stored.get("agent_fs_scope") is None
 
 
 def test_workspace_color_saved_as_pink_stays_pink():

@@ -43,6 +43,7 @@ const ICONS: Record<InjectedPrompt['kind'], AppIconName> = {
   webhook: 'comment',
   update_task: 'spark',
   retry: 'activity',
+  retry_scheduled: 'clock',
   restart_resume: 'activity',
   chat_action: 'activity',
   error: 'activity',
@@ -189,6 +190,10 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
 
       <template v-else-if="prompt.kind === 'restart_resume'">
         <p class="injected-card-note">Ciaobot restarted while the previous turn was running, so it asked the agent to continue where it left off.</p>
+      </template>
+
+      <template v-else-if="prompt.kind === 'retry_scheduled'">
+        <p class="injected-card-note">A retry is scheduled.</p>
       </template>
 
       <template v-else-if="prompt.kind === 'chat_action'">

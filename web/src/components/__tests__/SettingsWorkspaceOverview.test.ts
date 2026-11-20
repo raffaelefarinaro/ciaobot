@@ -70,7 +70,6 @@ function workspaces(names: string[], primary = 'personal'): WorkspacesResponse {
     })),
     active: names[0] ?? null,
     primary,
-    default_agent_fs_scope: 'workspace',
     provider_options: [{ value: 'claude', label: 'Claude' }],
   }
 }
@@ -87,7 +86,7 @@ async function mountOverview(active = 'work', path = '/settings/workspace') {
   const { default: SettingsView } = await import('../SettingsView.vue')
   const wrapper = mount(SettingsView, {
     attachTo: document.body,
-    global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: Stub } },
+    global: { plugins: [router], stubs: { Teleport: true } },
   })
   await flushPromises()
   await nextTick()

@@ -20,10 +20,11 @@ import stat
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
+from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV, RECALL_CHECK_MAX_REQUEST_BYTES
 from ciao.chat_actions import (
     AGENT_ACTION_KINDS,
     COMMAND_MAX_BYTES,
@@ -51,6 +52,43 @@ _SHARED_NOUN_VERBS: dict[str, frozenset[str]] = {
 }
 
 _SKILL_PATH = Path(__file__).resolve().parent / "stock" / "skills" / "ciao-cli" / "SKILL.md"
+
+#: Topic aliases `ciao help <topic>` accepts, each mapped to the relative
+#: reference it prints. Explicit on purpose: help never takes a path.
+_HELP_TOPICS: dict[str, str] = {
+    "memory": "references/memory-and-review.md",
+    "vault": "references/memory-and-review.md",
+    "queues": "references/memory-and-review.md",
+    "note": "references/workspace-operations.md",
+    "file": "references/workspace-operations.md",
+    "chat": "references/workspace-operations.md",
+    "project": "references/workspace-operations.md",
+    "task": "references/tasks.md",
+    "schedule": "references/automation-and-status.md",
+    "webhook": "references/automation-and-status.md",
+    "context": "references/automation-and-status.md",
+    "stats": "references/automation-and-status.md",
+    "gws": "references/automation-and-status.md",
+    "workspace": "references/automation-and-status.md",
+    "repo": "references/automation-and-status.md",
+    "examples": "reference.md",
+}
+#: Every unique reference once, in mapping order, for bare help.
+_HELP_REFERENCES: tuple[str, ...] = tuple(dict.fromkeys(_HELP_TOPICS.values()))
+
+
+def _help_parts(topic: str | None = None) -> Iterator[str]:
+    """Lazily yield the shared entry and the selected reference chunks."""
+    yield _SKILL_PATH.read_text(encoding="utf-8")
+    references = (_HELP_TOPICS[topic],) if topic else _HELP_REFERENCES
+    for relative in references:
+        yield "\n" + (_SKILL_PATH.parent / relative).read_text(encoding="utf-8")
+
+
+def _help_text(topic: str | None = None) -> str:
+    """Return complete help, or the shared entry plus one topic reference."""
+    return "".join(_help_parts(topic))
+
 
 _SCHEDULE_FLAG_HELP: dict[str, str] = {
     "--command": "Shell command run before the prompt. Only a bypass-mode chat may set one; "
@@ -180,7 +218,7 @@ def _verbs(parent: argparse.ArgumentParser, dest: str = "verb") -> argparse._Sub
 _NEEDS_ACTION_FLAG_PARAMS: tuple[tuple[str, str], ...] = (
     ("--command-file", "command"), ("--note", "note"), ("--profile", "profile"),
     ("--mode", "mode"), ("--tool", "tool"), ("--setting", "setting"),
-    ("--reason", "reason"), ("--server", "server"), ("--provider", "provider"),
+    ("--reason", "reason"),
 )
 #: The flags each agent-raisable kind accepts. Values are checked by the engine.
 _NEEDS_ACTION_FLAGS: dict[str, frozenset[str]] = {
@@ -190,7 +228,6 @@ _NEEDS_ACTION_FLAGS: dict[str, frozenset[str]] = {
     "device_code": frozenset({"--tool"}),
     "system_setting": frozenset({"--setting", "--note"}),
     "restart": frozenset({"--reason", "--note"}),
-    "mcp_auth": frozenset({"--server", "--provider"}),
 }
 assert set(_NEEDS_ACTION_FLAGS) == AGENT_ACTION_KINDS
 
@@ -203,7 +240,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="Accepted for compatibility; output is always JSON.")
     nouns = parser.add_subparsers(dest="noun", metavar="<noun>")
 
-    nouns.add_parser("help", help="Print the ciao-cli command reference.")
+    help_parser = nouns.add_parser("help", help="Print the ciao-cli command reference.")
+    help_parser.add_argument(
+        "topic", nargs="?", choices=tuple(_HELP_TOPICS),
+        help="Print the shared entry plus one topic reference (default: the whole reference).",
+    )
 
     context = _verbs(nouns.add_parser("context", help="Workspace, project and chat context."))
     context.add_parser("get", help="Return the active workspace, project, chat and server status.")
@@ -228,6 +269,8 @@ def build_parser() -> argparse.ArgumentParser:
     search = vault.add_parser("search", help="Full-text search of the active vault.")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=10)
+    recall = vault.add_parser("recall-check", help="Check selected recall claims against vault evidence.")
+    recall.add_argument("--claims-file", required=True)
     review = _verbs(vault.add_parser("review", help="Vault-note review queue."), dest="action")
     review.add_parser("list", help="List review candidates (stale, orphaned, duplicate, weakly linked).")
     show = review.add_parser("show", help="Show one candidate's evidence.")
@@ -346,8 +389,6 @@ def build_parser() -> argparse.ArgumentParser:
     needs.add_argument("--tool", default=None, help="device_code: gh or az.")
     needs.add_argument("--setting", default=None, help="system_setting: the macOS privacy setting.")
     needs.add_argument("--reason", default=None, help="restart: config or update.")
-    needs.add_argument("--server", default=None, help="mcp_auth: the MCP server to sign in to.")
-    needs.add_argument("--provider", default=None, help="mcp_auth: claude or opencode (defaults to this chat's).")
 
     project = _verbs(nouns.add_parser("project", help="Projects in the active workspace."))
     plist = project.add_parser("list", help="List projects.")
@@ -673,6 +714,24 @@ def _command_file_text(raw: str) -> str:
         raise UsageError("--command-file holds text a command may not contain.") from None
 
 
+def _recall_claims_file(raw: str) -> str:
+    try:
+        path = Path(raw).expanduser().resolve()
+        if is_credential_adjacent(path) or not stat.S_ISREG(path.stat().st_mode):
+            raise UsageError("--claims-file must name an ordinary non-credential file.")
+        with path.open("rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise UsageError("--claims-file must name an ordinary file.")
+            payload = handle.read(RECALL_CHECK_MAX_REQUEST_BYTES + 1)
+        if len(payload) > RECALL_CHECK_MAX_REQUEST_BYTES:
+            raise UsageError("--claims-file exceeds the request size limit.")
+        return payload.decode("utf-8", errors="strict")
+    except UsageError:
+        raise
+    except (OSError, RuntimeError, ValueError, UnicodeError):
+        raise UsageError("--claims-file cannot be read as UTF-8.") from None
+
+
 def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
     """Map parsed arguments to ``(operation, arguments)``; ``None`` for help.
 
@@ -695,6 +754,8 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
     if noun == "vault":
         if verb == "search":
             return "vault_search", {"query": args.query, "limit": args.limit}
+        if verb == "recall-check":
+            return "vault_recall_check", {"claims_json": _recall_claims_file(args.claims_file)}
         action = args.action
         if action == "list":
             return "vault_review", {"action": "list"}
@@ -969,8 +1030,8 @@ def main(argv: list[str]) -> int:
         return 2
     if args.noun == "help":
         try:
-            sys.stdout.write(_SKILL_PATH.read_text(encoding="utf-8"))
-            sys.stdout.write("\n" + _SKILL_PATH.with_name("reference.md").read_text(encoding="utf-8"))
+            for part in _help_parts(args.topic):
+                sys.stdout.write(part)
         except OSError:
             parser.print_help()
         return 0

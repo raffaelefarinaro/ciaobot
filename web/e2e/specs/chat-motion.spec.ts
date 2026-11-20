@@ -11,24 +11,106 @@ interface TileArrivalWindow { __tileArrival?: { opacity: number } }
  * reverse of pulling it down), archiving moves to the next chat rather than Home,
  * and the phone drawer slides out on close the way it slides in on open.
  */
-test('a chat opened from Home rises into place, then settles', async ({ page }) => { await page.setViewportSize({ width: 1280, height: 800 }); await isolate(page, 'motion-rise'); await boot(page, '/', '.empty-shell:not(.home-boot)')
-  // The rise only starts 800 ms after bootstrap (bootSettledAt in ChatLayout.vue), so wait for bootstrap first.
-  await page.waitForTimeout(900)
-  // The class lives only for the 320 ms rise, so polling for it can miss it on a loaded
-  // runner. Latch it in the page the moment any chat panel carries it, before the click.
-  await page.evaluate(() => {
-    const w = window as unknown as ChatRiseWindow
-    const isRising = (el: Element) => el.matches('.chat-panel.chat-rise') || el.querySelector('.chat-panel.chat-rise') !== null
-    new MutationObserver(records => {
-      for (const r of records) {
-        if (r.target instanceof Element && r.type === 'attributes' && isRising(r.target)) w.__sawChatRise = true
-        for (const n of r.addedNodes) if (n instanceof Element && isRising(n)) w.__sawChatRise = true
-      }
-    }).observe(document.body, { attributes: true, attributeFilter: ['class'], childList: true, subtree: true })
+/**
+ * A chat opened from Home rises into place only once its real panel has arrived
+ * (#3086). The ChatPanel chunk is held on the wire, so the skeleton stays on
+ * screen past the whole 340 ms window and the page clock proves it: nothing is
+ * marked while the panel is absent, and the rise runs its full window after the
+ * panel mounts. The class is latched in the page, since it lives only for that
+ * window and a polled read can miss it on a loaded runner.
+ */
+test('a chat opened from Home rises into place when its panel arrives, then settles', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.emulateMedia({ reducedMotion: 'no-preference' })
+  await isolate(page, 'motion-rise')
+  // Held before Home boots, so a request on Home would be caught.
+  let chunkRequests = 0
+  let markRequested!: () => void
+  const requested = new Promise<void>(resolve => { markRequested = resolve })
+  let releaseChunk!: () => void
+  const gate = new Promise<void>(resolve => { releaseChunk = resolve })
+  await page.route(/\/assets\/ChatPanel-[^/]+\.js(\?.*)?$/, async route => {
+    chunkRequests += 1
+    markRequested()
+    await gate
+    await route.continue()
   })
+  try {
+    await boot(page, '/', '.empty-shell:not(.home-boot)')
+    expect(chunkRequests).toBe(0)
+
+    // The rise waits 800 ms after bootstrap on the app's clock: install the page clock now and move it past that.
+    await page.clock.install({ time: new Date() })
+    await page.clock.runFor(900)
+    // Latch the class in the page before the click: the observer sees it the moment a chat panel carries it.
+    await page.evaluate(() => {
+      const w = window as unknown as ChatRiseWindow
+      const isRising = (el: Element) => el.matches('.chat-panel.chat-rise') || el.querySelector('.chat-panel.chat-rise') !== null
+      new MutationObserver(records => {
+        for (const r of records) {
+          if (r.target instanceof Element && r.type === 'attributes' && isRising(r.target)) w.__sawChatRise = true
+          for (const n of r.addedNodes) if (n instanceof Element && isRising(n)) w.__sawChatRise = true
+        }
+      }).observe(document.body, { attributes: true, attributeFilter: ['class'], childList: true, subtree: true })
+    })
+    await page.locator('.chat-item', { hasText: 'alpha first conversation' }).click()
+    await requested
+    await expect(page).toHaveURL(/\/chat\/alpha-chat-1$/)
+
+    // Held: the skeleton is immediate, and no real panel or rise exists, before and after 1000 ms more.
+    // Read the page's own clock: the page clock has advanced past the Node wall clock.
+    const pageNow = await page.evaluate(() => Date.now())
+    await page.clock.pauseAt(new Date(pageNow + 1000))
+    const skeleton = page.locator('[role="status"][aria-label="Loading conversation"]')
+    await expect(skeleton).toBeVisible()
+    await expect(page.locator('.chat-panel')).toHaveCount(0)
+    await page.clock.runFor(1000)
+    await expect(skeleton).toBeVisible()
+    await expect(page.locator('.chat-panel')).toHaveCount(0)
+    expect(await page.evaluate(() => (window as unknown as ChatRiseWindow).__sawChatRise === true)).toBe(false)
+
+    // Release the chunk: the real panel mounts and rises for the full window.
+    releaseChunk()
+    const panel = page.locator('.chat-panel').first()
+    const arrived = expect(panel).toBeVisible()
+    await page.clock.runFor(16)
+    await arrived
+    await expect.poll(() => page.evaluate(() => (window as unknown as ChatRiseWindow).__sawChatRise === true)).toBe(true)
+    await page.clock.runFor(340)
+    await expect(page.locator('.chat-panel.chat-rise')).toHaveCount(0)
+  } finally {
+    // Never leave the held chunk stuck if an assertion above failed.
+    releaseChunk()
+  }
+})
+
+/**
+ * Under reduced motion the chat arrives without travel: the panel is usable, no
+ * arrival class or timer starts, and its computed animation is none.
+ */
+test('under reduced motion a chat opened from Home arrives without the rise', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await isolate(page, 'motion-rise-reduced')
+  await boot(page, '/', '.empty-shell:not(.home-boot)')
+  await page.clock.install({ time: new Date() })
+  await page.clock.runFor(900)
   await page.locator('.chat-item', { hasText: 'alpha first conversation' }).click()
-  await expect.poll(() => page.evaluate(() => (window as unknown as ChatRiseWindow).__sawChatRise === true)).toBe(true)
-  await expect(page.locator('.chat-panel.chat-rise')).toHaveCount(0) })
+  await expect(page).toHaveURL(/\/chat\/alpha-chat-1$/)
+  await expect(page.locator('.chat-panel').first()).toBeVisible()
+  await expect(page.locator('.chat-panel.chat-rise')).toHaveCount(0)
+  const motion = await page.locator('.chat-panel').first().evaluate(el => {
+    const style = getComputedStyle(el)
+    return { animationName: style.animationName, transform: style.transform }
+  })
+  expect(motion.animationName).toBe('none')
+  expect(['none', 'matrix(1, 0, 0, 1, 0, 0)']).toContain(motion.transform)
+  // Forcing the arrival class on the panel: without the reduced-motion rule it would animate, so the CSS alone must hold it still.
+  await page.locator('.chat-panel').first().evaluate(el => el.classList.add('chat-rise'))
+  const forced = await page.locator('.chat-panel').first().evaluate(el => getComputedStyle(el).animationName)
+  expect(forced).toBe('none')
+})
+
 test('archiving a chat opens the next one in the title rail order instead of Home', async ({ page }) => { await page.setViewportSize({ width: 1280, height: 800 }); await isolate(page, 'motion-archive'); await boot(page, '/chat/alpha-chat-1', COMPOSER)
   await page.getByRole('button', { name: /^Archive/ }).first().click()
   await page.getByRole('button', { name: 'Archive', exact: true }).last().click()

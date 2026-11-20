@@ -25,15 +25,6 @@ export const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
   },
   {
-    // Read-only view of one subagent's own conversation. Nested under the chat
-    // that spawned it because that is the only place the transcript exists —
-    // a Claude Code subagent is a transcript file, not a resumable session.
-    path: '/chat/:chatId/subagent/:agentId',
-    name: 'chat-subagent',
-    component: () => import('./components/ChatLayout.vue'),
-    meta: { requiresAuth: true },
-  },
-  {
     path: '/project/:projectId',
     name: 'project',
     component: () => import('./components/ChatLayout.vue'),
@@ -110,6 +101,12 @@ export const routes: RouteRecordRaw[] = [
     name: 'settings-tab',
     component: () => import('./components/ChatLayout.vue'),
     meta: { requiresAuth: true },
+  },
+  {
+    // An address no view owns (an old link, a typo such as /usage) lands on
+    // Home instead of rendering an empty shell.
+    path: '/:pathMatch(.*)*',
+    redirect: '/',
   },
 ]
 

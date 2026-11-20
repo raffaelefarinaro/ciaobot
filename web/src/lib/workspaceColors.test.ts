@@ -88,7 +88,7 @@ describe('accent presets', () => {
     for (const id of extra) expect(normalizeWorkspaceColor(id)).toBe(id)
   })
 
-  const css = readFileSync(resolve(__dirname, '../App.vue'), 'utf8')
+  const css = readFileSync(resolve(__dirname, '../styles/app.css'), 'utf8')
   function accentPair(id: string, light: boolean): { accent: string; strong: string } {
     const selector = `${light ? ':root.theme-light ' : ''}[data-workspace-color="${id}"]`
     const start = css.indexOf(`${selector} {`)

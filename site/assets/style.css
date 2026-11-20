@@ -396,37 +396,6 @@ th { color: var(--muted); font-weight: 600; }
   margin: 0 0 6px;
 }
 .install-head .install-label { margin: 0; }
-.install-row {
-  display: flex;
-  align-items: stretch;
-  gap: 8px;
-  min-height: 52px;
-}
-.install-row .install-os { display: flex; flex: none; align-items: stretch; }
-.install-row .install-box { flex: 1; min-width: 0; }
-.install-row .install-guide { flex: 1; min-width: 0; margin-top: 0; text-align: center; }
-.install-os select {
-  min-height: 44px;
-  padding: 0 32px 0 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  background: var(--surface-3);
-  color: var(--text);
-  font: 600 14px var(--sans);
-  cursor: pointer;
-}
-.install-os select:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-.visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
-  border: 0;
-}
 .install-box {
   display: flex;
   align-items: stretch;
@@ -463,13 +432,6 @@ th { color: var(--muted); font-weight: 600; }
 .install-note { color: var(--subtle); font-size: 14px; margin: 8px 0 0; text-align: center; }
 .install-client { margin: 0 0 10px; }
 .install-client-note { margin: 0 0 20px; text-align: left; }
-.install-guide { margin-top: 12px; }
-.install[data-platform="windows"] .install-box button {
-  background: var(--primary);
-  border-left-color: var(--primary);
-  color: var(--bg);
-}
-.install[data-platform="windows"] .install-box button:hover { background: var(--primary-strong); }
 
 /* Big product screenshot under the hero */
 .shot { margin: 32px auto 0; max-width: 1080px; }

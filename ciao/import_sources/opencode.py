@@ -58,9 +58,9 @@ had no date: a session reached through the CLI names no path, which is why
 — a real directory, unlike Claude Code's lossy slug, so it is stored under the
 same field and read as what it is.
 
-**The read is bounded, and every failure is a refusal, never a guess.** The
-runner passes ``timeout`` to :func:`subprocess.run` with ``capture_output=True``,
-mirroring ``ciao.providers.opencode._credential_count``; stdout larger than
+**Parsing is bounded, and every failure is a refusal, never a guess.** The
+runner retains its existing ``subprocess.run`` capture with a timeout; it is
+not covered by the bounded auth-list helper. Stdout larger than
 :data:`~ciao.import_sources.contract.MAX_SESSION_BYTES` is never parsed at all.
 An export is one JSON object, so a cut payload has no whole-message boundary to
 stop on and a half-recovered conversation presented as whole is exactly the
@@ -71,10 +71,10 @@ CLI that is not installed, output that is not JSON and an opencode older than th
 V2 floor all raise :class:`SourceError` with a stated reason.
 
 **The floor is single-sourced, not restated.** ``opencode session list`` and
-``opencode session export`` are read through ``ciao.providers.opencode``'s own
+``opencode session export`` are read through ``ciao.opencode_cli``'s own
 ``resolve_opencode_binary`` (which honours ``CIAO_OPENCODE_BIN`` and the
-login-shell PATH) and its ``_server_version_error``/``_version_number``, whose
-floor is ``(2, 0, 16)``. An older CLI is reported ``Unsupported`` rather than
+login-shell PATH) and its ``cli_version_error``/``version_number``, whose
+floor is ``(2, 3, 2)``. An older CLI is reported ``Unsupported`` rather than
 parsed on the chance that the schema happens to look familiar; the export schema
 above was read from the tagged source *at that floor* for exactly this reason.
 
@@ -128,14 +128,12 @@ from ciao.import_sources.contract import (
 )
 
 # The floor, the binary resolution and the V2 version check are the provider's
-# own, imported rather than restated: a second copy of "2.0.16" in an importer is
-# a rule that can drift from the one the engine enforces. They are private to
-# `ciao.providers.opencode` and imported anyway, because that is the price of one
-# supported opencode rather than two.
-from ciao.providers.opencode import (
-    _server_version_error,
-    _version_number,
+# own, imported rather than restated: a second copy of the minimum version in an
+# importer is a rule that can drift from the one the engine enforces.
+from ciao.opencode_cli import (
+    cli_version_error,
     resolve_opencode_binary,
+    version_number,
 )
 
 logger = logging.getLogger(__name__)
@@ -477,8 +475,8 @@ def _resolve_binary(binary: str | None) -> str:
 def _require_supported_v2(binary: str, *, timeout: float) -> str:
     """The installed version as the CLI reports it, or a refusal.
 
-    The floor is the provider's, not this module's: ``_server_version_error`` is
-    the same function ``ciao/providers/opencode.py`` refuses a chat with, so an
+    The floor is the provider's, not this module's: ``cli_version_error`` is
+    the same function ``ciao/opencode_cli.py`` refuses a chat with, so an
     importer and the engine can never disagree about which opencode is supported.
     A version that cannot be parsed at all is refused too — "unknown" is not a
     version, and guessing at a schema from a build nobody has identified is the
@@ -505,7 +503,7 @@ def _require_supported_v2(binary: str, *, timeout: float) -> str:
         )
     reported = (result.stdout or "").strip().splitlines()
     version = reported[0].strip() if reported else ""
-    unsupported = _server_version_error({"version": version})
+    unsupported = cli_version_error({"version": version})
     if unsupported is not None:
         # The parsed tuple is in the message because the string is not: "v2.0.16"
         # and "2.0.16-beta.3" read alike in a log line, and the log is what an
@@ -513,7 +511,7 @@ def _require_supported_v2(binary: str, *, timeout: float) -> str:
         raise SourceError(
             REASON_UNSUPPORTED,
             f"{unsupported} `opencode --version` reported "
-            f"{version or '(nothing)'}, parsed as {_version_number(version) or 'no version'}.",
+            f"{version or '(nothing)'}, parsed as {version_number(version) or 'no version'}.",
         )
     return version
 
@@ -528,7 +526,7 @@ def _run_opencode_json(
 ) -> Any:
     """Run ``opencode <args>`` once, bounded, and return its stdout parsed as JSON.
 
-    The shape mirrors ``ciao.providers.opencode._credential_count``: one
+    The shape mirrors ``ciao.opencode_cli._credential_count``: one
     :func:`subprocess.run` with ``capture_output=True``, an explicit encoding and
     a ``timeout``, and no shell. Everything that can go wrong becomes a
     :class:`SourceError` naming which of the things happened — a missing binary,

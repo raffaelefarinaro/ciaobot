@@ -30,7 +30,7 @@ async function mountSettings(move: Record<string, unknown>) {
   })
   const wrapper = mount(SettingsView, {
     attachTo: document.body,
-    global: { plugins: [router], stubs: { UpdateProgressView: stub } },
+    global: { plugins: [router] },
   })
   await flushPromises()
   const card = () => wrapper.find('.workspace-root-path').element.closest('.card') as HTMLElement

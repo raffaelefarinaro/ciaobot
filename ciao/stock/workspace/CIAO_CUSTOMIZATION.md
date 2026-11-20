@@ -56,7 +56,7 @@ Example `.runtime/workspaces.json`:
 
 Ciaobot supports two chat providers, each authenticating through its own CLI:
 
-- `claude`: Claude Code / Claude Agent SDK, against Anthropic.
+- `claude`: Claude Code, through the claude-agent-acp adapter, against Anthropic.
 - `opencode`: the open-source agent CLI, bring-your-own model provider. This is how you reach anything else — Ollama, OpenRouter, or any OpenAI-compatible endpoint. Configure it in opencode and its models appear in Ciaobot's pickers automatically; Ciaobot lists whatever opencode reports as connected.
 
 Each provider has its own default model, thinking level, and permission mode
@@ -99,7 +99,7 @@ Use this when a workspace should not see certain MCPs, connectors, or high-risk 
 }
 ```
 
-Tool names follow Claude SDK naming:
+Tool names follow Claude Code's naming:
 
 - `mcp__server_name`: block an entire MCP server.
 - `mcp__server_name__tool_name`: block one MCP tool.

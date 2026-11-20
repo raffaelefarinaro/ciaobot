@@ -352,8 +352,8 @@ def test_packaged_prompt_still_updates_after_timing_override(tmp_path: Path) -> 
 
 def test_http_system_timing_response_matches_get_for_persisted_row(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     class _Manager(ScheduleManager):
-        def replace(self, entry, *, timing_fields=frozenset()):
-            super().replace(entry, timing_fields=timing_fields)
+        def replace(self, entry, *, timing_fields=frozenset(), **scope):
+            super().replace(entry, timing_fields=timing_fields, **scope)
             if entry.scope == "system" and timing_fields:
                 entry.daily_time_utc = "07:55"  # diverge transient object from the persisted value
 

@@ -37,7 +37,7 @@ Day-to-day work lands on `develop` through pull requests. Do not push directly t
 
 1. Branch from `develop`, open a PR back into `develop`, and wait for CI.
 2. When it is time to ship, a maintainer runs `scripts/prepare-release --apply --create-pr` from a clean checkout. That cuts `release/vX.Y.Z` from `develop`, bumps versions, updates `CHANGELOG.md`, and opens a release PR into `main`.
-3. Merging the release PR into `main` creates the GitHub tag and release automatically. The `publish.yml` workflow then builds the PWA and the engine wheel, verifies it in a clean environment, signs the engine manifest, and attaches the wheel, its signed manifest, and the `install.sh`/`install-engine.sh` installer as one release.
+3. Merging the release PR into `main` creates the GitHub tag and release automatically. The `publish.yml` workflow then builds the PWA and the engine wheel, verifies the wheel in a clean environment, stamps the Linux installer with the release version and wheel digest, signs the engine manifest, and attaches the stamped `install.sh` (the one-line Linux installer) and the engine wheel on every release. The wheel-only signed manifest and its `.sig`, which 1.x engines read, are attached on 2.0.0 only (`LEGACY_MANIFEST_VERSION` in `publish.yml`); later releases skip them.
 4. A follow-up job merges `main` back into `develop` so version files stay aligned.
 
 `main` is release-only. `develop` is the integration branch and the GitHub default branch.

@@ -478,7 +478,7 @@ class BackupService:
         # of the tick.
         self._node_state = node_state
         self._now = now or _utcnow
-        # True while an engine update claim holds admission closed. Both entry
+        # True while a restart drain holds admission closed. Both entry
         # paths (the loop and the manual trigger) defer on it rather than
         # starting git work a restart would interrupt.
         self._admission_closed = admission_closed
@@ -619,22 +619,10 @@ class BackupService:
     # ── the run ─────────────────────────────────────────────────────────────
 
     def _admission_refuses(self) -> bool:
-        """True while an engine update claim holds admission closed."""
+        """True while a restart drain holds admission closed."""
         if self._admission_closed is None:
             return False
         return bool(self._admission_closed())
-
-    def update_idle_reasons(self) -> list[str]:
-        """What a restart would interrupt here, empty when nothing is running.
-
-        Read by an unattended update's idle snapshot before it claims admission.
-        ``_running`` is set inside the lock, so a backup that has been admitted
-        but has not reached its first git read is reported too. Public so the
-        engine asks rather than reaching into the flag.
-        """
-        if not self._running:
-            return []
-        return ["a backup is running"]
 
     async def run_backup(self, *, source: str = "manual") -> BackupStatus:
         """One backup attempt, serialized; returns the state it left behind.
@@ -1002,7 +990,7 @@ class BackupService:
                 # condition that only the owner or a restart changes, and it does
                 # not delay the run that follows an unpause, because the stamp is
                 # still absent and the delay is still zero then. A deferred tick
-                # (an update claim holds admission closed) waits the same way
+                # (a restart drain holds admission closed) waits the same way
                 # rather than spinning on a status that never stamps its attempt.
                 if not await self._wait(stop, BACKUP_INTERVAL_S, sleep):
                     return
@@ -1286,11 +1274,8 @@ What that means for how you work:
 
 - A path with spaces is a path with spaces. Quote every path you pass to a
   command, and copy the data folder above exactly as it is written there.
-- The work happens in the data folder above. If a command there is refused
-  (for example with "Operation not permitted"), stop and tell the owner that
-  this chat has no write access to the data folder. They can grant it in
-  Settings → Overview → File access → Whole machine, and then you
-  retry.
+- The work happens in the data folder above. If a command there is refused,
+  stop and tell the owner what was refused.
 - Nothing in this prompt is a credential, and no credential belongs in the
   remote URL, in the repository, or in this chat. Use the authentication this
   machine already has — an SSH key, a credential helper, `gh auth setup-git` —

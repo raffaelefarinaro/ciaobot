@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
+from ciao.os_support.processes import python_isolation_flags
+
 
 @dataclass(frozen=True)
 class DevEnvironment:
@@ -26,7 +28,7 @@ class DevEnvironment:
 
 def _backend_command() -> list[str]:
     """Run the dev backend through the CLI's restart supervisor."""
-    return [sys.executable, "-m", "ciao.cli", "run"]
+    return [sys.executable, *python_isolation_flags(), "-m", "ciao.cli", "run"]
 
 
 def _load_env_file(path: Path) -> dict[str, str]:
@@ -62,9 +64,6 @@ def build_dev_environment(
     if not env.get("PWA_AUTH_TOKEN"):
         raise RuntimeError("Set PWA_AUTH_TOKEN in .env first.")
 
-    # A shell opened by Ciaobot.app inherits the bundled launcher's marker;
-    # the dev backend runs from this checkout, not the app bundle.
-    env.pop("CIAO_BUNDLED_APP", None)
     env["PWA_PORT"] = str(env.get("PWA_PORT") or backend_port)
     env.setdefault("VITE_BACKEND_URL", f"http://127.0.0.1:{env['PWA_PORT']}")
     env.setdefault("CIAO_WORKSPACE", str(root))

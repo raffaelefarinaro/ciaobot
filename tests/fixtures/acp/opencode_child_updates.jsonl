@@ -1,0 +1,9 @@
+{"rootSessionId":"ses_root","childSessionId":"ses_child","parentSessionId":"ses_root","depth":1,"title":"Explore","type":"status","status":"running"}
+{"rootSessionId":"ses_root","childSessionId":"ses_child","parentSessionId":"ses_root","depth":1,"type":"update","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"NESTED"},"_meta":{"opencode/child-session":{"id":"ses_child","parentID":"ses_root","depth":1,"title":"Explore"}}}}
+{"rootSessionId":"ses_root","childSessionId":"ses_child","parentSessionId":"ses_root","depth":1,"type":"update","update":{"sessionUpdate":"usage_update","used":900,"size":1000,"cost":{"amount":"9.99","currency":"USD"}}}
+{"rootSessionId":"ses_root","childSessionId":"ses_child","parentSessionId":"ses_root","depth":1,"type":"update","update":{"sessionUpdate":"config_option_update","configOptions":[{"id":"model","currentValue":"child-model","options":[]}]}}
+{"rootSessionId":"ses_root","childSessionId":"ses_child","parentSessionId":"ses_root","depth":1,"type":"update","update":{"sessionUpdate":"current_mode_update","currentModeId":"plan"}}
+{"rootSessionId":"ses_root","childSessionId":"ses_child","parentSessionId":"ses_root","depth":1,"type":"update","update":{"sessionUpdate":"compaction_update","compactionId":"c1","status":"completed"}}
+{"rootSessionId":"ses_root","childSessionId":"ses_child","parentSessionId":"ses_root","depth":1,"type":"update","update":{"sessionUpdate":"tool_call","toolCallId":"ses_child:call_1","title":"bash","kind":"execute","rawInput":{"command":"ls"},"status":"pending"}}
+{"rootSessionId":"ses_root","childSessionId":"ses_child","parentSessionId":"ses_root","depth":1,"type":"update","update":{"sessionUpdate":"tool_call_update","toolCallId":"ses_child:call_1","status":"completed"}}
+{"rootSessionId":"ses_root","childSessionId":"ses_child","parentSessionId":"ses_root","depth":1,"type":"status","status":"completed"}

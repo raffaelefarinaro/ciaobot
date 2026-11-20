@@ -7,6 +7,7 @@ import inspect
 import io
 import json
 import os
+import re
 import shlex
 import stat
 import subprocess
@@ -68,6 +69,133 @@ def test_dispatch_runs_the_registered_tool_and_tags_telemetry_cli(tmp_path: Path
     assert record["tool"] == "context_get"
     assert record["chat_id"] == "chat-1"
     assert record["status"] == "ok"
+
+
+def test_managed_recall_cli_mapping_and_argument_surface(tmp_path: Path) -> None:
+    parser = agent_cli.build_parser()
+    payload = tmp_path / "claims.json"
+    payload.write_text("[]", encoding="utf-8")
+    assert agent_cli.resolve(parser.parse_args(["vault", "recall-check", "--claims-file", str(payload)])) == (
+        "vault_recall_check", {"claims_json": "[]"}
+    )
+    with pytest.raises(SystemExit):
+        parser.parse_args(["vault", "recall-check"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["vault", "recall-check", "--claims-json", "[]"])
+
+
+def test_managed_recall_cli_file_reader_is_bounded_and_strict(tmp_path: Path, monkeypatch) -> None:
+    from ciao.agent_surface import RECALL_CHECK_MAX_REQUEST_BYTES
+    from ciao.agent_cli import UsageError
+
+    exact = tmp_path / "exact.json"
+    exact.write_bytes(b" " * RECALL_CHECK_MAX_REQUEST_BYTES)
+    assert len(agent_cli._recall_claims_file(str(exact)).encode()) == RECALL_CHECK_MAX_REQUEST_BYTES
+    too_large = tmp_path / "large.json"
+    too_large.write_bytes(b"x" * (RECALL_CHECK_MAX_REQUEST_BYTES + 1))
+    with pytest.raises(UsageError, match="request size limit"):
+        agent_cli._recall_claims_file(str(too_large))
+    invalid = tmp_path / "invalid.json"
+    invalid.write_bytes(b"\xff")
+    with pytest.raises(UsageError, match="UTF-8"):
+        agent_cli._recall_claims_file(str(invalid))
+    credential = tmp_path / ".runtime" / "token.json"
+    credential.parent.mkdir()
+    credential.write_text("[]")
+    with pytest.raises(UsageError, match="credential"):
+        agent_cli._recall_claims_file(str(credential))
+
+
+def test_managed_recall_cli_reader_observes_stat_guards_and_read_limit(tmp_path: Path, monkeypatch) -> None:
+    import stat as stat_module
+
+    path = tmp_path / "claims.json"
+    path.write_text("[]", encoding="utf-8")
+    real_stat = Path.stat
+    real_fstat = os.fstat
+    real_open = Path.open
+    seen: list[tuple[str, int | None]] = []
+
+    def stat_guard(candidate, *args, **kwargs):
+        seen.append(("stat", None))
+        return real_stat(candidate, *args, **kwargs)
+
+    def fstat_guard(fd):
+        seen.append(("fstat", None))
+        return real_fstat(fd)
+
+    class TrackingFile:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            self.handle.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.handle.__exit__(*args)
+
+        def fileno(self):
+            return self.handle.fileno()
+
+        def read(self, limit):
+            seen.append(("read", limit))
+            return self.handle.read(limit)
+
+    def open_guard(candidate, *args, **kwargs):
+        seen.append(("open", None))
+        return TrackingFile(real_open(candidate, *args, **kwargs))
+
+    monkeypatch.setattr(Path, "stat", stat_guard)
+    monkeypatch.setattr(Path, "open", open_guard)
+    monkeypatch.setattr(os, "fstat", fstat_guard)
+    assert agent_cli._recall_claims_file(str(path)) == "[]"
+    labels = [event for event, _value in seen]
+    open_index = labels.index("open")
+    fstat_index = labels.index("fstat")
+    read_index = labels.index("read")
+    assert any(event == "stat" for event in labels[:open_index])
+    assert open_index < fstat_index < read_index
+    assert seen[read_index] == ("read", agent_cli.RECALL_CHECK_MAX_REQUEST_BYTES + 1)
+
+    # A stable nonregular pre-open target is rejected without opening it.
+    seen.clear()
+    monkeypatch.setattr(
+        Path, "stat",
+        lambda *_a, **_k: SimpleNamespace(st_mode=stat_module.S_IFIFO),
+    )
+    monkeypatch.setattr(Path, "open", lambda *_a, **_k: pytest.fail("nonregular target opened"))
+    with pytest.raises(agent_cli.UsageError, match="ordinary"):
+        agent_cli._recall_claims_file(str(path))
+    assert seen == []
+
+    # The descriptor check is independent; this uses a regular path and injects
+    # a nonregular opened handle without creating a FIFO.
+    monkeypatch.setattr(Path, "stat", stat_guard)
+    monkeypatch.setattr(Path, "open", lambda candidate, *a, **k: real_open(candidate, *a, **k))
+
+    class NonregularHandleStat:
+        def __init__(self, value):
+            self.value = value
+
+        @property
+        def st_mode(self):
+            return stat_module.S_IFIFO
+
+        def __getattr__(self, name):
+            return getattr(self.value, name)
+
+    monkeypatch.setattr(os, "fstat", lambda fd: NonregularHandleStat(real_fstat(fd)))
+    with pytest.raises(agent_cli.UsageError, match="ordinary"):
+        agent_cli._recall_claims_file(str(path))
+
+
+def test_managed_recall_operation_is_read_only_with_narrow_schema() -> None:
+    from ciao import mcp_server
+
+    operation = mcp_server.OPERATIONS_BY_NAME["vault_recall_check"]
+    assert operation.annotations == mcp_server._READ
+    assert set(inspect.signature(operation.fn).parameters) == {"service", "claims_json"}
 
 
 def test_unknown_operation_and_bad_arguments_are_envelopes_with_telemetry(tmp_path: Path) -> None:
@@ -823,9 +951,12 @@ def test_every_documented_command_parses(tmp_path: Path) -> None:
     # `chat needs-action command` reads its command at parse time too.
     command = tmp_path / "command.txt"
     command.write_text("ls -la\n", encoding="utf-8")
+    claims = tmp_path / "claims.json"
+    claims.write_text("[]", encoding="utf-8")
     required = {
         "memory update": ["--region", "memory", "--action", "add"],
         "vault search": ["q"], "vault review show": ["p"],
+        "vault recall-check": ["--claims-file", str(claims)],
         "vault review keep": ["--candidate", "c"], "vault review trash": ["--candidate", "c"],
         "vault review restore": ["--candidate", "c"], "vault review delete": ["--candidate", "c", "--confirm", "c"],
         "vault review complete": ["--candidate", "c"], "vault review restore-completed": ["--candidate", "c"],
@@ -978,11 +1109,262 @@ def test_cli_posts_the_operation_with_the_bearer_token(
     assert json.loads(capsys.readouterr().out)["ok"] is True
 
 
+#: Every unique reference `ciao help` assembles, in the documented order. Named
+#: independently of the production mapping so a reordering or a dropped file
+#: fails here.
+_CLI_REFERENCE_ORDER = (
+    "references/memory-and-review.md",
+    "references/workspace-operations.md",
+    "references/tasks.md",
+    "references/automation-and-status.md",
+    "reference.md",
+)
+#: Every accepted `ciao help <topic>` alias and the file it must print.
+_CLI_TOPIC_REFERENCES = {
+    "memory": "references/memory-and-review.md",
+    "vault": "references/memory-and-review.md",
+    "queues": "references/memory-and-review.md",
+    "note": "references/workspace-operations.md",
+    "file": "references/workspace-operations.md",
+    "chat": "references/workspace-operations.md",
+    "project": "references/workspace-operations.md",
+    "task": "references/tasks.md",
+    "schedule": "references/automation-and-status.md",
+    "webhook": "references/automation-and-status.md",
+    "context": "references/automation-and-status.md",
+    "stats": "references/automation-and-status.md",
+    "gws": "references/automation-and-status.md",
+    "workspace": "references/automation-and-status.md",
+    "repo": "references/automation-and-status.md",
+    "examples": "reference.md",
+}
+
+
+def _cli_reference_text(relative: str) -> str:
+    return (agent_cli._SKILL_PATH.parent / relative).read_text(encoding="utf-8")
+
+
+def _expected_help(relatives: tuple[str, ...] = _CLI_REFERENCE_ORDER) -> str:
+    return agent_cli._SKILL_PATH.read_text(encoding="utf-8") + "".join(
+        "\n" + _cli_reference_text(relative) for relative in relatives
+    )
+
+
 def test_cli_help_prints_the_skill_document(capsys: pytest.CaptureFixture[str]) -> None:
     assert agent_cli.main(["help"]) == 0
     out = capsys.readouterr().out
+    assert out == _expected_help()
     assert out.startswith("---\nname: ciao-cli")
     assert "vault search" in out
+    assert out.count("# ciao CLI reference") == 1
+    for heading in (
+        "## Memory", "## Vault", "## Review queues", "## Notes", "## Files",
+        "## Chats", "## Reloading tools", "## Projects", "## Tasks",
+        "## Schedules", "## Webhook triggers", "## Workspace and status",
+        "## Worked examples", "## Common mistakes", "## Long-running commands",
+    ):
+        assert heading in out, heading
+    for relative in _CLI_REFERENCE_ORDER:
+        assert out.count(_cli_reference_text(relative)) == 1, relative
+
+
+@pytest.mark.parametrize(("topic", "reference"), sorted(_CLI_TOPIC_REFERENCES.items()))
+def test_cli_help_topic_routes_to_expected_reference(
+    topic: str, reference: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert agent_cli.main(["help", topic]) == 0
+    out = capsys.readouterr().out
+    assert out == _expected_help((reference,))
+    assert out.startswith("---\nname: ciao-cli")
+
+
+def test_cli_help_topic_does_not_read_unrelated_references(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base = agent_cli._SKILL_PATH.parent
+    watched = {agent_cli._SKILL_PATH, *(base / relative for relative in _CLI_REFERENCE_ORDER)}
+    reads: list[Path] = []
+    original_read_text = Path.read_text
+
+    def spy_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self in watched:
+            reads.append(self)
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", spy_read_text)
+    assert agent_cli.main(["help", "task"]) == 0
+    capsys.readouterr()
+    assert reads == [agent_cli._SKILL_PATH, base / "references/tasks.md"]
+
+
+def test_cli_help_topics_fit_context_budget(capsys: pytest.CaptureFixture[str]) -> None:
+    for topic in _CLI_TOPIC_REFERENCES:
+        assert agent_cli.main(["help", topic]) == 0
+        out = capsys.readouterr().out
+        size = len(out.encode("utf-8"))
+        assert size <= 16_000, f"ciao help {topic} is {size} bytes"
+
+
+def test_cli_help_budget_is_measured_in_utf8_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    skill = tmp_path / "SKILL.md"
+    entry = "---\nname: ciao-cli\n---\n"
+    skill.write_text(entry, encoding="utf-8")
+    reference = tmp_path / "references" / "tasks.md"
+    reference.parent.mkdir()
+    reference.write_text("é" * 8_001, encoding="utf-8")
+    monkeypatch.setattr(agent_cli, "_SKILL_PATH", skill)
+
+    assert agent_cli.main(["help", "task"]) == 0
+    out = capsys.readouterr().out
+    assert out == entry + "\n" + "é" * 8_001
+    assert len(out) == len(entry) + 1 + 8_001
+    assert len(out.encode("utf-8")) == len(entry.encode("utf-8")) + 1 + 16_002
+    assert len(out.encode("utf-8")) > 16_000
+
+
+def test_cli_help_unknown_topic_is_a_usage_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fail_post(*args: object, **kwargs: object) -> dict:
+        raise AssertionError("ciao help must not call the engine")
+
+    monkeypatch.setattr(agent_cli, "post", fail_post)
+    with pytest.raises(SystemExit) as excinfo:
+        agent_cli.main(["help", "not-a-topic"])
+    assert excinfo.value.code == 2
+    assert "invalid choice: 'not-a-topic'" in capsys.readouterr().err
+
+
+def test_cli_help_is_available_without_an_agent_session(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv(AGENT_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(AGENT_URL_ENV, raising=False)
+
+    def fail_post(*args: object, **kwargs: object) -> dict:
+        raise AssertionError("ciao help must not call the engine")
+
+    monkeypatch.setattr(agent_cli, "post", fail_post)
+    assert agent_cli.main(["help"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("---\nname: ciao-cli")
+    assert "## Worked examples" in out
+    assert agent_cli.main(["help", "task"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("---\nname: ciao-cli")
+    assert "task report" in out
+
+
+def test_cli_help_json_flag_remains_compatible(capsys: pytest.CaptureFixture[str]) -> None:
+    assert agent_cli.main(["help", "task", "--json"]) == 0
+    with_json = capsys.readouterr().out
+    assert agent_cli.main(["help", "task"]) == 0
+    assert with_json == capsys.readouterr().out
+    assert with_json.startswith("---\nname: ciao-cli")
+
+
+@pytest.mark.parametrize("failing_read", [1, 2, 3])
+def test_cli_help_preserves_missing_resource_fallback(
+    failing_read: int, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sequence = [
+        agent_cli._SKILL_PATH,
+        *(agent_cli._SKILL_PATH.parent / relative for relative in _CLI_REFERENCE_ORDER),
+    ]
+    written = ""
+    for index, path in enumerate(sequence[: failing_read - 1]):
+        text = path.read_text(encoding="utf-8")
+        written += text if index == 0 else "\n" + text
+    parser_text = agent_cli.build_parser().format_help()
+    reads: list[Path] = []
+    original_read_text = Path.read_text
+
+    def flaky_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self in sequence:
+            reads.append(self)
+            if len(reads) == failing_read:
+                raise OSError("missing packaged resource")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read_text)
+
+    def fail_post(*args: object, **kwargs: object) -> dict:
+        raise AssertionError("ciao help must not call the engine")
+
+    monkeypatch.setattr(agent_cli, "post", fail_post)
+    assert agent_cli.main(["help"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == written + parser_text
+    assert captured.err == ""
+    assert reads == sequence[:failing_read]
+
+
+def test_cli_help_topic_preserves_missing_reference_fallback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    entry_path = agent_cli._SKILL_PATH
+    tasks_path = entry_path.parent / "references/tasks.md"
+    entry = entry_path.read_text(encoding="utf-8")
+    parser_text = agent_cli.build_parser().format_help()
+    reads: list[Path] = []
+    original_read_text = Path.read_text
+
+    def flaky_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        if self in (entry_path, tasks_path):
+            reads.append(self)
+            if self == tasks_path:
+                raise OSError("missing packaged resource")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read_text)
+
+    def fail_post(*args: object, **kwargs: object) -> dict:
+        raise AssertionError("ciao help must not call the engine")
+
+    monkeypatch.setattr(agent_cli, "post", fail_post)
+    assert agent_cli.main(["help", "task"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == entry + parser_text
+    assert captured.err == ""
+    assert reads == [entry_path, tasks_path]
+
+
+def test_cli_help_topics_retain_operational_guards(capsys: pytest.CaptureFixture[str]) -> None:
+    def topic_help(topic: str) -> str:
+        assert agent_cli.main(["help", topic]) == 0
+        return capsys.readouterr().out
+
+    task = topic_help("task")
+    assert "task_revision_conflict" in task
+    assert "A finished turn is not a finished task." in task
+    assert "task report" in task and "task complete" in task
+    assert "Only when the user clearly said the task is done." in task
+    assert "the user approves those on the board" in task
+    assert "Destructive, with no trash" in task
+    assert "the record is permanently removed" in task
+
+    chat = topic_help("chat")
+    assert "You can never apply it yourself." in chat
+    assert "`/mcp`, `/reload-plugins`" in chat
+    assert "ciao chat reload" in chat
+    assert "Standalone `/mcp` is app navigation" in chat
+    assert "Chat details → MCP, which runs the agent's own MCP command" in chat
+    assert "mcp_auth" not in chat
+
+    webhook = topic_help("webhook")
+    assert "never save a copy in notes, memory or source files" in webhook
+
+    assert "--verification-file" in topic_help("queues")
+
+    examples = topic_help("examples")
+    assert "shared entry" in examples
+    assert "linked references" in examples
+    assert "ciao help <topic>" in examples
+    assert "runs inside a subagent as one auto-reload run for the whole session" in examples
+    assert "SKILL.md` has the command syntax" not in examples
+    assert "prints both" not in examples
 
 
 def test_cli_surface_prompt_variant_names_ciao_commands() -> None:
@@ -995,7 +1377,7 @@ def test_cli_surface_prompt_variant_names_ciao_commands() -> None:
     assert "`AGENTS.md`" in append
     assert "ciao chat reload" in append
     assert "terminal slash commands are not available here" in append
-    reference = Path(agent_cli._SKILL_PATH).read_text(encoding="utf-8")
+    reference = agent_cli._help_text()
     assert "`/mcp`, `/reload-plugins`" in reference
 
 
@@ -1011,13 +1393,23 @@ def test_cli_surface_prompt_carries_a_compact_synopsis() -> None:
     skills/help rather than another budget increase.
     """
     cli = system_prompt_payload("")["append"]
-    reference = (Path(agent_cli._SKILL_PATH)).read_text(encoding="utf-8")
+    reference = agent_cli._help_text()
     missing = [command for command in _commands() if command not in reference]
     assert missing == []
-    assert "ciao help" in cli and "ciao <noun> --help" in cli
+    assert "ciao help <topic>" in cli and "ciao <noun> --help" in cli
     assert "vault search       QUERY" in cli and "task report" in cli
     assert "vault review restore-completed" not in cli
     assert len(cli) < 12000
+
+
+def test_cli_surface_prompt_routes_exact_lookups_to_topics() -> None:
+    cli = system_prompt_payload("")["append"]
+    assert "ciao help <topic>" in cli
+    assert "ciao help queues" in cli
+    assert "examples" in cli
+    for topic in re.findall(r"ciao help ([a-z]+)", cli):
+        args = agent_cli.build_parser().parse_args(["help", topic])
+        assert args.noun == "help" and args.topic == topic
 
 
 def test_ciao_entrypoint_routes_agent_nouns_before_the_operator_parser(
@@ -1295,6 +1687,39 @@ def test_chat_archive_archives_the_chat_a_title_resolved_to(tmp_path: Path) -> N
     assert archived == ["chat-1"]
 
 
+def test_chat_delete_archive_and_handover_turn_a_teardown_refusal_into_a_tool_error(
+    tmp_path: Path,
+) -> None:
+    from ciao.control_plane import ControlPlaneError, McpPrincipal
+    from ciao.web.project_chats import _TEARDOWN_CONFLICT, ChatTeardownConflict
+
+    _service_, plane, pcm = _names_service(tmp_path)
+
+    def _refuse(*_args, **_kwargs):
+        raise ChatTeardownConflict(_TEARDOWN_CONFLICT)
+
+    async def _refuse_async(*_args, **_kwargs):
+        raise ChatTeardownConflict(_TEARDOWN_CONFLICT)
+
+    pcm.delete_chat = _refuse
+    pcm.handover_chat = _refuse
+    pcm.archive_chat = _refuse_async
+    principal = McpPrincipal(
+        token_id="t", chat_id="chat-2", project_id="project-2", workspace="personal", provider="claude"
+    )
+    calls = [
+        lambda: plane.chat_delete(principal, "chat-1"),
+        lambda: plane.chat_handover(principal, "chat-1", provider="claude", model="sonnet"),
+        lambda: asyncio.run(plane.chat_archive(principal, "chat-1")),
+    ]
+    for call in calls:
+        with pytest.raises(ControlPlaneError) as refused:
+            call()
+        assert refused.value.code == "chat_busy"
+        assert refused.value.retryable is True
+        assert str(refused.value) == _TEARDOWN_CONFLICT
+
+
 # ── Approval policy: no argv auto-approval ────────────────────────────────
 # Since S6 every Ciaobot operation runs as `ciao <noun> <verb>` and no `ciao …`
 # prefix is pre-approved (an allow prefix is a shell-suffix bypass risk). Auto
@@ -1314,55 +1739,6 @@ def test_no_argv_allow_or_ask_patterns_remain() -> None:
     assert not hasattr(em, "AGENT_CLI_ASK_PATTERNS")
     assert not hasattr(em, "agent_cli_allowed_tool_rules")
     assert not hasattr(em, "agent_cli_permission_rules")
-
-
-@pytest.mark.asyncio
-async def test_claude_cli_surface_does_not_pre_approve_ciao_commands(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """No `ciao …` argv prefix is pre-approved (an allow prefix is a shell-suffix
-    bypass risk); auto mode keeps a card on every shell command."""
-    from ciao.models import AgentRequest
-    from ciao.providers.claude import ClaudeProvider
-
-    captured: dict = {}
-
-    class FakeClient:
-        def __init__(self, options):
-            captured["options"] = options
-
-    provider = ClaudeProvider(
-        tmp_path,
-        config=SimpleNamespace(memory_char_limit=2200, user_char_limit=1375, vault_root=tmp_path / "v"),
-    )
-    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
-    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
-
-    await provider._ensure_connected(
-        AgentRequest(prompt="t", model="sonnet", mode="auto", provider="claude")
-    )
-    allowed = captured["options"].allowed_tools or []
-    assert not [entry for entry in allowed if entry.startswith("Bash(ciao ")]
-    assert not [entry for entry in allowed if entry.startswith("mcp__ciaobot__")]
-    assert not captured["options"].mcp_servers  # no MCP server is attached
-
-
-def test_opencode_cli_auto_mode_keeps_shell_ask_for_ciao_commands() -> None:
-    """Auto mode emits one generic V2 `shell: ask` rule."""
-    from ciao.providers.opencode import mode_settings
-
-    _agent, rules = mode_settings("auto")
-    shell = [rule for rule in rules if rule["action"] == "shell"]
-    assert shell == [{"action": "shell", "resource": "*", "effect": "ask"}]
-    assert rules[-1]["effect"] == "deny"
-
-
-@pytest.mark.parametrize("mode", ["plan", "normal", "bypass"])
-def test_opencode_cli_rules_are_auto_mode_only(mode: str) -> None:
-    from ciao.providers.opencode import mode_settings
-
-    rules = mode_settings(mode)[1]
-    assert not any(rule["resource"].startswith("ciao ") for rule in rules)
 
 
 # ── release-gate fixes (v0.18.0) ───────────────────────────────────────────
@@ -1720,6 +2096,22 @@ def test_a_needs_action_lands_in_the_calling_chat(tmp_path: Path) -> None:
     assert len(action["id"]) == 32
     # The state the manager holds is the state the caller was told about.
     assert manager.get_chat(chat.chat_id).actions[0].id == action["id"]
+
+
+def test_an_agent_cannot_raise_the_retired_mcp_auth_kind(tmp_path: Path) -> None:
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager)
+    token = _offer_token(service, chat, project)
+    with _client(service) as client:
+        response = _post(
+            client,
+            token,
+            "chat_needs_action",
+            {"kind": "mcp_auth", "params": {"server": "linear", "provider": "claude"}},
+        )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_action_kind"
+    assert manager.get_chat(chat.chat_id).actions == []
 
 
 def test_a_needs_action_cannot_target_another_chat(tmp_path: Path) -> None:

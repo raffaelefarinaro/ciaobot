@@ -1595,3 +1595,152 @@ def test_an_entry_update_with_no_evidence_at_all_still_goes_to_review(
     assert body["proposal"] is not None
     assert body["proposal"]["operation"] == nep.REPLACE_ENTRY
     assert note.read_text(encoding="utf-8") == ENTRY_PLAIN
+
+
+# ── An unattended `unverified` does not hold off an attended chat ──────────
+
+
+def test_an_attended_verdict_settles_what_an_unattended_pass_left_unverified(
+    tmp_path: Path,
+) -> None:
+    """The repro behind #2848: the nightly pass could not reach the calendar, and
+    the attended chat that can see it was told to wait out a 30-day cooldown."""
+    install, root, note = _install(tmp_path)
+    unattended = _plane(install, unattended=True)
+    first = _verify(
+        unattended,
+        root,
+        _verdict(
+            install._vault,
+            note,
+            outcome=nv.UNVERIFIED,
+            coverage=nv.COVERAGE_PARTIAL,
+            evidence=[],
+            reason="calendar not reachable unattended",
+        ),
+        name="nightly.json",
+    )
+    assert first["status"] == nv.UNVERIFIED
+
+    attended = _plane(install)
+    body = _verify(
+        attended,
+        root,
+        _verdict(
+            install._vault,
+            note,
+            outcome=nv.UPDATE,
+            before=PLAIN,
+            after=FOURTH,
+            evidence=[CITATION],
+        ),
+        name="chat.json",
+    )
+
+    assert body["status"] == nv.APPLIED
+    assert note.read_text(encoding="utf-8") == FOURTH
+    assert body["receipt_id"]
+    receipt = mr.find_receipt(mr.journal_path(install._vault, None), body["receipt_id"])
+    assert receipt is not None
+    assert receipt["source"] == "chat"
+    check = nv.read_note_checks(install._vault)[NOTE]
+    assert check.outcome == nv.UPDATE, "the stored check is the new verdict"
+    assert check.content_revision == mr.content_revision(FOURTH)
+
+
+def test_an_unattended_rerun_is_still_held_off_by_its_own_unverified(
+    tmp_path: Path,
+) -> None:
+    """The nightly pass keeps its cooldown; the reply says why and what would help."""
+    install, root, note = _install(tmp_path)
+    plane = _plane(install, unattended=True)
+    fields = _verdict(
+        install._vault,
+        note,
+        outcome=nv.UNVERIFIED,
+        coverage=nv.COVERAGE_PARTIAL,
+        evidence=[],
+        reason="calendar not reachable unattended",
+    )
+    _verify(plane, root, fields, name="first.json")
+
+    body = _verify(plane, root, fields, name="second.json")
+
+    assert body["status"] == nv.ALREADY_CHECKED
+    assert "calendar not reachable unattended" in body["message"]
+    assert "attended chat" in body["message"]
+    assert body["check"]["reason"] == "calendar not reachable unattended"
+
+
+def test_an_attended_verdict_does_not_reopen_a_pending_proposal(tmp_path: Path) -> None:
+    """A check waiting on a person is not an `unverified`, so the cooldown still holds."""
+    import asyncio
+
+    install, root, note = _install(tmp_path)
+    nightly = _plane(install, unattended=True)
+    name = _payload(
+        root,
+        _verdict(install._vault, note, outcome=nv.RETIRE, evidence=[CITATION]),
+        name="retire.json",
+    )
+    queued = asyncio.run(nightly.verify_note(_principal(), payload_file=name))["data"]
+    assert queued["status"] == nv.NEEDS_REVIEW
+    assert queued["proposal"] is not None
+
+    attended = _plane(install)
+    name = _payload(
+        root,
+        _verdict(install._vault, note, outcome=nv.STILL_VALID, evidence=[CITATION]),
+        name="chat.json",
+    )
+    body = asyncio.run(attended.verify_note(_principal(), payload_file=name))["data"]
+
+    assert body["status"] == nv.ALREADY_CHECKED
+    assert _queue(install._vault).count("- [note_edit ") == 1
+    assert len(_sidecars(install._vault)) == 1
+
+
+def test_an_attended_verdict_does_not_reopen_an_applied_check(tmp_path: Path) -> None:
+    """Only an `unverified` reopens: a settled, applied check keeps its cooldown."""
+    import asyncio
+
+    install, root, note = _install(tmp_path)
+    plane = _plane(install)
+    name = _payload(root, _verdict(install._vault, note))
+
+    first = asyncio.run(plane.verify_note(_principal(), payload_file=name))["data"]
+    second = asyncio.run(plane.verify_note(_principal(), payload_file=name))["data"]
+
+    assert first["status"] == nv.APPLIED
+    assert second["status"] == nv.ALREADY_CHECKED
+
+
+def test_an_attended_entry_verdict_settles_an_unattended_unverified_entry(
+    tmp_path: Path,
+) -> None:
+    """The entry-scoped twin of the repro: the same cooldown exception applies."""
+    install, root, note, entry = _entry_install(tmp_path)
+    unattended = _plane(install, unattended=True)
+    _verify(
+        unattended,
+        root,
+        _entry_verdict(
+            note,
+            entry,
+            outcome=nv.UNVERIFIED,
+            coverage=nv.COVERAGE_PARTIAL,
+            evidence=[],
+            reason="calendar not reachable unattended",
+        ),
+        name="nightly.json",
+    )
+
+    body = _verify(
+        _plane(install),
+        root,
+        _entry_verdict(note, entry, outcome=nv.STILL_VALID, evidence=[CITATION]),
+        name="chat.json",
+    )
+
+    assert body["status"] == nv.APPLIED
+    assert body["scope"] == "entry"

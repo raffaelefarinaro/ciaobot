@@ -9,6 +9,7 @@ dispatcher needs: the operation table, the bearer-token registry, the
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import functools
 import inspect
@@ -17,7 +18,7 @@ import logging
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -31,6 +32,7 @@ from ciao.control_plane import (
     AgentPrincipal,
     CiaoControlPlane,
     ControlPlaneError,
+    ManagedRecallAuthorization,
     CONTEXT_LOGS_DEFAULT_LINES,
 )
 from ciao.schedules import DEFAULT_TIMEZONE
@@ -166,8 +168,34 @@ _SURFACE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar("ciao_agent_s
 @dataclass(slots=True)
 class _Session:
     principal: AgentPrincipal
-    token: str
+    token: str = field(repr=False)
     expires_at: int
+
+
+AGENT_SESSION_AUTH_POLL_S = 0.25
+
+
+class _ManagedRecallAuthorization:
+    __slots__ = ("__registry", "__session")
+
+    def __init__(self, registry: AgentSessionRegistry, session: _Session) -> None:
+        self.__registry = registry
+        self.__session = session
+
+    def __repr__(self) -> str:
+        return "<managed recall authorization>"
+
+    def is_active(self) -> bool:
+        with self.__registry._lock:
+            session = self.__session
+            return (
+                self.__registry._by_token.get(session.token) is session
+                and session.expires_at > int(time.time())
+            )
+
+    async def wait_invalid(self) -> None:
+        while self.is_active():
+            await asyncio.sleep(AGENT_SESSION_AUTH_POLL_S)
 
 
 class AgentSessionRegistry:
@@ -234,7 +262,9 @@ class AgentSessionRegistry:
             item = self._by_token.pop(token, None)
             if item is None:
                 return False
-            self._by_key.pop((item.principal.chat_id, item.principal.provider), None)
+            key = (item.principal.chat_id, item.principal.provider)
+            if self._by_key.get(key) == token:
+                self._by_key.pop(key, None)
             return True
 
     async def verify_token(self, token: str) -> AccessToken | None:
@@ -254,6 +284,21 @@ class AgentSessionRegistry:
                 subject=item.principal.chat_id,
                 claims=item.principal.to_claims(),
             )
+
+    def live_authorization(
+        self, access: AccessToken | None, principal: AgentPrincipal
+    ) -> ManagedRecallAuthorization | None:
+        if access is None or "ciaobot" not in (access.scopes or []):
+            return None
+        with self._lock:
+            session = self._by_token.get(access.token)
+            if (
+                session is None
+                or session.principal != principal
+                or session.expires_at <= int(time.time())
+            ):
+                return None
+            return _ManagedRecallAuthorization(self, session)
 
     def status(self) -> dict[str, Any]:
         now = int(time.time())
@@ -314,7 +359,7 @@ class Operation:
 
 async def _op_context_logs(service: CiaoMcpService, lines: int = CONTEXT_LOGS_DEFAULT_LINES) -> dict[str, Any]:
     """Return the installed Ciaobot version plus recent failed background jobs recorded
-    for the calling workspace. Read-only; works under workspace-only file access.
+    for the calling workspace. Read-only.
 
     Engine-wide server error, debug and service logs are not readable here: they carry no
     immutable workspace provenance, so the `error_log`, `debug_log` and `service_log`
@@ -388,6 +433,21 @@ async def _op_vault_search(service: CiaoMcpService, query: str, limit: int = 10)
     return await service._invoke("vault_search", lambda cp, p: cp.vault_search(p, query, limit))
 
 
+async def _op_vault_recall_check(service: CiaoMcpService, claims_json: str = "") -> dict[str, Any]:
+    """Check selected factual claims against bounded vault evidence."""
+    return await service._invoke(
+        "vault_recall_check",
+        lambda cp, p: cp.vault_recall_check(
+            p,
+            claims_json=claims_json,
+            authorization_factory=lambda: service.registry.live_authorization(
+                get_access_token(), p
+            ),
+        ),
+        mutating=False,
+    )
+
+
 async def _op_vault_review(service: CiaoMcpService, action: str = "list", path: str = "", candidate_id: str = "",
                             disposition: str = "", confirm: str = "") -> dict[str, Any]:
     """List and decide scoped vault-note review candidates.
@@ -454,10 +514,13 @@ async def _op_verify_note(service: CiaoMcpService, payload_file: str = "") -> di
       What needs you; do not try to apply it another way.
     - `unverified` — no source this pass reached could support the verdict, the
       check did not cover the whole note, or the input was too large to judge.
-      Nothing was written, and a cooldown stops tonight's run re-asking.
+      Nothing was written, and a cooldown stops tonight's run re-asking. An
+      attended chat that has the source can settle it later.
     - `conflict` — the note moved since you read it. Re-read and judge again.
     - `already_checked` — a check for this exact revision is in its cooldown or
-      is waiting on a proposal. Nothing was asked or written.
+      is waiting on a proposal. Nothing was asked or written. The reply names the
+      check's reason; an unattended `unverified` with no proposal does not block
+      an attended chat, which can send its verdict.
     - `failed` — the note could not be used at all.
 
     A retirement is never applied here: it is a human decision, all the way
@@ -749,7 +812,7 @@ async def _op_chat_needs_action(
     """Ask the user, in the calling chat, to do something only they can do.
 
     ``kind`` is one of command, gws_auth, permission_mode, device_code,
-    system_setting, restart, mcp_auth. ``params`` holds that kind's values as
+    system_setting, restart. ``params`` holds that kind's values as
     strings (for command: ``command``, optional ``note``). Nothing is executed:
     the request becomes a card the user acts on. There is no chat argument; the
     request belongs to the calling chat. Values are plain strings on purpose, so
@@ -842,7 +905,7 @@ async def _op_schedule(service: CiaoMcpService, action: str, prompt: str | None 
                        description: str | None = None, provider: str | None = None,
                        model: str | None = None, archive_policy: str | None = None,
                        workspace: str | None = None, command: str | None = None,
-                       schedule_id: str = "") -> dict[str, Any]:
+                       schedule_id: str = "", revision: str | None = None) -> dict[str, Any]:
     """Preview, create, or update a Ciaobot schedule (recurring, one-off, or manual-only).
 
     action:
@@ -938,6 +1001,11 @@ async def _op_schedule(service: CiaoMcpService, action: str, prompt: str | None 
             workspace, work from a chat scoped to it or ask the
             operator.
         schedule_id: (update only) The schedule to update.
+        revision: (update only, optional) The `revision` from schedules_list
+            or the last update. When given, the update is refused with
+            schedule_conflict, changing nothing, if the schedule's editable
+            content changed since; re-read it and retry. Omit it to apply
+            the fields you pass to the current row.
 
     An enabled schedule with a missed latest occurrence (e.g. the
     server was off, or a run stopped before it finished) runs once on
@@ -952,7 +1020,7 @@ async def _op_schedule(service: CiaoMcpService, action: str, prompt: str | None 
     # `Unknown schedule fields: _defaults`.
     supplied: dict[str, Any] = {
         key: value for key, value in locals().items()
-        if key not in {"service", "action", "schedule_id"}
+        if key not in {"service", "action", "schedule_id", "revision"}
     }
     # Refuse chat bindings at the tool surface, before the control
     # plane, so the caller learns the stance even on an update payload
@@ -1003,13 +1071,15 @@ async def _op_schedule(service: CiaoMcpService, action: str, prompt: str | None 
             )
         return await service._invoke(
             "schedule",
-            lambda cp, p: cp.schedule_update(p, schedule_id, **values),
+            lambda cp, p: cp.schedule_update(p, schedule_id, revision=revision, **values),
             mutating=True,
         )
     raise ControlPlaneError("invalid_action", "action must be preview, create, or update.")
 
 
-async def _op_schedule_action(service: CiaoMcpService, schedule_id: str, action: str) -> dict[str, Any]:
+async def _op_schedule_action(
+    service: CiaoMcpService, schedule_id: str, action: str, revision: str | None = None
+) -> dict[str, Any]:
     """Run one lifecycle action on a schedule.
 
     action:
@@ -1019,12 +1089,15 @@ async def _op_schedule_action(service: CiaoMcpService, schedule_id: str, action:
         "delete" — delete a removable user schedule (destructive). System
             schedules (scope=system) cannot be deleted — this raises
             schedule_not_removable instead.
+
+    revision: optional, for pause/resume/delete — the schedule's `revision`;
+        a mismatch is refused with schedule_conflict and nothing changes.
     """
     dispatch = {
-        "pause": lambda cp, p: cp.schedule_update(p, schedule_id, enabled=False),
-        "resume": lambda cp, p: cp.schedule_update(p, schedule_id, enabled=True),
+        "pause": lambda cp, p: cp.schedule_update(p, schedule_id, revision=revision, enabled=False),
+        "resume": lambda cp, p: cp.schedule_update(p, schedule_id, revision=revision, enabled=True),
         "run": lambda cp, p: cp.schedule_run(p, schedule_id),
-        "delete": lambda cp, p: cp.schedule_delete(p, schedule_id),
+        "delete": lambda cp, p: cp.schedule_delete(p, schedule_id, revision=revision),
     }
     op = dispatch.get(action)
     if op is None:
@@ -1496,6 +1569,7 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("memory_status", _READ, _op_memory_status.__doc__ or "", _op_memory_status),
     Operation("memory_update", _WRITE, _op_memory_update.__doc__ or "", _op_memory_update),
     Operation("vault_search", _READ, _op_vault_search.__doc__ or "", _op_vault_search),
+    Operation("vault_recall_check", _READ, _op_vault_recall_check.__doc__ or "", _op_vault_recall_check),
     Operation("vault_review", _DESTRUCTIVE, _op_vault_review.__doc__ or "", _op_vault_review),
     Operation("verify_note", _WRITE, _op_verify_note.__doc__ or "", _op_verify_note),
     Operation("note_related", _READ, _op_note_related.__doc__ or "", _op_note_related),

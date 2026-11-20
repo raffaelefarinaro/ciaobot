@@ -570,15 +570,13 @@ describe('traceSummaryMeta', () => {
     expect(traceSummaryMeta([])).toBe('steps')
   })
 
-  it('correctly counts and pluralizes thoughts, notes, tool calls, files, and subagents', () => {
+  it('correctly counts and pluralizes thoughts, notes, tool calls, and files', () => {
     expect(traceSummaryMeta([
       { role: 'assistant', tool_name: '_thinking', content: 'Hmm', timestamp: '' },
       { role: 'assistant', content: 'Note 1', timestamp: '' },
       { role: 'assistant', tool_name: '_activity', content: 'Tool A\nTool B', timestamp: '' },
       { role: 'assistant', tool_name: '_filecard', file_path: 'a.md', content: '', timestamp: '' },
-    ], [
-      { agent_id: 'sub-1', messages: [] }
-    ])).toBe('1 thought · 1 note · 2 tool calls · 1 file · 1 subagent')
+    ])).toBe('1 thought · 1 note · 2 tool calls · 1 file')
   })
 
   it('pluralizes multiple items correctly', () => {
@@ -589,10 +587,7 @@ describe('traceSummaryMeta', () => {
       { role: 'assistant', content: 'Note 2', timestamp: '' },
       { role: 'assistant', tool_name: '_filecard', file_path: 'a.md', content: '', timestamp: '' },
       { role: 'assistant', tool_name: '_filecard', file_path: 'b.md', content: '', timestamp: '' },
-    ], [
-      { agent_id: 'sub-1', messages: [] },
-      { agent_id: 'sub-2', messages: [] }
-    ])).toBe('2 thoughts · 2 notes · 2 files · 2 subagents')
+    ])).toBe('2 thoughts · 2 notes · 2 files')
   })
 })
 
@@ -681,8 +676,27 @@ describe('describeToolStep', () => {
     expect(describeToolStep('⚙️ skill {"id":"  loop-engineering  "}')).toBe('Using the loop-engineering skill')
     expect(describeToolStep('⚙️ skill {"id":42}')).toBe('Using a skill')
     expect(describeToolStep('🔌 mcp__github__get_pull_request #418')).toBe('github · get pull request')
+    // Real inputs that doubled a word: the ACP adapter labels a call with its
+    // kind when it has no input, so the summary repeats the tool name.
+    expect(describeToolStep('⚙️ skill skill')).toBe('Using a skill')
+    expect(describeToolStep('⚙️ skill {"name":""}')).toBe('Using a skill')
+    expect(describeToolStep('⚙️ skill {"name":"skill"}')).toBe('Using a skill')
+    expect(describeToolStep('🤖 subagent subagent')).toBe('Running a subagent')
+    expect(describeToolStep('🤖 task task')).toBe('Running a subagent')
+    expect(describeToolStep('🔧 bash bash')).toBe('Running a command')
+    expect(describeToolStep('🔧 weather weather')).toBe('weather')
     expect(describeToolStep('📝 TodoWrite [...]')).toBe('Updating the plan')
     expect(describeToolStep('🔧 ToolSearch select:mcp__claude_ai_Airtable__list_records_for_table')).toBe('Loading tools')
+  })
+})
+
+describe('describeToolStep subagents', () => {
+  it('names a subagent by its description, or says one is running when empty', () => {
+    expect(describeToolStep('🤖 Agent [pr-reviewer] Review PR 418')).toBe('Subagent: [pr-reviewer] Review PR 418')
+    expect(describeToolStep('↳ 🤖 Task Summarise the vault')).toBe('Subagent: Summarise the vault')
+    expect(describeToolStep('🤖 subagent Reviewer')).toBe('Subagent: Reviewer')
+    expect(describeToolStep('🤖 Agent')).toBe('Running a subagent')
+    expect(describeToolStep('🤖 Task ')).toBe('Running a subagent')
   })
 })
 

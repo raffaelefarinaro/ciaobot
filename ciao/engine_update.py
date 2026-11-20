@@ -1,13 +1,17 @@
-"""Stage and apply an engine update for installer-managed installs (#562).
+"""The receiving half of an engine update transaction (#562, #3130 P6).
 
-Everything here is one transaction with two halves, split by who can survive
-what. :func:`stage_update` (part 1, #569) runs while the engine is up: lock,
-durable operation record, signed-manifest verification, wheel download +
-digest check, and a fully installed staged env. :func:`apply_update` and
-:func:`run_apply` (this module's second half) own the downtime: a bounded
-drain, then a *detached* updater job running from the staged env, outside the
-engine's own supervisor job and outside the env it replaces, so the swap, the
-readiness check and the rollback all survive the engine being stopped.
+2.0 keeps only what a 1.x install needs to hop onto 2.x: the detached
+``run-apply`` and ``run-recover`` jobs the 1.x updater launches from the staged
+environment, the operation record they read and write, the lock, and startup
+recovery of an interrupted swap. Staging and applying an update are no longer
+done here: on macOS the app updates the engine itself, and on Linux the
+installer does.
+
+The transaction is one state machine with two halves, split by who can
+survive what. :func:`run_apply` owns the downtime once the swap has begun: a
+*detached* updater job running from the staged env, outside the engine's own
+supervisor job and outside the env it replaces, so the swap, the readiness
+check and the rollback all survive the engine being stopped.
 
 Which job owns the swap, how the engine is stopped and what a staged
 environment looks like are not this transaction's business: they are answered
@@ -23,13 +27,10 @@ import hashlib
 import http.client
 import json
 import logging
-import math
 import os
 import shutil
-import signal
 import subprocess
 import sys
-import sysconfig
 import time
 import urllib.error
 import urllib.request
@@ -38,9 +39,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any, Callable, Protocol
 
-from ciao import install_receipt, macos_service, package_version, release_manifest
+from ciao import install_receipt, macos_service
 from ciao.os_support.locks import lock_exclusive, unlock
-from ciao.os_support.private import make_private, make_private_dir, mkstemp_private
+from ciao.os_support.private import make_private, mkstemp_private
 from ciao.server_host import ServerHostError, parse_service_command
 from ciao.update_host import (
     RECOVER_LABEL,
@@ -75,9 +76,6 @@ PHASES = (
     "rollback_failed",
     "failed",
 )
-RELEASE_BASE = "https://github.com/raffaelefarinaro/ciaobot/releases/download"
-MANIFEST_NAME = release_manifest.MANIFEST_NAME
-SIGNATURE_NAME = release_manifest.SIGNATURE_NAME
 PREVIOUS_RECEIPT_NAME = "previous-receipt.json"
 OPERATION_NAME = "operation.json"
 LOCK_NAME = "update.lock"
@@ -106,18 +104,9 @@ _HTTP_TIMEOUT = 5.0
 # `_LOCK_TIMEOUT`.
 _DRAIN_REQUEST_TIMEOUT = 30.0
 _POLL_INTERVAL = 1.0
-# Three consecutive empty readings, not one: a chat that settles between two
-# polls would otherwise look drained while its work is still visible.
-_IDLE_POLLS_REQUIRED = 3
-_UV_TIMEOUT = 600
 _STOP_TIMEOUT = 30.0
 _READY_TIMEOUT = 120.0
 _LOCK_TIMEOUT = 30.0
-# How long a drain waits for active chats, and the floor an operator may set.
-# Below a second there is no time to read the first poll, and a non-finite
-# value would turn the deadline into no deadline at all.
-_DEFAULT_DRAIN_TIMEOUT = 600.0
-_MIN_DRAIN_TIMEOUT = 1.0
 # Every loopback probe in this module is to the engine on *this* machine, so
 # none of them may be routed through the system HTTP proxy: urllib honours the
 # macOS proxy settings, and a Mac configured with one (a PAC URL, a corporate
@@ -126,25 +115,16 @@ _MIN_DRAIN_TIMEOUT = 1.0
 # lookup for this opener alone and changes nothing else about the process.
 _LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-# A `fetch` is called with the URL and destination, and may take extra keyword
-# bounds (`max_bytes`). Typed loosely on purpose: a test double is a plain
-# two-argument function, and the contract that matters is that it writes
-# `dest`.
-Fetch = Callable[..., None]
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 class PostJson(Protocol):
     """POST one drain-handshake request to the engine and return its JSON answer.
 
-    ``body`` is the JSON request body, or ``None`` when the caller names no
-    drain owner — which is what a manual update sends, byte-identical to the
-    empty POST this handshake has always used.
+    ``body`` is the JSON request body; every drain request names its owner.
     """
 
-    def __call__(
-        self, url: str, body: dict[str, Any] | None = None
-    ) -> dict[str, Any]: ...
+    def __call__(self, url: str, body: dict[str, Any] | None = None) -> dict[str, Any]: ...
 
 
 GetJson = Callable[[str], "dict[str, Any] | None"]
@@ -182,11 +162,9 @@ class Operation:
     """The durable record of one staging run, rewritten at every phase.
 
     ``env_freeze`` is what the staged environment was resolved to, recorded
-    while it is still only a directory nobody runs. On macOS the apply moves
-    that very env rather than resolving anything, so there it is audit-only. On
-    Windows the apply rebuilds the live env from the wheel offline, and these
-    are the pins it constrains that rebuild to (#857); a record written before
-    the field existed reads as ``""``, which the Windows apply refuses.
+    while it is still only a directory nobody runs. The apply moves that very
+    env rather than resolving anything, so it is audit-only; a record written
+    before the field existed reads as ``""``.
     """
 
     id: str
@@ -206,11 +184,6 @@ class Operation:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
-
-
-def _stamp() -> str:
-    """The operation id prefix: compact, sortable, and filesystem-safe."""
-    return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
 def _operation_path(state_dir: Path) -> Path:
@@ -261,6 +234,93 @@ def write_operation(op: Operation, state_dir: Path | None = None) -> None:
         tmp.unlink(missing_ok=True)
 
 
+# The 1.x stager named each env `stage-<operation id>` directly under the updates
+# state dir (the v1.10.0 record pinned in tests/test_engine_update_hop_contract.py).
+STAGE_DIR_PREFIX = "stage-"
+
+
+def _contained_stage_dir(raw: str, state_dir: Path) -> Path | None:
+    """Return the recorded env path only when it is a plain ``stage-*`` child of ``state_dir``.
+
+    Nothing is resolved, so nothing can be redirected: the path must be absolute,
+    its parent must be the state dir exactly as written (which rules out ``..``,
+    the state dir itself, its parents, nested directories and any intermediate
+    symlink), its name must carry the stage prefix, and it must not be a symlink.
+    """
+    if not raw:
+        return None
+    candidate = Path(raw)
+    if not candidate.is_absolute() or candidate.parent != state_dir:
+        return None
+    name = candidate.name
+    if not name.startswith(STAGE_DIR_PREFIX) or name == STAGE_DIR_PREFIX:
+        return None
+    if candidate.is_symlink():
+        return None
+    return candidate
+
+
+def retire_staged(state_dir: Path | None = None) -> bool:
+    """Discard a ``staged`` record that nothing will ever apply, and its env.
+
+    The 1.x updater staged a 2.0 env and wrote a ``staged`` record, then was
+    removed; nothing else retires that record. Only the ``staged`` phase is
+    touched: a record that reached ``draining`` or later is in flight or
+    half-applied and belongs to :func:`recover_interrupted_apply`. The directory
+    must be a direct ``stage-*`` child of the state dir (see
+    :func:`_contained_stage_dir`), and the record is removed after it, so an
+    interrupted run is simply retried. Returns True when a record was removed;
+    False when there was nothing to do, the record was refused, another update
+    holds the lock, or the filesystem refused an operation.
+
+    Never raises: ``status`` is read by the 0.5.x app and the startup path must
+    not fail on a stale record, so an ``OSError`` is logged at INFO and answered
+    False.
+    """
+    root = state_dir or default_state_dir()
+    try:
+        return _retire_staged(root)
+    except OSError as exc:
+        logger.info("Could not discard the staged engine update: %s", exc)
+        return False
+
+
+def _retire_staged(root: Path) -> bool:
+    if root.is_symlink():
+        logger.info("Update state dir is a symlink; leaving staged updates alone")
+        return False
+    first = read_operation(root)
+    if first is None or first.phase != "staged":
+        return False
+    try:
+        handle = acquire_lock(root)
+    except UpdateInProgress:
+        return False
+    try:
+        op = read_operation(root)
+        if op is None or op.phase != "staged":
+            return False
+        target = _contained_stage_dir(op.stage_dir, root)
+        # INFO, not WARNING: `status` is polled by the 0.5.x app, which reads
+        # stderr as part of its answer, and a refused record is still printed.
+        if target is None:
+            logger.info(
+                "Staged update %s does not name a stage dir in the update state dir; leaving it",
+                op.id,
+            )
+            return False
+        if target.exists() and not target.is_dir():
+            logger.info("Staged update %s is not a directory; leaving it", op.id)
+            return False
+        if target.is_dir():
+            shutil.rmtree(target)
+        _operation_path(root).unlink(missing_ok=True)
+        logger.info("Discarded staged update %s that was never applied", op.id)
+        return True
+    finally:
+        release_lock(handle)
+
+
 def acquire_lock(state_dir: Path | None = None) -> IO[str]:
     """Take the exclusive update lock, or raise ``UpdateInProgress``.
 
@@ -291,125 +351,6 @@ def release_lock(handle: IO[str]) -> None:
     handle.close()
 
 
-def default_fetch(
-    url: str, dest: Path, *, attempts: int = 3, timeout: float = 30.0, max_bytes: int = 0
-) -> None:
-    """Stream ``url`` to ``dest`` with plain urllib, retrying transient errors.
-
-    A stalled release CDN is the common failure, not a 404, so transient
-    ``OSError``/``URLError`` gets up to ``attempts`` tries with a short sleep.
-    Bytes land in a ``.part`` sibling and are renamed in one step, so an
-    interrupted run never leaves a truncated file that a later digest check
-    would have to distinguish from a corrupt one.
-
-    ``max_bytes`` aborts a download that has already grown past what the
-    caller expects. Without it a wrong or hostile ``Content-Length`` fills the
-    disk long before the digest check that would have rejected the bytes; the
-    ceiling is generous by the caller, because being wrong about it must fail
-    a legitimate release rather than a truncated one.
-    """
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    part = dest.with_name(dest.name + ".part")
-    last: Exception | None = None
-    for attempt in range(1, attempts + 1):
-        try:
-            request = urllib.request.Request(
-                url, headers={"User-Agent": "ciaobot-updater"}
-            )
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                written = 0
-                too_large = False
-                with part.open("wb") as handle:
-                    while True:
-                        chunk = response.read(_CHUNK)
-                        if not chunk:
-                            break
-                        written += len(chunk)
-                        if max_bytes and written > max_bytes:
-                            too_large = True
-                            break
-                        handle.write(chunk)
-                if too_large:
-                    # Not an OSError, so this is not retried: the server is
-                    # answering fine, it is just serving something this release
-                    # does not describe. The partial bytes are dropped first:
-                    # they are not a release anybody can install, and leaving
-                    # them makes a retry look like it is resuming. Dropped
-                    # after the handle is closed: Windows refuses to delete a
-                    # file that is still open (WinError 32).
-                    part.unlink(missing_ok=True)
-                    raise UpdateError(
-                        f"{url} is larger than the {max_bytes} bytes expected"
-                    )
-            os.replace(part, dest)
-            return
-        except (OSError, urllib.error.URLError) as exc:
-            last = exc
-            part.unlink(missing_ok=True)
-            if attempt < attempts:
-                time.sleep(2)
-    assert last is not None
-    raise UpdateError(f"could not download {url}: {last}")
-
-
-def resolve_latest_version() -> str:
-    """The newest published version, or ``UpdateError`` when it is unknown.
-
-    Reuses the same release-redirect lookup the recurring update check uses, so
-    the app and the updater cannot disagree about what "latest" means.
-    """
-    status = package_version.package_status()
-    latest = str(status.get("latest_version") or "")
-    if not latest:
-        detail = str(status.get("error") or "no release found")
-        raise UpdateError(f"could not resolve the latest release: {detail}")
-    return latest
-
-
-def python_request() -> str:
-    """The uv ``--python`` request that restages the engine like this one.
-
-    The running version, and on Windows its architecture too: Windows on Arm
-    runs the engine as x64 (cryptography ships no win_arm64 wheel), and a bare
-    version would let uv pick an Arm64 interpreter that cannot install it.
-    """
-    version = f"{sys.version_info.major}.{sys.version_info.minor}"
-    arch = {"win-amd64": "x86_64", "win-arm64": "aarch64"}.get(sysconfig.get_platform())
-    if sys.platform != "win32" or arch is None:
-        return version
-    return f"cpython-{version}-windows-{arch}-none"
-
-
-def find_uv(receipt_uv: str = "", *, host: UpdateHost | None = None) -> str:
-    """Locate a ``uv`` executable, preferring the one that built this engine.
-
-    The receipt's value, when the installer recorded one, is the only candidate:
-    it is the binary that produced the running environment, so staging with
-    anything else could mismatch a toolchain. A recorded uv that is missing or
-    not executable is an error naming it, never a fall-through to another uv.
-    Without one, ``PATH``, then the location the installer used on this
-    platform. Not being able to stage without uv is a hard, clearly-explained
-    failure rather than a fallback that would install a differently-built env.
-    """
-    if receipt_uv:
-        if os.path.isfile(receipt_uv) and os.access(receipt_uv, os.X_OK):
-            return receipt_uv
-        raise UpdateError(
-            f"the install receipt names uv at {receipt_uv}, but it is missing or "
-            "not executable; reinstall Ciaobot to restore it"
-        )
-    platform = host or default_update_host()
-    candidates: list[str] = []
-    which = shutil.which("uv")
-    if which:
-        candidates.append(which)
-    candidates.extend(platform.uv_candidates())
-    for candidate in candidates:
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    raise UpdateError("could not find the uv executable to stage the update with")
-
-
 def _sha256(path: Path) -> tuple[str, int]:
     """Streamed digest and size, so a large wheel is never held in memory."""
     digest = hashlib.sha256()
@@ -419,14 +360,6 @@ def _sha256(path: Path) -> tuple[str, int]:
             digest.update(chunk)
             size += len(chunk)
     return digest.hexdigest(), size
-
-
-def _receipt_uv() -> str:
-    """The ``uv`` recorded by the installer for this very process, if any."""
-    from ciao import install_receipt
-
-    receipt = install_receipt.running_receipt()
-    return receipt.uv if receipt is not None else ""
 
 
 def _pick_wheel(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -439,224 +372,6 @@ def _pick_wheel(manifest: dict[str, Any]) -> dict[str, Any]:
         )
     wheel: dict[str, Any] = wheels[0]
     return wheel
-
-
-def stage_update(
-    target_version: str | None = None,
-    *,
-    current_version: str | None = None,
-    state_dir: Path | None = None,
-    release_base: str = RELEASE_BASE,
-    fetch: Fetch | None = None,
-    run: Runner = subprocess.run,
-    uv: str | None = None,
-    python_version: str | None = None,
-    host: UpdateHost | None = None,
-) -> Operation:
-    """Stage ``target_version`` (or the latest) and return the final record.
-
-    Raises ``UpdateInProgress`` when another run holds the lock, and
-    ``UpdateError`` for anything that goes wrong; either way a ``failed``
-    record is left behind describing the phase that broke, because the point of
-    the record is to let the UI explain what happened.
-
-    ``fetch``, ``run``, ``uv`` and ``state_dir`` are injectable so the tests
-    never touch the network, a real ``uv``, or this machine's real state.
-    ``host`` is the update host: staging needs two of its answers on every
-    platform, where ``uv`` is and what an installed env calls its interpreter.
-    """
-    root = state_dir or default_state_dir()
-    root.mkdir(parents=True, exist_ok=True)
-    make_private_dir(root)
-    handle = acquire_lock(root)
-    try:
-        return _stage_locked(
-            target_version,
-            current_version=current_version,
-            state_dir=root,
-            release_base=release_base,
-            fetch=fetch or default_fetch,
-            run=run,
-            uv=uv,
-            python_version=python_version,
-            host=host,
-        )
-    finally:
-        release_lock(handle)
-
-
-def _stage_locked(
-    target_version: str | None,
-    *,
-    current_version: str | None,
-    state_dir: Path,
-    release_base: str,
-    fetch: Fetch,
-    run: Runner,
-    uv: str | None,
-    python_version: str | None,
-    host: UpdateHost | None,
-) -> Operation:
-    import ciao
-
-    current: str = current_version or ciao.__version__
-    target = target_version or resolve_latest_version()
-    if not release_manifest._VERSION_RE.fullmatch(target):
-        raise UpdateError(f"not a release version: {target!r}")
-    if target == current:
-        # Before any record is written: an up-to-date engine is not an update
-        # attempt, and leaving a `failed` record for it would be a lie.
-        raise UpdateError(f"already on {target}")
-
-    stage_dir = state_dir / target
-    existing = read_operation(state_dir)
-    if (
-        existing is not None
-        and os.path.abspath(existing.stage_dir) == os.path.abspath(stage_dir)
-        and _update_pending(existing)
-    ):
-        # The stage dir holds the interpreter the updater and the recovery job
-        # run from, and the previous env a rollback restores. Deleting it under
-        # a pending update strands both; before any record is written, like the
-        # refusal above.
-        raise UpdateError(
-            f"the update to {target} is still {existing.phase}; wait for it to "
-            "settle (ciao update status) before staging it again"
-        )
-    shutil.rmtree(stage_dir, ignore_errors=True)
-    stage_dir.mkdir(parents=True)
-    make_private_dir(stage_dir)
-
-    now = _now()
-    op = Operation(
-        id=f"{_stamp()}-{target}",
-        phase="resolving",
-        from_version=current,
-        to_version=target,
-        started_at=now,
-        updated_at=now,
-        stage_dir=str(stage_dir),
-    )
-
-    def advance(phase: str) -> None:
-        op.phase = phase
-        op.updated_at = _now()
-        write_operation(op, state_dir)
-
-    advance("resolving")
-    try:
-        release_url = f"{release_base}/v{target}"
-        manifest_path = stage_dir / MANIFEST_NAME
-        signature_path = stage_dir / SIGNATURE_NAME
-        advance("downloading")
-        fetch(f"{release_url}/{MANIFEST_NAME}", manifest_path)
-        fetch(f"{release_url}/{SIGNATURE_NAME}", signature_path)
-
-        advance("verifying")
-        manifest = release_manifest.verify_manifest(
-            manifest_path.read_bytes(),
-            signature_path.read_text(encoding="utf-8"),
-            release_manifest.RELEASE_PUBLIC_KEY,
-        )
-        if manifest["version"] != target:
-            raise UpdateError(
-                f"manifest is for {manifest['version']}, not {target}"
-            )
-        entry = _pick_wheel(manifest)
-        filename = str(entry["filename"])
-        wheel_path = stage_dir / filename
-        # One mebibyte of slack over the signed size: a wheel that is merely a
-        # little larger than the manifest claims is a release to investigate,
-        # not a download to keep filling the disk with.
-        fetch(
-            f"{release_url}/{filename}",
-            wheel_path,
-            max_bytes=int(entry["size"]) + 1_048_576,
-        )
-        digest, size = _sha256(wheel_path)
-        if digest != entry["sha256"] or size != entry["size"]:
-            raise UpdateError("downloaded wheel does not match the signed manifest")
-        op.wheel = str(wheel_path)
-        op.wheel_sha256 = digest
-
-        advance("staging")
-        platform = host or default_update_host()
-        uv_bin = uv or find_uv(_receipt_uv(), host=platform)
-        py = python_version or python_request()
-        # A real tool env, in a tool dir of this update's own, because the apply
-        # moves this directory into the live env's place: it has to be the shape
-        # `uv tool install` produces — its `uv-receipt.toml`, its entry points —
-        # and not a venv that merely looks like one. Every dependency is
-        # resolved here, while the engine is up and the network is there, so the
-        # swap is a rename plus the two absolute paths a move breaks (#611).
-        tool_dir = stage_dir / "tool"
-        run(
-            [uv_bin, "tool", "install", "--python", py, str(wheel_path)],
-            check=True,
-            capture_output=True,
-            text=True, encoding="utf-8",
-            timeout=_UV_TIMEOUT,
-            # Pinned to this update's own directories, for the same reason the
-            # apply used to pin the install it replaced: an inherited
-            # `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR` would build the environment
-            # somewhere the apply does not know to look, and the version check
-            # below would then be checking a directory nothing will ever move.
-            env={
-                **os.environ,
-                "UV_TOOL_DIR": str(tool_dir),
-                "UV_TOOL_BIN_DIR": str(stage_dir / "bin"),
-            },
-        )
-        env_python = platform.find_staged_python(tool_dir)
-        out = run(
-            [str(env_python), "-I", "-c", "import ciao; print(ciao.__version__)"],
-            check=True,
-            capture_output=True,
-            text=True, encoding="utf-8",
-        ).stdout.strip()
-        if out != target:
-            raise UpdateError(f"staged env reports version {out!r}, not {target}")
-        op.env_python = str(env_python)
-        # What this update is about to bring in, taken from the env itself and
-        # not from the manifest: the pins that matter are the ones the resolver
-        # chose, transitive ones included. `check=True` because a staging run
-        # that cannot say what it resolved should not record `staged`; the env
-        # is discarded either way, and this costs no network.
-        op.env_freeze = run(
-            [uv_bin, "pip", "freeze", "--python", str(env_python)],
-            check=True,
-            capture_output=True,
-            text=True, encoding="utf-8",
-            timeout=_UV_TIMEOUT,
-        ).stdout.strip()
-
-        from ciao import install_receipt
-
-        receipt_path = install_receipt.default_receipt_path()
-        if receipt_path.is_file():
-            # Kept so #570 can roll back to the install the receipt describes,
-            # after the staging env replaces the running one.
-            previous = stage_dir / PREVIOUS_RECEIPT_NAME
-            shutil.copy2(receipt_path, previous)
-            op.previous_receipt = str(previous)
-    except Exception as exc:
-        # One write, with the reason attached: a `failed` record whose error is
-        # still empty would be the one case the UI cannot explain.
-        #
-        # `run(..., check=True)` reports only "returned non-zero exit status 1"
-        # here; uv's own stderr is the likeliest real explanation, so it is
-        # carried into the record instead of being captured and dropped.
-        message = _reason(exc)
-        op.phase = "failed"
-        op.error = message
-        op.updated_at = _now()
-        write_operation(op, state_dir)
-        if isinstance(exc, UpdateError):
-            raise
-        raise UpdateError(message) from exc
-
-    advance("staged")
-    return op
 
 
 def _reason(exc: BaseException) -> str:
@@ -734,17 +449,15 @@ def _http_error_detail(exc: urllib.error.HTTPError) -> str:
 
 
 def _drain_request(
-    post: PostJson, url: str, step: str, owner: str = ""
+    post: PostJson, url: str, step: str, owner: str
 ) -> dict[str, Any]:
     """POST one drain-handshake request, failing with a reason that names ``step``.
 
-    ``owner`` names the operation claiming the drain; empty sends the same URL
-    with no body a manual update has always sent, which is also all an injected
-    one-argument transport is called with.
+    ``owner`` names the operation claiming the drain; the engine refuses a
+    request without one.
     """
-    body = {"owner": owner} if owner else None
     try:
-        return post(url) if body is None else post(url, body)
+        return post(url, {"owner": owner})
     except urllib.error.HTTPError as exc:
         raise UpdateError(
             f"the running engine refused the {step} (HTTP {exc.code}{_http_error_detail(exc)})"
@@ -763,42 +476,16 @@ def _drain_request(
         ) from exc
 
 
-def _drain_timeout(drain_timeout: float) -> UpdateError:
-    """The one failure that must leave the running engine exactly as it was."""
-    return UpdateError(
-        f"drain timed out after {int(drain_timeout)}s; the running engine was left untouched"
-    )
+def drain_owner_for(operation_id: str, explicit: str = "") -> str:
+    """The owner an update's drain carries: the coordinator's, else its own id.
 
-
-def _drain_timeout_arg(value: str) -> float:
-    """``--drain-timeout`` as a usable number of seconds, or a usage error.
-
-    A value below the floor is a typo (`--drain-timeout 60` meaning
-    milliseconds, or `0` meaning "do not wait" and stopping the engine
-    mid-turn), and a non-finite one (`inf`) is worse than a typo: it removes
-    the deadline entirely, so a drain that never completes keeps the engine
-    refusing turns with no upper bound on when that ends. argparse reports
-    both as what they are — a bad argument — rather than letting the apply
-    start and fail later, with the engine already drained.
+    The coordinator (automatic update) claims with the operation id, so the
+    default is that same id and the detached job agrees with it.
     """
-    try:
-        seconds = float(value)
-    except ValueError:
-        raise argparse.ArgumentTypeError(
-            f"not a number of seconds: {value!r}"
-        ) from None
-    if not math.isfinite(seconds):
-        raise argparse.ArgumentTypeError(
-            f"must be a finite number of seconds, got {value!r}"
-        )
-    if seconds < _MIN_DRAIN_TIMEOUT:
-        raise argparse.ArgumentTypeError(
-            f"must be at least {int(_MIN_DRAIN_TIMEOUT)}s, got {value!r}"
-        )
-    return seconds
+    return explicit or operation_id
 
 
-def _reopen_admission(post: PostJson, base: str, owner: str = "") -> str:
+def _reopen_admission(post: PostJson, base: str, owner: str) -> str:
     """Undo a drain and return why it failed, or ``""`` when it landed.
 
     ``owner`` is the operation the drain belongs to. The engine refuses a
@@ -922,181 +609,6 @@ def _previous_receipt(op: Operation) -> install_receipt.InstallReceipt | None:
     return install_receipt.read_receipt(path)
 
 
-def apply_update(
-    *,
-    drain_timeout: float = _DEFAULT_DRAIN_TIMEOUT,
-    drain_owner: str = "",
-    state_dir: Path | None = None,
-    port: int | None = None,
-    http_post: PostJson | None = None,
-    launchctl: Launchctl | None = None,
-    uid: int | None = None,
-    sleep: Sleep = time.sleep,
-    clock: Clock = time.monotonic,
-    host: UpdateHost | None = None,
-) -> Operation:
-    """Drain the running engine, then hand the swap to a detached job.
-
-    The foreground half of the apply, run by the operator (and by the #571
-    settings UI, through this same function). It stops admitting new turns,
-    waits for the ones already running — with a deadline, because a drain that
-    never completes must not cost the user their engine — and then hands the
-    rest to a one-shot updater job that runs from the *staged* environment.
-
-    That split is the whole point. The swap has to happen after the engine is
-    stopped and while its own files are being replaced, so it cannot be run by
-    the engine; and stopping the engine may take the process tree of the job
-    that started it, so it cannot be a child of the engine's job either. Hence
-    a sibling job, in an environment the swap has not touched — which is what
-    ``host.spawn_updater`` hands over on each platform.
-
-    ``host`` is the update host: the job that owns the swap, the interpreter it
-    runs from, and the engine's port and label. Everything else here is the
-    transaction, and is the same everywhere.
-
-    ``drain_owner`` names the operation claiming the drain when the coordinator,
-    not a person, started this apply. It rides every drain handshake so the
-    engine can refuse a cancel from anything else; empty keeps the manual
-    handshake exactly as it was.
-
-    Everything is injectable so the tests exercise the handshake, the timeout
-    and the handoff without launchd, a network, or a real engine. Note there is
-    no ``http_get``: the drain is polled by POSTing it again, so this half
-    never asks the engine a question the drain answer does not carry.
-    """
-    root = state_dir or default_state_dir()
-    root.mkdir(parents=True, exist_ok=True)
-    make_private_dir(root)
-    post = http_post or _post_json
-    platform = host or default_update_host(launchctl=launchctl, uid=uid)
-    base = f"http://localhost:{platform.engine_port() if port is None else port}"
-    handle = acquire_lock(root)
-    try:
-        op = read_operation(root)
-        # The record's own interpreter, not a path rebuilt from the stage dir: a
-        # tool env's directory is named after the distribution, so `<stage>/env`
-        # stopped being where the staged interpreter lives in #611. The venv
-        # layout is only the fallback for a record staged before that.
-        staged_python = (
-            Path(op.env_python)
-            if op is not None and op.env_python
-            else (Path(op.stage_dir, "env", "bin", "python") if op else None)
-        )
-        if (
-            op is None
-            or op.phase != "staged"
-            or staged_python is None
-            or not staged_python.exists()
-        ):
-            if op is not None and op.phase == "failed" and op.error:
-                # The record knows why, and "nothing staged" would be a lie:
-                # the staged env is usually still there, and only the apply
-                # has to be run again.
-                raise UpdateError(f"last apply failed: {op.error}; run: ciao update stage")
-            raise UpdateError("nothing staged; run: ciao update stage")
-
-        def advance(phase: str) -> None:
-            op.phase = phase
-            op.updated_at = _now()
-            write_operation(op, root)
-
-        def fail(message: str) -> str:
-            """Reopen admission and record why, with the engine left running.
-
-            Returns the recorded message, which names a failed cancel too.
-            """
-            cancel_error = _reopen_admission(post, base, drain_owner)
-            if cancel_error:
-                message = (
-                    f"{message}; reopening chats also failed ({cancel_error}), "
-                    "so new chats may be refused until Ciaobot restarts"
-                )
-            op.phase = "failed"
-            op.error = message
-            op.updated_at = _now()
-            write_operation(op, root)
-            return message
-
-        try:
-            advance("draining")
-            _drain_request(post, f"{base}/api/admin/drain", "drain request", drain_owner)
-            # Polled by re-POSTing the drain, not by reading
-            # a separate chat list: the drain POST is loopback-only, so it always
-            # answers for this machine, and `begin_restart_drain` is idempotent,
-            # so asking again is free. Reading a chat list instead would
-            # be a second source of truth for the same question.
-            # Three consecutive empty readings rather than one: a chat can look
-            # idle between two of its own phases, and stopping the engine then
-            # would cut a turn short.
-            deadline = clock() + drain_timeout
-            idle = 0
-            while True:
-                body = _drain_request(
-                    post, f"{base}/api/admin/drain", "drain status poll", drain_owner
-                )
-                active = body.get("active_chat_ids") or []
-                idle = idle + 1 if not active else 0
-                if idle >= _IDLE_POLLS_REQUIRED:
-                    break
-                if clock() >= deadline:
-                    raise _drain_timeout(drain_timeout)
-                sleep(_POLL_INTERVAL)
-        except BaseException as exc:
-            # `BaseException`, not `Exception`: a Ctrl-C, or one of the signals
-            # `UpdateHost.interrupt_signals` names, during a wait of up to ten
-            # minutes is the most likely way this ends, and skipping `fail()`
-            # there would leave the engine refusing every turn with nothing in
-            # the record to say why.
-            message = fail(_reason(exc))
-            if not isinstance(exc, Exception):
-                raise
-            raise UpdateError(message) from exc
-
-        try:
-            platform.spawn_updater(op, op.env_python or str(staged_python))
-        except BaseException as exc:
-            message = fail(_reason(exc))
-            if not isinstance(exc, Exception):
-                raise
-            raise UpdateError(message) from exc
-
-        # The durable recovery agent goes in here, behind the updater and before
-        # the engine is ever stopped. From the next moment on, the swap can
-        # strand the machine where the service's program does not exist: the
-        # live env is renamed aside and the supervisor cannot start the engine,
-        # so the startup hook that would otherwise finish the swap cannot run
-        # either. This job is started by the host's supervisor, from the staged
-        # interpreter, and re-checks on an interval — so it is still there after
-        # the reboot, the logout, or the death of the updater it is standing
-        # behind. The staged interpreter is the right one *here* and only here:
-        # the swap has not moved anything yet, and `run_apply` re-points the job
-        # at the env it keeps the moment it does.
-        #
-        # Best effort with a loud log rather than a refusal: the swap can still
-        # succeed, `recover_interrupted_apply` still covers the cases where the
-        # engine does come back, and refusing a working update over a missing
-        # net would be the worse outcome for the operator. The lock is still
-        # held here, so the agent's first tick stands down rather than racing
-        # the apply that installed it.
-        try:
-            platform.install_recovery_agent(op, str(staged_python), root)
-        except Exception as exc:  # noqa: BLE001 — a missing net is not a failed update
-            logger.warning(
-                "could not install the %s agent, so a swap interrupted from here "
-                "is only recoverable when the engine starts: %s",
-                RECOVER_LABEL,
-                exc,
-            )
-
-        # The lock is released by the `finally` on the way out, which is the
-        # handoff: the updater job takes it the moment this returns, and it
-        # waits for it rather than failing when it loses the race.
-        advance("applying")
-        return op
-    finally:
-        release_lock(handle)
-
-
 def _acquire_lock_waiting(root: Path, sleep: Sleep, clock: Clock) -> IO[str]:
     """Take the lock the foreground half is still holding, or give up.
 
@@ -1171,11 +683,11 @@ def _rollback(
         lambda: _wait_until_unreachable(get, status_url, _STOP_TIMEOUT, sleep, clock),
     )
     if env_moved and not stopped:
-        # A host that could not confirm the stop (Windows: the engine still
-        # holds its runtime lock) must not have its env deleted or renamed from
-        # under it. Nothing is touched, the receipt included, and the record
-        # says so; `previous-env` is still on disk, so the recovery task retries
-        # the whole rollback on its next tick (see `_restore_pending`).
+        # A host that could not confirm the stop must not have its env deleted
+        # or renamed from under it. Nothing is touched, the receipt included,
+        # and the record says so; `previous-env` is still on disk, so the
+        # recovery task retries the whole rollback on its next tick (see
+        # `_restore_pending`).
         errors.append(
             "the engine did not stop, so the environment and receipt were left in "
             "place for the recovery task to retry"
@@ -1224,7 +736,7 @@ def _runs_the_receipt_install(
 
     Two shapes, and the README install has both. `uv tool install` puts the
     interpreter inside the tool env (`live_env`) and the `ciao` entry point
-    *beside* it in `~/.local/bin`; `install-engine.sh` then runs
+    *beside* it in `~/.local/bin`; the retired installer then ran
     `ciao setup --python "$ciao"`, so the LaunchAgent's `ProgramArguments[0]` is
     that bin entry point — the receipt's own `executable`, and outside the env.
     Both belong to the one install: `run_apply` re-points the entry-point links
@@ -1332,7 +844,7 @@ def run_apply(
 ) -> Operation:
     """Stop, swap, start, verify — or roll back. Runs in the updater job.
 
-    The detached half of the apply, launched by :func:`apply_update` through the
+    The detached half of the apply, launched by the 1.x apply through the
     update host's supervisor. It stops the engine before touching a file, because
     the engine's own 60-second file watcher would otherwise restart a half-swapped
     environment, then renames the live env aside, re-points the durable recovery
@@ -1341,7 +853,7 @@ def run_apply(
     answer.
 
     Nothing here resolves a dependency: the environment the swap installs is the
-    one :func:`stage_update` built and verified, moved rather than rebuilt
+    one the 1.x staging built and verified, moved rather than rebuilt
     (#611). That is what makes an apply work with no network at all, and what
     makes "apply what was verified" true rather than nearly true.
 
@@ -1351,6 +863,7 @@ def run_apply(
     *before* the engine is stopped reopens admission on the way out, because
     the foreground half has already closed it and nothing else would.
     """
+    drain_owner = drain_owner_for(operation_id, drain_owner)
     root = state_dir or default_state_dir()
     root.mkdir(parents=True, exist_ok=True)
     post = http_post or _post_json
@@ -1418,7 +931,7 @@ def run_apply(
             # must be what staging verified against the signed manifest.
             return record(
                 "the staged wheel no longer matches the digest recorded when it "
-                "was staged; run: ciao update stage"
+                "was staged; stage the update again"
             )
         if not op.env_python or not Path(op.env_python).exists():
             return record("the staged environment is gone; nothing to install")
@@ -1429,7 +942,7 @@ def run_apply(
             # no longer describes what is on disk.
             return record(
                 f"the installed engine is {receipt.version}, but this update was "
-                f"staged from {op.from_version}; run: ciao update stage"
+                f"staged from {op.from_version}; stage the update again"
             )
 
         live_env = Path(receipt.python).parent.parent
@@ -1439,8 +952,8 @@ def run_apply(
         # service actually runs, and a receipt that disagrees with the loaded
         # job means the receipt is the thing that is wrong. Refusing here is the
         # same "nothing is touched" class as the pre-flight checks above. The
-        # receipt's entry point is passed in with its env: `install-engine.sh`
-        # points the LaunchAgent at `~/.local/bin/ciao`, which is outside the
+        # receipt's entry point is passed in with its env: the retired installer
+        # pointed the LaunchAgent at `~/.local/bin/ciao`, which is outside the
         # tool env and is re-pointed by this very swap.
         disagreement = _service_disagreement(
             live_env,
@@ -1494,7 +1007,7 @@ def run_apply(
             platform.move_env(live_env, previous_env)
             env_moved = True
             # The net is re-pointed at the env the swap just set aside, and before
-            # the staged env is moved into the live env's place: `apply_update`
+            # the staged env is moved into the live env's place: the 1.x apply
             # installed the recovery agent from the staged interpreter, and that
             # directory is about to become the live one, so the agent's program
             # would be a dangling path from the rename onwards — the one window in
@@ -1503,7 +1016,7 @@ def run_apply(
             # The `previous-env` exists from this instant, is a complete old
             # installation, and is only moved again by the rollback.
             #
-            # Best effort with a loud log, as in `apply_update`: a net that could
+            # Best effort with a loud log, as the 1.x apply does: a net that could
             # not be re-pointed still leaves `recover_interrupted_apply` covering
             # the paths where the engine does come back, and failing a swap that
             # is otherwise fine over a missing net costs the operator the update.
@@ -1680,7 +1193,7 @@ def recover_interrupted_apply(
     of, the stop that has to come first would take it down before it
     finished, and `/api/startup-status` has nothing to answer until the server
     binds. The recovery job is outside all of that by construction, which is the
-    same reason `apply_update` hands its half to a job rather than doing it
+    same reason the 1.x apply hands its half to a job rather than doing it
     inline.
 
     Fail-safe at every step, because a recovery that guesses is worse than one
@@ -1866,8 +1379,7 @@ def recover_apply(
             # the swap that is actually in flight. Once the newer record is
             # settled (only staged, say), nothing will ever retire this one but
             # itself: the host retires it, after deleting whatever a
-            # best-effort delete left behind, which on Windows can keep it
-            # registered for another tick. The record is not touched.
+            # best-effort delete left behind. The record is not touched.
             if not _update_pending(op):
                 platform.retire_recovery_agent(root)
                 return None
@@ -1883,8 +1395,7 @@ def recover_apply(
             # moved anything (this process holds the lock, so it is not still
             # running). Nothing is undone because nothing moved; the engine is
             # started again, since a supervisor that saw it stopped on purpose
-            # will not (Windows: `/End` does not trigger `RestartOnFailure`),
-            # and the record says what happened.
+            # will not, and the record says what happened.
             logger.warning(
                 "engine update %s was interrupted while stopping the engine; "
                 "nothing was moved, starting the engine again",
@@ -2005,34 +1516,15 @@ def recover_apply(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point for ``ciao update``."""
+    """Entry point for ``ciao update``.
+
+    Only the receiving half of the 1.x -> 2.x hop is left: ``status`` and the
+    two hidden verbs an updater job runs. Staging and applying an update are
+    the Ciaobot for Mac app's job on macOS and the installer's on Linux, so
+    ``stage`` and ``apply`` are gone and argparse refuses them.
+    """
     parser = argparse.ArgumentParser(prog="ciao update", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-
-    stage = sub.add_parser("stage", help="Stage an engine update (no downtime)")
-    stage.add_argument("--version", default=None, help="release to stage, no leading v")
-    stage.add_argument("--json", action="store_true", help="print the operation record")
-
-    apply_cmd = sub.add_parser("apply", help="Drain, then apply a staged update")
-    apply_cmd.add_argument(
-        "--drain-timeout",
-        type=_drain_timeout_arg,
-        default=_DEFAULT_DRAIN_TIMEOUT,
-        help=(
-            "seconds to wait for active chats before giving up "
-            f"(default: {int(_DEFAULT_DRAIN_TIMEOUT)}, minimum: {int(_MIN_DRAIN_TIMEOUT)})"
-        ),
-    )
-    apply_cmd.add_argument(
-        "--drain-owner",
-        default="",
-        metavar="OPERATION_ID",
-        help=(
-            "own the drain as this operation, so only it may cancel; "
-            "omit for a manual apply"
-        ),
-    )
-    apply_cmd.add_argument("--json", action="store_true", help="print the operation record")
 
     status = sub.add_parser("status", help="Print the current update record")
     status.add_argument("--json", action="store_true", help="print the operation record")
@@ -2053,6 +1545,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "status":
+        retire_staged()
         op = read_operation()
         if op is None:
             print("no update staged")
@@ -2074,85 +1567,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error: {exc}", file=sys.stderr)
         return 0
 
-    if args.command == "run-recover":
-        job_host = current_update_host()
-        job_host.redirect_detached_stdio(default_state_dir())
-        try:
-            recover_apply(args.operation, host=job_host)
-        except Exception as exc:  # noqa: BLE001 — the record is the outcome
-            print(f"Error: {exc}", file=sys.stderr)
-        return 0
-
-    # Staging and applying are only safe for an engine the installer owns: an
-    # editable checkout or a bundled app is updated by its own path, and
-    # preparing a staged env for one would be a no-op with a confusing side
-    # effect.
-    if package_version.detect_install_mode() != "installer":
-        print(
-            "Error: in-app updates are only for engines installed with the "
-            "Ciaobot engine installer",
-            file=sys.stderr,
-        )
-        return 2
-    if args.command == "apply":
-        # The same host `apply_update` builds when the caller names none, so the
-        # interrupts that can end a drain and the transaction they end are one
-        # decision rather than two. Only the signal set is read here; the rest of
-        # the host is the apply's own business.
-        platform = default_update_host()
-        # A drain can wait ten minutes, and closing the terminal or a supervisor
-        # stopping the process is as ordinary a way to end that wait as Ctrl-C is.
-        # The host names those signals, because which ones exist is a platform
-        # question. They all default to killing the process outright,
-        # which would skip the cancel that reopens admission and leave the
-        # engine refusing every turn with nothing in the record to explain it.
-        # Turning them into the KeyboardInterrupt the handler below already
-        # deals with, and restoring the previous handlers on the way out, is
-        # the whole of the fix. `signal.signal` needs the main thread and a
-        # real handler; neither holds everywhere this is callable, and neither
-        # failure is worth refusing an update over.
-        def _interrupt(_signum: int, _frame: Any) -> None:
-            raise KeyboardInterrupt
-
-        restore: dict[signal.Signals, Any] = {}
-        for sig in platform.interrupt_signals():
-            with contextlib.suppress(ValueError, OSError, AttributeError):
-                restore[sig] = signal.getsignal(sig)
-                signal.signal(sig, _interrupt)
-        try:
-            op = apply_update(
-                drain_timeout=args.drain_timeout,
-                drain_owner=args.drain_owner,
-                host=platform,
-            )
-        except KeyboardInterrupt:
-            # 130 is the conventional exit for SIGINT, and this is the same
-            # event: the apply was interrupted, the record says why, and
-            # admission has been reopened.
-            print("Error: update cancelled", file=sys.stderr)
-            return 130
-        except UpdateError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            return 1
-        finally:
-            for sig, handler in restore.items():
-                if handler is not None:
-                    with contextlib.suppress(ValueError, OSError, AttributeError):
-                        signal.signal(sig, handler)
-        if args.json:
-            print(_format(op, True))
-        else:
-            print(
-                f"applying {op.to_version}: the engine will restart; "
-                "check: ciao update status"
-            )
-        return 0
+    job_host = current_update_host()
+    job_host.redirect_detached_stdio(default_state_dir())
     try:
-        op = stage_update(args.version)
-    except UpdateError as exc:
+        recover_apply(args.operation, host=job_host)
+    except Exception as exc:  # noqa: BLE001 — the record is the outcome
         print(f"Error: {exc}", file=sys.stderr)
-        return 1
-    print(_format(op, args.json))
     return 0
 
 

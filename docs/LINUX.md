@@ -1,17 +1,113 @@
 # Linux hosting
 
-Ciaobot's Python backend and PWA can run on Ubuntu 24.04 with Python 3.12 and
-Node 22. Use a browser or installed PWA from macOS, Windows, Linux, or a phone.
-The agents execute on the server and use its files and credentials. Apple
-Intelligence requires a Mac host; select Claude/OpenCode models for Linux
-routines. Native Windows and Linux desktop bundles are separate work.
+Ciaobot's engine and PWA run on Ubuntu 24.04 (a similar distribution works) as
+a systemd service under a dedicated account. Use a browser or installed PWA
+from macOS, Windows, Linux, or a phone. The agents execute on the server and
+use its files and credentials. Apple Intelligence requires a Mac host; select
+Claude/OpenCode models for Linux routines. A native Linux desktop bundle is
+separate work.
 
-## Install
+## Install (one line)
 
-Use a dedicated account and separate application code from workspace data.
-The following administrator commands assume a source checkout (at the desired
-release/ref) is already at `/opt/ciaobot/source`, including the Linux support.
-The macOS release installer is not a Linux installer.
+Run the installer as the account that will own Ciaobot — a dedicated account,
+never root:
+
+```sh
+curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
+```
+
+The installer installs this release's engine wheel for the invoking user with
+uv (bootstrapping uv into `~/.local/bin` first when the machine has none, with
+Python 3.13 pinned for the engine), runs `ciao setup`, and — unless it is
+given `--no-service` — asks for `sudo` once to install and start the systemd
+service through `ciao service install`: `sudo` is needed only to write
+`/etc/systemd/system/ciaobot.service` root-owned. `ciao` itself lands in the
+account's uv tool bin directory (by default `~/.local/bin`; the installer
+prints the exact path). Every download is pinned: the release wheel is
+compared against the sha256 stamped into the installer before anything is
+installed, and the uv release archive is digest-pinned and checked before it
+is extracted. `ciao setup` generates the dashboard password in the workspace
+`.env` and prints a one-time login URL; existing passwords and configuration
+are preserved on rerun.
+
+Flags (pass what follows to the script after `sh -s --` when piping):
+
+| Flag | Meaning |
+| ---- | ------- |
+| `--workspace DIR` | set up `DIR` (default: `$HOME/Ciaobot`, only when the machine has no Ciaobot unit yet; on a machine whose unit is already installed, setup is skipped and the workspace the unit records is kept) |
+| `--no-service` | skip the systemd unit: the engine is installed and you start it yourself |
+| `--replace-unit` | have `ciao service install` take over a unit that belongs to a source install (see [Existing source installs](#existing-source-installs)); without it such a machine is refused with exit 3 |
+| `--wheel PATH` | install this local wheel instead of downloading the release wheel (CI and rehearsal) |
+| `-h` | print usage and exit |
+
+Keep the generated `PWA_AUTH_TOKEN`. Authenticate provider CLIs as the service
+account, not root. Claude uses the `claude` CLI installed on the machine (the ACP adapter drives it);
+`ciao auth claude --print-only` prints the login command. Run it from an interactive SSH session as that account.
+Install OpenCode 2 separately if using that provider (`npm install -g @opencode/cli`, see [INTEGRATIONS.md](../INTEGRATIONS.md#opencode)), then run `ciao auth opencode`.
+Codex works the same way: install `@openai/codex` yourself, then run `ciao auth codex`. When the codex CLI is present, the pinned `@agentclientprotocol/codex-acp` adapter is used if it is already on the PATH at that version; otherwise the engine installs it on first start into its own folder, as described in [INTEGRATIONS.md](../INTEGRATIONS.md#codex). The installer has nothing to do for either adapter.
+Provider OAuth may require completing a browser flow on your own computer.
+
+The service account also needs a Git author identity for automatic workspace
+snapshots. If it has no configured identity, set `GIT_AUTHOR_NAME`,
+`GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, and `GIT_COMMITTER_EMAIL` in the workspace
+`.env` to the identity you want recorded for automation (for example `Ciaobot`
+and `ciaobot@localhost`). This does not change the administrator's Git settings.
+
+## Service
+
+`ciao service install` — the command the installer runs, and the way to
+(re)install the unit after the fact — renders the unit for the invoking
+account (the account the terminal is in, from its user id, not `$HOME`) and
+installs it through a fixed `sudo sh -c` script that stages
+`/etc/systemd/system/ciaobot.service` in a root-owned private directory, runs
+`systemd-analyze verify` on it, and installs it mode `0644` owned by root. It
+then runs `sudo systemctl daemon-reload`,
+`sudo systemctl enable ciaobot.service` and, unless `--no-start`,
+`sudo systemctl restart ciaobot.service`. When one step fails, the steps
+before it have already run, so the failed step is printed and the command
+exits 1: inspect with `systemctl status ciaobot` before retrying.
+
+Before changing the installed unit, look at what would change:
+
+```sh
+ciao service install --workspace /srv/ciaobot --dry-run
+```
+
+prints the unit followed by one `# would run: …` line per command and runs
+nothing. `--workspace` overrides the workspace the installed unit records;
+`--replace` takes a unit over on purpose (see [Existing source
+installs](#existing-source-installs)); `--no-start` installs and enables the
+unit without restarting it.
+
+Inspect and operate the service with systemd tools:
+
+```sh
+systemctl status ciaobot
+sudo journalctl -u ciaobot -n 100 --no-pager
+```
+
+The unit preserves the engine interpreter it was installed with, sets `HOME`
+and tool `PATH`, uses a private umask, and restarts on failure. Subprocesses
+belong to the same service control group and are stopped with it. The
+application handles its own `.env`; do not also use an `EnvironmentFile`.
+
+The unit is enabled by the install, so the service starts at boot. Ciaobot
+does not read or change a Linux engine's start-at-sign-in state: an
+administrator who disabled the unit re-enables it with
+`sudo systemctl enable --now ciaobot`.
+
+Settings → Restart drains active chat work and re-executes the backend. A direct
+`systemctl stop/restart` is an administrative stop, not that application drain:
+wait for active work to finish first. Systemd allows up to 120 seconds for shutdown.
+
+`ciao linux-service` still renders unit text and installs nothing; the
+source-install flow below uses it to render a unit by hand.
+
+## Existing source installs
+
+Everything in this section keeps working. This is a root-administered source
+checkout: code and venv under `/opt/ciaobot`, workspace `/srv/ciaobot`,
+service account `ciaobot`.
 
 ```sh
 sudo apt-get update
@@ -40,58 +136,6 @@ and transfer `ciao/web/static/` with the source. The server does not need Vite.
 Setup generates the dashboard password in `/srv/ciaobot/.env`, mode `0600`, and
 prints a one-time login URL. Existing passwords and config are preserved on rerun.
 
-For HTTPS reverse proxy hosting, set Settings → Access & devices → Network access to
-**This computer only** (the bind address, `127.0.0.1`) and restart the service,
-and keep the port in the workspace `.env`:
-
-```dotenv
-PWA_PORT=8443
-```
-
-The proxy must forward the public host as `X-Forwarded-Host` (nginx:
-`proxy_set_header X-Forwarded-Host $host;`), or WebSocket upgrades from the
-browser are rejected as cross-origin.
-
-Keep the generated `PWA_AUTH_TOKEN`. Authenticate provider CLIs as `ciaobot`,
-not root. The Claude SDK includes a Claude binary; `ciao auth claude --print-only`
-prints the login command. Run it from an interactive SSH session as that account.
-Install OpenCode 2 separately if using that provider (`npm install -g @opencode/cli`, see [INTEGRATIONS.md](../INTEGRATIONS.md#opencode)), then run `ciao auth opencode`.
-Provider OAuth may require completing a browser flow on your own computer.
-
-The service account also needs a Git author identity for automatic workspace
-snapshots. If it has no configured identity, set `GIT_AUTHOR_NAME`,
-`GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, and `GIT_COMMITTER_EMAIL` in the workspace
-`.env` to the identity you want recorded for automation (for example `Ciaobot`
-and `ciaobot@localhost`). This does not change the administrator's Git settings.
-
-### Workspace file sandbox
-
-A workspace set to **Workspace only** runs the agent and its shell inside
-`bwrap` (bubblewrap). Install it, and on Ubuntu 23.10 and later give it an
-AppArmor profile: those releases block the unprivileged user namespaces `bwrap`
-needs, and chats then refuse to start with "bwrap is installed but cannot
-create a sandbox".
-
-```sh
-sudo apt-get install bubblewrap
-sudo tee /etc/apparmor.d/bwrap >/dev/null <<'EOF'
-abi <abi/4.0>,
-include <tunables/global>
-
-profile bwrap /usr/bin/bwrap flags=(unconfined) {
-  userns,
-  include if exists <local/bwrap>
-}
-EOF
-sudo apparmor_parser -r /etc/apparmor.d/bwrap
-sudo -u ciaobot -H bwrap --ro-bind / / -- true && echo sandbox-ok
-```
-
-The engine checks `bwrap` once at startup, so restart the service after adding
-the profile. Without a working `bwrap`, set the workspace to **Whole machine**.
-
-## Service
-
 Generate and inspect the unit, then install it explicitly:
 
 ```sh
@@ -114,14 +158,37 @@ sudo journalctl -u ciaobot -n 100 --no-pager
 ```
 
 `linux-service` only renders text: it neither creates an account nor changes a
-service. Paths must be absolute. The unit preserves the virtualenv interpreter,
-sets `HOME` and tool `PATH`, uses a private umask, and restarts on failure.
-Subprocesses belong to the same service control group and are stopped with it.
-The application handles its own `.env`; do not also use an `EnvironmentFile`.
+service. Paths must be absolute.
 
-Settings → Restart drains active chat work and re-executes the backend. A direct
-`systemctl stop/restart` is an administrative stop, not that application drain:
-wait for active work to finish first. Systemd allows up to 120 seconds for shutdown.
+`ciao service install` refuses a unit that belongs to a different install: one
+whose `ExecStart` interpreter is not this environment's Python (the source
+checkout install this section describes), or one that records a different
+`CIAO_WORKSPACE` or `User=` than the unit it would write. Overwriting it would
+repoint (or break) an install that already exists. Either keep the source
+install and continue administering it as the Service, Updates and backups and
+Uninstall sections describe, or take the unit over deliberately with `ciao service
+install --replace`; removing the old checkout and virtualenv once nothing else
+uses them is then up to the administrator.
+
+To migrate a source install to the one-line install, stop the unit once active
+work has drained, then run the installer as the service account, pointing it
+at the workspace the unit serves and letting it take the unit over:
+
+```sh
+sudo systemctl stop ciaobot
+sudo -iu ciaobot
+curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | \
+  sh -s -- --workspace /srv/ciaobot --replace-unit
+exit
+systemctl status ciaobot
+```
+
+Setup preserves the existing workspace configuration, and `ciao service
+install --replace` rewrites the unit with the same `User=` and workspace but
+the uv tool environment's interpreter. After the run the engine lives in the
+service account's uv tool directory (`~/.local/bin/ciao`) and not in code an
+administrator owns under `/opt`: the account owns the code it runs. Remove
+`/opt/ciaobot` and its virtualenv once nothing else uses them.
 
 ## Moving the workspace
 
@@ -152,6 +219,18 @@ cannot read is skipped.
 
 ## HTTPS access
 
+For HTTPS reverse proxy hosting, set Settings → Access & devices → Network access to
+**This computer only** (the bind address, `127.0.0.1`) and restart the service,
+and keep the port in the workspace `.env`:
+
+```dotenv
+PWA_PORT=8443
+```
+
+The proxy must forward the public host as `X-Forwarded-Host` (nginx:
+`proxy_set_header X-Forwarded-Host $host;`), or WebSocket upgrades from the
+browser are rejected as cross-origin.
+
 Use Tailscale Serve for private HTTPS access, or point a domain at the VPS and
 put Caddy in front of the loopback backend. A minimal Caddyfile is:
 
@@ -174,7 +253,26 @@ directly at the HTTPS hostname with its dashboard password.
 
 ## Updates and backups
 
-Linux source installs are updated by the administrator — never as the ciaobot
+Run `ciao update` as the account that owns the install to update a one-line
+install. It downloads the latest installer and runs it with the flags you pass
+(for example `ciao update --no-service`). The installer re-downloads the release
+wheel, checks it against the stamped digest, refreshes the engine with
+`uv tool install --force`, and re-installs and restarts the service unit; the
+workspace, its `.env` and its configuration are kept. `ciao update status`
+prints the last update record. Never update as root.
+
+The `sudo` step is the one that can fail. A run with no terminal (for example
+one started by a background caller) cannot answer the `sudo` password prompt,
+so it fails at the unit step, after `uv tool install --force` has already put
+the new code in place. The unit file is then not reinstalled and the service is
+not restarted by that run. Run `ciao update` from an interactive shell, so
+`sudo` can prompt, before relying on the new release.
+
+`ciao update` on a source checkout refuses with exit status 2 and tells you to
+update it with git. Source checkouts are updated as described in the next
+section, not by the installer.
+
+Source installs are updated by the administrator — never as the ciaobot
 account, which owns neither the source checkout nor the virtualenv. Pin the
 chosen source revision, build its frontend, install its Python dependencies,
 and restart the service after active work has drained. For staging, prepare a
@@ -187,6 +285,20 @@ credentials and native sessions). Include any separately configured vault paths.
 Store backups privately. Git does not include runtime state or credentials.
 If an upgrade migrates data, rollback requires its matching pre-upgrade backup,
 not just the previous code. Keep only one active host scheduler during migration.
+
+## Uninstall
+
+Run as the account that owns the install; the `sudo` steps remove the unit:
+
+```sh
+sudo systemctl disable --now ciaobot && sudo rm /etc/systemd/system/ciaobot.service && uv tool uninstall ciaobot
+```
+
+The workspace is kept: the folder with its vault, `.env` and provider
+credentials stays on disk, and deleting it is a separate decision the operator
+makes by hand. The dedicated account stays until the administrator removes it
+with `userdel`, and a migrated source install's `/opt/ciaobot` checkout and
+virtualenv are removed the same way.
 
 ## Open in Terminal
 

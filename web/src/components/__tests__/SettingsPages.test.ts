@@ -9,6 +9,7 @@ import SettingsView from '../SettingsView.vue'
 
 afterEach(() => {
   vi.restoreAllMocks()
+  delete (globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__
 })
 
 const ROUTINES = { workspace_context: { workspace_root: '/srv/ciao' } }
@@ -51,7 +52,7 @@ async function mountSettings(path: string, routines?: unknown) {
   get.mockClear()
   const wrapper = mount(SettingsView, {
     attachTo: document.body,
-    global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: stub } },
+    global: { plugins: [router], stubs: { Teleport: true } },
   })
   await flushPromises()
   await nextTick()
@@ -69,6 +70,21 @@ function calledUrls(get: ReturnType<typeof stubGet>): string[] {
 
 describe('Settings pages', () => {
   const MOVED = ['Appearance', 'This host', 'PWA password', 'Other devices', 'Network access', 'Developer', 'Workspace health', 'Memory backup', 'Update task history', 'Memory handover']
+
+  it('hides Use Ciaobot as an app inside Ciaobot for Mac', async () => {
+    ;(globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__ = true
+    const general = await mountSettings('/settings')
+    try {
+      const t = titles(general.wrapper)
+      for (const title of ['Updates', 'Notifications', 'Keyboard shortcuts', 'Start at sign-in']) {
+        expect(t).toContain(title)
+      }
+      expect(t).not.toContain('Use Ciaobot as an app')
+      expect(general.wrapper.find('#install-app').exists()).toBe(false)
+    } finally {
+      general.wrapper.unmount()
+    }
+  })
 
   it('each page renders only its own cards', async () => {
     const general = await mountSettings('/settings')

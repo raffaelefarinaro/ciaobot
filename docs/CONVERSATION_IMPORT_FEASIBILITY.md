@@ -1,5 +1,7 @@
 # Conversation-history import: source-format and proposals-only extraction feasibility (issue #980)
 
+Historical, paths no longer exist: written before #3135; the OpenCode HTTP driver and `ciao/providers/opencode.py` named below were removed in the ACP cutover.
+
 ## Status
 
 Evidence/design report for #980, a child of #975. **No runtime code was
@@ -59,7 +61,7 @@ json` with the project directory as the working directory (the listing is
 `process.cwd()`-scoped). Both go through one bounded `subprocess.run` mirroring
 `ciao/providers/opencode.py:_server_list`, and the binary and the `(2, 0, 16)`
 floor come from that module's own `resolve_opencode_binary` /
-`_server_version_error`, so an importer and the engine cannot disagree about
+`server_version_error`, so an importer and the engine cannot disagree about
 which opencode is supported. Four points are settled by code rather than left as
 proposals: the export's `messages[]` are **flat objects discriminated on `type`**
 — there is no `role` field and no `{info, parts}` nesting — so role is the tag
@@ -250,7 +252,7 @@ readable in public source at exactly the version floor Ciaobot enforces.
 |---|---|
 | Discovery | `opencode session list --format json`, run **once per project directory** |
 | Export | `opencode session export <sessionID>` (writes JSON to stdout) |
-| Version evidence | **Installed:** `opencode --version` → `opencode v2.0.22`, binary `/Users/raffaelefarinaro/.opencode/bin/opencode`. **Floor Ciaobot enforces:** `ciao/providers/opencode.py:_server_version_error` (L400-409) rejects anything that is not `2.x` with `>= (2, 0, 16)`. **Both commands exist at that floor:** in `sst/opencode`, the files `packages/cli/src/commands/handlers/session/list.ts` and `.../export.ts` are present at tag `v2.0.16` and byte-identical in length to `v2.0.22` (3633 and 3381 bytes). **Documentation:** https://opencode.ai/v2/docs/cli/commands/ documents `opencode session list`, `opencode session list --max-count 20 --format json`, `opencode session export ses_4f2a1c`, `--sanitize`, `opencode session import session.json` (with `--directory`), and states that server-backed commands accept `--standalone` or `--server <url>`. That page is *latest* docs and does **not** state a minimum version — the v2.0.16 claim rests on the tagged source, not on the docs page |
+| Version evidence | **Installed:** `opencode --version` → `opencode v2.0.22`, binary `/Users/raffaelefarinaro/.opencode/bin/opencode`. **Floor Ciaobot enforces:** `ciao/providers/opencode.py:server_version_error` rejects anything that is not `2.x` with `>= (2, 0, 16)` (this audit recorded the helper under its then-name `_server_version_error`, at L400-409, before it was published; that historical name/location is recorded evidence, not a current pointer). **Both commands exist at that floor:** in `sst/opencode`, the files `packages/cli/src/commands/handlers/session/list.ts` and `.../export.ts` are present at tag `v2.0.16` and byte-identical in length to `v2.0.22` (3633 and 3381 bytes). **Documentation:** https://opencode.ai/v2/docs/cli/commands/ documents `opencode session list`, `opencode session list --max-count 20 --format json`, `opencode session export ses_4f2a1c`, `--sanitize`, `opencode session import session.json` (with `--directory`), and states that server-backed commands accept `--standalone` or `--server <url>`. That page is *latest* docs and does **not** state a minimum version — the v2.0.16 claim rests on the tagged source, not on the docs page |
 | Known format | **The export payload is `{info, messages}`**, declared in public source at `v2.0.16` as `packages/schema/src/session-transfer.ts`: `Data = Schema.Struct({ info: Session.Info, messages: Schema.Array(SessionMessage.Info) })`, built in `packages/core/src/session/transfer.ts` as `{ info: sessions.get(sessionID), messages: sessions.messages({sessionID, order: "asc"}).filter(isSettled) }`. `info` fields exercised by that file's own import path: `id`, `parentID`, `title`, `agent`, `model`, `metadata`, `permissions`, `cost`, `tokens.{input,output,reasoning,cache.read,cache.write}`, `time.{created,updated,idle,viewed,archived}`, `outcome`, `revert.files[].{file,patch}`, `location.directory`. Message shape is a tagged union on `type`: `sanitizeMessage` in the same file handles `user` (`text`, `files`, `agents`, `skills`), `synthetic` (`text`, `description`), `system` (`text`), `skill` (`text`), `shell` (`command`, `output.output`), `assistant` (`content[]` of `text`/`reasoning`/tool parts, each with a `state`, plus `providerState`/`providerResultState`), `compaction` (`status`, `summary`, `recent`, `providerState`). **Listing shape** is exactly `[{id, title, updated, created, projectId, directory}]` (`list.ts` L28-42) |
 | Known completeness | Four real losses, all visible in `transfer.ts` or the `list.ts` handler. Three are export-side: `isSettled` keeps an assistant message **only** when `time.completed !== undefined` (an interrupted or in-flight assistant turn is dropped) and a `shell`/`compaction` message only when `status !== "running"`; ordering is ascending, so order is recoverable; and `session list` filters `parentID: null`, so **child/branch sessions are not discoverable by listing** (the protocol schema in `packages/protocol/src/groups/session.ts` documents `parentID` as "Use null to return only root sessions"). The fourth is the **listing's own cap**: `opencode session list` returns **exactly one page** — `list.ts` calls `session.list({project, parentID: null, order: "desc", limit: Option.getOrElse(input.maxCount, () => 100)})` with **no cursor or offset**, so `--max-count` defaults to 100 (`opencode session list --help`, `v2.0.22`) and a project with more than 100 root sessions is silently truncated to the 100 most recent. **An importer must therefore set the cap explicitly and say so, or paginate** — and it cannot paginate through the CLI as it stands, so C5's discovery has to record that the cap was raised and whether it was reached |
 | Unresolved evidence | (a) no export has actually been observed — the schema above is read from tagged source, not from a run, so field *population* (`parentID` on a real root session, `revert`, `outcome`, tool `state` variants) is unverified; (b) `session list` is **project-scoped to `process.cwd()`** (`list.ts` resolves `client.location.get({location:{directory: process.cwd()}})` then `session.list({project: location.project.id, …})`), so there is no single global listing — discovery must enumerate project directories, and how those are discovered is undecided; (c) both commands resolve a **server** connection (`ServerConnection.resolve({server, standalone})`), so neither is a pure file read: an importer must have a running background service or start a private `--standalone` server, which is a service command, not a file scan; (d) `session export` in a non-TTY **fails without an explicit session id** ("Pass a session ID when running without an interactive terminal"), which is fine for an importer but must be coded for; (e) `opencode session import` refuses an id that already exists and requires the parent session to exist when `info.parentID` is set, so a branch cannot be round-tripped into an install that lacks its parent |
@@ -765,15 +767,25 @@ does not re-derive it from the diff.
 **Why matching `session_id` alone is not sufficient.** Two observed facts
 about the reclaim path, both read from `ciao/web/project_chats.py`:
 
-* **Reclaim is fail-open.** `_archive_chat_unlocked` and `delete_chat` both
-  schedule `_reclaim_provider_sessions_async`, which calls
-  `delete_sdk_session_blob` (Claude's JSONL blob) or
-  `OpencodeProvider.delete_thread` (`DELETE /api/session/{id}`) and **logs and
-  continues** when the provider is unavailable. A session that should have been
-  reclaimed can still be on disk, so "the chat is archived, therefore the file
-  is gone" is not an assumption an importer may make. The vault markdown
-  transcript is the durable record of an archived chat; it is not the absence
-  of a session file.
+* **Reclaim is fail-open.** `_archive_chat_unlocked` awaits
+  `_reclaim_provider_sessions_async` inline before it marks the row archived,
+  while `delete_chat` and reset schedule it through
+  `_schedule_provider_cleanup` behind the provider disconnect. The reclaimer
+  dispatches the shared stateless adapter-class `delete_session` operation —
+  resolved through the provider registry for the chat's own provider, with no
+  live provider held — and keeps going when the provider is unavailable: an
+  adapter failure is logged and the remaining sessions are still attempted,
+  but quiet outcomes leave no trace. The operation returns `True`, `False` or
+  `None`: only a literal `False` draws the host's cleanup-warning log, and
+  `None` is a missing confirmation signal, not a claim that anything was
+  deleted. An adapter inheriting the unsupported default returns `None` for
+  every session — those sessions are quietly left behind with no log entry —
+  and Claude's adapter likewise supplies no confirmation in any outcome,
+  logging only its own SDK I/O failures. A session that should have been
+  reclaimed can therefore still be on disk, so "the chat is archived,
+  therefore the file is gone" is not an assumption an importer may make. The
+  vault markdown transcript is the durable record of an archived chat; it is
+  not the absence of a session file.
 * **The idle sweep deletes nothing.** `reap_idle_providers` only *disconnects*
   a provider idle past `_PROVIDER_IDLE_TIMEOUT_SECONDS` (900 s): "Only the
   provider is released. The chat row, its `session_id` and its transcript are
@@ -1332,7 +1344,7 @@ provider contract changed.
    releases at the time of writing, so no V2 release notes were cited. The claim
    "both commands exist at 2.0.16" is a source-level claim and should be
    re-confirmed by whoever bumps the floor in
-   `opencode._server_version_error`.
+   `opencode.server_version_error`.
 3. **Claude Code's JSONL message schema has no fixture.** Only the fields
    Ciaobot's own reader depends on are established. Timestamps, branch
    selection, `isMeta` semantics, and whether old session files are rewritten
@@ -1364,6 +1376,10 @@ provider contract changed.
 ## References
 
 Repository (read in this worktree):
+*(Historical evidence for this document's audit, as inspected then: names and
+line numbers below are the ones that audit read, not current pointers.
+`_server_version_error` is its then-name for the module's version-support
+check, which is now `ciao/providers/opencode.py:server_version_error`.)*
 
 * `ciao/web/memory_pass.py` — the archive memory pass: `MEMORY_PASS_CHATS`,
   `MemoryPassCoordinator.enqueue`/`pump`/`on_turn_finished`/`resume`,

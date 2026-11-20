@@ -45,9 +45,8 @@
  * that disagrees with itself is **flagged with what disagrees and the controls
  * that resolve it** rather than silently rewritten.
  */
-import SkeletonLoader from './SkeletonLoader.vue'
 import TaskNoteFeed from './TaskNoteFeed.vue'
-import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, useId, watch } from 'vue'
 import { routeLocationKey, routerKey } from 'vue-router'
 import { DropdownMenuContent, DropdownMenuItem, DropdownMenuPortal, DropdownMenuRoot, DropdownMenuTrigger } from 'reka-ui'
 import PaneHeader from './PaneHeader.vue'
@@ -144,37 +143,7 @@ const fileViewer = useFileViewerStore()
 const itemPeek = useItemPeekStore()
 const workspace = computed(() => projectStore.activeWorkspace)
 
-/**
- * Where the skeleton switches from column rows to card rows.
- *
- * Only the loading placeholder reads this. The lanes stay side by side at every
- * width and scroll inside the board, so no gesture is gated on it. The pane root is
- * a block that fills the `chat-pane` container, so observing it measures the pane;
- * the window keeps a listener off this component entirely, since the pane resizes
- * when the sidebar drags.
- */
-const NARROW_PANE_PX = 940
 const paneEl = ref<HTMLElement | null>(null)
-const paneWidth = ref<number | null>(null)
-const isNarrow = computed(() => paneWidth.value !== null && paneWidth.value <= NARROW_PANE_PX)
-
-let paneObserver: ResizeObserver | null = null
-onMounted(() => {
-  const node = paneEl.value
-  if (!node) return
-  // jsdom has no ResizeObserver; the width stays null and the board draws its
-  // columns, which is what a test reads.
-  if (typeof ResizeObserver === 'undefined') return
-  paneObserver = new ResizeObserver((entries) => {
-    const entry = entries[entries.length - 1]
-    if (entry) paneWidth.value = entry.contentRect.width
-  })
-  paneObserver.observe(node)
-})
-onBeforeUnmount(() => {
-  paneObserver?.disconnect()
-  paneObserver = null
-})
 
 // ── Load states ───────────────────────────────────────────────────────────
 //
@@ -268,7 +237,7 @@ watch(workspace, () => {
   // the same id against a workspace that never had it.
   if (overlay.value) finishOverlayClose()
   load()
-})
+}, { flush: 'sync' })
 
 // ── Filters ───────────────────────────────────────────────────────────────
 
@@ -954,6 +923,9 @@ const DELEGATE_DEFAULT_KEY = '__workspace-default__'
 const delegateRuntime = ref<NewChatRuntime | null>(null)
 const delegateModelPickerOpen = ref(false)
 const delegateModelTrigger = ref<HTMLButtonElement | null>(null)
+const delegateModelLabelId = useId()
+const delegateModelRegion = ref<HTMLElement | null>(null)
+const delegateModelWorkspace = ref('')
 const taskStore = useTaskStore()
 
 // The provider the workspace starts chats on; names the default row.
@@ -985,8 +957,14 @@ const delegateModelSections = computed<ModelSection[]>(() => [
 // The triggerless selector does not own the chip, so return focus to it
 // ourselves when the list closes (Escape, outside click, or a pick).
 function closeDelegateModelPicker(): void {
+  const focused = document.activeElement
+  const restore = !!focused && !!delegateModelRegion.value?.querySelector('.model-selector__popover')?.contains(focused)
   delegateModelPickerOpen.value = false
-  void nextTick(() => delegateModelTrigger.value?.focus())
+  const transition = taskStore.modelTransition
+  void nextTick(() => {
+    if (restore && transition === taskStore.modelTransition && delegateModelTrigger.value?.isConnected
+      && (document.activeElement === document.body || document.activeElement === focused)) delegateModelTrigger.value.focus()
+  })
 }
 
 function toggleDelegateModelPicker(): void {
@@ -1002,6 +980,29 @@ function selectDelegateModel(value: string | string[], sectionKey: string): void
     return
   }
   delegateRuntime.value = { model, provider: providerForModelSection(sectionKey) }
+}
+
+watch(() => projectStore.activeWorkspace, () => { delegateRuntime.value = null }, { flush: 'sync' })
+watch(() => taskStore.modelTransition, transition => {
+  const focused = document.activeElement
+  const restore = !!focused && !!delegateModelRegion.value?.querySelector('.model-selector__popover')?.contains(focused)
+  delegateModelPickerOpen.value = false
+  void nextTick(() => {
+    if (restore && transition === taskStore.modelTransition && delegateModelTrigger.value?.isConnected
+      && (document.activeElement === document.body || document.activeElement === focused)) delegateModelTrigger.value.focus()
+  })
+  if (delegateOpen.value && delegateModelWorkspace.value === projectStore.activeWorkspace
+    && delegateTakesInstructions.value && taskStore.modelWorkspaceEligible
+    && !taskStore.modelLoading && !taskStore.models) void taskStore.fetchModels()
+}, { flush: 'sync' })
+
+function delegateSelectionHandler(transition: number) {
+  return (value: string | string[], section: string) => {
+    if (transition === taskStore.modelTransition && taskStore.modelWorkspaceEligible) selectDelegateModel(value, section)
+  }
+}
+function delegateCloseHandler(transition: number) {
+  return () => { if (transition === taskStore.modelTransition) closeDelegateModelPicker() }
 }
 
 const delegateFocusActive = computed(
@@ -1113,6 +1114,7 @@ async function openDelegate(task: Task, mode?: DelegateMode) {
   delegateBody.value = ''
   delegateRevision.value = ''
   delegateBodyState.value = 'loading'
+  delegateModelWorkspace.value = workspace.value
   delegateOpen.value = true
   const seq = ++delegateSeq
   const read = await board.get(workspace.value, task.id)
@@ -3184,7 +3186,29 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
         </div>
 
         <!-- 1 · first load in flight -->
-        <SkeletonLoader v-if="firstLoad" label="Loading tasks" :variant="isNarrow ? 'cards' : 'board'" :count="3" />
+        <div v-if="firstLoad" class="task-loading" role="status" aria-label="Loading tasks">
+          <div
+            class="task-lanes"
+            :class="columnsShown ? 'task-lanes--columns' : 'task-lanes--list'"
+            aria-hidden="true"
+          >
+            <section v-for="lane in boardLanes" :key="lane.status || 'all'" class="task-lane">
+              <h3 class="task-lane-head">
+                <span class="task-lane-label">{{ lane.label }}</span>
+                <span class="task-loading-bar task-loading-bar--count"></span>
+              </h3>
+              <ul class="task-cards">
+                <li v-for="index in 2" :key="index" class="task-card">
+                  <span class="task-loading-bar"></span>
+                  <span class="task-loading-bar task-loading-bar--short"></span>
+                </li>
+              </ul>
+            </section>
+            <div v-if="columnsShown && !doneShown" class="task-done-toggle">
+              <span class="task-done-toggle-label">Done</span>
+            </div>
+          </div>
+        </div>
 
         <!-- 2 · first load failed: the server's sentence and a Retry. Never an
              "empty board" claim, which is what a failed GET would be read as. -->
@@ -3607,9 +3631,9 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
               <dd>{{ delegatePreview?.project }}</dd>
             </div>
             <div>
-              <dt>Provider &amp; model</dt>
+              <dt :id="delegateModelLabelId">Provider &amp; model</dt>
               <dd>
-                <div v-if="delegateTakesInstructions" class="task-delegate-model-wrap">
+                <div v-if="delegateTakesInstructions" ref="delegateModelRegion" class="task-delegate-model-wrap">
                   <button
                     ref="delegateModelTrigger"
                     type="button"
@@ -3625,11 +3649,20 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
                     triggerless
                     :model-value="delegateRuntime?.model || DELEGATE_DEFAULT_KEY"
                     :sections="delegateModelSections"
+                    :labelled-by="delegateModelLabelId"
                     placeholder="Model"
                     placement="bottom-start"
-                    @select="selectDelegateModel"
-                    @close="closeDelegateModelPicker"
+                    v-on="{ select: delegateSelectionHandler(taskStore.modelTransition), close: delegateCloseHandler(taskStore.modelTransition) }"
                   />
+                  <span v-if="projectStore.workspaceRegistryStatus === 'error'" role="alert">Workspace list unavailable.
+                    <button type="button" class="btn-small" aria-label="Retry workspace list for delegation models" @click="projectStore.fetchWorkspaces()">Retry</button>
+                  </span>
+                  <span v-else-if="!taskStore.modelWorkspaceEligible" role="status" aria-label="Delegation models" aria-live="polite">Delegation models unavailable until this workspace is registered.</span>
+                  <span v-else-if="taskStore.modelError" role="alert" aria-label="Delegation models">Delegation models unavailable: {{ taskStore.modelError }}
+                    <template v-if="taskStore.modelStale"> Previously loaded models may be out of date.</template>
+                    <button type="button" class="btn-small" aria-label="Retry delegation models" @click="taskStore.fetchModels()">Retry</button>
+                  </span>
+                  <span v-else role="status" aria-label="Delegation models" aria-live="polite">{{ taskStore.modelLoading ? (taskStore.modelStale ? 'Loading delegation models; previous models may be out of date.' : 'Loading delegation models…') : taskStore.modelEmpty ? 'No models listed; availability is unknown.' : taskStore.models ? 'Delegation models loaded. Availability may be incomplete.' : 'Delegation models not loaded.' }}</span>
                 </div>
                 <template v-else>The attempt's own chat</template>
               </dd>
@@ -3777,7 +3810,7 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
       :data-rail-host="overlay ? undefined : ''"
       @click.self="overlay && requestDetailClose()"
     >
-      <PaneHeader v-if="!overlay" :brand="false" phone-overflow @open-sidebar="emit('open-sidebar')">
+      <PaneHeader v-if="!overlay" phone-overflow @open-sidebar="emit('open-sidebar')">
         <template #title>
           <div class="header-left">
             <ItemTitleRow :rail="taskRailOn" close-label="Close task" @close="requestDetailClose()">
@@ -3791,6 +3824,7 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
                 :items="taskRail.items.value"
                 :current-id="detailId"
                 group-label="Tasks on this board"
+                :busy="taskRail.switching.value"
                 @select="onTaskRailSelect"
                 @rename="detailTitleField?.focus()"
                 @lean="taskRailLean = $event"
@@ -4314,9 +4348,6 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
 <style scoped src="./headerFold.css"></style>
 
 <style scoped>
-/* The pane root. It is also the element `NARROW_PANE_PX` observes: a block
-   filling the `chat-pane` container, so its inline size IS the container's, and
-   the one number both the JS lanes and the CSS breakpoint agree on. */
 .task-view {
   display: flex;
   flex-direction: column;
@@ -4484,6 +4515,18 @@ defineExpose({ requestClose, selectAdjacent, closeDetailPage, openCreate })
 .task-unreadable-msg { color: var(--fg2); min-width: 0; }
 
 /* ── Board ─────────────────────────────────────────────────────────────── */
+.task-loading { display: flex; flex: 1 1 auto; min-width: 0; }
+.task-loading .task-card,
+.task-loading .task-done-toggle { pointer-events: none; cursor: default; }
+.task-loading-bar {
+  display: block;
+  width: 80%;
+  height: var(--space-3);
+  border-radius: var(--radius-xs);
+  background: var(--border);
+}
+.task-loading-bar--short { width: 45%; }
+.task-loading-bar--count { width: var(--space-6); }
 .task-lanes {
   display: flex;
   /* Every lane fills the board: a short lane stretches to the tallest one, and
@@ -4985,8 +5028,11 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 /* As wide as the task editor the sheet opens from. */
 .task-delegate-sheet { max-width: 1120px; }
 .task-delegate-sheet .task-form textarea { min-height: 12rem; }
-.task-delegate-model-wrap { position: relative; display: inline-flex; }
-.task-delegate-model { white-space: nowrap; }
+.task-delegate-model-wrap { position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); min-width: 0; max-width: 100%; }
+.task-delegate-model { max-width: 100%; white-space: normal; text-align: left; overflow-wrap: anywhere; }
+.task-delegate-model-wrap [role="alert"],
+.task-delegate-model-wrap [role="status"] { max-width: 100%; overflow-wrap: anywhere; }
+.task-delegate-model-wrap [role="alert"] button { min-width: var(--touch); min-height: var(--touch); }
 .task-form textarea {
   width: 100%;
   min-width: 0;

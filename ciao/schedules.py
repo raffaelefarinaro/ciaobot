@@ -19,20 +19,25 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
+import hashlib
 import json
 import logging
+import os
 import re
 import threading
+import time
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from importlib import resources
 from pathlib import Path
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Callable, Coroutine, Protocol, cast
 from zoneinfo import ZoneInfo
 
 from ciao.jsonio import read_json_dict
+from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.schedule_command import normalize_schedule_command
 from ciao.models import BridgeMode
 
@@ -434,8 +439,15 @@ def migrate_loops(runtime_root: Path) -> int:
             # already renamed aside. An imported loop is a user schedule.
             scope="user",
         )
-        store.replace(entry)
-        imported += 1
+        try:
+            added = store.add_if_absent(entry)
+        except ScheduleStoreCorrupt:
+            logger.exception(
+                "schedules.json is unreadable; leaving %s in place", source.name
+            )
+            return imported
+        if added:
+            imported += 1
 
     try:
         source.replace(source.with_name("loops.json.migrated"))
@@ -857,7 +869,7 @@ def was_dispatched_since(entry: "ScheduleEntry", when: datetime) -> bool:
 # ``last_status`` values that mean the dispatch did not produce a completed
 # run. "skipped" is deliberately absent: it marks work the provider or the user
 # is still expected to finish (a quota-deferred retry, an approval card, an
-# AskUserQuestion, unsettled background subagents), and re-running that would
+# AskUserQuestion), and re-running that would
 # duplicate a turn nobody abandoned. "busy" and "missing-chat" belong to the
 # interval path, which has no expected slot to satisfy. "retrying" is in
 # neither set: the slot is still being worked on.
@@ -866,16 +878,8 @@ FAILED_RUN_STATUSES = frozenset({"error"})
 # The mirror image: a dispatch whose run reached one of these needs no replay.
 # "skipped" is here for the same reason it is absent above — the turn was not
 # abandoned, somebody is still expected to finish it — so the occurrence it
-# served counts as served. "unfinished" is the subagent case split out of
-# "skipped" (see ``RUN_STATUS_UNFINISHED``) and counts the same way.
-COMPLETED_RUN_STATUSES = frozenset({"ok", "skipped", "unfinished"})
-
-# The row status for a run that ended with background subagents unsettled, or
-# on an interim message with no synthesis turn. Kept apart from "skipped"
-# because nothing in the chat is waiting on the operator: the PWA said "needs
-# you — check the chat" and the chat had no question or approval to answer.
-# The job-run log still records these as "skipped".
-RUN_STATUS_UNFINISHED = "unfinished"
+# served counts as served.
+COMPLETED_RUN_STATUSES = frozenset({"ok", "skipped"})
 
 # Row status for a run whose agent found an external service unreachable and
 # armed a network retry in its chat (`ciao chat retry --action set --kind
@@ -885,7 +889,7 @@ RUN_STATUS_UNFINISHED = "unfinished"
 RUN_STATUS_RETRYING = "retrying"
 
 # Row statuses that point the operator at the run's chat.
-CHAT_ATTENTION_RUN_STATUSES = frozenset({"skipped", RUN_STATUS_UNFINISHED})
+CHAT_ATTENTION_RUN_STATUSES = frozenset({"skipped"})
 
 # Separates the occurrence a dispatch was made for from the token that makes it
 # unique, inside ``last_dispatch_id``. Same shape as SYSTEM_ID_SEPARATOR: one
@@ -1038,8 +1042,12 @@ def settle_retrying_runs(store: "ScheduleStore", chat_id: str, status: str) -> b
     for entry in store.list_entries():
         if entry.last_run_chat_id != chat_id or entry.last_status != RUN_STATUS_RETRYING:
             continue
+        base = dataclasses.replace(entry)
         if stamp_run_outcome(entry, entry.last_dispatch_id, status):
-            store.replace(entry)
+            try:
+                store.replace(entry, base=base)
+            except ScheduleNotFound:
+                continue
             changed = True
     return changed
 
@@ -1047,10 +1055,9 @@ def settle_retrying_runs(store: "ScheduleStore", chat_id: str, status: str) -> b
 def settle_runs_for_archived_chat(store: "ScheduleStore", chat_id: str) -> bool:
     """Clear the chat-attention flag on every entry whose run chat was archived.
 
-    "skipped" and "unfinished" tell the operator to check the run's chat: an
-    approval card, a question, unsettled subagents. Archiving that chat is the
-    operator's answer,
-    and the chat can no longer take one, so leaving the flag up pointed the
+    "skipped" tells the operator to check the run's chat: an approval card or
+    a question. Archiving that chat is the operator's answer, and the chat can
+    no longer take one, so leaving the flag up pointed the
     Automations page at an archived chat until the next run replaced it (a
     weekly entry stayed flagged for a week). The occurrence already counts as
     served (``COMPLETED_RUN_STATUSES``), so "ok" changes no catch-up decision.
@@ -1063,13 +1070,17 @@ def settle_runs_for_archived_chat(store: "ScheduleStore", chat_id: str) -> bool:
     for entry in store.list_entries():
         if entry.last_run_chat_id != chat_id:
             continue
+        base = dataclasses.replace(entry)
         if entry.last_status in CHAT_ATTENTION_RUN_STATUSES:
             entry.last_status = "ok"
         elif entry.last_status == RUN_STATUS_RETRYING:
             entry.last_status = "error"
         else:
             continue
-        store.replace(entry)
+        try:
+            store.replace(entry, base=base)
+        except ScheduleNotFound:
+            continue
         changed = True
     return changed
 
@@ -1114,7 +1125,6 @@ class ScheduleEntry:
     # "ok", "error", "busy" (skipped, the target chat had a turn in flight),
     # "missing-chat" (target gone and unrecoverable; the entry was disabled),
     # "skipped" (stopped on an approval, a question or a deferred retry) or
-    # "unfinished" (ended before its subagents' results were synthesized) or
     # "retrying" (waiting on a network retry in the run chat).
     # Wall-clock entries also carry it: "running" from their own dispatch, then
     # the run's outcome written back by the dispatch pipeline, which is what
@@ -1190,6 +1200,183 @@ class ScheduleEntry:
     removable: bool = True
 
 
+# Stored beside a row's own fields (inside the system overlay for a system
+# routine). Not a ``ScheduleEntry`` field, so it never reaches API payloads
+# except through :meth:`ScheduleStore.revision`.
+_REV_KEY = "_rev"
+# Fields the scheduler stamps while it runs. They are not editable content: a
+# dispatch must not invalidate the revision an editor is holding.
+RUN_STATE_FIELDS = frozenset({
+    "last_triggered_on",
+    "last_dispatched_at",
+    "last_run_chat_id",
+    "last_status",
+    "last_recovered_on",
+    "last_dispatch_id",
+    "last_completed_on",
+})
+
+
+# Not user content: ``created_at`` is a system row's read-time first-seen
+# fallback until the scheduler stamps it, and the rest are derived flags.
+_DIGEST_EXCLUDED = RUN_STATE_FIELDS | {"created_at", "scope", "editable", "removable"}
+
+
+def _editable_digest(entry: "ScheduleEntry") -> str:
+    content = {k: v for k, v in asdict(entry).items() if k not in _DIGEST_EXCLUDED}
+    raw = json.dumps(content, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _rev_value(raw: object) -> int:
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0 else 0
+
+
+def _revision_token(rev: int, entry: "ScheduleEntry") -> str:
+    return f"{rev}-{_editable_digest(entry)}"
+
+
+def _fresh_epoch() -> int:
+    """A rev no earlier incarnation of the same id can have held."""
+    return time.time_ns()
+
+
+class ScheduleStoreCorrupt(RuntimeError):
+    """A schedule store file is unreadable, so a write must not replace it.
+
+    Reads keep treating such a file as empty (the engine stays up); a write
+    would otherwise persist an empty store over data an operator may still be
+    able to repair.
+    """
+
+
+class ScheduleConflict(RuntimeError):
+    """The caller's revision no longer matches the row; nothing was written."""
+
+
+class ScheduleNotFound(LookupError):
+    """The row a scoped write targets no longer exists (deleted meanwhile)."""
+
+
+class _RootLock:
+    """Per-runtime-root writer lock shared by every ``ScheduleStore`` instance.
+
+    ``rlock`` gives in-process reentrancy across instances; ``hold`` adds an
+    exclusive advisory lock on a sidecar file so cooperating processes
+    serialize too. The sidecar is a stable path that is never unlinked and is
+    not the JSON file, whose inode every save replaces. Order is always rlock
+    then file lock. Nothing may await or call out while holding it.
+    """
+
+    def __init__(self, lock_path: Path) -> None:
+        self.lock_path = lock_path
+        self.rlock = threading.RLock()
+        self._depth = 0
+        self._fd: int | None = None
+
+    @contextlib.contextmanager
+    def hold(self):
+        with self.rlock:
+            if self._depth == 0:
+                self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+                try:
+                    lock_exclusive(fd)
+                except BaseException:
+                    os.close(fd)
+                    raise
+                self._fd = fd
+            self._depth += 1
+            try:
+                yield
+            finally:
+                self._depth -= 1
+                if self._depth == 0:
+                    fd, self._fd = self._fd, None
+                    assert fd is not None
+                    try:
+                        unlock(fd)
+                    finally:
+                        os.close(fd)
+
+
+_ROOT_LOCKS: dict[str, _RootLock] = {}
+_ROOT_LOCKS_GUARD = threading.Lock()
+
+
+def _root_lock(runtime_root: Path) -> _RootLock:
+    key = os.path.normcase(os.path.realpath(runtime_root))
+    with _ROOT_LOCKS_GUARD:
+        lock = _ROOT_LOCKS.get(key)
+        if lock is None:
+            lock = _ROOT_LOCKS[key] = _RootLock(Path(key) / "schedules.lock")
+        return lock
+
+
+def schedule_store_lock(runtime_root: Path):
+    """The store's writer lock, for callers that edit ``schedules.json`` raw.
+
+    Same shared in-process lock plus the ``schedules.lock`` sidecar every
+    ``ScheduleStore`` write takes, reentrant with them. Hold it only around a
+    short read-modify-write of the files, never across an await or an
+    external operation.
+    """
+    return _root_lock(runtime_root).hold()
+
+
+# The only fields ``update_fields`` may set: the system's own bookkeeping
+# stamps. Anything a user or agent edits goes through ``replace`` with an
+# authorization and a revision, never through here.
+_SCOPED_FIELDS = RUN_STATE_FIELDS | {"web_project_name", "fallback_project_id"}
+
+
+def _original_overlay_keys(raw: bytes | None) -> set[str]:
+    if raw is None:
+        return set()
+    try:
+        overlays = json.loads(raw.decode("utf-8")).get("schedules", {})
+    except (ValueError, AttributeError):
+        return set()
+    return {str(key) for key in overlays} if isinstance(overlays, dict) else set()
+
+
+def _original_user_ids(raw: bytes | None, workspace: str) -> set[str]:
+    if raw is None:
+        return set()
+    try:
+        rows = json.loads(raw.decode("utf-8")).get("schedules", [])
+    except (ValueError, AttributeError):
+        return set()
+    return {
+        str(row["schedule_id"])
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("scope") != "system"
+        and row.get("workspace") == workspace
+        and row.get("schedule_id")
+    }
+
+
+def _original_overlay_bases(raw: bytes | None, workspace: str) -> set[str]:
+    if raw is None:
+        return set()
+    try:
+        overlays = json.loads(raw.decode("utf-8")).get("schedules", {})
+    except (ValueError, AttributeError):
+        return set()
+    bases: set[str] = set()
+    for key in overlays if isinstance(overlays, dict) else ():
+        base, separator, row_workspace = str(key).partition(SYSTEM_ID_SEPARATOR)
+        if separator and row_workspace == workspace:
+            bases.add(base)
+    return bases
+
+
+def bump_row_revision(row: dict) -> None:
+    """Advance a raw user row's revision counter after an editable change."""
+    row[_REV_KEY] = _rev_value(row.get(_REV_KEY)) + 1
+
+
 class ScheduleStore:
     """JSON-backed storage for user schedules plus packaged system schedules."""
 
@@ -1211,7 +1398,11 @@ class ScheduleStore:
         # Packaged stock definitions, cached after the first successful read.
         # See _load_system_definitions for why this is not re-read per tick.
         self._system_definitions: list[dict] | None = None
-        self._lock = threading.RLock()
+        root = _root_lock(runtime_root)
+        # Reads and in-process reentrancy share the thread lock; every write
+        # goes through ``_txn`` so other processes are excluded as well.
+        self._lock = root.rlock
+        self._txn = root.hold
 
     def list_entries(self, *, chat_id: int | None = None) -> list[ScheduleEntry]:
         with self._lock:
@@ -1300,15 +1491,146 @@ class ScheduleStore:
             description=description or "",
             command=normalize_schedule_command(command),
         )
-        with self._lock:
-            data = self._load()
+        with self._txn():
+            data = self._load_for_write()
             normalize_auto_archive(entry)
-            data.setdefault("schedules", []).append(self._serialize_entry(entry))
+            row = self._serialize_entry(entry)
+            row[_REV_KEY] = 0
+            data.setdefault("schedules", []).append(row)
             self._save(data)
         return entry
 
-    def replace(self, entry: ScheduleEntry, *, timing_fields: frozenset[str] = frozenset()) -> None:
-        # Both write doors normalise, so no caller can persist an auto-archive
+    def replace(
+        self,
+        entry: ScheduleEntry,
+        *,
+        timing_fields: frozenset[str] = frozenset(),
+        base: ScheduleEntry | None = None,
+        authorize: Callable[[ScheduleEntry], None] | None = None,
+        expected_revision: str | None = None,
+    ) -> None:
+        """Persist ``entry``.
+
+        Without ``base`` this is the legacy upsert of the whole row. With
+        ``base`` (the row as the caller read it before editing) only the fields
+        that differ from it are applied to the *current* row, under the writer
+        lock: another writer's edit to a different field is kept, a row deleted
+        meanwhile raises :class:`ScheduleNotFound` instead of coming back, and
+        unknown stored keys survive. Two edits to the same field still resolve
+        last-writer-wins. ``authorize`` runs on the current row before anything
+        is written and may raise to refuse. ``expected_revision`` (an opaque token
+        from :meth:`revision`) is checked after ``authorize``, on the current row,
+        and a mismatch raises :class:`ScheduleConflict` before anything changes.
+        """
+        if base is None:
+            self._replace_whole(
+                entry,
+                timing_fields=timing_fields,
+                authorize=authorize,
+                expected_revision=expected_revision,
+            )
+            return
+        with self._txn():
+            if entry.scope == "system":
+                current = self.get(entry.schedule_id)
+                if current is None:
+                    raise ScheduleNotFound(entry.schedule_id)
+                if authorize is not None:
+                    authorize(current)
+                self._check_revision(current, expected_revision)
+                merged = self._merge_changes(current, base, entry)
+                self._finalize_entry(merged)
+                self._replace_system_state(
+                    merged, timing_fields=timing_fields, base=base, changed=entry
+                )
+                return
+            data = self._load_for_write()
+            items = data.setdefault("schedules", [])
+            for index, item in enumerate(items):
+                if not isinstance(item, dict) or item.get("schedule_id") != entry.schedule_id:
+                    continue
+                current = self._entry_from_item(item)
+                if authorize is not None:
+                    authorize(current)
+                self._check_revision(current, expected_revision, item=item)
+                merged = self._merge_changes(current, base, entry)
+                self._finalize_entry(merged)
+                before, after = asdict(current), asdict(merged)
+                updated = dict(item)
+                updated.update({k: v for k, v in after.items() if before.get(k) != v})
+                if _editable_digest(current) != _editable_digest(merged):
+                    updated[_REV_KEY] = _rev_value(item.get(_REV_KEY)) + 1
+                items[index] = updated
+                self._save(data)
+                return
+            raise ScheduleNotFound(entry.schedule_id)
+
+    def _stored_rev(self, entry: ScheduleEntry, item: dict | None = None) -> int:
+        if entry.scope == "system":
+            state = self._load_system_state()
+            overlay = self._system_overlay(
+                state, entry.schedule_id, system_base_id(entry.schedule_id)
+            )
+            return _rev_value(overlay.get(_REV_KEY))
+        if item is None:
+            item = next(
+                (i for i in self._runtime_items() if i.get("schedule_id") == entry.schedule_id),
+                {},
+            )
+        return _rev_value(item.get(_REV_KEY))
+
+    def revision(self, schedule_id: str) -> str | None:
+        """Opaque token for the row's editable content, or None when absent.
+
+        It combines the content digest with a stored counter that every editable
+        change (and every restore, via a fresh epoch) advances, so an edit that
+        is later reverted, or a row deleted and restored, yields a different
+        token. Run-state stamps do not move it. A caller that holds a token and
+        passes it as ``expected_revision`` is refused with
+        :class:`ScheduleConflict` if anything editable changed since. Restoring
+        an old ``schedules.json`` by hand can revive an old token: that needs
+        independently durable history and is not detected.
+        """
+        with self._lock:
+            entry = self.get(schedule_id)
+            return None if entry is None else _revision_token(self._stored_rev(entry), entry)
+
+    def snapshot(self) -> list[tuple[ScheduleEntry, str]]:
+        """Every listed row with its revision, read as one consistent snapshot.
+
+        Taken under the writer lock so a row and the token shown with it always
+        describe the same committed state, even against another process.
+        """
+        with self._txn():
+            return [(e, _revision_token(self._stored_rev(e), e)) for e in self.list_entries()]
+
+    def get_with_revision(self, schedule_id: str) -> tuple[ScheduleEntry, str] | None:
+        """One row and its revision from the same committed state."""
+        with self._txn():
+            entry = self.get(schedule_id)
+            if entry is None:
+                return None
+            return entry, _revision_token(self._stored_rev(entry), entry)
+
+    def _check_revision(
+        self, current: ScheduleEntry, expected: str | None, *, item: dict | None = None
+    ) -> None:
+        if expected is None:
+            return
+        if _revision_token(self._stored_rev(current, item), current) != expected:
+            raise ScheduleConflict(current.schedule_id)
+
+    @staticmethod
+    def _merge_changes(
+        current: ScheduleEntry, base: ScheduleEntry, edited: ScheduleEntry
+    ) -> ScheduleEntry:
+        base_values, edited_values = asdict(base), asdict(edited)
+        changes = {k: v for k, v in edited_values.items() if base_values.get(k) != v}
+        return dataclasses.replace(current, **changes)
+
+    @staticmethod
+    def _finalize_entry(entry: ScheduleEntry) -> None:
+        # Every write door normalises, so no caller can persist an auto-archive
         # policy the dispatcher will refuse to honour.
         normalize_auto_archive(entry)
         entry.command = normalize_schedule_command(entry.command)
@@ -1316,32 +1638,187 @@ class ScheduleStore:
             time_error = wall_clock_time_error(entry)
             if time_error:
                 raise ValueError(time_error)
-        with self._lock:
+
+    def _replace_whole(
+        self,
+        entry: ScheduleEntry,
+        *,
+        timing_fields: frozenset[str],
+        authorize: Callable[[ScheduleEntry], None] | None,
+        expected_revision: str | None = None,
+    ) -> None:
+        self._finalize_entry(entry)
+        with self._txn():
+            if authorize is not None or expected_revision is not None:
+                current = self.get(entry.schedule_id)
+                if current is None:
+                    raise ScheduleNotFound(entry.schedule_id)
+                if authorize is not None:
+                    authorize(current)
+                self._check_revision(current, expected_revision)
             if entry.scope == "system":
                 self._replace_system_state(entry, timing_fields=timing_fields)
                 return
-            data = self._load()
+            data = self._load_for_write()
             items = data.setdefault("schedules", [])
             for index, item in enumerate(items):
                 if item.get("schedule_id") == entry.schedule_id:
-                    items[index] = self._serialize_entry(entry)
+                    row = self._serialize_entry(entry)
+                    rev = _rev_value(item.get(_REV_KEY))
+                    stored = self._entry_from_item(item)
+                    normalize_auto_archive(stored)
+                    if _editable_digest(stored) != _editable_digest(entry):
+                        rev += 1
+                    row[_REV_KEY] = rev
+                    items[index] = row
                     self._save(data)
                     return
-            items.append(self._serialize_entry(entry))
+            row = self._serialize_entry(entry)
+            row[_REV_KEY] = _fresh_epoch()
+            items.append(row)
             self._save(data)
 
-    def delete(self, schedule_id: str) -> bool:
-        with self._lock:
+    def delete(
+        self,
+        schedule_id: str,
+        *,
+        authorize: Callable[[ScheduleEntry], None] | None = None,
+        expected_revision: str | None = None,
+    ) -> bool:
+        with self._txn():
             entry = self.get(schedule_id)
-            if entry is not None and entry.scope == "system":
-                return False
-            data = self._load()
+            if entry is not None:
+                if authorize is not None:
+                    authorize(entry)
+                if entry.scope == "system":
+                    return False
+                self._check_revision(entry, expected_revision)
+            data = self._load_for_write()
+            if (
+                entry is None
+                and authorize is not None
+                and any(isinstance(i, dict) and i.get("schedule_id") == schedule_id for i in data.get("schedules", []))
+            ):
+                # A stored row that cannot be listed cannot be authorized.
+                raise ScheduleNotFound(schedule_id)
             before = len(data.setdefault("schedules", []))
             data["schedules"] = [item for item in data["schedules"] if item.get("schedule_id") != schedule_id]
             if len(data["schedules"]) == before:
                 return False
             self._save(data)
             return True
+
+    def update_fields(
+        self,
+        schedule_id: str,
+        changes: Mapping[str, Any],
+        *,
+        only_if: Callable[[ScheduleEntry], bool] | None = None,
+    ) -> bool:
+        """Set just ``changes`` on the *current* row, under the writer lock.
+
+        ``only_if`` is checked on the freshly read row, so a guard such as "the
+        field is still blank" or "this dispatch still owns the row" holds at
+        write time. Returns False, writing nothing, when the row is gone or the
+        guard refuses: a row deleted meanwhile is never resurrected and another
+        writer's edit to any other field is kept.
+        """
+        unsupported = set(changes) - _SCOPED_FIELDS
+        if unsupported:
+            raise ValueError(f"update_fields cannot set: {', '.join(sorted(unsupported))}")
+        with self._txn():
+            current = self.get(schedule_id)
+            if current is None or (only_if is not None and not only_if(current)):
+                return False
+            updated = dataclasses.replace(current, **changes)
+            try:
+                self.replace(updated, base=current)
+            except ScheduleNotFound:
+                return False
+            return True
+
+    def add_if_absent(self, entry: ScheduleEntry) -> bool:
+        """Insert a user row unless its id exists; check and insert are one step."""
+        self._finalize_entry(entry)
+        with self._txn():
+            data = self._load_for_write()
+            items = data.setdefault("schedules", [])
+            if any(isinstance(i, dict) and i.get("schedule_id") == entry.schedule_id for i in items):
+                return False
+            row = self._serialize_entry(entry)
+            # Caller-supplied ids repeat across delete and re-import (loop ids
+            # are deterministic), so start from a fresh epoch, not 0.
+            row[_REV_KEY] = _fresh_epoch()
+            items.append(row)
+            self._save(data)
+            return True
+
+    def ensure_store(self) -> None:
+        """Create an empty ``schedules.json`` if none exists; never touches one."""
+        with self._txn():
+            if not self._path.exists():
+                self._save({"schedules": []})
+
+    def revert_rename(
+        self,
+        old: str,
+        new: str,
+        *,
+        original_schedules: bytes | None,
+        original_state: bytes | None,
+    ) -> None:
+        """Undo :meth:`rename_workspace` for the rows it moved, keeping later edits.
+
+        ``original_*`` are the files' bytes from before the rename. Only rows
+        that were filed under ``old`` then, and sit under ``new`` now, move
+        back; a row that was already under ``new`` stays. Every other field of
+        a row, and every row added since, is left as it is now.
+        """
+        with self._txn():
+            try:
+                self._revert_user_rows(old, new, original_schedules)
+            finally:
+                # The overlay step runs even if the user-row step could not.
+                self._revert_overlays(old, new, original_state)
+
+    def _revert_user_rows(self, old: str, new: str, original: bytes | None) -> None:
+        moved_ids = _original_user_ids(original, old)
+        if moved_ids:
+            data = self._load_for_write()
+            dirty = False
+            for item in data.get("schedules", []):
+                if (
+                    isinstance(item, dict)
+                    and item.get("schedule_id") in moved_ids
+                    and item.get("workspace") == new
+                ):
+                    item["workspace"] = old
+                    bump_row_revision(item)
+                    dirty = True
+            if dirty:
+                self._save(data)
+
+    def _revert_overlays(self, old: str, new: str, original_state: bytes | None) -> None:
+        moved_keys = _original_overlay_bases(original_state, old)
+        if moved_keys:
+            state = self._load_system_state(strict=True)
+            existing = _original_overlay_keys(original_state)
+            changed = False
+            for base in moved_keys:
+                new_key = system_schedule_id(base, new)
+                old_key = system_schedule_id(base, old)
+                # An overlay already at the new name before the rename is
+                # not the rename's to move back.
+                if new_key in existing:
+                    continue
+                if new_key in state and old_key not in state:
+                    overlay = dict(state.pop(new_key))
+                    overlay["workspace"] = old
+                    overlay[_REV_KEY] = _rev_value(overlay.get(_REV_KEY)) + 1
+                    state[old_key] = overlay
+                    changed = True
+            if changed:
+                self._save_system_state(state)
 
     def take_user_items(self, predicate: Callable[[dict], bool]) -> list[dict]:
         """Remove the user schedules ``predicate`` selects and return them raw.
@@ -1354,8 +1831,8 @@ class ScheduleStore:
         be taken; per-workspace system routines stop by losing their workspace
         from the registry instead.
         """
-        with self._lock:
-            data = self._load()
+        with self._txn():
+            data = self._load_for_write()
             items = [item for item in data.get("schedules", []) if isinstance(item, dict)]
             taken = [
                 item for item in items
@@ -1374,8 +1851,8 @@ class ScheduleStore:
         A row whose ``schedule_id`` is already present is skipped rather than
         duplicated. Returns how many rows were added.
         """
-        with self._lock:
-            data = self._load()
+        with self._txn():
+            data = self._load_for_write()
             current = data.setdefault("schedules", [])
             present = {
                 str(item.get("schedule_id"))
@@ -1389,7 +1866,7 @@ class ScheduleStore:
                 schedule_id = str(item.get("schedule_id") or "")
                 if not schedule_id or schedule_id in present:
                     continue
-                current.append(dict(item))
+                current.append({**dict(item), _REV_KEY: _fresh_epoch()})
                 present.add(schedule_id)
                 added += 1
             if added:
@@ -1405,8 +1882,11 @@ class ScheduleStore:
         Idempotent: a second call sees no ``old`` rows and writes nothing.
         """
         renamed = 0
-        with self._lock:
-            data = self._load()
+        with self._txn():
+            data = self._load_for_write()
+            # Load both stores before writing either, so an unreadable overlay
+            # refuses the whole rename instead of leaving it half-applied.
+            state = self._load_system_state(strict=True)
             dirty = False
             for item in data.get("schedules", []):
                 if (
@@ -1415,11 +1895,11 @@ class ScheduleStore:
                     and item.get("workspace") == old
                 ):
                     item["workspace"] = new
+                    item[_REV_KEY] = _rev_value(item.get(_REV_KEY)) + 1
                     dirty = True
                     renamed += 1
             if dirty:
                 self._save(data)
-            state = self._load_system_state()
             rebuilt: dict[str, dict] = {}
             relocated = 0
             for schedule_id, overlay in state.items():
@@ -1429,6 +1909,7 @@ class ScheduleStore:
                 if separator and row_workspace == old:
                     moved_overlay = dict(overlay)
                     moved_overlay["workspace"] = new
+                    moved_overlay[_REV_KEY] = _rev_value(moved_overlay.get(_REV_KEY)) + 1
                     rebuilt[system_schedule_id(base, new)] = moved_overlay
                     relocated += 1
                 else:
@@ -1445,6 +1926,18 @@ class ScheduleStore:
             return data
         except json.JSONDecodeError:
             return {"schedules": []}
+
+    def _load_for_write(self) -> dict:
+        """Load for a read-modify-write; refuse a store that cannot be parsed."""
+        if not self._path.exists():
+            return {"schedules": []}
+        try:
+            data = read_json_dict(self._path)
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+            raise ScheduleStoreCorrupt(f"{self._path.name} is unreadable: {exc}") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("schedules", []), list):
+            raise ScheduleStoreCorrupt(f"{self._path.name} is not a schedule store")
+        return data
 
     def _save(self, payload: dict) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -1601,8 +2094,8 @@ class ScheduleStore:
         """
         if not self._include_system:
             return []
-        with self._lock:
-            state = self._load_system_state()
+        with self._txn():
+            state = self._load_system_state(strict=True)
             stamp = _utc_stamp(now)
             stamped: list[str] = []
             for entry in self._system_entries():
@@ -1681,15 +2174,21 @@ class ScheduleStore:
         )
         return {key: value for key, value in overlay.items() if key != "workspace"}
 
-    def _load_system_state(self) -> dict[str, dict]:
+    def _load_system_state(self, *, strict: bool = False) -> dict[str, dict]:
+        """Read the overlay file; ``strict`` (writers) refuses an unreadable one."""
+        name = self._system_state_path.name
         if not self._system_state_path.exists():
             return {}
         try:
             data = json.loads(self._system_state_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+            if strict:
+                raise ScheduleStoreCorrupt(f"{name} is unreadable: {exc}") from exc
             return {}
-        raw = data.get("schedules", {})
+        raw = data.get("schedules", {}) if isinstance(data, dict) else None
         if not isinstance(raw, dict):
+            if strict:
+                raise ScheduleStoreCorrupt(f"{name} is not a system state store")
             return {}
         return {
             key: self._normalized_overlay(value)
@@ -1745,7 +2244,20 @@ class ScheduleStore:
             f"'{requested or '(none)'}'.{hint}"
         )
 
-    def _replace_system_state(self, entry: ScheduleEntry, *, timing_fields: frozenset[str] = frozenset()) -> None:
+    def _replace_system_state(
+        self,
+        entry: ScheduleEntry,
+        *,
+        timing_fields: frozenset[str] = frozenset(),
+        base: ScheduleEntry | None = None,
+        changed: ScheduleEntry | None = None,
+    ) -> None:
+        """Write ``entry``'s overlay.
+
+        With ``base``/``changed`` (a scoped write) only the non-timing fields the
+        caller actually edited are written; the rest stay as the current overlay
+        has them.
+        """
         unknown_timing = timing_fields - SYSTEM_TIMING_FIELDS
         if unknown_timing:
             raise ValueError(f"unknown system timing fields: {', '.join(sorted(unknown_timing))}")
@@ -1756,21 +2268,38 @@ class ScheduleStore:
         # Validate before changing state; empty or malformed system defaults are
         # not accepted as an operator update either.
         validate_system_timing(entry.daily_time_utc, entry.timezone_name)
-        state = self._load_system_state()
+        state = self._load_system_state(strict=True)
         was_direct = entry.schedule_id in state
         current = state.setdefault(entry.schedule_id, {})
         if not was_direct:
+            # The new direct key shadows the legacy overlay entirely, so carry
+            # every inherited field across or a disabled routine comes back
+            # enabled and its last-run stamps are lost.
             inherited = state.get(system_base_id(entry.schedule_id), {})
-            for field in SYSTEM_TIMING_FIELDS:
+            for field in SYSTEM_STATE_FIELDS | {SYSTEM_FIRST_SEEN_KEY, _REV_KEY}:
                 if field in inherited:
                     current[field] = inherited[field]
+            # First materialization of this key: start from a fresh epoch so a
+            # key that is later removed and re-added cannot repeat a token.
+            current.setdefault(_REV_KEY, _fresh_epoch())
         for field in SYSTEM_STATE_FIELDS:
             if field in SYSTEM_TIMING_FIELDS:
                 if field in timing_fields or getattr(entry, field) != getattr(previous, field):
                     current[field] = getattr(entry, field)
                 continue
+            if (
+                base is not None
+                and changed is not None
+                and getattr(changed, field) == getattr(base, field)
+            ):
+                continue
             current[field] = getattr(entry, field)
         current.setdefault(SYSTEM_FIRST_SEEN_KEY, entry.created_at)
+        if any(
+            getattr(entry, f) != getattr(previous, f)
+            for f in SYSTEM_STATE_FIELDS - RUN_STATE_FIELDS
+        ):
+            current[_REV_KEY] = _rev_value(current.get(_REV_KEY)) + 1
         self._save_system_state(state)
 
     def _serialize_entry(self, entry: ScheduleEntry) -> dict:
@@ -1851,7 +2380,7 @@ class ScheduleManager:
         # scheduler asks before it dispatches: a run that never happens must
         # not consume a one-shot entry or run a command.
         self._target_refusal = target_refusal
-        # True while an update claim holds admission closed. A deferred entry is
+        # True while a restart drain holds admission closed. A deferred entry is
         # left exactly as it was: not stamped, not consumed, still eligible when
         # admission reopens, and never left in `_inflight`/`_claimed_chats`.
         self._admission_closed = admission_closed
@@ -1885,12 +2414,33 @@ class ScheduleManager:
         if self._loop_task is None:
             self._loop_task = asyncio.create_task(self._loop(), name="schedule-loop")
 
-    async def stop(self) -> None:
+    async def stop(self, *, settle_timeout: float = 30.0) -> int:
+        """Stop the loop, then cancel and join every tracked run task.
+
+        Returns how many run tasks had **not** settled by ``settle_timeout``.
+        Cancelling a task is a request, not proof that its work ended, so a
+        task that is still running keeps its ``_inflight`` / claimed-chat marks:
+        a caller must treat a non-zero count as "scheduled work may still be
+        running" and not as an idle engine.
+        """
         if self._loop_task is not None:
             self._loop_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._loop_task
             self._loop_task = None
+        pending = [task for task in self._run_tasks if not task.done()]
+        for task in pending:
+            task.cancel()
+        unsettled = 0
+        if pending:
+            _done, still = await asyncio.wait(pending, timeout=settle_timeout)
+            unsettled = len(still)
+            if unsettled:
+                logger.warning(
+                    "%d scheduled run task(s) had not settled %.0fs after cancellation",
+                    unsettled, settle_timeout,
+                )
+        return unsettled
 
     def list_entries(self, *, chat_id: int | None = None) -> list[ScheduleEntry]:
         return self._store.list_entries(chat_id=chat_id)
@@ -1964,9 +2514,14 @@ class ScheduleManager:
             name = resolve_name(entry.web_project_id)
             if not name:
                 continue
-            entry.web_project_name = name
-            self.replace(entry)
-            stamped += 1
+            project_id = entry.web_project_id
+            if self._store.update_fields(
+                entry.schedule_id,
+                {"web_project_name": name},
+                only_if=lambda cur: not cur.web_project_name
+                and cur.web_project_id == project_id,
+            ):
+                stamped += 1
         if stamped:
             logger.info("Recorded the target project name on %d schedule(s)", stamped)
         return stamped
@@ -1994,14 +2549,29 @@ class ScheduleManager:
             if not entry.web_chat_id:
                 continue
             if stamp_fallback_project(entry, pcm):
-                self.replace(entry)
-                stamped += 1
+                chat_id = entry.web_chat_id
+                if self._store.update_fields(
+                    entry.schedule_id,
+                    {"fallback_project_id": entry.fallback_project_id},
+                    only_if=lambda cur: not cur.fallback_project_id
+                    and not cur.web_project_id
+                    and cur.web_chat_id == chat_id,
+                ):
+                    stamped += 1
         if stamped:
             logger.info("Recorded the re-home fallback on %d schedule(s)", stamped)
         return stamped
 
-    def delete(self, schedule_id: str) -> bool:
-        return self._store.delete(schedule_id)
+    def delete(
+        self,
+        schedule_id: str,
+        *,
+        authorize: Callable[[ScheduleEntry], None] | None = None,
+        expected_revision: str | None = None,
+    ) -> bool:
+        return self._store.delete(
+            schedule_id, authorize=authorize, expected_revision=expected_revision
+        )
 
     def take_user_items(self, predicate: Callable[[dict], bool]) -> list[dict]:
         """See :meth:`ScheduleStore.take_user_items`."""
@@ -2011,9 +2581,29 @@ class ScheduleManager:
         """See :meth:`ScheduleStore.put_back_user_items`."""
         return self._store.put_back_user_items(items)
 
-    def replace(self, entry: ScheduleEntry, *, timing_fields: frozenset[str] = frozenset()) -> None:
+    def replace(
+        self,
+        entry: ScheduleEntry,
+        *,
+        timing_fields: frozenset[str] = frozenset(),
+        base: ScheduleEntry | None = None,
+        authorize: Callable[[ScheduleEntry], None] | None = None,
+        expected_revision: str | None = None,
+    ) -> None:
         """Persist a validated schedule update through the public manager API."""
-        self._store.replace(entry, timing_fields=timing_fields)
+        self._store.replace(
+            entry,
+            timing_fields=timing_fields,
+            base=base,
+            authorize=authorize,
+            expected_revision=expected_revision,
+        )
+
+    def snapshot(self) -> list[tuple[ScheduleEntry, str]]:
+        return self._store.snapshot()
+
+    def get_with_revision(self, schedule_id: str) -> tuple[ScheduleEntry, str] | None:
+        return self._store.get_with_revision(schedule_id)
 
     def _prepare_run_chat(
         self, entry: ScheduleEntry, model: str, mode: BridgeMode, provider: str
@@ -2040,7 +2630,7 @@ class ScheduleManager:
         return self._target_refusal(entry)
 
     def _admission_refuses(self) -> bool:
-        """True while an update claim holds admission closed.
+        """True while a restart drain holds admission closed.
 
         Asked at the top of every path that can start work, before the chat is
         prepared, the dispatch is stamped, a task is created or a one-shot is
@@ -2060,25 +2650,16 @@ class ScheduleManager:
             "error": "a server update is pending; retry after the restart",
         }
 
-    def update_idle_reasons(self) -> list[str]:
-        """What a restart would interrupt here, empty when nothing is running.
+    def work_count(self) -> int:
+        """How much scheduled work is running or about to start.
 
-        Read by an unattended update's idle snapshot before it claims admission.
-        A run is tracked in ``_inflight`` from the moment the dispatch is
-        committed, and a chat is claimed slightly earlier, before the stream
-        exists; both mean a turn is under way or about to start, so either one
-        defers the claim. Public so the engine (and the wiring in
-        ``ciao.auto_update``) asks rather than reaching into the sets.
+        Counts in-flight runs, chats claimed for a dispatch that has not
+        streamed yet, and tracked tasks that are still alive. A drain polls it
+        next to the active chats: it is non-zero while a command-only run, or a
+        dispatch between its claim and its first stream, has no chat to show.
         """
-        reasons = [
-            f"scheduled run {schedule_id} in flight"
-            for schedule_id in sorted(self._inflight)
-        ]
-        reasons.extend(
-            f"scheduled dispatch claimed chat {chat_id}"
-            for chat_id in sorted(self._claimed_chats)
-        )
-        return reasons
+        live_tasks = sum(1 for task in self._run_tasks if not task.done())
+        return len(self._inflight) + len(self._claimed_chats) + live_tasks
 
     def _begin_dispatch(
         self,
@@ -2171,6 +2752,20 @@ class ScheduleManager:
             return True
         return self._chat_dispatchable(entry)
 
+    def _persist(self, entry: ScheduleEntry, base: ScheduleEntry) -> bool:
+        """Write only what changed on ``entry`` since ``base`` onto the current row.
+
+        ``base`` is the row as this code read it, taken before any mutation.
+        Another writer's edit to a different field is kept, and a row deleted
+        meanwhile is not brought back: returns False then, so callers that go on
+        to delete a one-shot or publish a result can tell.
+        """
+        try:
+            self._store.replace(entry, base=base)
+        except ScheduleNotFound:
+            return False
+        return True
+
     def _stamp_interval_status(self, entry: ScheduleEntry, status: str) -> None:
         """Record a non-firing outcome, writing only when it actually changed.
 
@@ -2179,16 +2774,21 @@ class ScheduleManager:
         """
         if entry.last_status == status:
             return
+        base = dataclasses.replace(entry)
         entry.last_status = status
-        self._store.replace(entry)
+        self._persist(entry, base)
 
-    def _disable_interval(self, entry: ScheduleEntry, reason: str) -> None:
+    def _disable_interval(
+        self, entry: ScheduleEntry, reason: str, *, base: ScheduleEntry | None = None
+    ) -> None:
         logger.warning(
             "Interval schedule %s: %s; disabling it", entry.schedule_id, reason
         )
+        if base is None:
+            base = dataclasses.replace(entry)
         entry.enabled = False
         entry.last_status = "missing-chat"
-        self._store.replace(entry)
+        self._persist(entry, base)
 
     async def _fire_interval(self, entry: ScheduleEntry, now: datetime) -> str | None:
         """Start one interval run. Returns the target chat id, or None.
@@ -2202,6 +2802,9 @@ class ScheduleManager:
             # Deferred, not skipped: nothing is stamped and the entry stays due,
             # so the run happens after admission reopens.
             return None
+        # As read, before prepare_chat may re-point the binding: the scoped
+        # write persists that re-home and nothing else.
+        base = dataclasses.replace(entry)
         _, model, mode, provider = (
             self._resolve_target(entry)
             if self._resolve_target is not None
@@ -2215,7 +2818,7 @@ class ScheduleManager:
         refusal = self._refused_target(entry)
         if refusal:
             # The entry is disabled rather than left to fail every tick.
-            self._disable_interval(entry, refusal)
+            self._disable_interval(entry, refusal, base=base)
             return None
         try:
             chat_id = self._prepare_run_chat(entry, model, mode, provider)
@@ -2223,10 +2826,10 @@ class ScheduleManager:
             # The target could not be prepared — the app refuses to run in its
             # own memory machinery, the project is gone, the model is unknown.
             # The entry is disabled rather than left to fail every tick.
-            self._disable_interval(entry, str(exc))
+            self._disable_interval(entry, str(exc), base=base)
             return None
         if chat_id is None and not entry.command:
-            self._disable_interval(entry, "no chat left to dispatch into")
+            self._disable_interval(entry, "no chat left to dispatch into", base=base)
             return None
         # Stamp before dispatching: the interval is measured from this value, so
         # a crash mid-run must not leave the entry due again immediately.
@@ -2238,7 +2841,9 @@ class ScheduleManager:
         # returns None for them), so the id carries no occurrence — it is here
         # purely so a superseded run cannot write its status over a newer one.
         dispatch_id = self._begin_dispatch(entry, now, slot_day="")
-        self._store.replace(entry)
+        if not self._persist(entry, base):
+            # Deleted since it was read: nothing may start for a row that is gone.
+            return None
         self._dispatched_ids.add(entry.schedule_id)
         self._inflight.add(entry.schedule_id)
         if chat_id:
@@ -2297,19 +2902,22 @@ class ScheduleManager:
         latest = self._store.get(entry.schedule_id)
         if latest is None:
             return
+        latest_base = dataclasses.replace(latest)
         if not dispatch_is_current(latest, dispatch_id):
             # A newer dispatch owns the entry's run state now. Record whatever
             # this run's outcome says about its *own* occurrence (nothing, for
             # an interval entry — it has no slot) and leave the fields that
             # describe the latest run to the dispatch that is now the latest.
             if stamp_run_outcome(latest, dispatch_id, status):
-                self._store.replace(latest)
+                self._persist(latest, latest_base)
             return
         if status == "missing-chat" and entry.command:
             # A command printed output but the dispatcher found no chat to
             # report it into. A prompt entry with no chat is disabled in
             # _fire_interval; a command entry only learns this here.
-            self._disable_interval(latest, "no chat left to dispatch into")
+            self._disable_interval(
+                latest, "no chat left to dispatch into", base=latest_base
+            )
         latest.last_status = status
         rehomed = bool(entry.web_chat_id) and entry.web_chat_id != bound_before
         if rehomed and latest.web_chat_id == bound_before:
@@ -2322,7 +2930,7 @@ class ScheduleManager:
             latest.web_chat_id = entry.web_chat_id
         if chat_id:
             latest.last_run_chat_id = chat_id
-        self._store.replace(latest)
+        self._persist(latest, latest_base)
 
     async def _tick_interval(self, entry: ScheduleEntry, now: datetime) -> None:
         if self._admission_refuses():
@@ -2364,6 +2972,9 @@ class ScheduleManager:
                 "chat_id": entry.web_chat_id or "",
             }
         chat_id = await self._fire_interval(entry, now or _now_utc())
+        if self._store.get(entry.schedule_id) is None:
+            # Deleted while the run was being started: nothing started.
+            return {**result, "status": "refused", "error": "the schedule was deleted"}
         if chat_id is None and not entry.command:
             return {**result, "status": "missing-chat"}
         return {**result, "status": "started", "chat_id": chat_id or ""}
@@ -2386,6 +2997,7 @@ class ScheduleManager:
         entry = self._store.get(schedule_id)
         if entry is None:
             raise ValueError(f"Schedule '{schedule_id}' not found.")
+        base = dataclasses.replace(entry)
         if self._admission_refuses():
             return self._deferred_result(entry)
         # Asked before the dispatch: a command entry is never prepared here,
@@ -2433,8 +3045,8 @@ class ScheduleManager:
         # already started.
         entry.last_status = "running"
         if entry.frequency == "once":
-            self._store.replace(entry)
-            self._store.delete(entry.schedule_id)
+            if self._persist(entry, base):
+                self._store.delete(entry.schedule_id)
         result: dict = {
             "schedule_id": schedule_id,
             "archive_policy": entry.archive_policy,
@@ -2446,8 +3058,17 @@ class ScheduleManager:
         # For non-"once" entries, persist the stamp now. ("once" already
         # replaced above; replace-then-delete to leave a clean store.)
         if entry.frequency != "once":
-            self._store.replace(entry)
+            self._persist(entry, base)
         return result
+
+    def _record_first_seen(self, now: datetime) -> None:
+        # An unreadable overlay file blocks the stamp (writes fail closed) but
+        # must not stop the scheduler: due rows still fire and the stamp is
+        # retried on the next tick once the file is repaired.
+        try:
+            self._store.record_system_first_seen(now)
+        except ScheduleStoreCorrupt:
+            logger.exception("system schedule state is unreadable; not stamping first-seen")
 
     async def tick(self, now: datetime | None = None) -> None:
         if self._admission_refuses():
@@ -2458,8 +3079,9 @@ class ScheduleManager:
         if self._is_node_active is not None and not self._is_node_active():
             return
         current = now or _now_utc()
-        self._store.record_system_first_seen(current)
+        self._record_first_seen(current)
         for entry in self._store.list_entries():
+            base = dataclasses.replace(entry)
             # Manual and disabled schedules never auto-fire.
             if entry.frequency == "manual" or not entry.enabled:
                 continue
@@ -2511,7 +3133,7 @@ class ScheduleManager:
                 )
                 if entry.last_status != "error":
                     entry.last_status = "error"
-                    self._store.replace(entry)
+                    self._persist(entry, base)
                 continue
             # A command entry is never prepared here, so the refusal has to be
             # asked for: the dispatch's own check runs after this entry has
@@ -2524,7 +3146,7 @@ class ScheduleManager:
                 )
                 if entry.last_status != "error":
                     entry.last_status = "error"
-                    self._store.replace(entry)
+                    self._persist(entry, base)
                 continue
             # The slot being served is the one this tick matched, whatever the
             # clock says by the time the run ends: a 23:55 daily dispatched at
@@ -2547,8 +3169,8 @@ class ScheduleManager:
                 entry.last_triggered_on = "done"
                 entry.last_dispatched_at = localized.isoformat(timespec="seconds")
                 entry.last_status = "running"
-                self._store.replace(entry)
-                self._store.delete(entry.schedule_id)
+                if self._persist(entry, base):
+                    self._store.delete(entry.schedule_id)
             else:
                 entry.last_triggered_on = current_day
                 entry.last_dispatched_at = localized.isoformat(timespec="seconds")
@@ -2559,7 +3181,7 @@ class ScheduleManager:
                 # that never reports back is still recognisable as interrupted
                 # after a restart (issue #486).
                 entry.last_status = "running"
-                self._store.replace(entry)
+                self._persist(entry, base)
 
     def reconcile_interrupted_runs(self) -> list[str]:
         """Record as failed any run that was still in flight when the process
@@ -2582,12 +3204,13 @@ class ScheduleManager:
         """
         repaired: list[str] = []
         for entry in self._store.list_entries():
+            base = dataclasses.replace(entry)
             if entry.last_status != "running":
                 continue
             if entry.schedule_id in self._dispatched_ids:
                 continue
             entry.last_status = "error"
-            self._store.replace(entry)
+            self._persist(entry, base)
             repaired.append(entry.schedule_id)
             logger.info(
                 "Schedule %s: run interrupted before it finished (dispatched %s); "
@@ -2655,9 +3278,10 @@ class ScheduleManager:
         current = now or _now_utc()
         # Even under skip_system: the post-setup grace startup is exactly when
         # a fresh install's rows must be stamped.
-        self._store.record_system_first_seen(current)
+        self._record_first_seen(current)
         fired: list[str] = []
         for entry in self._store.list_entries():
+            base = dataclasses.replace(entry)
             # Manual and disabled schedules never auto-fire.
             if entry.frequency == "manual" or not entry.enabled:
                 continue
@@ -2731,7 +3355,7 @@ class ScheduleManager:
                 # Spend this slot's one automatic recovery, whatever the run
                 # goes on to do.
                 entry.last_recovered_on = expected_day
-            self._store.replace(entry)
+            self._persist(entry, base)
             fired.append(entry.schedule_id)
         return fired
 

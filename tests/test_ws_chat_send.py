@@ -40,6 +40,139 @@ from ciao.web.chat_broker import ChatStream
 from ciao.web.project_chats import SEND_ID_HISTORY_TURNS, ProjectChatManager
 from ciao.web.routes_chat import ws_chat
 from tests.session import signed_in
+from tests.test_start_stream_enospc_repro import admission_case, storage_fault
+
+
+def _storage_app(manager):
+    app = Starlette(routes=[WebSocketRoute("/ws/chat/{chat_id}", ws_chat)])
+    app.state.project_chat_manager = manager
+    app.state.focused_chats = {}
+    app.state.serializer = URLSafeTimedSerializer("test-secret")
+    return app
+
+
+def _bounded_frame(ws):
+    async def receive():
+        return await asyncio.wait_for(ws._send_rx.receive(), 5)
+    frame = ws.portal.call(receive)
+    assert frame["type"] == "websocket.send", frame
+    return json.loads(frame.get("text") or frame["bytes"])
+
+
+def _frames_until(ws, predicate):
+    frames = []
+    for _ in range(40):
+        frame = _bounded_frame(ws)
+        frames.append(frame)
+        if predicate(frames):
+            return frames
+    pytest.fail(f"Expected frame not received; types: {[frame['type'] for frame in frames]}")
+
+
+def _socket_probe(manager, chat, monkeypatch):
+    probe = SimpleNamespace(calls=[], entered=asyncio.Event(), release=asyncio.Event())
+    async def stream_chat(chat_id, prompt, images=None, **kwargs):
+        probe.calls.append(prompt)
+        probe.entered.set()
+        await probe.release.wait()
+        yield ResultEvent(type="result", result="ok", session_id="", is_error=False,
+                          effective_model=chat.model, usage={}, quota={})
+    monkeypatch.setattr(manager, "stream_chat", stream_chat)
+    return probe
+
+
+def _finish_socket_probe(ws, manager, probe):
+    async def finish():
+        probe.release.set()
+        tasks = [task for _, task in list(manager._streaming._drive_tasks.values())]
+        if tasks:
+            await asyncio.wait_for(asyncio.gather(*tasks), 5)
+    ws.portal.call(finish)
+
+
+def test_storage_failure_reports_error_without_active_turn(admission_case, storage_fault, monkeypatch):
+    from ciao.control_plane import CiaoControlPlane
+
+    manager, chat, registry = admission_case
+    probe = _socket_probe(manager, chat, monkeypatch)
+    fault = storage_fault(manager, registry)
+    before = registry.read_bytes()
+    client = signed_in(TestClient(_storage_app(manager)))
+    with client.websocket_connect(f"/ws/chat/{chat.chat_id}") as ws:
+        ws.send_json({"type": "message", "text": "synthetic", "send_id": "storage-send"})
+        frames = _frames_until(ws, lambda frames: frames[-1]["type"] == "error")
+        assert not any(frame["type"] == "user_echo" or frame.get("message") == "thinking" for frame in frames)
+    assert not probe.calls and manager.get_active_stream(chat.chat_id) is None
+    assert CiaoControlPlane._chat_state_fields(SimpleNamespace(pcm=manager), chat)["active_turn"] is False
+    assert registry.read_bytes() == before and chat.user_turn_count == 0
+    fault.armed = False
+    with client.websocket_connect(f"/ws/chat/{chat.chat_id}") as ws:
+        ws.send_text("{")  # deterministic reply, not a timeout-based silence assertion
+        frames = _frames_until(ws, lambda frames: frames[-1]["type"] == "error")
+        assert not any(frame["type"] == "user_echo" for frame in frames)
+    assert manager.find_turn_by_send_id(chat.chat_id, "storage-send") is None
+
+
+def test_storage_recovery_accepts_same_send_id(admission_case, storage_fault, monkeypatch):
+    manager, chat, registry = admission_case
+    probe = _socket_probe(manager, chat, monkeypatch)
+    fault = storage_fault(manager, registry)
+    client = signed_in(TestClient(_storage_app(manager)))
+    with client.websocket_connect(f"/ws/chat/{chat.chat_id}") as ws:
+        message = {"type": "message", "text": "synthetic", "send_id": "storage-send"}
+        ws.send_json(message)
+        _frames_until(ws, lambda frames: frames[-1]["type"] == "error")
+        fault.armed = False
+        try:
+            ws.send_json(message)
+            frames = _frames_until(ws, lambda frames:
+                any(frame.get("message") == "thinking" for frame in frames)
+                and any(frame["type"] == "user_echo" for frame in frames))
+            assert not any(frame["type"] == "error" for frame in frames)
+            async def entered():
+                await asyncio.wait_for(probe.entered.wait(), 5)
+            ws.portal.call(entered)
+            assert probe.calls == ["synthetic"] and chat.user_turn_count == 1
+            _finish_socket_probe(ws, manager, probe)
+            terminal = _frames_until(ws, lambda frames: frames[-1]["type"] == "result")
+            assert not any(frame["type"] == "error" for frame in terminal)
+        finally:
+            _finish_socket_probe(ws, manager, probe)
+
+
+def test_postcommit_failure_does_not_report_rejected_send(admission_case, storage_fault, monkeypatch):
+    manager, chat, registry = admission_case
+    probe = _socket_probe(manager, chat, monkeypatch)
+    fault = storage_fault(manager, registry, "audit")
+    client = signed_in(TestClient(_storage_app(manager)))
+    with client.websocket_connect(f"/ws/chat/{chat.chat_id}") as ws:
+        message = {"type": "message", "text": "synthetic", "send_id": "committed-send"}
+        try:
+            ws.send_json(message)
+            frames = _frames_until(ws, lambda frames:
+                any(frame.get("message") == "thinking" for frame in frames)
+                and any(frame["type"] == "user_echo" for frame in frames))
+            fault.armed = False
+            assert not any(frame["type"] == "error" for frame in frames)
+            assert manager._streaming.drive_task(chat.chat_id) is not None
+            ws.send_json(message)
+            duplicate = _frames_until(ws, lambda frames: frames[-1].get("duplicate") is True)
+            assert not any(frame["type"] == "error" for frame in duplicate)
+            assert duplicate[-1]["type"] == "user_echo"
+            async def entered():
+                await asyncio.wait_for(probe.entered.wait(), 5)
+            ws.portal.call(entered)
+            assert probe.calls == ["synthetic"] and chat.user_turn_count == 1
+            _finish_socket_probe(ws, manager, probe)
+            _frames_until(ws, lambda frames: frames[-1]["type"] == "result")
+            # Replay after completion must still deduplicate, not just reuse a live stream.
+            ws.send_json(message)
+            replay = _frames_until(ws, lambda frames: frames[-1].get("duplicate") is True)
+            assert replay[-1]["turn_index"] == 0
+            assert probe.calls == ["synthetic"] and chat.user_turn_count == 1
+        finally:
+            fault.armed = False
+            _finish_socket_probe(ws, manager, probe)
 
 
 def _app(started: list[tuple[str, str]]) -> Starlette:
@@ -210,15 +343,12 @@ async def test_attach_streams_ends_when_keepalive_send_fails(monkeypatch) -> Non
 
 
 def _steer_app(calls: list, stream: ChatStream | None) -> Starlette:
-    async def steer_queue(chat_id: str) -> None:
-        calls.append(("steer_queue", chat_id))
-
-    async def set_queue_delivery(chat_id: str, entry_ids, delivery) -> bool:
-        calls.append(("set_queue_delivery", chat_id, entry_ids, delivery))
+    async def send_queued_now(chat_id: str, entry_ids) -> bool:
+        calls.append(("send_queued_now", chat_id, entry_ids))
         return True
 
-    def queue_message(chat_id, text, images=None, entry_id=None, delivery="queue", **kwargs) -> bool:
-        calls.append(("queue_message", text, entry_id, delivery))
+    def queue_message(chat_id, text, images=None, entry_id=None, **kwargs) -> bool:
+        calls.append(("queue_message", text, entry_id, kwargs))
         return True
 
     manager = SimpleNamespace(
@@ -228,8 +358,7 @@ def _steer_app(calls: list, stream: ChatStream | None) -> Starlette:
         find_turn_by_send_id=lambda _cid, _sid: None,
         has_pending_send=lambda _cid, _sid: False,
         queue_message=queue_message,
-        steer_queue=steer_queue,
-        set_queue_delivery=set_queue_delivery,
+        send_queued_now=send_queued_now,
         start_stream=lambda *_a, **_k: None,
     )
     app = Starlette(routes=[WebSocketRoute("/ws/chat/{chat_id}", ws_chat)])
@@ -239,40 +368,48 @@ def _steer_app(calls: list, stream: ChatStream | None) -> Starlette:
     return app
 
 
-def test_ws_message_with_steer_delivery_steers() -> None:
-    calls: list = []
-    client = signed_in(TestClient(_steer_app(calls, ChatStream("chat-1"))))
-    with client.websocket_connect("/ws/chat/chat-1") as ws:
+def test_ws_message_delivery_field_is_ignored_mid_turn(tmp_path: Path) -> None:
+    """A mid-turn message queues even when the frame says delivery steer."""
+    from tests.test_project_chats_queue import _make_manager
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("delivery-ignored", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="delivery-ignored")
+    stream = ChatStream("running")
+    pcm._broker.register(chat.chat_id, stream)
+    app = Starlette(routes=[WebSocketRoute("/ws/chat/{chat_id}", ws_chat)])
+    app.state.project_chat_manager = pcm
+    app.state.focused_chats = {}
+    app.state.serializer = URLSafeTimedSerializer("test-secret")
+    client = signed_in(TestClient(app))
+    with client.websocket_connect(f"/ws/chat/{chat.chat_id}") as ws:
         ws.send_text('{"type":"message","text":"x","delivery":"steer","entry_id":"e1"}')
         ws.send_text('{"type":"message","text":"y","entry_id":"e2"}')
         ws.send_text('{"type":"message","text":"z","delivery":"bogus","entry_id":"e3"}')
-    assert calls == [
-        ("queue_message", "x", "e1", "steer"),
-        ("steer_queue", "chat-1"),
-        ("queue_message", "y", "e2", "queue"),
-        ("queue_message", "z", "e3", "queue"),
-    ]
+    queued = [event for event in stream.buffered_events() if event.get("type") == "queued"]
+    assert [event["text"] for event in queued] == ["x", "y", "z"]
+    assert all("delivery" not in event for event in queued)
+    assert [entry["id"] for entry in stream.pending] == ["e1", "e2", "e3"]
 
 
-def test_queue_set_delivery_frame() -> None:
+def test_queue_send_now_frame() -> None:
     calls: list = []
     client = signed_in(TestClient(_steer_app(calls, None)))
     with client.websocket_connect("/ws/chat/chat-1") as ws:
-        ws.send_text('{"type":"queue_set_delivery","entry_ids":["e1"],"delivery":"steer"}')
-    assert calls == [("set_queue_delivery", "chat-1", ["e1"], "steer")]
+        ws.send_text('{"type":"queue_send_now","entry_ids":["e1"]}')
+    assert calls == [("send_queued_now", "chat-1", ["e1"])]
 
 
-def test_queue_set_delivery_frame_rejects_malformed_input() -> None:
+def test_queue_send_now_frame_rejects_malformed_input() -> None:
     calls: list = []
     client = signed_in(TestClient(_steer_app(calls, None)))
     frames = [
-        '{"type":"queue_set_delivery","entry_ids":"e1","delivery":"steer"}',
-        '{"type":"queue_set_delivery","entry_ids":[1,{"a":1}],"delivery":"steer"}',
-        '{"type":"queue_set_delivery","entry_ids":["e1"],"delivery":"sometimes"}',
-        '{"type":"queue_set_delivery","entry_ids":[],"delivery":"steer"}',
-        '{"type":"queue_set_delivery","entry_ids":["' + "x" * 300 + '"],"delivery":"steer"}',
-        '{"type":"queue_set_delivery","entry_ids":' + str(["e"] * 500).replace("'", '"') + ',"delivery":"steer"}',
-        '{"type":"queue_set_delivery","delivery":"steer"}',
+        '{"type":"queue_send_now","entry_ids":"e1"}',
+        '{"type":"queue_send_now","entry_ids":[1,{"a":1}]}',
+        '{"type":"queue_send_now","entry_ids":[]}',
+        '{"type":"queue_send_now","entry_ids":["' + "x" * 300 + '"]}',
+        '{"type":"queue_send_now","entry_ids":' + str(["e"] * 500).replace("'", '"') + '}',
+        '{"type":"queue_send_now"}',
     ]
     with client.websocket_connect("/ws/chat/chat-1") as ws:
         for frame in frames:
@@ -280,33 +417,33 @@ def test_queue_set_delivery_frame_rejects_malformed_input() -> None:
     assert calls == []
 
 
-def test_queue_set_delivery_send_now_during_restart_drain_answers_server_restarting() -> None:
+def test_queue_send_now_during_restart_drain_answers_server_restarting() -> None:
     from ciao.web.project_chats import RestartDrainingError
 
     calls: list = []
     app = _steer_app(calls, None)
 
-    async def draining(chat_id, entry_ids, delivery):
+    async def draining(chat_id, entry_ids):
         raise RestartDrainingError()
 
-    app.state.project_chat_manager.set_queue_delivery = draining
+    app.state.project_chat_manager.send_queued_now = draining
     client = signed_in(TestClient(app))
     with client.websocket_connect("/ws/chat/chat-1") as ws:
-        ws.send_text('{"type":"queue_set_delivery","entry_ids":["e1"],"delivery":"steer"}')
+        ws.send_text('{"type":"queue_send_now","entry_ids":["e1"]}')
         assert ws.receive_json()["type"] == "server_restarting"
 
 
-def test_queue_set_delivery_failure_is_an_error_frame_not_a_crash() -> None:
+def test_queue_send_now_failure_is_an_error_frame_not_a_crash() -> None:
     calls: list = []
     app = _steer_app(calls, None)
 
-    async def boom(chat_id, entry_ids, delivery):
+    async def boom(chat_id, entry_ids):
         raise ValueError("This chat has been archived.")
 
-    app.state.project_chat_manager.set_queue_delivery = boom
+    app.state.project_chat_manager.send_queued_now = boom
     client = signed_in(TestClient(app))
     with client.websocket_connect("/ws/chat/chat-1") as ws:
-        ws.send_text('{"type":"queue_set_delivery","entry_ids":["e1"],"delivery":"steer"}')
+        ws.send_text('{"type":"queue_send_now","entry_ids":["e1"]}')
         assert ws.receive_json() == {"type": "error", "message": "This chat has been archived."}
 
 
@@ -583,7 +720,7 @@ async def test_a_queued_flush_prunes_the_send_id_history(tmp_path: Path) -> None
         yield ResultEvent(
             type="result",
             result="assistant answer",
-            session_id="sess-sid",
+            session_id="1c446bfc-cecb-571e-85c3-f55a9429df79",
             is_error=False,
             effective_model=chat.model,
             usage={},
@@ -708,20 +845,14 @@ async def test_the_history_row_does_not_carry_the_send_id(
     project = pcm.create_project("sendids", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="send-id")
     pcm.start_stream(chat.chat_id, "hello", send_id="s-1")
-    chat.session_id = "sess-a"
+    chat.session_id = "a0764c30-d9b6-57fb-a0ea-c0b1a04c9f50"
     pcm._save()
-    monkeypatch.setitem(
-        sys.modules,
-        "claude_agent_sdk",
-        SimpleNamespace(
-            get_session_messages=lambda session_id, directory: [
+    monkeypatch.setattr("ciao.transcripts.get_session_messages", lambda session_id, directory: [
                 SimpleNamespace(
                     type="user",
                     message={"role": "user", "content": "hello"},
                 ),
-            ]
-        ),
-    )
+            ])
 
     from ciao.web import transcript_service
 
@@ -804,9 +935,6 @@ def _origin_app(calls: list, stream: ChatStream | None = None) -> Starlette:
         calls.append(("queue_message", text, dict(kwargs)))
         return True
 
-    async def steer_queue(chat_id: str) -> None:
-        calls.append(("steer_queue", chat_id, {}))
-
     manager = SimpleNamespace(
         get_chat=lambda _cid: SimpleNamespace(archived=False, user_turn_origin={}),
         get_active_stream=lambda _cid: stream,
@@ -814,7 +942,6 @@ def _origin_app(calls: list, stream: ChatStream | None = None) -> Starlette:
         find_turn_by_send_id=lambda _cid, _sid: None,
         has_pending_send=lambda _cid, _sid: False,
         queue_message=queue_message,
-        steer_queue=steer_queue,
         start_stream=start_stream,
     )
     app = Starlette(routes=[WebSocketRoute("/ws/chat/{chat_id}", ws_chat)])
@@ -876,12 +1003,12 @@ def test_a_retry_tagged_send_is_queued_with_its_origin() -> None:
         (
             "queue_message",
             "try again",
-            {"entry_id": None, "delivery": "queue", "send_id": "", "origin": "retry"},
+            {"entry_id": None, "send_id": "", "origin": "retry"},
         ),
     ], calls
 
 
-def test_a_retry_tagged_steer_is_queued_with_its_origin() -> None:
+def test_a_retry_tagged_mid_turn_message_is_queued_with_its_origin() -> None:
     calls: list = []
     client = signed_in(TestClient(_origin_app(calls, ChatStream("chat-1"))))
     with client.websocket_connect("/ws/chat/chat-1") as ws:
@@ -892,9 +1019,8 @@ def test_a_retry_tagged_steer_is_queued_with_its_origin() -> None:
         (
             "queue_message",
             "try again",
-            {"entry_id": None, "delivery": "steer", "send_id": "", "origin": "retry"},
+            {"entry_id": None, "send_id": "", "origin": "retry"},
         ),
-        ("steer_queue", "chat-1", {}),
     ], calls
 
 

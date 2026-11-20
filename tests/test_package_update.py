@@ -9,14 +9,17 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from ciao import main, tool_path
 from ciao.config import CiaoConfig
 from ciao.install_receipt import InstallReceipt, write_receipt
-from ciao.package_version import detect_install_mode, update_package
+from ciao.package_version import app_engine_root, detect_install_mode, update_package
 from ciao.web.routes_node import package_update_endpoint
 
 
-_BUNDLE_PYTHON = (
-    "/Applications/Ciaobot.app/Contents/Resources/ciao-runtime/python/arm64/bin/python3.12"
+_BUNDLE_PYTHON = "/Applications/Ciaobot.app/Contents/Resources/engine/bin/python3.12"
+_BUNDLE_CIAO = (
+    "/Applications/Ciaobot.app/Contents/Resources/engine/"
+    "lib/python3.12/site-packages/ciao/__init__.py"
 )
 
 
@@ -41,19 +44,16 @@ def _fake_ciao_module(monkeypatch, path) -> None:
 
 
 def test_detect_install_mode_bundled_app(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
     monkeypatch.setattr(sys, "executable", _BUNDLE_PYTHON)
     _fake_ciao_module(monkeypatch, tmp_path / "site-packages" / "ciao" / "__init__.py")
     assert detect_install_mode() == "bundled_app"
 
 
 def test_detect_install_mode_bundled_app_from_package_location(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
     monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python3"))
     _fake_ciao_module(
         monkeypatch,
-        "/Applications/Ciaobot.app/Contents/Resources/ciao-runtime/"
-        "site-packages/arm64/ciao/__init__.py",
+        _BUNDLE_CIAO,
     )
     assert detect_install_mode() == "bundled_app"
 
@@ -65,7 +65,6 @@ def test_detect_install_mode_ignores_inherited_marker_in_checkout(monkeypatch, t
     (repo / "ciao").mkdir(parents=True)
     (repo / ".git").mkdir()
     (repo / "pyproject.toml").write_text("", encoding="utf-8")
-    monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
     monkeypatch.setattr(sys, "executable", str(repo / ".venv" / "bin" / "python3"))
     _fake_ciao_module(monkeypatch, repo / "ciao" / "__init__.py")
     assert detect_install_mode() == "editable"
@@ -81,7 +80,6 @@ def test_detect_install_mode_prefers_checkout_over_bundled_interpreter(
     (repo / "ciao").mkdir(parents=True)
     (repo / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
     (repo / "pyproject.toml").write_text("", encoding="utf-8")
-    monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
     monkeypatch.setattr(sys, "executable", _BUNDLE_PYTHON)
     _fake_ciao_module(monkeypatch, repo / "ciao" / "__init__.py")
     assert detect_install_mode() == "editable"
@@ -91,31 +89,101 @@ def test_detect_install_mode_bundled_package_on_bundled_interpreter(
     monkeypatch,
 ) -> None:
     # The genuine app: interpreter and package both inside the bundle runtime.
-    monkeypatch.setenv("CIAO_BUNDLED_APP", "1")
     monkeypatch.setattr(sys, "executable", _BUNDLE_PYTHON)
     _fake_ciao_module(
         monkeypatch,
-        "/Applications/Ciaobot.app/Contents/Resources/ciao-runtime/"
-        "site-packages/arm64/ciao/__init__.py",
+        _BUNDLE_CIAO,
     )
     assert detect_install_mode() == "bundled_app"
 
 
-def test_detect_install_mode_ignores_a_non_one_bundled_marker(monkeypatch, tmp_path) -> None:
-    # Matches ciao.main, which only treats CIAO_BUNDLED_APP == "1" as bundled.
-    monkeypatch.setenv("CIAO_BUNDLED_APP", "0")
-    monkeypatch.setitem(
-        sys.modules,
-        "ciao",
-        types.SimpleNamespace(
-            __file__=str(tmp_path / "site-packages" / "ciao" / "__init__.py")
-        ),
+def test_old_tauri_runtime_path_is_not_bundled(monkeypatch) -> None:
+    old = "/Applications/Ciaobot.app/Contents/Resources/ciao-runtime"
+    monkeypatch.setattr(sys, "executable", f"{old}/python/arm64/bin/python3.12")
+    _fake_ciao_module(monkeypatch, f"{old}/site-packages/arm64/ciao/__init__.py")
+    assert detect_install_mode() != "bundled_app"
+
+
+def test_checkout_package_on_bundled_python_is_editable(monkeypatch, tmp_path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "ciao").mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (repo / "pyproject.toml").write_text("", encoding="utf-8")
+    monkeypatch.setattr(sys, "executable", _BUNDLE_PYTHON)
+    _fake_ciao_module(monkeypatch, repo / "ciao" / "__init__.py")
+    assert detect_install_mode() == "editable"
+
+
+def _engine_tree(tmp_path, *, with_ciao: bool = True):
+    root = tmp_path.resolve() / "Ciaobot.app" / "Contents" / "Resources" / "engine"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / "python3.12").write_text("", encoding="utf-8")
+    if with_ciao:
+        (root / "bin" / "ciao").write_text("", encoding="utf-8")
+    return root
+
+
+def test_app_engine_root_from_interpreter(monkeypatch, tmp_path) -> None:
+    root = _engine_tree(tmp_path)
+    monkeypatch.setattr(sys, "executable", str(root / "bin" / "python3.12"))
+    _fake_ciao_module(
+        monkeypatch, root / "lib" / "python3.12" / "site-packages" / "ciao" / "__init__.py"
     )
-    assert detect_install_mode() == "unknown"
+    assert app_engine_root() == root
+
+
+import pytest
+
+
+@pytest.mark.parametrize("layout", [
+    "Ciaobot.app/Contents/Resources/engine-old/bin/python3.12",
+    "Ciaobot.app/Contents/Resources/engineX/bin/python3.12",
+    "Ciaobot.app/Contents/Resources/engine",
+    "Ciaobot/Contents/Resources/engine/bin/python3.12",
+    "Other.app/Contents/Resources/engine/bin/python3.12",
+])
+def test_bundle_regex_rejects_near_misses(monkeypatch, layout) -> None:
+    monkeypatch.setattr(sys, "executable", f"/Applications/{layout}")
+    _fake_ciao_module(monkeypatch, "/opt/site-packages/ciao/__init__.py")
+    assert detect_install_mode() != "bundled_app"
+
+
+def test_app_engine_root_follows_symlinked_interpreter(monkeypatch, tmp_path) -> None:
+    root = _engine_tree(tmp_path)
+    link_bin = tmp_path.resolve() / "elsewhere" / "bin"
+    link_bin.mkdir(parents=True)
+    (link_bin / "python3").symlink_to(root / "bin" / "python3.12")
+    monkeypatch.setattr(sys, "executable", str(link_bin / "python3"))
+    _fake_ciao_module(monkeypatch, "/opt/site-packages/ciao/__init__.py")
+    assert app_engine_root() == root
+
+
+def test_app_engine_root_rejects_bin_ciao_directory(monkeypatch, tmp_path) -> None:
+    root = _engine_tree(tmp_path, with_ciao=False)
+    (root / "bin" / "ciao").mkdir()
+    monkeypatch.setattr(sys, "executable", str(root / "bin" / "python3.12"))
+    _fake_ciao_module(
+        monkeypatch, root / "lib" / "python3.12" / "site-packages" / "ciao" / "__init__.py"
+    )
+    assert app_engine_root() is None
+
+
+def test_app_engine_root_needs_bin_ciao(monkeypatch, tmp_path) -> None:
+    root = _engine_tree(tmp_path, with_ciao=False)
+    monkeypatch.setattr(sys, "executable", str(root / "bin" / "python3.12"))
+    _fake_ciao_module(
+        monkeypatch, root / "lib" / "python3.12" / "site-packages" / "ciao" / "__init__.py"
+    )
+    assert app_engine_root() is None
+
+
+def test_app_engine_root_none_outside_bundle(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python3"))
+    _fake_ciao_module(monkeypatch, tmp_path / "site-packages" / "ciao" / "__init__.py")
+    assert app_engine_root() is None
 
 
 def test_detect_install_mode_unknown_without_package_manager(monkeypatch, tmp_path) -> None:
-    monkeypatch.delenv("CIAO_BUNDLED_APP", raising=False)
     monkeypatch.setitem(
         sys.modules,
         "ciao",
@@ -128,7 +196,6 @@ def test_detect_install_mode_unknown_without_package_manager(monkeypatch, tmp_pa
 
 def _no_bundle_site_packages(monkeypatch, tmp_path) -> None:
     """Stage a plain site-packages import: neither a bundle nor a checkout."""
-    monkeypatch.delenv("CIAO_BUNDLED_APP", raising=False)
     monkeypatch.setitem(
         sys.modules,
         "ciao",
@@ -204,21 +271,26 @@ def test_update_package_installer_mode_points_at_installer(monkeypatch) -> None:
 
     assert result["ok"] is False
     assert result["mode"] == "installer"
-    # The engine-only installer, not the desktop one: an installer-managed
-    # engine has no Ciaobot.app to reinstall (#568).
-    assert "install-engine.sh" in result["command"]
-    assert "installer" in result["error"]
+    # install-engine.sh is deleted, and the engine no longer updates itself
+    # through its own verbs: macOS updates it through the app, Linux through the
+    # documented reinstall (#3130 P6).
+    assert result["command"] == ""
+    assert "no longer updates itself" in result["error"]
+    assert "Ciaobot for Mac updates it" in result["error"]
+    assert "docs/LINUX.md" not in result["error"]
+    assert "ciao update" not in result["error"] + result["command"]
+    assert "install-engine" not in result["command"] + result["error"]
 
 
 # Receipt ownership decides the answer, not the platform. A Linux
 # `systemd-user` engine placed by the shell installer is a managed install, so
-# it must be told about `ciao update stage` rather than the generic Linux
-# administrator workflow, which the platform branch would otherwise return
+# it must be told that it no longer updates itself rather than given the generic
+# Linux administrator workflow, which the platform branch would otherwise return
 # first. This is the #567 review finding on the branch order.
 #
-# The command follows the platform too: install.sh exits on Linux with "this
-# installer supports macOS only", so a Linux installer engine must not be sent
-# to it. (Round 1 review finding.)
+# No command is offered to it: install.sh exits on Linux with "this installer
+# supports macOS only", so a Linux installer engine must not be sent to it.
+# (Round 1 review finding.)
 def test_update_package_installer_checked_before_linux(monkeypatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "installer")
@@ -227,8 +299,11 @@ def test_update_package_installer_checked_before_linux(monkeypatch) -> None:
 
     assert result["ok"] is False
     assert result["mode"] == "installer"
-    assert "ciao update stage" in result["error"]
-    assert result["command"] == "ciao update stage"
+    assert "no longer updates itself" in result["error"]
+    assert "Run `ciao update`" in result["error"]
+    assert "docs/LINUX.md" in result["error"]
+    assert "Ciaobot for Mac" not in result["error"]
+    assert result["command"] == "ciao update"
 
 
 def test_linux_source_export_never_recommends_the_mac_installer(monkeypatch) -> None:
@@ -240,6 +315,67 @@ def test_linux_source_export_never_recommends_the_mac_installer(monkeypatch) -> 
         assert result["mode"] == mode
         assert "docs/LINUX.md" in result["error"]
         assert result["command"] == ""
+
+
+def _uv_tool_prefix(monkeypatch, root) -> None:
+    """Make ``root`` look like a uv tool env: its prefix holds uv's receipt."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "uv-receipt.toml").write_text('[tool]\nrequirements = [{ name = "ciaobot" }]\n', encoding="utf-8")
+    monkeypatch.setattr(sys, "prefix", str(root))
+
+
+def test_detect_install_mode_uv_tool_only_on_linux_with_receipt(monkeypatch, tmp_path) -> None:
+    _no_bundle_site_packages(monkeypatch, tmp_path)
+    _uv_tool_prefix(monkeypatch, tmp_path / "uv" / "tools" / "ciaobot")
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    assert detect_install_mode() == "uv_tool"
+
+    # Mutation guard: the platform test is what keeps a Mac or Windows
+    # interpreter that happens to hold a uv receipt out of the Linux answer.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert detect_install_mode() == "unknown"
+
+
+def test_detect_install_mode_uv_tool_needs_the_receipt(monkeypatch, tmp_path) -> None:
+    _no_bundle_site_packages(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "bare-venv"))
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    assert detect_install_mode() == "unknown"
+
+
+def test_editable_linux_source_install_keeps_administrator_answer(monkeypatch, tmp_path) -> None:
+    # F6: a source checkout on Linux is `editable` even when its venv carries a
+    # uv receipt, so it keeps the administrator answer and not `ciao update`.
+    repo = tmp_path / "repo"
+    (repo / "ciao").mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (repo / "pyproject.toml").write_text("", encoding="utf-8")
+    _fake_ciao_module(monkeypatch, repo / "ciao" / "__init__.py")
+    _uv_tool_prefix(monkeypatch, repo / ".venv")
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    assert detect_install_mode() == "editable"
+    result = update_package()
+
+    assert result["mode"] == "editable"
+    assert result["command"] == ""
+    assert "administrator" in result["error"]
+    assert "ciao update" not in result["error"]
+
+
+def test_update_package_uv_tool_points_at_ciao_update(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "uv_tool")
+
+    result = update_package()
+
+    assert result["ok"] is False
+    assert result["mode"] == "uv_tool"
+    assert result["command"] == "ciao update"
+    assert "`ciao update`" in result["error"]
+    assert "administrator" not in result["error"]
 
 
 def test_package_update_endpoint_explains_app_owned_updates() -> None:
@@ -296,3 +432,86 @@ def test_package_update_endpoint_installer_is_guidance() -> None:
 
     assert response.status_code == 400
     assert response.json()["mode"] == "installer"
+
+
+def _compose_path(monkeypatch, tmp_path) -> list[str]:
+    import os
+
+    tool = tmp_path / "tools"
+    tool.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setattr(tool_path, "common_tool_dirs", lambda: [str(tool)])
+    main._ensure_tool_dirs_on_path()
+    return os.environ["PATH"].split(os.pathsep)
+
+
+def _as_bundled(monkeypatch, root) -> None:
+    monkeypatch.setattr(sys, "executable", str(root / "bin" / "python3.12"))
+    _fake_ciao_module(
+        monkeypatch, root / "lib" / "python3.12" / "site-packages" / "ciao" / "__init__.py"
+    )
+
+
+def _shim_dir(tmp_path):
+    return tmp_path / "home" / "Library" / "Application Support" / "Ciaobot" / "engine" / "bin"
+
+
+def test_bundled_child_path_puts_ciao_shim_dir_first(monkeypatch, tmp_path) -> None:
+    root = _engine_tree(tmp_path)
+    _as_bundled(monkeypatch, root)
+    parts = _compose_path(monkeypatch, tmp_path)
+    assert parts[0] == str(_shim_dir(tmp_path))
+    # python3 must not resolve to the engine's pip-less CPython.
+    assert str(root / "bin") not in parts
+    assert parts.index("/usr/bin") < parts.index(str(tmp_path / "tools"))
+
+
+def test_ciao_shim_content_mode_and_quoting(monkeypatch, tmp_path) -> None:
+    import stat
+    import subprocess
+
+    root = _engine_tree(tmp_path)
+    # An apostrophe, a space and a $  in the app path must survive quoting.
+    odd = tmp_path.resolve() / "it's $HOME here" / "Ciaobot.app" / "Contents" / "Resources" / "engine"
+    (odd / "bin").mkdir(parents=True)
+    (odd / "bin" / "python3.12").write_text("", encoding="utf-8")
+    ciao = odd / "bin" / "ciao"
+    ciao.write_text('#!/bin/sh\nprintf "%s" "$1"\n', encoding="utf-8")
+    ciao.chmod(0o755)
+    del root
+    _as_bundled(monkeypatch, odd)
+    _compose_path(monkeypatch, tmp_path)
+    shim = _shim_dir(tmp_path) / "ciao"
+    assert stat.S_IMODE(shim.stat().st_mode) == 0o755
+    assert shim.read_text(encoding="utf-8").startswith("#!/bin/sh\nexec ")
+    out = subprocess.run([str(shim), "hello"], capture_output=True, text=True, check=True)
+    assert out.stdout == "hello"
+    assert [p.name for p in shim.parent.iterdir()] == ["ciao"]
+
+
+def test_ciao_shim_is_idempotent_and_regenerated_when_app_moved(monkeypatch, tmp_path) -> None:
+    first = _engine_tree(tmp_path)
+    _as_bundled(monkeypatch, first)
+    _compose_path(monkeypatch, tmp_path)
+    shim = _shim_dir(tmp_path) / "ciao"
+    inode = shim.stat().st_ino
+    _compose_path(monkeypatch, tmp_path)
+    assert shim.stat().st_ino == inode  # current shim is left alone
+
+    moved = tmp_path.resolve() / "moved"
+    moved.mkdir()
+    second = _engine_tree(moved)
+    _as_bundled(monkeypatch, second)
+    _compose_path(monkeypatch, tmp_path)
+    text = shim.read_text(encoding="utf-8")
+    assert str(second / "bin" / "ciao") in text
+    assert str(first / "bin" / "ciao") not in text
+
+
+def test_unbundled_child_path_keeps_tool_dirs_first(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python3"))
+    _fake_ciao_module(monkeypatch, tmp_path / "site-packages" / "ciao" / "__init__.py")
+    parts = _compose_path(monkeypatch, tmp_path)
+    assert parts == [str(tmp_path / "tools"), "/usr/bin"]
+    assert not _shim_dir(tmp_path).exists()

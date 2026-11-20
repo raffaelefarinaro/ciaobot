@@ -41,7 +41,7 @@ def test_empty_report_has_no_issues(tmp_path: Path) -> None:
     report = build_issue_report(tmp_path)
     assert report["has_issues"] is False
     assert report["failed_jobs"] == []
-    assert report["error_log_lines"] == 0
+    assert report["error_log_records"] == 0
     assert report["report_text"] == "(no runtime issues logged)"
 
 
@@ -63,7 +63,7 @@ def test_report_includes_error_log_and_failed_jobs(tmp_path: Path) -> None:
     report = build_issue_report(tmp_path)
 
     assert report["has_issues"] is True
-    assert report["error_log_lines"] == 1
+    assert report["error_log_records"] == 1
     assert [f["job"] for f in report["failed_jobs"]] == ["schedule_dispatch"]
     assert "stream exploded" in report["report_text"]
     assert "boom" in report["report_text"]
@@ -361,7 +361,7 @@ def test_workspace_report_never_reads_engine_logs(
 
     for target in (
         "ciao.debug_report.build_issue_report",
-        "ciao.debug_report.tail_error_log",
+        "ciao.debug_report.tail_error_records",
         "ciao.debug_report.tail_debug_log",
     ):
         monkeypatch.setattr(target, _refuse)
@@ -431,3 +431,98 @@ def test_recent_job_failures_filters_before_limit() -> None:
 
     assert [failure["error"] for failure in failures] == ["owned failure"]
     assert len(failures) <= 5
+
+
+def test_error_count_is_the_main_error_log_and_nothing_else(tmp_path: Path) -> None:
+    # The Settings summary ("N error-log line(s)") and "Fix issues in chat" both
+    # read the main server_errors.log tail. Rotated and other logs must not
+    # leak into the count when the main file is empty.
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "server_errors.log").write_text("", encoding="utf-8")
+    (runtime / "server_errors.log.1").write_text(
+        "2026-10-03 ERROR root: old\n" * 5, encoding="utf-8"
+    )
+    (runtime / "server_debug.log").write_text("DEBUG x\n" * 3, encoding="utf-8")
+    (runtime / "ciao.stderr.log").write_text("ERROR stderr\n" * 4, encoding="utf-8")
+
+    report = build_issue_report(tmp_path)
+
+    assert report["error_log_records"] == 0
+    assert report["has_issues"] is False
+    assert report["report_text"] == "(no runtime issues logged)"
+
+
+def _traceback_record(stamp: str, message: str, frames: int) -> str:
+    """One ERROR record as logging writes it: header, then a traceback of ``frames`` frames."""
+    lines = [f"{stamp} ERROR ciao.schedules: {message}", "Traceback (most recent call last):"]
+    for index in range(frames):
+        lines.append(f'  File "/app/ciao/module_{index}.py", line {index + 1}, in run')
+        lines.append("    result = await self._dispatch(payload)")
+    lines.append("RuntimeError: " + message)
+    return "\n".join(lines) + "\n"
+
+
+def test_error_count_matches_the_text_fix_in_chat_is_given(tmp_path: Path) -> None:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "server_errors.log").write_text(
+        _traceback_record("2026-11-20 08:40:13,123", "current", frames=3),
+        encoding="utf-8",
+    )
+    (runtime / "server_errors.log.1").write_text(
+        "2026-10-03 08:00:00,000 ERROR root: rotated\n" * 5, encoding="utf-8"
+    )
+
+    report = build_issue_report(tmp_path)
+
+    # One record: the ERROR line and its traceback lines count once together.
+    assert report["error_log_records"] == 1
+    assert "current" in report["report_text"]
+    assert "rotated" not in report["report_text"]
+
+
+def test_nine_error_records_with_tracebacks_count_as_nine_not_sixty_three(tmp_path: Path) -> None:
+    # The Settings summary used to count physical lines: nine tracebacks of this
+    # shape made 63 "error-log lines". The count is records.
+    text = "".join(
+        _traceback_record(f"2026-11-20 08:4{index}:00,000", f"failure {index}", frames=2)
+        for index in range(9)
+    )
+    assert sum(1 for line in text.splitlines() if line.strip()) == 63
+    _write_error_log(tmp_path, text)
+
+    report = build_issue_report(tmp_path)
+
+    assert report["error_log_records"] == 9
+    assert report["error_log"] == text
+
+
+def test_record_cap_keeps_whole_records_not_the_last_physical_lines(tmp_path: Path) -> None:
+    first = _traceback_record("2026-11-20 08:00:00,000", "first-run", frames=4)
+    middle = _traceback_record("2026-11-20 08:01:00,000", "middle-run", frames=4)
+    last = _traceback_record("2026-11-20 08:02:00,000", "newest-run", frames=4)
+    _write_error_log(tmp_path, first + middle + last)
+
+    report = build_issue_report(tmp_path, log_records=2)
+
+    # A physical-line cap would cut into the middle traceback; a record cap keeps
+    # the two newest records whole and drops the oldest.
+    assert report["error_log"] == middle + last
+    assert report["error_log_records"] == 2
+    assert "first-run" not in report["report_text"]
+
+
+def test_record_cap_is_applied_before_the_count_so_they_agree(tmp_path: Path) -> None:
+    text = "".join(
+        _traceback_record(f"2026-11-20 {index // 60:02d}:{index % 60:02d}:00,000", f"run {index}", frames=2)
+        for index in range(250)
+    )
+    _write_error_log(tmp_path, text)
+
+    report = build_issue_report(tmp_path)
+
+    assert report["error_log_records"] == 200
+    assert report["error_log"].count("ERROR ciao.schedules:") == 200
+    assert "run 49\n" not in report["error_log"]
+    assert "run 50\n" in report["error_log"]

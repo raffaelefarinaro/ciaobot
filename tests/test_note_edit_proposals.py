@@ -1474,3 +1474,34 @@ def test_a_settled_entry_row_clears_its_own_entry_check(tmp_path: Path) -> None:
     nep.settle_note_edit(config, "personal", proposal.id, accepted=False)
     assert ev.read_entry_checks(vault)["c" * 64].proposal_id == proposal.proposal_id
     assert _replace
+
+
+def test_the_sidecar_parser_is_pure_and_read_sidecar_goes_through_it(tmp_path: Path) -> None:
+    """The text parser takes no filesystem path and gives read_sidecar's answer."""
+    vault = _vault(tmp_path)
+    config = _config(vault)
+    proposal = nep.NoteEditProposal(
+        id="p" * 16,
+        workspace="personal",
+        relative_path="notes/Sofia.md",
+        operation=nep.REPLACE,
+        expected_revision="a" * 64,
+        before="x",
+        after="y",
+        outcome="update",
+        coverage="complete",
+        evidence=(),
+        reason="stale",
+        created_at="2026-11-18T00:00:00Z",
+        proposal_id="q" * 16,
+    )
+    path = nep.write_sidecar(config, proposal)
+    text = path.read_text(encoding="utf-8")
+
+    parsed = nep.parse_sidecar_text(text, where=path, proposal_id=proposal.id)
+
+    assert parsed == nep.read_sidecar(config, "personal", proposal.id)
+    with pytest.raises(nep.NoteEditSidecarError, match="schema"):
+        nep.parse_sidecar_text(
+            text.replace('"schema": 1', '"schema": 2'), where=path, proposal_id=proposal.id
+        )

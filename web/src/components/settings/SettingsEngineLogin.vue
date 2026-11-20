@@ -8,9 +8,16 @@
       <p class="hint">
         Whether the Ciaobot engine service on this host is registered to start by itself when you
         sign in to this computer. That is the <em>next</em> sign-in: changing it here never starts or
-        stops the engine you are talking to now. Installing Ciaobot as an app is a separate,
-        optional thing &mdash; a window onto this same address, explained in
-        <strong>Use Ciaobot as an app</strong> below.
+        stops the engine you are talking to now.
+        <template v-if="!desktop">
+          Installing Ciaobot as an app is a separate,
+          optional thing &mdash; a window onto this same address, explained in
+          <strong>Use Ciaobot as an app</strong> below.
+        </template>
+        <template v-else>
+          Ciaobot for Mac&rsquo;s own <strong>Start at Login</strong>, in the menu bar under
+          Settings, is separate: it starts Ciaobot for Mac when you sign in.
+        </template>
       </p>
     </div>
 
@@ -108,9 +115,11 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api } from '../../lib/api'
+import { isDesktopClient } from '../../lib/pwaPlatform'
 import { COPY_FEEDBACK_MS, writeClipboard } from '../../lib/codeCopy'
 import { apiErrorMessage, errorMessage, errorPayload } from '../../lib/errorMessage'
 
+const desktop = isDesktopClient()
 const LOGIN_ROUTE = '/api/service/login'
 
 /** `GET`/`PATCH /api/service/login` (#913), mirrored field for field. */
@@ -190,6 +199,15 @@ const stateView = computed<{ label: string; tone: Tone; detail: string }>(() => 
   const current = status.value
   if (!current) return { label: 'Unknown', tone: 'off', detail: '' }
   const reason = current.reason.trim()
+  // In the Mac app the app owns the login item, so there is no CLI service to
+  // install and no command to show: the row says where the setting lives.
+  if (desktop && current.installed === false) {
+    return {
+      label: 'Managed by Ciaobot for Mac',
+      tone: 'off',
+      detail: 'Ciaobot for Mac starts the engine at login from its menu bar: Settings → Start at Login.',
+    }
+  }
   if (current.installed === false) {
     return {
       label: 'Not installed for this user',
@@ -221,7 +239,8 @@ const actionLabel = computed(() => (
   status.value?.enabled ? 'Disable at sign-in' : 'Enable at sign-in'
 ))
 
-const setupCommand = computed(() => status.value?.setup_command || '')
+// The app has no CLI command to offer: its own Start at Login is the setting.
+const setupCommand = computed(() => (desktop ? '' : status.value?.setup_command || ''))
 
 const setupLead = computed(() => (
   status.value?.installed === false

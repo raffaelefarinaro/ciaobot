@@ -2,7 +2,7 @@
   <div v-if="project" class="project-view" data-rail-host>
     <!-- Like an open chat or automation: no brand or page tag, so on a phone
          close, title and actions share one row. -->
-    <PaneHeader :brand="false" @open-sidebar="emit('open-sidebar')">
+    <PaneHeader @open-sidebar="emit('open-sidebar')">
       <template #title>
         <div class="header-left">
           <!-- The same title row as an open chat: close, then the title rail of
@@ -30,6 +30,7 @@
               :items="titleRail.items.value"
               :current-id="project.project_id"
               group-label="Projects in this workspace"
+              :busy="titleRail.switching.value"
               @select="onRailSelect"
               @rename="startEditName"
               @lean="railLean = $event"

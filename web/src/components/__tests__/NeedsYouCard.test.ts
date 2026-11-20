@@ -31,10 +31,10 @@ const CHAT_ID = 'chat-1'
 function action(over: Partial<ChatAction> = {}): ChatAction {
   return {
     id: 'a1',
-    kind: 'mcp_auth',
+    kind: 'command',
     origin: 'engine',
     state: 'open',
-    params: { server: 'linear', provider: 'opencode' },
+    params: { command: 'echo review-only' },
     error: '',
     created_at: 1,
     ...over,
@@ -48,15 +48,13 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-/** A stand-in for the tab `window.open('', '_blank')` returns. */
-const fakeTab = () => ({ closed: false, opener: {} as unknown, location: { href: '' }, close: vi.fn() })
-
 let wrapper: VueWrapper | null = null
 
 function mountCard(props: { action?: ChatAction } = {}) {
   // A Pinia of its own per test, so one test's actions never reach another.
   const pinia = createPinia()
   setActivePinia(pinia)
+  useProjectStore().chatActions[CHAT_ID] = [props.action ?? action()]
   wrapper = mount(NeedsYouCard, {
     props: { chatId: CHAT_ID, action: action(), ...props },
     attachTo: document.body,
@@ -86,64 +84,13 @@ afterEach(() => {
 })
 
 describe('NeedsYouCard', () => {
-  it('shows the sign-in copy for an open action', () => {
+  it('shows the card copy and the generic controls for an open action', () => {
     const card = mountCard()
     const root = card.get('.needs-you-card')
     expect(root.attributes('data-state')).toBe('open')
-    expect(card.get('.needs-you-card-title').text()).toBe('Sign in to linear')
-    expect(card.get('.needs-you-card-why').text())
-      .toBe('linear is set up for this chat but not signed in. Sign in once so this chat can use its tools.')
-    expect(card.get('.needs-you-card-meta').text()).toBe('opencode · MCP')
-    expect(button(card, 'Sign in').exists()).toBe(true)
-    expect(button(card, 'Not now').exists()).toBe(true)
-  })
-
-  it('Sign in starts the action and opens the page in a new tab without an opener', async () => {
-    const tab = fakeTab()
-    const openSpy = vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window)
-    apiPost.mockResolvedValueOnce({
-      action: action({ state: 'waiting', params: { server: 'linear', provider: 'opencode', url: 'https://mcp.linear.app/authorize?x=1' } }),
-    })
-    const card = mountCard()
-    await button(card, 'Sign in').trigger('click')
-    await flushPromises()
-
-    expect(apiPost).toHaveBeenCalledWith('/api/chats/chat-1/actions/a1/start', {})
-    expect(openSpy).toHaveBeenCalledWith('', '_blank')
-    expect(tab.location.href).toBe('https://mcp.linear.app/authorize?x=1')
-    expect(tab.opener).toBeNull()
-  })
-
-  it('never opens an address that is not http or https', async () => {
-    const tab = fakeTab()
-    vi.spyOn(window, 'open').mockReturnValue(tab as unknown as Window)
-    apiPost.mockResolvedValueOnce({
-      action: action({ state: 'waiting', params: { server: 'linear', provider: 'opencode', url: 'javascript:alert(1)' } }),
-    })
-    const card = mountCard()
-    await button(card, 'Sign in').trigger('click')
-    await flushPromises()
-    expect(tab.location.href).toBe('')
-    expect(tab.close).toHaveBeenCalled()
-  })
-
-  it('a waiting card links to the page and shows the steps', () => {
-    const card = mountCard({
-      action: action({ state: 'waiting', params: { server: 'linear', provider: 'opencode', url: 'https://mcp.linear.app/authorize?x=1' } }),
-    })
-    const link = card.get('a.needs-you-btn')
-    expect(link.attributes('href')).toBe('https://mcp.linear.app/authorize?x=1')
-    expect(link.attributes('target')).toBe('_blank')
-    expect(link.attributes('rel')).toBe('noopener noreferrer')
-    expect(link.text()).toBe('Open the sign-in page again')
-
-    const steps = card.findAll('.needs-you-steps li')
-    expect(steps).toHaveLength(3)
-    // Mounted straight into waiting, this card opened nothing.
-    expect(steps[0].text()).toBe('Open the sign-in page')
-    expect(steps[0].attributes('aria-current')).toBe('step')
-    expect(steps[1].attributes('aria-current')).toBeUndefined()
-    expect(card.find('.needs-you-card-spinner').exists()).toBe(true)
+    expect(card.get('.needs-you-card-title').text()).toBe('Suggested command — review before running')
+    expect(card.get('.needs-you-card-meta').text()).toBe('Suggested command')
+    expect(button(card, 'Type it in a terminal').exists()).toBe(true)
     expect(button(card, 'Not now').exists()).toBe(true)
   })
 
@@ -156,7 +103,7 @@ describe('NeedsYouCard', () => {
   it('a done card continues the chat, and Done dismisses it', async () => {
     apiPost.mockResolvedValueOnce({ actions: [], delivery: 'started' })
     const card = mountCard({ action: action({ state: 'done' }) })
-    await button(card, 'Continue the chat').trigger('click')
+    await button(card, 'Continue').trigger('click')
     await flushPromises()
     expect(apiPost).toHaveBeenLastCalledWith('/api/chats/chat-1/actions/a1/continue', {})
 
@@ -165,15 +112,6 @@ describe('NeedsYouCard', () => {
     await button(done, 'Done').trigger('click')
     await flushPromises()
     expect(apiPost).toHaveBeenLastCalledWith('/api/chats/chat-1/actions/a1/dismiss', {})
-  })
-
-  it('a failed card shows the engine error and offers Try again', async () => {
-    apiPost.mockResolvedValueOnce({ action: action({ state: 'waiting' }) })
-    const card = mountCard({ action: action({ state: 'failed', error: 'Timed out waiting for sign-in' }) })
-    expect(card.get('.needs-you-card-why').text()).toBe('Timed out waiting for sign-in')
-    await button(card, 'Try again').trigger('click')
-    await flushPromises()
-    expect(apiPost).toHaveBeenCalledWith('/api/chats/chat-1/actions/a1/start', {})
   })
 
   it('Not now dismisses the card, and the button is disabled while the request is out', async () => {
@@ -210,68 +148,29 @@ describe('NeedsYouCard', () => {
     expect(button(card, 'Not now').attributes('disabled')).toBeUndefined()
   })
 
-  it('a start refusal says the card changed and adopts the engine action', async () => {
-    apiPost.mockRejectedValueOnce(Object.assign(new Error('invalid_state'), {
-      status: 400,
-      payload: { error: 'invalid_state', action: action({ state: 'waiting' }) },
-    }))
-    const card = mountCard()
-    const store = useProjectStore()
-    await button(card, 'Sign in').trigger('click')
-    await flushPromises()
-    expect(card.get('[role=status]').text()).toBe('This card changed on another device. The newer state is shown.')
-    expect(store.chatActions['chat-1']?.[0]?.state).toBe('waiting')
-  })
-
-  it('a stale start says the card changed', async () => {
-    apiPost.mockRejectedValueOnce(Object.assign(new Error('chat_action_conflict'), {
-      status: 409,
-      payload: { error: 'chat_action_conflict', actions: [] },
-    }))
-    const card = mountCard()
-    await button(card, 'Sign in').trigger('click')
-    await flushPromises()
-    expect(card.get('[role=status]').text()).toBe('This card changed on another device. The newer state is shown.')
-  })
-
   it('a done card shows a check in the glyph, and an open card does not', () => {
-    const open = mountCard()
+    const gws = { kind: 'gws_auth', params: { profile: 'alpha' } } as const
+    const open = mountCard({ action: action(gws) })
     expect(open.find('.needs-you-card-glyph svg polyline').exists()).toBe(false)
-    const done = mountCard({ action: action({ state: 'done' }) })
+    const done = mountCard({ action: action({ ...gws, state: 'done' }) })
     expect(done.find('.needs-you-card-glyph svg polyline').exists()).toBe(true)
   })
 
-  it('Sign in keeps the focus on the card while the start request is out', async () => {
+  it('Not now keeps the focus on the card while the request is out', async () => {
     const pending = deferred<unknown>()
     apiPost.mockReturnValueOnce(pending.promise)
     const card = mountCard()
-    const sign = button(card, 'Sign in')
-    sign.element.focus()
-    await sign.trigger('click')
+    const dismiss = button(card, 'Not now')
+    dismiss.element.focus()
+    await dismiss.trigger('click')
     expect(document.activeElement).toBe(card.get('.needs-you-card').element)
 
-    pending.resolve({ action: action({ state: 'waiting', params: { server: 'linear', provider: 'opencode' } }) })
+    pending.resolve({ actions: [] })
     await flushPromises()
   })
 
-  it('when the sign-in link goes away with the focus on it, the focus moves to the card', async () => {
-    const waiting = action({
-      state: 'waiting',
-      params: { server: 'linear', provider: 'opencode', url: 'https://mcp.linear.app/x' },
-    })
-    const card = mountCard({ action: waiting })
-    const link = card.get('a.needs-you-btn')
-    ;(link.element as HTMLElement).focus()
-    expect(document.activeElement).toBe(link.element)
-
-    await card.setProps({ action: action({ state: 'done', params: waiting.params }) })
-    expect(document.activeElement).toBe(card.get('.needs-you-card').element)
-  })
-
-  it('every control is a real button or link', () => {
-    const card = mountCard({
-      action: action({ state: 'waiting', params: { server: 'linear', provider: 'opencode', url: 'https://mcp.linear.app/x' } }),
-    })
+  it('every control is a real button', () => {
+    const card = mountCard()
     for (const b of card.findAll('button')) expect(b.attributes('type')).toBe('button')
   })
 
@@ -292,7 +191,7 @@ describe('NeedsYouCard', () => {
     await flushPromises()
 
     const row = card.get('.needs-you-card-controls')
-    expect(row.findAll('button').map(b => b.text())).toEqual(['Sign in', 'Turn off', 'Not now'])
+    expect(row.findAll('button').map(b => b.text())).toEqual(['Type it in a terminal', 'Copy', 'Not now'])
     expect(card.get('.needs-you-card-error').element.closest('.needs-you-card-controls')).toBeNull()
   })
 
@@ -302,8 +201,10 @@ describe('NeedsYouCard', () => {
     expect(live.attributes('aria-live')).toBe('polite')
     expect(live.text()).toBe('')
 
-    await card.setProps({ action: action({ state: 'failed', error: 'Boom' }) })
+    await card.setProps({ action: action({ state: 'working' }) })
     await nextTick()
-    expect(card.get('.needs-you-card-live').text()).toBe("Couldn't sign in to linear. Boom")
+    expect(card.get('.needs-you-card-live').text()).toBe(
+      'Review it, then press Enter in the terminal. The command is typed at the prompt. Edit it if you want. Nothing has run.',
+    )
   })
 })

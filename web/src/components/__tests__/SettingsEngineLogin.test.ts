@@ -92,6 +92,7 @@ beforeEach(() => {
 afterEach(() => {
   while (mounted.length) mounted.pop()!.unmount()
   document.body.innerHTML = ''
+  delete (globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__
   vi.useRealTimers()
 })
 
@@ -231,6 +232,39 @@ describe('SettingsEngineLogin when the host has an answer', () => {
     // Neither a promise of an always-running engine nor of offline use.
     expect(text.toLowerCase()).not.toContain('offline')
     expect(text.toLowerCase()).not.toContain('always')
+  })
+
+  it('points at the Mac app Start at Login inside Ciaobot for Mac', async () => {
+    ;(globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__ = true
+    const view = await mountPanel()
+    const text = view.text()
+
+    expect(text).toContain('Start at Login')
+    expect(text).toContain('menu bar')
+    expect(text).not.toContain('Use Ciaobot as an app')
+    expect(text).toContain('That is the next sign-in')
+  })
+})
+
+describe('SettingsEngineLogin in the Mac app with no CLI service', () => {
+  it('says the app owns Start at Login and shows no CLI command', async () => {
+    ;(globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__ = true
+    apiGet.mockResolvedValue(status({
+      installed: false,
+      enabled: null,
+      can_change: false,
+      reason: 'The Ciaobot engine service is not installed for this user.',
+      setup_command: 'ciao service start --workspace /Users/me/Ciao',
+    }))
+    const view = await mountPanel()
+
+    expect(stateText(view)).toContain('Managed by Ciaobot for Mac')
+    expect(view.text()).toContain('Ciaobot for Mac starts the engine at login from its menu bar: Settings → Start at Login.')
+    expect(view.text()).not.toContain('ciao service start')
+    expect(view.text()).not.toContain('Not installed for this user')
+    expect(view.find('code.login-command-text').exists()).toBe(false)
+    expect(view.findAll('button').map((b) => b.text())).not.toContain('Copy')
+    expect(actionButton(view).exists()).toBe(false)
   })
 })
 

@@ -1,4 +1,4 @@
-import type { ChatMessage, SubagentTranscript } from './types'
+import type { ChatMessage } from './types'
 import { formatConnectorLabel } from './mcpLabels'
 import { isPlausibleFilePath } from './filePaths'
 
@@ -208,7 +208,7 @@ export function formatTokenUsage(usage?: Record<string, unknown>): string {
 
 /** One display part of a settled turn: an Activity trace segment or an
  *  earlier reply the server explicitly marked as completed. The turn's closing
- *  reply is never a part; the caller appends it with its outputs/subagents. */
+ *  reply is never a part; the caller appends it with its outputs. */
 export type TurnPart =
   | { kind: 'trace'; steps: ChatMessage[] }
   | { kind: 'assistant'; msg: ChatMessage }
@@ -293,7 +293,7 @@ export function findFinalAnswerIndex(
 
 /** Split one turn's buffered steps into display parts, EXCLUDING the final
  *  reply at `finalIdx` (the caller appends that itself, with the turn's
- *  outputs/subagents attached).
+ *  outputs attached).
  *
  *  Only an earlier assistant row the server explicitly marked completed
  *  (`phase: 'final_answer'`, no tool call) is a bubble: a hidden continuation
@@ -326,7 +326,7 @@ export function buildTurnParts(buffer: ChatMessage[], finalIdx: number): TurnPar
   return parts
 }
 
-export function traceSummaryMeta(steps: ChatMessage[], subs?: SubagentTranscript[]): string {
+export function traceSummaryMeta(steps: ChatMessage[]): string {
   let toolCount = 0
   let textCount = 0
   let thinkingCount = 0
@@ -347,9 +347,6 @@ export function traceSummaryMeta(steps: ChatMessage[], subs?: SubagentTranscript
   if (textCount) parts.push(`${textCount} note${textCount === 1 ? '' : 's'}`)
   if (toolCount) parts.push(`${toolCount} tool call${toolCount === 1 ? '' : 's'}`)
   if (fileCount) parts.push(`${fileCount} file${fileCount === 1 ? '' : 's'}`)
-  if (subs?.length) {
-    parts.push(`${subs.length} subagent${subs.length === 1 ? '' : 's'}`)
-  }
   return parts.join(' · ') || 'steps'
 }
 
@@ -360,7 +357,7 @@ export interface MetaPart {
   isImportant?: boolean
 }
 
-export function traceSummaryMetaParts(steps: ChatMessage[], subs?: SubagentTranscript[]): MetaPart[] {
+export function traceSummaryMetaParts(steps: ChatMessage[]): MetaPart[] {
   let toolCount = 0
   let textCount = 0
   let thinkingCount = 0
@@ -404,13 +401,6 @@ export function traceSummaryMetaParts(steps: ChatMessage[], subs?: SubagentTrans
       key: 'files',
       text: `${fileCount} file${fileCount === 1 ? '' : 's'}`,
       shortText: `${fileCount} f`
-    })
-  }
-  if (subs?.length) {
-    parts.push({
-      key: 'subagents',
-      text: `${subs.length} subagent${subs.length === 1 ? '' : 's'}`,
-      shortText: `${subs.length} sub${subs.length === 1 ? '' : 's'}`
     })
   }
   return parts
@@ -605,27 +595,33 @@ export function describeToolStep(line: string): string {
   if (!parsed) return ''
   const { name, summary } = parsed
   const lower = name.toLowerCase()
+  // The ACP adapter labels a call with its kind when the call has no input or
+  // title, so the summary can just repeat the tool name. That is no detail.
+  const detail = summary.toLowerCase() === lower ? '' : summary
   const base = (value: string) => value.split(/[\\/]/).filter(Boolean).pop() || value
-  const first = summary.split(/\s+/)[0] || ''
+  const first = detail.split(/\s+/)[0] || ''
   if (lower === 'read') return first ? `Reading ${base(first)}` : 'Reading a file'
   if (['write', 'edit', 'multiedit', 'patch', 'notebookedit'].includes(lower)) {
     return first ? `Editing ${base(first)}` : 'Editing a file'
   }
-  if (lower === 'grep' || lower === 'glob' || lower === 'codesearch') return summary ? `Searching ${summary}` : 'Searching'
-  if (lower === 'websearch') return summary ? `Searching the web for ${summary}` : 'Searching the web'
-  if (lower === 'webfetch') return summary ? `Reading ${summary}` : 'Reading a web page'
-  if (lower === 'bash') return summary || 'Running a command'
-  if (lower === 'agent' || lower === 'task') return summary ? `Delegating: ${summary}` : 'Delegating to an agent'
+  if (lower === 'grep' || lower === 'glob' || lower === 'codesearch') return detail ? `Searching ${detail}` : 'Searching'
+  if (lower === 'websearch') return detail ? `Searching the web for ${detail}` : 'Searching the web'
+  if (lower === 'webfetch') return detail ? `Reading ${detail}` : 'Reading a web page'
+  if (lower === 'bash') return detail || 'Running a command'
+  if (lower === 'agent' || lower === 'task' || lower === 'subagent') {
+    return detail ? `Subagent: ${detail}` : 'Running a subagent'
+  }
   if (lower === 'skill') {
-    const skill = skillNameFrom(summary)
-    return skill ? `Using the ${skill} skill` : 'Using a skill'
+    // A skill named "skill" is the echoed tool name, not a name.
+    const skill = skillNameFrom(detail)
+    return skill && skill.toLowerCase() !== 'skill' ? `Using the ${skill} skill` : 'Using a skill'
   }
   if (lower === 'todowrite' || lower === 'taskcreate' || lower === 'taskupdate') return 'Updating the plan'
   // Claude Code's deferred-tool loader: plumbing, not a step worth naming.
   if (lower === 'toolsearch') return 'Loading tools'
   const mcp = /^mcp__(.+?)__(.+)$/.exec(name)
   if (mcp) return `${mcp[1]} · ${mcp[2].replace(/_/g, ' ')}`
-  return summary ? `${name} ${summary}` : name
+  return detail ? `${name} ${detail}` : name
 }
 
 const PERMISSION_LINE_PREFIX = '\u{1F6A7} Permission: '

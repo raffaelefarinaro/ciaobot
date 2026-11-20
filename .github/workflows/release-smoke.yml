@@ -10,179 +10,183 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Released version to install and smoke test (e.g. 0.8.1)."
+        description: "Released version to install and smoke test (e.g. 2.0.0)."
         required: true
         type: string
+
+env:
+  # The one release whose 1.x engine manifest is published (#3131 Q3). Same
+  # value as publish.yml. The legacy-update job runs for this version only.
+  LEGACY_MANIFEST_VERSION: "2.0.0"
 
 permissions:
   contents: read
 
 jobs:
-  smoke:
-    runs-on: macos-latest
-    timeout-minutes: 30
+  resolve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      legacy: ${{ steps.resolve.outputs.legacy }}
     steps:
       - name: Normalize version
         id: resolve
         env:
           REQUESTED: ${{ inputs.version }}
         run: |
+          set -euo pipefail
           version="${REQUESTED#v}"
-          test -n "$version"
+          # The same strict semver scripts/legacy-update-gate.py accepts.
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if ! [[ $version =~ $semver ]]; then
+            echo "not a release version: '$REQUESTED'" >&2
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          legacy=false
+          if [ "$version" = "$LEGACY_MANIFEST_VERSION" ]; then
+            legacy=true
+          fi
+          echo "legacy=$legacy" >> "$GITHUB_OUTPUT"
+
+  linux-install:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
       - name: Install with the one-line installer
-        env:
-          VERSION: ${{ steps.resolve.outputs.version }}
+        timeout-minutes: 15
         run: |
           set -euo pipefail
-          export PATH=/usr/bin:/bin:/usr/sbin:/sbin
-          # A fresh Mac is onboarded in the browser (#2021): the installer runs
-          # `ciao run --installer-bootstrap` and blocks until the setup wizard
-          # is finished. So the one-liner runs in the background and this step
-          # finishes the wizard over HTTP the way the page does: wait for the
-          # bootstrap to answer, then POST /api/setup/finish. Every wait is
-          # bounded, so a wizard that never comes up fails the step instead of
-          # hanging the job.
+          # The runner user has passwordless sudo, which ciao service install
+          # uses to write the unit. The workspace is explicit so the checks
+          # below read the same .env the service runs from.
           workspace="$RUNNER_TEMP/ciaobot-smoke-ws"
           echo "SMOKE_WORKSPACE=$workspace" >> "$GITHUB_ENV"
-          install_log="$RUNNER_TEMP/smoke-install.log"
-          : > "$install_log"
-          # The one-time sign-in URL is a credential, so the installer output is
-          # redacted on its way to the job log instead of being echoed raw.
+          install_log="$RUNNER_TEMP/linux-install.log"
+          # The login URL ciao setup prints is a credential, and so is a bare
+          # login token line: both are redacted before anything reaches the job log.
           show_log() {
             sed -E -e 's#(Open Ciaobot: ).*#\1[redacted]#' \
-              -e 's#https?://[^[:space:]]*(token|setup)[^[:space:]]*#[redacted]#g' "$install_log" || true
+              -e 's#https?://[^[:space:]]*(token|setup)[^[:space:]]*#[redacted]#g' \
+              -e 's#^[A-Za-z0-9_-]{32,}$#[redacted]#' "$install_log"
           }
-          (
-            set -o pipefail
-            curl -fsSL "https://github.com/raffaelefarinaro/ciaobot/releases/download/v${VERSION}/install.sh" \
-              | sh -s -- --version "$VERSION"
-          ) > "$install_log" 2>&1 &
-          installer=$!
-          if ! python3 - "$workspace" "$installer" <<'EOF'
-          import json, os, sys, time, urllib.error, urllib.request
-          workspace, installer = sys.argv[1], int(sys.argv[2])
-          base = "http://127.0.0.1:8443"
-          deadline = time.time() + 600
-          while True:
-              try:
-                  urllib.request.urlopen(base + "/api/setup-status", timeout=5).read()
-                  break
-              except (OSError, urllib.error.URLError):
-                  pass
-              try:
-                  os.kill(installer, 0)
-              except OSError:
-                  print("wizard: the installer exited before the wizard answered")
-                  raise SystemExit(1)
-              if time.time() > deadline:
-                  print("wizard: never answered")
-                  raise SystemExit(1)
-              time.sleep(3)
-          body = json.dumps({
-              "workspace": workspace, "workspace_name": "personal", "port": 8443,
-              "password": "ci-smoke-password", "provider": "claude", "restart": True,
-          }).encode()
-          request = urllib.request.Request(
-              base + "/api/setup/finish", data=body,
-              headers={"Content-Type": "application/json"},
-          )
-          try:
-              with urllib.request.urlopen(request, timeout=60) as response:
-                  print("wizard: finished", response.status)
-          except urllib.error.HTTPError as exc:
-              print("wizard: refused", exc.code, exc.read()[:500])
-              raise SystemExit(1)
-          EOF
-          then
+          if ! { curl -fsSL --max-time 600 "https://github.com/raffaelefarinaro/ciaobot/releases/download/v${VERSION}/install.sh" \
+            | sh -s -- --workspace "$workspace"; } > "$install_log" 2>&1; then
             show_log
-            kill "$installer" 2>/dev/null || true
+            echo "the one-line installer failed" >&2
             exit 1
           fi
-          for _ in $(seq 1 180); do kill -0 "$installer" 2>/dev/null || break; sleep 5; done
-          if kill -0 "$installer" 2>/dev/null; then
-            show_log
-            echo "installer still running after the wizard finished; stopping it" >&2
-            kill "$installer" 2>/dev/null || true
-            exit 1
-          fi
-          install_exit=0
-          wait "$installer" || install_exit=$?
           show_log
-          echo "install exit $install_exit"
-          [ "$install_exit" -eq 0 ]
-          # install.sh is the engine installer as of the transition release
-          # (#651): the app can no longer be freshly installed, so what this
-          # smoke test installs is the engine, and what it checks is that the
-          # engine came up. The public name is unchanged, so the run above is
-          # still the command the docs tell a new user to paste.
           test -x "$HOME/.local/bin/ciao"
-          test -s "$HOME/.local/state/ciaobot/install-receipt.json"
-          jq -e --arg version "$VERSION" '.version == $version' \
-            "$HOME/.local/state/ciaobot/install-receipt.json"
-      - name: Wait for the engine to answer
+          [ "$("$HOME/.local/bin/ciao" --version)" = "ciao $VERSION" ]
+      - name: Check the service answers
+        timeout-minutes: 5
         run: |
           set -euo pipefail
-          # The installer above already started the engine as a LaunchAgent and
-          # waited on it; there is no app left to open (#651). The port comes
-          # from the workspace the wizard set up ($SMOKE_WORKSPACE), the way the
-          # installer itself reads it, rather than being assumed.
-          launchctl print "gui/$(id -u)/com.ciao.server" >/dev/null
+          # The port comes from the workspace the installer set up, and falls
+          # back to the default the engine uses when .env does not name one.
           port=$(awk -F= '/^PWA_PORT=/{print $2}' "$SMOKE_WORKSPACE/.env" 2>/dev/null | tr -d '"' | tail -1 || true)
           [ -n "$port" ] || port=8443
-          for _ in {1..45}; do
-            curl -fsS "http://localhost:$port/api/startup-status" >/dev/null 2>&1 && break
+          for _ in $(seq 1 90); do
+            systemctl is-active --quiet ciaobot && break
             sleep 1
           done
-          curl -fsS "http://localhost:$port/api/startup-status" | jq -e '.desktop_api_version == 1'
-      - name: Re-run installer as an update/recovery path
-        env:
-          VERSION: ${{ steps.resolve.outputs.version }}
+          systemctl is-active --quiet ciaobot
+          for _ in $(seq 1 90); do
+            curl -fsS --max-time 5 "http://127.0.0.1:$port/api/startup-status" >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS --max-time 5 "http://127.0.0.1:$port/api/startup-status" | jq -e '.desktop_api_version == 1'
+      - name: Re-run the one-liner (same-version reinstall)
+        timeout-minutes: 15
         run: |
           set -euo pipefail
-          export PATH=/usr/bin:/bin:/usr/sbin:/sbin
-          # The LaunchAgent the wizard's activation wrote makes this machine
-          # set up, so the installer takes its update path and does not start
-          # the browser wizard again.
-          curl -fsSL "https://github.com/raffaelefarinaro/ciaobot/releases/download/v${VERSION}/install.sh" \
-            | sh -s -- --version "$VERSION" --no-start
-          test -x "$HOME/.local/bin/ciao"
-          jq -e --arg version "$VERSION" '.version == $version' \
-            "$HOME/.local/state/ciaobot/install-receipt.json"
-      - name: Verify the engine installer assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.resolve.outputs.version }}
-        run: |
-          set -euo pipefail
-          # This release publishes the engine plus the server host archive its
-          # manifest authenticates (#653, #1022): no app archive, no latest.json
-          # feed, no native verifier, no bundled runtime. What this step checks
-          # is the installer, under both names.
-          gh release download "v${VERSION}" --repo raffaelefarinaro/ciaobot \
-            --pattern install.sh --pattern install-engine.sh
-          # install.sh is the engine installer (#651). The placeholder belongs to
-          # the app installer, so its absence is what says the retired script is
-          # not what a new user downloads - and install-engine.sh, the name the
-          # app's Move action fetches (#604), has to be the same bytes, or that
-          # hand-over is stranded at the moment a user accepts it.
-          grep -q -- '--migrate' install.sh
-          if grep -q '__VERIFIER_SHA256__' install.sh; then
-            echo "install.sh on the release is still the app installer" >&2
+          # Same version, no flags: this is a same-version reinstall of the
+          # pasted one-liner, not an upgrade. The installed unit keeps the
+          # workspace it records. The service step restarts the unit, so the
+          # main PID must change.
+          pid_before=$(systemctl show -p MainPID --value ciaobot.service)
+          [ "$pid_before" -gt 0 ]
+          update_log="$RUNNER_TEMP/linux-update.log"
+          if ! { curl -fsSL --max-time 600 "https://github.com/raffaelefarinaro/ciaobot/releases/download/v${VERSION}/install.sh" \
+            | sh; } > "$update_log" 2>&1; then
+            sed -E -e 's#(Open Ciaobot: ).*#\1[redacted]#' \
+              -e 's#https?://[^[:space:]]*(token|setup)[^[:space:]]*#[redacted]#g' \
+              -e 's#^[A-Za-z0-9_-]{32,}$#[redacted]#' "$update_log"
+            echo "the update run of the one-line installer failed" >&2
             exit 1
           fi
-          test "$(shasum -a 256 install.sh | awk '{print $1}')" = \
-            "$(shasum -a 256 install-engine.sh | awk '{print $1}')"
+          test -x "$HOME/.local/bin/ciao"
+          [ "$("$HOME/.local/bin/ciao" --version)" = "ciao $VERSION" ]
+          port=$(awk -F= '/^PWA_PORT=/{print $2}' "$SMOKE_WORKSPACE/.env" 2>/dev/null | tr -d '"' | tail -1 || true)
+          [ -n "$port" ] || port=8443
+          for _ in $(seq 1 90); do
+            systemctl is-active --quiet ciaobot && break
+            sleep 1
+          done
+          systemctl is-active --quiet ciaobot
+          for _ in $(seq 1 90); do
+            curl -fsS --max-time 5 "http://127.0.0.1:$port/api/startup-status" >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS --max-time 5 "http://127.0.0.1:$port/api/startup-status" | jq -e '.desktop_api_version == 1'
+          pid_after=$(systemctl show -p MainPID --value ciaobot.service)
+          [ "$pid_after" -gt 0 ]
+          [ "$pid_after" != "$pid_before" ]
       - name: Diagnostics
         if: failure()
         run: |
-          echo "--- processes ---"
-          pgrep -lf 'ciao|uv' || true
-          echo "--- launchd state ---"
-          launchctl print "gui/$(id -u)/com.ciao.server" 2>&1 | head -60 || true
-          echo "--- LaunchAgent ---"
-          cat "$HOME/Library/LaunchAgents/com.ciao.server.plist" 2>/dev/null || true
-          echo "--- install receipt ---"
-          cat "$HOME/.local/state/ciaobot/install-receipt.json" 2>/dev/null || true
+          redact() {
+            sed -E -e 's#(Open Ciaobot: ).*#\1[redacted]#' \
+              -e 's#https?://[^[:space:]]*(token|setup)[^[:space:]]*#[redacted]#g' \
+              -e 's#^[A-Za-z0-9_-]{32,}$#[redacted]#'
+          }
+          echo "--- install log ---"
+          redact < "$RUNNER_TEMP/linux-install.log" 2>/dev/null | tail -200 || true
+          echo "--- update log ---"
+          redact < "$RUNNER_TEMP/linux-update.log" 2>/dev/null | tail -200 || true
+          echo "--- service ---"
+          systemctl status ciaobot --no-pager 2>&1 | head -60 | redact || true
+          echo "--- journal ---"
+          sudo -n journalctl -u ciaobot -n 200 --no-pager 2>&1 | redact || true
           echo "--- runtime logs ---"
-          find "${SMOKE_WORKSPACE:-$HOME/Ciaobot}/.runtime" -maxdepth 1 -type f -print -exec tail -80 {} \; 2>/dev/null || true
+          # Allowlist only: the workspace .runtime directory holds the login
+          # token file, so no other file in it is opened.
+          debug_log="${SMOKE_WORKSPACE:-$HOME/Ciaobot}/.runtime/server_debug.log"
+          if [ -f "$debug_log" ]; then
+            echo "== server_debug.log"
+            tail -80 "$debug_log" | redact || true
+          fi
+
+  legacy-update:
+    needs: resolve
+    if: needs.resolve.outputs.legacy == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: v${{ needs.resolve.outputs.version }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: "0.13.8"
+      - name: Stage the release from the 1.x updater
+        timeout-minutes: 15
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The gate fetches the pinned 1.x wheel and the published manifest,
+          # signature and wheel, then runs that 1.x updater to stage the
+          # release. It never applies the update.
+          python3 scripts/legacy-update-gate.py \
+            --target "$VERSION" \
+            --release-base https://github.com/raffaelefarinaro/ciaobot/releases/download \
+            --uv "$(command -v uv)"

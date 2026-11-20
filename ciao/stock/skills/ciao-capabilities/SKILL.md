@@ -1,6 +1,6 @@
 ---
 name: ciao-capabilities
-description: Use for questions about what Ciaobot can do or how one of its features works, and for tours and onboarding of new users. Covers memory and the vault, Memory Map, vault review, schedules and webhook triggers, workspaces, projects, chats, running agents and their transcripts, forks, subagents, files and pinned panels, file access, slash commands, keyboard shortcuts, document conversion, HTML artifacts and CSV tables, the task board, the browser terminal, skills, MCP, models and providers, permission modes, notifications, updates, importing past conversations, and installing on macOS, Linux or Windows. Not for performing the action itself (scheduling, remembering, adding a task). Trigger on "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "where are my agents", "is the subagent still running", "can ciaobot / can you / can I ...", "how does ... work in ciaobot", even when the word Ciaobot is not mentioned.
+description: Use for questions about what Ciaobot can do or how one of its features works, and for tours and onboarding of new users. Covers memory and the vault, Memory Map, vault review, schedules and webhook triggers, workspaces, projects, chats, forks, subagents, files and pinned panels, permission mode, slash commands, keyboard shortcuts, document conversion, HTML artifacts and CSV tables, the task board, the browser terminal, skills, MCP, models and providers, permission modes, notifications, updates, importing past conversations, and installing on macOS or Linux. Not for performing the action itself (scheduling, remembering, adding a task). Trigger on "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "where are my agents", "is the subagent still running", "can ciaobot / can you / can I ...", "how does ... work in ciaobot", even when the word Ciaobot is not mentioned.
 ---
 
 # Ciaobot Capabilities
@@ -16,7 +16,7 @@ You are running inside Ciaobot. The app's feature surface is not otherwise visib
 
 ## The one-paragraph pitch
 
-Ciaobot is a local-first personal assistant and second brain: a persistent personal workspace for Claude Code and OpenCode. Your agents do the work; Ciaobot keeps project context, chats, files, schedules, and reviewable memory together. Notes and remembered knowledge stay in plain Markdown you own and can use without Ciaobot. Technically, it is a meta-harness around existing agent execution loops, not a replacement for them. Changing models or harnesses keeps the workspace, but does not make provider sessions, tools, or permissions interchangeable.
+Ciaobot is a local-first personal assistant and second brain: a persistent personal workspace for Claude Code, Codex and OpenCode. Your agents do the work; Ciaobot keeps project context, chats, files, schedules, and reviewable memory together. Notes and remembered knowledge stay in plain Markdown you own and can use without Ciaobot. Technically, it is a meta-harness around existing agent execution loops, not a replacement for them. Changing models or harnesses keeps the workspace, but does not make provider sessions, tools, or permissions interchangeable.
 
 ## Connecting providers
 
@@ -24,22 +24,22 @@ Ciaobot uses the provider CLI the user already has, rather than creating a
 second model account or storing a second provider credential. For Anthropic,
 the user installs and signs into [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview),
 then chooses Claude Code in Ciaobot; Ciaobot adds workspace/project context and
-handles the end-of-conversation memory pass around that session. For
-OpenAI access, OpenRouter, Ollama, or another cloud/local backend, the user
-installs [OpenCode 2.0.16+](https://opencode.ai/v2/docs/), configures and
+handles the end-of-conversation memory pass around that session. For Codex, the user installs the Codex CLI and signs in with `codex login`
+(install and sign-in are in Settings → Providers), then chooses Codex in Ciaobot.
+For OpenRouter, Ollama, or another cloud/local backend, the user
+installs [OpenCode 2.3.2+](https://opencode.ai/v2/docs/), configures and
 authenticates the provider there, then chooses OpenCode in Ciaobot. Its connected models appear
 in the Ciaobot picker. Point users to the live
 [`INTEGRATIONS.md`](https://github.com/raffaelefarinaro/ciaobot/blob/main/INTEGRATIONS.md)
 for current commands; do not invent version-sensitive install or login syntax.
 
-When a user has to sign in, install a CLI, or set up an MCP server, read
-`references/install-and-settings.md`: it carries the current verified commands
-and the exact places in the app. The agent hands over a command to review and
-run — `ciao chat needs-action command --command-file FILE` puts one in the chat as a card that types it into the chat's terminal for the user to run — and
-never runs a sign-in, an install or an MCP setup on the user's behalf.
-When the user asks for that setup in a chat, offer the command in that chat
-straight away rather than pointing them to a Settings page, and link any
-Settings page you do mention by its in-app path (`[MCP servers](/settings/mcp)`).
+For provider login or installation prefer the existing Settings flow. For MCP
+sign-in use **Chat details → MCP**, which runs the agent's own MCP command;
+[MCP servers](/settings/mcp) opens the same command. Read `references/install-and-settings.md` for setup,
+manual fallback and `ciao chat needs-action` details. For an operator-run command,
+offer a reviewed `ciao chat needs-action command --command-file FILE` suggestion
+or point to **Chat details → Open → Terminal**; the user runs it. See
+`references/terminal.md` for the shell's boundaries.
 
 ## Capability areas
 
@@ -47,14 +47,14 @@ Each area has a reference file next to this one. Open only the file the question
 
 | Area | What it covers | Read |
 |---|---|---|
-| Workspaces, projects, chats | hierarchy, file access, archiving a workspace, usage statistics (`ciao stats`) and the Usage page, `ciao project`, linked repos, code mode, forks, subagents and locating running agents and their completed transcripts, background shells (the provider's own `run_in_background` / `Monitor`), plan mode, turn resilience | `references/workspaces-and-chats.md` |
+| Workspaces, projects, chats | hierarchy, permission mode and file access, archiving a workspace, usage statistics (`ciao stats`) and the Usage page, `ciao project`, linked repos, code mode, forks, subagents, long scripts (a subagent, or a background shell: the chat is told when it finishes), plan mode, turn resilience | `references/workspaces-and-chats.md` |
 | Memory and the vault | the memory pass, what is automatic vs yours, To decide, History and Undo, the optional reason on every decision, Memory Map, Vault Review, retirement candidates, conversation import, memory backup | `references/memory.md` |
 | Automations | schedules, interval runs, project vs chat targets, catch-up, webhook triggers | `references/automations.md` |
 | Files | viewer and pinned panel, folder browser and folder pins, annotations, drafts, previews, document conversion, HTML artifacts, CSV tables, backlinks, keyboard shortcuts | `references/files.md` |
-| Skills, models, Google Workspace | skills, subagents, slash commands, skill proposals, providers, permission modes, queue and steer, `gws` | `references/models-and-extensions.md` |
+| Skills, models, Google Workspace | skills, subagents, slash commands, skill proposals, providers, permission modes, message queue, `gws` | `references/models-and-extensions.md` |
 | Task board | the Tasks page, Delegate to agent, Approve Done, "After this update" tasks | `references/tasks.md` |
 | Terminal | the browser terminal panel: where it runs, the grant and the session it rides on, sessions, the socket protocol, how to offer a suggested command, and what an agent can and cannot do | `references/terminal.md` |
-| App and system | Settings page, MCP, installing and updating, other devices, forgotten password, Linux, Windows, local API | `references/install-and-settings.md` |
+| App and system | Settings page, MCP, installing and updating, other devices, forgotten password, Linux, local API | `references/install-and-settings.md` |
 
 ## Left to companion tools
 
@@ -62,7 +62,7 @@ Ciaobot deliberately does not build in dictation, keeping the host awake, an age
 
 ## Privacy and trust posture
 
-Local-first: the server, vault, and runtime state live on the user's machine; traffic leaves only toward the configured model providers. Memory is reviewable: confident state-shaped facts are filed by the memory pass, the unsure ones wait as proposals, every individual accept or dismiss in the queue asks for an optional reason before it writes (picking a re-home destination is the exception; the destination is the answer), and no unattended run promotes a new always-loaded fact (unless the operator set Memory handover to Dismiss and accept). An existing notes folder is never discarded or rewritten during onboarding, and the vault stays portable plain markdown. The agent's file access is set per workspace (File access, in `references/workspaces-and-chats.md`): under Workspace only it cannot read outside that workspace's folder, but the network is not restricted.
+Local-first: the server, vault, and runtime state live on the user's machine; traffic leaves only toward the configured model providers. Memory is reviewable: confident state-shaped facts are filed by the memory pass, the unsure ones wait as proposals, every individual accept or dismiss in the queue asks for an optional reason before it writes (picking a re-home destination is the exception; the destination is the answer), and no unattended run promotes a new always-loaded fact (unless the operator set Memory handover to Dismiss and accept). An existing notes folder is never discarded or rewritten during onboarding, and the vault stays portable plain markdown. Ciaobot does not limit the agent's file access; each CLI's permission mode does, and bypass gives full access to what the user account can reach (`references/workspaces-and-chats.md`).
 
 ## Guided tour (new users)
 
@@ -82,5 +82,5 @@ Close with: they can ask "what can Ciaobot do?" (or about any specific feature) 
 ## Where the details live
 
 - Workspace customization surface (env vars, workspaces registry, tool deny-lists, model routing): `CIAO_CUSTOMIZATION.md` in the workspace root.
-- Automations how-to: `ciao schedule` commands in `ciao help`. Webhook triggers: `ciao webhook` commands in `ciao help`, and the manage + sender recipes in `PWA_API.md`. Spawning chats: `ciao chat create`. Reaching another model: `ciao chat handover`. Vault read conventions are inline system-prompt policy.
+- Automations how-to: `ciao schedule` commands in `ciao help schedule`. Webhook triggers: `ciao webhook` commands in `ciao help webhook`, and the manage + sender recipes in `PWA_API.md`. Spawning chats: `ciao chat create`. Reaching another model: `ciao chat handover`. Vault read conventions are inline system-prompt policy.
 - Canonical docs in the Ciaobot GitHub repo (`raffaelefarinaro/ciaobot`, also present in source checkouts): `README.md`, `docs/ARCHITECTURE.md`, and `PWA_API.md` (routes, auth, agent recipes).

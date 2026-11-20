@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import json
 import time
 from contextlib import asynccontextmanager
@@ -65,7 +66,7 @@ class _FakeControlPlane:
         self.schedule_values = values
         return {"ok": True, "data": values}
 
-    def schedule_update(self, _principal, schedule_id, **changes) -> dict:
+    def schedule_update(self, _principal, schedule_id, *, revision=None, **changes) -> dict:
         self.schedule_updates.append((schedule_id, changes))
         return {"ok": True, "data": {"schedule_id": schedule_id, **changes}}
 
@@ -158,6 +159,111 @@ def test_registry_reissues_when_workspace_or_project_changes() -> None:
     assert moved.project_id == "project-work"
     assert principal.workspace == "personal"
     assert registry.status()["active_sessions"] == 1
+
+
+def test_live_authorization_requires_registered_access_and_full_principal() -> None:
+    registry = AgentSessionRegistry(ttl_seconds=60)
+    token, principal = registry.issue(
+        chat_id="chat-1", project_id="project-1", workspace="personal", provider="claude"
+    )
+    access = asyncio.run(registry.verify_token(token))
+    assert access is not None
+    assert registry.live_authorization(None, principal) is None
+    assert registry.live_authorization(access.model_copy(update={"scopes": []}), principal) is None
+    assert registry.live_authorization(access, replace(principal, workspace="work")) is None
+    assert registry.live_authorization(access.model_copy(update={"token": "other"}), principal) is None
+    assert registry.live_authorization(access, principal) is not None
+
+
+def test_live_authorization_tracks_exact_session() -> None:
+    registry = AgentSessionRegistry(ttl_seconds=60)
+    token, principal = registry.issue(
+        chat_id="chat-1", project_id="project-1", workspace="personal", provider="claude"
+    )
+    access = asyncio.run(registry.verify_token(token))
+    assert access is not None
+    handle = registry.live_authorization(access, principal)
+    assert handle is not None and handle.is_active()
+    assert token not in repr(handle)
+    assert token not in repr(registry._by_token[token])
+    assert registry.revoke(token)
+    replacement, _ = registry.issue(
+        chat_id="chat-1", project_id="project-1", workspace="personal", provider="claude"
+    )
+    assert replacement != token
+    assert handle.is_active() is False
+
+
+def test_live_authorization_expires_at_registry_boundary(monkeypatch) -> None:
+    registry = AgentSessionRegistry(ttl_seconds=60)
+    token, principal = registry.issue(
+        chat_id="chat-1", project_id="project-1", workspace="personal", provider="claude"
+    )
+    access = asyncio.run(registry.verify_token(token))
+    assert access is not None
+    handle = registry.live_authorization(access, principal)
+    assert handle is not None and handle.is_active()
+    monkeypatch.setattr("ciao.mcp_server.time.time", lambda: access.expires_at)
+    assert handle.is_active() is False
+
+
+def test_revoking_expired_replaced_token_preserves_current_key_owner(monkeypatch) -> None:
+    now = [100]
+    monkeypatch.setattr("ciao.mcp_server.time.time", lambda: now[0])
+    registry = AgentSessionRegistry(ttl_seconds=60)
+    token_a, principal_a = registry.issue(
+        chat_id="chat-1", project_id="project-1", workspace="personal", provider="claude"
+    )
+    access_a = asyncio.run(registry.verify_token(token_a))
+    assert access_a is not None
+    handle_a = registry.live_authorization(access_a, principal_a)
+    assert handle_a is not None
+
+    now[0] = 160
+    token_b, principal_b = registry.issue(
+        chat_id="chat-1", project_id="project-1", workspace="personal", provider="claude"
+    )
+    access_b = asyncio.run(registry.verify_token(token_b))
+    assert access_b is not None
+    handle_b = registry.live_authorization(access_b, principal_b)
+    assert handle_b is not None and handle_b.is_active()
+
+    assert asyncio.run(registry.verify_token(token_a)) is None
+    assert not handle_a.is_active()
+
+    token_c, _ = registry.issue(
+        chat_id="chat-1", project_id="project-2", workspace="work", provider="claude"
+    )
+    assert token_c not in {token_a, token_b}
+    assert not handle_b.is_active()
+    assert registry.status()["active_sessions"] == 1
+
+
+async def test_live_authorization_polling_is_cancelable_and_thread_safe() -> None:
+    registry = AgentSessionRegistry(ttl_seconds=60)
+    token, principal = registry.issue(
+        chat_id="chat-1", project_id="project-1", workspace="personal", provider="claude"
+    )
+    access = await registry.verify_token(token)
+    assert access is not None
+    handle = registry.live_authorization(access, principal)
+    assert handle is not None
+    watcher = asyncio.create_task(handle.wait_invalid())
+    await asyncio.to_thread(registry.revoke, token)
+    await asyncio.wait_for(watcher, timeout=1)
+    assert not handle.is_active()
+
+    token, principal = registry.issue(
+        chat_id="chat-1", project_id="project-1", workspace="personal", provider="claude"
+    )
+    access = await registry.verify_token(token)
+    assert access is not None
+    handle = registry.live_authorization(access, principal)
+    assert handle is not None
+    watcher = asyncio.create_task(handle.wait_invalid())
+    watcher.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await watcher
 
 
 def test_hot_loop_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
@@ -819,6 +925,33 @@ async def _assert_current_project_action_is_deferred(action: str) -> None:
 def test_current_project_complete_and_delete_are_deferred() -> None:
     asyncio.run(_assert_current_project_action_is_deferred("project_complete"))
     asyncio.run(_assert_current_project_action_is_deferred("project_delete"))
+
+
+def test_deferred_action_waits_for_provider_background_work() -> None:
+    async def scenario() -> None:
+        pcm = _LifecyclePcm()
+        busy = {"value": True}
+        pcm.active_chat_ids = lambda: set()  # type: ignore[attr-defined]
+        pcm._providers = {"chat-1": object()}  # type: ignore[attr-defined]
+        pcm._provider_background_busy = (  # type: ignore[attr-defined]
+            lambda chat_id, service: busy["value"]
+        )
+        config = SimpleNamespace(workspace=lambda name: object())
+        control_plane = CiaoControlPlane(
+            config, project_chat_manager=pcm, schedule_manager=SimpleNamespace()
+        )
+        principal = McpPrincipal(
+            token_id="t", chat_id="chat-1", project_id="project-1",
+            workspace="personal", provider="claude",
+        )
+        control_plane.project_complete(principal, "project-1")
+        await asyncio.sleep(0.05)
+        assert not pcm.completed
+        busy["value"] = False
+        await asyncio.sleep(0.4)
+        assert pcm.completed == ["project-1"]
+
+    asyncio.run(scenario())
 
 
 class _ChatCreatePcm:

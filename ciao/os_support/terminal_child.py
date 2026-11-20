@@ -25,10 +25,8 @@ The rules it follows, and why:
   user's terminal and could carry the path of the program. A failure is a
   status, and only a status.
 
-The POSIX-only imports are inside the function, so the engine's import-all
-gate can load this module on Windows too; that is also what keeps the
-``win32`` type check clean. Importing the module does nothing: the work
-happens in :func:`main`, under a ``__main__`` guard.
+Importing the module does nothing: the work happens in :func:`main`, under a
+``__main__`` guard.
 """
 
 from __future__ import annotations
@@ -44,13 +42,7 @@ EXEC_FAILED = 126
 
 
 def _claim_controlling_terminal() -> None:
-    """Make the pty slave this process inherited its session's terminal.
-
-    The imports are inside the function on purpose: this module is loaded by
-    the engine's import-all gate on Windows, where neither module exists.
-    """
-    if sys.platform == "win32":  # pragma: no cover - the adapter is POSIX-only
-        raise OSError("a controlling terminal is a POSIX thing")
+    """Make the pty slave this process inherited its session's terminal."""
     import fcntl
     import termios
 
@@ -73,6 +65,4 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    if sys.platform == "win32":  # pragma: no cover - the adapter is POSIX-only
-        raise SystemExit(2)
     raise SystemExit(main(sys.argv[1:]))

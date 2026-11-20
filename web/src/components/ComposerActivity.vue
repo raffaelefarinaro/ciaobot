@@ -1,5 +1,5 @@
 <template>
-  <PopoverRoot :open="open" :modal="false" @update:open="onOpenChange">
+  <PopoverRoot :open="openedBy !== null" :modal="false" @update:open="onOpenChange">
   <PopoverAnchor as-child>
   <div
     ref="rootEl"
@@ -9,23 +9,39 @@
   >
     <div v-if="hasActivity" class="composer-activity-segs">
       <button
+        v-if="agents.length > 0"
         type="button"
-        class="composer-activity-seg"
-        :title="activityTitle"
-        :aria-label="activityTitle"
+        class="composer-activity-seg composer-activity-seg--agents"
+        :title="agentsTitle"
+        :aria-label="agentsTitle"
         aria-haspopup="dialog"
-        :aria-expanded="open"
+        :aria-expanded="openedBy === 'agents'"
         :aria-controls="popoverId"
-        @click="toggle($event)"
+        @click="toggle('agents', $event)"
       >
-        <ActivityGlyph :kind="activityGlyph" />
-        <span v-if="compact" class="composer-activity-count">{{ totalCount }}</span>
-        <span v-else class="composer-activity-label">{{ activityLabel }}</span>
+        <ActivityGlyph kind="working" />
+        <span v-if="compact" class="composer-activity-count">{{ agents.length }}</span>
+        <span v-else class="composer-activity-label">{{ agentsLabel }}</span>
+      </button>
+      <button
+        v-if="shells.length > 0"
+        type="button"
+        class="composer-activity-seg composer-activity-seg--runs"
+        :title="shellsTitle"
+        :aria-label="shellsTitle"
+        aria-haspopup="dialog"
+        :aria-expanded="openedBy === 'shells'"
+        :aria-controls="popoverId"
+        @click="toggle('shells', $event)"
+      >
+        <ActivityGlyph kind="run" />
+        <span v-if="compact" class="composer-activity-count">{{ shells.length }}</span>
+        <span v-else class="composer-activity-label">{{ shellsLabel }}</span>
       </button>
     </div>
 
     <PopoverContent
-      v-if="open"
+      v-if="openedBy !== null"
       as-child
       side="top"
       align="end"
@@ -40,43 +56,31 @@
     <div
       :id="popoverId"
       class="composer-activity-popover"
-      aria-label="Background activity"
+      aria-label="Running work"
     >
-      <template v-if="agentCount > 0">
+      <template v-if="agents.length > 0">
         <p class="composer-activity-pop-head">Agents</p>
-        <router-link
-          v-for="sub in agentRows"
-          :key="sub.agent_id"
-          class="composer-activity-pop-item"
-          :to="subagentPath(chatId, sub.agent_id)"
-          @click="close(false)"
-        >
-          <ActivityGlyph kind="working" />
-          <span class="composer-activity-pop-label">{{ subagentLabel(sub) }}</span>
-          <small v-if="sub.subagent_type">{{ sub.subagent_type }}</small>
-        </router-link>
-        <!-- The pushed count can arrive before the running-subagent poll. -->
-        <p v-if="!agentRows.length" class="composer-activity-pop-note">Details loading…</p>
+        <ul class="composer-activity-pop-list">
+          <li v-for="row in agents" :key="row.tool_use_id" class="composer-activity-pop-item">
+            <ActivityGlyph kind="working" />
+            <span class="composer-activity-pop-label">{{ row.label }}</span>
+            <small v-if="row.detail" class="composer-activity-pop-detail">{{ row.detail }}</small>
+            <small v-if="elapsed(row)" class="composer-activity-pop-age">{{ elapsed(row) }}</small>
+          </li>
+        </ul>
       </template>
-      <template v-if="processCount > 0">
-        <p class="composer-activity-pop-head">Processes</p>
-        <ShellRows
-          :rows="shellRows"
-          :now="now"
-          variant="popover"
-          :stop-task="stopTask"
-          :stopping="stopping"
-          :errors="stopErrors"
-          @open="openDetails"
-        />
+      <template v-if="shells.length > 0">
+        <p class="composer-activity-pop-head">Shells</p>
+        <ul class="composer-activity-pop-list">
+          <li v-for="row in shells" :key="row.tool_use_id" class="composer-activity-pop-item">
+            <ActivityGlyph kind="run" />
+            <span class="composer-activity-pop-label">{{ row.label }}</span>
+            <small v-if="elapsed(row)" class="composer-activity-pop-age">{{ elapsed(row) }}</small>
+          </li>
+        </ul>
       </template>
-      <button type="button" class="composer-activity-pop-foot" @click="openDetails">Open Chat details →</button>
     </div>
     </PopoverContent>
-
-    <!-- Announces a shell starting or being stopped, never its ticking age. Always
-         mounted so the change is read. -->
-    <span class="sr-only" role="status" aria-live="polite">{{ announcement }}</span>
   </div>
   </PopoverAnchor>
   </PopoverRoot>
@@ -84,26 +88,19 @@
 
 <script setup lang="ts">
 import { PopoverAnchor, PopoverContent, PopoverRoot } from 'reka-ui'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ActivityGlyph from './ActivityGlyph.vue'
-import ShellRows from './ShellRows.vue'
-import { isShellRow, shellTaskId, subagentLabel, subagentPath } from '../lib/subagentIds'
-import type { RunningSubagent } from '../lib/types'
+import { elapsedLabel, type RunningWorkRow } from '../lib/runningWork'
 
 const props = defineProps<{
   chatId: string
-  /** Larger of the watcher's pushed count and the poll's non-shell rows. */
-  agentCount: number
-  /** Poll rows; `shell` rows are processes and are listed under Processes. */
-  agents: RunningSubagent[]
+  /** Running subagents of the chat (its running subagent cards). */
+  agents: RunningWorkRow[]
+  /** Running background shells of the chat (its running, backgrounded shell cards). */
+  shells: RunningWorkRow[]
+  /** The shared clock, ticking while work runs, so elapsed times advance. */
   now: number
-  /** Stops a process row by its bare id; omitted, no row offers Stop. */
-  stopTask?: (taskId: string) => unknown
-  /** Bare task ids with a stop pending, and failed-stop messages, from the store. */
-  stopping?: Record<string, true>
-  stopErrors?: Record<string, string>
 }>()
-const emit = defineEmits<{ 'open-details': [] }>()
 
 // Below this composer-bar width the parts fold to glyph + count. The bar is
 // measured, not the cluster: the cluster's own width depends on the mode, which
@@ -112,72 +109,34 @@ const COMPACT_BAR_BELOW_PX = 560
 
 const rootEl = ref<HTMLElement | null>(null)
 const compact = ref(false)
-const open = ref(false)
+const openedBy = ref<'agents' | 'shells' | null>(null)
 let trigger: HTMLElement | null = null
 const popoverId = computed(() => `composer-activity-${props.chatId}`)
 
-const agentRows = computed(() => props.agents.filter(sub => !isShellRow(sub)))
-const shellRows = computed(() => props.agents.filter(isShellRow))
-const processCount = computed(() => shellRows.value.length)
-const hasActivity = computed(() => props.agentCount > 0 || processCount.value > 0)
-const totalCount = computed(() => props.agentCount + processCount.value)
-const activityLabel = computed(() => `${totalCount.value} running`)
-const activityGlyph = computed((): 'working' | 'run' => (props.agentCount > 0 ? 'working' : 'run'))
-// Joins the non-zero parts: "2 agents running, 1 background run: <label>".
-const activityTitle = computed(() => {
-  const parts: string[] = []
-  if (props.agentCount > 0) parts.push(props.agentCount === 1 ? '1 agent running' : `${props.agentCount} agents running`)
-  if (processCount.value === 1) parts.push(`1 background run: ${subagentLabel(shellRows.value[0])}`)
-  else if (processCount.value > 1) parts.push(`${processCount.value} background runs`)
-  return parts.join(', ')
-})
-// "Stopping x" for as long as the store holds a pending stop, so it clears
-// itself when the row leaves.
-const stopNotice = computed(() => {
-  const pending = shellRows.value.find(r => props.stopping?.[shellTaskId(r.agent_id)])
-  return pending ? `Stopping ${subagentLabel(pending)}` : ''
-})
-const announcement = computed(() => {
-  if (stopNotice.value) return stopNotice.value
-  if (!processCount.value) return ''
-  const more = processCount.value > 1 ? ` and ${processCount.value - 1} more` : ''
-  return `Running in the background: ${subagentLabel(shellRows.value[0])}${more}`
-})
+const agentsLabel = computed(() => (props.agents.length === 1 ? '1 agent' : `${props.agents.length} agents`))
+const agentsTitle = computed(() => (props.agents.length === 1 ? '1 agent running' : `${props.agents.length} agents running`))
+const shellsLabel = computed(() => (props.shells.length === 1 ? '1 shell' : `${props.shells.length} shells`))
+const shellsTitle = computed(() => (props.shells.length === 1 ? '1 shell running' : `${props.shells.length} shells running`))
+const hasActivity = computed(() => props.agents.length > 0 || props.shells.length > 0)
 
-// Runs before the DOM drops a row: if the focused Stop belongs to the row that
-// is leaving, hand focus to the next row's Stop, else back to the opener.
-watch(() => shellRows.value.map(r => r.agent_id), (ids, oldIds) => {
-  const live = new Set(ids)
-  const focusedId = document.activeElement?.getAttribute('data-stop-id')
-  if (!focusedId || live.has(focusedId) || !open.value) return
-  const index = (oldIds ?? []).indexOf(focusedId)
-  void nextTick(() => {
-    const stops = Array.from(document.querySelectorAll<HTMLElement>(`#${CSS.escape(popoverId.value)} [data-stop-id]`))
-    const next = stops[Math.min(Math.max(index, 0), stops.length - 1)]
-    if (next) next.focus()
-    else trigger?.focus()
-  })
-}, { flush: 'pre' })
+function elapsed(row: RunningWorkRow): string {
+  return elapsedLabel(row.started_at, props.now)
+}
 
-function toggle(event: MouseEvent) {
-  if (open.value) {
+function toggle(key: 'agents' | 'shells', event: MouseEvent) {
+  if (openedBy.value === key) {
     close(true)
     return
   }
-  open.value = true
+  openedBy.value = key
   trigger = event.currentTarget as HTMLElement
 }
 
 function close(returnFocus: boolean) {
-  if (!open.value) return
-  open.value = false
+  if (openedBy.value === null) return
+  openedBy.value = null
   if (returnFocus) trigger?.focus()
   trigger = null
-}
-
-function openDetails() {
-  close(false)
-  emit('open-details')
 }
 
 function onOpenChange(next: boolean) {
@@ -189,7 +148,7 @@ function onOpenChange(next: boolean) {
 // the claim has to happen here, on the element the key bubbles through first
 // (the popover renders inline, inside the cluster). ModelSelector does the same.
 function onEscape(e: KeyboardEvent) {
-  if (!open.value) return
+  if (openedBy.value === null) return
   e.preventDefault()
   e.stopPropagation()
   close(true)
@@ -205,6 +164,14 @@ function onInteractOutside(e: CustomEvent<{ originalEvent: Event }>) {
 
 watch(hasActivity, (active) => { if (!active) close(false) })
 
+// The part that opened the popover can vanish (the last shell ended). Close without
+// moving focus: there is nothing left to return it to.
+const openerRendered = computed(() => {
+  const key = openedBy.value
+  if (key === null) return true
+  return key === 'agents' ? props.agents.length > 0 : props.shells.length > 0
+})
+watch(openerRendered, (ok) => { if (!ok) close(false) })
 watch(() => props.chatId, () => close(false))
 
 let observer: ResizeObserver | null = null
@@ -279,17 +246,16 @@ onBeforeUnmount(() => {
   font-size: var(--text-xs);
   font-weight: 700;
 }
-.composer-activity-count { color: var(--accent); }
+.composer-activity-seg--agents .composer-activity-count { color: var(--accent); }
 
 .composer-activity-popover {
   /* Popper supplies the fixed placement; this is only the surface. */
   z-index: 300;
   display: grid;
-  /* minmax(0, …): a long agent name truncates instead of widening its row past
-     the popover and pushing the type tag out of it. */
-  grid-template-columns: minmax(0, 1fr);
   gap: 2px;
   width: min(280px, calc(100vw - 32px));
+  max-height: min(360px, 60vh);
+  overflow-y: auto;
   padding: var(--space-1);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
@@ -308,31 +274,25 @@ onBeforeUnmount(() => {
   text-transform: uppercase;
 }
 
-.composer-activity-pop-item,
-.composer-activity-pop-foot {
+.composer-activity-pop-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* A row is text, not a control: nothing in the popover acts, so no hover or focus. */
+.composer-activity-pop-item {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  width: 100%;
   min-width: 0;
-  box-sizing: border-box;
   min-height: 36px;
   padding: 0 var(--space-2);
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: none;
   color: var(--fg);
-  font: inherit;
   font-size: var(--text-sm);
-  text-align: left;
-  text-decoration: none;
-  cursor: pointer;
 }
-
-.composer-activity-pop-item:hover,
-.composer-activity-pop-foot:hover { background: var(--bg3); }
-.composer-activity-pop-item:focus-visible,
-.composer-activity-pop-foot:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 .composer-activity-pop-label {
   min-width: 0;
@@ -341,23 +301,19 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.composer-activity-pop-note {
-  margin: 0;
-  padding: 0 var(--space-2) var(--space-1);
+.composer-activity-pop-detail,
+.composer-activity-pop-age {
+  flex-shrink: 0;
   color: var(--fg3);
   font-size: var(--text-xs);
 }
 
-.composer-activity-pop-foot {
-  margin-top: var(--space-1);
-  border-top: 1px solid var(--border);
-  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
-  color: var(--fg2);
-}
+.composer-activity-pop-detail { margin-left: auto; font-family: var(--font-mono); }
+.composer-activity-pop-age { margin-left: auto; font-family: var(--font-mono); }
+.composer-activity-pop-detail + .composer-activity-pop-age { margin-left: var(--space-1); }
 
 @media (pointer: coarse) {
   .composer-activity-seg { height: auto; min-height: var(--touch); min-width: var(--touch); justify-content: center; }
-  .composer-activity-pop-item,
-  .composer-activity-pop-foot { min-height: var(--touch); }
+  .composer-activity-pop-item { min-height: var(--touch); }
 }
 </style>

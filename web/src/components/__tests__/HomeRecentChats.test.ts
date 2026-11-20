@@ -48,8 +48,7 @@ function seedChats(includeChats = true) {
   ] as unknown as typeof store.chats : [] as unknown as typeof store.chats
   store.activeWorkspace = 'personal'
   store.bootstrapped = true
-  store.projectStreaming = {}
-  store.backgroundAgents = { working: 1 }
+  store.projectStreaming = { working: true }
   return store
 }
 
@@ -186,7 +185,7 @@ describe('HomeRecentChats lanes and tiers', () => {
     quiet.last_activity_at = timestamp(60)
     quiet.last_read_at = timestamp(3600)
     store.chats.push({ ...quiet, chat_id: 'busy', title: 'Still working', last_read_at: timestamp(60) } as typeof quiet)
-    store.backgroundAgents = { ...store.backgroundAgents, busy: 1 }
+    store.projectStreaming = { ...store.projectStreaming, busy: true }
     await nextTick()
     const order = wrapper.findAll('.home-tier').map(n => n.classes().find(c => c.startsWith('home-tier--'))!)
     expect(order).toContain('home-tier--unread')

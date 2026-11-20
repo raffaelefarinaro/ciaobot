@@ -70,10 +70,16 @@ function listing(rows: UpdateTaskRow[]): UpdateTasksResponse {
   return { tasks: rows }
 }
 
+const listingGet = vi.fn()
+
 beforeEach(() => {
   setActivePinia(createPinia())
   useProjectStore().activeWorkspace = 'personal'
   vi.mocked(api.get).mockReset()
+  listingGet.mockReset()
+  vi.mocked(api.get).mockImplementation(((path: string) => path.includes('/preview?')
+    ? Promise.resolve({ task_id: decodeURIComponent(path.split('/')[3]), revision: 1, workspace: new URLSearchParams(path.split('?')[1]).get('workspace'), state: 'review', summary: '', plan: {}, checked_at: '' })
+    : listingGet(path)) as never)
   vi.mocked(api.post).mockReset()
 })
 
@@ -86,7 +92,7 @@ describe('the second request', () => {
     // Applicability and state are per workspace and the route refuses a
     // nameless question, so this cannot ride along on /api/housekeeping: that
     // request has no workspace to put in the query.
-    vi.mocked(api.get).mockResolvedValue(listing([task()]) as never)
+    listingGet.mockResolvedValue(listing([task()]) as never)
     const store = useHousekeepingStore()
     await store.refreshUpdateTasks('personal')
 
@@ -107,14 +113,14 @@ describe('the second request', () => {
 
   it('reads coverage_gap when nothing is offered, and clears it when it is', async () => {
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValueOnce({
+    listingGet.mockResolvedValueOnce({
       tasks: [task({ offered: false, applicability: 'not_applicable' })],
       coverage_gap: { reason: 'nothing_offered', detail: 'no eligible task applies right now' },
     } as never)
     await store.refreshUpdateTasks('personal')
     expect(store.updateTasksCoverageGap?.reason).toBe('nothing_offered')
 
-    vi.mocked(api.get).mockResolvedValueOnce(listing([task()]) as never)
+    listingGet.mockResolvedValueOnce(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
     expect(store.updateTasksCoverageGap).toBeNull()
   })
@@ -126,10 +132,10 @@ describe('the second request', () => {
     // cleared list — clearing would claim this workspace has no tasks when the
     // truth is that nobody could ask.
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValueOnce(listing([task()]) as never)
+    listingGet.mockResolvedValueOnce(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
 
-    vi.mocked(api.get).mockRejectedValueOnce(new Error('offline'))
+    listingGet.mockRejectedValueOnce(new Error('offline'))
     await store.refreshUpdateTasks('personal')
 
     expect(store.updateTasks).toHaveLength(1)
@@ -139,11 +145,11 @@ describe('the second request', () => {
     // Showing the previous workspace's answers under the new one is worse than a
     // briefly empty list: the card would be right about the wrong workspace.
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValueOnce(listing([task()]) as never)
+    listingGet.mockResolvedValueOnce(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
     expect(store.updateTasks).toHaveLength(1)
 
-    vi.mocked(api.get).mockResolvedValueOnce(listing([]) as never)
+    listingGet.mockResolvedValueOnce(listing([]) as never)
     await store.refreshUpdateTasks('work')
     expect(store.updateTasks).toEqual([])
   })
@@ -156,12 +162,12 @@ describe('the second request', () => {
     // control-flow analysis would otherwise narrow the `let` to `never` and the
     // call below would not type-check.
     const pending: { release: (() => void) | null } = { release: null }
-    vi.mocked(api.get).mockImplementationOnce(() => new Promise((resolve) => {
+    listingGet.mockImplementationOnce(() => new Promise((resolve) => {
       pending.release = () => resolve(listing([task()]) as never)
     }))
     const slow = store.refreshUpdateTasks('personal')
 
-    vi.mocked(api.get).mockResolvedValueOnce(listing([task({ id: 'other' })]) as never)
+    listingGet.mockResolvedValueOnce(listing([task({ id: 'other' })]) as never)
     await store.refreshUpdateTasks('work')
     expect(store.updateTasks.map((row) => row.id)).toEqual(['other'])
 
@@ -178,11 +184,11 @@ describe('the second request', () => {
     // until the next poll, which is exactly the resurrection a dismissal is
     // supposed to prevent.
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValueOnce(listing([task()]) as never)
+    listingGet.mockResolvedValueOnce(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
 
     const pending: { release: (() => void) | null } = { release: null }
-    vi.mocked(api.get).mockImplementationOnce(() => new Promise((resolve) => {
+    listingGet.mockImplementationOnce(() => new Promise((resolve) => {
       // The pre-dismiss answer, computed before the press.
       pending.release = () => resolve(listing([task()]) as never)
     }))
@@ -209,7 +215,7 @@ describe('the second request', () => {
 describe('starting a task', () => {
   it('posts the start and re-renders from the rows the reply carried', async () => {
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValue(listing([task()]) as never)
+    listingGet.mockResolvedValue(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
 
     vi.mocked(api.post).mockResolvedValue({
@@ -234,7 +240,7 @@ describe('starting a task', () => {
     // (task, revision), so a double press, a second tab and a retry after a
     // dropped response all land in the same chat with the prompt sent once.
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValue(listing([task()]) as never)
+    listingGet.mockResolvedValue(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
     vi.mocked(api.post).mockResolvedValue({
       ok: true, task_id: 'review-legacy-rows', chat_id: 'chat-9', resumed: true,
@@ -249,7 +255,7 @@ describe('starting a task', () => {
     // throwing the id away would strand a chat the engine already made *and*
     // leave the next start to mint a second one.
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValue(listing([task()]) as never)
+    listingGet.mockResolvedValue(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
     vi.mocked(api.post).mockRejectedValueOnce(
       refused(500, { error: 'the turn could not be dispatched', chat_id: 'chat-9' }),
@@ -264,7 +270,7 @@ describe('starting a task', () => {
 
   it('surfaces a refusal in plain language and keeps the card', async () => {
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValue(listing([task()]) as never)
+    listingGet.mockResolvedValue(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
     vi.mocked(api.post).mockRejectedValueOnce(
       refused(409, {
@@ -282,7 +288,7 @@ describe('starting a task', () => {
     // A task that arrived in a later version is not a failure to retry; sending
     // somebody to "try again" for it would be the wrong next step.
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValue(listing([task()]) as never)
+    listingGet.mockResolvedValue(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
     vi.mocked(api.post).mockRejectedValueOnce(
       refused(409, {
@@ -298,7 +304,7 @@ describe('starting a task', () => {
     // ok with no chat_id is not a launch. Clearing the card on it would tell
     // the operator the work is under way when nothing was opened.
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValue(listing([task()]) as never)
+    listingGet.mockResolvedValue(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
     vi.mocked(api.post).mockResolvedValue({ ok: true, task_id: 'review-legacy-rows' } as never)
 
@@ -313,19 +319,19 @@ describe('starting a task', () => {
     // decision landed but the follow-up listing could not be computed, and
     // writing [] would tell the card this workspace has no tasks.
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValue(listing([task()]) as never)
+    listingGet.mockResolvedValue(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
     vi.mocked(api.post).mockResolvedValue({ ok: true, task_id: 'x', chat_id: 'chat-9' } as never)
 
     await store.startUpdateTask(task())
-    expect(api.get).toHaveBeenCalledTimes(2)
+    expect(listingGet).toHaveBeenCalledTimes(2)
   })
 
   it('marks the row pending for the duration and clears it afterwards', async () => {
     // A card with a dead button and no feedback is the other half of "silently
     // cleared": the operator cannot tell a press from a no-op.
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValue(listing([task()]) as never)
+    listingGet.mockResolvedValue(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
 
     let seen: boolean | undefined
@@ -350,7 +356,7 @@ describe('starting a task', () => {
 describe('dismissing a task', () => {
   it('records the decision and lets the server re-offer nothing for it', async () => {
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValue(listing([task()]) as never)
+    listingGet.mockResolvedValue(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
     vi.mocked(api.post).mockResolvedValue({
       ok: true, task_id: 'review-legacy-rows', tasks: [task({ status: 'dismissed', suppressed: true })],
@@ -373,7 +379,7 @@ describe('dismissing a task', () => {
     // verdict would put a later start back in reach of finished work.
     const store = useHousekeepingStore()
     const running = task({ status: 'in_progress', chat_id: 'chat-9' })
-    vi.mocked(api.get).mockResolvedValue(listing([running]) as never)
+    listingGet.mockResolvedValue(listing([running]) as never)
     await store.refreshUpdateTasks('personal')
     vi.mocked(api.post).mockRejectedValueOnce(
       refused(409, { error: 'update task review-legacy-rows@1 is already completed at this revision' }),
@@ -395,12 +401,12 @@ describe('a transition the server refuses', () => {
     // It is a re-read and nothing more: the reason stays attached, and nothing is
     // cleared on the store's own account.
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValueOnce(listing([task()]) as never)
+    listingGet.mockResolvedValueOnce(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
 
     // The stale tab's answer: the task is completed, so the record has no card
     // for Home to draw.
-    vi.mocked(api.get).mockResolvedValueOnce(listing([]) as never)
+    listingGet.mockResolvedValueOnce(listing([]) as never)
     vi.mocked(api.post).mockRejectedValueOnce(
       refused(409, {
         error: "update task 'review-legacy-rows'@1 is already completed at this revision",
@@ -418,7 +424,7 @@ describe('a transition the server refuses', () => {
     // set the store back to the old workspace and clear the new one's rows on the
     // way — trading a stale card for an empty Home.
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValue(listing([task()]) as never)
+    listingGet.mockResolvedValue(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
 
     const pending: { release: (() => void) | null } = { release: null }
@@ -427,7 +433,7 @@ describe('a transition the server refuses', () => {
     }))
     const slow = store.startUpdateTask(task())
 
-    vi.mocked(api.get).mockResolvedValueOnce(listing([task({ id: 'other' })]) as never)
+    listingGet.mockResolvedValueOnce(listing([task({ id: 'other' })]) as never)
     await store.refreshUpdateTasks('work')
     vi.mocked(api.get).mockClear()
 
@@ -448,7 +454,7 @@ describe('a transition that lost a workspace race', () => {
     // the wrong workspace, which is the one thing a per-workspace list must not
     // do. Guarded exactly as `refreshUpdateTasks` guards its own answer.
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValue(listing([task()]) as never)
+    listingGet.mockResolvedValue(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
 
     // Typed rather than inferred: the assignment happens inside a callback, so
@@ -466,7 +472,7 @@ describe('a transition that lost a workspace race', () => {
     }))
     const slow = store.startUpdateTask(task())
 
-    vi.mocked(api.get).mockResolvedValueOnce(listing([task({ id: 'other' })]) as never)
+    listingGet.mockResolvedValueOnce(listing([task({ id: 'other' })]) as never)
     await store.refreshUpdateTasks('work')
     expect(store.updateTasks.map((row) => row.id)).toEqual(['other'])
 
@@ -484,7 +490,7 @@ describe('a transition that lost a workspace race', () => {
     // to the old workspace and clear the new one's rows on the way — trading one
     // wrong list for an empty one.
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValue(listing([task()]) as never)
+    listingGet.mockResolvedValue(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
 
     const pending: { release: (() => void) | null } = { release: null }
@@ -494,7 +500,7 @@ describe('a transition that lost a workspace race', () => {
     }))
     const slow = store.startUpdateTask(task())
 
-    vi.mocked(api.get).mockResolvedValueOnce(listing([task({ id: 'other' })]) as never)
+    listingGet.mockResolvedValueOnce(listing([task({ id: 'other' })]) as never)
     await store.refreshUpdateTasks('work')
     vi.mocked(api.get).mockClear()
 
@@ -519,7 +525,7 @@ describe('the two clocks', () => {
       applicability_checked_at: '2026-09-01T10:00:00+00:00',
       updated_at: '2026-09-05T18:30:00+00:00',
     })
-    vi.mocked(api.get).mockResolvedValue(listing([row]) as never)
+    listingGet.mockResolvedValue(listing([row]) as never)
     await store.refreshUpdateTasks('personal')
 
     expect(store.updateTasks[0].applicability_checked_at).toBe('2026-09-01T10:00:00+00:00')
@@ -534,10 +540,255 @@ function held<T>() {
   return { promise, resolve, reject }
 }
 
+describe('automatic task previews', () => {
+  const key = 'review-legacy-rows@1'
+  const answer = (overrides: Record<string, unknown> = {}) => ({
+    task_id: 'review-legacy-rows', revision: 1, workspace: 'personal', state: 'review',
+    summary: 'observed', plan: { moves: [] }, checked_at: '2026-11-13T00:00:00Z', ...overrides,
+  })
+  const flush = async () => { await Promise.resolve(); await Promise.resolve() }
+
+  it('prepares an offered task without blocking the listing or posting', async () => {
+    const preview = held<unknown>()
+    vi.mocked(api.get).mockImplementation(((path: string) =>
+      path.includes('/preview?') ? preview.promise : Promise.resolve(listing([task()]))) as never)
+    const store = useHousekeepingStore()
+    await store.refreshUpdateTasks('personal')
+    expect(store.updateTasks).toHaveLength(1)
+    expect(store.taskPreviews['review-legacy-rows@1'].loading).toBe(true)
+    expect(api.post).not.toHaveBeenCalled()
+  })
+
+  it('settles the initial load gate while preview preparation is pending', async () => {
+    const preview = held<unknown>()
+    vi.spyOn(window, 'setInterval').mockImplementation((() => 0) as never)
+    vi.spyOn(window, 'addEventListener').mockImplementation(() => {})
+    vi.mocked(api.get).mockImplementation(((path: string) => path.includes('/preview?') ? preview.promise
+      : Promise.resolve(path === '/api/housekeeping' ? { actions: [] }
+        : path === '/api/workspace-health' ? { checks: [] } : listing([task()]))) as never)
+    const store = useHousekeepingStore()
+    store.init()
+    await flush()
+    await flush()
+    await flush()
+    expect(store.initialLoadPending).toBe(false)
+    expect(store.taskPreviews[key].loading).toBe(true)
+    expect(api.post).not.toHaveBeenCalled()
+  })
+
+  it('does not preview suppressed, unknown, inapplicable or started tasks', async () => {
+    const rows = [
+      task({ id: 'suppressed', suppressed: true }), task({ id: 'hidden', offered: false }),
+      task({ id: 'unknown', applicability: 'unknown' }), task({ id: 'inapplicable', applicability: 'not_applicable' }),
+      ...(['completed', 'dismissed', 'in_progress', 'waiting_review', 'failed'] as const)
+        .map(status => task({ id: status, status })),
+    ]
+    listingGet.mockResolvedValue(listing(rows))
+    const store = useHousekeepingStore()
+    await store.refreshUpdateTasks('personal')
+    expect(store.taskPreviews).toEqual({})
+    expect(api.get).toHaveBeenCalledTimes(1)
+  })
+
+  it('coalesces the same snapshot and uses fresh for changed stamps, rechecks and explicit refresh', async () => {
+    const first = held<unknown>()
+    const second = held<unknown>()
+    const third = held<unknown>()
+    const fourth = held<unknown>()
+    const queue = [first, second, third, fourth]
+    vi.mocked(api.get).mockImplementation(((path: string) => path.includes('/preview?')
+      ? queue.shift()!.promise : listingGet(path)) as never)
+    const a = task()
+    const b = task({ applicability_checked_at: 'later' })
+    listingGet.mockResolvedValue(listing([a]))
+    const store = useHousekeepingStore()
+    await store.refreshUpdateTasks('personal')
+    await store.refreshUpdateTasks('personal')
+    await store.refreshTaskPreview(a)
+    expect(queue).toHaveLength(3)
+    listingGet.mockResolvedValue(listing([b]))
+    await store.refreshUpdateTasks('personal')
+    expect(queue).toHaveLength(2)
+    second.resolve(answer({ summary: 'new' }))
+    await flush()
+    first.resolve(answer({ summary: 'old' }))
+    await flush()
+    expect(store.taskPreviews[key]).toMatchObject({ loading: false, result: { summary: 'new' } })
+    await store.refreshUpdateTasks('personal')
+    expect(queue).toHaveLength(2)
+    const recheck = store.recheckUpdateTask()
+    await recheck
+    third.resolve(answer({ summary: 'recheck' }))
+    await flush()
+    const explicit = store.refreshTaskPreview(b)
+    fourth.resolve(answer({ summary: 'explicit' }))
+    await explicit
+    expect(store.taskPreviews[key].result?.summary).toBe('explicit')
+    const paths = vi.mocked(api.get).mock.calls.map(([path]) => path).filter(path => path.includes('/preview?'))
+    expect(paths).toEqual([
+      '/api/update-tasks/review-legacy-rows/preview?workspace=personal',
+      ...Array(3).fill('/api/update-tasks/review-legacy-rows/preview?workspace=personal&fresh=1'),
+    ])
+  })
+
+  it('rejects an old A answer after an A B A workspace switch', async () => {
+    const old = held<unknown>()
+    const fresh = held<unknown>()
+    let count = 0
+    listingGet.mockResolvedValue(listing([task()]))
+    vi.mocked(api.get).mockImplementation(((path: string) => path.includes('/preview?')
+      ? (++count === 1 ? old.promise : count === 2 ? Promise.resolve(answer({ workspace: 'work' })) : fresh.promise)
+      : listingGet(path)) as never)
+    const store = useHousekeepingStore()
+    await store.refreshUpdateTasks('personal')
+    await store.refreshUpdateTasks('work')
+    await store.refreshUpdateTasks('personal')
+    fresh.resolve(answer({ summary: 'current' }))
+    await flush()
+    old.resolve(answer({ summary: 'obsolete' }))
+    await flush()
+    expect(store.taskPreviews[key].result?.summary).toBe('current')
+  })
+
+  it('starts a fresh server scan on workspace switches instead of joining the old A scan', async () => {
+    const inflight = new Map<string, { promise: Promise<unknown>; resolve: (value: unknown) => void }>()
+    const scans: { workspace: string; snapshot: string; resolve: (value: unknown) => void }[] = []
+    let snapshot = 'before switch'
+    listingGet.mockResolvedValue(listing([task()]))
+    vi.mocked(api.get).mockImplementation(((path: string) => {
+      if (!path.includes('/preview?')) return listingGet(path)
+      const url = new URL(path, 'http://localhost')
+      const workspace = url.searchParams.get('workspace')!
+      const scanKey = `${workspace}:${url.pathname}`
+      if (!url.searchParams.has('fresh') && inflight.has(scanKey)) return inflight.get(scanKey)!.promise
+      const pending = held<unknown>()
+      scans.push({ workspace, snapshot, resolve: pending.resolve })
+      if (!url.searchParams.has('fresh')) inflight.set(scanKey, pending)
+      return pending.promise
+    }) as never)
+    const store = useHousekeepingStore()
+    await store.refreshUpdateTasks('personal')
+    snapshot = 'after switch'
+    await store.refreshUpdateTasks('work')
+    await store.refreshUpdateTasks('personal')
+    const paths = vi.mocked(api.get).mock.calls.map(([path]) => path).filter(path => path.includes('/preview?'))
+    expect(paths).toEqual([
+      '/api/update-tasks/review-legacy-rows/preview?workspace=personal',
+      '/api/update-tasks/review-legacy-rows/preview?workspace=work&fresh=1',
+      '/api/update-tasks/review-legacy-rows/preview?workspace=personal&fresh=1',
+    ])
+    expect(scans.map(scan => [scan.workspace, scan.snapshot])).toEqual([
+      ['personal', 'before switch'], ['work', 'after switch'], ['personal', 'after switch'],
+    ])
+    scans[2].resolve(answer({ summary: scans[2].snapshot }))
+    await flush()
+    scans[0].resolve(answer({ summary: scans[0].snapshot }))
+    await flush()
+    expect(store.taskPreviews[key]).toMatchObject({ loading: false, result: { summary: 'after switch' } })
+  })
+
+  it.each(['dismissal', 'removal', 'revision'] as const)('drops pending preview on %s without affecting another task', async change => {
+    const first = held<unknown>()
+    const other = held<unknown>()
+    const revised = held<unknown>()
+    const row = task()
+    const second = task({ id: 'other' })
+    listingGet.mockResolvedValue(listing([row, second]))
+    let firstRequests = 0
+    vi.mocked(api.get).mockImplementation(((path: string) => path.includes('/preview?')
+      ? path.includes('/other/') ? other.promise : ++firstRequests === 1 ? first.promise : revised.promise : listingGet(path)) as never)
+    const store = useHousekeepingStore()
+    await store.refreshUpdateTasks('personal')
+    if (change === 'dismissal') {
+      vi.mocked(api.post).mockResolvedValueOnce({ ok: true, tasks: [task({ status: 'dismissed' }), second] } as never)
+      await store.dismissUpdateTask(row)
+    } else {
+      listingGet.mockResolvedValue(listing(change === 'removal' ? [second] : [task({ revision: 2 }), second]))
+      await store.refreshUpdateTasks('personal')
+    }
+    first.resolve(answer())
+    other.resolve(answer({ task_id: 'other' }))
+    revised.resolve(answer({ revision: 2 }))
+    await flush()
+    expect(Object.keys(store.taskPreviews).sort()).toEqual(change === 'revision' ? ['other@1', 'review-legacy-rows@2'] : ['other@1'])
+    expect(store.taskPreviews['other@1']).toMatchObject({ loading: false, result: { task_id: 'other' } })
+  })
+
+  it.each([
+    { applicability: 'unknown' as const }, { applicability: 'not_applicable' as const },
+    { status: 'in_progress' as const }, { offered: false }, { suppressed: true },
+  ])('invalidates on loss of eligibility and fetches fresh on return: %o', async change => {
+    const old = held<unknown>()
+    const next = held<unknown>()
+    let count = 0
+    vi.mocked(api.get).mockImplementation(((path: string) => path.includes('/preview?')
+      ? (++count === 1 ? old.promise : next.promise) : listingGet(path)) as never)
+    listingGet.mockResolvedValue(listing([task()]))
+    const store = useHousekeepingStore()
+    await store.refreshUpdateTasks('personal')
+    listingGet.mockResolvedValue(listing([task(change)]))
+    await store.refreshUpdateTasks('personal')
+    expect(store.taskPreviews).toEqual({})
+    listingGet.mockResolvedValue(listing([task()]))
+    await store.refreshUpdateTasks('personal')
+    next.resolve(answer({ summary: 'fresh' }))
+    await flush()
+    old.resolve(answer({ summary: 'old' }))
+    await flush()
+    expect(store.taskPreviews[key].result?.summary).toBe('fresh')
+    expect(api.get).toHaveBeenCalledWith('/api/update-tasks/review-legacy-rows/preview?workspace=personal&fresh=1')
+  })
+
+  it('keeps recheck refreshable after a listing failure and rejects the old pending answer', async () => {
+    const old = held<unknown>()
+    const next = held<unknown>()
+    let count = 0
+    vi.mocked(api.get).mockImplementation(((path: string) => path.includes('/preview?')
+      ? (++count === 1 ? old.promise : next.promise) : listingGet(path)) as never)
+    listingGet.mockResolvedValueOnce(listing([task()])).mockRejectedValueOnce(new Error('offline'))
+    const store = useHousekeepingStore()
+    await store.refreshUpdateTasks('personal')
+    await store.recheckUpdateTask()
+    expect(store.updateTasksHealth.status).toBe('stale')
+    expect(store.updateTasks).toHaveLength(1)
+    expect(store.taskPreviews[key]).toEqual({ loading: false, result: null, error: 'Preview needs refreshing.', applicabilityCheckedAt: '' })
+    const retry = store.refreshTaskPreview(task())
+    next.resolve(answer({ summary: 'retry' }))
+    await retry
+    old.resolve(answer({ summary: 'old' }))
+    await flush()
+    expect(store.taskPreviews[key].result?.summary).toBe('retry')
+  })
+
+  it.each(['review', 'blocked', 'unknown', 'error'] as const)('preserves lifecycle for %s preview', async state => {
+    listingGet.mockResolvedValue(listing([task()]))
+    vi.mocked(api.get).mockImplementation(((path: string) => path.includes('/preview?')
+      ? state === 'error' ? Promise.reject(new Error('offline')) : Promise.resolve(answer({ state, plan: state === 'review' ? { moves: [] } : null }))
+      : listingGet(path)) as never)
+    const store = useHousekeepingStore()
+    await store.refreshUpdateTasks('personal')
+    await flush()
+    expect(store.updateTasks).toEqual([task()])
+    expect(api.post).not.toHaveBeenCalled()
+    if (state === 'error') expect(store.taskPreviews[key]).toMatchObject({ result: null, error: 'offline' })
+    else expect(store.taskPreviews[key].result).toMatchObject({ state, summary: 'observed' })
+  })
+
+  it.each([{ task_id: 'other' }, { revision: 2 }, { workspace: 'work' }])('rejects mismatched preview scope %o', async mismatch => {
+    listingGet.mockResolvedValue(listing([task()]))
+    vi.mocked(api.get).mockImplementation(((path: string) => path.includes('/preview?')
+      ? Promise.resolve(answer(mismatch)) : listingGet(path)) as never)
+    const store = useHousekeepingStore()
+    await store.refreshUpdateTasks('personal')
+    await flush()
+    expect(store.taskPreviews[key]).toMatchObject({ result: null, error: 'Preview response does not match this task.' })
+  })
+})
+
 describe('source health', () => {
   it('update tasks: first failure is unavailable', async () => {
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockRejectedValueOnce(new Error('offline'))
+    listingGet.mockRejectedValueOnce(new Error('offline'))
     await expect(store.refreshUpdateTasks('personal')).resolves.toBeUndefined()
 
     expect(store.updateTasksHealth.status).toBe('unavailable')
@@ -548,7 +799,7 @@ describe('source health', () => {
 
   it('update tasks: success with an empty list is ready', async () => {
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValueOnce(listing([]) as never)
+    listingGet.mockResolvedValueOnce(listing([]) as never)
     await store.refreshUpdateTasks('personal')
 
     expect(store.updateTasksHealth.status).toBe('ready')
@@ -561,20 +812,20 @@ describe('source health', () => {
     try {
       vi.setSystemTime(new Date('2026-10-26T10:00:00Z'))
       const store = useHousekeepingStore()
-      vi.mocked(api.get).mockResolvedValueOnce(listing([task()]) as never)
+      listingGet.mockResolvedValueOnce(listing([task()]) as never)
       await store.refreshUpdateTasks('personal')
       const first = store.updateTasksHealth.lastSuccessAt
       expect(first).toBe('2026-10-26T10:00:00.000Z')
 
       vi.setSystemTime(new Date('2026-10-26T10:05:00Z'))
-      vi.mocked(api.get).mockRejectedValueOnce(new Error('offline'))
+      listingGet.mockRejectedValueOnce(new Error('offline'))
       await store.refreshUpdateTasks('personal')
       expect(store.updateTasksHealth.status).toBe('stale')
       expect(store.updateTasksHealth.lastSuccessAt).toBe(first)
       expect(store.updateTasksHealth.error).toBe('offline')
       expect(store.updateTasks).toHaveLength(1)
 
-      vi.mocked(api.get).mockResolvedValueOnce(listing([task()]) as never)
+      listingGet.mockResolvedValueOnce(listing([task()]) as never)
       await store.refreshUpdateTasks('personal')
       expect(store.updateTasksHealth.status).toBe('ready')
       expect(store.updateTasksHealth.error).toBe('')
@@ -586,12 +837,12 @@ describe('source health', () => {
   it('update tasks: A, B, A rejects the late A response', async () => {
     const store = useHousekeepingStore()
     const a1 = held<UpdateTasksResponse>()
-    vi.mocked(api.get).mockReturnValueOnce(a1.promise as never)
+    listingGet.mockReturnValueOnce(a1.promise as never)
     const slow = store.refreshUpdateTasks('personal')
 
-    vi.mocked(api.get).mockResolvedValueOnce(listing([task({ id: 'b' })]) as never)
+    listingGet.mockResolvedValueOnce(listing([task({ id: 'b' })]) as never)
     await store.refreshUpdateTasks('work')
-    vi.mocked(api.get).mockResolvedValueOnce(listing([task({ id: 'a2' })]) as never)
+    listingGet.mockResolvedValueOnce(listing([task({ id: 'a2' })]) as never)
     await store.refreshUpdateTasks('personal')
 
     a1.resolve(listing([task({ id: 'a1' })]))
@@ -603,12 +854,12 @@ describe('source health', () => {
   it('update tasks: A, B, A late rejection does not demote health', async () => {
     const store = useHousekeepingStore()
     const a1 = held<UpdateTasksResponse>()
-    vi.mocked(api.get).mockReturnValueOnce(a1.promise as never)
+    listingGet.mockReturnValueOnce(a1.promise as never)
     const slow = store.refreshUpdateTasks('personal')
 
-    vi.mocked(api.get).mockResolvedValueOnce(listing([task({ id: 'b' })]) as never)
+    listingGet.mockResolvedValueOnce(listing([task({ id: 'b' })]) as never)
     await store.refreshUpdateTasks('work')
-    vi.mocked(api.get).mockResolvedValueOnce(listing([task({ id: 'a2' })]) as never)
+    listingGet.mockResolvedValueOnce(listing([task({ id: 'a2' })]) as never)
     await store.refreshUpdateTasks('personal')
 
     a1.reject(new Error('late'))
@@ -620,12 +871,12 @@ describe('source health', () => {
 
   it('update tasks: workspace switch resets health to checking', async () => {
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValueOnce(listing([task()]) as never)
+    listingGet.mockResolvedValueOnce(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
     expect(store.updateTasksHealth.status).toBe('ready')
 
     const work = held<UpdateTasksResponse>()
-    vi.mocked(api.get).mockReturnValueOnce(work.promise as never)
+    listingGet.mockReturnValueOnce(work.promise as never)
     const pending = store.refreshUpdateTasks('work')
     expect(store.updateTasksHealth.status).toBe('checking')
     expect(store.updateTasksHealth.lastSuccessAt).toBe('')
@@ -638,11 +889,11 @@ describe('source health', () => {
 
   it('update tasks: a refresh in the same workspace never flips ready back to checking', async () => {
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValueOnce(listing([task()]) as never)
+    listingGet.mockResolvedValueOnce(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
 
     const again = held<UpdateTasksResponse>()
-    vi.mocked(api.get).mockReturnValueOnce(again.promise as never)
+    listingGet.mockReturnValueOnce(again.promise as never)
     const pending = store.refreshUpdateTasks('personal')
     expect(store.updateTasksHealth.status).toBe('ready')
     again.resolve(listing([task()]))
@@ -651,11 +902,11 @@ describe('source health', () => {
 
   it('update tasks: a pre-dismiss poll cannot restore the task', async () => {
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValueOnce(listing([task()]) as never)
+    listingGet.mockResolvedValueOnce(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
 
     const poll = held<UpdateTasksResponse>()
-    vi.mocked(api.get).mockReturnValueOnce(poll.promise as never)
+    listingGet.mockReturnValueOnce(poll.promise as never)
     const slow = store.refreshUpdateTasks('personal')
 
     vi.mocked(api.post).mockResolvedValueOnce({
@@ -674,11 +925,11 @@ describe('source health', () => {
 
   it('update tasks: a pre-dismiss poll that rejects late is dropped, not stale', async () => {
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockResolvedValueOnce(listing([task()]) as never)
+    listingGet.mockResolvedValueOnce(listing([task()]) as never)
     await store.refreshUpdateTasks('personal')
 
     const poll = held<UpdateTasksResponse>()
-    vi.mocked(api.get).mockReturnValueOnce(poll.promise as never)
+    listingGet.mockReturnValueOnce(poll.promise as never)
     const slow = store.refreshUpdateTasks('personal')
 
     vi.mocked(api.post).mockResolvedValueOnce({
@@ -697,7 +948,7 @@ describe('source health', () => {
 
   it('update tasks: a dismiss reply that carried rows counts as a fresh read', async () => {
     const store = useHousekeepingStore()
-    vi.mocked(api.get).mockRejectedValueOnce(new Error('offline'))
+    listingGet.mockRejectedValueOnce(new Error('offline'))
     await store.refreshUpdateTasks('personal')
     expect(store.updateTasksHealth.status).toBe('unavailable')
 
@@ -718,7 +969,7 @@ describe('source health', () => {
       ['not_substantiated', true],
       ['nothing_offered', false],
     ] as const) {
-      vi.mocked(api.get).mockResolvedValueOnce({
+      listingGet.mockResolvedValueOnce({
         tasks: [],
         coverage_gap: { reason, detail: 'x' },
       } as never)

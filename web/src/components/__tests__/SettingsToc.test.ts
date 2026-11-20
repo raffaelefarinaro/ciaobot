@@ -34,7 +34,6 @@ async function mountSettings(routines?: unknown, tab = '') {
         })),
         active: 'work',
         primary: 'personal',
-        default_agent_fs_scope: 'workspace',
         provider_options: [{ value: 'claude', label: 'Claude' }],
       } as never
     }
@@ -58,7 +57,7 @@ async function mountSettings(routines?: unknown, tab = '') {
   })
   const wrapper = mount(SettingsView, {
     attachTo: document.body,
-    global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: stub } },
+    global: { plugins: [router], stubs: { Teleport: true } },
   })
   await flushPromises()
   await nextTick()
@@ -81,7 +80,10 @@ it('lists the rendered sections of the tab in the On this page rail', async () =
       'Notifications',
       'Keyboard shortcuts',
     ])
-    expect(labels.slice(5)).toEqual(['Resume after restart', 'Check vault answers', 'Start at sign-in', 'Open source'])
+    expect(labels.slice(5)).toEqual(['Resume after restart', 'Start at sign-in', 'Open source'])
+    expect(labels).not.toContain('Check vault answers')
+    expect(wrapper.findAll('.settings-main .section-title').map(heading => heading.text()))
+      .not.toContain('Check vault answers')
     expect(labels).not.toContain('Memory handover')
     expect(labels).not.toContain('Update task history')
     expect(labels).not.toContain('Session insights')

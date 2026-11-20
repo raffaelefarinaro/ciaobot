@@ -5,7 +5,7 @@ import {
   PopoverRoot,
   PopoverTrigger,
 } from 'reka-ui'
-import { computed, nextTick, onMounted, ref, useId, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 
 export interface ModelSection {
   key: string
@@ -29,6 +29,7 @@ interface Props {
   placement?: 'bottom-start' | 'bottom-end' | 'top-start' | 'top-end'
   activeModels?: string[]
   triggerless?: boolean
+  mobileSheet?: boolean
   // When set, only the section with this key is shown. Used by the
   // image-capability card's "Open picker" to land the user on the current
   // backend instead of the full cross-provider list.
@@ -53,6 +54,7 @@ const props = withDefaults(defineProps<Props>(), {
   placement: 'bottom-start',
   activeModels: () => [],
   triggerless: false,
+  mobileSheet: false,
   labelledBy: '',
   describedBy: '',
 })
@@ -60,7 +62,7 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<{
   'update:modelValue': [value: string | string[]]
   select: [value: string | string[], sectionKey: string]
-  close: []
+  close: [reason: 'escape' | 'other' | 'close']
 }>()
 
 const open = ref(false)
@@ -75,6 +77,11 @@ const rootRef = ref<HTMLElement | null>(null)
 const triggerRef = ref<HTMLElement | null>(null)
 const searchRef = ref<HTMLInputElement | null>(null)
 const listRef = ref<HTMLElement | null>(null)
+let preserveFocusOnUnmount = false
+onBeforeUnmount(() => {
+  const active = document.activeElement
+  preserveFocusOnUnmount = !!active && active !== document.body && !rootRef.value?.contains(active)
+})
 
 const effectiveValue = computed<string | string[]>(() => {
   if (props.multiple) return Array.isArray(props.modelValue) ? props.modelValue : []
@@ -155,15 +162,22 @@ function onPopoverOpenChange(nextOpen: boolean): void {
     })
     return
   }
-  close()
+  close('other')
 }
 
-function close() {
+function close(reason: 'escape' | 'other' | 'close' = 'other') {
   const returnFocus = !props.triggerless ? triggerRef.value : null
+  const active = document.activeElement
+  const shouldReturnFocus = !active || active === document.body || !!rootRef.value?.contains(active)
   open.value = false
   query.value = ''
-  if (returnFocus) nextTick(() => returnFocus.focus())
-  if (props.triggerless) emit('close')
+  if (returnFocus && shouldReturnFocus) nextTick(() => {
+    const current = document.activeElement
+    if (returnFocus.isConnected && (!current || current === document.body || rootRef.value?.contains(current))) {
+      returnFocus.focus()
+    }
+  })
+  if (props.triggerless) emit('close', reason)
 }
 
 function selectModel(model: string, sectionKey: string) {
@@ -181,7 +195,7 @@ function selectModel(model: string, sectionKey: string) {
   } else {
     emit('update:modelValue', model)
     emit('select', model, sectionKey)
-    close()
+    close('other')
   }
 }
 
@@ -229,6 +243,10 @@ function scrollActiveIntoView() {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229) {
+    if (event.key === 'Escape') event.stopPropagation()
+    return
+  }
   if (event.key === 'Escape') {
     // Claim the key. Dismissing this popover is the whole meaning of the press,
     // and the global handler in ChatLayout treats an unclaimed Escape as "go
@@ -236,8 +254,7 @@ function onKeydown(event: KeyboardEvent) {
     // half-finished Settings edits.
     event.preventDefault()
     event.stopPropagation()
-    close()
-    triggerRef.value?.focus()
+    close('escape')
     return
   }
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -290,21 +307,33 @@ function onOpenAutoFocus(event: Event): void {
   focusSearch()
 }
 
+function onCloseAutoFocus(event: Event): void {
+  // Never override focus that has already moved outside the picker.
+  const active = document.activeElement
+  if (preserveFocusOnUnmount || (active && active !== document.body && !rootRef.value?.contains(active))) {
+    event.preventDefault()
+  }
+}
+
 function onEscapeKeyDown(event: KeyboardEvent): void {
+  if (event.isComposing || event.keyCode === 229) {
+    // Reka dismisses its layer unless this window-level event is prevented.
+    event.preventDefault()
+    return
+  }
   // Claim Escape locally. ChatLayout treats an unclaimed Escape as navigation
   // away from the current pane.
   event.preventDefault()
   event.stopPropagation()
-  close()
+  close('escape')
 }
 
 watch(popoverVisible, (visible) => {
   if (visible) focusSearch()
 })
 
-// Auto-focus the search input and scroll active item into view whenever the
-// filtered list changes while open.
-watch(filteredSections, () => {
+// Search edits retain focus; prop/section changes must not steal footer focus.
+watch(query, () => {
   if (popoverVisible.value) {
     nextTick(() => {
       searchRef.value?.focus()
@@ -337,6 +366,7 @@ onMounted(() => {
           'model-selector--open': popoverVisible,
           'model-selector--disabled': disabled,
           'model-selector--triggerless': triggerless,
+          'model-selector--mobile-sheet': mobileSheet,
         }"
       >
         <PopoverTrigger v-if="!triggerless" as-child :disabled="disabled">
@@ -365,6 +395,7 @@ onMounted(() => {
         :position-strategy="'fixed'"
         :update-position-strategy="'always'"
         @open-auto-focus="onOpenAutoFocus"
+        @close-auto-focus="onCloseAutoFocus"
         @escape-key-down="onEscapeKeyDown"
       >
         <div
@@ -372,6 +403,15 @@ onMounted(() => {
           :class="[`model-selector__popover--${placement}`, 'model-selector__popover--placed']"
           aria-label="Model selector"
         >
+          <div v-if="mobileSheet" class="model-selector__mobile-header">
+            <span>Choose model</span>
+            <button
+              type="button"
+              class="model-selector__close"
+              aria-label="Close model picker"
+              @click.stop="close('close')"
+            >×</button>
+          </div>
           <div
             class="model-selector__listbox"
           role="listbox"
@@ -453,9 +493,9 @@ onMounted(() => {
             No models match "{{ query }}"
           </div>
 
+          </div>
           <div v-if="$slots.footer" class="model-selector__footer">
             <slot name="footer" />
-          </div>
           </div>
         </div>
       </PopoverContent>
@@ -533,9 +573,18 @@ onMounted(() => {
   /* Popper supplies the fixed placement and collision transform. The
      component's own styles only describe the elevated surface. */
   z-index: 300;
-  min-width: 320px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: min(320px, calc(100vw - 24px));
   max-width: min(480px, calc(100vw - 24px));
-  max-height: min(420px, calc(100dvh - var(--safe-top) - var(--safe-bottom) - 32px));
+  /* Reka reports the room left on the chosen side (flipped above the trigger
+     on short landscape phones); the viewport bound alone can overflow it. */
+  max-height: min(
+    420px,
+    calc(100dvh - var(--safe-top) - var(--safe-bottom) - 32px),
+    calc(var(--reka-popper-available-height, 100dvh) - 8px)
+  );
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -546,7 +595,8 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  max-height: inherit;
+  flex: 1 1 auto;
+  overflow: visible;
 }
 
 .model-selector__search-wrap {
@@ -576,6 +626,7 @@ onMounted(() => {
   overflow-y: auto;
   padding: 6px;
   flex: 1 1 auto;
+  min-height: 0;
 }
 
 .model-selector__section {
@@ -755,10 +806,38 @@ onMounted(() => {
 
 .model-selector__footer {
   flex: 0 0 auto;
+  min-height: 0;
+  overflow-y: auto;
   padding: 8px 10px;
+  /* A control scrolled into view keeps clear of the footer's edge. */
+  scroll-padding: 8px;
   border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
   background: var(--bg2);
   border-radius: 0 0 var(--radius) var(--radius);
+}
+
+@media (max-height: 600px) {
+  .model-selector__footer {
+    flex: 0 1 auto;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: var(--fg2) var(--bg3);
+  }
+
+  .model-selector__footer::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  .model-selector__footer::-webkit-scrollbar-track {
+    background: var(--bg3);
+    border-radius: 999px;
+  }
+
+  .model-selector__footer::-webkit-scrollbar-thumb {
+    background: var(--fg2);
+    border: 2px solid var(--bg3);
+    border-radius: 999px;
+  }
 }
 
 .model-selector__header {
@@ -767,6 +846,10 @@ onMounted(() => {
   border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
   background: var(--bg2);
   border-radius: var(--radius) var(--radius) 0 0;
+}
+
+.model-selector__mobile-header {
+  display: none;
 }
 
 @media (max-width: 768px) {
@@ -778,16 +861,30 @@ onMounted(() => {
        below the shared top bar. */
     position: fixed !important;
     top: 0 !important;
-    right: calc(12px + var(--safe-right)) !important;
     bottom: auto !important;
+    right: calc(12px + var(--safe-right)) !important;
     left: calc(12px + var(--safe-left)) !important;
     width: auto !important;
     min-width: 0 !important;
     max-width: none !important;
     transform: none !important;
   }
-  .model-selector--triggerless .model-selector__popover {
+  .model-selector--mobile-sheet :deep([data-reka-popper-content-wrapper]) {
+    bottom: 0 !important;
+    height: auto !important;
+    pointer-events: none;
+  }
+  .model-selector--mobile-sheet :deep([data-reka-popper-content-wrapper])::before {
+    position: fixed;
+    z-index: 0;
+    inset: 0 calc(-12px - var(--safe-right)) 0 calc(-12px - var(--safe-left));
+    background: color-mix(in srgb, var(--bg) 66%, transparent);
+    content: '';
+    pointer-events: auto;
+  }
+  .model-selector--mobile-sheet .model-selector__popover {
     position: absolute !important;
+    z-index: 1;
     top: calc(61px + var(--safe-top) + 4px);
     right: 0;
     bottom: auto;
@@ -795,7 +892,47 @@ onMounted(() => {
     width: auto;
     min-width: 0;
     max-width: none;
-    max-height: calc(100dvh - 61px - var(--safe-top) - var(--safe-bottom) - 20px);
+    max-height: calc(var(--app-h, 100dvh) - 61px - var(--safe-top) - var(--safe-bottom) - 24px);
+    pointer-events: auto;
+  }
+  .model-selector--mobile-sheet .model-selector__mobile-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex: 0 0 auto;
+    min-height: 48px;
+    padding: 0 4px 0 10px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+    color: var(--fg);
+    font-size: var(--text-base);
+    font-weight: 600;
+  }
+  .model-selector__close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--touch, 44px);
+    min-width: var(--touch, 44px);
+    height: var(--touch, 44px);
+    min-height: var(--touch, 44px);
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--fg2);
+    font: inherit;
+    font-size: 24px;
+    line-height: 1;
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+  .model-selector__close:hover,
+  .model-selector__close:focus-visible {
+    background: var(--bg3);
+    color: var(--fg);
+  }
+  .model-selector__close:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
 }
 </style>

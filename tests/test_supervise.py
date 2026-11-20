@@ -103,6 +103,44 @@ def test_zero_exit_is_returned_without_relaunch(tmp_path: Path) -> None:
     assert slept == []
 
 
+def test_only_sigterm_and_sigint_are_installed_and_restored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A host exposing SIGBREAK must not add a third stop signal: the POSIX
+    stops are SIGTERM and SIGINT, each restored when supervise returns."""
+    synthetic_sigbreak = 9999
+    installed: list[tuple[int, object]] = []
+
+    monkeypatch.setattr(
+        supervise_module.signal, "SIGBREAK", synthetic_sigbreak, raising=False
+    )
+    monkeypatch.setattr(
+        supervise_module.signal, "getsignal", lambda signum: signum + 1000
+    )
+
+    def fake_signal(signum: int, handler: object) -> None:
+        installed.append((signum, handler))
+
+    monkeypatch.setattr(supervise_module.signal, "signal", fake_signal)
+    monkeypatch.setattr(supervise_module, "check_workspace_access", lambda: None)
+
+    code = supervise(child_argv=_counter_child(tmp_path, 0))
+
+    assert code == 0
+    assert _launches(tmp_path) == 1
+    assert [signum for signum, _ in installed] == [
+        signal.SIGTERM,
+        signal.SIGINT,
+        signal.SIGTERM,
+        signal.SIGINT,
+    ]
+    first, second, restored_first, restored_second = installed
+    assert callable(first[1]) and callable(second[1])
+    assert restored_first[1] == signal.SIGTERM + 1000
+    assert restored_second[1] == signal.SIGINT + 1000
+    assert synthetic_sigbreak not in [signum for signum, _ in installed]
+
+
 def test_crash_loop_backs_off(tmp_path: Path) -> None:
     """Past CRASH_LOOP_MAX_RESTARTS consecutive restart exits each wait, doubling."""
     slept, sleep = _recording_sleep()
@@ -177,7 +215,6 @@ def test_default_child_argv_uses_module_path() -> None:
     ]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
 def test_sigterm_is_forwarded_to_the_child(tmp_path: Path) -> None:
     """The child shares the supervisor's process group, so a stop sent to the
     supervisor never reaches it on its own: the supervisor has to forward it."""
@@ -217,7 +254,6 @@ def test_sigterm_is_forwarded_to_the_child(tmp_path: Path) -> None:
     assert signal.getsignal(signal.SIGTERM) == before
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
 def test_restart_code_after_stop_returns_zero(tmp_path: Path) -> None:
     """A child that asks for a restart while the stop is being forwarded is not
     relaunched, and the stop wins over the restart code: a service manager
@@ -259,33 +295,6 @@ def test_restart_code_after_stop_returns_zero(tmp_path: Path) -> None:
     assert _launches(tmp_path) == 1
 
 
-def test_no_stdio_redirects_the_child_into_the_runtime_logs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Under pythonw.exe there is no console: without this the child's output is lost."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(sys, "stdout", None)
-    monkeypatch.setattr(sys, "stderr", None)
-
-    code = supervise(
-        child_argv=[
-            sys.executable,
-            "-c",
-            "import sys; print('out'); print('err', file=sys.stderr)",
-        ]
-    )
-
-    assert code == 0
-    logs = tmp_path / ".runtime"
-    assert "out" in (logs / "ciao.stdout.log").read_text(encoding="utf-8")
-    assert "err" in (logs / "ciao.stderr.log").read_text(encoding="utf-8")
-    # The log files are closed, so the module streams have to be back to the None
-    # they were: ciao.cli keeps writing to sys.stderr after supervise returns and
-    # would raise on a closed file.
-    assert sys.stderr is None
-    assert sys.stdout is None
-
-
 def test_a_console_is_left_alone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -301,8 +310,7 @@ def test_a_console_is_left_alone(
 def test_a_child_is_killed_when_the_process_tree_cannot_be_tracked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A job object can fail to open after the child is spawned, and a live but
-    untracked engine must not outlive the supervisor that failed to claim it."""
+    """A tree that cannot be tracked after the child is spawned must not leave a live but untracked engine running without the supervisor that failed to claim it."""
     killed: list[bool] = []
 
     class _UntrackedChild:
@@ -319,7 +327,7 @@ def test_a_child_is_killed_when_the_process_tree_cannot_be_tracked(
 
     class _UnclaimableTree:
         def __init__(self, pid: int, *, dies_with_engine: bool = False) -> None:
-            raise OSError("no job object")
+            raise OSError("untrackable")
 
     monkeypatch.setattr(supervise_module.subprocess, "Popen", _UntrackedChild)
     monkeypatch.setattr(supervise_module, "ProcessTree", _UnclaimableTree)

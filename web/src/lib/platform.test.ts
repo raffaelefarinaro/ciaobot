@@ -17,7 +17,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { readFileSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import * as platform from './platform'
 
 const SRC = join(__dirname, '..')
@@ -36,6 +36,10 @@ const RETIRED: Record<string, string> = {
 /** The live marker and the one file allowed to read it. */
 const MARKER = '__CIAOBOT_DESKTOP__'
 const MARKER_READER = join(SRC, 'lib', 'pwaPlatform.ts')
+
+/** The Mac app's settings bridge and the one file allowed to name its handler. */
+const BRIDGE = 'ciaobotAppSettings'
+const BRIDGE_READER = join(SRC, 'lib', 'macAppSettings.ts')
 
 /** Every `.ts`/`.vue` under `web/src`, `__tests__` included: a test that uses
  * the retired helper or bridge asserts a branch that can no longer be taken. */
@@ -75,5 +79,14 @@ describe('app-presence abstraction', () => {
       .filter(file => !file.includes('__tests__') && !file.endsWith('.test.ts'))
       .filter(file => readFileSync(file, 'utf8').includes(MARKER))
     expect(readers).toEqual([MARKER_READER])
+  })
+
+  it('reads the Mac app settings handler only in lib/macAppSettings.ts', () => {
+    // Tests and workshop stories stub the native side; only the app reads it.
+    const readers = sourceFiles()
+      .filter(file => !file.includes('__tests__') && !file.endsWith('.test.ts'))
+      .filter(file => !file.startsWith(join(SRC, 'stories') + sep))
+      .filter(file => readFileSync(file, 'utf8').includes(BRIDGE))
+    expect(readers).toEqual([BRIDGE_READER])
   })
 })

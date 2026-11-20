@@ -17,14 +17,12 @@ function mountRow(props: Record<string, unknown> = {}) {
     props: {
       steps: [step({ content: 'Checking the config' })],
       open: false,
-      chatId: 'chat-1',
       thinkingExpanded: false,
       renderMarkdown: (text: string) => `<p>${text}</p>`,
       renderActivityLine: (line: string) => line,
       outputsId: 'outputs-0',
       ...props,
     },
-    global: { stubs: { SubagentPanel: true } },
   })
 }
 

@@ -1,10 +1,10 @@
 # Ciaobot agent CLI control plane
 
 Since the S6 slice of the CLI-first migration, Ciaobot's own control surface
-for the two supported providers, Claude and OpenCode, is a command line:
+for the supported providers, Claude, Codex and OpenCode, is a command line:
 every operation runs as `ciao <noun> <verb> … --json` inside the managed
-provider's shell, described by one skill document
-(`ciao/stock/skills/ciao-cli/SKILL.md`). The MCP adapter and `/mcp/` mount are
+provider's shell, described by the shared entry and linked references in
+`ciao/stock/skills/ciao-cli/`. The MCP adapter and `/mcp/` mount are
 gone. What remains is the transport-free core the dispatcher needs: the shared
 operation table, the bearer-token registry, the plan-mode gate/envelope/
 telemetry, and the third-party project MCP server management surfaced by
@@ -55,10 +55,9 @@ flowchart LR
 - The scope is also not a containment boundary against the model itself. The
   same process holds native Read/Bash/Edit over its workspace root, so the
   control plane is the *convenient* path to Ciaobot state, not the only one.
-  `.env` (which holds `PWA_AUTH_TOKEN`), `.runtime/` and `secrets/` are denied
-  to the native file tools on both providers — see `credential_path_deny_rules`
-  in `ciao/execution_modes.py`, which also states what that deny does not cover
-  (the shell).
+  Ciaobot does not restrict the native file tools by path on any provider:
+  `.env` (which holds `PWA_AUTH_TOKEN`), `.runtime/` and `secrets/` are as
+  readable as any other file in the workspace.
 - A chat whose control plane is unavailable fails the turn:
   `build_agent_request` raises `AgentSurfaceUnavailableError`, which is
   published as a normal failed turn with a logged ERROR. The
@@ -93,7 +92,7 @@ Claude routes it through its classifier and opencode keeps its generic
 because a prompt-injected model could start a Bash input with an allowlisted
 prefix (`ciao help >/dev/null; <cmd>`) and the shell suffix would run without a
 card. There is no `AGENT_CLI_ALLOW_PATTERNS` / `AGENT_CLI_ASK_PATTERNS` and no
-`Bash(ciao …)` allow-list on either provider.
+`Bash(ciao …)` allow-list on any provider.
 
 Users who want no cards switch to `bypass`, which grants the full `allow`
 wildcard. The server-side floor (mode gates, `unattended_forbidden`, workspace
@@ -109,16 +108,11 @@ there is no Ciaobot MCP server to attach. Every chat is on the CLI surface, so
 restarted when the token changes (`provider_reuse_key`).
 
 Separately, Claude Code and OpenCode own their external MCP server configuration
-and authentication. Settings → MCP is a native-config inventory plus live status from already running
-chats in the selected workspace; it writes configuration only to turn one server
-off or on (`POST /api/mcp/servers/enabled`), and never writes credentials or probes
-a server. For a server an open chat reports as needing a sign-in, that
-chat's sign-in card is the live path (Settings' **Sign in** raises and starts it,
-and may start the chat's OpenCode server); a CLI sign-in only reaches sessions
-started afterwards. Add servers, and authenticate them for new sessions, through
-the provider CLI from the workspace directory (`claude mcp add` / `claude mcp login`, or OpenCode V2's
-`opencode mcp add` / `opencode mcp auth`). Every server declared for the
-workspace loads; `mcp__<name>` in its `disallowed_tools` blocks one.
+and authentication. Ciaobot keeps no MCP inventory or status and does not read or write that
+configuration or any credential; Settings → MCP only opens the CLI's own MCP command. Add servers,
+and authenticate them for new sessions, through the provider CLI from the workspace directory
+(`claude mcp add` / `claude mcp login`, or OpenCode V2's `opencode mcp add` / `opencode mcp auth`).
+Every server declared for the workspace loads; `mcp__<name>` in its `disallowed_tools` blocks one.
 
 Static configuration in an unrelated terminal is intentionally unsupported: the
 token is a live chat capability, not an operator credential. Use Ciaobot's
@@ -128,11 +122,11 @@ self-actions, and telemetry remain enforced.
 ## Operation catalog
 
 The operation table in `ciao/mcp_server.py` is the single source the dispatcher
-runs; `ciao/stock/skills/ciao-cli/SKILL.md` is the command reference and
+runs; `ciao/stock/skills/ciao-cli/SKILL.md` is the reference entry and index, and
 `GET /api/agent/status` reports the live operation list. The catalog covers
 application actions that are safe and meaningful for a scoped agent:
 bounded memory (`ciao memory status|update`), vault (`ciao vault search`,
-`ciao vault review …`), projects (`ciao project …`), workspaces
+`ciao vault recall-check --claims-file FILE`, `ciao vault review …`), projects (`ciao project …`), workspaces
 (`ciao workspace list`), chats (`ciao chat …`), schedules (`ciao schedule …`), the task board
 (`ciao task …`, including `task delegate` and `task report`), notes
 (`ciao note create|related|verify`), webhook triggers (`ciao webhook …`),
@@ -147,6 +141,31 @@ operation it dispatches. `tests/test_agent_surface.py` pins both directions of
 that mapping against the parser, so a verb added to the CLI without a row here
 fails rather than quietly becoming a command the telemetry and the behavioral
 evals cannot name.
+
+`vault recall-check` is enabled for a model-invoked best-effort check before
+answering a vault-recall question. The caller supplies a UTF-8 JSON claims file;
+the operation is available only during a live foreground provider pass. It is
+not a hard pre-final interception: invocation and temporary-file cleanup are not
+guaranteed. Prompt guidance cannot enforce that providers avoid retaining claim
+text in private traces.
+Findings return to the authenticated requester (normally as the ordinary tool
+result). The operation binds to the exact registry session presented at
+execution and refuses results if that session is revoked, chat-revoked, rotated
+or expired while the request is pending. A 250 ms polling watcher is cooperative,
+not a hard cancellation deadline; synchronous checks also guard helper admission
+and result delivery. This proves live chat-capability validity, not which turn
+or process made the request: a still-valid same-scope token from an earlier pass
+is indistinguishable from a token used by the current pass and can use the current
+pass's unspent attempt. It allows one attempt per provider pass and honors the existing
+vault-verification opt-out. The operation has a cooperative 45-second server
+deadline while the CLI HTTP timeout remains 60 seconds; a client timeout or
+disconnect does not guarantee cancellation. The reader's resolve/stat/open/
+fstat sequence has a TOCTOU window and assumes a non-hostile local filesystem.
+No verification-specific message, notification or stream event is produced
+for this model-invoked check. The former post-answer verifier is retired and its
+historical verdict data are preserved; the badge and Settings card are removed
+atomically with activation. Ordinary tool transcripts can contain the request
+and result; this is not an invisible or zero-retention path.
 
 The proposals queue is reviewed and dismissed through the PWA, with one
 deliberate CLI exception the nightly curation agent drives because one shell
@@ -185,7 +204,7 @@ that simply finished: a turn ending is not a verified edit.
 `ciao chat needs-action KIND [flags]` puts a request in front of the user in
 the calling chat: a card the user acts on. The kinds are the engine's
 `AGENT_ACTION_KINDS` in `ciao/chat_actions.py`: `command`, `gws_auth`,
-`permission_mode`, `device_code`, `system_setting`, `restart` and `mcp_auth`.
+`permission_mode`, `device_code`, `system_setting` and `restart`.
 `limit` is the engine's own and is never agent-raisable.
 
 ```
@@ -195,7 +214,6 @@ ciao chat needs-action permission_mode --mode MODE [--note TEXT]
 ciao chat needs-action device_code --tool gh|az
 ciao chat needs-action system_setting --setting NAME [--note TEXT]
 ciao chat needs-action restart --reason config|update [--note TEXT]
-ciao chat needs-action mcp_auth --server NAME [--provider claude|opencode]
 ```
 
 The CLI routes each flag to the one kind that takes it; a flag that does not
@@ -253,18 +271,21 @@ belongs in Settings; a request is for the steps Settings does not cover.
 The CLI replaces transport recipes, not behavioural knowledge. The core keeps
 the safety boundaries, recall and write-authorization rules, and a compact
 common-command synopsis: removing that synopsis previously hurt routing.
-`ciao help` exposes the full packaged `ciao-cli` reference even though that
-skill is not installed in workspace catalogs; `ciao <noun> --help` gives group
-syntax. Agent-surface commands use JSON envelopes; the top-level review-queue
+`ciao help [topic]` exposes the packaged `ciao-cli` reference even though that
+skill is not installed in workspace catalogs. Bare `ciao help` prints the full
+reference; a topic prints the shared entry and one grouped reference, bounded
+to 16,000 UTF-8 bytes. Topics are `memory`, `vault`, `queues` (memory and
+review); `note`, `file`, `chat`, `project` (workspace operations); `task`;
+`schedule`, `webhook`, `context`, `stats`, `gws`, `workspace`, `repo`
+(automation and status); and `examples`. Use topic help for detailed lookups;
+`ciao <noun> --help` gives group syntax. Agent-surface commands use JSON envelopes; the top-level review-queue
 commands have their own documented output conventions.
 
 Durable writes must load `ciao-memory` for destinations, frontmatter,
 verification stamps and consolidation. Integration and provider mechanics stay
 in their relevant skills or CLI help. The core requires the managed interface
 and forbids routing around its checks or refusals; it does not blacklist HTTP
-clients or forbid ordinary authorized note-content edits. Workspace-only file
-access does not imply that GitHub is signed out: the engine can grant its
-existing login to a sandboxed chat.
+clients or forbid ordinary authorized note-content edits.
 
 ## Validation status
 
@@ -274,3 +295,14 @@ measured real-session parity (completion 86%/100% per provider on both
 surfaces, zero fallbacks) and drove the D-11 name resolution, D-12 command
 table in the core prompt, and the CLI permission posture that make the CLI
 surface usable.
+
+### Managed vault-recall checks
+
+The enabled managed `vault_recall_check` operation uses engine-local admission allowing at most two unfinished checker tasks
+and twelve admissions per trailing 60 seconds across managed-recall callers.
+Busy and rate-limit denials refund the provisional provider-pass attempt; an
+immediate pre-checker authorization failure remains charged, and an admitted
+attempt remains charged even if it fails or is cancelled. State is process-local
+and resets on engine restart. These limits are an admission safeguard, not a
+monetary or token-spend guarantee, and do not promise cancellation of remote
+provider work or evidence threads.

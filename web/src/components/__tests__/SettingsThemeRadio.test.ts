@@ -26,7 +26,7 @@ it('Theme follows the radio keyboard pattern and saves the choice to the engine'
   localStorage.setItem('ciao-theme', 'dark')
   const wrapper = mount(SettingsView, {
     attachTo: document.body,
-    global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: stub } },
+    global: { plugins: [router], stubs: { Teleport: true } },
   })
   try {
     await flushPromises()
@@ -69,7 +69,7 @@ it('two quick theme choices do not flicker back to the first while its save is q
   localStorage.setItem('ciao-theme', 'system')
   const wrapper = mount(SettingsView, {
     attachTo: document.body,
-    global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: stub } },
+    global: { plugins: [router], stubs: { Teleport: true } },
   })
   try {
     await flushPromises()

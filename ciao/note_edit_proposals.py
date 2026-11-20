@@ -680,6 +680,17 @@ def read_sidecar(
         raise NoteEditSidecarError(
             f"unreadable note-edit proposal {path}: {exc}"
         ) from exc
+    return parse_sidecar_text(text, where=path, proposal_id=proposal_id)
+
+
+def parse_sidecar_text(text: str, *, where: Path, proposal_id: str) -> NoteEditProposal:
+    """The filed proposal a sidecar's text describes, or a refusal.
+
+    Pure: no filesystem access. ``where`` names the file in the refusals and is
+    not opened. Raises :class:`NoteEditSidecarError` for text that is not a
+    readable record filed under ``proposal_id``.
+    """
+    path = where
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -827,7 +838,7 @@ def _queued_row_id(
     """The queue row id for the bullet just written, or ``""`` if it is not there.
 
     Read back rather than assumed from the call, for the reason
-    :func:`ciao.vocabulary_proposals.generate_category_proposals` does it:
+    :func:`ciao.vocabulary_proposals.publish_category_candidates` does it:
     `append_proposals` dedupes the bullet text against the decision history as
     well as the live queue, so a bullet it declined to write would otherwise be
     reported as filed — and the check would then be pinned to a proposal id that

@@ -1,63 +1,20 @@
-// One install action per platform. macOS offers the native client and the engine
-// command; Windows has its PowerShell command; Linux links to its admin guide.
-(function () {
-  document.querySelectorAll('[data-install]').forEach(function (box) {
-    var select = box.querySelector('[data-install-os]');
-    var code = box.querySelector('code');
-    var label = box.querySelector('[data-install-label]');
-    var note = box.querySelector('[data-install-note]');
-    var commandBox = box.querySelector('[data-install-command]');
-    var guide = box.querySelector('[data-install-guide]');
-    var macClient = box.querySelector('[data-mac-client]');
-    var macNote = box.querySelector('[data-mac-client-note]');
-    if (!select || !code) return;
-
-    function show() {
-      var option = select.options[select.selectedIndex];
-      var platform = option.value;
-      var command = option.dataset.cmd || '';
-      var guideURL = option.dataset.url || '';
-      box.dataset.platform = platform;
-      code.textContent = command;
-      if (label) label.textContent = option.dataset.label;
-      if (commandBox) commandBox.hidden = !command;
-      if (note) note.hidden = platform !== 'windows';
-      if (macClient) macClient.hidden = platform !== 'mac';
-      if (macNote) macNote.hidden = platform !== 'mac';
-      if (guide) {
-        guide.hidden = !guideURL;
-        if (guideURL) guide.href = guideURL;
-      }
-    }
-
-    var ua = navigator.userAgentData;
-    var platform = (ua && ua.platform) || navigator.platform || navigator.userAgent || '';
-    if (/win/i.test(platform)) select.value = 'windows';
-    else if (/linux/i.test(platform) && !/android/i.test(navigator.userAgent)) select.value = 'linux';
-    select.addEventListener('change', show);
-    select.closest('.install-os').hidden = false;
-    show();
-  });
-})();
-
-// Resolve the newest native Mac DMG, including prereleases. Without JavaScript
-// or network access, the button still opens the client's releases page.
+// The Mac button opens the latest release page. When the latest release carries
+// the Ciaobot DMG, the button links to that file instead. Without JavaScript or
+// network access, the button keeps the release page link.
 (function () {
   var links = document.querySelectorAll('[data-mac-client]');
   if (!links.length || !window.fetch) return;
-  fetch('https://api.github.com/repos/raffaelefarinaro/ciaobot-mac/releases?per_page=20')
+  fetch('https://api.github.com/repos/raffaelefarinaro/ciaobot/releases/latest')
     .then(function (response) {
       if (!response.ok) throw new Error(response.status);
       return response.json();
     })
-    .then(function (releases) {
-      for (var i = 0; i < releases.length; i += 1) {
-        if (releases[i].draft) continue;
-        var asset = releases[i].assets.find(function (item) { return /\.dmg$/i.test(item.name); });
-        if (!asset) continue;
-        links.forEach(function (link) { link.href = asset.browser_download_url; });
-        break;
-      }
+    .then(function (release) {
+      var asset = release.assets.find(function (item) {
+        return /^Ciaobot-.*\.dmg$/.test(item.name);
+      });
+      if (!asset) return;
+      links.forEach(function (link) { link.href = asset.browser_download_url; });
     })
     .catch(function () {});
 })();

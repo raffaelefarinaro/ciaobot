@@ -11,8 +11,8 @@ It covers the whole read path:
   which tool calls earn a file card, which user turns are the CLI talking to
   itself rather than the human, and which injected context is stripped back
   off a prompt before it is shown;
-* the per-session renderers - the Claude session JSONL, an opencode thread,
-  and the nested subagent transcripts;
+* the per-session renderers - the Claude session JSONL and an ACP session
+  journal (:func:`_render_acp_journal`);
 * the assembly that stitches a chat's sessions, handover messages and durable
   transcript metadata into one chronological list
   (:func:`_assemble_chat_messages`);
@@ -36,20 +36,13 @@ import json
 import logging
 import re
 from collections import Counter
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-from ciao import cli_envelopes, subagent_tracking
+from ciao import cli_envelopes, provider_registry
+from ciao.tool_summary import summarize_claude_tool_input
 from ciao.background_notice import format_finished_runs
 from ciao.models import ChatContext
-from ciao.providers.claude import _summarize_tool_input
-from ciao.providers.opencode import (
-    OpencodeProvider,
-    native_wake_run,
-    _file_touches as _opencode_file_touches,
-    _summarize_tool_input as _summarize_opencode_tool_input,
-)
 from ciao.rate_limits import is_rate_limit_telemetry
 from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
 
@@ -257,7 +250,7 @@ def _extract_assistant_blocks(
             tinput = block.get("input") or {}
             if not isinstance(tinput, dict):
                 tinput = {}
-            summary = _summarize_tool_input(name, tinput)
+            summary = summarize_claude_tool_input(name, tinput)
             touches = normalize_file_touch_paths(
                 extract_file_touches(name, tinput),
                 workspace_root,
@@ -330,7 +323,7 @@ def _strip_injected_context(content: str) -> str:
 # The user-record skip rules (/model and /mode echoes, the interrupted-turn
 # sentinel, the interrupt marker, the CLI envelope tags) and the
 # task-notification grammar live in ciao/cli_envelopes.py. They are shared
-# with ciao/subagent_tracking.py, whose turn counter must skip exactly the
+# with any reader that counts user turns, which must skip exactly the
 # records this renderer hides or `turn_index` anchoring drifts. The assistant
 # acknowledgement of a control slash command ("Set model to ..." / "Set mode
 # to ...") is collapsed into a system bubble by _classify_control_ack below.
@@ -358,6 +351,38 @@ _is_cli_internal_envelope = cli_envelopes.is_cli_envelope
 _SYNTHESIS_NUDGE_LABEL = "\U0001F916 Background agents finished — asked for a consolidated report"
 
 
+# Prompt Ciaobot used to inject when background agents finished. It is no
+# longer sent (#1394: the CLI now runs a follow-up turn itself). It is kept
+# because session files recorded before then contain it, and the renderer
+# collapses it into the status line above.
+_SYNTHESIS_NUDGE = (
+    "The background agent(s) you dispatched have now finished. Review their "
+    "results (read their transcripts or output as needed) and post your "
+    "consolidated final report for this task now. Do not dispatch new "
+    "background agents to answer this. If you already posted the final "
+    "report, reply with a brief confirmation instead of repeating it."
+)
+
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _collapse_whitespace(text: str) -> str:
+    return _WHITESPACE_RE.sub(" ", text).strip()
+
+
+_SYNTHESIS_PROMPT_COLLAPSED = _collapse_whitespace(_SYNTHESIS_NUDGE)
+
+
+def _is_synthesis_nudge(text: str) -> bool:
+    """True when ``text`` is the legacy subagent-synthesis prompt (no longer sent).
+
+    Matches on the tail: the nudge is sent with the chat's context prefix
+    attached, and the /messages prefix stripper only removes the shapes it
+    recognizes.
+    """
+    return _collapse_whitespace(text).endswith(_SYNTHESIS_PROMPT_COLLAPSED)
+
+
 def _summarize_task_notification(content: str) -> str | None:
     """Render a <task-notification> envelope as a one-line system bubble.
 
@@ -370,8 +395,8 @@ def _summarize_task_notification(content: str) -> str | None:
     several into one record; the rest stay hidden with the envelope. A record
     that merely *carries* the grammar — the human's own prose quoting it, or
     shell output from a command that printed a session JSONL — is not a
-    completion and returns None, the same rule `ciao/subagent_tracking.py`
-    applies so the two readers stay aligned.
+    completion and returns None, the same rule the shared
+    envelope vocabulary applies.
     """
     fields = cli_envelopes.envelope_notification_fields(content)
     if fields is None:
@@ -381,8 +406,7 @@ def _summarize_task_notification(content: str) -> str | None:
     first_line = summary.splitlines()[0].strip() if summary else ""
     icon = "\U0001F916"  # 🤖
     if first_line:
-        # Trim aggressively so the bubble stays one line; full output lives in
-        # the subagent transcript fetchable via /api/chats/{id}/subagents.
+        # Trim aggressively so the bubble stays one line.
         snippet = first_line if len(first_line) <= 120 else first_line[:117] + "..."
         return f"{icon} Subagent {status}: {snippet}"
     return f"{icon} Subagent {status}"
@@ -396,7 +420,7 @@ def _native_task_notice(content: str) -> str | None:
     notification decides: a ``Monitor event`` or an unrecognised summary falls
     through to the one-line status bubble. A record can concatenate several
     completions; the consecutive native ones share one notice. No log path:
-    the provider's output file is outside the file sandbox. A subagent's tail
+    the provider's output file is not copied into the notice. A subagent's tail
     is its inline report.
     """
     runs: list[cli_envelopes.NativeTaskRun] = []
@@ -420,252 +444,6 @@ def _native_task_notice(content: str) -> str | None:
         for run in runs
     ]
     return format_finished_runs(entries, tail_lines=50)[0]
-
-
-def _render_subagent_messages(msgs: Iterable[object]) -> list[dict]:
-    """Render SDK or JSONL message objects for the subagent transcript UI."""
-    rendered: list[dict] = []
-    # Materialised because the failed-tool pre-pass has to see the results,
-    # which arrive after the calls they belong to.
-    msgs = list(msgs)
-    failed_tool_ids = _failed_tool_use_ids(msgs)
-    for m in msgs:
-        mtype = getattr(m, "type", None)
-        message = getattr(m, "message", None)
-        if isinstance(m, dict):
-            mtype = m.get("type", mtype)
-            message = m.get("message", message)
-        if mtype == "assistant":
-            blocks = _extract_assistant_blocks(message)
-            blocks = [
-                b for b in blocks
-                if not (b["kind"] == "text" and _is_no_response_sentinel(b["text"]))
-            ]
-            if not blocks:
-                continue
-            pending_tools: list[str] = []
-
-            def flush_tools() -> None:
-                if pending_tools:
-                    rendered.append({
-                        "role": "system",
-                        "content": "\n".join(pending_tools),
-                        "tool_name": "_activity",
-                    })
-                    pending_tools.clear()
-
-            for blk in blocks:
-                if blk["kind"] == "tool_use":
-                    name = blk["name"] or "tool"
-                    summary = blk.get("summary") or ""
-                    touches = blk.get("file_touches")
-                    if not isinstance(touches, list) or not touches:
-                        touch = blk.get("file_touch")
-                        touches = [touch] if touch else []
-                    if (
-                        touches
-                        and blk.get("id") in failed_tool_ids
-                        and not _touches_survive_failure(name)
-                    ):
-                        # Denied or errored write: nothing reached disk, so
-                        # render a plain activity row instead of a file card
-                        # that implies the write happened.
-                        touches = []
-                    if touches:
-                        flush_tools()
-                        for touch in touches:
-                            if not isinstance(touch, dict) or not touch.get("file_path"):
-                                continue
-                            rendered.append({
-                                "role": "system",
-                                "tool_name": "_filecard",
-                                "content": touch["file_path"],
-                                "file_path": touch["file_path"],
-                                "action": touch.get("action") or "touched",
-                                "tool": name,
-                            })
-                        continue
-                    line = f"{_tool_icon(name)} {name}"
-                    if summary:
-                        line += f" {summary}"
-                    pending_tools.append(line)
-                elif blk["kind"] == "thinking":
-                    # Subagent reasoning is not surfaced in the transcript
-                    # panel (it was dropped before thinking blocks were
-                    # extracted; skip to keep that behavior).
-                    continue
-                else:
-                    flush_tools()
-                    text = blk["text"].strip()
-                    if text:
-                        rendered.append({"role": "assistant", "content": text})
-            flush_tools()
-            continue
-
-        content = _extract_text_content(message).strip()
-        if not content:
-            continue
-        if _is_no_response_sentinel(content):
-            continue
-        rendered.append({"role": str(mtype or "system"), "content": content})
-    return rendered
-
-
-def _local_session_jsonl_paths(
-    session_id: str, workspace_root: Path, *, agent_root: Path | None = None
-) -> list[Path]:
-    """Find local Claude Code JSONL files for ``session_id``."""
-    try:
-        from ciao.transcripts import (
-            _claude_projects_dir,
-            _global_session_matches,
-        )
-    except ImportError:
-        return []
-    paths: list[Path] = []
-    root = agent_root if agent_root is not None else workspace_root
-    preferred = _claude_projects_dir(root) / f"{session_id}.jsonl"
-    if preferred.exists():
-        paths.append(preferred)
-    # When an agent root is supplied, the preferred path already scopes to
-    # that root's own projects dir, so a session under another root stays
-    # invisible (the re-rooting isolation). Without a root, keep the global
-    # scan so callers that supply nothing behave exactly as today.
-    if agent_root is not None:
-        return paths
-    # Sweep every cross-cwd match, not just the first: a session resumed or
-    # copied under another cwd can have subagent progress records spread
-    # across the files, and _local_subagent_transcripts reads them all. The
-    # listing is cached (transcripts._global_session_matches) so this costs
-    # one walk per TTL window, not one per poll — and a miss re-scans
-    # (rate-limited) so a session created mid-window is not missed.
-    try:
-        for path in _global_session_matches(session_id):
-            if path not in paths:
-                paths.append(path)
-    except OSError:
-        pass
-    return paths
-
-
-def _jsonl_message_from_entry(entry: dict) -> dict | None:
-    etype = entry.get("type")
-    message = entry.get("message")
-    if etype in {"assistant", "user"} and isinstance(message, dict):
-        return {"type": etype, "message": message}
-    if etype == "progress":
-        nested = entry.get("data", {}).get("message")
-        if isinstance(nested, dict):
-            ntype = nested.get("type")
-            nmessage = nested.get("message")
-            if ntype in {"assistant", "user"} and isinstance(nmessage, dict):
-                return {"type": ntype, "message": nmessage}
-    return None
-
-
-def _read_jsonl_messages(path: Path) -> list[dict]:
-    messages: list[dict] = []
-    try:
-        with path.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(entry, dict):
-                    continue
-                msg = _jsonl_message_from_entry(entry)
-                if msg is not None:
-                    messages.append(msg)
-    except OSError:
-        return []
-    return messages
-
-
-def _local_subagent_transcripts(
-    session_id: str, workspace_root: Path, *, agent_root: Path | None = None
-) -> list[dict]:
-    """Fallback parser for nested subagent JSONL files and progress entries."""
-    projects_root = Path.home() / ".claude" / "projects"
-    grouped: dict[str, list[dict]] = {}
-
-    try:
-        # The projects dir holds one slug folder per cwd; a bare glob over
-        # "*/<sid>/subagents/*.jsonl" descends every slug. Restrict to the
-        # dirs the cached listing already knows, so a stale-slug pileup
-        # cannot turn this fallback into a multi-second scandir storm.
-        if agent_root is not None:
-            # Same isolation as `_local_session_jsonl_paths` above: the
-            # preferred slug already scopes to this root's own projects dir,
-            # so a session id resumed or copied under another cwd cannot mix
-            # another root's subagent transcripts into this chat's panel.
-            try:
-                from ciao.transcripts import _claude_projects_dir
-            except ImportError:
-                candidate_dirs = []
-            else:
-                preferred_slug = _claude_projects_dir(agent_root)
-                candidate_dirs = (
-                    [preferred_slug]
-                    if preferred_slug.is_dir() and (preferred_slug / session_id / "subagents").is_dir()
-                    else []
-                )
-        else:
-            candidate_dirs = [
-                entry
-                for entry in projects_root.iterdir()
-                if entry.is_dir() and (entry / session_id / "subagents").is_dir()
-            ]
-    except OSError:
-        candidate_dirs = []
-    nested_paths: list[Path] = []
-    for entry in candidate_dirs:
-        subagents_dir = entry / session_id / "subagents"
-        try:
-            nested_paths.extend(sorted(subagents_dir.glob("*.jsonl")))
-        except OSError:
-            continue
-    for path in nested_paths:
-        msgs = _read_jsonl_messages(path)
-        if msgs:
-            grouped.setdefault(path.stem, []).extend(msgs)
-
-    for path in _local_session_jsonl_paths(session_id, workspace_root, agent_root=agent_root):
-        try:
-            with path.open(encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(entry, dict) or entry.get("type") != "progress":
-                        continue
-                    msg = _jsonl_message_from_entry(entry)
-                    if msg is None:
-                        continue
-                    data = entry.get("data", {})
-                    agent_id = (
-                        data.get("agent_id")
-                        or data.get("subagent_id")
-                        or data.get("task_id")
-                        or data.get("parent_tool_use_id")
-                        or "progress"
-                    )
-                    grouped.setdefault(str(agent_id), []).append(msg)
-        except OSError:
-            continue
-
-    return [
-        {"agent_id": agent_id, "messages": _render_subagent_messages(messages)}
-        for agent_id, messages in sorted(grouped.items())
-        if messages
-    ]
 
 
 def _overlay_assistant_timings(
@@ -747,234 +525,435 @@ def _mark_preceding_answer(rows: list[dict]) -> None:
         return
 
 
-def _render_opencode_thread(
-    thread: dict,
-    chat,
-    *,
-    metadata: bool = True,
-    start_user_idx: int = 0,
-    workspace_root: Path | None = None,
-    agent_root: Path | None = None,
-) -> list[dict]:
-    """Render opencode session messages into the provider-neutral PWA row shape.
+def _stamp_turn_metadata(entry: dict, chat: Any, user_idx: int) -> None:
+    """Overlay one user turn's send-time facts (images, send time, unattended, origin)."""
+    refs = chat.user_turn_images.get(str(user_idx))
+    if refs:
+        entry["images"] = list(refs)
+    timing = chat.user_turn_timings.get(str(user_idx)) or {}
+    if timing.get("sent_at"):
+        entry["sent_at"] = timing["sent_at"]
+    if chat.user_turn_unattended.get(str(user_idx)):
+        entry["unattended"] = True
+    origin = chat.user_turn_origin.get(str(user_idx))
+    if origin:
+        entry["origin"] = origin
 
-    ``thread`` is :meth:`OpencodeProvider.read_thread`'s ``{"info", "messages"}``
-    payload; each message is ``{"info": {role, ...}, "parts": [...]}``.
 
-    ``metadata`` overlays ``chat``'s per-turn images/timings/unattended/origin flags
-    onto the rows. Pass ``False`` when ``thread`` is a *child* session: its
-    turn numbering restarts at 0, so the parent chat's turn metadata does not
-    apply to it.
+# Subagent calls (OpenCode `subagent`, Claude `Agent`/`Task`) render as one card row. Their
+# nested rows are capped per card; the rest are a count. Mirrors web/src/lib/subagentCard.ts.
+_SUBAGENT_TOOLS = frozenset({"agent", "subagent", "task"})
+SUBAGENT_STEP_LIMIT = 50
+_SUBAGENT_INPUT_RE = re.compile(r"^\[([^\]]*)\]\s*(.*)$", re.DOTALL)
 
-    ``start_user_idx`` offsets per-session user numbering when stitching
-    ``previous_session_ids``.
 
-    ``workspace_root`` and ``agent_root`` normalise file-card paths the way the
-    Claude replay does (see :func:`normalize_file_touch_paths`).
+def _is_subagent_tool(tool: str) -> bool:
+    return tool.strip().lower() in _SUBAGENT_TOOLS
+
+
+def _subagent_fields(summary: str) -> tuple[str, str]:
+    """(agent_type, description) from a journalled ``[type] description`` input.
+
+    Journals written before the input carried the description kept the call's title
+    (``subagent``) as its input; that names no description.
     """
-    messages = thread.get("messages")
-    if not isinstance(messages, list):
-        messages = []
-    result: list[dict] = []
-    user_idx = int(start_user_idx) if isinstance(start_user_idx, int) else 0
-    pending_tools: list[str] = []
-    pending_runs: list[dict] = []
+    text = summary.strip()
+    if not text or _is_subagent_tool(text):
+        return "", ""
+    match = _SUBAGENT_INPUT_RE.match(text)
+    if match:
+        return match.group(1).strip(), match.group(2).strip()
+    return "", text
+
+
+def _subagent_step_key(step: dict) -> str | None:
+    step_id = step.get("tool_use_id")
+    if not step_id:
+        return None
+    return f"{step_id}\n{step['file_path']}" if step.get("kind") == "file" else str(step_id)
+
+
+def _subagent_title(description: str) -> str:
+    return f"Subagent: {description}" if description else "Subagent"
+
+
+class _ActivityRun:
+    """The open run of activity lines; each line keeps the tool_use_id that wrote it."""
+
+    __slots__ = ("lines", "ids")
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+        self.ids: list[str] = []
+
+
+class _SubagentCard:
+    """One subagent call while the journal renders: its wire fields and nested steps."""
+
+    __slots__ = ("tool_use_id", "agent_type", "description", "state", "steps", "_step_at")
+
+    def __init__(self, tool_use_id: str, agent_type: str, description: str) -> None:
+        self.tool_use_id = tool_use_id
+        self.agent_type = agent_type
+        self.description = description
+        # No terminal record yet: running. A launch acknowledgement or a later result settles it.
+        self.state = "running"
+        self.steps: list[dict] = []
+        self._step_at: dict[str, int] = {}
+
+    def remember(self, agent_type: str, description: str) -> None:
+        if description:
+            self.agent_type = agent_type
+            self.description = description
+
+    def add_step(self, step: dict) -> None:
+        # A child call announced again (same call, and file) replaces its own step.
+        key = _subagent_step_key(step)
+        at = self._step_at.get(key) if key is not None else None
+        if at is None:
+            if key is not None:
+                self._step_at[key] = len(self.steps)
+            self.steps.append(step)
+        else:
+            self.steps[at] = step
+
+    def settle(self, record: dict) -> None:
+        status = record.get("subagent_status")
+        if status:
+            self.state = "done" if status == "completed" else "failed"
+        elif record.get("is_error"):
+            self.state = "failed"
+        elif record.get("background"):
+            # The launch acknowledgement: the subagent keeps running.
+            return
+        else:
+            self.state = "done"
+
+    def row(self) -> dict:
+        return {
+            "role": "system",
+            "content": _subagent_title(self.description),
+            "tool_name": "_subagent",
+            "tool_use_id": self.tool_use_id,
+            "subagent": {
+                "tool_use_id": self.tool_use_id,
+                "agent_type": self.agent_type,
+                "description": self.description,
+                "state": self.state,
+                "step_count": len(self.steps),
+                "steps": self.steps[:SUBAGENT_STEP_LIMIT],
+            },
+        }
+
+
+class _ShellCard:
+    """One shell call while the journal renders: its command, background flag and settled result.
+
+    Mirrors ``web/src/lib/shellCard.ts``. A background shell's launch acknowledgement leaves it
+    running: its end is not on the wire, so it stays running until a later result for the call.
+    """
+
+    __slots__ = ("tool_use_id", "command", "background", "state", "exit_code", "output_tail")
+
+    def __init__(self, tool_use_id: str) -> None:
+        self.tool_use_id = tool_use_id
+        self.command = ""
+        self.background = False
+        self.state = "running"
+        self.exit_code: int | None = None
+        self.output_tail = ""
+
+    def remember(self, command: str, background: bool) -> None:
+        if command:
+            self.command = command
+        self.background = self.background or background
+
+    def settle(self, record: dict) -> None:
+        if record.get("background"):
+            # The launch acknowledgement: the shell keeps running.
+            self.background = True
+            return
+        code = record.get("exit_code")
+        self.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
+        failed = bool(record.get("is_error")) or (self.exit_code is not None and self.exit_code != 0)
+        self.state = "failed" if failed else "done"
+        self.output_tail = str(record.get("output_tail") or "")
+
+    def row(self) -> dict:
+        return {
+            "role": "system",
+            "content": self.command or "Shell",
+            "tool_name": "_shell",
+            "tool_use_id": self.tool_use_id,
+            "shell": {
+                "tool_use_id": self.tool_use_id,
+                "command": self.command,
+                "background": self.background,
+                "state": self.state,
+                "exit_code": self.exit_code,
+                "output_tail": self.output_tail,
+            },
+        }
+
+
+def _render_acp_journal(
+    records: list[dict],
+    chat: Any,
+    *,
+    start_user_idx: int,
+    workspace_root: Path | None,
+    agent_root: Path | None,
+) -> list[dict]:
+    """Render one ACP session's journal rows into the provider-neutral PWA row shape.
+
+    ``records`` is the ``acp_journal`` a provider's ``read_thread`` returns: user prompts and
+    the ``event_to_json`` payloads of each turn, in the order they happened. Consecutive text
+    deltas join into one assistant row; a tool call, a thinking block or a prompt ends that
+    row. Subagent text and thinking (a payload with ``parent_tool_use_id``) stay out of the
+    parent's reply. A subagent call is one ``_subagent`` row: its children's activity and file
+    cards nest under it. A call written more than once (a re-announce) is one row or line, not
+    two. A ``result`` row carries no text of its own (the text was already streamed), so it only
+    ends a run.
+    """
+    result: list[Any] = []
+    user_idx = int(start_user_idx)
+    text_run: list[str] = []
+    run: _ActivityRun | None = None
+    line_at: dict[str, tuple[_ActivityRun, int]] = {}
+    cards: dict[str, _SubagentCard] = {}
+    shells: dict[str, _ShellCard] = {}
+    filed: set[str] = set()
+
+    def flush_text() -> None:
+        if text_run:
+            text = "".join(text_run).strip()
+            text_run.clear()
+            if text:
+                result.append({"role": "assistant", "content": text})
 
     def flush_tools() -> None:
-        if pending_tools:
-            result.append({
-                "role": "system",
-                "content": "\n".join(pending_tools),
-                "tool_name": "_activity",
-            })
-            pending_tools.clear()
+        nonlocal run
+        if run is not None and run.lines:
+            result.append(run)
+        run = None
 
-    def flush_notice() -> None:
-        # Shells and subagents that finished together draw one card, ahead of
-        # the reply; it also splits the wake from the turn before it.
-        if pending_runs:
-            result.append({
-                "role": "system",
-                "content": format_finished_runs(pending_runs, tail_lines=50)[0],
-                "origin": "background_run",
-            })
-            pending_runs.clear()
+    def add_line(call_id: str, line: str) -> None:
+        nonlocal run
+        if call_id and call_id in line_at:
+            held, at = line_at[call_id]
+            held.lines[at] = line
+            return
+        if run is None:
+            run = _ActivityRun()
+        run.lines.append(line)
+        run.ids.append(call_id)
+        if call_id:
+            line_at[call_id] = (run, len(run.lines) - 1)
 
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        info = message.get("info")
-        info = info if isinstance(info, dict) else {}
-        role = str(info.get("role") or "")
-        parts = message.get("parts")
-        parts = [part for part in parts if isinstance(part, dict)] if isinstance(parts, list) else []
-        if role == "synthetic":
+    def file_steps(record: dict, tool: str, call_id: str) -> list[dict] | None:
+        raw_touches = record.get("file_touches") or (
+            [record["file_touch"]] if record.get("file_touch") else []
+        )
+        touches = normalize_file_touch_paths(
+            [t for t in raw_touches if isinstance(t, dict) and t.get("file_path")],
+            workspace_root,
+            agent_root=agent_root,
+        )
+        if not touches:
+            return None
+        return [
+            {
+                "kind": "file",
+                "file_path": touch["file_path"],
+                "action": touch.get("action") or "touched",
+                "tool": tool,
+                "tool_use_id": call_id,
+            }
+            for touch in touches
+        ]
+
+    for record in records:
+        kind = record.get("type")
+        parent = record.get("parent_tool_use_id")
+        if kind == "user":
+            flush_text()
             flush_tools()
-            run = native_wake_run(
-                "\n".join(str(part.get("text") or "") for part in parts),
-                info.get("description"),
-                info.get("metadata"),
-            )
-            if run is not None:
-                pending_runs.append(run)
-            continue
-        flush_notice()
-        if role == "user":
-            flush_tools()
-            # A prompt can span several text parts; synthetic ones are
-            # opencode's own injections (compaction summaries), not something
-            # the user typed.
-            texts = [
-                str(part.get("text") or "")
-                for part in parts
-                if part.get("type") == "text" and not part.get("synthetic")
-            ]
-            raw_prompt = "\n".join(texts)
-            content = _strip_injected_context(raw_prompt).strip()
+            content = _strip_injected_context(str(record.get("text") or "")).strip()
             if not content:
                 continue
-            # Hidden continuation: skipped before user_idx += 1 so
-            # markers keep their turn_index.
+            # A hidden continuation is a turn the host sent itself (after `ciao chat
+            # reload`): skipped before user_idx advances, and it marks the answer
+            # before it as final, as the other renderers do.
             if cli_envelopes.is_hidden_continuation(content):
-                if metadata:
-                    _mark_preceding_answer(result)
+                # Activity runs and subagent cards are not dict rows yet: the scan skips them.
+                _mark_preceding_answer([item if isinstance(item, dict) else {"role": "system"} for item in result])
                 continue
-            entry: dict = {
-                "role": "user",
-                "content": content,
-                "turn_index": user_idx,
-            }
-            if metadata:
-                refs = chat.user_turn_images.get(str(user_idx))
-                if refs:
-                    entry["images"] = list(refs)
-                timing = chat.user_turn_timings.get(str(user_idx)) or {}
-                if timing.get("sent_at"):
-                    entry["sent_at"] = timing["sent_at"]
-                if chat.user_turn_steered.get(str(user_idx)):
-                    # A steered index inherits the running turn's unattended
-                    # flag for the control plane's guards; the bubble is still
-                    # something the person typed.
-                    entry["steered"] = True
-                elif chat.user_turn_unattended.get(str(user_idx)):
-                    entry["unattended"] = True
-                origin = chat.user_turn_origin.get(str(user_idx))
-                if origin:
-                    entry["origin"] = origin
+            entry: dict = {"role": "user", "content": content, "turn_index": user_idx}
+            _stamp_turn_metadata(entry, chat, user_idx)
             result.append(entry)
             user_idx += 1
-            continue
-        if role != "assistant":
-            continue
-        for part in parts:
-            kind = str(part.get("type") or "")
-            if kind == "text":
-                flush_tools()
-                text = str(part.get("text") or "").strip()
-                if text:
-                    result.append({"role": "assistant", "content": text})
+        elif kind == "text_delta":
+            if parent:
                 continue
-            if kind == "reasoning":
-                # Same `_thinking` tag as the Claude replay path: the PWA
-                # folds it into the collapsed Activity trace.
+            flush_tools()
+            text_run.append(str(record.get("text") or ""))
+        elif kind == "thinking":
+            if parent:
+                continue
+            flush_text()
+            flush_tools()
+            text = str(record.get("text") or "").strip()
+            if text:
+                result.append({"role": "system", "content": text, "tool_name": "_thinking"})
+        elif kind == "tool_use":
+            tool = str(record.get("tool_name") or "tool")
+            call_id = str(record.get("tool_use_id") or "")
+            summary = str(record.get("tool_input") or "")
+            if parent and parent in cards:
+                # A child of a subagent call nests under its card, never in the parent's trace.
+                steps = file_steps(record, tool, call_id)
+                if steps is None:
+                    steps = [{
+                        "kind": "activity",
+                        "line": f"{_tool_icon(tool)} {tool}" + (f" {summary}" if summary else ""),
+                        "tool_use_id": call_id,
+                    }]
+                for step in steps:
+                    cards[parent].add_step(step)
+                continue
+            if _is_subagent_tool(tool) and not parent:
+                agent_type, description = _subagent_fields(summary)
+                card = cards.get(call_id)
+                if card is not None:
+                    card.remember(agent_type, description)
+                    continue
+                flush_text()
                 flush_tools()
-                text = str(part.get("text") or "").strip()
-                if text:
+                card = _SubagentCard(call_id, agent_type, description)
+                cards[call_id] = card
+                result.append(card)
+                continue
+            if call_id and call_id in filed:
+                continue
+            steps = file_steps(record, tool, call_id)
+            if steps is not None:
+                flush_text()
+                flush_tools()
+                filed.add(call_id)
+                for step in steps:
                     result.append({
                         "role": "system",
-                        "content": text,
-                        "tool_name": "_thinking",
+                        "tool_name": "_filecard",
+                        "content": step["file_path"],
+                        "file_path": step["file_path"],
+                        "action": step["action"],
+                        "tool": tool,
                     })
                 continue
-            if kind == "tool":
-                tool = str(part.get("tool") or "tool")
-                state = part.get("state")
-                state = state if isinstance(state, dict) else {}
-                raw_input = state.get("input")
-                touches = normalize_file_touch_paths(
-                    _opencode_file_touches(tool, raw_input) or [],
-                    workspace_root,
-                    agent_root=agent_root,
-                )
-                if str(state.get("status") or "") == "error":
-                    # A failed/denied write or edit reached nothing on disk:
-                    # match the live path (and the Claude replay path) by
-                    # rendering a plain activity row instead of a file card.
-                    touches = []
-                if touches:
+            if record.get("shell") and call_id and not parent:
+                # A shell call is one card row, keyed by its call id; a re-announce updates it.
+                shell = shells.get(call_id)
+                if shell is None:
+                    flush_text()
                     flush_tools()
-                    for touch in touches:
-                        result.append({
-                            "role": "system",
-                            "tool_name": "_filecard",
-                            "content": touch["file_path"],
-                            "file_path": touch["file_path"],
-                            "action": touch.get("action") or "touched",
-                            "tool": tool,
-                        })
-                    continue
-                summary = _summarize_opencode_tool_input(tool, raw_input)
-                line = f"{_tool_icon(tool)} {tool}"
-                if summary:
-                    line += f" {summary}"
-                pending_tools.append(line)
-        flush_tools()
-    flush_notice()
-    if metadata:
-        _overlay_assistant_timings(result, chat.user_turn_timings)
-        _overlay_turn_verification(
-            result, getattr(chat, "turn_verification", None) or {}
-        )
-    return result
+                    shell = _ShellCard(call_id)
+                    shells[call_id] = shell
+                    result.append(shell)
+                shell.remember(summary, bool(record.get("shell_background")))
+                continue
+            flush_text()
+            line = f"{_tool_icon(tool)} {tool}"
+            if summary:
+                line += f" {summary}"
+            # A child whose parent card is not in this journal keeps the subagent marker.
+            add_line(call_id, f"↳ {line}" if parent else line)
+        elif kind == "tool_result":
+            call_id = str(record.get("tool_use_id") or "")
+            card = cards.get(call_id)
+            if card is not None and not parent:
+                card.settle(record)
+            shell = shells.get(call_id)
+            if shell is not None and not parent:
+                shell.settle(record)
+        elif kind == "result":
+            # A turn ends here. Its reply text must not run on into the next turn's
+            # (a provider's own continuation has no user row between them).
+            flush_text()
+        # Any other kind (status, permission_request, ...) adds no row: a call
+        # is one activity line, and the terminal result's text was streamed.
+    flush_text()
+    flush_tools()
+    rows: list[dict] = []
+    for item in result:
+        if isinstance(item, _ActivityRun):
+            rows.append({"role": "system", "content": "\n".join(item.lines), "tool_name": "_activity"})
+        elif isinstance(item, (_SubagentCard, _ShellCard)):
+            rows.append(item.row())
+        else:
+            rows.append(item)
+    return rows
 
 
-def _opencode_child_duration_ms(info: dict) -> int | None:
-    """Child run length from its session timestamps, or None.
+def _session_lineage(chat: Any) -> list[str]:
+    """Every session id a chat has used, oldest first, without blanks or repeats.
 
-    The child session's own ``time.created`` / ``time.updated`` are the only
-    length available once the transcript is no longer read, so the in-chat
-    panel can still show how long a run took.
+    Each provider keeps its turns only in the session that wrote them, and ciaobot rotates
+    through ``_rotate_session_id`` (autocompact, resume fallback, continuation), so history
+    is stitched across the whole lineage.
     """
-    time_info = info.get("time") if isinstance(info, dict) else None
-    if not isinstance(time_info, dict):
-        return None
-    created = time_info.get("created")
-    updated = time_info.get("updated")
-    if (
-        not isinstance(created, (int, float))
-        or isinstance(created, bool)
-        or not isinstance(updated, (int, float))
-        or isinstance(updated, bool)
-    ):
-        return None
-    created_ms = int(created)
-    updated_ms = int(updated)
-    if updated_ms < created_ms:
-        return None
-    return updated_ms - created_ms
-
-
-def _opencode_child_turn_index(info: dict, chat) -> int:
-    """The parent turn a child belongs to: the last one sent before it began."""
-    time_info = info.get("time")
-    created_ms = time_info.get("created") if isinstance(time_info, dict) else None
-    if not isinstance(created_ms, (int, float)) or isinstance(created_ms, bool):
-        return 0
-    best = 0
-    for key, timing in (chat.user_turn_timings or {}).items():
-        sent_at = (timing or {}).get("sent_at")
-        if not sent_at:
+    session_ids: list[str] = []
+    seen: set[str] = set()
+    for sid in (*getattr(chat, "previous_session_ids", []), chat.session_id):
+        sid_str = str(sid or "").strip()
+        if not sid_str or sid_str in seen:
             continue
+        seen.add(sid_str)
+        session_ids.append(sid_str)
+    return session_ids
+
+
+def _append_unrendered_error(rendered: list[dict], current: list[dict]) -> None:
+    """Keep the chat's persisted error turn when the provider's history does not show it."""
+    if not current or current[-1].get("role") != "assistant" or not current[-1].get("is_error"):
+        return
+    for row in reversed(rendered):
+        if row.get("role") == "assistant":
+            if row.get("is_error") or row.get("content") == current[-1].get("content"):
+                return
+            break
+    rendered.append(dict(current[-1]))
+
+
+async def _acp_history_rows(
+    pcm: Any, config: Any, provider: str, chat: Any, session_root: Path
+) -> list[dict]:
+    """Rendered history for every session in a chat's lineage, from each session's journal."""
+    provider_cls = provider_registry.require(provider).factory()
+    rendered: list[dict] = []
+    start_user_idx = chat.turn_index_base
+    for sid in _session_lineage(chat):
         try:
-            idx = int(key)
-            sent_ms = datetime.fromisoformat(
-                str(sent_at).replace("Z", "+00:00")
-            ).timestamp() * 1000
-        except (TypeError, ValueError):
+            thread = await provider_cls.read_thread(
+                session_root, sid, runtime_root=config.state_path.parent
+            )
+            records = thread.get("acp_journal") if isinstance(thread, dict) else None
+            if not isinstance(records, list) or not records:
+                continue
+            segment = _render_acp_journal(
+                records,
+                chat,
+                start_user_idx=start_user_idx,
+                workspace_root=Path(config.workspace_root),
+                agent_root=session_root,
+            )
+        except Exception:  # noqa: BLE001 — one unreadable journal must not blank its siblings
+            logger.warning("Could not render an ACP session journal; its turns are left out.")
             continue
-        if sent_ms <= created_ms and idx > best:
-            best = idx
-    return best
+        if segment:
+            # Advance the turn offset by this segment's user rows.
+            rendered.extend(segment)
+            start_user_idx += sum(1 for row in segment if row.get("role") == "user")
+    return rendered
 
 
 def _stamp_user_turn(
@@ -995,7 +974,7 @@ def _stamp_user_turn(
     turn's flags on it. Images are always re-derived from this turn's refs (or
     the session message's inline blocks), never kept from the row's old index.
     """
-    for key in ("images", "sent_at", "steered", "unattended", "origin"):
+    for key in ("images", "sent_at", "unattended", "origin"):
         entry.pop(key, None)
     # Image refs are recorded per user-turn index at send time. JSON keys are
     # strings, but tolerate int lookups too in case the map has been mutated
@@ -1027,9 +1006,7 @@ def _stamp_user_turn(
         entry["sent_at"] = sent_at
     # Loop/schedule ticks are user turns in the session file too, so the flag
     # has to come from our own per-turn record.
-    if chat.user_turn_steered.get(str(turn_index)) or chat.user_turn_steered.get(turn_index):
-        entry["steered"] = True
-    elif chat.user_turn_unattended.get(str(turn_index)) or chat.user_turn_unattended.get(turn_index):
+    if chat.user_turn_unattended.get(str(turn_index)) or chat.user_turn_unattended.get(turn_index):
         entry["unattended"] = True
     origin = chat.user_turn_origin.get(str(turn_index)) or chat.user_turn_origin.get(turn_index)
     if origin:
@@ -1523,85 +1500,24 @@ async def _assemble_chat_messages(
     session_root = Path(
         _resolver(chat_id) if _resolver is not None else config.workspace_root
     )
-    if provider not in {"claude", "opencode"}:
-        current = pcm._transcripts.current_messages(
-            ChatContext.for_web(chat_id), provider
-        )
-        if current:
-            _overlay_assistant_timings(current, chat.user_turn_timings)
+    descriptor = provider_registry.get(provider)
+    if descriptor is not None and descriptor.acp_spec_path:
+        # An ACP agent's history is its session journal (the provider read_thread). With no
+        # journal, the neutral branch below serves the local transcript instead.
+        acp_rows = await _acp_history_rows(pcm, config, provider, chat, session_root)
+        if acp_rows:
+            current = pcm._transcripts.current_messages(ChatContext.for_web(chat_id), provider)
+            _append_unrendered_error(acp_rows, current)
+            _overlay_transcript_metadata(acp_rows, current)
+            _overlay_assistant_timings(acp_rows, chat.user_turn_timings)
             _overlay_turn_verification(
-                current, getattr(chat, "turn_verification", None) or {}
+                acp_rows, getattr(chat, "turn_verification", None) or {}
             )
-            return [*handover_messages, *current]
-        archived = _messages_from_archived_transcript(pcm, config, chat)
-        if archived is not None:
-            return [*handover_messages, *archived]
-        return list(handover_messages)
-    if provider == "opencode":
-        if getattr(chat, "archived", False):
-            # An archived chat is read-only and its provider-side session may
-            # be gone; serve the vault markdown without paying a provider
-            # session read (for opencode, a throwaway server spawn) first.
-            archived = _messages_from_archived_transcript(pcm, config, chat)
-            if archived is not None:
-                return [*handover_messages, *archived]
-        # Stitch the same lineage Claude uses: each provider keeps its turns
-        # only in the session that wrote them, and ciaobot rotates via
-        # ``_rotate_session_id`` (autocompact / resume-fallback / continuation).
-        # Reading only ``chat.session_id`` blanked every chat that had rotated
-        # — exactly the bug that hid the first turn of chat-a495fc8f.
-        session_ids: list[str] = []
-        seen: set[str] = set()
-        for sid in (*getattr(chat, "previous_session_ids", []), chat.session_id):
-            sid_str = str(sid or "").strip()
-            if not sid_str or sid_str in seen:
-                continue
-            seen.add(sid_str)
-            session_ids.append(sid_str)
-        rendered: list[dict] = []
-        start_user_idx = chat.turn_index_base
-        for sid in session_ids:
-            try:
-                opencode_thread = await OpencodeProvider.read_thread(
-                    session_root, sid
-                )
-                if not opencode_thread:
-                    continue
-                segment = _render_opencode_thread(
-                    opencode_thread,
-                    chat,
-                    start_user_idx=start_user_idx,
-                    workspace_root=config.workspace_root,
-                    agent_root=session_root,
-                )
-            except Exception:  # noqa: BLE001 — one missing segment must not blank siblings
-                continue
-            if segment:
-                # Advance the global turn offset by the user-bubble count in
-                # this segment so the next segment's ``turn_index`` + timings
-                # stay aligned with ``chat.user_turn_timings``.
-                user_count = sum(1 for row in segment if row.get("role") == "user")
-                rendered.extend(segment)
-                start_user_idx += user_count
+            return [*handover_messages, *acp_rows]
+    if provider != "claude":
         current = pcm._transcripts.current_messages(
             ChatContext.for_web(chat_id), provider
         )
-        if rendered:
-            if current and current[-1].get("role") == "assistant" and current[-1].get("is_error"):
-                has_error_in_rendered = False
-                for row in reversed(rendered):
-                    if row.get("role") == "assistant":
-                        if row.get("is_error") or row.get("content") == current[-1].get("content"):
-                            has_error_in_rendered = True
-                        break
-                if not has_error_in_rendered:
-                    err_msg = dict(current[-1])
-                    rendered.append(err_msg)
-            _overlay_transcript_metadata(
-                rendered,
-                current,
-            )
-            return [*handover_messages, *rendered]
         if current:
             _overlay_assistant_timings(current, chat.user_turn_timings)
             _overlay_turn_verification(
@@ -1841,13 +1757,12 @@ async def _assemble_chat_messages(
                 if task_summary is not None:
                     result.append({"role": "system", "content": task_summary})
                 continue
-            # Our own subagent-synthesis nudge (ciao/subagent_tracking.py).
+            # Our own subagent-synthesis nudge (legacy, no longer sent).
             # It's a server-injected prompt, not something the user typed, so
             # showing the paragraph verbatim reads as words they never wrote.
             # Collapse it to a status line, and skip without incrementing
-            # user_idx — subagent_tracking._is_countable_user_turn applies the
-            # same rule, so the two turn counters stay aligned.
-            if subagent_tracking.is_synthesis_nudge(content):
+            # user_idx.
+            if _is_synthesis_nudge(content):
                 result.append({"role": "system", "content": _SYNTHESIS_NUDGE_LABEL})
                 continue
         entry: dict = {
@@ -1862,8 +1777,8 @@ async def _assemble_chat_messages(
     # Stitch the durable transcript's per-turn metadata (token usage with the
     # context %, quota, effective model) onto the rendered rows — the session
     # JSONL carries none of it, so without this the turn footer showed only
-    # the completion time and duration. The opencode branch has made the same
-    # overlay since the transcript store gained these fields.
+    # the completion time and duration. The ACP journal path applies the same
+    # overlay.
     current = pcm._transcripts.current_messages(
         ChatContext.for_web(chat_id), provider
     )

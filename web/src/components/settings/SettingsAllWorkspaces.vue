@@ -18,7 +18,7 @@
         <div>
           <p class="workspace-title">New workspace</p>
           <p class="hint hint--compact">
-            Saved to <code>.runtime/workspaces.json</code> and applied immediately. Google and claude.ai connectors are set afterwards in the cards above, once the new workspace is open.
+            Saved to <code>.runtime/workspaces.json</code> and applied immediately. Google and Claude context trimming are set afterwards in the cards above, once the new workspace is open.
           </p>
         </div>
       </div>
@@ -40,14 +40,6 @@
               {{ provider.label }}
             </option>
           </select>
-        </label>
-        <label class="settings-field"><span class="ws-label">File access</span>
-          <select class="routine-input workspace-select" v-model="newWorkspaceForm.agent_fs_scope" :disabled="workspacesSaving === 'new'">
-            <option value="">{{ fsScopeDefaultOptionLabel }}</option>
-            <option value="workspace">Workspace only</option>
-            <option value="machine">Whole machine</option>
-          </select>
-          <span class="hint hint--compact">{{ WORKSPACE_FS_SCOPE_COPY[newWorkspaceForm.agent_fs_scope] }} {{ WORKSPACE_FS_SANDBOX_NOTE }}</span>
         </label>
       </div>
       <div class="action-row settings-actions">
@@ -221,11 +213,7 @@ import WorkspaceColorPicker from './WorkspaceColorPicker.vue'
 import { workspaceLabel } from '../../lib/workspaceLabel'
 import { moveAnnouncement, moveName } from '../../lib/workspaceOrder'
 import { useProjectStore } from '../../stores/projects'
-import {
-  WORKSPACE_ADMIN_KEY,
-  WORKSPACE_FS_SANDBOX_NOTE,
-  WORKSPACE_FS_SCOPE_COPY,
-} from '../../composables/useWorkspaceAdmin'
+import { WORKSPACE_ADMIN_KEY } from '../../composables/useWorkspaceAdmin'
 
 // All workspaces: the last card of Workspace > Overview (/settings/workspace).
 // Every workspace as a boxed row, the short New workspace form and the
@@ -249,7 +237,6 @@ const {
   showNewWorkspace,
   workspaceForms,
   newWorkspaceForm,
-  fsScopeDefaultOptionLabel,
   workspaceProviderFieldLabel,
   workspaceProviderOptions,
   settingsMenu,

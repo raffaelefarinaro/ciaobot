@@ -6,7 +6,7 @@
 import { classifyError } from './errorAttribution'
 import type { TurnOrigin } from './types'
 
-export type RunVerdict = 'ok' | 'cancelled' | 'failed'
+export type RunVerdict = 'ok' | 'cancelled' | 'failed' | 'unknown'
 export interface BackgroundRunEntry {
   label: string
   runId: string
@@ -27,6 +27,7 @@ export type InjectedPrompt =
   | { kind: 'webhook'; instructions: string; event: string }
   | { kind: 'update_task' }
   | { kind: 'retry' }
+  | { kind: 'retry_scheduled' }
   | { kind: 'restart_resume' }
   | { kind: 'chat_action' }
   | { kind: 'error'; label: string; copy: string; text: string; retried: boolean }
@@ -34,10 +35,10 @@ export type InjectedPrompt =
 
 // Mirrors the format produced by `format_finished_runs` in ciao/background_notice.py.
 export const BACKGROUND_WAKE_RE = /^\[Ciaobot\] (\d+) background runs? finished\./
-// Mirrors subagent_tracking.CLI_TASK_WAKE_PREFIX + SubagentWatchers.build_cli_task_wake_prompt.
+// Chats recorded before 2.0 carry this envelope; the engine no longer sends it.
 export const CLI_TASK_WAKE_PREFIX = '[Ciaobot] Lost CLI tasks:'
 const CLI_TASK_WAKE_RE = /^\[Ciaobot\] Lost CLI tasks: (\d+) CLI tasks? /
-const RUN_HEAD_RE = /^— (.+) \(([^,()]+), (ok|CANCELLED|FAILED)(?:, exit (-?\d+))?\)$/
+const RUN_HEAD_RE = /^— (.+) \(([^,()]+), (ok|CANCELLED|FAILED|exit status unknown)(?:, exit (-?\d+))?\)$/
 const CLI_TASK_RE = /^— (.+?): (.*) \(task ([A-Za-z0-9_-]+)\)$/
 // Mirrors ciao/schedule_command.py CommandRun.compose_prompt + prompt_fence.fence:
 // the command may span lines and contain backticks, so match the whole
@@ -51,7 +52,12 @@ const HANDOVER_RE = /^Handed over from (.+?) to (.+)\.$/
 // Mirrors ciao/webhook_dispatch.py EVENT_PREAMBLE / EVENT_FENCE_OPEN / _neutralize.
 const WEBHOOK_PREAMBLE = 'The block between the webhook-event tags is the event text'
 
-const VERDICTS: Record<string, RunVerdict> = { ok: 'ok', CANCELLED: 'cancelled', FAILED: 'failed' }
+const VERDICTS: Record<string, RunVerdict> = {
+  ok: 'ok',
+  CANCELLED: 'cancelled',
+  FAILED: 'failed',
+  'exit status unknown': 'unknown',
+}
 
 /** Undo ciao/prompt_fence.py neutralize(): `&lt;tag` / `&lt;/tag` back to `<tag` / `</tag`. */
 export function unneutralize(tag: string, text: string): string {
@@ -59,10 +65,14 @@ export function unneutralize(tag: string, text: string): string {
 }
 
 // Run logs keep the colour codes test runners print; drawn as text they are noise.
+// An unterminated OSC is dropped to the end of its line, as the engine's sanitiser does.
 // eslint-disable-next-line no-control-regex -- matching ESC is the point
-const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
+const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\][^\n]*/g
+// Every Unicode category C character (controls, format, private use, unassigned) except newline and tab,
+// plus the line and paragraph separators: the same set the engine's sanitiser removes.
+const NON_PRINTING_RE = /(?![\n\t])\p{C}|\u2028|\u2029/gu
 function stripAnsi(text: string): string {
-  return text.replace(ANSI_RE, '')
+  return text.replace(ANSI_RE, '').replace(NON_PRINTING_RE, '')
 }
 
 function parseBackgroundRuns(content: string, count: number): InjectedPrompt {
@@ -217,6 +227,12 @@ export function errorNoticePrompt(text: string, retried = false): InjectedPrompt
   return { kind: 'error', label, copy, text, retried }
 }
 
+export function retryScheduledNotice(text: string): InjectedPrompt {
+  return !text.trim() || text === 'manual' || text === 'mcp'
+    ? { kind: 'retry_scheduled' }
+    : errorNoticePrompt(text)
+}
+
 const ERROR_HINT_MAX = 200
 
 /** The provider's own message as one line: no leading `Error:`, first non-empty line, clipped. */
@@ -241,7 +257,7 @@ export function runFailureHint(run: BackgroundRunEntry): string {
   return ''
 }
 
-const TONE_ORDER: RunVerdict[] = ['failed', 'cancelled', 'ok']
+const TONE_ORDER: RunVerdict[] = ['failed', 'cancelled', 'ok', 'unknown']
 
 export function summarizeInjectedPrompt(prompt: InjectedPrompt, chatTitle?: string): InjectedSummary {
   switch (prompt.kind) {
@@ -291,6 +307,8 @@ export function summarizeInjectedPrompt(prompt: InjectedPrompt, chatTitle?: stri
       return { label: 'Update task', facts: chatTitle ?? '', tone: null }
     case 'retry':
       return { label: 'Retry started', facts: 'Same request · new attempt', tone: null }
+    case 'retry_scheduled':
+      return { label: 'Retry scheduled', facts: '', tone: null }
     case 'restart_resume':
       return { label: 'Continue after restart', facts: 'The engine restarted mid-turn', tone: null }
     case 'chat_action':

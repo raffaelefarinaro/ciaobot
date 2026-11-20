@@ -21,7 +21,7 @@ def test_the_home_dir_fixture_is_that_home(home_dir: Path) -> None:
 
 
 def test_the_installed_opencode_is_never_found(monkeypatch) -> None:
-    from ciao.providers.opencode import resolve_opencode_binary
+    from ciao.opencode_cli import resolve_opencode_binary
 
     monkeypatch.delenv("CIAO_OPENCODE_BIN", raising=False)
     assert resolve_opencode_binary() is None

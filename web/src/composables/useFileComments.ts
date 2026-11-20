@@ -56,6 +56,12 @@ export function placeCommentTrigger(
   return { top, left }
 }
 
+/** True when `node` sits inside a read-only CSV cell (CsvViewer's td.csv-cell-wrap). */
+function isInsideCsvCell(node: Node | null): boolean {
+  const el = node instanceof Element ? node : node?.parentElement
+  return !!el?.closest('.csv-cell-wrap')
+}
+
 export type CommentDraft = {
   selection: string
   text: string
@@ -333,6 +339,10 @@ export function useFileComments(options: UseFileCommentsOptions) {
     }
     if (commentDraft.value) return
     const sel = window.getSelection()
+    // A click on a CSV cell collapses the selection inside that cell. The cell
+    // anchor onCsvCellSelect set for it is the selection, so keep it. A collapse
+    // anywhere else (outside click) still dismisses it below.
+    if (sel && sel.isCollapsed && lastCsvCell && isInsideCsvCell(sel.anchorNode)) return
     if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
       lastSelectionRange = null
       selectionAnchor.value = null

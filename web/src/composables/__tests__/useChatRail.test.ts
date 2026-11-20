@@ -21,7 +21,6 @@ function seed() {
     { chat_id: 'c', project_id: 'project-1', title: 'c', archived: false, local: true, last_activity_at: at(100), created_at: at(100) },
   ] as unknown as typeof store.chats
   store.projectStreaming = {}
-  store.backgroundAgents = {}
   store.activeWorkspace = 'personal'
   return store
 }
@@ -67,7 +66,6 @@ describe('useChatRail', () => {
       { chat_id: 'gen-1', project_id: 'general', title: 'g', archived: false, local: true, last_activity_at: at(900), created_at: at(900) },
     ] as unknown as typeof store.chats
     store.projectStreaming = {}
-    store.backgroundAgents = {}
     store.activeWorkspace = 'personal'
     // A chat that needs you keeps its sidebar place; only its mark changes.
     makeNeedsYouByQuestion(store, 'late-1')
@@ -90,7 +88,9 @@ describe('useChatRail', () => {
 
   it('a rail select makes the next instance reuse the order', async () => {
     const store = seed()
-    const switchChat = vi.spyOn(store, 'switchChat').mockResolvedValue()
+    const switchChat = vi.spyOn(store, 'switchChat').mockImplementation(async id => {
+      store.activeChatId = id
+    })
     const rail = useChatRail(() => 'b')
     const before = ids(rail)
 

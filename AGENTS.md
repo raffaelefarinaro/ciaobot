@@ -1,7 +1,8 @@
 # Ciao Contributor Guide
 
-You are working on the Ciaobot app repository. This is the only agent rules
-file; Claude Code and opencode both load it.
+You are working on the Ciaobot app repository. This is the root agent rules
+file; Claude Code and opencode both load it. The Swift Mac app in `mac/` adds
+`mac/AGENTS.md`: read it before changing anything under `mac/`.
 
 Before changing code:
 - Read the relevant sections of `docs/ARCHITECTURE.md` (system design) and
@@ -21,27 +22,27 @@ Before changing code:
 - Do not commit secrets, private workspace data, or operator credentials.
 
 ## Project shape
-- Backend: Python 3.12, Starlette + uvicorn. Frontend: Vue 3 + Vite + Pinia +
-  TypeScript in `web/`.
 - `ciao/cli.py` is the `ciao` CLI; `ciao/main.py` is the server entry.
 - `ciao/web/app.py` lists every route as an explicit `Route(...)`; handlers
   live in `ciao/web/routes_*.py`.
-- `ciao/providers/` holds `claude.py` (Claude Agent SDK), `opencode.py` and the
-  shared `base.py`. One-shot model calls go through `providers/oneshot.py`;
+- `ciao/providers/` holds the ACP agent layer (`acp/`, one `AgentSpec` per CLI) and the
+  shared `base.py`; `ciao/opencode_cli.py` holds the OpenCode CLI helpers. One-shot model calls go through `providers/oneshot.py`;
   there is no Messages API and no provider-enforced structured output, so
   validate model JSON locally.
 - `ciao/stock/` holds generic assets shipped in the wheel (skills, commands,
   schedules, workspace templates). User vaults and runtime data belong in a
   separate workspace, never in this repo.
-- `web/src/`: `components/` (one SFC per pane, Settings panels in `settings/`),
-  `stores/` (Pinia), `composables/`, `lib/` (pure helpers, no Vue imports).
-  Tests sit in `__tests__/` beside the code, or as `foo.test.ts` next to `lib/foo.ts`.
-- `npm run build` writes into `ciao/web/static/`, which is gitignored.
+- `web/src/lib/` holds pure helpers with no Vue imports. Tests sit in
+  `__tests__/` beside the code, or as `foo.test.ts` next to `lib/foo.ts`.
 - There is no client/host split any more: one engine, one origin, one session.
   Keep `/api/*` behind the signed session cookie, keep every `/ws/*` handshake
   same-origin-gated, and keep the loopback-only set (`_LOOPBACK_ONLY_API` in
   `ciao/web/auth.py`) gated on the TCP peer. The boundary audit is in
   `docs/REMOTE_BOUNDARY.md`.
+- `mac/` is the Swift Mac app (SwiftPM package `CiaobotMac`, Sparkle updates),
+  imported from `ciaobot-mac` with its history. It does not bundle or import
+  the engine yet and is never part of the wheel; `mac/docs/reference.md` is
+  its reference and `/release-mac` its (operator-only) release skill.
 
 ## Commands
 ```bash
@@ -51,6 +52,7 @@ Before changing code:
 cd web && npm test                       # vitest
 cd web && npm run build                  # vue-tsc + vite build
 cd web && npm run test:e2e               # Playwright
+cd web && npm run build-storybook && npm run test-storybook  # Storybook workshop build + browser interaction runner
 ciao dev                                 # backend :8543 + Vite :5173
 scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
 ```
@@ -77,31 +79,30 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   4. `cd web && npm run build` after frontend changes.
   PRs into `develop` run the Linux backend and frontend gates in parallel
   (`linux-server` and `linux-web`). A develop PR whose diff changes `web/`
-  also runs the conditional `linux-e2e` Chromium check after `linux-web`.
+  also runs the conditional `linux-e2e` Chromium check alongside `linux-web`,
+  after the fast `web-scope` detector. Its stable check fails if detection fails;
+  non-web PRs run only that scope validation.
+  A develop PR whose diff changes `mac/`, `pyproject.toml`, `uv.lock` (or
+  `web/src/lib/workspaceColors.ts`) also runs `mac-app` (Swift tests, the app
+  bundle with its full engine, on macOS 15) after
+  the fast `mac-scope` detector; release PRs and manual runs always run it.
   `npm run test:e2e` invokes its npm prehook, which builds both the PWA and
-  terminal harness before Playwright. On Windows a develop PR
-  runs only the fast gates: every module importing and `python -m mypy ciao`
-  (natively win32, so a POSIX-only call such as `os.getuid` or `signal.SIGHUP`
-  outside a platform branch fails it). The Windows `pytest` and `npm test`
-  suites and the macOS job (browser tests and an engine cold-start) run on
-  the push to `develop` after merge and on release PRs into `main`, so a PR
-  going green is not proof those will. Path handling is the usual Windows
-  break (`ciao\x` vs `ciao/x`): compare paths with `Path`/`as_posix()`, not
-  string literals.
-  A test that hands a path to code that checks it is absolute builds it from
-  `tmp_path`: `/nonexistent/x` has no drive and is relative on Windows.
+  terminal harness before Playwright. Python 3.14
+  (`linux-server-latest-python`) and macOS (`test`) run on release PRs and
+  manual full runs; a green develop PR is not proof the release PR's macOS
+  job will pass.
   `pip-audit`, `npm audit` and `npm run lint` are advisory in CI (`|| true`).
   Lint is still worth running; it just will not fail the build for you.
 - Run one full backend suite and one frontend run at a time, here and in any
   gate script. Two concurrent suites starve the machine and time out the 20 s
-  component tests (`SettingsFsScope`), which reads as a red gate. A single
+  component tests (`mountSmoke`), which reads as a red gate. A single
   failure is re-run (`--lf`) before it is called red. Timing tests assert
   relative behaviour with a small absolute allowance, not a fixed millisecond
   budget a loaded machine can miss.
 - Re-run a red CI run whole (`gh run rerun <id>`, not `--failed` or "Re-run
   failed jobs"). A failed-jobs re-run leaves the PR's status rollup with only
   that attempt's jobs, so required checks such as `linux-server`, `linux-web`,
-  conditional `linux-e2e` and `windows` go missing and the PR shows BLOCKED
+  the conditional `linux-e2e` and `mac-app` go missing and the PR shows BLOCKED
   while everything is green.
 - Assert a guard where it acts, not only in the finished output. When a change
   bounds, redacts, filters or fences untrusted text, the test should observe the
@@ -115,7 +116,6 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   - a new `CIAO_*` env var goes in `INTEGRATIONS.md` (`tests/test_env_vars_documented.py`);
   - a new module under `ciao/` goes in `docs/ARCHITECTURE.md`'s repo layout
     (`tests/test_architecture_doc.py`);
-  - Windows installer or service changes go in `docs/WINDOWS.md` (`tests/test_windows_docs.py`).
 - For UI changes, verify keyboard focus, browser zoom, and 44px mobile touch
   targets. Every new feature must be visually inspected in the browser before
   pushing.
@@ -123,10 +123,15 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   must remain inert while a text field is focused. The Settings keyboard
   shortcuts card can disable or rebind them; preferences are shared through the
   engine. Enter-to-send is also shared, but touch keyboards always insert a
-  newline. Preserve picker precedence and IME composition handling.
-- OpenCode provider changes must preserve the V2-only 2.0.16+ contract. Replay
-  the V2 fixtures and run one tiny real turn against the installed OpenCode 2.x
-  server; do not restore V1 route or response-shape fallbacks.
+  newline. Preserve picker precedence and IME composition handling. The standalone
+  `/mcp` token is local chat navigation (arguments remain ordinary messages):
+  retain the owning workspace, actual provider, staged attachments and pane. Only
+  MCP actions are quiet in attention projections; never hide failed turns or
+  questions. MCP terminal recovery copies only; the user opens Terminal and
+  reviews and runs it separately. See `web/README.md` and `DESIGN.md`.
+- OpenCode provider changes run over `opencode acp` at OpenCode 2.3.2 or newer.
+  Replay the ACP fixtures and run one tiny real turn against the installed
+  OpenCode 2.x; do not restore the retired HTTP server or its V1 route fallbacks.
 
 ## Common mistakes
 - **Restarting the service.** Never restart the running engine yourself; it cuts
@@ -161,63 +166,10 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   during a release becomes an issue, fixed on `develop` before the next cut.
 
 ## Loop engineering notes
-Facts the user-level `loop-engineering` skill (`~/.claude/skills`) reads from
-this file; the gates are the ones under Verification.
-- PR target is `develop`. `Closes #N` does not auto-close on a develop merge;
-  close issues explicitly: "Merged into develop via #<PR> (<sha>). Ships in the
-  next release."
-- Branch prefix: `raffaelefarinaro/issue-<N>-<slug>`.
-- Gates run from a worktree with the main checkout's venv, which is an
-  editable install of `~/repos/ciaobot`: always set `PYTHONPATH=$PWD`
-  (`PYTHONPATH=$PWD ~/repos/ciaobot/.venv/bin/python -m pytest -n auto tests/`).
-- Symlink `web/node_modules` (and `desktop/runtime` when `desktop/` changes)
-  from the main checkout; delete both before every push.
-- Before planning, read `docs/DEVELOPMENT.md`, plus `web/README.md` and
-  `DESIGN.md` for anything under `web/`.
-- New issues: `[Bug]` → label `bug`, `[Feature]` → `enhancement` (see the
-  `ciao-support` skill). `report`-labelled issues are auto-opened and may be
-  noise: flag, don't drop. `not_ready` issues are skipped by the backlog loop.
-- After merging a batch into `develop`, watch the post-merge push run
-  (`gh run list --workflow ci.yml --branch develop --event push --limit 1`).
-  The Windows suites and the macOS job run only there. If it goes red, open a
-  `bug` issue naming the failing tests and the merge that broke them, and fix
-  it before merging more on top. `/ciao-release` will not cut over a red run.
-  Before queuing a PR whose diff touches path handling, the filesystem,
-  subprocesses or Windows code, add the `windows-full` label and push once, so
-  the full Windows suites run on the PR instead of after merge.
-- Hands-on device testing (a real Windows or macOS install) is for diffs that
-  touch the installers (`scripts/install*.sh`, `scripts/install.ps1`), the
-  service or scheduled-task code, engine update/migration, or `desktop/`.
-  Other issues rely on CI.
-- Security-sensitive diffs (ship fan-out plus a PR-scoped security review):
-  auth, secrets, `/api` or `/ws` routes, `docs/REMOTE_BOUNDARY.md`, `desktop/`
-  (also run the `desktop/src-tauri` commands in `docs/DEVELOPMENT.md`),
-  release plumbing.
-- There is no `/code-review` command for reviewer workers; review from
-  `git diff origin/develop...HEAD`.
-- Other sessions merge into `develop` all day, so use the skill's serial merge
-  queue. The `gates.sh` for this repo runs, from the worktree root: `PYTHONPATH=$PWD
-  ~/repos/ciaobot/.venv/bin/python -m mypy ciao`, the same with `--platform
-  win32`, `PYTHONPATH=$PWD ~/repos/ciaobot/.venv/bin/python -m pytest -n auto
-  tests/` (re-run only `--lf` before calling it red; latency tests flake under
-  load), and, after symlinking `web/node_modules`, `npm test` and `npm run build`
-  in `web/` (remove the symlink afterwards). When the diff touches `web/`, it
-  also runs `npm run test:e2e`; npm's prehook builds the PWA and terminal
-  harness before the browser suite. Develop PRs changing `web/` run the
-  conditional Linux Chromium gate before merge, while the macOS job retains
-  browser coverage on develop pushes and PRs into `main`. The terminal-renderer specs need
-  `npm run build:harness` first.
-- `PWA_API.md`, `DESIGN.md` (the Home paragraph), `web/README.md` and
-  `docs/ARCHITECTURE.md` are appended to by most PRs and conflict when two land
-  together. Resolve by keeping both sides.
-- An engine booted inside a worktree can push memory-backup commits
-  (`backup <ts>Z`, `<branch> session commit <ts>`) to the branch. Compare
-  `git ls-remote origin <branch>` with the reported sha and drop strays with
-  `--force-with-lease`.
-- Live `ciao eval tasks` runs (`docs/TASK_EVAL.md`) import the checkout under
-  test through an editable venv. Run them from a detached worktree with its own
-  venv, never from an issue worktree: the merge queue removes that worktree and
-  every later run in the batch errors.
+The facts the user-level `loop-engineering` skill reads for this repo (merge
+queue, gates.sh, worktree setup, unavailable-runner exception) are in
+[`docs/LOOP_ENGINEERING.md`](docs/LOOP_ENGINEERING.md). Read it before running
+the loop or merging into `develop`.
 
 ## Reporting issues
 When you find a bug, test failure or worthwhile enhancement, explain it to the

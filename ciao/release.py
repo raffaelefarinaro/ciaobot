@@ -508,6 +508,43 @@ def _run(
     return result.stdout.strip() if capture and result.stdout else ""
 
 
+def pinned_uv_version(root: Path) -> str:
+    """The uv version ``pyproject.toml`` pins in ``[tool.uv] required-version``."""
+    pyproject = root / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    required = data.get("tool", {}).get("uv", {}).get("required-version")
+    match = re.fullmatch(r"==\s*(\d+\.\d+\.\d+)", required or "")
+    if not match:
+        raise ReleaseError(
+            f"{pyproject} must pin uv exactly with [tool.uv] required-version "
+            f'= "==X.Y.Z"; found {required!r}'
+        )
+    return match.group(1)
+
+
+def _installed_uv_version(root: Path) -> str:
+    try:
+        out = _run(["uv", "--version"], cwd=root, capture=True)
+    except (OSError, ReleaseError) as exc:
+        raise ReleaseError(f"cannot run `uv --version`: {exc}") from exc
+    match = re.match(r"uv (\d+\.\d+\.\d+)", out)
+    if not match:
+        raise ReleaseError(f"cannot parse `uv --version` output: {out!r}")
+    return match.group(1)
+
+
+def _ensure_pinned_uv(root: Path) -> None:
+    """Refuse a uv other than the pinned one: it would rewrite uv.lock."""
+    pinned = pinned_uv_version(root)
+    installed = _installed_uv_version(root)
+    if installed != pinned:
+        raise ReleaseError(
+            f"uv {installed} is installed but pyproject.toml pins uv {pinned}; "
+            f"a different uv rewrites uv.lock. Install uv {pinned} "
+            f"(e.g. `uv self update {pinned}` or `brew upgrade uv`) and retry."
+        )
+
+
 def _git(root: Path, args: list[str], *, check: bool = True) -> str:
     return _run(["git", *args], cwd=root, capture=True, check=check)
 
@@ -872,7 +909,7 @@ def _probe_opencode() -> ProviderProbe:
     published: bool | None = None
     try:
         from ciao.dependency_updates import get_latest_npm_version
-        from ciao.providers.opencode import resolve_opencode_binary
+        from ciao.opencode_cli import resolve_opencode_binary
 
         binary = resolve_opencode_binary()
         if binary is None:
@@ -909,66 +946,45 @@ def _probe_opencode() -> ProviderProbe:
     return ProviderProbe("opencode", installed, latest, published, note)
 
 
-def _probe_bundled_claude(root: Path) -> ProviderProbe:
-    """Probe the Claude CLI bundled in the installed SDK. Never raises."""
-    installed: str | None = None
-    source = ""
+def _probe_claude() -> ProviderProbe:
+    """Probe the user's ``claude`` CLI, which claude-agent-acp drives. Never raises.
+
+    The record tests the CLI version, as before. The adapter is pinned in
+    ``adapter_install.ADAPTERS``; a missing or differently-versioned adapter is a note, and a
+    note blocks recording, as a missing SDK did.
+    """
+    from ciao import adapter_install, setup_status
+    from ciao.dependency_updates import get_latest_npm_version
+
     notes: list[str] = []
-    latest: str | None = None
-    # A fresh interpreter: this process may have imported the SDK before a
-    # release step reinstalled it.
+    binary = setup_status.claude_cli_path()
+    if not binary:
+        return ProviderProbe("claude", None, None, None, "claude CLI not found")
     try:
         proc = subprocess.run(
-            [
-                sys.executable,
-                "-I",
-                "-c",
-                "import json, claude_agent_sdk._version as v, "
-                "claude_agent_sdk._cli_version as c; "
-                "print(json.dumps({'sdk': v.__version__, 'cli': c.__cli_version__}))",
-            ],
+            [binary, "--version"],
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=30,
+            timeout=10,
             check=False,
         )
-        if proc.returncode != 0:
-            raise RuntimeError((proc.stderr or "").strip()[-300:] or f"rc {proc.returncode}")
-        payload = json.loads(proc.stdout)
-        cli_version = str(payload["cli"])
-        sdk_version = str(payload["sdk"])
-    except Exception as exc:  # noqa: BLE001 - a missing SDK blocks the release
-        return ProviderProbe(
-            "claude", None, None, None, f"claude_agent_sdk unreadable: {exc}"
-        )
-    installed = cli_version
-    source = f"claude-agent-sdk {sdk_version}"
-    try:
-        from ciao.dependency_updates import (
-            get_latest_npm_version,
-            parse_pyproject_dependencies,
-        )
-
-        spec = parse_pyproject_dependencies(root / "pyproject.toml").get(
-            "claude-agent-sdk", ""
-        )
-        match = re.fullmatch(r"==\s*(\S+)", spec.strip())
-        pin = match.group(1) if match else None
-        if pin != sdk_version:
-            notes.append(
-                f"installed claude-agent-sdk {sdk_version} != pyproject pin {pin}; "
-                "reinstall the SDK"
-            )
-        from ciao.providers.claude import get_bundled_claude_path
-
-        binary = get_bundled_claude_path()
-        if binary is None:
-            notes.append("bundled claude binary not found")
-        else:
-            proc = subprocess.run(
-                [binary, "--version"],
+        installed = parse_cli_version(proc.stdout or proc.stderr) if proc.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError) as exc:
+        return ProviderProbe("claude", None, None, None, f"claude --version failed: {exc}")
+    if installed is None:
+        return ProviderProbe("claude", None, None, None, "claude --version printed no version")
+    source = f"claude {installed}"
+    adapter_name = adapter_install.CLAUDE_ADAPTER
+    adapter_pin = adapter_install.ADAPTERS[adapter_name].version
+    state = adapter_install.detect(adapter_name)
+    if state != "ready":
+        notes.append(adapter_install.describe(adapter_name, state))
+    else:
+        try:
+            run = subprocess.run(
+                [*adapter_install.launch_argv(adapter_name), "--version"],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -976,11 +992,13 @@ def _probe_bundled_claude(root: Path) -> ProviderProbe:
                 timeout=10,
                 check=False,
             )
-            reported = parse_cli_version(proc.stdout or proc.stderr)
-            if reported != cli_version:
-                notes.append(
-                    f"bundled claude reports {reported}, SDK records {cli_version}"
-                )
+            reported = parse_cli_version(run.stdout or run.stderr) if run.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError, adapter_install.AdapterNotReady):
+            reported = None
+        if reported != adapter_pin:
+            notes.append(f"claude-agent-acp reports {reported or 'no version'}, pinned {adapter_pin}")
+    latest: str | None = None
+    try:
         latest = get_latest_npm_version(_CLAUDE_PACKAGE)
     except Exception as exc:  # noqa: BLE001 - probes never raise
         notes.append(f"probe failed: {exc}")
@@ -989,7 +1007,7 @@ def _probe_bundled_claude(root: Path) -> ProviderProbe:
 
 def _opencode_untested_reason(probe: ProviderProbe) -> tuple[str, str] | None:
     """``(reason, why)`` when OpenCode cannot be recorded as tested."""
-    from ciao.providers.opencode import _server_version_error
+    from ciao.opencode_cli import OPENCODE_MIN_TEXT, cli_version_error
 
     version = probe.installed
     if version is None:
@@ -998,8 +1016,8 @@ def _opencode_untested_reason(probe: ProviderProbe) -> tuple[str, str] | None:
         return "not_installed", "is not installed"
     if "-" in version or not STABLE_VERSION_RE.fullmatch(version):
         return "unpublished", f"{version} is not a stable version"
-    if _server_version_error({"version": version}) is not None:
-        return "unreadable", f"{version} is outside the supported 2.0.16+ / 2.x contract"
+    if cli_version_error({"version": version}) is not None:
+        return "unreadable", f"{version} is outside the supported {OPENCODE_MIN_TEXT}+ / 2.x contract"
     if probe.published is False:
         return "unpublished", f"{version} is not published on npm"
     if probe.published is None:
@@ -1019,7 +1037,7 @@ def build_provider_record(
     if claude.note or claude.installed is None:
         raise ReleaseError(
             "Claude CLI cannot be recorded: "
-            f"{claude.note or 'bundled CLI version not found'}"
+            f"{claude.note or 'claude CLI version not found'}"
         )
     problem = _opencode_untested_reason(opencode)
     if problem is None:
@@ -1191,8 +1209,7 @@ def main(argv: list[str] | None = None) -> int:
         "--skip-dep-check",
         action="store_true",
         help=(
-            "Do not check PyPI/npm for newer dependency versions or "
-            "auto-bump the Claude SDK."
+            "Do not check PyPI/npm for newer dependency versions."
         ),
     )
     parser.add_argument(
@@ -1254,7 +1271,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.refresh_provider_versions:
         opencode_probe = _probe_opencode()
-        claude_probe = _probe_bundled_claude(root)
+        claude_probe = _probe_claude()
         _print_provider_versions(opencode_probe, claude_probe)
         refreshed = build_provider_record(
             version=current.pyproject,
@@ -1324,11 +1341,12 @@ def main(argv: list[str] | None = None) -> int:
         _print_gws_skills_status(gws_installed, gws_pinned)
 
     if not args.skip_provider_versions:
-        _print_provider_versions(_probe_opencode(), _probe_bundled_claude(root))
+        _print_provider_versions(_probe_opencode(), _probe_claude())
 
     if not args.apply:
         return 0
 
+    _ensure_pinned_uv(root)
     _ensure_clean(root, allow_dirty=args.allow_dirty)
     if not args.no_branch:
         _checkout_release_branch(root, branch=branch, source=args.source)
@@ -1358,7 +1376,7 @@ def main(argv: list[str] | None = None) -> int:
             version=version,
             release_date=release_date,
             opencode=_probe_opencode(),
-            claude=_probe_bundled_claude(root),
+            claude=_probe_claude(),
             untested=set(args.untested_provider),
         )
         record_path = root / PROVIDER_RECORD_RELPATH

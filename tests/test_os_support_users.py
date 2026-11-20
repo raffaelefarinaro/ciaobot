@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import re
-import sys
 
 import pytest
 
@@ -24,17 +23,5 @@ def test_the_lock_directory_is_keyed_by_the_user(monkeypatch: pytest.MonkeyPatch
     assert lock.parent.name == f"ciao-queue-locks-{user_key()}"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the POSIX branch is not defined on Windows")
 def test_posix_keys_by_the_same_uid_as_before() -> None:
     assert user_key() == str(os.getuid())
-
-
-@pytest.mark.skipif(sys.platform != "win32", reason="SIDs are the Windows branch")
-def test_windows_keys_by_the_account_sid() -> None:
-    import subprocess
-
-    whoami = subprocess.run(
-        ["whoami", "/user", "/fo", "csv", "/nh"], capture_output=True, text=True, check=True
-    )
-    assert user_key() == whoami.stdout.strip().split(",")[-1].strip('"')
-    assert user_key().startswith("S-1-5-")

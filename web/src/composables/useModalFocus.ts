@@ -77,7 +77,7 @@ export function useModalFocus(
   }
 
   function onKeydown(event: KeyboardEvent) {
-    if (!active.value) return
+    if (!active.value || event.isComposing || event.keyCode === 229) return
     if (event.key === 'Escape') {
       event.preventDefault()
       event.stopImmediatePropagation()

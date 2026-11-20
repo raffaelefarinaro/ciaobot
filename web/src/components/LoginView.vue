@@ -1,23 +1,13 @@
 <template>
   <div class="login-page">
-    <div class="login-shell" :class="{ 'native-bootstrap': nativeBootstrap }">
-      <div v-if="!nativeBootstrap" class="login-shell-bar">
-        <span class="dot dot--r"></span>
-        <span class="dot dot--y"></span>
-        <span class="dot dot--g"></span>
-        <span class="login-shell-title">
-          {{ isRestarting ? 'ciaobot@local · restarting' : (isBootstrap ? 'ciaobot@local · first-run setup' : 'ciaobot@local · log in') }}
-        </span>
-      </div>
-
+    <div class="login-shell">
       <!-- RESTARTING SCREEN -->
       <div v-if="isRestarting" class="login-body restarting-body">
-        <p v-if="!nativeBootstrap" class="line line--banner">
-          <span class="wordmark wordmark--md">restarting</span>
+        <p class="line line--banner">
+          <Wordmark size="md" />
           <span class="banner-meta">// ciaobot is loading config ...</span>
         </p>
-        <p v-if="nativeBootstrap" class="line line--sys">Setup saved. Ciaobot is starting on this Mac.</p>
-        <p v-else class="line line--sys">
+        <p class="line line--sys">
           Ciaobot is finishing setup and moving to the background service. Keep the terminal that started it open until it says setup is complete, then you can close it.
         </p>
         <p class="line line--sys">
@@ -31,18 +21,18 @@
       <!-- SETUP WIZARD SCREEN -->
       <form v-else-if="isBootstrap" class="login-body setup-wizard" @submit.prevent="doFinish">
         <p class="line line--banner">
-          <span class="wordmark wordmark--md">ciaobot setup</span>
-          <span v-if="isBootstrap && !nativeBootstrap" class="banner-meta">// tour + local setup</span>
+          <Wordmark size="md" />
+          <span class="banner-meta">// tour + local setup</span>
         </p>
 
-        <section v-if="!nativeBootstrap" class="setup-run-note" aria-label="First launch instructions">
+        <section class="setup-run-note" aria-label="First launch instructions">
           <span class="run-note-kicker">First launch from Terminal</span>
           <p>
             Keep the terminal that started Ciaobot open while you finish this setup. When setup completes, Ciaobot moves to the background service: you can close the terminal and keep using this tab.
           </p>
         </section>
 
-        <section v-if="!nativeBootstrap" class="setup-tour" aria-label="Ciaobot setup tour">
+        <section class="setup-tour" aria-label="Ciaobot setup tour">
           <p class="tour-title">Your coding-agent subscription, with a real interface and memory.</p>
           <ul class="tour-list">
             <li>
@@ -78,7 +68,6 @@
             <input
               id="setup-workspace"
               v-model="workspace"
-              @input="workspaceEdited = true"
               type="text"
               class="form-input"
               placeholder="~/ciaobot"
@@ -405,7 +394,7 @@
            the password, and people could not tell where to type. -->
       <form v-else class="login-body login-form" @submit.prevent="doLogin">
         <p class="line line--banner">
-          <span class="wordmark wordmark--md">ciaobot</span>
+          <Wordmark size="md" />
         </p>
         <h1 class="login-title">Enter your password</h1>
         <p class="login-lede">Enter your Ciaobot password. The installer picks one for you; you can change it in Settings.</p>
@@ -447,6 +436,7 @@
 </template>
 
 <script setup lang="ts">
+import Wordmark from './Wordmark.vue'
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useAuthStore } from '../stores/auth'
 import type { SetupStatus } from '../lib/types'
@@ -466,12 +456,8 @@ const isBootstrap = ref(false)
 const bootstrapLoading = ref(true)
 const setupStatus = ref<SetupStatus | null>(null)
 const workspace = ref('~/ciaobot')
-const workspaceEdited = ref(false)
-const nativeBootstrap = ref(false)
 function applySetupStatus(status: SetupStatus) {
-  if (status.native_bootstrap) nativeBootstrap.value = true
   setupStatus.value = status
-  if (!workspaceEdited.value) workspace.value = status.suggested_workspace ?? (nativeBootstrap.value ? '~/Ciaobot' : '~/ciaobot')
 }
 const port = ref(8443)
 const python = ref('')
@@ -670,7 +656,6 @@ async function createPickerFolder() {
 function selectPickerFolder() {
   if (!pickerPath.value) return
   workspace.value = pickerPath.value
-  workspaceEdited.value = true
   pickerOpen.value = false
 }
 
@@ -928,38 +913,6 @@ onUnmounted(() => {
   box-shadow:
     0 24px 48px rgba(0, 0, 0, 0.45),
     0 0 0 1px rgba(255, 77, 109, 0.08);
-}
-.native-bootstrap .form-input,
-.native-bootstrap .btn-small,
-.native-bootstrap .btn-primary {
-  min-height: 44px;
-  box-sizing: border-box;
-}
-.native-bootstrap .form-input { font-size: 16px; }
-.native-bootstrap .form-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-.login-shell-bar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  background: var(--bg-elev);
-  border-bottom: 1px solid var(--border);
-}
-.dot {
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
-  display: inline-block;
-}
-.dot--r { background: var(--error); }
-.dot--y { background: var(--warning); }
-.dot--g { background: var(--success); }
-.login-shell-title {
-  margin-left: 8px;
-  font-size: var(--text-xs);
-  color: var(--fg3);
-  letter-spacing: 0.5px;
 }
 
 .login-body {
@@ -1629,7 +1582,6 @@ onUnmounted(() => {
 }
 
 @media (max-width: 600px) {
-  .login-shell-title { font-size: 10px; }
   .login-body { padding: 16px; }
   .tour-list {
     grid-template-columns: 1fr;

@@ -272,7 +272,7 @@ def test_discovered_private_legacy_dotenv_is_exempt_before_import(
     # from_env adopts the working directory when it is a set-up workspace, so a
     # run from a checkout that has served an engine would read that checkout.
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("ciao.install_discovery.discover_workspace", lambda base: workspace)
+    monkeypatch.setattr("ciao.workspace_discovery.discover_workspace", lambda base: workspace)
     config = CiaoConfig.from_env(export=False)
     assert not config.bootstrap_mode
     assert config.workspace_root == workspace.resolve()

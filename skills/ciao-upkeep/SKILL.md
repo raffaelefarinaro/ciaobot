@@ -37,8 +37,8 @@ row you did not check is worse than no date.
 `ciao/dependency_updates.py::check_available_updates` reports updates for
 **two files only**: `pyproject.toml` and `web/package.json`. It is correct for
 what it covers, and it covers less than we install. `AUTO_UPDATE_KEYS` is
-`("claude-agent-sdk",)`, so `--apply` during a release bumps exactly one
-package; everything else is report-only. Treat its output as one section of
+empty (since #3138 C2b nothing is auto-applied), so `--apply` during a release
+bumps nothing; everything is report-only. Treat its output as one section of
 this one.
 
 ```bash
@@ -87,21 +87,26 @@ build`), and let the release carry it later. Never blanket-upgrade majors.
 
 ### Claude harness trim catalog
 
-Run on every `claude-agent-sdk` bump and on every upkeep run. A new bundled CLI
+Run on every Claude Code CLI upgrade and on every upkeep run. A new CLI release
 can add a built-in tool, a bundled skill or a `disable*` setting; each one costs
 context in every chat or bypasses Ciaobot's schedules until it is classified in
-`ciao/claude_trim.py`.
+`ciao/claude_trim.py`. There is no automatic inventory test: it went with the SDK
+driver (#3138 C2b), so this check is by hand.
 
-1. Run `.venv/bin/pytest tests/test_claude_harness_inventory.py -q`. A failure
-   names each unclassified tool or skill.
+1. Inventory by hand. Read `claude --help` for the flags and compare the
+   built-in tool and skill names the CLI reports at session start (the `tools`
+   and `skills` lists in the adapter's init payload, which a live Claude chat
+   shows) with the catalog in `ciao/claude_trim.py`. A name in neither
+   `TRIM_OPTIONS` nor `KEPT_CLAUDE_TOOLS` is unclassified.
 2. Classify each one in `ciao/claude_trim.py`:
    - It duplicates a PWA surface or bypasses Ciaobot (scheduling, notifications,
      settings writers): a `TrimOption` with `default_trimmed=True`, plus
      `locked=True` if it bypasses the scheduler.
    - It is useful but costs context: a `TrimOption` with `default_trimmed=False`.
    - It is core to how Ciaobot works: a `KEPT_CLAUDE_TOOLS` entry with a one-line reason.
-3. New `disable*` settings:
-   `strings "$(.venv/bin/python -c 'from ciao.providers.claude import get_bundled_claude_path as p; print(p())')" | grep -oE '"disable[A-Z][A-Za-z]+"' | sort -u`.
+3. New `disable*` settings, from the CLI the adapter drives (the `claude` on
+   PATH, resolved through symlinks):
+   `grep -aoE '"disable[A-Z][A-Za-z]+"' "$(readlink -f "$(command -v claude)")" | sort -u`.
    Compare against the setting options in the catalog plus the known-unoffered
    `disableBundledSkills`, `disableClaudeAiConnectors` and `disableAllHooks`. For
    any new key, decide whether to offer it, and record the decision in the UPKEEP row.

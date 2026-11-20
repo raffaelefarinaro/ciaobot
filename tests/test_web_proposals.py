@@ -2438,6 +2438,29 @@ def test_dismissing_a_category_records_the_refusal_by_id(tmp_path: Path) -> None
     assert read_category_sidecar(vault, _CATEGORY_ID)["paths"]
 
 
+def test_the_category_dismiss_route_records_the_refusal_off_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The decline takes the proposal queue lock, which can wait for up to 30 s, so
+    the route must hand it to a worker thread rather than block the loop."""
+    import asyncio
+
+    config = _category_vault(tmp_path)
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+    awaited: list[str] = []
+    real_to_thread = asyncio.to_thread
+
+    async def recording_to_thread(func, *args, **kwargs):
+        awaited.append(getattr(func, "__name__", ""))
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", recording_to_thread)
+
+    assert client.post(f"/api/proposals/{row['id']}/dismiss").status_code == 200
+    assert "decline_category_row" in awaited
+
+
 def test_a_batch_dismiss_records_the_refusal_too(tmp_path: Path) -> None:
     """The batch path records the id before the rewrite too, or a bulk "reject
     these" would bring the whole cluster back the next night."""

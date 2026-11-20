@@ -1,13 +1,11 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test'
-import { COMPOSER } from '../support/app'
+import { COMPOSER, settled } from '../support/app'
 
 /**
  * The needs-you stack's key control, in a real browser.
  *
- * The stack is capped at min(42vh, 380px) and scrolls inside itself. On a
- * phone a sign-in card taller than the cap showed its top only, so Finish
- * sign-in sat under the composer. jsdom cannot measure that cap, so this is a
- * browser spec: it needs the real layout of the stack against the composer.
+ * The generic stack is capped and scrolls inside itself. A remote Google
+ * sign-in's callback field must stay reachable inside that stack.
  *
  * The page is served on a host name that is not loopback, which is what makes
  * the paste field appear. A session cookie for that host is set on the context;
@@ -45,26 +43,24 @@ async function openOffLoopback(page: Page, session: string): Promise<void> {
   expect(await page.evaluate(() => location.hostname)).toBe(HOST)
 }
 
-/** The sign-in whose card is taller than the stack's cap, as on a phone. */
+/** A remote sign-in with a callback field. */
 const SIGN_IN = {
-  kind: 'mcp_auth',
+  kind: 'gws_auth',
   state: 'waiting',
   params: {
-    server: 'linear',
-    provider: 'claude',
-    session_id: 'sess-1',
-    url: 'https://auth.example.invalid/authorize?state=w',
+    profile: 'alpha',
+    url: 'https://accounts.google.com/o/oauth2/auth?state=w',
   },
 }
 
 test.describe('the needs-you stack on a phone', () => {
-  test('an off-loopback sign-in shows Finish sign-in above the composer', async ({ page }, testInfo: TestInfo) => {
+  test('an off-loopback sign-in keeps Finish sign-in within the stack', async ({ page }, testInfo: TestInfo) => {
     const session = `nys-primary-${testInfo.workerIndex}`
     await raise(page, session, SIGN_IN)
     await openOffLoopback(page, session)
 
     const stack = page.locator('.needs-you-stack')
-    const finish = page.locator('.needs-you-card').getByRole('button', { name: 'Finish sign-in' })
+    const finish = stack.locator('.needs-you-card').getByRole('button', { name: 'Finish sign-in' })
     await expect(finish).toBeVisible()
 
     // The scroll is smooth, so poll until the control is inside the stack.
@@ -74,10 +70,10 @@ test.describe('the needs-you stack on a phone', () => {
       return f.y + f.height <= s.y + s.height + 0.5
     }).toBe(true)
 
-    const composer = (await page.locator(COMPOSER).boundingBox())!
     const button = (await finish.boundingBox())!
-    expect(button.y + button.height, 'Finish sign-in sits under the composer').toBeLessThanOrEqual(composer.y + 0.5)
     expect(button.y).toBeGreaterThanOrEqual(0)
+    const bounds = (await stack.boundingBox())!
+    expect(button.y + button.height).toBeLessThanOrEqual(bounds.y + bounds.height + 0.5)
 
     // Nothing covers it: the element at its centre is the button itself.
     const covered = await finish.evaluate(
@@ -87,18 +83,23 @@ test.describe('the needs-you stack on a phone', () => {
     expect(covered).toBe(true)
   })
 
-  test('a device code under a sign-in card is scrolled into view', async ({ page }, testInfo: TestInfo) => {
+  test('a device code under a command card is scrolled into view', async ({ page }, testInfo: TestInfo) => {
     const session = `nys-device-${testInfo.workerIndex}`
-    await raise(page, session, SIGN_IN)
-    await raise(page, session, {
-      kind: 'device_code',
-      state: 'waiting',
-      params: { tool: 'gh', code: 'ABCD-1234', url: 'https://github.com/login/device', session_id: 's2' },
-    })
+    await raise(page, session, { kind: 'command', state: 'open', params: { command: 'echo review-only', note: 'Review this command' } })
     await openOffLoopback(page, session)
 
     const stack = page.locator('.needs-you-stack')
-    const code = page.locator('.needs-you-device-code')
+    await settled(stack)
+    const beforeScroll = await page.evaluate(() => window.scrollY)
+    const beforeFocus = await page.evaluateHandle(() => document.activeElement)
+    const response = await page.request.post(`http://127.0.0.1:${port()}/__fixture__/chat-action`, {
+      headers: { cookie: `e2e_session=${session}` },
+      data: { chat_id: CHAT_ID, kind: 'device_code', state: 'waiting', params: { tool: 'gh', code: 'ABCD-1234', url: 'https://github.com/login/device', session_id: 's2' } },
+    })
+    expect(response.ok()).toBe(true)
+    const { action } = await response.json() as { action: { id: string } }
+    const card = page.locator(`.needs-you-card[data-action-id="${action.id}"]`)
+    const code = card.locator('.needs-you-device-code')
     await expect(code).toBeVisible()
 
     await expect.poll(async () => {
@@ -110,5 +111,26 @@ test.describe('the needs-you stack on a phone', () => {
     const composer = (await page.locator(COMPOSER).boundingBox())!
     const box = (await code.boundingBox())!
     expect(box.y + box.height, 'the one-time code sits under the composer').toBeLessThanOrEqual(composer.y + 0.5)
+    expect(await page.evaluate(() => window.scrollY)).toBe(beforeScroll)
+    expect(await page.evaluate(el => document.activeElement === el, beforeFocus)).toBe(true)
+    await beforeFocus.dispose()
+    expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true)
+    await testInfo.attach('phone-generic-stack', { body: await page.screenshot(), contentType: 'image/png' })
+  })
+})
+
+test.describe('the needs-you stack on desktop', () => {
+  test.use({ viewport: { width: 1440, height: 900 }, hasTouch: false, isMobile: false })
+
+  test('keeps a generic command above the composer', async ({ page }, testInfo: TestInfo) => {
+    const session = `nys-desktop-${testInfo.workerIndex}`
+    await raise(page, session, { kind: 'command', state: 'open', params: { command: 'echo review-only', note: 'Review this command' } })
+    await openOffLoopback(page, session)
+    const stack = page.locator('.needs-you-stack')
+    await expect(stack.locator('.needs-you-card')).toBeVisible()
+    const box = (await stack.boundingBox())!
+    const composer = (await page.locator(COMPOSER).boundingBox())!
+    expect(box.y + box.height).toBeLessThanOrEqual(composer.y + 0.5)
+    await testInfo.attach('desktop-generic-stack', { body: await page.screenshot(), contentType: 'image/png' })
   })
 })

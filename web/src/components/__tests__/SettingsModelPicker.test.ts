@@ -10,7 +10,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h, nextTick } from 'vue'
 import { modelDisplayName } from '../../lib/modelLabels'
 import { sectionsFromModelsResponse } from '../../lib/modelSections'
-import type { ModelsResponse } from '../../lib/types'
+import type { ModelsResponse, ProviderDescriptor } from '../../lib/types'
 
 // A namespaced id, the shape opencode's catalog carries.
 const NAMESPACED = 'openai/gpt-5.6-luna'
@@ -36,6 +36,7 @@ vi.mock('../../lib/api', () => {
             name: 'claude',
             ok: true,
             auth: 'oauth',
+            state: 'ready',
             command: 'claude auth login',
             version: '2.1.205 (Claude Code)',
             label: 'Claude Code',
@@ -44,6 +45,7 @@ vi.mock('../../lib/api', () => {
             name: 'opencode',
             ok: true,
             auth: 'oauth',
+            state: 'ready',
             command: 'opencode auth login',
             version: '2.0.16',
             label: 'opencode',
@@ -69,6 +71,11 @@ vi.mock('../../lib/api', () => {
 const MODELS: ModelsResponse = {
   models: ['haiku', 'sonnet', 'opus'],
   default: 'sonnet',
+  // The registry rows /api/models serves, in its order.
+  providers: [
+    { id: 'claude', label: 'Anthropic (via Claude Code)', short_label: 'Claude', capabilities: {} },
+    { id: 'opencode', label: 'OpenCode', short_label: 'OpenCode', capabilities: {} },
+  ] as ProviderDescriptor[],
   provider_models: { claude: ['haiku', 'sonnet', 'opus'], opencode: [NAMESPACED] },
   provider_defaults: { claude: 'sonnet', opencode: NAMESPACED },
   opencode_models: [NAMESPACED],
@@ -112,7 +119,7 @@ async function mountModelsTab(): Promise<VueWrapper> {
   const { default: SettingsView } = await import('../SettingsView.vue')
   const wrapper = mount(SettingsView, {
     attachTo: document.body,
-    global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: Stub } },
+    global: { plugins: [router], stubs: { Teleport: true } },
   })
   await flushPromises()
   await nextTick()

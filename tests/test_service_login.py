@@ -1,7 +1,7 @@
 """ciao.service_login: the sign-in state is read from the machine, or not at all.
 
-Every OS call is faked here. Nothing in this file reaches a live ``launchctl``,
-``schtasks.exe`` or the operator's real ``~/Library/LaunchAgents``, because the
+Every OS call is faked here. Nothing in this file reaches a live ``launchctl``
+or the operator's real ``~/Library/LaunchAgents``, because the
 seams the module uses for both platforms are patched rather than invoked, and
 because the plist directory the read walks is the module's own
 ``_plist_path``.
@@ -13,30 +13,26 @@ What these tests are actually about is the refusals:
   never touched, and never inferred from the environment the way
   ``discover_runtime`` would;
 * a change flips one enabled bit and nothing else — no start, stop, restart,
-  bootstrap, register, ``/Create``, ``/Run``, ``/End``, ``/Delete``, and no
-  plist or task XML is written;
+  bootstrap or register, and no plist is written;
 * a change only counts when the re-read confirms it, so a runner that lies
   about succeeding produces a failure rather than a claim.
 """
 
 from __future__ import annotations
 
-import functools
 import plistlib
 import shlex
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Sequence
-from xml.sax.saxutils import escape
 
 import pytest
 
-from ciao import macos_service, service_login, windows_service
+from ciao import macos_service, service_login
 
 UID = 501
 SERVER = macos_service.SERVER_LABEL
-TASK = windows_service.TASK_NAME
 
 
 def _section(*entries: tuple[str, str]) -> str:
@@ -85,46 +81,6 @@ class _Launchctl:
     @property
     def verbs(self) -> list[list[str]]:
         return [command[1] for command in self.calls]
-
-
-class _Schtasks:
-    """A ``schtasks`` that answers ``/Query /XML`` from a script of documents.
-
-    Used as the ``runner`` of the real ``windows_service`` helpers, so the argv
-    a test reads is the argv the module actually builds.
-    """
-
-    def __init__(
-        self, *documents: str, returncode: int = 0, change_returncode: int = 0
-    ) -> None:
-        self.documents = list(documents)
-        self.returncode = returncode
-        self.change_returncode = change_returncode
-        self.calls: list[tuple[list[str], dict[str, Any]]] = []
-
-    def __call__(self, *args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        self.calls.append((list(args), dict(kwargs)))
-        if "/Change" in args:
-            return subprocess.CompletedProcess(
-                ["schtasks.exe", *args], self.change_returncode, stdout="", stderr=""
-            )
-        index = sum(1 for argv, _ in self.calls if "/Query" in argv) - 1
-        document = self.documents[min(index, len(self.documents) - 1)] if self.documents else ""
-        return subprocess.CompletedProcess(
-            ["schtasks.exe", *args],
-            self.returncode,
-            stdout=document,
-            stderr="ERROR: The system cannot find the file specified."
-            if self.returncode
-            else "",
-        )
-
-    @property
-    def argvs(self) -> list[list[str]]:
-        return [list(argv) for argv, _kwargs in self.calls]
-
-    def queries(self) -> int:
-        return sum(1 for argv, _ in self.calls if "/Query" in argv)
 
 
 # --------------------------------------------------------------------------- #
@@ -226,35 +182,15 @@ def _install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> 
 
 
 def _status(
-    monkeypatch: pytest.MonkeyPatch, platform: str, launchctl: Any = None, schtasks: _Schtasks | None = None
+    monkeypatch: pytest.MonkeyPatch, platform: str, launchctl: Any = None
 ) -> Any:
-    """Run ``login_status`` for *platform* with both OS seams faked.
-
-    The Windows seam is faked one level lower — as the ``runner`` the real
-    ``windows_service`` helper calls — so the argv a test sees is the one the
-    module builds, not one the test supplied.
-    """
-    _install_schtasks(monkeypatch, schtasks or _Schtasks())
+    """Run ``login_status`` for *platform* with both OS seams faked."""
     monkeypatch.setattr(service_login, "_uid", lambda: UID)
     monkeypatch.setattr(
         service_login, "_launchctl_run", launchctl or _Launchctl(_section())
     )
     monkeypatch.setattr(sys, "platform", platform)
     return service_login.login_status
-
-
-def _install_schtasks(monkeypatch: pytest.MonkeyPatch, schtasks: _Schtasks) -> None:
-    """Route the module's Windows seams to *schtasks* through the real helpers."""
-    monkeypatch.setattr(
-        service_login,
-        "_query_task_xml",
-        functools.partial(windows_service.query_task_xml, runner=schtasks),
-    )
-    monkeypatch.setattr(
-        service_login,
-        "_set_task_enabled",
-        functools.partial(windows_service.set_task_enabled, runner=schtasks),
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -526,8 +462,8 @@ def test_the_launchctl_seam_reports_a_timeout_as_a_command_it_could_not_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`macos_service.set_login_enabled` catches `OSError` and nothing else, so
-    the bound has to be reported the way `_schtasks` reports its own: a failure
-    the caller already knows how to refuse, never a bare `TimeoutExpired`."""
+    the bound has to be reported as a failure the caller already knows how to
+    refuse, never a bare `TimeoutExpired`."""
     argv = ["print-disabled", f"gui/{UID}"]
 
     def _never_answers(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -931,375 +867,6 @@ def test_nothing_is_run_when_the_definition_has_no_login_trigger(
 
 
 # --------------------------------------------------------------------------- #
-# Windows: the registered task's own document
-# --------------------------------------------------------------------------- #
-
-
-TASK_NS = "http://schemas.microsoft.com/windows/2004/02/mit/task"
-
-# A fixed ASCII workspace, the shape a real `C:\\...` path arrives in. It does
-# not have to exist: both sides of every comparison go through the same
-# resolve, and a Windows CI account whose name is not ASCII must not turn a
-# workspace-identity test into a "the code page mangled it" one.
-WIN_ROOT = Path("C:/ciao")
-WIN_OTHER = Path("C:/ciao-other")
-
-
-def _task_xml(
-    workspace: Path | None = None,
-    *,
-    enabled: str = "true",
-    logon: str = "true",
-    actions: int = 1,
-    workdir: str | None = None,
-) -> str:
-    """A task document shaped like the one `render_task_xml` registers."""
-    root = workspace if workspace is not None else Path("C:/ciao")
-    body = "".join(
-        "    <Exec>\n      <Command>pythonw.exe</Command>\n"
-        "      <Arguments>-m ciao.cli supervise</Arguments>\n"
-        f"      <WorkingDirectory>{escape(workdir if workdir is not None else str(root))}"
-        "</WorkingDirectory>\n    </Exec>\n"
-        for _ in range(actions)
-    )
-    if logon == "missing":
-        trigger = "    <IdleTrigger>\n      <Enabled>true</Enabled>\n    </IdleTrigger>\n"
-    else:
-        trigger = (
-            "    <LogonTrigger>\n"
-            f"      <Enabled>{logon}</Enabled>\n"
-            "      <UserId>DESKTOP-1\\ada</UserId>\n"
-            "    </LogonTrigger>\n"
-        )
-    return (
-        '<?xml version="1.0" encoding="UTF-16"?>\n'
-        f'<Task version="1.2" xmlns="{TASK_NS}">\n'
-        "  <RegistrationInfo><URI>\\Ciaobot\\Engine</URI></RegistrationInfo>\n"
-        f"  <Triggers>\n{trigger}  </Triggers>\n"
-        "  <Settings>\n"
-        "    <AllowStartOnDemand>true</AllowStartOnDemand>\n"
-        f"    <Enabled>{enabled}</Enabled>\n"
-        "  </Settings>\n"
-        f'  <Actions Context="Author">\n{body}  </Actions>\n'
-        "</Task>\n"
-    )
-
-
-def test_a_registered_task_that_is_enabled_and_fires_at_logon(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    schtasks = _Schtasks(_task_xml(WIN_ROOT, enabled="true"))
-    login_status = _status(monkeypatch, "win32", schtasks=schtasks)
-
-    status = login_status(WIN_ROOT)
-
-    assert (status.platform, status.supported) == ("windows", True)
-    assert (status.installed, status.enabled, status.can_change) == (True, True, True)
-    assert schtasks.argvs == [["/Query", "/TN", TASK, "/XML"]]
-    assert schtasks.calls[0][1] == {"encoding": "oem"}
-
-
-def test_a_registered_task_that_is_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    login_status = _status(
-        monkeypatch, "win32", schtasks=_Schtasks(_task_xml(WIN_ROOT, enabled="false"))
-    )
-
-    status = login_status(WIN_ROOT)
-
-    assert (status.installed, status.enabled, status.can_change) == (True, False, True)
-
-
-@pytest.mark.parametrize("logon", ["false", "missing"])
-def test_a_task_with_no_enabled_logon_trigger_offers_no_toggle(
-    monkeypatch: pytest.MonkeyPatch, logon: str
-) -> None:
-    """`/Enable` alone would leave it still not starting at sign-in."""
-    document = _task_xml(WIN_ROOT, logon=logon)
-    login_status = _status(monkeypatch, "win32", schtasks=_Schtasks(document))
-
-    status = login_status(WIN_ROOT)
-
-    assert (status.installed, status.enabled, status.can_change) == (True, None, False)
-    assert "logon trigger" in status.reason
-
-
-def test_a_task_for_another_workspace_is_reported_not_repointed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    other = WIN_OTHER
-    workspace = WIN_ROOT
-    login_status = _status(monkeypatch, "win32", schtasks=_Schtasks(_task_xml(other)))
-
-    status = login_status(workspace)
-
-    assert (status.installed, status.enabled, status.can_change) == (True, None, False)
-    assert str(other) in status.reason
-    assert status.setup_command is None
-
-
-@pytest.mark.parametrize(
-    "workspace_text,reason",
-    [
-        ("C:/ciao/Łukasz", "lossy code page"),
-        ("C:/ciao/�", "lossy code page"),
-    ],
-)
-def test_a_task_workspace_the_code_page_mangled_is_unknown(
-    monkeypatch: pytest.MonkeyPatch,
-    workspace_text: str,
-    reason: str,
-) -> None:
-    login_status = _status(
-        monkeypatch,
-        "win32",
-        schtasks=_Schtasks(_task_xml(WIN_ROOT, workdir=workspace_text)),
-    )
-
-    status = login_status(WIN_ROOT)
-
-    assert status.enabled is None
-    assert reason in status.reason
-
-
-def test_ambiguous_actions_are_unknown(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    login_status = _status(
-        monkeypatch, "win32", schtasks=_Schtasks(_task_xml(WIN_ROOT, actions=2))
-    )
-
-    status = login_status(WIN_ROOT)
-
-    assert (status.installed, status.enabled) == (True, None)
-    assert "Exec actions" in status.reason
-
-
-def test_a_task_with_no_working_directory_is_unknown(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    login_status = _status(
-        monkeypatch,
-        "win32",
-        schtasks=_Schtasks(_task_xml(WIN_ROOT, workdir="")),
-    )
-
-    status = login_status(WIN_ROOT)
-
-    assert status.enabled is None
-    assert "working directory" in status.reason
-
-
-def test_a_task_whose_enabled_key_is_not_explicit_is_unknown(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    login_status = _status(
-        monkeypatch, "win32", schtasks=_Schtasks(_task_xml(WIN_ROOT, enabled="1"))
-    )
-
-    status = login_status(WIN_ROOT)
-
-    assert status.enabled is None
-    assert "explicit true or false" in status.reason
-
-
-def test_a_task_with_no_settings_at_all_is_unknown(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    document = _task_xml(WIN_ROOT).replace(
-        "  <Settings>\n    <AllowStartOnDemand>true</AllowStartOnDemand>\n"
-        "    <Enabled>true</Enabled>\n  </Settings>\n",
-        "",
-    )
-    login_status = _status(monkeypatch, "win32", schtasks=_Schtasks(document))
-
-    assert login_status(WIN_ROOT).enabled is None
-
-
-@pytest.mark.parametrize(
-    "document,reason",
-    [
-        ("", "not XML"),
-        ("<Task>", "not XML"),
-        ("<NotATask/>", "not a Task Scheduler task document"),
-    ],
-    ids=["empty", "truncated", "wrong-root"],
-)
-def test_a_document_we_cannot_read_leaves_installed_unknown(
-    monkeypatch: pytest.MonkeyPatch, document: str, reason: str
-) -> None:
-    login_status = _status(monkeypatch, "win32", schtasks=_Schtasks(document))
-
-    status = login_status(WIN_ROOT)
-
-    assert (status.installed, status.enabled, status.can_change) == (None, None, False)
-    assert reason in status.reason
-    # A failed query must not be read as "there is no task"; it says so.
-    assert status.setup_command == f'schtasks.exe /Query /TN "{TASK}" /XML'
-
-
-def test_a_query_that_fails_does_not_claim_a_missing_task(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    login_status = _status(
-        monkeypatch, "win32", schtasks=_Schtasks("", returncode=1)
-    )
-
-    status = login_status(WIN_ROOT)
-
-    assert (status.installed, status.enabled, status.can_change) == (None, None, False)
-    assert "cannot find the file specified" in status.reason
-    assert "ciao setup" in status.reason
-
-
-def test_a_query_that_times_out_is_unavailable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _timeout() -> subprocess.CompletedProcess[str]:
-        raise windows_service.WindowsServiceError("schtasks /Query timed out after 30s")
-
-    monkeypatch.setattr(service_login, "_query_task_xml", _timeout)
-    monkeypatch.setattr(service_login, "_uid", lambda: UID)
-    monkeypatch.setattr(sys, "platform", "win32")
-
-    status = service_login.login_status(WIN_ROOT)
-
-    assert (status.installed, status.enabled) == (None, None)
-    assert "timed out" in status.reason
-
-
-# --------------------------------------------------------------------------- #
-# Windows: the write
-# --------------------------------------------------------------------------- #
-
-
-def _windows_set(
-    monkeypatch: pytest.MonkeyPatch, schtasks: _Schtasks
-) -> None:
-    """Both Windows seams routed through the real helpers onto *schtasks*."""
-    _install_schtasks(monkeypatch, schtasks)
-    monkeypatch.setattr(service_login, "_uid", lambda: UID)
-    monkeypatch.setattr(sys, "platform", "win32")
-
-
-def test_enabling_runs_only_change_enable_and_re_queries(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    schtasks = _Schtasks(
-        _task_xml(WIN_ROOT, enabled="false"),
-        _task_xml(WIN_ROOT, enabled="true"),
-    )
-    _windows_set(monkeypatch, schtasks)
-
-    status = service_login.set_login_enabled(WIN_ROOT, True)
-
-    assert status.enabled is True
-    # Read, write, read. Nothing that registers, starts, ends or deletes.
-    assert schtasks.argvs == [
-        ["/Query", "/TN", TASK, "/XML"],
-        ["/Change", "/TN", TASK, "/Enable"],
-        ["/Query", "/TN", TASK, "/XML"],
-    ]
-
-
-def test_disabling_runs_only_change_disable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    schtasks = _Schtasks(
-        _task_xml(WIN_ROOT, enabled="true"),
-        _task_xml(WIN_ROOT, enabled="false"),
-    )
-    _windows_set(monkeypatch, schtasks)
-
-    status = service_login.set_login_enabled(WIN_ROOT, False)
-
-    assert status.enabled is False
-    assert [argv[3] for argv in schtasks.argvs if argv[0] == "/Change"] == ["/Disable"]
-
-
-def test_a_change_the_schtasks_helper_makes_is_bounded_and_verbatim() -> None:
-    """The helper keeps the fixed task name and the fixed verb, and adds no
-    shell and no unbounded call of its own."""
-    calls: list[tuple[list[str], dict[str, Any]]] = []
-
-    def _runner(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        calls.append((list(args), dict(kwargs)))
-        return subprocess.CompletedProcess(["schtasks.exe", *args], 0, stdout="", stderr="")
-
-    windows_service.set_task_enabled(True, runner=_runner)
-    windows_service.set_task_enabled(False, runner=_runner)
-
-    assert [argv for argv, _ in calls] == [
-        ["/Change", "/TN", TASK, "/Enable"],
-        ["/Change", "/TN", TASK, "/Disable"],
-    ]
-
-
-def test_a_refused_change_raises_on_the_helpers_own_terms() -> None:
-    calls: list[list[str]] = []
-
-    def _runner(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        calls.append(list(args))
-        return subprocess.CompletedProcess(
-            ["schtasks.exe", *args], 5, stdout="", stderr="Access is denied."
-        )
-
-    with pytest.raises(windows_service.WindowsServiceError) as raised:
-        windows_service.set_task_enabled(True, runner=_runner)
-
-    assert "Access is denied" in str(raised.value)
-    assert calls == [["/Change", "/TN", TASK, "/Enable"]]
-
-
-def test_a_schtasks_failure_is_unavailable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    schtasks = _Schtasks(
-        _task_xml(WIN_ROOT, enabled="false"),
-        _task_xml(WIN_ROOT, enabled="false"),
-        change_returncode=5,
-    )
-    _windows_set(monkeypatch, schtasks)
-
-    with pytest.raises(service_login.LoginUnavailable) as raised:
-        service_login.set_login_enabled(WIN_ROOT, True)
-
-    assert "/Change failed" in str(raised.value)
-    assert raised.value.status is not None
-    assert raised.value.status.enabled is False
-    assert [argv[0] for argv in schtasks.argvs] == ["/Query", "/Change", "/Query"]
-
-
-def test_a_change_the_re_query_does_not_confirm_is_a_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The document never changes: /Change succeeded, the task did not move.
-    schtasks = _Schtasks(_task_xml(WIN_ROOT, enabled="false"))
-    _windows_set(monkeypatch, schtasks)
-
-    with pytest.raises(service_login.LoginUnavailable) as raised:
-        service_login.set_login_enabled(WIN_ROOT, True)
-
-    assert raised.value.status is not None
-    assert raised.value.status.enabled is False
-    assert schtasks.queries() == 2
-
-
-def test_nothing_is_changed_when_the_task_is_not_ours(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    schtasks = _Schtasks(_task_xml(WIN_OTHER))
-    _windows_set(monkeypatch, schtasks)
-
-    with pytest.raises(service_login.LoginRefused) as raised:
-        service_login.set_login_enabled(WIN_ROOT, False)
-
-    assert str(WIN_OTHER) in str(raised.value)
-    assert schtasks.argvs == [["/Query", "/TN", TASK, "/XML"]]
-
-
-# --------------------------------------------------------------------------- #
 # Linux and the rest: a stated answer, with no OS call at all
 # --------------------------------------------------------------------------- #
 
@@ -1311,7 +878,6 @@ def test_linux_is_unsupported_and_never_asks_the_machine(
         raise AssertionError("Linux must not reach an OS command")
 
     monkeypatch.setattr(service_login, "_launchctl_run", _no_os)
-    monkeypatch.setattr(service_login, "_query_task_xml", _no_os)
     monkeypatch.setattr(service_login, "_uid", _no_os)
     monkeypatch.setattr(sys, "platform", "linux")
 
@@ -1330,7 +896,6 @@ def test_linux_refuses_a_change_without_touching_anything(
         raise AssertionError("Linux must not reach an OS command")
 
     monkeypatch.setattr(service_login, "_launchctl_run", _no_os)
-    monkeypatch.setattr(service_login, "_set_task_enabled", _no_os)
     monkeypatch.setattr(sys, "platform", "linux")
 
     with pytest.raises(service_login.LoginRefused) as raised:
@@ -1340,11 +905,12 @@ def test_linux_refuses_a_change_without_touching_anything(
     assert raised.value.status.platform == "linux"
 
 
+@pytest.mark.parametrize("platform", ["sunos5", "win32"])
 def test_a_platform_with_no_backend_says_so(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    platform: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(service_login, "_launchctl_run", lambda *a, **k: None)
-    monkeypatch.setattr(sys, "platform", "sunos5")
+    monkeypatch.setattr(sys, "platform", platform)
 
     status = service_login.login_status(tmp_path / "workspace")
 

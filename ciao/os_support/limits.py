@@ -12,15 +12,13 @@ of whether the unit file was refreshed by an upgrade.
 POSIX clamps the request to the hard limit: the kernel refuses a soft limit
 above it, and the hard limit is the ceiling a process cannot pass without
 privilege. A failure is swallowed — the engine must start even on a host that
-forbids the call. Windows is a no-op: the launchd/systemd limit does not apply
-there, and the CRT descriptor table is already large, so the function exists
-only to keep call sites free of a platform branch.
+forbids the call.
 """
 
 from __future__ import annotations
 
 import logging
-import sys
+import resource
 
 logger = logging.getLogger(__name__)
 
@@ -30,43 +28,34 @@ logger = logging.getLogger(__name__)
 # var: the value is a product decision, not per-install configuration.
 SERVER_NOFILE_TARGET = 4096
 
-if sys.platform == "win32":
+def raise_file_descriptor_limit(target: int = SERVER_NOFILE_TARGET) -> None:
+    """Raise the soft ``RLIMIT_NOFILE`` to *target*, clamped to the hard limit.
 
-    def raise_file_descriptor_limit(target: int = SERVER_NOFILE_TARGET) -> None:
-        """No-op on Windows; see the module docstring."""
+    Best-effort: a ``getrlimit``/``setrlimit`` failure is logged and
+    swallowed so the caller keeps starting. An already-sufficient soft
+    limit (including infinity) is left untouched.
+    """
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (OSError, ValueError):
+        logger.warning("Could not read the file-descriptor limit", exc_info=True)
         return
-
-else:
-    import resource
-
-    def raise_file_descriptor_limit(target: int = SERVER_NOFILE_TARGET) -> None:
-        """Raise the soft ``RLIMIT_NOFILE`` to *target*, clamped to the hard limit.
-
-        Best-effort: a ``getrlimit``/``setrlimit`` failure is logged and
-        swallowed so the caller keeps starting. An already-sufficient soft
-        limit (including infinity) is left untouched.
-        """
-        try:
-            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        except (OSError, ValueError):
-            logger.warning("Could not read the file-descriptor limit", exc_info=True)
-            return
-        desired = target if hard == resource.RLIM_INFINITY else min(target, hard)
-        if soft == resource.RLIM_INFINITY or soft >= desired:
-            logger.debug(
-                "File-descriptor soft limit already %s (target %s)", soft, desired
-            )
-            return
-        try:
-            resource.setrlimit(resource.RLIMIT_NOFILE, (desired, hard))
-        except (OSError, ValueError):
-            logger.warning(
-                "Could not raise the file-descriptor soft limit from %s to %s",
-                soft,
-                desired,
-                exc_info=True,
-            )
-            return
-        logger.info(
-            "Raised the file-descriptor soft limit from %s to %s", soft, desired
+    desired = target if hard == resource.RLIM_INFINITY else min(target, hard)
+    if soft == resource.RLIM_INFINITY or soft >= desired:
+        logger.debug(
+            "File-descriptor soft limit already %s (target %s)", soft, desired
         )
+        return
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (desired, hard))
+    except (OSError, ValueError):
+        logger.warning(
+            "Could not raise the file-descriptor soft limit from %s to %s",
+            soft,
+            desired,
+            exc_info=True,
+        )
+        return
+    logger.info(
+        "Raised the file-descriptor soft limit from %s to %s", soft, desired
+    )

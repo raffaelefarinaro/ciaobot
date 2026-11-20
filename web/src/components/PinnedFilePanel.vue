@@ -1,9 +1,7 @@
 <template>
   <div class="pinned-file-panel" ref="rootEl">
-    <!-- No brand and no page tag: this header sits beside the main pane's in the
-         split view, and a second wordmark two inches away is the duplication the
-         mark was moved out of the sidebar to end. The filename is the title. -->
-    <PaneHeader :brand="false" @open-sidebar="$emit('close')">
+    <!-- No page tag: the filename is the title. -->
+    <PaneHeader @open-sidebar="$emit('close')">
       <template #title>
         <div class="header-left">
           <button

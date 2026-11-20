@@ -330,45 +330,6 @@ def test_skipped_dispatch_stamps_last_status_on_the_row(tmp_path: Path) -> None:
     assert stored.last_status == "skipped"
 
 
-def test_unsettled_subagents_stamp_unfinished_not_skipped(tmp_path: Path) -> None:
-    """A run whose background subagents never settled has no question or
-    approval waiting in its chat, so the row must not carry "skipped" (which
-    the Automations page renders as "needs you — check the chat"). The job-run
-    log keeps "skipped"; only the row status is split out."""
-    import asyncio
-
-    pcm, store = _dispatch_manager(tmp_path)
-    project = pcm.create_project("Holder", workspace="personal")
-    chat = pcm.create_chat(project.project_id, title="Daily brief", model="opus")
-    entry = store.create(
-        daily_time_utc="08:00",
-        prompt="brief",
-        model="opus",
-        mode="auto",
-        chat_id=0,
-        frequency="daily",
-        web_chat_id=chat.chat_id,
-        workspace="personal",
-    )
-    pcm.start_stream = _stream_stub(
-        [{"type": "result", "text": "Dispatched two agents", "is_error": False}]
-    )  # type: ignore[method-assign]
-
-    async def _unsettled(_chat_id: str, **_kw: object) -> tuple[bool, bool]:
-        return False, True
-
-    pcm._await_schedule_subagents = _unsettled  # type: ignore[method-assign]
-
-    result = asyncio.run(
-        pcm.dispatch_schedule(entry, entry.prompt, "opus", "auto", "claude")
-    )
-
-    assert result["status"] == "unfinished"
-    stored = store.get(entry.schedule_id)
-    assert stored is not None
-    assert stored.last_status == "unfinished"
-
-
 def _retry_dispatch(tmp_path: Path, kind: str) -> tuple[dict, object]:
     import asyncio
 
@@ -488,10 +449,11 @@ async def _switched_kind_turn(tmp_path: Path, *, error: bool) -> tuple[object, o
 
     async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         if error:
-            # Simulates the cap: the retry is gone by the time the turn ends.
-            pcm._clear_chat_retry(chat, status="stopped")
+            from ciao.web.project_chats import _MAX_CONNECTION_DROP_RETRIES
+
+            chat.retry_attempts = _MAX_CONNECTION_DROP_RETRIES
         yield ResultEvent(
-            type="result", result="boom" if error else "done", session_id="s",
+            type="result", result="API Error: Connection closed mid-response." if error else "done", session_id="s",
             is_error=error, effective_model=chat.model, usage={}, quota={},
             cost_usd=0.0,
         )

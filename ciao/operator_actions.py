@@ -345,8 +345,6 @@ def _run_provider_recheck(context: DetectionContext, provider: str) -> tuple[dic
         return {"state": state}, (
             f"{label} {check.get('installed', '')} is still older than {check.get('tested', '')}."
         )
-    if state == "bundled":
-        return {"state": state}, f"{label} is bundled with Ciaobot."
     if state == "unsupported":
         return {"state": state}, f"{label} is not compatible with this Ciaobot version."
     return {"state": state}, f"Could not verify {label}'s version."
@@ -454,6 +452,109 @@ def _detect_github_star(context: DetectionContext) -> list[OperatorAction]:
             dismiss_label="Later",
         )
     ]
+
+
+# -- Mac app switch ----------------------------------------------------------
+
+# Between a package update (30) and provider updates (40): it is a machine
+# condition of the install, but moving to the app is bigger than applying a
+# release, so it yields to the update tile and its own restart flow.
+_MAC_APP_SWITCH_SEVERITY = 35
+# "Not now" suppresses the ask for this long, then it may surface once more.
+MAC_APP_SWITCH_SNOOZE_DAYS = 30
+
+
+def _mac_switch_receipt_path(context: DetectionContext) -> Path | None:
+    runtime = context.runtime
+    if runtime is None:
+        return None
+    return Path(runtime) / "mac-app-switch-receipt.json"
+
+
+def _read_mac_switch_receipt(context: DetectionContext) -> dict[str, Any]:
+    path = _mac_switch_receipt_path(context)
+    if path is None:
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _write_mac_switch_receipt(context: DetectionContext, status: str) -> None:
+    path = _mac_switch_receipt_path(context)
+    if path is None:
+        return
+    now = context.now or datetime.now(UTC)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"status": status, "at": now.isoformat()}),
+            encoding="utf-8", newline="",
+        )
+    except OSError:
+        logger.exception("operator actions: could not write mac app switch receipt")
+
+
+def _detect_mac_app_switch(context: DetectionContext) -> list[OperatorAction]:
+    """A Mac install the 1.x installer set up should move into Ciaobot for Mac.
+
+    The condition lives on the engine, decided by
+    ``package_version.needs_mac_app_switch`` from where the engine is
+    installed: only an installer-managed engine on an Apple-silicon Mac emits
+    it, so a Linux engine, the app's bundled engine and a checkout never do.
+    Apple silicon only, because the 2.0 app runs a local engine there alone
+    (#3129) — an Intel Mac would download an app that cannot take over.
+
+    It is ask-shaped, not a fix, so it works like the star nudge: link-only
+    (the engine downloads and installs nothing), a shared "Not now" receipt
+    that snoozes every device for 30 days, and silence while the first-run
+    wizard is up. Remote viewers of the same engine see the row too, which the
+    copy says plainly: the install happens on the computer running Ciaobot.
+    """
+    if getattr(context.config, "bootstrap_mode", False):
+        return []
+    from ciao import package_version
+
+    # Called through the module attribute so tests can monkeypatch it.
+    if not package_version.needs_mac_app_switch():
+        return []
+    receipt = _read_mac_switch_receipt(context)
+    status = str(receipt.get("status", ""))
+    if status == "later":
+        try:
+            at = datetime.fromisoformat(str(receipt.get("at", "")))
+        except ValueError:
+            at = None
+        now = context.now or datetime.now(UTC)
+        if at is not None and now - at < timedelta(days=MAC_APP_SWITCH_SNOOZE_DAYS):
+            return []
+    return [
+        OperatorAction(
+            id="mac-app-switch",
+            kind="mac-app-switch",
+            severity=_MAC_APP_SWITCH_SEVERITY,
+            title="Switch to the new Ciaobot app",
+            # The row renders only the first line and it arrives ellipsised, so
+            # the reassurance leads: it survives the cut.
+            detail=(
+                "Your workspaces, chats and settings are kept. Install Ciaobot "
+                "for Mac on the computer running Ciaobot and it takes over from "
+                "this install."
+            ),
+            glyph="▲",
+            workspace="",
+            link_label="Download for Mac",
+            link_url=package_version.MAC_APP_DOWNLOAD_URL,
+            dismiss_label="Not now",
+        )
+    ]
+
+
+def _dismiss_mac_app_switch(context: DetectionContext) -> tuple[dict[str, Any], str]:
+    _write_mac_switch_receipt(context, "later")
+    return {"status": "later"}, "Hidden for 30 days."
 
 
 # -- vault location ----------------------------------------------------------
@@ -1211,9 +1312,7 @@ def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction
     `CIAO_WORKSPACES` gave way to the Settings-owned runtime registry. A variable that is set and silently
     ignored is worse than one that never existed: the operator believes a setting
     is in effect. The fix comments the lines out of `.env`, so it carries a run
-    button — the engine owns that file; the agent's credential denylist does not
-    reach it (``execution_modes.CREDENTIAL_DENY_PATTERNS`` denies `.env` to
-    every provider), which is why a chat alone could never clear the tile.
+    button — the engine owns `.env`; the tile's Remove button edits it.
     """
     stale = _stale_legacy_env(context.config)
     if not stale:
@@ -1237,9 +1336,8 @@ def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction
                 f"These variables in my `.env` are no longer read by the engine: "
                 f"{names}. For each one: "
                 + "; ".join(f"{name}: {hint}" for name, hint in stale)
-                + ". Do not try to read or edit `.env` — the sandbox denies it "
-                "to you, and the tile's own Remove button comments these lines "
-                "out. Explain what each variable used to control and where its "
+                + ". Do not edit `.env` yourself: the tile's Remove button "
+                "comments these lines out. Explain what each variable used to control and where its "
                 "setting lives now, and how I can check the current value (in "
                 "Settings, where it has one)."
             ),
@@ -1250,6 +1348,7 @@ def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction
 _DETECTORS: list[Callable[[DetectionContext], list[OperatorAction]]] = [
     _detect_workspace_unmigrated,
     _detect_package_update,
+    _detect_mac_app_switch,
     _detect_provider_updates,
     _detect_vault_vocabulary,
     _detect_unmigrated_links,
@@ -1305,6 +1404,8 @@ def dismiss_action(action_id: str, context: DetectionContext) -> tuple[dict[str,
         return _dismiss_provider_update(context, _provider_of(action_id))
     if action_id == "github-star":
         return _dismiss_github_star(context)
+    if action_id == "mac-app-switch":
+        return _dismiss_mac_app_switch(context)
     raise ValueError(f"unknown operator action id: {action_id}")
 
 
@@ -1432,11 +1533,8 @@ def _comment_out_env_lines(path: Path, keys: set[str]) -> list[str]:
 def _run_legacy_env_cleanup(context: DetectionContext) -> tuple[dict[str, Any], str]:
     """Comment the retired variables out of the workspace ``.env``.
 
-    The tile's chat prompt used to ask the agent to do this, but `.env` is a
-    credential-denied path for every provider
-    (``execution_modes.CREDENTIAL_DENY_PATTERNS``), so the write can never
-    happen there and the tile could never clear (#1134). The engine owns the
-    file, and the lines are inert — commenting them out changes no behaviour.
+    The engine owns `.env`, and the lines are inert — commenting them out
+    changes no behaviour.
 
     Also drops the keys from the running process, because server startup
     ``load_dotenv``ed them into ``os.environ`` and detection reads that; without

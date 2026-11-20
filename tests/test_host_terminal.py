@@ -14,20 +14,18 @@ from typing import Any
 
 import pytest
 
-from ciao import host_terminal, setup_status
-from ciao.providers import opencode
+from ciao import adapter_install, host_terminal, setup_status
+from ciao import opencode_cli as opencode
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class _Spawns:
     def __init__(self) -> None:
-        self.calls: list[tuple[list[str], Path, dict[str, str], int]] = []
+        self.calls: list[tuple[list[str], Path, dict[str, str]]] = []
 
-    def __call__(
-        self, argv: list[str], *, cwd: Path, env: dict[str, str], creationflags: int = 0
-    ) -> None:
-        self.calls.append((argv, cwd, env, creationflags))
+    def __call__(self, argv: list[str], *, cwd: Path, env: dict[str, str]) -> None:
+        self.calls.append((argv, cwd, env))
 
 
 def _setup(
@@ -50,10 +48,30 @@ def _setup(
     return spawns
 
 
+def test_claude_install_runs_the_cli_installer_then_the_adapter_when_no_cli_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "")
+    assert host_terminal.action_command("claude-install") == (
+        f"{setup_status.claude_install_command()} && {adapter_install.install_command(adapter_install.CLAUDE_ADAPTER)}"
+    )
+
+
+def test_claude_install_runs_only_the_adapter_when_the_cli_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "/Users/me/.local/bin/claude")
+    command = host_terminal.action_command("claude-install")
+    assert command == adapter_install.install_command(adapter_install.CLAUDE_ADAPTER)
+    assert setup_status.claude_install_command() not in command
+
+
 def test_actions_map_to_the_commands_ciaobot_already_shows(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The Windows claude-login form (`& '<path>' auth login`) has its own test.
     monkeypatch.setattr(host_terminal, "host_platform", lambda: host_terminal.PLATFORM_MACOS)
-    assert host_terminal.action_command("claude-install") == setup_status.claude_install_command()
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "")
+    assert host_terminal.action_command("claude-install") == (
+        f"{setup_status.claude_install_command()} && {adapter_install.install_command(adapter_install.CLAUDE_ADAPTER)}"
+    )
     assert host_terminal.action_command("claude-login") == setup_status.claude_auth_command(
         setup_status.claude_cli_path()
     )
@@ -63,7 +81,7 @@ def test_actions_map_to_the_commands_ciaobot_already_shows(monkeypatch: pytest.M
     assert host_terminal.action_command("skills-update") == host_terminal.SKILLS_UPDATE_COMMAND
     assert set(host_terminal.ACTION_IDS) == {
         "claude-install", "claude-login", "opencode-install",
-        "opencode-login", "gws-install", "skills-update",
+        "opencode-login", "codex-install", "codex-login", "gws-install", "skills-update",
         "opencode-update", "claude-update",
     }
     with pytest.raises(KeyError):
@@ -83,7 +101,7 @@ def test_update_actions_resolve_from_current_checks(
         lambda: {provider: {"state": "below_tested", "command": command}},
     )
     assert host_terminal.action_command(f"{provider}-update") == command
-    for state in ("current", "untested", "bundled", "unsupported", "unknown"):
+    for state in ("current", "untested", "unsupported", "unknown"):
         monkeypatch.setattr(
             provider_versions, "current_checks", lambda s=state: {provider: {"state": s}}
         )
@@ -93,12 +111,6 @@ def test_update_actions_resolve_from_current_checks(
     with pytest.raises(host_terminal.NothingToUpdate) as excinfo:
         host_terminal.action_command(f"{provider}-update")
     assert not isinstance(excinfo.value, (KeyError, LookupError))
-
-
-def test_ps_quote_doubles_every_powershell_quote_character() -> None:
-    assert host_terminal._ps_quote("C:\\Users\\o'brien") == "'C:\\Users\\o''brien'"
-    for ch in "\u2018\u2019\u201a\u201b":
-        assert host_terminal._ps_quote(f"a{ch}b") == f"'a{ch}{ch}b'"
 
 
 def test_frontend_copy_names_the_gws_install_command() -> None:
@@ -151,49 +163,6 @@ def test_macos_quotes_a_hostile_folder_name(monkeypatch: pytest.MonkeyPatch, tmp
     assert f"cd -- {shlex.quote(str(folder))} || exit 1" in text
     assert not any(line.startswith("cd -- ") and "'" not in line for line in text.splitlines())
     assert "\n$(x)" not in text
-
-
-def test_windows_prefers_windows_terminal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    spawns = _setup(monkeypatch, "win32", found={"wt", "powershell.exe"})
-    assert host_terminal.launch(tmp_path, action=None, runtime_dir=tmp_path) == "Windows Terminal"
-    argv, cwd, _env, flags = spawns.calls[0]
-    assert argv == ["/bin/wt", "-d", str(tmp_path)]
-    assert flags == 0x8 | 0x200
-    assert cwd == tmp_path
-
-
-def test_windows_terminal_runs_the_command_in_powershell(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    spawns = _setup(monkeypatch, "win32", found={"wt", "powershell.exe"})
-    monkeypatch.setattr(host_terminal, "SKILLS_UPDATE_COMMAND", "a; b")
-    host_terminal.launch(tmp_path, action="skills-update", runtime_dir=tmp_path)
-    argv = spawns.calls[0][0]
-    assert argv[-5:] == ["-NoExit", "-ExecutionPolicy", "RemoteSigned", "-Command", "a\\; b"]
-
-
-def test_windows_falls_back_to_a_powershell_console(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    spawns = _setup(monkeypatch, "win32", found={"powershell.exe"})
-    assert host_terminal.launch(tmp_path, action="gws-install", runtime_dir=tmp_path) == "PowerShell"
-    argv, cwd, _env, flags = spawns.calls[0]
-    assert argv[:2] == ["/bin/powershell.exe", "-NoExit"]
-    assert argv[-1] == host_terminal.GWS_INSTALL_COMMAND
-    assert flags == 0x10 | 0x200
-    assert cwd == tmp_path
-
-
-def test_windows_claude_login_uses_the_call_operator_for_a_full_path(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _setup(monkeypatch, "win32")
-    path = "C:\\Users\\O'Neil\\claude.exe"
-    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: path)
-    monkeypatch.setattr(setup_status, "claude_auth_command", lambda cli="": "whatever auth login")
-    assert host_terminal.action_command("claude-login") == "& 'C:\\Users\\O''Neil\\claude.exe' auth login"
-    monkeypatch.setattr(setup_status, "claude_auth_command", lambda cli="": "claude auth login")
-    assert host_terminal.action_command("claude-login") == "claude auth login"
 
 
 def test_linux_without_a_display_is_unavailable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -402,18 +371,6 @@ def test_resolve_folder_needs_an_id(tmp_path: Path) -> None:
         host_terminal.resolve_folder(_config(tmp_path), _Pcm({}, {}))
 
 
-def test_windows_terminal_escapes_a_semicolon_in_the_folder(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    spawns = _setup(monkeypatch, "win32", found={"wt", "powershell.exe"})
-    folder = tmp_path / "a;new-tab calc"
-    folder.mkdir()
-    host_terminal.launch(folder, action=None, runtime_dir=tmp_path)
-    argv, cwd, _env, _flags = spawns.calls[0]
-    assert argv == ["/bin/wt", "-d", str(folder).replace(";", "\\;")]
-    assert cwd == folder
-
-
 def test_macos_removes_the_script_when_the_spawn_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -461,7 +418,51 @@ def test_every_emitted_terminal_action_is_allowlisted(
     monkeypatch.setattr(opencode, "resolve_opencode_binary", lambda: "/bin/opencode")
     monkeypatch.setattr(opencode, "_credential_count", lambda *a, **k: 1)
     for error in ("too old", None):
-        monkeypatch.setattr(opencode, "_server_version_error", lambda _v, e=error: e)
+        monkeypatch.setattr(opencode, "cli_version_error", lambda _v, e=error: e)
         rows.append(opencode.opencode_login_status(inventory=False))
     actions = [row.get("terminal_action") for row in rows]
     assert all(action in host_terminal.ACTION_IDS for action in actions)
+
+
+def test_codex_actions_are_allowlisted_constants(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao.providers.acp import agents
+
+    assert "codex-install" in host_terminal.ACTION_IDS
+    assert "codex-login" in host_terminal.ACTION_IDS
+    # No codex resolves here (conftest), so the line installs the CLI and then the pinned adapter.
+    command = host_terminal.action_command("codex-install")
+    assert command == host_terminal.codex_install_command()
+    assert command.startswith(f"{adapter_install.CODEX_CLI_INSTALL} && ")
+    assert command.endswith(adapter_install.install_command(adapter_install.CODEX_ADAPTER))
+    assert "ciao.adapter_install codex-acp" in command
+    assert " -g " not in command.replace(adapter_install.CODEX_CLI_INSTALL, "")
+    monkeypatch.setattr(agents, "codex_binary", lambda: "/opt/tools/codex")
+    assert host_terminal.codex_install_command() == adapter_install.install_command(
+        adapter_install.CODEX_ADAPTER
+    )
+    monkeypatch.setattr(agents, "codex_binary", lambda: "/opt/tools/codex")
+    assert host_terminal.action_command("codex-login") == "/opt/tools/codex login"
+
+
+def test_codex_login_without_codex_is_not_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao.providers.acp import agents
+
+    monkeypatch.setattr(agents, "codex_binary", lambda: None)
+    with pytest.raises(host_terminal.NotInstalled):
+        host_terminal.action_command("codex-login")
+
+
+def test_launch_without_codex_refuses_before_spawning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.providers.acp import agents
+
+    spawns: list[list[str]] = []
+    monkeypatch.setattr(agents, "codex_binary", lambda: None)
+    monkeypatch.setattr(
+        host_terminal, "capabilities", lambda: host_terminal.Capabilities(True, "macos", terminal="Terminal")
+    )
+    monkeypatch.setattr(host_terminal, "_spawn", lambda argv, **_kw: spawns.append(argv))
+    with pytest.raises(host_terminal.NotInstalled):
+        host_terminal.launch(tmp_path, action="codex-login", runtime_dir=tmp_path / ".runtime")
+    assert spawns == []

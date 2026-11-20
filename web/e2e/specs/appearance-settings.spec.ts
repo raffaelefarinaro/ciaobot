@@ -47,15 +47,21 @@ test.describe('Settings › Appearance', () => {
     await expect.poll(() => fg(page)).toBe('#e8e8f0')
   })
 
-  test('shows the supplied wordmark in both themes', async ({ page }) => {
+  test('shows the vector brand mark with theme ink and accent dots', async ({ page }) => {
     await boot(page, '/settings/appearance', SETTINGS)
-    const brand = page.getByRole('button', { name: 'Reload Ciaobot' })
-    await page.getByRole('radio', { name: 'Light', exact: true }).click()
-    await expect(brand.locator('.brand-logo--light')).toBeVisible()
-    await expect(brand.locator('.brand-logo--dark')).toBeHidden()
-    await page.getByRole('radio', { name: 'Dark', exact: true }).click()
-    await expect(brand.locator('.brand-logo--dark')).toBeVisible()
-    await expect(brand.locator('.brand-logo--light')).toBeHidden()
+    const brand = page.locator('.sidebar-brand[role="img"]')
+    for (const [theme, color] of [['Light', 'rgb(26, 26, 46)'], ['Dark', 'rgb(232, 232, 240)']]) {
+      await page.getByRole('radio', { name: theme, exact: true }).click()
+      await expect(brand).toBeVisible()
+      await expect(brand).toHaveAttribute('aria-label', 'Ciaobot')
+      await expect(brand).toHaveCSS('width', '30px')
+      await expect(brand).toHaveCSS('height', '30px')
+      await expect(brand.locator('svg path')).toHaveAttribute('stroke', 'currentColor')
+      await expect(brand).toHaveCSS('color', color)
+      await expect(brand.locator('svg circle').first()).toHaveAttribute('fill', 'var(--accent)')
+      await expect(brand.locator('svg circle').last()).toHaveAttribute('fill', 'var(--accent)')
+      await expect(page.getByRole('button', { name: 'Reload Ciaobot' })).toHaveCount(0)
+    }
   })
 
   test('body font follows the choice and code stays monospace', async ({ page }) => {

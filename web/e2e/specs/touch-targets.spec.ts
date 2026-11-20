@@ -408,9 +408,6 @@ test.describe('touch targets', () => {
     await page.route('**/api/package/status', (route) => route.fulfill({ json: {
       current_version: '1.1.0', latest_version: '1.2.0', update_available: true, mode: 'installer',
     } }))
-    await page.route('**/api/update/status', (route) => route.fulfill({ json: {
-      install_mode: 'installer', can_update: true, operation: null, running: false,
-    } }))
   })
 
   test('touch emulation is a coarse pointer', async ({ page }) => {
@@ -486,6 +483,88 @@ test.describe('touch targets', () => {
     const found = await measure(page, '#chat-work-rail .chat-repo-section')
     expect(found.total, 'no controls measured in the Repository section').toBeGreaterThan(0)
     expect(found.bad, `controls under ${TOUCH_MIN}px:\n${found.bad.join('\n')}`).toEqual([])
+  })
+
+  test('chat model picker keeps permission controls reachable in constrained viewports', async ({ page }) => {
+    await ensureCoarsePointer(page)
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    await page.locator('.model-picker-wrap.composer-model .composer-chip').click()
+    const popup = page.locator('.model-selector__popover')
+    await expect(popup).toBeVisible()
+    await quiesce(page)
+
+    async function checkModeButton(name: string) {
+      const button = popup.locator('.permission-modes__choices').getByRole('button', { name: new RegExp(name) })
+      await button.scrollIntoViewIfNeeded()
+      await expect(button).toBeVisible()
+      await expect(button).toBeInViewport()
+      const geometry = await button.evaluate(el => {
+        const rect = el.getBoundingClientRect()
+        const footer = el.closest<HTMLElement>('.model-selector__footer')!.getBoundingClientRect()
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+        return {
+          width: rect.width,
+          height: rect.height,
+          withinFooter: rect.top >= footer.top && rect.bottom <= footer.bottom,
+          hit: !!hit && (hit === el || el.contains(hit)),
+        }
+      })
+      expect(geometry.width).toBeGreaterThanOrEqual(TOUCH_MIN)
+      expect(geometry.height).toBeGreaterThanOrEqual(TOUCH_MIN)
+      expect(geometry.withinFooter).toBe(true)
+      expect(geometry.hit).toBe(true)
+    }
+
+    await page.setViewportSize({ width: 1280, height: 900 })
+    const desktopFooter = popup.locator('.model-selector__footer')
+    const desktopFooterMetrics = await desktopFooter.evaluate(el => ({ height: el.clientHeight, scrollHeight: el.scrollHeight }))
+    expect(desktopFooterMetrics.scrollHeight).toBeLessThanOrEqual(desktopFooterMetrics.height)
+    for (const name of ['Manual', 'Auto', 'Bypass', 'Plan']) {
+      await checkModeButton(name)
+      await expect(
+        popup.locator('.permission-modes__choices').getByRole('button', { name: new RegExp(name) }).locator('.permission-mode__description'),
+      ).toBeInViewport()
+    }
+    for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }]) {
+      await page.setViewportSize(viewport)
+      await expect(popup).toBeVisible()
+      const listbox = popup.locator('.model-selector__listbox')
+      const list = popup.locator('.model-selector__list')
+      const footer = popup.locator('.model-selector__footer')
+      await expect(listbox).toBeVisible()
+      await expect(list).toBeVisible()
+      await expect(footer).toBeVisible()
+      await expect(popup.locator('.model-selector__search')).toBeVisible()
+      expect(await listbox.evaluate(el => getComputedStyle(el).overflowY)).toBe('visible')
+      expect(await list.evaluate(el => getComputedStyle(el).overflowY)).toBe('auto')
+      expect(await footer.evaluate(el => getComputedStyle(el).overflowY)).toBe('auto')
+      if (viewport.height <= 600) {
+        expect(await footer.evaluate(el => getComputedStyle(el).scrollbarWidth)).toBe('thin')
+      }
+      const footerScrollBeforeList = await footer.evaluate(el => el.scrollTop)
+      await list.evaluate(el => { el.scrollTop = el.scrollHeight })
+      await expect(popup.locator('.model-selector__item').last()).toBeInViewport()
+      const listScrollAfterList = await list.evaluate(el => el.scrollTop)
+      expect(listScrollAfterList).toBeGreaterThan(0)
+      expect(await footer.evaluate(el => el.scrollTop)).toBe(footerScrollBeforeList)
+      const listScrollBeforeFooter = await list.evaluate(el => el.scrollTop)
+      await footer.evaluate(el => { el.scrollTop = el.scrollHeight })
+      const footerScrollAfterFooter = await footer.evaluate(el => el.scrollTop)
+      const footerMetrics = await footer.evaluate(el => ({ height: el.clientHeight, scrollHeight: el.scrollHeight }))
+      if (footerMetrics.scrollHeight > footerMetrics.height) expect(footerScrollAfterFooter).toBeGreaterThan(0)
+      expect(await list.evaluate(el => el.scrollTop)).toBe(listScrollBeforeFooter)
+      for (const name of ['Manual', 'Auto', 'Bypass', 'Plan']) await checkModeButton(name)
+      await expect(popup).toBeInViewport()
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+      expect(await popup.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
+    }
+
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.evaluate(() => { document.documentElement.style.zoom = '200%' })
+    await expect(popup).toBeVisible()
+    for (const name of ['Manual', 'Auto', 'Bypass', 'Plan']) await checkModeButton(name)
+    expect(await popup.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
   })
 
   for (const [route, ready] of POPUP_SURFACES) {

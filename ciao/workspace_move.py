@@ -3,7 +3,7 @@
 The install workspace (``CIAO_WORKSPACE``: ``.env``, ``.runtime/``, the vault,
 skills, the agent roots) cannot be moved by editing ``.env``: the engine finds
 ``.env`` *inside* the workspace, and the service definition (the LaunchAgent on
-macOS, the logon task on Windows) is what names the folder. A move therefore
+macOS, the systemd unit on Linux) is what names the folder. A move therefore
 has to stop the engine, rename the folder, repair what recorded the old
 absolute path, repoint the service definition and start the engine again —
 and the engine cannot do that to itself while it runs.
@@ -13,8 +13,8 @@ So the work is split the way an engine update is:
 * :func:`plan` is read-only. It answers whether a move to ``target`` is safe
   and what the operator should know first. The CLI prints it; the PWA shows it.
 * :func:`start` records an operation outside the workspace and hands it to a
-  one-shot job that is a *sibling* of the engine's own service (a launchd job,
-  a Task Scheduler task), so stopping the engine cannot take the move with it.
+  one-shot job that is a *sibling* of the engine's own service (a launchd job),
+  so stopping the engine cannot take the move with it.
   The CLI's ``--apply`` and the Settings button both call it.
 * :func:`run_move` is that job: drain, stop, rename, rewrite, repoint, start,
   verify — and on any failure after the rename, put everything back and start
@@ -49,6 +49,7 @@ from typing import IO, Any, Callable, Protocol
 
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.os_support.private import make_private, mkstemp_private
+from ciao.os_support.processes import isolated_probe_flags
 from ciao.server_host import (
     MOVE_HOST_PROTOCOL,
     HostOwnership,
@@ -61,8 +62,6 @@ OPERATION_NAME = "operation.json"
 LOCK_NAME = "move.lock"
 JOB_LABEL = "com.ciao.workspace-move"
 JOB_PLIST_NAME = f"{JOB_LABEL}.plist"
-JOB_TASK_NAME = r"\Ciaobot\WorkspaceMove"
-JOB_TASK_FILE = "Ciaobot-WorkspaceMove.xml"
 JOB_LOG_NAME = "workspace-move.log"
 DEFINITION_BACKUP_PREFIX = "service-definition"
 LINUX_UNIT = "ciaobot.service"
@@ -121,7 +120,7 @@ _PRE_MOVE_PHASES = frozenset({"queued", "draining", "stopping"})
 _LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 GetJson = Callable[[str], "dict[str, Any] | None"]
-PostJson = Callable[[str], "dict[str, Any]"]
+PostJson = Callable[[str, "dict[str, Any] | None"], "dict[str, Any]"]
 Sleep = Callable[[float], None]
 Clock = Callable[[], float]
 
@@ -173,6 +172,14 @@ class ServiceDefinition(Protocol):
 
 def default_state_dir() -> Path:
     """Beside the update state: outside every workspace, so it survives the move."""
+    from ciao import package_version
+
+    if package_version.running_from_app_bundle():
+        # The app-mode engine has no install receipt to hang the record beside
+        # (and no LaunchAgent at all): the app-owned engine state dir holds it.
+        from ciao import app_engine
+
+        return app_engine.state_dir() / "workspace-move"
     from ciao.engine_update import default_state_dir as update_state_dir
 
     return update_state_dir().parent / "workspace-move"
@@ -193,6 +200,12 @@ class MoveOperation:
     #: named in ``error`` and the job exits with ``ACCESS_DENIED_EXIT``.
     denied: bool = False
     startup_exit_code: int | None = None
+    #: Performed by the app-mode engine (``workspace_move_app.before_boot``),
+    #: never by a launchd job. Defaults off so 1.x records still parse.
+    app: bool = False
+    #: The pointer's runtime root before the move (app mode only), so a rollback
+    #: can repoint the record it came from. Defaults empty for the same reason.
+    runtime_root: str = ""
 
 
 def _now() -> str:
@@ -206,6 +219,25 @@ def read_operation(state_dir: Path | None = None) -> MoveOperation | None:
         parsed: Any = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    return _parse_operation(parsed)
+
+
+def read_operation_strict(state_dir: Path) -> MoveOperation | None:
+    """The record at ``state_dir``, read as strictly as the workspace pointer.
+
+    Used where the record drives a rename (app mode): the file must be this
+    user's own ``0o600`` regular file, not a symlink, and bounded in size —
+    anything else reads as "no record", never as an instruction.
+    """
+    from ciao import app_engine
+
+    parsed = app_engine.read_private_json(
+        state_dir / OPERATION_NAME, label="the workspace move record"
+    )
+    return _parse_operation(parsed)
+
+
+def _parse_operation(parsed: Any) -> MoveOperation | None:
     if not isinstance(parsed, dict) or parsed.get("phase") not in PHASES:
         return None
     try:
@@ -225,6 +257,8 @@ def read_operation(state_dir: Path | None = None) -> MoveOperation | None:
                 if parsed.get("startup_exit_code") is not None
                 else None
             ),
+            app=parsed.get("app") is True,
+            runtime_root=str(parsed.get("runtime_root", "")),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -232,6 +266,15 @@ def read_operation(state_dir: Path | None = None) -> MoveOperation | None:
 
 def write_operation(op: MoveOperation, state_dir: Path | None = None) -> None:
     root = state_dir or default_state_dir()
+    if op.app:
+        # An app-mode record drives a rename, and `read_operation_strict`
+        # refuses anything but this user's own `0o600`, ACL-free file: write
+        # it with the same verified writer the workspace pointer uses, so a
+        # record this process writes is always one it can read back.
+        from ciao import app_engine
+
+        app_engine.write_private_json(root / OPERATION_NAME, asdict(op))
+        return
     root.mkdir(parents=True, exist_ok=True)
     _write_text_atomic(root / OPERATION_NAME, json.dumps(asdict(op), indent=2) + "\n", private=True)
 
@@ -266,7 +309,7 @@ def _age_seconds(stamp: str) -> float:
 def abandoned(op: MoveOperation | None, state_dir: Path | None = None) -> bool:
     """An in-flight record no job is working on: the job crashed, or the machine
     rebooted under it. A queued record gets a grace period, because the job takes
-    the lock only once launchd or Task Scheduler has started it."""
+    the lock only once launchd has started it."""
     if not in_flight(op):
         return False
     assert op is not None
@@ -287,7 +330,7 @@ def _keep_owner(path: Path, like: Path, *, follow: bool = True) -> None:
     the service account; a file root rewrote would otherwise become one the
     engine can no longer write.
     """
-    if sys.platform == "win32" or not _running_as_root():
+    if not _running_as_root():
         return
     try:
         st = like.stat()
@@ -300,7 +343,7 @@ def _keep_owner(path: Path, like: Path, *, follow: bool = True) -> None:
 
 
 def _keep_owner_tree(root: Path, like: Path) -> None:
-    if sys.platform == "win32" or not _running_as_root():
+    if not _running_as_root():
         return
     try:
         st = like.stat()
@@ -377,6 +420,7 @@ def plan(
     service_can_reach: Callable[[Path], bool] | None = None,
     state_dir: Path | None = None,
     host: HostOwnership | None = None,
+    app_mode: bool = False,
 ) -> MovePlan:
     """Whether ``source`` can move to ``target_raw``, and what to know first.
 
@@ -388,12 +432,18 @@ def plan(
     is none. The move job runs under that host, so a macOS folder grant the
     user gave the host covers the move too; without a host the job is a bare
     interpreter macOS never prompts for, and a protected folder stays refused.
+
+    ``app_mode`` is the Ciaobot-for-Mac engine moving its own folder: it runs
+    under the app, so there is no detached job and no host to verify, a
+    protected folder warns instead of refusing (a denial is probed before the
+    rename and undone, see ``ciao.workspace_move_app``), and the refusals
+    name the app's setup rather than the service's.
     """
     platform = platform or sys.platform
     source = source.expanduser().resolve()
     raw = target_raw.strip()
     result = MovePlan(source=str(source), target=raw)
-    if platform not in ("darwin", "win32") and not platform.startswith("linux"):
+    if platform != "darwin" and not platform.startswith("linux"):
         result.refusals.append(f"Moving the workspace is not supported on {platform}.")
         return result
     if platform.startswith("linux") and not (_running_as_root() if admin is None else admin):
@@ -466,7 +516,19 @@ def plan(
             protected = tcc_protected_location(path)
             if not protected:
                 continue
-            if through_host:
+            if app_mode:
+                # The engine itself moves the folder as Ciaobot.app's child, so
+                # macOS attributes the access to Ciaobot for Mac. The move
+                # probes the destination before anything is renamed and the
+                # boot-side rollback undoes a denied move, so a refusal would
+                # protect nothing the rollback does not already (the
+                # maintainer's warn-but-undo answer for the app).
+                result.warnings.append(
+                    f"The {label} is inside ~/{protected}. macOS may ask Ciaobot "
+                    f"for access to your {protected} folder; if access is "
+                    "denied, the move is undone."
+                )
+            elif through_host:
                 result.warnings.append(
                     f"The {label} is inside ~/{protected}. The move runs as the Ciaobot "
                     f"Server app. macOS may require access to your {protected} folder; "
@@ -483,6 +545,12 @@ def plan(
         result.refusals.append(
             f"No Ciaobot unit names a workspace in {LINUX_UNIT_DIR / LINUX_UNIT}, so there is "
             "nothing to repoint. Install it as docs/LINUX.md describes."
+        )
+    elif registered is None and app_mode:
+        # The app-mode engine repoints the app-owned pointer, not a service
+        # definition: nothing recorded means setup has not finished.
+        result.refusals.append(
+            "Ciaobot for Mac has no workspace recorded yet. Finish setup first."
         )
     elif registered is None:
         result.refusals.append(
@@ -501,11 +569,15 @@ def plan(
     if update_in_flight:
         result.refusals.append("An engine update is in progress. Try again when it has finished.")
     if not engine_running:
-        # The job drains running chats through the engine before it stops it,
-        # so a stopped engine is a refusal rather than a mid-move failure.
-        result.refusals.append(
-            "Ciaobot is not running. Start it with `ciao service start`, then move it."
-        )
+        # The detached job drains running chats through the engine before it
+        # stops it, and the app-mode engine IS the mover, so a stopped engine
+        # is a refusal rather than a mid-move failure.
+        if app_mode:
+            result.refusals.append("Ciaobot is not running. Open Ciaobot, then move it.")
+        else:
+            result.refusals.append(
+                "Ciaobot is not running. Start it with `ciao service start`, then move it."
+            )
     previous = read_operation(state_dir)
     if in_flight(previous):
         assert previous is not None
@@ -537,8 +609,6 @@ def plan(
         schedules: Any = json.loads((source / ".runtime" / "schedules.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         schedules = None
-    # Searched in the parsed values, not the raw text: JSON escapes the
-    # backslashes of a Windows path.
     if _mentions(schedules, str(source)):
         result.warnings.append(
             "Some automation prompts mention the old folder by path. Edit them after the move."
@@ -678,7 +748,7 @@ def rekey_vault_receipts(migration_dir: Path) -> list[str]:
 
 
 def relink_symlinks(root: Path, old: str, new: str) -> int:
-    """Repoint links under ``root`` (symlinks; junctions on Windows) that name ``old``."""
+    """Repoint symlinks under ``root`` that name ``old``."""
     from ciao.os_support import links
 
     count = 0
@@ -828,71 +898,6 @@ class MacServiceDefinition:
             raise MoveError(f"cannot rewrite {self.path}")
 
 
-class WindowsServiceDefinition:
-    """The engine logon task's XML, re-registered after every change."""
-
-    def __init__(self, path: Path | None = None) -> None:
-        from ciao import windows_service
-
-        self.path = path or windows_service.live_task_dir() / windows_service.TASK_FILE_NAME
-
-    def workspace(self) -> Path | None:
-        from ciao import windows_service
-
-        try:
-            if not windows_service.task_exists():
-                return None
-        except windows_service.WindowsServiceError:
-            return None
-        return windows_service.task_workspace(self.path)
-
-    def backup(self, dest: Path) -> None:
-        shutil.copy2(self.path, dest)
-
-    def repoint(self, old: Path, new: Path) -> None:
-        from xml.sax.saxutils import escape
-
-        from ciao import windows_service
-
-        xml = self.path.read_bytes().decode("utf-16")
-        current = windows_service.task_workspace(self.path)
-        if current is None:
-            raise MoveError(f"{self.path} names no working directory")
-        updated = rewrite_prefix(str(current), str(old), str(new))
-        rewritten = xml.replace(
-            f"<WorkingDirectory>{escape(str(current))}</WorkingDirectory>",
-            f"<WorkingDirectory>{escape(updated)}</WorkingDirectory>",
-        )
-        if updated == str(current) or rewritten == xml:
-            raise MoveError(f"could not repoint the working directory in {self.path}")
-        self.path.write_bytes(rewritten.encode("utf-16"))
-        windows_service.register_task(self.path)
-
-    def restore(self, backup: Path) -> None:
-        from ciao import windows_service
-
-        shutil.copy2(backup, self.path)
-        windows_service.register_task(self.path)
-
-    def preflight(self) -> None:
-        """Re-register the unchanged task: the one way to learn it may be changed.
-
-        A task registered from an elevated shell can only be changed by an
-        elevated process, and the move job runs at the user's normal integrity
-        level; `schtasks /Create /F` then answers "Access is denied".
-        """
-        from ciao import windows_service
-
-        try:
-            windows_service.register_task(self.path)
-        except windows_service.WindowsServiceError as exc:
-            raise MoveError(
-                f"Windows refused to update the Ciaobot logon task ({exc}). It was probably "
-                "registered from an elevated shell; re-run setup from a normal PowerShell, "
-                "then move again."
-            ) from exc
-
-
 class LinuxServiceDefinition:
     """The root-installed systemd unit (docs/LINUX.md), reloaded after every change."""
 
@@ -948,8 +953,6 @@ class LinuxServiceDefinition:
         value = self._environment("HOME")
         if value:
             return Path(value)
-        if sys.platform == "win32":
-            return None
         import pwd
 
         user = self.user()
@@ -1020,6 +1023,21 @@ def _completed_detail(completed: Any) -> str:
     return str(getattr(completed, "stderr", "") or getattr(completed, "stdout", "") or "").strip()
 
 
+def _dotenv_port(workspace: Path) -> int:
+    """The port recorded in ``workspace``'s ``.env``, else the default one.
+
+    Read through the one helper both service definitions and the app-mode
+    pointer answer agree on: the port the engine serves is the workspace's own.
+    """
+    from ciao.macos_service import read_dotenv
+
+    raw = read_dotenv(workspace / ".env").get("PWA_PORT", "").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return 8443
+
+
 class LinuxEngineHost:
     """``systemctl`` for the engine's unit; the port from the workspace ``.env``."""
 
@@ -1028,13 +1046,7 @@ class LinuxEngineHost:
         self._systemctl = systemctl or _systemctl
 
     def engine_port(self) -> int:
-        from ciao.macos_service import read_dotenv
-
-        raw = read_dotenv(self._workspace / ".env").get("PWA_PORT", "").strip()
-        try:
-            return int(raw)
-        except ValueError:
-            return 8443
+        return _dotenv_port(self._workspace)
 
     def start_engine(self) -> Any:
         completed = self._systemctl("start", LINUX_UNIT)
@@ -1048,8 +1060,6 @@ class LinuxEngineHost:
 
 
 def current_service_definition() -> ServiceDefinition:
-    if sys.platform == "win32":
-        return WindowsServiceDefinition()
     if sys.platform.startswith("linux"):
         return LinuxServiceDefinition()
     return MacServiceDefinition()
@@ -1075,6 +1085,17 @@ def start(
     spawn: Callable[[MoveOperation, Path], None] | None = None,
 ) -> MoveOperation:
     """Record the move and start the job that performs it. Raises ``MoveError``."""
+    from ciao import package_version
+
+    if package_version.running_from_app_bundle():
+        # Defence in depth: in app mode there is no launchd job and no service
+        # definition to repoint — the engine performs the move itself in the
+        # gap of its exec restart (ciao.workspace_move_app, whose move route
+        # records through `record`, never through this).
+        raise MoveError(
+            "In Ciaobot for Mac the engine moves the workspace itself; "
+            "use workspace_move_app."
+        )
     if not move_plan.ok:
         raise MoveError(" ".join(move_plan.refusals))
     root = state_dir or default_state_dir()
@@ -1175,7 +1196,7 @@ def _job_argv(op: MoveOperation, state_dir: Path, host: HostOwnership | None = N
             ) from exc
     return [
         op.python,
-        "-I",
+        *isolated_probe_flags(),
         "-m",
         "ciao.workspace_move",
         "run",
@@ -1195,9 +1216,7 @@ def spawn_job(op: MoveOperation, state_dir: Path) -> None:
     otherwise kill it past every rollback, leaving the engine drained or
     stopped and the folder half-moved.
     """
-    if sys.platform == "win32":
-        _spawn_windows_job(op, state_dir)
-    elif sys.platform.startswith("linux"):
+    if sys.platform.startswith("linux"):
         import signal
 
         previous = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGINT, signal.SIGHUP)}
@@ -1256,29 +1275,6 @@ def _spawn_mac_job(op: MoveOperation, state_dir: Path) -> None:
         raise MoveError(detail or "launchctl bootstrap failed")
 
 
-def _spawn_windows_job(op: MoveOperation, state_dir: Path) -> None:
-    from ciao import windows_service
-
-    argv = _job_argv(op, state_dir)
-    xml = windows_service._update_job_xml(
-        task_name=JOB_TASK_NAME,
-        description="Moves the Ciaobot workspace folder, then exits.",
-        triggers="",
-        python=windows_service.windowless_python(argv[0]),
-        arguments=argv[1:],
-        # Never the workspace: Windows refuses to rename a folder that is
-        # some process's working directory.
-        workdir=str(state_dir),
-        user=windows_service.current_user(),
-    )
-    definition = state_dir / JOB_TASK_FILE
-    definition.write_bytes(xml.encode("utf-16"))
-    windows_service.register_task(definition, JOB_TASK_NAME)
-    completed = windows_service._schtasks("/Run", "/TN", JOB_TASK_NAME)
-    if completed.returncode != 0:
-        raise MoveError((completed.stderr or completed.stdout or "").strip() or "schtasks /Run failed")
-
-
 # ── the detached job ─────────────────────────────────────────────────
 
 
@@ -1291,11 +1287,28 @@ def _get_json(url: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _post_json(url: str) -> dict[str, Any]:
-    request = urllib.request.Request(url, method="POST", data=b"")
+def _post_json(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    data = b"" if body is None else json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(url, method="POST", data=data)
     with _LOCAL_OPENER.open(request, timeout=_DRAIN_REQUEST_TIMEOUT) as response:
         parsed: Any = json.loads(response.read().decode("utf-8"))
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _schedule_work_idle(body: dict[str, Any]) -> bool:
+    """True when the drain answer reports no scheduled work.
+
+    An engine that does not report ``schedule_work_count`` predates it and
+    cannot say whether scheduled work is running, so that is a refusal, never
+    "idle": update that engine from Settings first.
+    """
+    count = body.get("schedule_work_count")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise MoveError(
+            "the running engine does not report scheduled work, so it cannot be "
+            "drained safely from here; update it from Settings, then move again"
+        )
+    return count == 0
 
 
 def _no_answer(step: str) -> str:
@@ -1315,10 +1328,14 @@ def _http_error_detail(exc: urllib.error.HTTPError) -> str:
     return f": {error}" if isinstance(error, str) else ""
 
 
-def _drain_request(post: PostJson, url: str, step: str) -> dict[str, Any]:
-    """POST one drain-handshake request, failing with a reason that names ``step``."""
+def _drain_request(post: PostJson, url: str, step: str, owner: str) -> dict[str, Any]:
+    """POST one drain-handshake request, failing with a reason that names ``step``.
+
+    ``owner`` is this move's operation id; the engine refuses a drain request
+    that names none.
+    """
     try:
-        return post(url)
+        return post(url, {"owner": owner})
     except urllib.error.HTTPError as exc:
         raise MoveError(
             f"the running engine refused the {step} (HTTP {exc.code}{_http_error_detail(exc)})"
@@ -1345,6 +1362,11 @@ def _server_lock_held(workspace: Path) -> bool:
     runtime = Path(runtime_raw).expanduser() if runtime_raw else workspace / ".runtime"
     if not runtime.is_absolute():
         runtime = workspace / runtime
+    return _runtime_lock_held(runtime)
+
+
+def _runtime_lock_held(runtime: Path) -> bool:
+    """Whether a process holds the ``server.lock`` under runtime root ``runtime``."""
     try:
         handle = (runtime / "server.lock").open("rb")
     except OSError:
@@ -1390,7 +1412,7 @@ def _is_privacy_denial(exc: BaseException, platform: str | None = None) -> bool:
     )
 
 
-def _record_denied_folder(folder: Path) -> str:
+def _record_denied_folder(folder: Path, *, app: bool = False) -> str:
     """Record a macOS privacy denial of ``folder`` and name it for the operator.
 
     The move runs under the branded host, so a folder the user answered
@@ -1398,14 +1420,25 @@ def _record_denied_folder(folder: Path) -> str:
     recorded through the same machinery the engine's own probe uses, where
     ``ciao service status`` reads it, and the move's own record names the
     folder and the place to allow it.
+
+    In app mode the move is performed by the engine inside Ciaobot.app
+    itself, so the app names the folder and the app's own grant is the one
+    to allow.
     """
     from ciao.workspace_access import record_denial
 
-    message = (
-        f"macOS denied Ciaobot Server access to {folder}: allow it in System Settings "
-        "→ Privacy & Security → Files and Folders (Ciaobot Server), then move the "
-        "workspace again."
-    )
+    if app:
+        message = (
+            f"macOS denied Ciaobot access to {folder}: allow it in System Settings "
+            "→ Privacy & Security → Files and Folders (Ciaobot), then move the "
+            "workspace again."
+        )
+    else:
+        message = (
+            f"macOS denied Ciaobot Server access to {folder}: allow it in System Settings "
+            "→ Privacy & Security → Files and Folders (Ciaobot Server), then move the "
+            "workspace again."
+        )
     record_denial(message)
     return message
 
@@ -1454,6 +1487,7 @@ def run_move(
     """Perform ``op``: the detached half. Returns the final record."""
     source, target = Path(op.source), Path(op.target)
     base = f"http://localhost:{op.port or host.engine_port()}"
+    owner = f"move-{op.id}"
     backup = state_dir / f"{DEFINITION_BACKUP_PREFIX}-{op.id}"
 
     def advance(phase: str, error: str = "") -> None:
@@ -1506,7 +1540,7 @@ def run_move(
     def reopen() -> str:
         """Re-admit turns. ``""`` on success, else why the cancel did not land."""
         try:
-            _drain_request(post, f"{base}/api/admin/drain/cancel", "drain cancel")
+            _drain_request(post, f"{base}/api/admin/drain/cancel", "drain cancel", owner)
         except Exception as exc:  # noqa: BLE001 — best effort; never raises
             return str(exc) or exc.__class__.__name__
         return ""
@@ -1528,8 +1562,8 @@ def run_move(
         deadline = clock() + _DRAIN_TIMEOUT
         idle = 0
         while idle < _IDLE_POLLS_REQUIRED:
-            body = _drain_request(post, f"{base}/api/admin/drain", "drain status poll")
-            idle = 0 if body.get("active_chat_ids") else idle + 1
+            body = _drain_request(post, f"{base}/api/admin/drain", "drain status poll", owner)
+            idle = 0 if body.get("active_chat_ids") or not _schedule_work_idle(body) else idle + 1
             if idle >= _IDLE_POLLS_REQUIRED:
                 break
             if clock() >= deadline:
@@ -1578,9 +1612,7 @@ def run_move(
         rekey_claude_json(str(source), str(target), home=claude_home)
         advance("repointing")
         service.backup(backup)
-        # Restored on any failure from here on: a repoint can fail after it has
-        # already rewritten the definition (Windows writes the XML, then
-        # registers it).
+        # Restored on any failure from here on: a repoint can fail after it has already rewritten the definition.
         backed_up = True
         service.repoint(source, target)
         advance("starting")
@@ -1627,8 +1659,6 @@ def run_move(
                 errors.append(f"restoring the service definition: {rollback_exc}")
         if moved:
             try:
-                # Rename first: on Windows a file link is a hard link and a
-                # directory link a junction, and both need their target to exist.
                 os.rename(target, source)
             except Exception as rollback_exc:  # noqa: BLE001
                 errors.append(f"moving the folder back: {rollback_exc}")
@@ -1668,6 +1698,17 @@ def run_move(
 
 
 def registered_workspace() -> Path | None:
+    """The workspace this engine is registered to serve, or ``None``."""
+    from ciao import package_version
+
+    if package_version.running_from_app_bundle():
+        # The app owns the workspace pointer. In app mode the LaunchAgent
+        # plist is never read (and never written), so no service definition
+        # is constructed here at all.
+        from ciao.app_engine import read_pointer
+
+        pointer = read_pointer()
+        return pointer.workspace if pointer is not None else None
     return current_service_definition().workspace()
 
 
@@ -1679,6 +1720,12 @@ def update_in_flight() -> bool:
 
 
 def engine_port() -> int:
+    from ciao import package_version
+
+    if package_version.running_from_app_bundle():
+        # In app mode there is no update host to ask: the pointer names the
+        # workspace and the workspace's own `.env` names the port.
+        return _dotenv_port(registered_workspace() or Path("."))
     workspace = registered_workspace() or Path(".")
     return current_engine_host(workspace).engine_port()
 
@@ -1711,6 +1758,9 @@ def _linux_service_can_reach() -> Callable[[Path], bool] | None:
 
 def plan_for(source: Path, target_raw: str) -> MovePlan:
     """:func:`plan` with this machine's service, engine, update and move state."""
+    from ciao import package_version
+
+    app_mode = package_version.running_from_app_bundle()
     result = plan(
         source,
         target_raw,
@@ -1720,8 +1770,22 @@ def plan_for(source: Path, target_raw: str) -> MovePlan:
         service_can_reach=_linux_service_can_reach(),
         # The move job runs under this machine's verified host, so the plan
         # knows whether a protected folder can be moved into or out of (#1658).
-        host=_verified_host_if_installed(),
+        # In app mode there is no host and no detached job: the engine is the
+        # mover, and a protected folder warns instead of refusing.
+        host=None if app_mode else _verified_host_if_installed(),
+        app_mode=app_mode,
     )
+    if app_mode:
+        # A takeover that has not finished may still be rewriting the very
+        # folders a move would rename. Private read of the journal; S4b owns
+        # mac_takeover.py, so nothing there is edited from here.
+        from ciao import mac_takeover
+
+        if mac_takeover._unfinished_journal():
+            result.refusals.append(
+                "Ciaobot is still moving your existing install into the app. "
+                "Try again once it has finished."
+            )
     if sys.platform.startswith("linux"):
         for conf in LinuxServiceDefinition().drop_ins_naming(source.expanduser().resolve()):
             result.refusals.append(

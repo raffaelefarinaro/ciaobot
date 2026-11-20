@@ -13,7 +13,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -23,7 +22,6 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
-from ciao.fs_sandbox import AGENT_FS_SCOPES
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web import request_limits, routes_api, routes_helpers
@@ -36,8 +34,6 @@ from ciao.workspace_reroot import write_receipt
 
 ROUTE = "/api/chats/{chat_id}/file-paths/resolve"
 URL = ROUTE
-POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="POSIX paths, symlinks and modes")
-WIN32_ONLY = pytest.mark.skipif(sys.platform != "win32", reason="native Windows drive paths")
 
 
 @pytest.fixture(autouse=True)
@@ -197,7 +193,6 @@ def test_real_rerooted_config_discovers_workspace_and_vault(tmp_path):
     ]
 
 
-@POSIX_ONLY
 def test_rerooted_symlink_escape_fails(tmp_path):
     config = _rerooted_config(tmp_path)
     outside = _write(tmp_path / "outside.md")
@@ -379,24 +374,13 @@ def test_absolute_home_parent_and_native_path_policy(tmp_path, monkeypatch):
     chat = _chat(manager, "work")
     client = _client(manager, config)
     monkeypatch.setenv("HOME", str(vault))
-    monkeypatch.setenv("USERPROFILE", str(vault))  # what expanduser reads on Windows
     accepted = _results(_post(client, chat.chat_id, [str(note), "~/notes/a.md", "./notes/a.md", "notes/../notes/a.md"]))
     assert accepted == [_canon(note)] * 4
     assert _results(_post(client, chat.chat_id, [
         "../other/other.md", "~otheruser/notes/a.md", "\\\\server\\share\\a.md", "//server/share/a.md",
         "\\\\?\\C:\\x.md", "C:\\Windows\\win.ini", "notes/a.md/x",
     ])) == [None] * 7
-    if sys.platform != "win32":
-        assert _results(_post(client, chat.chat_id, ["C:\\Users\\x\\a.md"])) == [None]
-
-
-@WIN32_ONLY
-def test_native_win32_drive_path_is_accepted(tmp_path):
-    config = _legacy_config(tmp_path)
-    note = _write(config.workspace_vault_root("work") / "notes" / "a.md")
-    manager = _manager(config)
-    chat = _chat(manager, "work")
-    assert _results(_post(_client(manager, config), chat.chat_id, [str(note)])) == [_canon(note)]
+    assert _results(_post(client, chat.chat_id, ["C:\\Users\\x\\a.md"])) == [None]
 
 
 def test_agent_grants_do_not_expand_discovery(tmp_path):
@@ -407,15 +391,8 @@ def test_agent_grants_do_not_expand_discovery(tmp_path):
     manager = _manager(config)
     chat = _chat(manager, "work")
     client = _client(manager, config)
-    # The agent FS scope is set per workspace (CiaoConfig has no scope field).
-    # Each scope must be in effect when the lookup runs, and neither may widen it.
-    for scope in AGENT_FS_SCOPES:
-        config.workspaces["work"] = WorkspaceConfig(
-            name="work", vault_root="memory-vault/work", agent_fs_scope=scope
-        )
-        assert config.workspace("work").effective_agent_fs_scope() == scope
-        result = _results(_post(client, chat.chat_id, [str(credentials), str(data_root), "n.md"]))
-        assert result == [None, None, _canon(vault_note)], scope
+    result = _results(_post(client, chat.chat_id, [str(credentials), str(data_root), "n.md"]))
+    assert result == [None, None, _canon(vault_note)]
 
 
 def test_line_suffix_and_file_type_size_rules(tmp_path):
@@ -465,7 +442,6 @@ def test_line_suffix_and_file_type_size_rules(tmp_path):
     ]
 
 
-@POSIX_ONLY
 def test_fifo_and_symlink_loop_are_null(tmp_path):
     config = _legacy_config(tmp_path)
     vault = config.workspace_vault_root("work")

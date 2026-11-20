@@ -246,9 +246,9 @@ def test_identity_is_distinct_from_pwa_retired_and_experiment() -> None:
     assert info["CFBundleExecutable"] == "Ciaobot Server"
     assert info["LSUIElement"] is True
 
-    from ciao import cli, macos_service
+    from ciao import cli
 
-    reserved = {macos_service.DESKTOP_BUNDLE_ID, "local.ciaobot.menubar", *cli._OUR_BUNDLE_IDS}
+    reserved = {"local.ciaobot.app", "local.ciaobot.menubar", *cli._OUR_BUNDLE_IDS}
     assert BUILD.BUNDLE_ID not in reserved
     # Not the experiment identity either.
     assert BUILD.BUNDLE_ID != "local.ciaobot.server-host-experiment"
@@ -3115,3 +3115,73 @@ def _kill_group_exact(pgid: int) -> None:
         os.killpg(pgid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
+
+
+class _CodesignDisplay:
+    """Answers every ``codesign`` probe with one fixed display, or fails to start."""
+
+    def __init__(self, *, rc: int = 0, stderr: str = "", raises: bool = False) -> None:
+        self.rc = rc
+        self.stderr = stderr
+        self.raises = raises
+
+    def __call__(
+        self, argv: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        if self.raises:
+            raise OSError("codesign cannot start")
+        return subprocess.CompletedProcess(argv, self.rc, "", self.stderr)
+
+
+_ADHOC_DISPLAY = (
+    "Identifier=org.example.host\n"
+    "Format=app bundle with Mach-O universal (x86_64 arm64)\n"
+    "CodeDirectory v=20500 size=400 flags=0x2(adhoc) hashes=7+3 location=embedded\n"
+    "Signature=adhoc\n"
+    "TeamIdentifier=not set\n"
+)
+_DEVELOPER_ID_DISPLAY = (
+    "Identifier=org.example.host\n"
+    "Signature size=9000\n"
+    "Authority=Developer ID Application: Example (TESTTEAM01)\n"
+    "Authority=Developer ID Certification Authority\n"
+    "Authority=Apple Root CA\n"
+    "TeamIdentifier=TESTTEAM01\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("rc", "stderr", "raises", "want"),
+    [
+        pytest.param(0, _ADHOC_DISPLAY, False, True, id="real-adhoc"),
+        pytest.param(0, "Identifier=x\nSignature=adhoc\n", False, True, id="minimal-adhoc"),
+        pytest.param(0, _DEVELOPER_ID_DISPLAY, False, False, id="developer-id"),
+        pytest.param(1, "code object is not signed at all\n", False, False, id="unsigned"),
+        pytest.param(0, "", True, False, id="probe-cannot-start"),
+        pytest.param(
+            0, _ADHOC_DISPLAY + "Signature=adhoc\n", False, False, id="repeated-signature"
+        ),
+        pytest.param(
+            0,
+            _ADHOC_DISPLAY + "Authority=Developer ID Application: X\n",
+            False,
+            False,
+            id="adhoc-with-authority",
+        ),
+        pytest.param(
+            0,
+            _ADHOC_DISPLAY.replace("not set", "TESTTEAM01"),
+            False,
+            False,
+            id="adhoc-with-team",
+        ),
+    ],
+)
+def test_is_adhoc_signed_reads_only_a_verified_adhoc_display(
+    tmp_path: Path, rc: int, stderr: str, raises: bool, want: bool
+) -> None:
+    runner = _CodesignDisplay(rc=rc, stderr=stderr, raises=raises)
+
+    from ciao import server_host
+
+    assert server_host.is_adhoc_signed(tmp_path / "Ciaobot Server.app", runner=runner) is want

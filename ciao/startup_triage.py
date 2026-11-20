@@ -60,8 +60,8 @@ operator's approval, report it under "Action needed:" and leave the action to th
 Steps:
 1. Group the log lines and failed job runs into distinct issues.
 2. Diagnose each one from local evidence first: the injected report above is engine-wide, while \
-`ciao context logs` is workspace-scoped and omits engine logs, showing only this workspace's failed runs \
-(it works under workspace-only file access). Use both, plus workspace config, and stay with what the evidence shows.
+`ciao context logs` is workspace-scoped and omits engine logs, showing only this workspace's failed runs. \
+Use both, plus workspace config, and stay with what the evidence shows.
 3. Check if the errors are typical environment or installation issues:
    - Python version mismatch (Ciaobot requires Python 3.12+).
    - Port conflicts (port 8543 already in use).
@@ -234,7 +234,7 @@ async def run_startup_triage(pcm, config, resolve_target) -> bool:
     # (``bool(error_log.strip() or failed_jobs)``), so the gate cannot drift
     # from the report again. It used to re-derive the gate from
     # ``error_line_count``, a key ``build_issue_report`` never emits — it
-    # emits ``error_log_lines`` — so the error-log half was always falsy and
+    # emits ``error_log_records`` — so the error-log half was always falsy and
     # a boot with tracebacks but no failed job opened no triage chat.
     if not report.get("has_issues"):
         return False
@@ -260,9 +260,9 @@ async def run_startup_triage(pcm, config, resolve_target) -> bool:
     # chat every restart.
     _record_triage(runtime_dir, now)
     logger.info(
-        "Startup found %s error line(s) and %d failed job run(s); "
+        "Startup found %s error record(s) and %d failed job run(s); "
         "dispatching a triage chat",
-        report.get("error_log_lines", 0),
+        report.get("error_log_records", 0),
         len(report.get("failed_jobs") or []),
     )
     await pcm.dispatch_schedule(entry, entry.prompt, model, mode, provider)

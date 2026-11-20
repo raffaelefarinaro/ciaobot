@@ -123,7 +123,6 @@ async function mountPanel(archived = false): Promise<{
       stubs: {
         PaneHeader: PaneHeaderStub,
         ModelSelector: ChildStub,
-        SubagentPanel: ChildStub,
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,
         RouterLink: ChildStub,
@@ -167,6 +166,17 @@ describe('ChatPanel send shortcut', () => {
 
     expect(wrapper.vm.handleSendShortcut()).toBe(true)
     expect(sendMessage.mock.calls[0][1]).toBe('hello')
+    wrapper.unmount()
+  })
+
+  it('opens MCP details through the exposed pane shortcut without sending', async () => {
+    const { wrapper, sendMessage } = await mountPanel()
+    await wrapper.get('textarea.chat-input').setValue('/mcp')
+    expect(wrapper.vm.handleSendShortcut()).toBe(true)
+    await flushPromises()
+    expect((wrapper.get('textarea.chat-input').element as HTMLTextAreaElement).value).toBe('')
+    expect(wrapper.find('.chat-rail').exists()).toBe(true)
+    expect(sendMessage).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 

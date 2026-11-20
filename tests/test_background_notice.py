@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 from ciao.background_notice import format_finished_runs
 
 
@@ -97,3 +100,32 @@ def test_no_output_distinguishes_none_from_empty() -> None:
 
     assert "(no output)" in empty
     assert "(no output)" not in unknown
+
+
+# ── neutral ownership ───────────────────────────────────────────────────
+#
+# AST checks are pinned to enclosing context, not line numbers.
+
+def _ciao_source(*parts: str) -> str:
+    return (Path(__file__).resolve().parent.parent / "ciao").joinpath(*parts).read_text()
+
+
+def _imports_by_module(source: str) -> dict[str, set[str]]:
+    modules: dict[str, set[str]] = {}
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            modules.setdefault(node.module, set()).update(a.name for a in node.names)
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                modules.setdefault(alias.name, set())
+    return modules
+
+
+def test_background_notice_imports_no_provider_sdk_or_web_module() -> None:
+    banned_prefixes = ("ciao.providers", "ciao.web")
+    sdk_roots = {"anthropic", "opencode", "openai", "httpx"}
+    for module in _imports_by_module(_ciao_source("background_notice.py")):
+        assert not module.startswith(banned_prefixes), module
+        assert module.split(".", 1)[0] not in sdk_roots, module
+
+

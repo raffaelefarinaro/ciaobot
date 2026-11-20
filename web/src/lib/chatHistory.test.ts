@@ -189,11 +189,6 @@ describe('toChatMessage', () => {
     expect(out.unattended).toBeUndefined()
   })
 
-  test('carries the steered marker for a user row sent into a running turn', () => {
-    expect(toChatMessage({ role: 'user', content: 'q', steered: true }).steered).toBe(true)
-    expect(toChatMessage({ role: 'user', content: 'q' }).steered).toBeUndefined()
-  })
-
   test('toChatMessage carries origin', () => {
     expect(toChatMessage({ role: 'user', content: 'q', origin: 'webhook' }).origin).toBe('webhook')
     expect(toChatMessage({ role: 'user', content: 'q' }).origin).toBeUndefined()
@@ -257,6 +252,65 @@ describe('dropSupersededLiveTail', () => {
       msg({ role: 'assistant', content: 'server', i: 1 }),
     ]
     expect(dropSupersededLiveTail(rows, 1, [rows[2]])).toBe(rows)
+  })
+
+  test('drops a live error notice when the window contains the matching settled error', () => {
+    const error = 'Missing scopes: api.responses.write'
+    const server = msg({
+      role: 'assistant',
+      content: error,
+      i: 1,
+      timestamp: 'T',
+      is_error: true,
+    })
+    const rows = [
+      msg({ role: 'user', content: 'q', i: 0 }),
+      msg({ role: 'system', content: `Error: ${error}`, timestamp: 'T' }),
+      server,
+    ]
+
+    expect(dropSupersededLiveTail(rows, 1, [server])).toEqual([
+      rows[0],
+      server,
+    ])
+  })
+
+  test('keeps a client error notice that does not match the settled error', () => {
+    const server = msg({
+      role: 'assistant',
+      content: 'The provider failed',
+      i: 1,
+      timestamp: 'T',
+      is_error: true,
+    })
+    const notice = msg({ role: 'system', content: 'Error: a different local failure' })
+    const rows = [
+      msg({ role: 'user', content: 'q', i: 0 }),
+      notice,
+      server,
+    ]
+
+    expect(dropSupersededLiveTail(rows, 1, [server])).toEqual([
+      rows[0],
+      notice,
+      server,
+    ])
+  })
+
+  test('keeps a live error notice until the server error has a completion timestamp', () => {
+    const server = msg({
+      role: 'assistant',
+      content: 'The provider failed',
+      i: 1,
+      is_error: true,
+    })
+    const rows = [
+      msg({ role: 'user', content: 'q', i: 0 }),
+      msg({ role: 'system', content: 'Error: The provider failed' }),
+      server,
+    ]
+
+    expect(dropSupersededLiveTail(rows, 1, [server])).toBe(rows)
   })
 
   test('drops the live trace once a settled server row replaces it', () => {
@@ -520,7 +574,7 @@ describe('toChatMessage sent_context', () => {
   })
 })
 
-describe('vault answer check', () => {
+describe('legacy turn-verification metadata', () => {
   const verification: TurnVerification = {
     supported: 1,
     unsupported: 0,

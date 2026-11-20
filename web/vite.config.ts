@@ -20,11 +20,8 @@ export default defineConfig(({ mode }) => {
     base: e2e ? '/__fixture__/harness/' : '/',
     plugins: [
       vue({
-        // Leave root-absolute template URLs (`src="/favicon.png"`, all in `public/`)
-        // as plain URLs instead of compiling them into imports. The build served
-        // them from `public/` either way; under vitest on Windows the import
-        // resolved to `file:///favicon.png`, which is not a valid path there, and
-        // every component that renders one failed to load.
+        // Leave root-absolute template URLs (`src="/favicon.png"`, all in `public/`) as plain URLs
+        // instead of compiling them into imports; the build serves them from `public/` either way.
         template: { transformAssetUrls: { includeAbsolute: false } },
       }),
     ],
@@ -52,11 +49,11 @@ export default defineConfig(({ mode }) => {
       // naming but import `@playwright/test`, which throws the moment vitest
       // loads it — and a suite that reports "4 files failed, 1168 tests passed"
       // is the kind of green-with-red that people learn to scroll past.
-      exclude: ['**/node_modules/**', '**/dist/**', 'e2e/**'],
+      exclude: ['**/node_modules/**', '**/dist/**', 'e2e/**', '**/*.stories.*', '.storybook/**'],
       // A ceiling, not a target. Many component tests `await import()` a view
       // whose first import compiles it and its whole import tree inside the
       // test's own budget. Under the full parallel suite that ran past vitest's
-      // 5 s default on windows-latest and on a Windows laptop (ChatLayout,
+      // 5 s default on slow runners (ChatLayout,
       // ChatPanel*, PaneHeaderBrand), and a timed-out test left its mounted
       // layout's key handlers behind for the tests after it. A test that is
       // genuinely slow is still caught; one that hangs still fails.

@@ -52,11 +52,11 @@ layer to hardcode what the layer below provides.
 ```
 L3  Patterns    compositions with rules      lanes, action dock, settings card list
 L2  Components  own a meaning, not a look    ChatSignals, TierLabel, CountTile
-L1  Primitives  global, unscoped, in App.vue .btn-small, .card, .badge, inputs
-L0  Tokens      App.vue :root                colour, type, space, radius, motion
+L1  Primitives  global, unscoped, in app.css  .btn-small, .card, .badge, inputs
+L0  Tokens      app.css :root                 colour, type, space, radius, motion
 ```
 
-### L0 — Tokens (`web/src/App.vue`, the `:root` block)
+### L0 — Tokens (`web/src/styles/app.css`, the `:root` block)
 
 The single source of raw values. Already complete; do not add near-duplicates.
 
@@ -82,11 +82,11 @@ if you genuinely need an off-scale size.
 value. `var(--warning, #b7791f)` in `SettingsView.vue` is wrong twice over: the
 token is `#facc15`, and the fallback can never fire.
 
-### L1 — Primitives (`web/src/App.vue`, the global `<style>` block)
+### L1 — Primitives (`web/src/styles/app.css`, the global stylesheet)
 
-`App.vue`'s style block is **not scoped**, so it is the app's global sheet. This
-is where shared primitives live. `.btn-small`, `.card` and friends are already
-here.
+`App.vue` loads this stylesheet through an **unscoped** external `<style>` block.
+This is where shared primitives live. `.btn-small`, `.card` and friends are
+already here.
 
 **Rule L1.1 — one name, one look.** A primitive may not be re-specified by a
 container. These currently violate it and should collapse into primitive
@@ -281,7 +281,7 @@ and label should agree — rename the route or the label.
 
 ## 5. Theming
 
-`:root.theme-light` in `App.vue` redefines tokens. Components should therefore
+`:root.theme-light` in `web/src/styles/app.css` redefines tokens. Components should therefore
 need **no** theme-specific CSS: style through tokens and both themes work.
 
 Only 4 of 36 components mention `.theme-light`, and that is the *correct* number
@@ -370,6 +370,49 @@ reported as an error, not a failure, and does not fail the file count.
 ---
 
 ## 7. Checklist for any UI change
+
+### Isolated workshop coverage
+
+Storybook imports the production components and `styles/app.css`, without the
+application bootstrap or an engine. Inventory coverage is an exact
+owner → state → story-ID contract, not migration or fidelity completion.
+The existing four TabBar mappings remain unchanged.
+
+| Production owner | State | Story ID |
+|---|---|---|
+| `web/src/components/SidebarRow.vue` | default | `foundation-sidebar-row--default` |
+| same | active | `foundation-sidebar-row--active` |
+| same | unread | `foundation-sidebar-row--unread` |
+| same | muted | `foundation-sidebar-row--muted` |
+| same | pending | `foundation-sidebar-row--pending` |
+| same | long-content | `foundation-sidebar-row--long-content` |
+| `web/src/components/SidebarListSkeleton.vue` | loading | `foundation-sidebar-list-skeleton--loading` |
+| same | nested | `foundation-sidebar-list-skeleton--nested` |
+| `web/src/components/settings/SettingsSwitch.vue` | default | `settings-switch--on`, `settings-switch--off` |
+| same | disabled | `settings-switch--disabled-on`, `settings-switch--disabled-off` |
+| same | busy | `settings-switch--busy` |
+| same | narrow | `settings-switch--narrow` |
+
+Row stories omit `to`: they show the plain-div appearance, not navigation,
+focus, host controls, clicks, disabled state or every prop combination. Pending
+uses the real naming shimmer and screen-reader text. Long content uses a 240px
+wrapper with meta. Skeleton loading uses one group of three rows; nested uses
+two groups of two rows and one status announcement. Its composed placeholders
+do not separately mark SidebarRow's placeholder state covered. Other unknown
+or uncovered states stay open; no other skeleton or consumer gains coverage.
+
+SettingsSwitch stories render the controlled production native button; the
+wrapper feeds toggle events back into checked. Busy shows an ellipsis and
+`aria-busy` but remains enabled unless explicitly disabled. Narrow uses a
+maximum 390px container. Keyboard-focus and reduced-motion have no dedicated
+stories. Only the vault-check and restart-resume cards use this shared switch
+so far; their persistence, parent loading fidelity and connected-screen story
+coverage are unchanged. Legacy switch styles remain for unmigrated consumers.
+
+The Node inventory tests reject wrong owners, states and exact ID sets.
+`npm run build-storybook` additionally checks all registry-linked IDs against
+the generated index and fails on missing stories, Docs or inventory IDs.
+This is not an automated browser interaction or visual-regression runner.
 
 - [ ] No hex/rgb/hsl literal; no hardcoded `font-size`, `border-radius`, or spacing
 - [ ] No container re-specifying a primitive (Rule L1.1)

@@ -58,7 +58,7 @@ GitHub Desktop, Obsidian):
    Tests belong in the PRs, not here.
 4. **Heads up only when action is needed** — a changed default, something that
    now refuses to run until configured, a setting that moved, a removal. Say
-   what changed, who it affects (macOS / Linux / Windows), and the exact fix.
+   what changed, who it affects (macOS / Linux), and the exact fix.
 5. **New features** are capabilities a user did not have. **Improvements** are
    things they already had that now work better or differently.
    An improvement that changes behaviour a user relied on also goes in
@@ -72,11 +72,30 @@ GitHub Desktop, Obsidian):
 8. **Group, don't enumerate.** Five PRs that together make the task board better
    are one or two lines, not five.
 9. **Platform tags** in parentheses only when an item is platform-specific:
-   "(Linux)", "(Windows)".
+   "(macOS)", "(Linux)".
 10. **Order by how many users it touches**, most first, within each section.
 11. **Plain words, present tense, no hype, no emoji.** British/American mix is
     fine; consistency within a release is not optional.
 12. Small releases are short. A patch with one fix is one line under Bug fixes.
+
+## The 2.0.0 Heads up (v2.0.0 only)
+
+The 2.0.0 notes are the one release whose Heads up is fixed, not chosen. Rule 4
+does not apply to 2.0.0: its Heads up must include the block below, verbatim, and
+the bullets after it. Any later release follows the rules above.
+
+```markdown
+**Heads up:**
+- **Windows is no longer supported.** Ciaobot 2.0 runs on macOS (the Ciaobot app) and on Linux servers (the one-line installer). Windows installs stay on 1.10 and do not update; move your workspace folder to a Mac or Linux machine to keep using it. **Mac:** Ciaobot is now one app download that includes the engine; after this update, Home shows where to get it. **Linux:** `curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh`; existing source installs keep working (docs/LINUX.md).
+- **OpenCode needs 2.3.2 or newer.** Older versions are refused with a message that says so.
+- **Restarts and updates no longer wait for background work.** Programmatic restarts and updates start without waiting for background agents or shells to finish.
+- **The Mac app updates itself** through Sparkle. Installs that stay on 1.x do not get the 2.0.0 hop after 2.0.1: reinstall them by hand to get later releases.
+- **Messages always queue.** A message sent while a reply runs waits and runs as the next turn. There is no Steer and no "While a reply is running" setting.
+- **No background panel.** Subagents show in the chat's activity trace as their dispatch row, with nested tool lines; on OpenCode only the dispatch row shows for now. There is no running list, no Stop for a background shell, no Move to background, no subagent transcript page and no live agent count. Work interrupted by an upgrade restart is not picked up again.
+- **Schedules are judged on the turn's own reply.** A run whose background agents report later may be archived first.
+- **Ciaobot no longer limits what the agent can touch.** "File access: Workspace only" is gone. Every workspace has the same file access as your user account, within the agent's permission mode, and bypass means full access, including for schedules and webhook runs. The agent CLI's own permission settings (Claude Code `permissions`, OpenCode `permission`) are the only limit. Ciaobot no longer blocks agent file tools from `.env`, `.runtime/` and `secrets/`.
+- **MCP is managed in each agent's CLI.** Settings → MCP servers and Chat details → MCP open `claude mcp` or `opencode mcp`. There are no Ciaobot sign-in cards, on/off toggles or automatic reloads; servers you turned off stay off. A running chat picks up changes after `ciao chat reload` or in a new chat.
+```
 
 ## How to gather the material
 

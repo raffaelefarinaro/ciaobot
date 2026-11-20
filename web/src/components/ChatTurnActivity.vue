@@ -10,7 +10,7 @@
       <span class="trace-label">{{ durationMs ? `Worked for ${formatDuration(durationMs)}` : 'Activity' }}</span>
       <span class="trace-meta">
         <span
-          v-for="part in traceSummaryMetaParts(steps, subs)"
+          v-for="part in traceSummaryMetaParts(steps)"
           :key="part.key"
           :class="['trace-meta-part', `part-${part.key}`, { 'part-important': part.isImportant }]"
         >
@@ -35,6 +35,14 @@
               v-html="renderActivityLine(line)"
             ></div>
           </div>
+        </div>
+        <div v-else-if="step.tool_name === '_subagent' && step.subagent" class="trace-step trace-step--subagent">
+          <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11h14v8H5zM12 4v3M9 15h.01M15 15h.01" /></svg></span>
+          <SubagentCard :card="step.subagent" @open-file="emit('open-file', $event)" />
+        </div>
+        <div v-else-if="step.tool_name === '_shell' && step.shell" class="trace-step trace-step--shell">
+          <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 4 4-4 4M11 16h8" /></svg></span>
+          <ShellCard :card="step.shell" />
         </div>
         <div v-else-if="step.tool_name === '_filecard'" class="trace-step trace-step--file">
           <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l3 3v15H6z" /></svg></span>
@@ -84,10 +92,6 @@
           <div class="trace-text" v-html="renderMarkdown(step.content)"></div>
         </div>
       </template>
-      <div v-if="subs?.length" class="trace-step trace-step--subagent">
-        <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3" /><path d="M6 20a6 6 0 0 1 12 0" /></svg></span>
-        <SubagentPanel :subagents="subs" :chat-id="chatId" />
-      </div>
       <div v-if="outputs?.length" class="answer-outputs answer-outputs--trace">
         <button
           type="button"
@@ -137,7 +141,8 @@
  * styling, which both pull from `chatTrace.css`.
  */
 import AppIcon from './AppIcon.vue'
-import SubagentPanel from './SubagentPanel.vue'
+import SubagentCard from './SubagentCard.vue'
+import ShellCard from './ShellCard.vue'
 import {
   activityLines,
   fileCardBasename,
@@ -148,14 +153,12 @@ import {
   traceSummaryMetaParts,
   type TraceOutput,
 } from '../lib/chatActivity'
-import type { ChatMessage, SubagentTranscript } from '../lib/types'
+import type { ChatMessage } from '../lib/types'
 import { formatDuration } from '../lib/time'
 
 defineProps<{
   /** The turn's intermediate assistant text and tool calls, in order. */
   steps: ChatMessage[]
-  /** Subagent transcripts dispatched by this turn, if any. */
-  subs?: SubagentTranscript[]
   /** Files the turn wrote, listed in the collapsible Outputs disclosure. */
   outputs?: TraceOutput[]
   /** Whether that disclosure is expanded. Owned by ChatPanel, like `open`. */
@@ -164,8 +167,6 @@ defineProps<{
   outputsId: string
   /** Whether the body is expanded. Owned by ChatPanel. */
   open: boolean
-  /** Chat the turn belongs to; links each subagent row to its transcript. */
-  chatId: string
   /** Shared "show thinking" preference. Owned by ChatPanel. */
   thinkingExpanded: boolean
   /** ChatPanel's memoised markdown renderer. */

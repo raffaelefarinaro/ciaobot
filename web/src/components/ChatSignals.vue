@@ -33,18 +33,6 @@
       :title="retryTitle"
       :aria-label="retryTitle"
     ><ActivityGlyph kind="alert" /></span>
-    <!-- Not on the ladder: a shell can outlive everything else on the row (a dev
-         server goes for hours), so it shows beside needs-you and working
-         instead of hiding behind them. -->
-    <span
-      v-if="shellCount > 0"
-      class="chat-signal chat-signal--runs"
-      :title="shellsTitle"
-      :aria-label="shellsTitle"
-    >
-      <ActivityGlyph kind="run" />
-      <span v-if="density === 'card' && shellCount > 1" class="chat-signal-count">{{ shellCount }}</span>
-    </span>
     <span
       v-if="scheduleSummary"
       class="chat-signal chat-signal--schedule"
@@ -75,7 +63,6 @@ import { computed } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
 import type { WorkspaceAccent } from '../lib/workspaceColors'
-import { isShellRow, subagentLabel } from '../lib/subagentIds'
 import ActivityGlyph from './ActivityGlyph.vue'
 import ScheduleGlyph from './ScheduleGlyph.vue'
 
@@ -92,29 +79,7 @@ const taskStore = useTaskStore()
 
 const needsInput = computed(() => store.chatNeedsInput(props.chatId))
 const working = computed(() => store.isChatStreaming(props.chatId))
-// Subagents working for this chat. Two sources for the same fact, on
-// different clocks: the watcher's own count (pushed over /ws/events) and the
-// sidebar's running-subagent poll. Take the larger rather than picking a side,
-// so the row never reads idle just because one of them has not ticked yet.
-const agentCount = computed(() => Math.max(
-  Number(store.backgroundAgents[props.chatId] || 0),
-  store.runningSubagentsFor(props.chatId).filter(sub => !isShellRow(sub)).length,
-))
-// Subagents are the chat's work too: they show as working, not a mark of
-// their own, and only the label says who is doing it.
-const workingTitle = computed(() => {
-  if (working.value || agentCount.value === 0) return 'Working'
-  return agentCount.value === 1 ? '1 agent running' : `${agentCount.value} agents running`
-})
-// Background shells and Monitors from the same poll. One is named, the way the
-// composer names it, so hovering the row says what is going.
-const shells = computed(() => store.runningSubagentsFor(props.chatId).filter(isShellRow))
-const shellCount = computed(() => shells.value.length)
-const shellsTitle = computed(() =>
-  shellCount.value === 1
-    ? `Background run: ${subagentLabel(shells.value[0])}`
-    : `${shellCount.value} background runs`,
-)
+const workingTitle = 'Working'
 const retryPending = computed(() => store.chats.find(c => c.chat_id === props.chatId)?.retry?.status === 'pending')
 // An agent can schedule a retry from a turn that succeeded, so only say
 // "failed" when there is an error on the chat.
@@ -135,7 +100,7 @@ const memoryAttention = computed(() => store.memoryPassNeedsAttention(props.chat
 const primarySignal = computed<'needs' | 'memory' | 'working' | 'retry' | null>(() => {
   if (needsInput.value) return 'needs'
   if (memoryAttention.value) return 'memory'
-  if (working.value || agentCount.value > 0) return 'working'
+  if (working.value) return 'working'
   if (props.density === 'row' && retryPending.value) return 'retry'
   return null
 })
@@ -210,18 +175,9 @@ const scheduleTitle = computed(() => {
   white-space: nowrap;
 }
 
-/* Working and runs draw ActivityGlyph; the gap keeps a count clear of it. */
-.chat-signal--working,
-.chat-signal--runs {
+/* Working draws ActivityGlyph. */
+.chat-signal--working {
   gap: var(--space-1);
-}
-
-/* Only shown for more than one run, where the number is the point. */
-.chat-signal-count {
-  color: var(--accent);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 700;
 }
 
 /* An attribute of the chat, not a state, so it stays muted like the task and

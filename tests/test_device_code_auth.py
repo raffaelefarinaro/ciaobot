@@ -16,7 +16,7 @@ from ciao.chat_actions import (
     validate_params,
 )
 from ciao.terminal_sessions import TerminalSessionError
-from ciao.web import device_code_auth, mcp_auth_claude
+from ciao.web import device_code_auth
 from ciao.web.chat_actions_base import ActionContext
 from ciao.web.chat_actions_runtime import ACTION_HANDLERS
 from ciao.web.device_code_auth import (
@@ -27,7 +27,6 @@ from ciao.web.device_code_auth import (
 )
 from tests.test_agent_surface import _client as _agent_client
 from tests.test_agent_surface import _offer_chat, _offer_service, _offer_token, _post
-from tests.test_mcp_auth_claude import FakePcm, FakeTerminals, _DismissedPcm
 
 BIN = Path("/opt/homebrew/bin")
 GH_ARGV = [
@@ -50,6 +49,95 @@ AZ_OUTPUT = (
     b"To sign in, use a web browser to open the page https://microsoft.com/devicelogin "
     b"and enter the code FGH7JKL2M to authenticate.\r\n"
 )
+
+
+class FakePcm:
+    """Records every card update; holds one action."""
+
+    def __init__(self, action: ChatAction) -> None:
+        self.action = action
+        self.updates: list[tuple[str, dict[str, object], str]] = []
+
+    def update_action(
+        self,
+        chat_id: str,
+        action_id: str,
+        *,
+        state: str,
+        params_update: dict[str, object] | None = None,
+        error: str = "",
+    ) -> dict[str, object] | None:
+        self.updates.append((state, dict(params_update or {}), error))
+        params = {**self.action.params, **(params_update or {})}
+        self.action = ChatAction(
+            id=self.action.id,
+            kind=self.action.kind,
+            origin=self.action.origin,
+            state=cast(Any, state),
+            params=MappingProxyType(params),
+            error=error,
+        )
+        return None
+
+    def get_action(self, chat_id: str, action_id: str) -> ChatAction | None:
+        return self.action
+
+    @property
+    def last(self) -> tuple[str, dict[str, object], str]:
+        return self.updates[-1]
+
+
+class FakeTerminals:
+    """The helper-session surface the flow uses, with settable outcomes."""
+
+    def __init__(
+        self,
+        *,
+        create_error: str | None = None,
+        missing: bool = False,
+        exited: bool = False,
+        exit_code: int | None = None,
+        output: bytes = b"",
+        end_error: str | None = None,
+    ) -> None:
+        self.create_error = create_error
+        self.missing = missing
+        self.exited = exited
+        self.exit_code = exit_code
+        self.output = output
+        self.end_error = end_error
+        self.created: list[tuple[Path, str, str, list[str]]] = []
+        self.ended: list[str] = []
+
+    async def create(
+        self, folder: Path, target_kind: str, target_id: str, *, argv: list[str] | None = None
+    ) -> SimpleNamespace:
+        if self.create_error is not None:
+            raise TerminalSessionError(cast(Any, self.create_error))
+        self.created.append((folder, target_kind, target_id, list(argv or [])))
+        return SimpleNamespace(session_id="sess_1")
+
+    def get(self, session_id: str) -> SimpleNamespace:
+        if self.missing:
+            raise TerminalSessionError("not_found")
+        return SimpleNamespace(session_id=session_id, exited=self.exited, exit_code=self.exit_code)
+
+    def helper_output(self, session_id: str) -> bytes:
+        if self.missing:
+            raise TerminalSessionError("not_found")
+        return self.output
+
+    async def end(self, session_id: str) -> None:
+        if self.end_error is not None:
+            raise TerminalSessionError(cast(Any, self.end_error))
+        self.ended.append(session_id)
+
+
+class _DismissedPcm(FakePcm):
+    """A card the user dismissed while the helper was starting."""
+
+    def get_action(self, chat_id: str, action_id: str) -> ChatAction | None:
+        return None
 
 
 class FakeDeviceTerminals(FakeTerminals):
@@ -170,36 +258,6 @@ async def test_unresolvable_tool_cannot_run(
 
 
 @pytest.mark.asyncio
-async def test_unrelated_interpreter_is_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        device_code_auth, "resolve_command", lambda name: [str(Path("C:/Python/python.exe"))]
-    )
-    terminals = FakeDeviceTerminals()
-    pcm = FakePcm(_action("az"))
-
-    await DeviceCodeFlow().start(_ctx(pcm, terminals, tmp_path), pcm.action, {})
-
-    assert pcm.last[2] == device_code_auth.CANNOT_RUN.format(tool="az")
-    assert terminals.created == []
-
-
-@pytest.mark.asyncio
-async def test_node_wrapped_script_is_accepted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    prefix = [str(Path("C:/node.exe")), str(Path("C:/npm/gh.js"))]
-    monkeypatch.setattr(device_code_auth, "resolve_command", lambda name: list(prefix))
-    terminals = FakeDeviceTerminals()
-    pcm = FakePcm(_action("gh"))
-
-    await DeviceCodeFlow().start(_ctx(pcm, terminals, tmp_path), pcm.action, {})
-
-    assert terminals.created[0][3][:2] == prefix
-
-
-@pytest.mark.asyncio
 async def test_no_terminal_manager_or_folder_fails(tmp_path: Path, resolved: None) -> None:
     pcm = FakePcm(_action("gh"))
     await DeviceCodeFlow().start(_ctx(pcm, None, tmp_path), pcm.action, {})
@@ -216,7 +274,8 @@ async def test_capacity_maps_to_the_c2_copy(tmp_path: Path, resolved: None) -> N
     await DeviceCodeFlow().start(
         _ctx(pcm, FakeDeviceTerminals(create_error="capacity"), tmp_path), pcm.action, {}
     )
-    assert pcm.last[2] == mcp_auth_claude.CAPACITY
+    assert pcm.last[2] == CAPACITY
+    assert CAPACITY.startswith("Too many terminal sessions are open")
 
     pcm2 = FakePcm(_action("gh"))
     await DeviceCodeFlow().start(

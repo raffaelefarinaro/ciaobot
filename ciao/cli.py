@@ -10,20 +10,22 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import sqlite3
 import subprocess
 import sys
 import time
-from dataclasses import asdict, dataclass, replace
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, cast
 import urllib.error
 import urllib.request
 
-from ciao import dev, gws_wrapper, package_smoke, proposal_kinds, public_release, release, service_backend
-from ciao.install_discovery import trusted_registry
+from ciao import dev, gws_wrapper, package_smoke, package_version, proposal_kinds, public_release, release, service_backend
+from ciao.workspace_discovery import trusted_registry
 from ciao.server_host import (
     BUNDLE_ID,
     EXIT_TIMEOUT_SECONDS,
@@ -38,24 +40,18 @@ from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir, hosted_service_python, load_server_plist
 from ciao.jsonio import write_private_text
 from ciao.os_support.private import make_private, open_private
-from ciao.os_support.console import use_utf8_stdio
+from ciao.os_support.processes import python_isolation_flags
 from ciao.git_proc import EXACT_BYTES
-from ciao.os_support.shell_hints import path_hint, path_hint_note
+from ciao.os_support.shell_hints import path_hint
 from ciao.os_support.tool_path import dedupe_path
 from ciao.sync_skills import SETUP_MEMORY_FAILED_RC
 
 if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
     from ciao import skill_proposals
     from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.curation_run import Worklist
 
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-
-
-def _absolute_installer_path(value: str) -> str:
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        raise argparse.ArgumentTypeError("installer workspace suggestion must be an absolute path")
-    return str(path)
 
 
 def _workspace_name_arg(value: str) -> str:
@@ -70,154 +66,58 @@ def _workspace_name_arg(value: str) -> str:
 def _relaunch_argv() -> list[str]:
     """argv for re-execing the CLI: a fresh interpreter picks up new code
     after a package update."""
-    return [sys.executable, "-m", "ciao.cli", *sys.argv[1:]]
+    return [sys.executable, *python_isolation_flags(), "-m", "ciao.cli", *sys.argv[1:]]
 
 
 def _run_command(args: argparse.Namespace) -> int:
-    if args.installer_suggest_workspace is not None and not args.installer_bootstrap:
-        print("--installer-suggest-workspace requires --installer-bootstrap", file=sys.stderr)
+    if args.port is not None and not args.app_engine:
+        print("--port requires --app-engine", file=sys.stderr)
         return 2
-    if args.installer_run_id and not args.installer_bootstrap:
-        print("--installer-run-id requires --installer-bootstrap", file=sys.stderr)
-        return 2
-    if args.installer_bootstrap and args.supervised:
-        print("--installer-bootstrap cannot be combined with --supervised", file=sys.stderr)
-        return 2
-    if args.installer_native_workspace is not None and not args.installer_bootstrap:
-        print("--installer-native-workspace requires --installer-bootstrap", file=sys.stderr)
-        return 2
-    if args.installer_native_fd is not None and not args.installer_bootstrap:
-        print("--installer-native-fd requires --installer-bootstrap", file=sys.stderr)
-        return 2
-    if args.installer_native_fd is not None and args.installer_native_fd < 3:
-        print("--installer-native-fd must be a non-stdio descriptor", file=sys.stderr)
-        return 2
-    if args.installer_native_workspace is not None and args.installer_native_fd is None:
-        print("--installer-native-workspace requires --installer-native-fd", file=sys.stderr)
-        return 2
-    if not args.installer_bootstrap:
-        # Ordinary `ciao run` keeps its exact call shape.
-        return _run_server(supervised=args.supervised)
-    if not args.installer_run_id:
-        # A person resumed setup by hand (the installers print this command for
-        # a cancelled run), so there is no installer parent to activate the
-        # service: this process becomes one. A native notification descriptor
-        # has no parent left to read it, so that combination is refused above.
-        if args.installer_native_fd is not None:
-            print("--installer-native-fd requires --installer-run-id", file=sys.stderr)
+    if args.app_engine:
+        # App-mode: the Mac app owns this engine. The bundle check keeps the
+        # flag out of reach everywhere else.
+        if not package_version.running_from_app_bundle():
+            print("--app-engine runs only from the engine inside Ciaobot.app", file=sys.stderr)
             return 2
-        return _resume_installer_bootstrap(args.installer_suggest_workspace)
-    if args.installer_native_fd is None:
-        # The legacy call shape, unchanged; the exact-kwargs tests pin it.
-        return _run_server(
-            supervised=args.supervised,
-            installer_bootstrap=True,
-            installer_run_id=args.installer_run_id,
-            installer_suggest_workspace=args.installer_suggest_workspace,
-        )
-    return _run_server(
-        supervised=args.supervised,
-        installer_bootstrap=True,
-        installer_run_id=args.installer_run_id,
-        installer_suggest_workspace=args.installer_suggest_workspace,
-        installer_native_fd=args.installer_native_fd,
-        installer_native_workspace=args.installer_native_workspace,
-    )
-
-
-def _resume_installer_bootstrap(suggestion: str | None) -> int:
-    """Run the bootstrap as a child and activate the service once it succeeds.
-
-    A child, not this process: the bootstrap ends its own process the moment
-    setup completes (the restart watchdog exits it directly), so nothing after
-    it here would ever run. The same parent/child split the installers use.
-    """
-    import uuid
-
-    run_id = str(uuid.uuid4())
-    argv = [sys.executable, "-m", "ciao.cli", "run", "--installer-bootstrap", "--installer-run-id", run_id]
-    if suggestion is not None:
-        # `--flag=value`, so a suggestion that begins with a dash stays a path.
-        argv.append(f"--installer-suggest-workspace={suggestion}")
-    try:
-        code = subprocess.call(argv)
-    except KeyboardInterrupt:
-        return 130
-    if code != 0:
-        return code
-    return _installer_command(argparse.Namespace(run_id=run_id, as_json=False))
-
-
-def _installer_command(args: argparse.Namespace) -> int:
-    """Verify an installer bootstrap result and start the service."""
-    from ciao.installer_handoff import HandoffError, activate
-
-    as_json = bool(args.as_json)
-    try:
-        result = activate(run_id=args.run_id)
-    except HandoffError as exc:
-        if as_json:
-            print(json.dumps({"ok": False, "error": str(exc)}))
-        else:
-            print(
-                "Ciaobot was installed, but the service was not started: "
-                f"{exc}",
-                file=sys.stderr,
+        if args.port is not None:
+            if not 1024 <= args.port <= 65535:
+                print("--port must be between 1024 and 65535", file=sys.stderr)
+                return 2
+            return _run_server(
+                supervised=args.supervised, app_engine=True, app_engine_port=args.port
             )
-        return 1
-    if as_json:
-        print(json.dumps({
-            "ok": True,
-            "workspace": str(result.workspace),
-            "service_backend": result.service_backend,
-            "definition": str(result.definition_path),
-            "port": result.port,
-        }))
-    else:
-        print(f"Ciaobot is starting from {result.workspace}.")
-    return 0
+        return _run_server(supervised=args.supervised, app_engine=True)
+    # Ordinary `ciao run` keeps its exact call shape.
+    return _run_server(supervised=args.supervised)
 
 
 def _run_server(
     *,
     supervised: bool = False,
-    installer_bootstrap: bool = False,
-    installer_run_id: str | None = None,
-    installer_suggest_workspace: str | None = None,
-    installer_native_fd: int | None = None,
-    installer_native_workspace: str | None = None,
+    app_engine: bool = False,
+    app_engine_port: int | None = None,
 ) -> int:
     from ciao.config import RESTART_EXIT_CODE
     from ciao.main import main as server_main
 
     try:
-        if installer_bootstrap and installer_native_fd is None:
-            # The legacy bootstrap keeps its exact call shape.
-            server_main(
-                supervised=supervised,
-                installer_bootstrap=True,
-                installer_run_id=installer_run_id,
-                installer_suggest_workspace=installer_suggest_workspace,
-            )
-        elif installer_bootstrap:
-            server_main(
-                supervised=supervised,
-                installer_bootstrap=True,
-                installer_run_id=installer_run_id,
-                installer_suggest_workspace=installer_suggest_workspace,
-                installer_native_fd=installer_native_fd,
-                installer_native_workspace=installer_native_workspace,
-            )
+        if app_engine and app_engine_port is not None:
+            server_main(supervised=supervised, app_engine=True, app_engine_port=app_engine_port)
+        elif app_engine:
+            # Before any configuration is loaded, no server, threads or locks
+            # of its own: the recorded move (this boot is its restart) moves
+            # the folder and repoints the pointer here, and an interrupted
+            # move is rolled back here. The engine boots either way.
+            from ciao import workspace_move_app
+
+            workspace_move_app.before_boot()
+            server_main(supervised=supervised, app_engine=True)
         else:
             server_main(supervised=supervised)
     except SystemExit as exc:
         code = exc.code if isinstance(exc.code, int) else 0
     else:
         code = 0
-    if installer_bootstrap:
-        # The installer parent owns this child's lifetime; a relaunch here would
-        # detach from it and make the outcome unobservable.
-        return code
     if code == RESTART_EXIT_CODE:
         # The setup wizard and package updates request a restart by exiting
         # with this code. Under launchd KeepAlive relaunches us anyway, but a
@@ -236,6 +136,14 @@ def _run_server(
         from ciao.config import reset_exported_dotenv
 
         reset_exported_dotenv()
+        if app_engine:
+            # In app mode the pointer is the only workspace source
+            # (`installed_workspace_env` returns early for an exported
+            # CIAO_WORKSPACE): without this pop a post-move restart would pin
+            # the vanished pre-move folder, and the fresh process — reading
+            # os.environ before the pointer — would never boot the new one.
+            os.environ.pop("CIAO_WORKSPACE", None)
+            os.environ.pop("CIAO_RUNTIME_ROOT", None)
         os.execv(sys.executable, _relaunch_argv())
     return code
 
@@ -435,16 +343,8 @@ def _write_launchd_plist(
     confirm_repoint: bool = False,
     host: HostOwnership | None = None,
     host_python: str | None = None,
-    exclusive: bool = False,
 ) -> Path:
-    """Render the server plist and write it, or refuse.
-
-    ``exclusive`` is the native installer's one addition: it creates the
-    definition with ``O_CREAT | O_EXCL`` and ``O_NOFOLLOW`` at ``0o600`` so an
-    existing name, a symlink or a concurrent creator is a refusal instead of an
-    overwrite. The legacy ``ciao setup`` and ``ciao service`` callers leave it
-    False and keep the byte-for-byte ``write_text`` path.
-    """
+    """Render the server plist and write it."""
     if not confirm_repoint:
         allow_env = os.environ.get("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", "").strip().lower() in (
             "1",
@@ -483,59 +383,7 @@ def _write_launchd_plist(
         host=host,
         host_python=host_python,
     )
-    if not exclusive:
-        plist.write_text(rendered, encoding="utf-8", newline="")
-        return plist
-    # The native path never replaces a definition. O_EXCL is the creation
-    # itself; O_NOFOLLOW refuses a symlink at the name. A failure before the
-    # open creates nothing, and a failure after it removes only the file this
-    # call created.
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(plist, flags, 0o600)
-    except FileExistsError:
-        raise RuntimeError(
-            f"a service definition already exists at {plist.name}; the native "
-            "installer never overwrites one"
-        ) from None
-    except OSError as exc:
-        raise RuntimeError(
-            f"could not create the service definition {plist.name}: {exc}"
-        ) from exc
-    try:
-        # umask may have stripped the requested mode; the native definition is
-        # exactly owner-only, like the ownership record it is bound to.
-        chmod_fd = getattr(os, "fchmod", None)
-        if chmod_fd is None:  # pragma: no cover - Windows uses the task branch
-            raise OSError("this platform has no fchmod")
-        chmod_fd(descriptor, 0o600)
-    except OSError as exc:
-        try:
-            os.close(descriptor)
-            plist.unlink()
-        except OSError:
-            pass
-        raise RuntimeError(
-            f"could not secure the service definition {plist.name}: {exc}"
-        ) from exc
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
-            descriptor = -1
-            handle.write(rendered)
-    except OSError as exc:
-        try:
-            plist.unlink()
-        except OSError:
-            pass
-        raise RuntimeError(
-            f"could not write the service definition {plist.name}: {exc}"
-        ) from exc
-    finally:
-        if descriptor >= 0:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+    plist.write_text(rendered, encoding="utf-8", newline="")
     return plist
 
 
@@ -734,11 +582,6 @@ def _print_setup_summary(workspace: Path, port: int) -> None:
     if hint is not None:
         print("To run `ciao` from a shell, add its directory to PATH:")
         print(f"  {hint}")
-        # Only alongside the line it qualifies: with the bin dir already on PATH
-        # there is nothing to change and nothing to wait for.
-        note = path_hint_note()
-        if note:
-            print(f"  {note}")
 
 
 def _default_app_dir() -> Path:
@@ -1400,14 +1243,13 @@ def select_setup_vault(
 
 
 def _service_platform() -> bool:
-    """True where ``ciao setup`` installs a per-user background service.
+    """True where ``ciao setup`` installs a per-user background service: macOS (a LaunchAgent).
 
-    macOS (a LaunchAgent) and Windows (a Task Scheduler logon task) both have
-    one; Linux does not, and there ``--load-launchd`` is refused rather than
+    Linux has none, and there ``--load-launchd`` is refused rather than
     silently ignored.
     """
 
-    return sys.platform in ("darwin", "win32")
+    return sys.platform == "darwin"
 
 
 def setup_workspace(
@@ -1425,8 +1267,6 @@ def setup_workspace(
     confirm_repoint: bool = False,
     initialize_git: bool = False,
     sync_failures: list[str] | None = None,
-    exclusive_service_definition: bool = False,
-    verified_host: HostOwnership | None = None,
     _vault_selection: SetupVaultSelection | None = None,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
@@ -1441,7 +1281,12 @@ def setup_workspace(
     # existing notes folder when the live LaunchAgent would be hijacked.
     # The later `_write_launchd_plist` guard is defense-in-depth; this one
     # makes refusal non-mutating for `setup_workspace` and `/api/setup/finish`.
-    write_launchd = _service_platform() or launch_agents_dir is not None
+    # In app mode the Mac app owns this engine, so it writes the app-owned
+    # workspace pointer below instead of planting a LaunchAgent — launchd
+    # would otherwise start a second engine at the next login.
+    write_launchd = (
+        _service_platform() or launch_agents_dir is not None
+    ) and not package_version.running_from_app_bundle()
     if write_launchd and not confirm_repoint:
         allow_env = os.environ.get("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", "").strip().lower() in (
             "1",
@@ -1472,14 +1317,10 @@ def setup_workspace(
     # the wizard was open; the native recorder re-verifies the bundle after the
     # write.
     host: HostOwnership | None = None
-    if write_launchd and sys.platform != "win32":
+    if write_launchd:
         from ciao.setup_status import tcc_protected_location
 
-        host = (
-            verified_host
-            if verified_host is not None
-            else _verified_host_if_installed()
-        )
+        host = _verified_host_if_installed()
         # Non-None only on macOS.
         protected = tcc_protected_location(root)
         if protected and host is None:
@@ -1599,6 +1440,15 @@ def setup_workspace(
                 encoding="utf-8", newline="",
             )
             written.append(env_path)
+    if package_version.running_from_app_bundle():
+        # The workspace pointer replaces the service definition in app mode:
+        # this bundled engine is restarted by the app, and the next start
+        # resolves CIAO_WORKSPACE/CIAO_RUNTIME_ROOT from this file instead of
+        # a LaunchAgent plist. Written after .env so the engine's next start
+        # reads the finished workspace.
+        from ciao import app_engine
+
+        written.append(app_engine.write_pointer(root, runtime_root))
     if first_setup or fresh_env:
         # First-time setup: stamp when this workspace was provisioned so the
         # post-setup restart can hold system-routine catch-up for a grace
@@ -1738,11 +1588,12 @@ def setup_workspace(
                     f"{sync_result.memory_error}"
                 )
 
+    from ciao.schedules import ScheduleStore  # noqa: PLC0415
+
     runtime_schedules = root / ".runtime" / "schedules.json"
-    _write_if_missing(
-        runtime_schedules,
-        json.dumps({"schedules": []}, indent=2) + "\n",
-    )
+    # Under the store's writer lock, so a store another process created a
+    # moment ago is never replaced by this empty one.
+    ScheduleStore(root / ".runtime").ensure_store()
     written.append(runtime_schedules)
 
     # First-run wizard names the user's first logical workspace. Writing a
@@ -1896,64 +1747,43 @@ def setup_workspace(
             if launch_agents_dir is not None
             else service_backend.current_backend().agents_dir()
         )
-        if sys.platform == "win32":
-            from ciao import windows_service
-
-            # The Windows definition is Task Scheduler XML written by the module
-            # that owns the task, not a plist. The repoint guard already ran
-            # above, through `_registered_service_workspace`.
-            #
-            # The renderer refuses values the task would only reject at logon:
-            # an interpreter that is not python*.exe, a UNC workspace, an
-            # unreadable account SID. Both setup callers report RuntimeError, so a
-            # bad value is a message and an exit code, never a traceback.
-            try:
-                written.append(windows_service.write_task_definition(
-                    workspace=root,
-                    python=resolved_engine,
-                    directory=launch_dir,
-                ))
-            except (ValueError, windows_service.WindowsServiceError) as exc:
-                raise RuntimeError(str(exc)) from exc
+        # Activation (E2): only a verified host selects the native hosted
+        # service; an absent, foreign or unverified host is not claimed and
+        # the direct shape is written. When no host is selected this run but
+        # the installed definition is already hosted and serves this
+        # workspace, it is left exactly as it is: re-rendering would silently
+        # downgrade a live hosted job to the direct shape.
+        if host is None and _existing_hosted_definition_serves(launch_dir, root):
+            # A hosted definition already owns this workspace; setup is a
+            # faithful no-op for the service definition, not a downgrade.
+            written.append(launch_dir.expanduser() / "com.ciao.server.plist")
         else:
-            # Activation (E2): only a verified host selects the native hosted
-            # service; an absent, foreign or unverified host is not claimed and
-            # the direct shape is written. When no host is selected this run but
-            # the installed definition is already hosted and serves this
-            # workspace, it is left exactly as it is: re-rendering would silently
-            # downgrade a live hosted job to the direct shape.
-            if host is None and _existing_hosted_definition_serves(launch_dir, root):
-                # A hosted definition already owns this workspace; setup is a
-                # faithful no-op for the service definition, not a downgrade.
-                written.append(launch_dir.expanduser() / "com.ciao.server.plist")
-            else:
-                try:
-                    written.append(_write_launchd_plist(
-                        workspace=root,
-                        launch_agents_dir=launch_dir,
-                        engine_path=resolved_engine,
-                        runtime_root=runtime_root,
-                        port=port,
-                        path=os.environ.get("PATH", ""),
-                        plist_name="com.ciao.server.plist",
-                        confirm_repoint=confirm_repoint,
-                        host=host,
-                        host_python=(
-                            _host_engine_interpreter(resolved_engine)
-                            if host is not None
-                            else None
-                        ),
-                        exclusive=exclusive_service_definition,
-                    ))
-                except ValueError as exc:
-                    # The render-time refusal B2 defines (a host given without
-                    # the python it must serve). Both `ciao setup` callers catch
-                    # RuntimeError and report it as a message, so it is never a
-                    # traceback.
-                    raise RuntimeError(str(exc)) from exc
-            # Explicit --launch-agents-dir also permits offline plist generation.
-            _remove_legacy_app_shortcuts(app_root_dir)
-            _disable_legacy_menubar_agent(launch_dir)
+            try:
+                written.append(_write_launchd_plist(
+                    workspace=root,
+                    launch_agents_dir=launch_dir,
+                    engine_path=resolved_engine,
+                    runtime_root=runtime_root,
+                    port=port,
+                    path=os.environ.get("PATH", ""),
+                    plist_name="com.ciao.server.plist",
+                    confirm_repoint=confirm_repoint,
+                    host=host,
+                    host_python=(
+                        _host_engine_interpreter(resolved_engine)
+                        if host is not None
+                        else None
+                    ),
+                ))
+            except ValueError as exc:
+                # The render-time refusal B2 defines (a host given without
+                # the python it must serve). Both `ciao setup` callers catch
+                # RuntimeError and report it as a message, so it is never a
+                # traceback.
+                raise RuntimeError(str(exc)) from exc
+        # Explicit --launch-agents-dir also permits offline plist generation.
+        _remove_legacy_app_shortcuts(app_root_dir)
+        _disable_legacy_menubar_agent(launch_dir)
 
     ensure_workspace_git(root, initialize_if_missing=initialize_git)
     # A vault outside the workspace (existing notes folder) gets its own
@@ -2002,46 +1832,16 @@ def _plist_data_workspace(data: dict[str, Any] | None) -> Path | None:
 
 
 def _registered_service_workspace(definitions_dir: Path) -> Path | None:
-    """Workspace the installed service definition serves, if it says one.
+    """Workspace the installed service definition serves, if it says one: the plist's ``CIAO_WORKSPACE``, resolved so a caller can compare it with a requested workspace."""
 
-    The platform's own answer: the plist's ``CIAO_WORKSPACE`` on macOS, the
-    task XML's ``Exec/WorkingDirectory`` on Windows. Both resolve the path, so a
-    caller can compare it with a requested workspace.
-    """
-
-    if sys.platform == "win32":
-        from ciao import windows_service
-
-        # `unregister_task` leaves the XML on disk, so a definition is not proof
-        # a task exists: ask Task Scheduler. Refusing to repoint a task that was
-        # already deleted would strand the user behind a stale file.
-        try:
-            if not windows_service.task_exists():
-                return None
-        except windows_service.WindowsServiceError:
-            return None
-        workspace = windows_service.task_workspace(
-            definitions_dir.expanduser() / windows_service.TASK_FILE_NAME
-        )
-        try:
-            return workspace.expanduser().resolve() if workspace is not None else None
-        except OSError:
-            return workspace
     return _plist_workspace(definitions_dir)
 
 
 def _service_definition(launch_dir: Path | str | None) -> Path | None:
-    """The service definition this platform keeps in ``launch_dir``, or None.
-
-    The server LaunchAgent on macOS, the Task Scheduler XML on Windows.
-    """
+    """The server LaunchAgent this platform keeps in ``launch_dir``, or None."""
 
     if launch_dir is None:
         return None
-    if sys.platform == "win32":
-        from ciao import windows_service
-
-        return Path(launch_dir).expanduser() / windows_service.TASK_FILE_NAME
     return Path(launch_dir).expanduser() / "com.ciao.server.plist"
 
 
@@ -2049,7 +1849,7 @@ def _setup_command(args: argparse.Namespace) -> int:
     root = Path(args.workspace).expanduser().resolve()
     if args.load_launchd and not _service_platform():
         print(
-            "Error: --load-launchd requires macOS or Windows. "
+            "Error: --load-launchd requires macOS. "
             "On Linux use `ciao linux-service`.",
             file=sys.stderr,
         )
@@ -2157,15 +1957,7 @@ def _setup_command(args: argparse.Namespace) -> int:
         _print_setup_summary(root, _pwa_port_from_env(root, args.port))
         return rc
     for agent_definition in definitions:
-        if sys.platform == "win32":
-            print(
-                "Task not registered. To register it: "
-                f"ciao setup --workspace {root} --load-launchd"
-            )
-        else:
-            print(
-                f"LaunchAgent not loaded. To load it: launchctl load -w {agent_definition}"
-            )
+        print(f"LaunchAgent not loaded. To load it: launchctl load -w {agent_definition}")
     if sys.platform.startswith("linux") and not definitions:
         print(
             "Workspace ready. Run `ciao run` from the workspace, or use "
@@ -2422,8 +2214,7 @@ def _vault_search_command(args: argparse.Namespace) -> int:
         # re-rooted install those differ by the workspace segment, so joining
         # against the parent printed a `file://` link that does not exist.
         abs_path = key_base / result["path"]
-        # as_uri, not "file://" + the path: on Windows that read `C:` as a host,
-        # and a space or non-ASCII name broke the markdown link on every OS.
+        # as_uri, not "file://" + the path: a space or non-ASCII name broke the markdown link.
         link = abs_path.as_uri()
         print(f"- **[{result['title']}]({link})** (rank: {result['rank']})")
         if result["snippet"]:
@@ -3979,6 +3770,16 @@ def _workspace_move_command(args: argparse.Namespace) -> int:
     if not args.apply:
         print("Nothing changed. Re-run with --apply to move it.")
         return 0
+    from ciao.package_version import running_from_app_bundle
+
+    if running_from_app_bundle():
+        # `workspace_move.start` would refuse the launchd job anyway; say the
+        # actionable answer instead, before anything is recorded.
+        print(
+            "In Ciaobot for Mac, move the workspace from Settings → Ciaobot folder → Move…",
+            file=sys.stderr,
+        )
+        return 1
     if sys.platform.startswith("linux"):
         print("Moving. Ciaobot stops once running chats finish, and starts again from the new folder.")
     try:
@@ -4959,8 +4760,7 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
         )
         return 2
     if kind == REPO_DESTINATION:
-        # Not stat'ed: the pass chat's sandbox may not see the repository, and
-        # the accept validates it against the workspace's linked projects.
+        # Not stat'ed: the accept validates it against the workspace's linked projects.
         if "]" in payload:
             print(
                 "kind 'repo' cannot queue a repository path containing ']': "
@@ -6186,10 +5986,13 @@ def _proposal_needle(args: argparse.Namespace) -> str | None:
 
 def _handover_accept_budget(vault: Path, queue: Path) -> str:
     """``""`` while this curation run may still accept, else why not."""
-    from ciao.curation_run import active_lease
+    from ciao.curation_run import CurationStateError, active_lease
     from ciao.proposal_predictions import HANDOVER_ACCEPT_CAP, count_agent_accepts_since
 
-    lease = active_lease(vault)
+    try:
+        lease = active_lease(vault)
+    except CurationStateError:
+        return "curation state is uncertain; handover is refused"
     if lease is None:
         return "accepting needs a live curation run (take the lease with curation-begin)"
     try:
@@ -6241,6 +6044,7 @@ def _handover_gate(
     workspace: Path, name: str | None, queue: Path, bullet: Any, verdict: str
 ) -> str:
     """``""`` when the run may act on *bullet* with *verdict*, else why not."""
+    from ciao.curation_run import CurationStateError, active_lease
     from ciao.proposal_predictions import (
         REGION_KINDS,
         handover_allows,
@@ -6256,6 +6060,10 @@ def _handover_gate(
     trusted = trusted_registry(name, queue.parent.parent)
     if trusted is None:
         return "the installed engine does not register this workspace at this vault"
+    try:
+        active_lease(queue.parent.parent)
+    except CurationStateError:
+        return "curation state is uncertain; handover is refused"
     registered = trusted.workspace(name or "")
     handover = registered.memory_handover if registered is not None else "off"
     if not handover_allows(handover, verdict):
@@ -6290,20 +6098,33 @@ def _curation_config(workspace: Path, vault: Path, name: str) -> Any:
     )
 
 
-def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
-    from ciao.curation_run import build_worklist, load_state, plan_run
+@dataclass(frozen=True, slots=True)
+class _CurationPlanningResult:
+    payload: dict[str, Any]
+    discovered: Worklist
+    remaining: Worklist
+
+
+def _curation_plan(
+    args: argparse.Namespace,
+    *,
+    category_items: tuple[Any, ...] = (),
+    category_generation_attempted: bool = False,
+) -> _CurationPlanningResult:
+    from ciao.curation_run import build_worklist_views, load_state, plan_run_with_blocked
     from ciao.entity_types import load_entity_types
     from ciao.vault_index import VAULT_RENDER_PREFIX
 
     workspace, vault, guide, budget, registry_root, name = _curation_context(args)
     state = load_state(vault)
     handover = _workspace_handover(workspace, name)
-    worklist = build_worklist(
+    views = build_worklist_views(
         handover=handover,
         vault_root=vault,
         guide_path=guide,
         workspace_dir=workspace,
         done_keys=frozenset(state.done_keys),
+        category_items=category_items,
         category_registry=load_entity_types(registry_root),
         # The one pass that folds the proposal queue needs the registry; every
         # other pass reads files, and saying so is cheaper than making the whole
@@ -6320,16 +6141,27 @@ def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
         # says so in the worklist notes.
         workspace=name,
     )
-    plan = plan_run(worklist, budget)
+    worklist = views.remaining
+    plan = plan_run_with_blocked(worklist, budget)
+    coverage_notes = [
+        "coverage is incomplete: discovery is not exhaustive and observed work may omit items"
+    ]
+    if not category_generation_attempted:
+        coverage_notes.append(
+            "category generation was omitted; category clusters were not scanned"
+        )
     payload: dict[str, Any] = {
         "workspace": str(workspace),
         "vault_root": str(vault),
         "handover": handover,
         **worklist.as_dict(),
         **plan.as_dict(),
+        "counts_complete": False,
+        "remaining_observed_count": worklist.total_keys,
+        "coverage_notes": coverage_notes,
         "last_run": state.last_run,
     }
-    return payload, worklist
+    return _CurationPlanningResult(payload, views.discovered, views.remaining)
 
 
 def _print_curation(payload: dict[str, Any], *, as_json: bool) -> None:
@@ -6338,15 +6170,38 @@ def _print_curation(payload: dict[str, Any], *, as_json: bool) -> None:
         sys.stdout.write("\n")
         return
     if payload.get("empty"):
-        print("Nothing to curate: every mechanical check is clear.")
+        print("No observed work remains. Coverage is incomplete.")
+        for note in payload.get("coverage_notes", []):
+            print(f"Coverage note: {note}")
         return
+    lease = payload.get("lease")
+    if lease and lease.get("holder"):
+        print(f"Lease holder (use exactly for follow-ups): {lease['holder']}")
+    print("Coverage is incomplete; counts are observed, not exhaustive.")
+    print(f"Observed work items: {payload.get('remaining_observed_count', 0)}")
+    for note in payload.get("coverage_notes", []):
+        print(f"Coverage note: {note}")
     print(f"Weekly pass due: {'yes' if payload.get('weekly_due') else 'no'}")
     print(f"Handover: {payload['handover']}")
+    if payload.get("blocked_count"):
+        print(
+            f"WARNING: {payload['blocked_count']} oversized log item(s) are blocked: automated "
+            "rotation is unavailable in this release. Name each overdue log under **What needs you** "
+            "for an operator to archive by hand."
+        )
     for item in payload.get("planned", []):
         print(f"- [{item['pass']}] {item['label']} ({item['count']}) — {item['reason']}")
         for key in item["keys"]:
             print(f"    {key}")
+    skill_deferred = [item for item in payload.get("deferred", []) if item["pass"] == "skill_proposals"]
+    if skill_deferred:
+        # One aggregate line: deferred proposals are the next run's work and are
+        # not listed one per file in any report.
+        waiting = sum(int(item["count"]) for item in skill_deferred)
+        print(f"- {waiting} skill proposal(s) deferred to a later run; they are not listed individually.")
     for item in payload.get("deferred", []):
+        if item["pass"] == "skill_proposals":
+            continue
         print(f"- deferred [{item['pass']}] {item['label']} ({item['count']}) — {item['reason']}")
 
 
@@ -6356,31 +6211,92 @@ def _curation_plan_command(args: argparse.Namespace) -> int:
     Read-only on purpose: the plan is also how a human (or a test) checks what
     the nightly run would do without taking the lease away from it.
     """
-    payload, _ = _curation_plan(args)
-    _print_curation(payload, as_json=args.json)
+    from ciao.curation_run import CurationStateError
+
+    try:
+        result = _curation_plan(args)
+    except CurationStateError as exc:
+        print(f"curation state error: {exc}", file=sys.stderr)
+        return 1
+    _print_curation(result.payload, as_json=args.json)
     return 0
+
+
+def _abandon_begun_run(vault, holder: str) -> None:
+    """Release a lease this begin took, before a non-zero exit.
+
+    A run that exits with an error must not hold the vault until its TTL, so
+    every failure after ``begin_run`` records an ``error`` end. A lease that is
+    already lost is left alone: its replacement, if any, is not ours to end.
+    """
+    from ciao.curation_run import CurationBusy, CurationStateError, end_run
+
+    try:
+        end_run(vault, holder=holder, status="error", planned=0, completed=0, deferred=0)
+    except (CurationBusy, CurationStateError):
+        pass
 
 
 def _curation_begin_command(args: argparse.Namespace) -> int:
     """Take the lease and print this run's plan.
 
     An empty worklist releases the lease again before returning: a quiet night
-    must not hold the lease until the TTL expires.
+    must not hold the lease until the TTL expires. Any other non-zero exit after
+    the lease is taken releases it as an ``error`` run first.
     """
-    from ciao.curation_run import CurationBusy, begin_run, end_run
+    from ciao.curation_run import CurationBusy, CurationStateError, begin_run, end_run, holder_is_live
 
-    _workspace, vault, _guide, budget, _registry_root, _name = _curation_context(args)
+    _workspace, vault, _guide, budget, registry_root, _name = _curation_context(args)
     try:
         lease = begin_run(vault, holder=args.holder, ttl_s=budget.max_seconds)
     except CurationBusy as exc:
         print(f"curation is already running: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
+    except CurationStateError as exc:
+        print(f"curation state error: {exc}", file=sys.stderr)
+        return 1
 
-    payload, _worklist = _curation_plan(args)
+    from ciao.curation_run import _category_cluster_items
+
+    try:
+        categories = tuple(
+            _category_cluster_items(vault, holder=lease.holder, registry_root=registry_root)
+        )
+    except CurationBusy:
+        # Lost while the worklist was being published: nothing was written
+        # after the loss, and the replacement lease (if any) is left alone.
+        print("curation lease lost while building the worklist", file=sys.stderr)
+        return CURATION_BUSY_EXIT
+    try:
+        result = _curation_plan(
+            args, category_items=categories, category_generation_attempted=True
+        )
+    except CurationStateError as exc:
+        print(f"curation state error: {exc}", file=sys.stderr)
+        _abandon_begun_run(vault, lease.holder)
+        return 1
+    payload = result.payload
     payload["lease"] = lease.as_dict()
     if payload.get("empty"):
-        end_run(vault, holder=lease.holder, status="ok", planned=0, completed=0, deferred=0)
+        try:
+            end_run(vault, holder=lease.holder, status="ok", planned=0, completed=0, deferred=0)
+        except CurationBusy as exc:
+            print(f"curation lease lost: {exc}", file=sys.stderr)
+            return CURATION_BUSY_EXIT
+        except CurationStateError as exc:
+            print(f"curation state error: {exc}", file=sys.stderr)
+            return 1
         payload["lease"] = {}
+    else:
+        try:
+            is_live = holder_is_live(vault, holder=lease.holder)
+        except CurationStateError as exc:
+            print(f"curation state error: {exc}", file=sys.stderr)
+            _abandon_begun_run(vault, lease.holder)
+            return 1
+        if not is_live:
+            print("curation lease lost while building the worklist", file=sys.stderr)
+            return CURATION_BUSY_EXIT
     _print_curation(payload, as_json=args.json)
     return 0
 
@@ -6395,18 +6311,19 @@ def _curation_holder(args: argparse.Namespace) -> str:
     than defaulted, because only `curation-begin` knows the value — guessing
     `host:pid` here would match nothing and reject every honest run.
     """
-    holder = (getattr(args, "holder", "") or "").strip()
-    if not holder:
+    holder = getattr(args, "holder", "") or ""
+    if not holder.strip():
         print(
             "pass --holder with the value `curation-begin` reported as lease.holder",
             file=sys.stderr,
         )
+        return ""
     return holder
 
 
 def _curation_progress_command(args: argparse.Namespace) -> int:
     """Record finished worklist keys and renew the lease."""
-    from ciao.curation_run import CurationBusy, record_done, renew_run
+    from ciao.curation_run import CurationBusy, CurationStateError, record_done
 
     _workspace, vault, _guide, budget, _registry_root, _name = _curation_context(args)
     holder = _curation_holder(args)
@@ -6417,11 +6334,13 @@ def _curation_progress_command(args: argparse.Namespace) -> int:
         print("pass at least one --key from `curation-begin`", file=sys.stderr)
         return 2
     try:
-        added = record_done(vault, keys, holder=holder)
+        added = record_done(vault, keys, holder=holder, ttl_s=budget.max_seconds)
     except CurationBusy as exc:
         print(f"curation lease lost: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
-    renew_run(vault, holder=holder, ttl_s=budget.max_seconds)
+    except CurationStateError as exc:
+        print(f"curation state error: {exc}", file=sys.stderr)
+        return 1
     payload = {"recorded": len(keys), "newly_done": added}
     if args.json:
         json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
@@ -6440,14 +6359,19 @@ def _curation_end_command(args: argparse.Namespace) -> int:
     show for it. `end_run` does the stamping, so it happens only for the run
     that still owns the lease.
     """
-    from ciao.curation_run import CurationBusy, end_run
+    from ciao.curation_run import CurationBusy, CurationStateError, end_run
 
     _workspace, vault, _guide, _budget, _registry_root, _name = _curation_context(args)
     holder = _curation_holder(args)
     if not holder:
         return 2
-    payload, worklist = _curation_plan(args)
-    live_keys = frozenset(key for item in worklist.items for key in item.keys)
+    try:
+        result = _curation_plan(args)
+    except CurationStateError as exc:
+        print(f"curation state error: {exc}", file=sys.stderr)
+        return 1
+    payload = result.payload
+    live_keys = frozenset(key for item in result.remaining.items for key in item.keys)
     deferred = int(payload.get("deferred_count", 0))
     try:
         # `end_run` stamps the marker itself, inside the lease check. Stamping
@@ -6470,6 +6394,14 @@ def _curation_end_command(args: argparse.Namespace) -> int:
     except CurationBusy as exc:
         print(f"curation lease lost: {exc}", file=sys.stderr)
         return CURATION_BUSY_EXIT
+    except CurationStateError as exc:
+        print(f"curation state error: {exc}", file=sys.stderr)
+        return 1
+    summary.update(
+        counts_complete=False,
+        remaining_observed_count=int(payload["remaining_observed_count"]),
+        coverage_notes=payload["coverage_notes"],
+    )
     advanced = bool(summary.get("full_pass_advanced"))
     if args.json:
         json.dump(summary, sys.stdout, ensure_ascii=False, indent=2)
@@ -6478,8 +6410,57 @@ def _curation_end_command(args: argparse.Namespace) -> int:
         print(
             f"run {summary['status']}: planned {summary['planned']}, "
             f"completed {summary['completed']}, deferred {summary['deferred']}; "
-            f"weekly marker {'advanced' if advanced else 'left due'}"
+            f"weekly marker {'advanced' if advanced else 'left due'}; "
+            f"Observed work: {summary['remaining_observed_count']} (coverage incomplete)"
         )
+        if summary.get("marker_error"):
+            print(f"Weekly marker not advanced: {summary['marker_error']}")
+        for note in summary["coverage_notes"]:
+            print(f"Coverage note: {note}")
+    return 0
+
+
+def _curation_log_append_command(args: argparse.Namespace) -> int:
+    """Append one report to a packaged decision log under the live lease.
+
+    Exit 0 on success, 2 for usage or payload errors (including a report file
+    that is not a regular file), 75 when the lease is not this holder's, 1 for
+    an unsafe, corrupt or unreadable log. The lease is checked before the
+    report file is opened, and again inside the append. Success is the only
+    thing printed on stdout; diagnostics never echo the payload.
+    """
+    import json
+
+    from ciao.curation_logs import CurationLogError, read_payload_file
+    from ciao.curation_run import CurationBusy, CurationStateError, append_log, holder_is_live
+
+    holder = _curation_holder(args)
+    if not holder:
+        return 2
+    _workspace, vault, _guide, _budget, _registry_root, _name = _curation_context(args)
+    try:
+        if not holder_is_live(vault, holder=holder):
+            print("curation lease lost: this run no longer holds the curation lease", file=sys.stderr)
+            return CURATION_BUSY_EXIT
+        payload = read_payload_file(Path(args.text_file))
+        result = append_log(vault, holder=holder, log=args.log, payload=payload)
+    except ValueError as exc:
+        print(f"curation-log-append: {exc}", file=sys.stderr)
+        return 2
+    except CurationBusy as exc:
+        print(f"curation lease lost: {exc}", file=sys.stderr)
+        return CURATION_BUSY_EXIT
+    except (CurationStateError, CurationLogError) as exc:
+        print(f"curation log error: {exc}", file=sys.stderr)
+        return 1
+    except OSError:
+        print("curation log error: an I/O operation failed", file=sys.stderr)
+        return 1
+    if args.json:
+        json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+    else:
+        print(f"appended {result['bytes_appended']} byte(s) to the {result['log']} log")
     return 0
 
 
@@ -7711,22 +7692,26 @@ def _register_launchd_service(workspace: Path) -> Path:
         raise RuntimeError(str(exc)) from exc
 
 
-def _service_command(args: argparse.Namespace) -> int:
+def _mac_takeover_command(args: argparse.Namespace) -> int:
+    from ciao import mac_takeover
+
+    return mac_takeover.run_cli(args)
+
+
+def _macos_service_command(args: argparse.Namespace) -> int:
     from ciao import macos_service
 
     action = args.service_action
     as_json = bool(args.as_json)
     if getattr(args, "deprecated_alias", False) and not as_json:
         print("`ciao desktop-service` is deprecated; use `ciao service`.", file=sys.stderr)
-    if sys.platform == "win32":
-        return _windows_service_command(args, as_json)
     if sys.platform != "darwin":
         return macos_service.print_result(
             macos_service.ServiceResult(
                 False,
                 str(action),
-                "`ciao service` manages the macOS LaunchAgent and the Windows "
-                "logon task. On Linux use `ciao linux-service` and systemctl.",
+                "`ciao service` manages the macOS LaunchAgent. On Linux use "
+                "`ciao linux-service` and systemctl.",
                 {},
             ),
             as_json=as_json,
@@ -7811,30 +7796,6 @@ def _service_command(args: argparse.Namespace) -> int:
         result = macos_service.stop_service(force=bool(args.force))
     elif action == "login":
         result = macos_service.set_login_enabled(args.login_action == "enable")
-    elif action == "update-engine":
-        result = macos_service.update_engine(force=bool(args.force))
-    elif action == "migrate":
-        result = macos_service.migrate_legacy_companion(running_app=args.app_bundle)
-    elif action == "migration-classify":
-        # The bridge Ciaobot.app needs to decide whether to hand this Mac's
-        # engine over to the terminal installer (#604). The classifier is a
-        # module of its own, not a desktop-service action, and it already runs
-        # from the verified wheel inside install-engine.sh; importing it here
-        # rather than shelling out to `python -I -m ciao.engine_migration` is
-        # the smaller change, and it keeps the app off a second interpreter.
-        # It reads and never writes, so a Mac the app cannot interpret comes
-        # back as `desktop_invalid` and the app asks instead of guessing.
-        from ciao.engine_migration import classify
-
-        classification = classify()
-        result = macos_service.ServiceResult(
-            True,
-            "migration-classify",
-            f"this Mac classifies as {classification.kind}",
-            asdict(classification),
-        )
-    elif action == "rollback":
-        result = macos_service.rollback_legacy_companion()
     else:  # pragma: no cover - argparse constrains the action.
         parser_error = macos_service.ServiceResult(
             False,
@@ -7846,18 +7807,6 @@ def _service_command(args: argparse.Namespace) -> int:
     return macos_service.print_result(result, as_json=as_json)
 
 
-# The macOS desktop shell, including its `update-engine` action. They have no
-# Windows equivalent, so they fail with a clean result instead of half-running;
-# Windows updates the engine with `ciao update` (#857).
-_WINDOWS_UNAVAILABLE_ACTIONS = (
-    "login",
-    "update-engine",
-    "migrate",
-    "migration-classify",
-    "rollback",
-)
-
-
 def _validate_service_workspace(workspace: Path) -> Path:
     """Resolve and check a workspace the engine service may serve.
 
@@ -7865,7 +7814,7 @@ def _validate_service_workspace(workspace: Path) -> Path:
     Ciaobot workspace has been set up, and the app's own source checkout never
     is one. The macOS TCC check is left out -- it lives in
     `_register_launchd_service` and applies only to a Mac with no verified
-    Ciaobot Server host; it names macOS privacy protection, which Windows lacks.
+    Ciaobot Server host.
     """
     from ciao.setup_marker import is_set_up_workspace
 
@@ -7883,89 +7832,6 @@ def _validate_service_workspace(workspace: Path) -> Path:
     return root
 
 
-def _windows_service_port() -> int:
-    """Port the Windows engine answers on: the task workspace's ``.env``, else the default."""
-
-    from ciao import macos_service, windows_service
-
-    workspace = windows_service.task_workspace(
-        windows_service.default_task_dir() / windows_service.TASK_FILE_NAME
-    )
-    if workspace is None:
-        return macos_service.DEFAULT_PORT
-    return _pwa_port_from_env(workspace, macos_service.DEFAULT_PORT)
-
-
-def _windows_service_command(args: argparse.Namespace, as_json: bool) -> int:
-    """`ciao service` on Windows: the engine's Task Scheduler logon task.
-
-    Only the generic lifecycle exists there. The macOS path answers with the
-    same `ServiceResult`, so plain and `--json` output are one shape everywhere.
-    """
-
-    from ciao import macos_service, windows_service
-
-    action = str(args.service_action)
-    if action == "status":
-        result = windows_service.service_status(_windows_service_port())
-    elif action == "start":
-        workspace = getattr(args, "workspace", None)
-        if workspace is not None:
-            requested: Path | None = None
-            try:
-                requested = _validate_service_workspace(Path(workspace))
-            except (RuntimeError, OSError) as exc:
-                return macos_service.print_result(
-                    macos_service.ServiceResult(
-                        False, "start", str(exc), {"setup_required": True}
-                    ),
-                    as_json=as_json,
-                )
-            # Refuse to repoint a task that already serves another workspace,
-            # before anything is written. Same wording as the macOS path.
-            installed = _registered_service_workspace(
-                windows_service.default_task_dir()
-            )
-            if installed is not None and installed != requested:
-                return macos_service.print_result(
-                    macos_service.ServiceResult(
-                        False,
-                        "start",
-                        f"The registered task serves {installed}, not {requested}. "
-                        f"Run `ciao setup --workspace {requested} --load-launchd --yes` to repoint it.",
-                        {
-                            "installed_workspace": str(installed),
-                            "requested_workspace": str(requested),
-                        },
-                    ),
-                    as_json=as_json,
-                )
-        result = windows_service.start_service(workspace)
-    elif action == "stop":
-        result = windows_service.stop_service(
-            _windows_service_port(), force=bool(args.force)
-        )
-    elif action == "restart":
-        result = windows_service.restart_service(
-            _windows_service_port(), force=bool(args.force)
-        )
-    elif action in _WINDOWS_UNAVAILABLE_ACTIONS:
-        result = macos_service.ServiceResult(
-            False,
-            action,
-            f"`ciao service {action}` is not available on Windows yet.",
-            {},
-        )
-    else:  # pragma: no cover - argparse constrains the action.
-        result = macos_service.ServiceResult(
-            False,
-            action,
-            "Unknown service action.",
-            {},
-        )
-    return macos_service.print_result(result, as_json=as_json)
-
-
 def _linux_service_command(args: argparse.Namespace) -> int:
     from ciao.linux_service import render_service
 
@@ -7980,53 +7846,64 @@ def _linux_service_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _desktop_command(args: argparse.Namespace) -> int:
-    from ciao import desktop_install
+def _service_command(args: argparse.Namespace) -> int:
+    if getattr(args, "deprecated_alias", False):
+        print("`ciao desktop-service` is deprecated; use `ciao service`.", file=sys.stderr)
+    if not sys.platform.startswith("linux"):
+        print("Error: ciao service is Linux only.", file=sys.stderr)
+        return 2
+    if os.geteuid() == 0:
+        print("Error: run as the account that will own Ciaobot, not root.", file=sys.stderr)
+        return 2
+    import pwd  # noqa: PLC0415  # POSIX-only module: lives in the Linux branch.
 
-    as_json = bool(getattr(args, "as_json", False))
-    explicit_dir = getattr(args, "app_dir", None)
-    if explicit_dir:
-        app_dir = Path(explicit_dir).expanduser()
-    else:
-        app_dir = _default_app_dir()
-        system_app_dir = Path("/Applications")
-        if not (app_dir / desktop_install.APP_BUNDLE_NAME).exists() and (
-            system_app_dir / desktop_install.APP_BUNDLE_NAME
-        ).exists():
-            # Older installs used /Applications. Keep uninstall able to find
-            # those bundles while new installs consistently use ~/Applications.
-            app_dir = system_app_dir
+    from ciao import linux_service  # noqa: PLC0415
 
-    def report(payload: dict[str, object], lines: list[str]) -> int:
-        if as_json:
-            print(json.dumps(payload, indent=2))
-        else:
-            for line in lines:
-                print(line)
+    # The account is who the unit will run as, not whoever holds $HOME (#3131 D2).
+    identity = pwd.getpwuid(os.geteuid())
+    # Do not resolve python (see render_service's comment).
+    python = Path(sys.prefix) / "bin" / "python"
+    workspace = args.workspace or linux_service.unit_workspace(linux_service.UNIT_PATH)
+    if workspace is None:
+        print(
+            "Error: pass --workspace: no installed unit records a workspace for this account.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        plan = linux_service.plan_install(
+            workspace=workspace, user=identity.pw_name, home=Path(identity.pw_dir),
+            python=python, replace=args.replace, start=not args.no_start,
+            unit_path=linux_service.UNIT_PATH,
+        )
+    except linux_service.UnitConflict as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 3
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if args.dry_run:
+        print(plan.unit, end="")
+        for argv, stdin in plan.commands:
+            print(f"# would run: {shlex.join(argv)}")
         return 0
 
+    def run(argv: Sequence[str], stdin: str | None) -> None:
+        subprocess.run(argv, input=stdin, text=True, encoding="utf-8", check=True)
+
     try:
-        result = desktop_install.uninstall_desktop_app(app_dir=app_dir)
-        lines = [
-            f"Removed {result['path']}"
-            if result["removed"]
-            else f"Nothing to remove at {result['path']}"
-        ]
-        # Named explicitly: when the bundle was already dragged to the Trash
-        # the headline reads "Nothing to remove", yet this run may still have
-        # booted out and deleted launchd plists. Staying silent about that
-        # tells the user nothing happened when something did.
-        for agent in result.get("removed_agents") or []:
-            lines.append(f"Removed {agent}")
-        if result.get("removed_shim"):
-            lines.append(f"Removed {result['removed_shim']}")
-        return report(result, lines)
-    except desktop_install.InstallError as exc:
-        if as_json:
-            print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
-        else:
-            print(str(exc), file=sys.stderr)
+        linux_service.run_plan(plan, run=run)
+    except subprocess.CalledProcessError as exc:
+        # Earlier steps ran and later ones did not, so the operator must be
+        # told which step died and that the unit may be half installed.
+        shown = shlex.join([str(part) for part in (exc.cmd or ())][:3])
+        print(f"Error: {shown} failed with exit code {exc.returncode}.", file=sys.stderr)
+        print(
+            "The install may be half applied: inspect it with `systemctl status ciaobot`.",
+            file=sys.stderr,
+        )
         return 1
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -8039,33 +7916,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Exit with the restart code instead of re-execing; for `ciao supervise`.",
     )
-    run_parser.add_argument(
-        "--installer-bootstrap",
-        action="store_true",
-        help=(
-            "Installer-only: start a scratch first-run bootstrap for a fresh machine. "
-            "Refused when a Ciaobot install already exists."
-        ),
-    )
-    run_parser.add_argument(
-        "--installer-run-id",
-        default=None,
-        help="Installer-only correlation id for the handoff result (requires --installer-bootstrap).",
-    )
-    run_parser.add_argument("--installer-suggest-workspace", type=_absolute_installer_path, default=None)
-    # Internal native-installer handover (#2340). Not operator surface: the
-    # native coordinator passes the inherited private notification descriptor
-    # and, when it has fixed the choice, the one accepted workspace. Hidden
-    # from --help, and the legacy installer passes neither.
-    run_parser.add_argument(
-        "--installer-native-fd", type=int, default=None, help=argparse.SUPPRESS
-    )
-    run_parser.add_argument(
-        "--installer-native-workspace",
-        type=_absolute_installer_path,
-        default=None,
-        help=argparse.SUPPRESS,
-    )
+    # App-owned engine mode (#3129): the Mac app launches this exact flag and
+    # supervises the process itself. Not operator surface: hidden from --help,
+    # and refused outside the bundle at dispatch.
+    run_parser.add_argument("--app-engine", action="store_true", help=argparse.SUPPRESS)
+    # The app's DEBUG test launch picks the engine's port with this; it
+    # replaces the default for this process and is refused without --app-engine.
+    run_parser.add_argument("--port", type=int, default=None, help=argparse.SUPPRESS)
     run_parser.set_defaults(func=_run_command)
 
     supervise_parser = subparsers.add_parser(
@@ -8085,30 +7942,14 @@ def build_parser() -> argparse.ArgumentParser:
     ) -> None:
         service_parser = subparsers.add_parser(name, help=help_text)
         service_sub = service_parser.add_subparsers(dest="service_action", required=True)
-        for action in (
-            "status",
-            "start",
-            "restart",
-            "stop",
-            "update-engine",
-            "migrate",
-            "migration-classify",
-            "rollback",
-        ):
+        for action in ("status", "start", "restart", "stop"):
             action_parser = service_sub.add_parser(action)
             action_parser.add_argument("--json", action="store_true", dest="as_json")
-            if action in {"restart", "stop", "update-engine"}:
+            if action in {"restart", "stop"}:
                 action_parser.add_argument(
                     "--force",
                     action="store_true",
                     help="Proceed even when chats are active (after UI confirmation).",
-                )
-            if action == "migrate":
-                action_parser.add_argument(
-                    "--app-bundle",
-                    type=Path,
-                    required=True,
-                    help="Installed Ciaobot.app bundle requesting migration.",
                 )
             if action == "start":
                 action_parser.add_argument(
@@ -8118,20 +7959,50 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Register the LaunchAgent for this workspace first if it is not installed.",
                 )
             action_parser.set_defaults(
-                func=_service_command,
+                func=_macos_service_command,
                 deprecated_alias=deprecated,
             )
         login_parser = service_sub.add_parser("login")
         login_parser.add_argument("login_action", choices=("enable", "disable"))
         login_parser.add_argument("--json", action="store_true", dest="as_json")
         login_parser.set_defaults(
-            func=_service_command,
+            func=_macos_service_command,
             deprecated_alias=deprecated,
         )
+        # #3131: the Linux system-service install shares this group so
+        # `ciao service install` reads like the other service verbs. It is
+        # registered only on `service`: `desktop-service` is the deprecated
+        # macOS alias, and the handler refuses non-Linux and root invocations
+        # itself.
+        if not deprecated:
+            install_parser = service_sub.add_parser(
+                "install",
+                help="Install the Linux systemd service for this account.",
+            )
+            install_parser.add_argument(
+                "--workspace", type=Path,
+                help="Workspace directory (default: the one the installed unit records).",
+            )
+            install_parser.add_argument(
+                "--replace", action="store_true",
+                help="Take over an existing unit that runs another interpreter (a source install).",
+            )
+            install_parser.add_argument(
+                "--no-start", action="store_true",
+                help="Install and enable the unit, but do not restart the service.",
+            )
+            install_parser.add_argument(
+                "--dry-run", action="store_true",
+                help="Print the unit and the commands without running anything.",
+            )
+            install_parser.set_defaults(
+                func=_service_command,
+                deprecated_alias=deprecated,
+            )
 
     add_service_parser(
         "service",
-        "Start, stop and inspect the launchd-managed Ciaobot engine (macOS).",
+        "Service control: start, stop and inspect on macOS (launchd), and install the Linux systemd unit.",
         deprecated=False,
     )
     add_service_parser(
@@ -8140,47 +8011,67 @@ def build_parser() -> argparse.ArgumentParser:
         deprecated=True,
     )
 
-    # Separate from `service`, which controls the launchd engine. This group
-    # only removes an old app bundle, for the compatibility window: the app
-    # itself is retired, and installation and updates are owned by
-    # scripts/install-engine.sh.
-    desktop_parser = subparsers.add_parser(
-        "desktop",
-        help="Remove an installed Ciaobot.app desktop bundle.",
+    takeover_parser = subparsers.add_parser(
+        "mac-takeover",
+        help="Ciaobot.app only: classify this Mac's 1.x engine for takeover "
+        "(plan is read-only; apply/finish/rollback are the journalled transaction).",
     )
-    desktop_sub = desktop_parser.add_subparsers(dest="desktop_action", required=True)
-    desktop_uninstall_parser = desktop_sub.add_parser(
-        "uninstall",
-        help="Remove the installed Ciaobot.app bundle.",
+    takeover_sub = takeover_parser.add_subparsers(
+        dest="mac_takeover_action", required=True
     )
-    desktop_uninstall_parser.add_argument(
-        "--app-dir",
-        type=Path,
-        default=None,
-        help="Directory holding Ciaobot.app (defaults to ~/Applications, "
-        "falling back to /Applications when the bundle is only there).",
+    takeover_plan_parser = takeover_sub.add_parser(
+        "plan", help="Print the takeover plan as JSON; changes nothing."
     )
-    desktop_uninstall_parser.add_argument("--json", action="store_true", dest="as_json")
-    desktop_uninstall_parser.set_defaults(func=_desktop_command)
+    takeover_plan_parser.add_argument("--json", action="store_true", dest="as_json")
+    takeover_plan_parser.add_argument(
+        "--launch-agents-dir", type=Path, default=None
+    )
+    takeover_plan_parser.add_argument("--label", default="com.ciao.server")
+    takeover_plan_parser.set_defaults(func=_mac_takeover_command)
 
-    installer_parser = subparsers.add_parser(
-        "installer",
-        help="Installer-only: verify a bootstrap result and start the service.",
+    takeover_apply_parser = takeover_sub.add_parser(
+        "apply",
+        help="Ciaobot.app only: back up the old plist, stop the old engine and "
+        "hand the workspace to the bundled engine (journalled).",
     )
-    installer_sub = installer_parser.add_subparsers(
-        dest="installer_action", required=True
-    )
-    installer_activate_parser = installer_sub.add_parser(
-        "activate",
-        help="Activate the service for a completed installer bootstrap run.",
-    )
-    installer_activate_parser.add_argument(
-        "--run-id",
+    takeover_apply_parser.add_argument("--json", action="store_true", dest="as_json")
+    takeover_apply_parser.add_argument(
+        "--expect-sha256",
         required=True,
-        help="The run id the installer passed to `ciao run --installer-bootstrap`.",
+        help="The plist sha256 the plan reported, which must still match.",
     )
-    installer_activate_parser.add_argument("--json", action="store_true", dest="as_json")
-    installer_activate_parser.set_defaults(func=_installer_command)
+    takeover_apply_parser.add_argument(
+        "--launch-agents-dir", type=Path, default=None
+    )
+    takeover_apply_parser.add_argument("--label", default="com.ciao.server")
+    takeover_apply_parser.set_defaults(func=_mac_takeover_command)
+
+    takeover_finish_parser = takeover_sub.add_parser(
+        "finish",
+        help="Ciaobot.app only: prove the bundled engine is healthy and list the "
+        "leftovers it may trash; --done closes the takeover after trashing.",
+    )
+    takeover_finish_parser.add_argument("--json", action="store_true", dest="as_json")
+    takeover_finish_parser.add_argument(
+        "--id", required=True, dest="takeover_id", help="The takeover id that apply returned."
+    )
+    takeover_finish_parser.add_argument(
+        "--done",
+        action="store_true",
+        dest="done",
+        help="Close the takeover's journal (call after trashing).",
+    )
+    takeover_finish_parser.set_defaults(func=_mac_takeover_command)
+
+    takeover_rollback_parser = takeover_sub.add_parser(
+        "rollback",
+        help="Ciaobot.app only: restore the 1.x engine after an unfinished takeover.",
+    )
+    takeover_rollback_parser.add_argument("--json", action="store_true", dest="as_json")
+    takeover_rollback_parser.add_argument(
+        "--id", required=True, dest="takeover_id", help="The takeover id that apply returned."
+    )
+    takeover_rollback_parser.set_defaults(func=_mac_takeover_command)
 
     linux_service_parser = subparsers.add_parser(
         "linux-service",
@@ -9550,7 +9441,7 @@ def build_parser() -> argparse.ArgumentParser:
     curation_begin_parser.add_argument(
         "--holder",
         default="",
-        help="Label recorded as the lease owner. Defaults to host:pid.",
+        help="Descriptive label; follow-ups must use the exact lease.holder returned. Defaults to host:pid.",
     )
     curation_begin_parser.set_defaults(func=_curation_begin_command)
 
@@ -9614,6 +9505,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Required: the `lease.holder` value `curation-begin` returned.",
     )
     curation_end_parser.set_defaults(func=_curation_end_command)
+
+    curation_log_append_parser = subparsers.add_parser(
+        "curation-log-append",
+        help="Append one technical report to a packaged decision log under the lease.",
+        description=(
+            "Appends the report in --text-file to Curation-Log or "
+            "Weekly-Review-Log, under the curation lease named by --holder. "
+            "Exit 0 with a JSON result on success, 2 for usage or payload "
+            "errors, 75 when the lease is not held by --holder, 1 when the log "
+            "is unsafe, corrupt or over its size limit. A retry after an "
+            "uncertain response (a timeout, a lost reply) can duplicate the "
+            "report: this command is not exactly-once. Check the log before "
+            "retrying."
+        ),
+    )
+    _add_curation_arguments(curation_log_append_parser)
+    curation_log_append_parser.add_argument(
+        "--log",
+        required=True,
+        choices=("curation", "weekly-review"),
+        help="Which decision log to append to.",
+    )
+    curation_log_append_parser.add_argument(
+        "--text-file",
+        required=True,
+        type=Path,
+        help=(
+            "File holding the report, UTF-8 without a byte-order mark, at most "
+            "256 KiB. An uncertain response can duplicate it on retry."
+        ),
+    )
+    curation_log_append_parser.add_argument(
+        "--holder",
+        required=True,
+        help="Required: the `lease.holder` value `curation-begin` returned.",
+    )
+    curation_log_append_parser.set_defaults(func=_curation_log_append_command)
 
     skill_proposal_add_parser = subparsers.add_parser(
         "skill-proposal-add",
@@ -10292,12 +10220,11 @@ def _gws_auth_helper_command(args: argparse.Namespace) -> int:
     return gws_auth_helper.main_entry(argv)
 
 
-# EX_NOPERM. Hardcoded: ``os.EX_NOPERM`` does not exist on Windows.
+# EX_NOPERM.
 RUNTIME_STATE_UNREADABLE_EXIT = 77
 
 
 def main(argv: list[str] | None = None) -> int:
-    use_utf8_stdio()
     os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
     os.environ.setdefault("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
     argv_list = list(sys.argv[1:] if argv is None else argv)
@@ -10314,6 +10241,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _dispatch(argv_list: list[str]) -> int:
+    if argv_list == ["--version"]:
+        from ciao import __version__  # noqa: PLC0415
+
+        print(f"ciao {__version__}")
+        return 0
     # The agent surface (`ciao memory …`, `ciao vault search …`): dispatch
     # before building the operator parser so a call from a chat costs
     # interpreter start-up, not this module's import graph. ``ciao.agent_cli``
@@ -10331,7 +10263,26 @@ def _dispatch(argv_list: list[str]) -> int:
     if argv_list[:1] == ["update"]:
         from ciao.engine_update import main as update_main
 
-        return update_main(argv_list[1:])
+        rest = argv_list[1:]
+        # On Linux `ciao update` re-runs the latest installer. The receiving
+        # verbs keep meaning the update record and the 1.x hop's detached job,
+        # so they stay on engine_update, which the updater job also runs.
+        receiver_verbs = {"status", "run-apply", "run-recover"}
+        if sys.platform.startswith("linux") and not (rest and rest[0] in receiver_verbs):
+            from ciao.package_version import detect_install_mode  # noqa: PLC0415
+
+            # A source checkout is updated with git. The installer would replace
+            # the venv the checkout runs from.
+            if detect_install_mode() == "editable":
+                print(
+                    "This is a source checkout; update it with git, not ciao update.",
+                    file=sys.stderr,
+                )
+                return 2
+            from ciao.linux_service import run_update  # noqa: PLC0415
+
+            return run_update(rest)
+        return update_main(rest)
     if argv_list[:1] == ["gws"]:
         # Passthrough: forward everything (including leading gws options such as
         # `--version`) untouched, keeping argparse out of the way.

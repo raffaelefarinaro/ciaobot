@@ -23,6 +23,8 @@
     "src/**/*.vue",
     "src/vite-env.d.ts",
     "src/jsdom-shim.d.ts",
+    ".storybook/**/*.ts",
+    "scripts/check-storybook-index.ts",
     "e2e/**/*.ts",
     "playwright.config.ts"
   ]

@@ -132,6 +132,42 @@ describe('vaultReview store', () => {
     expect(get).toHaveBeenCalledTimes(3)
   })
 
+  it('re-reads a loaded queue after it goes stale, so an item resolved elsewhere leaves the list', async () => {
+    // Issue #3020: a backlink added outside the panel resolves a candidate on
+    // the server, but the store kept the snapshot it loaded and every return
+    // to the panel (mount, focus, visibility) short-circuited on it.
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000)
+    get.mockResolvedValueOnce({ candidates: [candidate()], trashed: [] })
+    const store = useVaultReviewStore()
+    await store.ensureLoaded('personal')
+    expect(store.candidates).toHaveLength(1)
+
+    // Resolved elsewhere: the live queue no longer holds it.
+    get.mockResolvedValueOnce({ candidates: [], trashed: [] })
+    now.mockReturnValue(1_000_000 + 60_000)
+    await store.ensureLoaded('personal')
+
+    expect(get).toHaveBeenCalledTimes(2)
+    expect(store.candidates).toEqual([])
+    now.mockRestore()
+  })
+
+  it('a not-found action says the item changed and refreshes the queue', async () => {
+    get.mockResolvedValueOnce({ candidates: [candidate()], trashed: [] })
+    const store = useVaultReviewStore()
+    await store.fetch('personal')
+
+    post.mockRejectedValueOnce(new Error('trashed candidate not found'))
+    get.mockResolvedValueOnce({ candidates: [], trashed: [] })
+    const ok = await store.trash('personal', 'abc123abc123abc123abc123')
+
+    expect(ok).toBe(false)
+    expect(get).toHaveBeenCalledTimes(2)
+    expect(store.candidates).toEqual([])
+    expect(store.error).toBe('This item changed since the list was loaded, so the list was refreshed.')
+    expect(store.errorDetail).toBe('trashed candidate not found')
+  })
+
   it('drops a stale response when the workspace changed mid-flight', async () => {
     let release!: () => void
     get.mockImplementationOnce(

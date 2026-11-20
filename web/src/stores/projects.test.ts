@@ -11,10 +11,1001 @@ import {
   useProjectStore,
 } from './projects'
 import { useTaskSignalsStore } from './taskSignals'
-import { nextTick } from 'vue'
+import { nextTick, watch } from 'vue'
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: Error) => void
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
+  return { promise, resolve, reject }
+}
+
+describe('workspace registry evidence', () => {
+  it('retains legacy rename handling for a missing registry in a successful response', async () => {
+    const store = useProjectStore()
+    store.workspaces = [{ name: 'personal' }] as typeof store.workspaces
+    const read = deferred<unknown>()
+    apiGet.mockReturnValueOnce(read.promise)
+    const response = { renamed: { from: 'personal', to: 'renamed' }, active: 'renamed', provider_options: [{ value: 'custom', label: 'Custom' }] }
+    apiPatch.mockResolvedValueOnce(response)
+    expect(await store.updateWorkspace('personal', { name: 'renamed' })).toBe(response)
+    expect(store.workspaces).toEqual([])
+    expect(store.activeWorkspace).toBe('renamed')
+    expect(store.workspaceProviderOptions).toEqual(response.provider_options)
+    expect(store.workspaceRegistryStatus).toBe('loading')
+    read.resolve({})
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('error'))
+    expect(store.activeWorkspace).toBe('renamed')
+  })
+
+  it('keeps legacy fetchWorkspaces updates on a missing list without certifying it', async () => {
+    const store = useProjectStore()
+    store.workspaces = [{ name: 'personal' }] as typeof store.workspaces
+    const response = { active: 'work', provider_options: [{ value: 'custom', label: 'Custom' }] }
+    apiGet.mockResolvedValueOnce(response)
+    expect(await store.fetchWorkspaces()).toBe(response)
+    expect(store.workspaces).toEqual([])
+    expect(store.activeWorkspace).toBe('work')
+    expect(store.workspaceProviderOptions).toEqual(response.provider_options)
+    expect(store.workspaceRegistryStatus).toBe('error')
+  })
+
+  it.each(['create', 'archive', 'restore', 'reorder'] as const)(
+    'retains legacy empty-list handling for successful %s with missing workspaces',
+    async operation => {
+      const store = useProjectStore()
+      store.workspaces = [{ name: 'personal' }] as typeof store.workspaces
+      const read = deferred<unknown>()
+      apiGet.mockReturnValueOnce(read.promise)
+      const response = { active: 'work', provider_options: [{ value: 'custom', label: 'Custom' }] }
+      apiPost.mockResolvedValueOnce(response)
+      const result = operation === 'create' ? await store.createWorkspace({ name: 'new' })
+        : operation === 'archive' ? await store.archiveWorkspace('personal')
+          : operation === 'restore' ? await store.restoreArchivedWorkspace('id')
+            : await store.reorderWorkspaces(['personal'])
+      expect(result).toBe(response)
+      expect(store.workspaces).toEqual([])
+      if (operation !== 'reorder') expect(store.workspaceProviderOptions).toEqual(response.provider_options)
+      if (operation === 'archive') expect(store.activeWorkspace).toBe('work')
+      read.resolve({})
+      await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('error'))
+    },
+  )
+
+  it('follows a concurrent rename even when a newer mutation invalidated its list', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }, { name: 'work' }] })
+    await store.fetchWorkspaces()
+    const rename = deferred<unknown>()
+    const create = deferred<unknown>()
+    const read = deferred<unknown>()
+    apiPatch.mockReturnValueOnce(rename.promise)
+    apiPost.mockReturnValueOnce(create.promise)
+    apiGet.mockReturnValueOnce(read.promise)
+    const renameAction = store.updateWorkspace('personal', { name: 'renamed' })
+    const createAction = store.createWorkspace({ name: 'new' })
+    rename.resolve({ workspaces: [{ name: 'renamed' }, { name: 'work' }], renamed: { from: 'personal', to: 'renamed' } })
+    await renameAction
+    expect(store.activeWorkspace).toBe('renamed')
+    create.resolve({ workspaces: [{ name: 'renamed' }, { name: 'work' }, { name: 'new' }] })
+    await createAction
+    read.resolve({ workspaces: [{ name: 'work' }, { name: 'renamed' }, { name: 'new' }], active: 'work' })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    expect(store.activeWorkspace).toBe('renamed')
+    expect(localStorage.getItem('ciao-active-workspace')).toBe('renamed')
+  })
+
+  it('does not follow a stale rename after the selection changes away and back', async () => {
+    const store = useProjectStore()
+    const rename = deferred<unknown>()
+    const create = deferred<unknown>()
+    const read = deferred<unknown>()
+    apiPatch.mockReturnValueOnce(rename.promise)
+    apiPost.mockReturnValueOnce(create.promise)
+    apiGet.mockReturnValueOnce(read.promise)
+    const renameAction = store.updateWorkspace('personal', { name: 'renamed' })
+    const createAction = store.createWorkspace({ name: 'new' })
+    store.activeWorkspace = 'work'
+    store.activeWorkspace = 'personal'
+    rename.resolve({ workspaces: [{ name: 'renamed' }], renamed: { from: 'personal', to: 'renamed' } })
+    await renameAction
+    expect(store.activeWorkspace).toBe('personal')
+    create.resolve({ workspaces: [{ name: 'personal' }] })
+    await createAction
+    read.resolve({ workspaces: [{ name: 'personal' }] })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    expect(store.activeWorkspace).toBe('personal')
+  })
+
+  it('keeps the restored selection until bootstrap projects establish fallback options', async () => {
+    localStorage.setItem('ciao-active-workspace', 'custom')
+    const store = useProjectStore()
+    const projects = deferred<unknown>()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal' })
+      if (path === '/api/projects') return projects.promise
+      return Promise.resolve([])
+    })
+    const bootstrap = store.fetchAll()
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    expect(store.activeWorkspace).toBe('custom')
+    projects.resolve([{ project_id: 'custom-project', name: 'General', workspace: 'custom', context: '', created_at: '', order: 0, vault_folder: '' }])
+    await bootstrap
+    expect(store.activeWorkspace).toBe('custom')
+  })
+
+  it('applies bootstrap project fallback after a malformed workspace success without certifying it', async () => {
+    localStorage.setItem('ciao-active-workspace', 'old')
+    const store = useProjectStore()
+    const projects = deferred<unknown>()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return Promise.resolve({ active: 'work' })
+      if (path === '/api/projects') return projects.promise
+      return Promise.resolve([])
+    })
+    const bootstrap = store.fetchAll()
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('error'))
+    expect(store.activeWorkspace).toBe('old')
+    projects.resolve([{ project_id: 'work-project', name: 'General', workspace: 'work', context: '', created_at: '', order: 0, vault_folder: '' }])
+    await bootstrap
+    expect(store.activeWorkspace).toBe('work')
+    expect(store.workspaceRegistryStatus).toBe('error')
+    expect(store.workspaceRegistryError).toBeTruthy()
+  })
+
+  it('does not apply an obsolete malformed bootstrap fallback after a newer registry read', async () => {
+    localStorage.setItem('ciao-active-workspace', 'old')
+    const store = useProjectStore()
+    const projects = deferred<unknown>()
+    let workspaceReads = 0
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') {
+        workspaceReads++
+        return Promise.resolve(workspaceReads === 1 ? { active: 'work' } : { workspaces: [{ name: 'new' }], active: 'new' })
+      }
+      if (path === '/api/projects') return projects.promise
+      return Promise.resolve([])
+    })
+    const bootstrap = store.fetchAll()
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('error'))
+    await store.fetchWorkspaces()
+    expect(store.activeWorkspace).toBe('new')
+    projects.resolve([{ project_id: 'work-project', name: 'General', workspace: 'work', context: '', created_at: '', order: 0, vault_folder: '' }])
+    await bootstrap
+    expect(store.activeWorkspace).toBe('new')
+    expect(store.workspaceRegistryStatus).toBe('ready')
+    expect(store.workspaces.map(w => w.name)).toEqual(['new'])
+  })
+
+  it('does not apply an older optimistic reorder after a loading watcher starts a newer reorder', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }, { name: 'work' }] })
+    await store.fetchWorkspaces()
+    const first = deferred<unknown>()
+    const second = deferred<unknown>()
+    const read = deferred<unknown>()
+    apiPost.mockReturnValueOnce(second.promise).mockReturnValueOnce(first.promise)
+    apiGet.mockReturnValueOnce(read.promise)
+    let newer: Promise<unknown> | undefined
+    const stop = watch(() => store.workspaceRegistryStatus, status => {
+      if (status === 'loading' && !newer) newer = store.reorderWorkspaces(['personal', 'work'])
+    }, { flush: 'sync' })
+    const older = store.reorderWorkspaces(['work', 'personal'])
+    stop()
+    expect(store.workspaces.map(w => w.name)).toEqual(['personal', 'work'])
+    second.resolve({ workspaces: [{ name: 'personal' }, { name: 'work' }] })
+    await newer
+    first.resolve({ workspaces: [{ name: 'work' }, { name: 'personal' }] })
+    await older
+    read.resolve({ workspaces: [{ name: 'personal' }, { name: 'work' }] })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+  })
+
+  it('distinguishes fabricated options from a validated empty registry', async () => {
+    const store = useProjectStore()
+    expect(store.workspaceOptions.length).toBeGreaterThan(0)
+    expect(store.workspaceRegistryStatus).toBe('loading')
+    apiGet.mockResolvedValueOnce({ workspaces: [] })
+    await store.fetchWorkspaces()
+    expect(store.workspaceRegistryStatus).toBe('ready')
+    expect(store.workspaces).toEqual([])
+  })
+
+  it.each([undefined, null, {}, [{ name: '' }], [{ name: 'a' }, { name: 'a' }]])(
+    'does not certify malformed registry %j',
+    async workspaces => {
+      const store = useProjectStore()
+      apiGet.mockResolvedValueOnce({ workspaces })
+      await store.fetchWorkspaces()
+      expect(store.workspaceRegistryStatus).toBe('error')
+      expect(store.workspaceRegistryError).toBeTruthy()
+    },
+  )
+
+  it('waits for every concurrent mutation and a fresh read before certifying', async () => {
+    const store = useProjectStore()
+    let finishFirst!: (value: unknown) => void
+    let finishSecond!: (value: unknown) => void
+    let finishRead!: (value: unknown) => void
+    apiPost.mockReturnValueOnce(new Promise(resolve => { finishFirst = resolve }))
+    apiPost.mockReturnValueOnce(new Promise(resolve => { finishSecond = resolve }))
+    apiGet.mockReturnValueOnce(new Promise(resolve => { finishRead = resolve }))
+    const first = store.createWorkspace({ name: 'a' })
+    const second = store.createWorkspace({ name: 'b' })
+    finishSecond({ workspaces: [{ name: 'b' }] })
+    await second
+    expect(store.workspaceRegistryStatus).toBe('loading')
+    expect(apiGet).not.toHaveBeenCalled()
+    finishFirst({ workspaces: [{ name: 'a' }] })
+    await first
+    expect(store.workspaceRegistryStatus).toBe('loading')
+    expect(apiGet).toHaveBeenCalledWith('/api/workspaces')
+    finishRead({ workspaces: [{ name: 'a' }, { name: 'b' }] })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    expect(store.workspaces.map(w => w.name)).toEqual(['a', 'b'])
+  })
+
+  it.each([
+    [['a', 'b'], ['a', 'b']],
+    [['a', 'b'], ['b', 'a']],
+    [['b', 'a'], ['a', 'b']],
+    [['b', 'a'], ['b', 'a']],
+  ] as const)(
+    'certifies server commit order %j only after response order %j and a fresh GET',
+    async (commits, responses) => {
+      const store = useProjectStore()
+      const requests = { a: deferred<unknown>(), b: deferred<unknown>() }
+      const finalRead = deferred<unknown>()
+      let server = ['personal']
+      const snapshots: Record<string, { workspaces: { name: string }[] }> = {}
+      apiPost.mockImplementation((_path: string, payload: { name: 'a' | 'b' }) => requests[payload.name].promise)
+      apiGet.mockImplementation((path: string) => {
+        expect(path).toBe('/api/workspaces')
+        expect(server).toEqual(['personal', ...commits])
+        return finalRead.promise
+      })
+      const operations = {
+        a: store.createWorkspace({ name: 'a' }),
+        b: store.createWorkspace({ name: 'b' }),
+      }
+      for (const name of commits) {
+        server = [...server, name]
+        snapshots[name] = { workspaces: server.map(name => ({ name })) }
+      }
+      requests[responses[0]].resolve(snapshots[responses[0]])
+      expect(await operations[responses[0]]).toBe(snapshots[responses[0]])
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      expect(apiGet).not.toHaveBeenCalled()
+      requests[responses[1]].resolve(snapshots[responses[1]])
+      expect(await operations[responses[1]]).toBe(snapshots[responses[1]])
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      expect(apiGet).toHaveBeenCalledTimes(1)
+      finalRead.resolve({ workspaces: server.map(name => ({ name })) })
+      await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+      expect(store.workspaces.map(w => w.name)).toEqual(server)
+    },
+  )
+
+  it('ignores an older read after a newer read fails, then recovers', async () => {
+    const store = useProjectStore()
+    let finishOld!: (value: unknown) => void
+    apiGet.mockReturnValueOnce(new Promise(resolve => { finishOld = resolve }))
+    apiGet.mockRejectedValueOnce(new Error('private details'))
+    const old = store.fetchWorkspaces()
+    await expect(store.fetchWorkspaces()).rejects.toThrow('private details')
+    expect(store.workspaceRegistryStatus).toBe('error')
+    expect(store.workspaceRegistryError).not.toContain('private details')
+    finishOld({ workspaces: [{ name: 'stale' }] })
+    await old
+    expect(store.workspaceRegistryStatus).toBe('error')
+    expect(store.workspaces).toEqual([])
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+    await store.fetchWorkspaces()
+    expect(store.workspaceRegistryStatus).toBe('ready')
+    expect(store.workspaceRegistryError).toBe('')
+  })
+
+  it('ignores an older failure after a newer read succeeds', async () => {
+    const store = useProjectStore()
+    let rejectOld!: (error: Error) => void
+    apiGet.mockReturnValueOnce(new Promise((_resolve, reject) => { rejectOld = reject }))
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+    const old = store.fetchWorkspaces()
+    await store.fetchWorkspaces()
+    rejectOld(new Error('old failure'))
+    await expect(old).rejects.toThrow('old failure')
+    expect(store.workspaceRegistryStatus).toBe('ready')
+    expect(store.workspaceRegistryError).toBe('')
+    expect(store.workspaces.map(w => w.name)).toEqual(['personal'])
+  })
+
+  it('keeps a good registry ready when an invalid reorder is rejected locally', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }, { name: 'work' }] })
+    await store.fetchWorkspaces()
+    expect(await store.reorderWorkspaces(['personal', 'personal'])).toBeNull()
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(store.workspaceRegistryStatus).toBe('ready')
+  })
+
+  it('reports a failed post-mutation reread until a later read recovers', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+    apiGet.mockRejectedValueOnce(new Error('private network detail'))
+    await store.createWorkspace({ name: 'new' })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('error'))
+    expect(store.workspaceRegistryError).not.toContain('private network detail')
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }, { name: 'new' }] })
+    await store.fetchWorkspaces()
+    expect(store.workspaceRegistryStatus).toBe('ready')
+  })
+
+  it('invalidates a post-settlement read when another mutation begins', async () => {
+    const store = useProjectStore()
+    let finishOld!: (value: unknown) => void
+    let finishNew!: (value: unknown) => void
+    apiPost.mockResolvedValue({ workspaces: [{ name: 'personal' }] })
+    apiGet.mockReturnValueOnce(new Promise(resolve => { finishOld = resolve }))
+    apiGet.mockReturnValueOnce(new Promise(resolve => { finishNew = resolve }))
+    await store.createWorkspace({ name: 'a' })
+    await store.createWorkspace({ name: 'b' })
+    finishOld({ workspaces: [{ name: 'old' }] })
+    await Promise.resolve()
+    expect(store.workspaceRegistryStatus).toBe('loading')
+    finishNew({ workspaces: [{ name: 'new' }] })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    expect(store.workspaces.map(w => w.name)).toEqual(['new'])
+  })
+
+  it('coalesces reads requested during a mutation into its post-settlement read', async () => {
+    const store = useProjectStore()
+    let finishMutation!: (value: unknown) => void
+    apiPost.mockReturnValueOnce(new Promise(resolve => { finishMutation = resolve }))
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+    const mutation = store.createWorkspace({ name: 'new' })
+    const first = store.fetchWorkspaces()
+    const second = store.fetchWorkspaces()
+    expect(apiGet).not.toHaveBeenCalled()
+    finishMutation({ workspaces: [{ name: 'personal' }] })
+    await mutation
+    await Promise.all([first, second])
+    expect(apiGet).toHaveBeenCalledTimes(1)
+    expect(store.workspaceRegistryStatus).toBe('ready')
+  })
+
+  it('records registry success independently of a failed bootstrap project request', async () => {
+    const store = useProjectStore()
+    let finishRegistry!: (value: unknown) => void
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return new Promise(resolve => { finishRegistry = resolve })
+      if (path === '/api/projects') return Promise.reject(new Error('projects failed'))
+      return Promise.resolve([])
+    })
+    await expect(store.fetchAll()).rejects.toThrow('projects failed')
+    expect(store.workspaceRegistryStatus).toBe('loading')
+    finishRegistry({ workspaces: [{ name: 'personal' }] })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    expect(store.chatsHealth.status).toBe('unavailable')
+  })
+
+  it.each(['/api/projects', '/api/chats?active_only=1'])(
+    'publishes a delayed workspace success after bootstrap %s fails',
+    async failedPath => {
+      const store = useProjectStore()
+      const workspace = deferred<unknown>()
+      const unrelated = deferred<unknown>()
+      const unhandled = vi.fn()
+      window.addEventListener('unhandledrejection', unhandled)
+      apiGet.mockImplementation((path: string) => {
+        if (path === '/api/workspaces') return workspace.promise
+        if (path === failedPath) return unrelated.promise
+        return Promise.resolve([])
+      })
+      const bootstrap = store.fetchAll()
+      await vi.waitFor(() => expect(apiGet).toHaveBeenCalledWith(failedPath))
+      unrelated.reject(new Error('unrelated failure'))
+      await expect(bootstrap).rejects.toThrow('unrelated failure')
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      workspace.resolve({ workspaces: [{ name: 'personal' }] })
+      await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+      expect(store.workspaces.map(w => w.name)).toEqual(['personal'])
+      expect(store.chatsHealth.status).toBe('unavailable')
+      expect(unhandled).not.toHaveBeenCalled()
+      window.removeEventListener('unhandledrejection', unhandled)
+    },
+  )
+
+  it.each(['/api/projects', '/api/chats?active_only=1'])(
+    'publishes workspace success while bootstrap %s is still pending',
+    async delayedPath => {
+      const store = useProjectStore()
+      const unrelated = deferred<unknown>()
+      apiGet.mockImplementation((path: string) => {
+        if (path === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal' }] })
+        if (path === delayedPath) return unrelated.promise
+        return Promise.resolve([])
+      })
+      const bootstrap = store.fetchAll()
+      await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+      expect(store.activeWorkspace).toBe('personal')
+      unrelated.reject(new Error('later failure'))
+      await expect(bootstrap).rejects.toThrow('later failure')
+      expect(store.workspaceRegistryStatus).toBe('ready')
+      expect(store.chatsHealth.status).toBe('unavailable')
+    },
+  )
+
+  it('keeps workspace readiness independent of a failed refresh projects request', async () => {
+    const store = useProjectStore()
+    const workspace = deferred<unknown>()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return workspace.promise
+      if (path === '/api/projects') return Promise.reject(new Error('projects unavailable'))
+      return Promise.resolve([])
+    })
+    await expect(store.refreshWorkspaceRegistry()).rejects.toThrow('projects unavailable')
+    expect(store.workspaceRegistryStatus).toBe('loading')
+    expect(store.workspaceRegistryRevision).toBe(0)
+    workspace.resolve({ workspaces: [{ name: 'personal' }] })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    expect(store.workspaceRegistryRevision).toBe(0)
+    expect(store.workspaceRegistryError).toBe('')
+  })
+
+  it.each(['/api/projects', '/api/chats?active_only=1'])(
+    'handles a late workspace rejection after bootstrap %s fails first',
+    async failedPath => {
+      const store = useProjectStore()
+      const workspace = deferred<unknown>()
+      const unhandled = vi.fn()
+      window.addEventListener('unhandledrejection', unhandled)
+      apiGet.mockImplementation((path: string) => {
+        if (path === '/api/workspaces') return workspace.promise
+        if (path === failedPath) return Promise.reject(new Error('unrelated failure'))
+        return Promise.resolve([])
+      })
+      await expect(store.fetchAll()).rejects.toThrow('unrelated failure')
+      workspace.reject(new Error('private workspace error'))
+      await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('error'))
+      expect(store.workspaceRegistryError).not.toContain('private workspace error')
+      expect(store.chatsHealth.status).toBe('unavailable')
+      expect(unhandled).not.toHaveBeenCalled()
+      window.removeEventListener('unhandledrejection', unhandled)
+    },
+  )
+
+  it.each(['/api/projects', '/api/chats?active_only=1'])(
+    'records a workspace failure while unrelated bootstrap %s succeeds later',
+    async delayedPath => {
+      const store = useProjectStore()
+      const workspace = deferred<unknown>()
+      const unrelated = deferred<unknown>()
+      apiGet.mockImplementation((path: string) => {
+        if (path === '/api/workspaces') return workspace.promise
+        if (path === delayedPath) return unrelated.promise
+        return Promise.resolve([])
+      })
+      const bootstrap = store.fetchAll()
+      await vi.waitFor(() => expect(apiGet).toHaveBeenCalledWith(delayedPath))
+      workspace.reject(new Error('workspace failure'))
+      await expect(bootstrap).rejects.toThrow('workspace failure')
+      expect(store.workspaceRegistryStatus).toBe('error')
+      expect(store.chatsHealth.status).toBe('unavailable')
+      unrelated.resolve([])
+      await Promise.resolve()
+      expect(store.workspaceRegistryStatus).toBe('error')
+    },
+  )
+
+  it('rereads after an ambiguous mutation failure and preserves its rejection', async () => {
+    const store = useProjectStore()
+    let finishRead!: (value: unknown) => void
+    apiPost.mockRejectedValueOnce(new Error('mutation failed'))
+    apiGet.mockReturnValueOnce(new Promise(resolve => { finishRead = resolve }))
+    await expect(store.createWorkspace({ name: 'new' })).rejects.toThrow('mutation failed')
+    expect(store.workspaceRegistryStatus).toBe('loading')
+    finishRead({ workspaces: [{ name: 'new' }] })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    expect(store.workspaces.map(w => w.name)).toEqual(['new'])
+  })
+
+  it.each(['create', 'update', 'archive', 'restore', 'reorder'] as const)(
+    'rereads after a malformed %s response without changing its return value',
+    async operation => {
+      const store = useProjectStore()
+      apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+      await store.fetchWorkspaces()
+      let finishRead!: (value: unknown) => void
+      apiGet.mockReturnValueOnce(new Promise(resolve => { finishRead = resolve }))
+      const response = { workspaces: null }
+      apiPost.mockResolvedValueOnce(response)
+      apiPatch.mockResolvedValueOnce(response)
+      const result = operation === 'create' ? await store.createWorkspace({ name: 'new' })
+        : operation === 'update' ? await store.updateWorkspace('personal', {})
+          : operation === 'archive' ? await store.archiveWorkspace('personal')
+            : operation === 'restore' ? await store.restoreArchivedWorkspace('id')
+              : await store.reorderWorkspaces(['personal'])
+      expect(result).toBe(response)
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      finishRead({ workspaces: [{ name: 'personal' }] })
+      await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    },
+  )
+
+  it.each(['rename', 'archive'] as const)(
+    'fences an older GET across a successful %s and publishes the reconciled selection',
+    async operation => {
+      const store = useProjectStore()
+      apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }, { name: 'work' }] })
+      await store.fetchWorkspaces()
+      const old = deferred<unknown>()
+      const fresh = deferred<unknown>()
+      apiGet.mockReturnValueOnce(old.promise)
+      apiGet.mockReturnValueOnce(fresh.promise)
+      const oldRead = store.fetchWorkspaces()
+      const response = operation === 'rename'
+        ? { workspaces: [{ name: 'renamed' }, { name: 'work' }], renamed: { from: 'personal', to: 'renamed' } }
+        : { workspaces: [{ name: 'work' }], active: 'work', archived: { path: '/archive' } }
+      if (operation === 'rename') apiPatch.mockResolvedValueOnce(response)
+      else apiPost.mockResolvedValueOnce(response)
+      const result = operation === 'rename'
+        ? await store.updateWorkspace('personal', { name: 'renamed' })
+        : await store.archiveWorkspace('personal')
+      expect(result).toBe(response)
+      const active = operation === 'rename' ? 'renamed' : 'work'
+      expect(store.activeWorkspace).toBe(active)
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      old.resolve({ workspaces: [{ name: 'personal' }], active: 'personal' })
+      await oldRead
+      expect(store.activeWorkspace).toBe(active)
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      const ready: Array<[string, string[]]> = []
+      const stop = watch(() => store.workspaceRegistryStatus, status => {
+        if (status === 'ready') ready.push([store.activeWorkspace, store.workspaces.map(w => w.name)])
+      }, { flush: 'sync' })
+      fresh.resolve(response)
+      await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+      expect(ready).toEqual([[active, response.workspaces.map(w => w.name)]])
+      stop()
+    },
+  )
+
+  it.each(['create', 'update', 'archive', 'restore', 'reorder'] as const)(
+    'keeps a failed %s non-authoritative until its post-settlement GET',
+    async operation => {
+      const store = useProjectStore()
+      apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+      await store.fetchWorkspaces()
+      const fresh = deferred<unknown>()
+      apiGet.mockReturnValueOnce(fresh.promise)
+      apiPost.mockRejectedValueOnce(new Error('ambiguous failure'))
+      apiPatch.mockRejectedValueOnce(new Error('ambiguous failure'))
+      const result = operation === 'create' ? store.createWorkspace({ name: 'new' })
+        : operation === 'update' ? store.updateWorkspace('personal', {})
+          : operation === 'archive' ? store.archiveWorkspace('personal')
+            : operation === 'restore' ? store.restoreArchivedWorkspace('id')
+              : store.reorderWorkspaces(['personal'])
+      await expect(result).rejects.toThrow('ambiguous failure')
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      fresh.resolve({ workspaces: [{ name: 'committed' }] })
+      await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+      expect(store.workspaces.map(w => w.name)).toEqual(['committed'])
+    },
+  )
+
+  it.each(['create', 'update', 'archive', 'restore', 'reorder'] as const)(
+    'returns a successful %s response without certifying it',
+    async operation => {
+      const store = useProjectStore()
+      apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+      await store.fetchWorkspaces()
+      const fresh = deferred<unknown>()
+      apiGet.mockReturnValueOnce(fresh.promise)
+      const response = { workspaces: [{ name: 'personal' }, { name: 'response-only' }] }
+      apiPost.mockResolvedValueOnce(response)
+      apiPatch.mockResolvedValueOnce(response)
+      const result = operation === 'create' ? await store.createWorkspace({ name: 'new' })
+        : operation === 'update' ? await store.updateWorkspace('personal', {})
+          : operation === 'archive' ? await store.archiveWorkspace('personal')
+            : operation === 'restore' ? await store.restoreArchivedWorkspace('id')
+              : await store.reorderWorkspaces(['personal'])
+      expect(result).toBe(response)
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      fresh.resolve({ workspaces: [{ name: 'final' }] })
+      await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+      expect(store.workspaces.map(w => w.name)).toEqual(['final'])
+    },
+  )
+
+  it('publishes ready only after reconciling the active name', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'outdated'
+    const ready: Array<[string, string[]]> = []
+    const stop = watch(() => store.workspaceRegistryStatus, status => {
+      if (status === 'ready') ready.push([store.activeWorkspace, store.workspaces.map(w => w.name)])
+    }, { flush: 'sync' })
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }], active: 'personal' })
+    await store.fetchWorkspaces()
+    expect(ready).toEqual([['personal', ['personal']]])
+    stop()
+  })
+
+  it('does not adjust selection if a synchronous subscriber starts a newer mutation', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'personal'
+    let finishMutation!: (value: unknown) => void
+    apiPost.mockReturnValueOnce(new Promise(resolve => { finishMutation = resolve }))
+    let mutation: Promise<unknown> | undefined
+    const stop = watch(() => store.workspaces, () => {
+      if (!mutation) mutation = store.createWorkspace({ name: 'new' })
+    }, { flush: 'sync' })
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'old' }], active: 'old' })
+    await store.fetchWorkspaces()
+    expect(store.activeWorkspace).toBe('personal')
+    stop()
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+    finishMutation({ workspaces: [{ name: 'personal' }] })
+    await mutation
+  })
+
+  it('does not roll an old failed reorder back over a newer mutation', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }, { name: 'work' }] })
+    await store.fetchWorkspaces()
+    let rejectReorder!: (error: Error) => void
+    apiPost.mockReturnValueOnce(new Promise((_resolve, reject) => { rejectReorder = reject }))
+    apiPost.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }, { name: 'work' }, { name: 'new' }] })
+    const reorder = store.reorderWorkspaces(['work', 'personal'])
+    await store.createWorkspace({ name: 'new' })
+    expect(store.workspaces.map(w => w.name)).toEqual(['personal', 'work', 'new'])
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }, { name: 'work' }, { name: 'new' }] })
+    rejectReorder(new Error('failed'))
+    await expect(reorder).rejects.toThrow('failed')
+    expect(store.workspaces.map(w => w.name)).toEqual(['personal', 'work', 'new'])
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+  })
+
+  it('fences a mutation started synchronously by a loading subscriber', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+    await store.fetchWorkspaces()
+    let finishFirst!: (value: unknown) => void
+    let finishSecond!: (value: unknown) => void
+    apiPost.mockReturnValueOnce(new Promise(resolve => { finishSecond = resolve }))
+    apiPost.mockReturnValueOnce(new Promise(resolve => { finishFirst = resolve }))
+    let second: Promise<unknown> | undefined
+    const stop = watch(() => store.workspaceRegistryStatus, status => {
+      if (status === 'loading' && !second) second = store.createWorkspace({ name: 'second' })
+    }, { flush: 'sync' })
+    const first = store.createWorkspace({ name: 'first' })
+    stop()
+    finishSecond({ workspaces: [{ name: 'second' }] })
+    await second
+    finishFirst({ workspaces: [{ name: 'stale' }] })
+    let finishRead!: (value: unknown) => void
+    apiGet.mockReturnValueOnce(new Promise(resolve => { finishRead = resolve }))
+    await first
+    expect(store.workspaces.map(w => w.name)).not.toContain('stale')
+    finishRead({ workspaces: [{ name: 'final' }] })
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+  })
+})
+
+describe('continue recovery transport', () => {
+  it('persists a server-issued receipt before submitting recovery', async () => {
+    const store = useProjectStore()
+    apiPost.mockImplementation(async (_path: string, body: { action: string; request_id?: string }) => {
+      if (body.action === 'issue_recovery_request') return { request_id: 'server-id', expires: Date.now() / 1000 + 900 }
+      expect(body.request_id).toBe('server-id')
+      expect(localStorage.getItem('ciao-unknown-recovery:chat-a:server-id')).toBe('1')
+      return { request_id: 'server-id', status: 'completed', result: { http_status: 200 } }
+    })
+    apiGet.mockResolvedValue({ chat_id: 'chat-a' })
+    await store.continueRecovery('chat-a', 'failure', false)
+  })
+
+  it('does not dispatch with an already expired receipt', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValueOnce({ request_id: 'expired', expires: Date.now() / 1000 - 1 })
+    await expect(store.continueRecovery('chat-a', 'failure', false)).rejects.toThrow('expired')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(localStorage.getItem('ciao-unknown-recovery:chat-a:expired')).toBeNull()
+  })
+
+  it('does not dispatch if the issued receipt cannot be persisted', async () => {
+    const store = useProjectStore()
+    issueReceipt()
+    vi.mocked(localStorage.setItem).mockImplementationOnce(() => { throw new Error('storage full') })
+    await expect(store.continueRecovery('chat-a', 'failure', false)).rejects.toThrow('safety state cannot be saved')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+  })
+
+  it('holds the cross-tab lock while a receipt is being issued', async () => {
+    const first = useProjectStore()
+    setActivePinia(newPinia())
+    const second = useProjectStore()
+    let rejectIssue!: (error: Error) => void
+    apiPost.mockReturnValueOnce(new Promise((_resolve, reject) => { rejectIssue = reject }))
+    const pending = first.continueRecovery('chat-a', 'failure', false)
+    await vi.waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))
+    await expect(second.continueRecovery('chat-a', 'failure', false)).rejects.toThrow('in progress')
+    await expect(second.acknowledgeRecoveryReconciled('chat-a')).rejects.toThrow('in progress')
+    rejectIssue(new Error('issue failed'))
+    await expect(pending).rejects.toThrow('issue failed')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails closed when issuing a receipt is at capacity', async () => {
+    const store = useProjectStore()
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('journal full'), { status: 503 }))
+    await expect(store.continueRecovery('chat-a', 'failure', false)).rejects.toThrow('journal full')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(store.unknownRecoveryOutcomes['chat-a']).toBeUndefined()
+  })
+
+  it('retains a marker if its expired receipt cannot be reconciled', async () => {
+    const store = useProjectStore()
+    localStorage.setItem('ciao-unknown-recovery:chat-a:expired', '1')
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('receipt expired'), { status: 409 }))
+    await expect(store.acknowledgeRecoveryReconciled('chat-a')).rejects.toThrow('receipt expired')
+    expect(localStorage.getItem('ciao-unknown-recovery:chat-a:expired')).toBe('1')
+  })
+  it('requires an empty slot and refreshes a competing schedule after a literal set conflict', async () => {
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'literal-chat', retry: null } as ChatInfo]
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('slot occupied'), { status: 409 }))
+    apiGet.mockResolvedValueOnce({ chat_id: 'literal-chat', retry: { status: 'pending', mode: 'literal', schedule_id: 'other' } })
+    await expect(store.setChatRetry('literal-chat', 'task', ['image'])).rejects.toThrow('slot occupied')
+    expect(apiPost).toHaveBeenCalledExactlyOnceWith('/api/chats/literal-chat/retry', {
+      action: 'set', prompt: 'task', images: ['image'], require_empty: true,
+    })
+    expect(store.chats[0].retry?.schedule_id).toBe('other')
+  })
+  it.each([['try_now', 'tryChatRetryNow'], ['stop', 'stopChatRetry']] as const)(
+    'refreshes a replacement after a guarded literal %s conflict without reissuing it',
+    async (action, method) => {
+      const store = useProjectStore()
+      const retry = { status: 'pending', mode: 'literal', schedule_id: 'old', next_at: '', last_error: '', attempts: 0, interval_seconds: 3600 } as const
+      store.chats = [{ chat_id: 'literal-chat', retry } as ChatInfo]
+      apiPost.mockRejectedValueOnce(Object.assign(new Error('changed'), { status: 409 }))
+      apiGet.mockResolvedValueOnce({ chat_id: 'literal-chat', retry: { ...retry, schedule_id: 'new' } })
+      await expect(store[method]('literal-chat', 'old')).rejects.toThrow('changed')
+      expect(apiPost).toHaveBeenCalledExactlyOnceWith('/api/chats/literal-chat/retry', { action, schedule_id: 'old' })
+      expect(store.chats[0].retry?.schedule_id).toBe('new')
+    },
+  )
+
+  it('never submits a literal action without a schedule identity', async () => {
+    const store = useProjectStore()
+    await expect(store.stopChatRetry('literal-chat', '')).rejects.toThrow('identity')
+    await expect(store.tryChatRetryNow('literal-chat', '')).rejects.toThrow('identity')
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+
+  it('tombstones the exact abandoned request before clearing its marker, blocking delayed delivery', async () => {
+    const first = useProjectStore()
+    let delayed: Record<string, string> = {}
+    const journal = new Map<string, 'cancelled' | 'in_progress'>()
+    let actionStarted = false
+    const deliver = (body: Record<string, string>) => {
+      if (journal.has(body.request_id)) return { status: 409 }
+      journal.set(body.request_id, 'in_progress')
+      actionStarted = true
+      return { status: 200 }
+    }
+    apiPost.mockImplementation(async (_path: string, body: Record<string, string>) => {
+      if (body.action === 'issue_recovery_request') return { request_id: 'issued-id', expires: Date.now() / 1000 + 900 }
+      if (body.action === 'continue_recovery') {
+        delayed = body
+        throw new Error('tab died before delivery')
+      }
+      if (body.action === 'recovery_request_status') {
+        expect(body.request_id).toBe(delayed.request_id)
+        if (!journal.has(body.request_id)) journal.set(body.request_id, 'cancelled')
+        return { request_id: body.request_id, status: 'cancelled' }
+      }
+      if (body.action === 'recovery_status') return { status: 'stopped', recovery_state: '' }
+      throw new Error('unexpected action')
+    })
+    await expect(first.continueRecovery('chat-a', 'failure-a', false)).rejects.toThrow('tab died')
+    expect(delayed.request_id).toBeTruthy()
+    setActivePinia(newPinia())
+    const reloaded = useProjectStore()
+    await reloaded.acknowledgeRecoveryReconciled('chat-a')
+    expect(journal.get(delayed.request_id)).toBe('cancelled')
+    expect(reloaded.unknownRecoveryOutcomes['chat-a']).toBeUndefined()
+    expect(deliver(delayed)).toEqual({ status: 409 })
+    expect(actionStarted).toBe(false)
+  })
+
+  it.each(['in_progress', 'unknown'])('keeps the marker when the request status is %s', async status => {
+    const store = useProjectStore()
+    localStorage.setItem('ciao-unknown-recovery:chat-a:request-a', '1')
+    apiPost.mockResolvedValueOnce({ request_id: 'request-a', status })
+    await expect(store.acknowledgeRecoveryReconciled('chat-a')).rejects.toThrow(/in progress|unknown/)
+    expect(localStorage.getItem('ciao-unknown-recovery:chat-a:request-a')).toBe('1')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+  })
+
+  it('retains the marker and surfaces a journal capacity error during reconciliation', async () => {
+    const store = useProjectStore()
+    localStorage.setItem('ciao-unknown-recovery:chat-a:request-a', '1')
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('journal unavailable'), { status: 503 }))
+    await expect(store.acknowledgeRecoveryReconciled('chat-a')).rejects.toThrow('journal unavailable')
+    expect(localStorage.getItem('ciao-unknown-recovery:chat-a:request-a')).toBe('1')
+    expect(apiPost).toHaveBeenCalledExactlyOnceWith('/api/chats/chat-a/retry', { action: 'recovery_request_status', request_id: 'request-a' })
+  })
+
+  it('retains the marker and surfaces a journal capacity error during submission', async () => {
+    const store = useProjectStore()
+    issueReceipt()
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('journal unavailable'), { status: 503, payload: { status: 'unknown' } }))
+    await expect(store.continueRecovery('chat-a', 'failure-a', false)).rejects.toThrow('journal unavailable')
+    expect(store.unknownRecoveryOutcomes['chat-a']).toBe(true)
+    expect(Object.keys(localStorageData).some(key => key.startsWith('ciao-unknown-recovery:chat-a:'))).toBe(true)
+  })
+
+  it('sends the captured failure identity and unique request IDs for recovery', async () => {
+    const store = useProjectStore()
+    let issued = 0
+    apiPost.mockImplementation(async (_path: string, body: { action: string; request_id: string }) => body.action === 'issue_recovery_request'
+      ? { request_id: `issued-${++issued}`, expires: Date.now() / 1000 + 900 }
+      : { request_id: body.request_id, status: 'completed', result: { http_status: 200 } })
+    apiGet.mockResolvedValue({ chat_id: 'recovery-chat' })
+    await store.continueRecovery('recovery-chat', 'failure-1', false)
+    await store.continueRecovery('recovery-chat', 'failure-1', true)
+    expect(apiPost).toHaveBeenNthCalledWith(2, '/api/chats/recovery-chat/retry', {
+      action: 'continue_recovery', failure_id: 'failure-1', request_id: expect.any(String),
+    })
+    expect(apiPost).toHaveBeenNthCalledWith(4, '/api/chats/recovery-chat/retry', {
+      action: 'continue_recovery_now', failure_id: 'failure-1', request_id: expect.any(String),
+    })
+    expect(apiPost.mock.calls[1][1].request_id).not.toBe(apiPost.mock.calls[3][1].request_id)
+  })
+
+  it('propagates conflicts without stopping or retrying literally', async () => {
+    const store = useProjectStore()
+    issueReceipt()
+    apiPost.mockRejectedValueOnce(new Error('conflict'))
+    await expect(store.continueRecovery('recovery-chat', 'stale', true)).rejects.toThrow('conflict')
+    expect(apiPost).toHaveBeenCalledTimes(2)
+  })
+
+  it('blocks further opt-ins after an unknown outcome and checks disk status only on request', async () => {
+    const store = useProjectStore()
+    issueReceipt()
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('outcome unknown'), {
+      payload: { code: 'recovery_outcome_unknown' },
+    }))
+    await expect(store.continueRecovery('recovery-chat', 'failure-1', false)).rejects.toThrow()
+    await expect(store.continueRecovery('recovery-chat', 'failure-1', true)).rejects.toThrow('outcome is unknown')
+    expect(apiPost).toHaveBeenCalledTimes(2)
+    apiPost.mockResolvedValueOnce({ status: 'pending', mode: 'continue_recovery', recovery_state: 'prepared' })
+    expect(await store.checkRecoveryStatus('recovery-chat')).toMatchObject({ recovery_state: 'prepared' })
+    expect(apiPost).toHaveBeenLastCalledWith('/api/chats/recovery-chat/retry', { action: 'recovery_status' })
+    await expect(store.continueRecovery('recovery-chat', 'failure-1', true)).rejects.toThrow('outcome is unknown')
+    setActivePinia(newPinia())
+    const reloaded = useProjectStore()
+    expect(reloaded.unknownRecoveryOutcomes['recovery-chat']).toBe(true)
+    await expect(reloaded.continueRecovery('recovery-chat', 'failure-1', false)).rejects.toThrow('outcome is unknown')
+  })
+
+  it('preserves overlapping unknown outcomes from independent stores', async () => {
+    const first = useProjectStore()
+    setActivePinia(newPinia())
+    const second = useProjectStore()
+    let finish!: (value: unknown) => void
+    apiPost.mockImplementation(async (path: string, body: { action: string }) => {
+      if (body.action === 'issue_recovery_request') return { request_id: path.includes('chat-a') ? 'issued-a' : 'issued-b', expires: Date.now() / 1000 + 900 }
+      if (path.includes('chat-a')) return new Promise(resolve => { finish = resolve })
+      throw new Error('network lost')
+    })
+    const pending = first.continueRecovery('chat-a', 'failure-a', false)
+    await expect(second.continueRecovery('chat-b', 'failure-b', false)).rejects.toThrow()
+    const requestId = 'issued-a'
+    apiGet.mockResolvedValueOnce({ chat_id: 'chat-a' })
+    finish({ request_id: requestId, status: 'completed', result: { http_status: 200 } })
+    await pending
+    setActivePinia(newPinia())
+    const reloaded = useProjectStore()
+    expect(reloaded.unknownRecoveryOutcomes['chat-b']).toBe(true)
+    await expect(reloaded.continueRecovery('chat-b', 'failure-b', false)).rejects.toThrow('outcome is unknown')
+  })
+
+  it('cannot reconcile while another store has a request in flight', async () => {
+    const first = useProjectStore()
+    setActivePinia(newPinia())
+    const second = useProjectStore()
+    let fail!: (reason: Error) => void
+    issueReceipt()
+    apiPost.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject }))
+    const pending = first.continueRecovery('chat-a', 'failure-a', false)
+    await vi.waitFor(() => expect(apiPost).toHaveBeenCalledTimes(2))
+    await expect(second.acknowledgeRecoveryReconciled('chat-a')).rejects.toThrow(/in progress/i)
+    expect(apiPost).toHaveBeenCalledTimes(2)
+    expect(Object.keys(localStorageData).some(key => key.startsWith('ciao-unknown-recovery:chat-a:'))).toBe(true)
+    fail(new Error('network lost'))
+    await expect(pending).rejects.toThrow('network lost')
+    expect(Object.keys(localStorageData).some(key => key.startsWith('ciao-unknown-recovery:chat-a:'))).toBe(true)
+    apiPost.mockImplementationOnce(async (_path: string, body: { request_id: string }) => ({ request_id: body.request_id, status: 'cancelled' }))
+    apiPost.mockResolvedValueOnce({ status: 'stopped', mode: 'literal', recovery_state: '' })
+    await second.acknowledgeRecoveryReconciled('chat-a')
+    expect(Object.keys(localStorageData).some(key => key.startsWith('ciao-unknown-recovery:chat-a:'))).toBe(false)
+  })
+
+  it('fails closed when cross-tab locks are unavailable', async () => {
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: undefined })
+    const store = useProjectStore()
+    await expect(store.continueRecovery('chat-a', 'failure-a', false)).rejects.toThrow(/coordination/)
+    await expect(store.acknowledgeRecoveryReconciled('chat-a')).rejects.toThrow(/coordination/)
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+
+  it('refreshes a conflicting pending retry without stopping it', async () => {
+    const store = useProjectStore()
+    issueReceipt()
+    store.chats = [{ chat_id: 'recovery-chat', failure_id: 'failure-1' } as ChatInfo]
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('conflict'), { status: 409 }))
+    apiGet.mockResolvedValueOnce({ chat_id: 'recovery-chat', failure_id: 'failure-1', retry: { status: 'pending', mode: 'literal' } })
+    await expect(store.continueRecovery('recovery-chat', 'failure-1', false)).rejects.toThrow('conflict')
+    expect(store.chats[0].retry).toMatchObject({ status: 'pending', mode: 'literal' })
+    expect(apiPost).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not overwrite a newer retry event with an older conflict refresh', async () => {
+    const store = useProjectStore()
+    issueReceipt()
+    store.chats = [{ chat_id: 'recovery-chat', failure_id: 'failure-1' } as ChatInfo]
+    let resolve!: (value: unknown) => void
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('conflict'), { status: 409 }))
+    apiGet.mockReturnValueOnce(new Promise(r => { resolve = r }))
+    const request = store.continueRecovery('recovery-chat', 'failure-1', false)
+    await vi.waitFor(() => expect(apiGet).toHaveBeenCalled())
+    store.chats[0].retry = { status: 'pending', mode: 'literal', attempts: 2, last_error: '', next_at: '', interval_seconds: 3600 }
+    resolve({ chat_id: 'recovery-chat', failure_id: 'failure-1', retry: { status: 'pending', mode: 'continue_recovery' } })
+    await expect(request).rejects.toThrow('conflict')
+    expect(store.chats[0].retry?.mode).toBe('literal')
+  })
+
+  it('clears an unknown outcome only after an explicit reconciliation and a safe disk status', async () => {
+    const store = useProjectStore()
+    store.unknownRecoveryOutcomes['recovery-chat'] = true
+    apiPost.mockResolvedValueOnce({ status: 'pending', mode: 'continue_recovery', recovery_state: 'prepared' })
+    await expect(store.acknowledgeRecoveryReconciled('recovery-chat')).rejects.toThrow('still pending')
+    expect(store.unknownRecoveryOutcomes['recovery-chat']).toBe(true)
+    apiPost.mockResolvedValueOnce({ status: 'stopped', mode: 'literal', recovery_state: '' })
+    await store.acknowledgeRecoveryReconciled('recovery-chat')
+    expect(store.unknownRecoveryOutcomes['recovery-chat']).toBeUndefined()
+    expect(Object.keys(localStorageData).filter(key => key.startsWith('ciao-unknown-recovery:'))).toEqual([])
+  })
+
+  it('stops only the observed recovery id and leaves a refused schedule intact', async () => {
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'recovery-chat', retry: { status: 'pending', mode: 'continue_recovery' } } as ChatInfo]
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('changed or in flight'), { status: 409 }))
+    await expect(store.stopRecovery('recovery-chat', 'observed-id')).rejects.toThrow('changed or in flight')
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/recovery-chat/retry', { action: 'stop_recovery', recovery_id: 'observed-id' })
+    expect(store.chats[0].retry?.status).toBe('pending')
+  })
+
+  it('records an in-flight attempt before sending and keeps an ambiguous 409 blocked', async () => {
+    const store = useProjectStore()
+    issueReceipt()
+    apiPost.mockImplementationOnce(async () => {
+      expect(Object.keys(localStorageData).some(key => key.startsWith('ciao-unknown-recovery:recovery-chat:'))).toBe(true)
+      throw Object.assign(new Error('recovery not started'), { status: 409, payload: { error: 'recovery not started' } })
+    })
+    apiGet.mockRejectedValueOnce(new Error('unavailable'))
+    await expect(store.continueRecovery('recovery-chat', 'failure-1', true)).rejects.toThrow('recovery not started')
+    expect(store.unknownRecoveryOutcomes['recovery-chat']).toBe(true)
+  })
+})
 
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
+function issueReceipt(id = 'issued-id') {
+  apiPost.mockResolvedValueOnce({ request_id: id, expires: Date.now() / 1000 + 900 })
+}
 const apiPatch = vi.hoisted(() => vi.fn())
 const apiDel = vi.hoisted(() => vi.fn())
 const reloadWhenServerReady = vi.hoisted(() =>
@@ -127,18 +1118,307 @@ beforeEach(() => {
   apiDel.mockReset()
   reloadWhenServerReady.mockClear()
   const storage = {
+    get length() { return Object.keys(localStorageData).length },
+    key: vi.fn((index: number) => Object.keys(localStorageData)[index] ?? null),
     getItem: vi.fn((key: string) => localStorageData[key] ?? null),
     setItem: vi.fn((key: string, value: string) => { localStorageData[key] = value }),
     removeItem: vi.fn((key: string) => { delete localStorageData[key] }),
     clear: vi.fn(() => { localStorageData = {} }),
   }
   vi.stubGlobal('localStorage', storage)
+  const held = new Set<string>()
+  Object.defineProperty(navigator, 'locks', { configurable: true, value: {
+    request: async (name: string, _options: unknown, callback: (lock: object | null) => Promise<unknown>) => {
+      if (held.has(name)) return callback(null)
+      held.add(name)
+      try { return await callback({ name }) } finally { held.delete(name) }
+    },
+  } })
   Object.defineProperty(window, 'localStorage', { value: storage, configurable: true })
   Object.defineProperty(document, 'hasFocus', {
     value: vi.fn(() => true),
     configurable: true,
   })
   vi.stubGlobal('WebSocket', FakeWebSocket)
+})
+
+describe('chat mutation ordering', () => {
+  function fullChat(chatId: string, fields: Partial<ChatInfo> = {}): ChatInfo {
+    return {
+      chat_id: chatId,
+      project_id: 'project',
+      title: 'Chat',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'normal',
+      session_id: 'session',
+      created_at: '2026-11-14T00:00:00Z',
+      archived: false,
+      ...fields,
+    }
+  }
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void
+    let reject!: (error: Error) => void
+    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+    return { promise, resolve, reject }
+  }
+
+  it.each([
+    ['mode first', { mode: 'plan' }, { thinking_level: 'high' }],
+    ['thinking first', { thinking_level: 'high' }, { mode: 'bypass' }],
+  ] as const)('serializes mode and thinking updates for the same chat (%s)', async (_name, firstUpdate, secondUpdate) => {
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'same' } as ChatInfo]
+    const firstResponse = deferred<ChatInfo>()
+    const firstMode = 'mode' in firstUpdate ? firstUpdate.mode : undefined
+    const secondMode = 'mode' in secondUpdate ? secondUpdate.mode : undefined
+    const firstThinking = 'thinking_level' in firstUpdate ? firstUpdate.thinking_level : undefined
+    const secondThinking = 'thinking_level' in secondUpdate ? secondUpdate.thinking_level : undefined
+    const laterMode = secondMode || firstMode || 'normal'
+    const laterThinking = secondThinking || firstThinking || 'medium'
+    apiPatch.mockImplementationOnce(() => firstResponse.promise).mockResolvedValueOnce(fullChat('same', {
+      mode: laterMode, thinking_level: laterThinking,
+    }))
+    const first = store.updateChat('same', firstUpdate)
+    const second = store.updateChat('same', secondUpdate)
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    expect(apiPatch).toHaveBeenNthCalledWith(1, '/api/chats/same', firstUpdate)
+    firstResponse.resolve(fullChat('same', {
+      mode: firstMode || 'normal',
+      thinking_level: firstThinking || 'medium',
+    }))
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(2))
+    expect(apiPatch).toHaveBeenNthCalledWith(2, '/api/chats/same', secondUpdate)
+    await Promise.all([first, second])
+    expect(store.chats.find(chat => chat.chat_id === 'same')).toMatchObject({
+      mode: laterMode, thinking_level: laterThinking, provider: 'claude', model: 'sonnet',
+    })
+  })
+
+  it('updates different chats independently', async () => {
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'chat-a' } as ChatInfo, { chat_id: 'chat-b' } as ChatInfo]
+    const held = deferred<ChatInfo>()
+    apiPatch.mockImplementationOnce(() => held.promise).mockResolvedValueOnce(fullChat('chat-b', { mode: 'plan' }))
+    const a = store.updateChat('chat-a', { mode: 'normal' })
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    const b = store.updateChat('chat-b', { mode: 'plan' })
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(2))
+    await b
+    expect(store.chats.find(chat => chat.chat_id === 'chat-b')?.mode).toBe('plan')
+    held.resolve(fullChat('chat-a', { mode: 'normal' }))
+    await a
+  })
+
+  it('continues queued updates after a rejected update', async () => {
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'failure' } as ChatInfo]
+    const held = deferred<ChatInfo>()
+    apiPatch.mockImplementationOnce(() => held.promise).mockResolvedValueOnce(fullChat('failure', { mode: 'plan' }))
+    const failed = store.updateChat('failure', { mode: 'normal' })
+    const queued = store.updateChat('failure', { mode: 'plan' })
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    held.reject(new Error('first update failed'))
+    await expect(failed).rejects.toThrow('first update failed')
+    await expect(queued).resolves.toBeUndefined()
+    expect(apiPatch).toHaveBeenCalledTimes(2)
+    expect(store.chats.find(chat => chat.chat_id === 'failure')?.mode).toBe('plan')
+  })
+
+  it('clears mode pending after success or failure and continues the queue', async () => {
+    const store = useProjectStore()
+    const firstResponse = deferred<ChatInfo>()
+    const secondResponse = deferred<ChatInfo>()
+    apiPatch.mockImplementationOnce(() => firstResponse.promise).mockImplementationOnce(() => secondResponse.promise)
+    const failed = store.updateChat('pending', { mode: 'normal' })
+    const queued = store.updateChat('pending', { mode: 'plan' })
+    expect(store.pendingChatModeWrites.pending).toBe(2)
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    firstResponse.reject(new Error('mode write failed'))
+    await expect(failed).rejects.toThrow('mode write failed')
+    expect(store.pendingChatModeWrites.pending).toBe(1)
+    secondResponse.resolve({
+      ...fullChat('pending', { mode: 'plan' }),
+    })
+    await queued
+    expect(store.pendingChatModeWrites.pending).toBeUndefined()
+
+    apiPatch.mockResolvedValueOnce(fullChat('pending', { mode: 'bypass' }))
+    const success = store.updateChat('pending', { mode: 'bypass' })
+    expect(store.pendingChatModeWrites.pending).toBe(1)
+    await success
+    expect(store.pendingChatModeWrites.pending).toBeUndefined()
+  })
+
+  it('counts multiple queued mode writes but not thinking writes', async () => {
+    const store = useProjectStore()
+    const thinkingResponse = deferred<ChatInfo>()
+    apiPatch.mockImplementationOnce(() => thinkingResponse.promise)
+    const thinkingOnly = store.updateChat('other', { thinking_level: 'high' })
+    expect(store.pendingChatModeWrites.other).toBeUndefined()
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    thinkingResponse.resolve({ chat_id: 'other', thinking_level: 'high' } as ChatInfo)
+    await thinkingOnly
+
+    apiPatch.mockReset()
+    const held = deferred<ChatInfo>()
+    const secondResponse = deferred<ChatInfo>()
+    apiPatch.mockImplementationOnce(() => held.promise)
+      .mockImplementationOnce(() => secondResponse.promise)
+      .mockResolvedValueOnce(fullChat('count', { mode: 'auto' }))
+      .mockResolvedValueOnce(fullChat('count', { mode: 'bypass' }))
+    const first = store.updateChat('count', { mode: 'normal' })
+    expect(store.pendingChatModeWrites.count).toBe(1)
+    const second = store.updateChat('count', { mode: 'plan' })
+    expect(store.pendingChatModeWrites.count).toBe(2)
+    const third = store.updateChat('count', { mode: 'auto' })
+    expect(store.pendingChatModeWrites.count).toBe(3)
+    const thinking = store.updateChat('count', { thinking_level: 'high' })
+    expect(store.pendingChatModeWrites.count).toBe(3)
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    held.reject(new Error('first failed'))
+    await expect(first).rejects.toThrow('first failed')
+    expect(store.pendingChatModeWrites.count).toBe(2)
+    secondResponse.resolve(fullChat('count', { mode: 'plan' }))
+    await Promise.all([second, third, thinking])
+    expect(store.pendingChatModeWrites.count).toBeUndefined()
+    expect(apiPatch).toHaveBeenCalledTimes(4)
+  })
+
+  it.each(['post-first', 'patch-first'] as const)(
+    'serializes handover and mode in both orders without stale chat replacement (%s)',
+    async order => {
+      const store = useProjectStore()
+      const patch = deferred<ChatInfo>()
+      const post = deferred<ChatInfo>()
+      apiGet.mockResolvedValue([])
+      apiPatch.mockImplementationOnce(() => patch.promise)
+      apiPost.mockImplementationOnce(() => post.promise)
+      let handover!: Promise<ChatInfo>
+      let update!: Promise<void>
+      if (order === 'post-first') {
+        handover = store.handoverChat('combined', { provider: 'claude', model: 'sonnet' })
+        await vi.waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))
+        update = store.updateChat('combined', { mode: 'plan' })
+        expect(apiPatch).not.toHaveBeenCalled()
+        post.resolve(fullChat('combined', { provider: 'claude', model: 'sonnet', mode: 'normal' }))
+        await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+        patch.resolve(fullChat('combined', { provider: 'claude', model: 'sonnet', mode: 'plan' }))
+      } else {
+        update = store.updateChat('combined', { mode: 'plan' })
+        await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+        handover = store.handoverChat('combined', { provider: 'claude', model: 'sonnet' })
+        expect(apiPost).not.toHaveBeenCalled()
+        patch.resolve(fullChat('combined', { provider: 'opencode', model: 'old', mode: 'plan' }))
+        await vi.waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1))
+        post.resolve(fullChat('combined', { provider: 'claude', model: 'sonnet', mode: 'plan' }))
+      }
+      await update
+      await expect(handover).resolves.toMatchObject({ provider: 'claude', model: 'sonnet' })
+      expect(store.chats.find(chat => chat.chat_id === 'combined')).toMatchObject({
+        provider: 'claude', model: 'sonnet', mode: 'plan',
+      })
+    },
+  )
+
+  it('handover holds the queue through history load and reconnect', async () => {
+    const store = useProjectStore()
+    store.activeChatId = 'viewed'
+    store.connectWs('viewed')
+    const oldSocket = fakeSockets.at(-1)!
+    const history = deferred<ChatMessage[]>()
+    apiPost.mockResolvedValueOnce({ chat_id: 'viewed', provider: 'claude', model: 'sonnet' })
+    apiGet.mockImplementationOnce(() => history.promise)
+    const order: string[] = []
+    apiPatch.mockImplementationOnce(() => {
+      order.push('patch')
+      return Promise.resolve({ chat_id: 'viewed', mode: 'plan' })
+    })
+    class ObservedWebSocket extends FakeWebSocket {
+      constructor(url: string) {
+        super(url)
+        order.push('replacement socket')
+      }
+    }
+    vi.stubGlobal('WebSocket', ObservedWebSocket)
+    const handover = store.handoverChat('viewed', { provider: 'claude', model: 'sonnet' })
+    await vi.waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/chats/viewed/messages?limit=50'))
+    const update = store.updateChat('viewed', { mode: 'plan' })
+    expect(apiPatch).not.toHaveBeenCalled()
+    expect(oldSocket.readyState).toBe(FakeWebSocket.OPEN)
+    expect(fakeSockets).toHaveLength(1)
+    history.resolve([])
+    await handover
+    expect(oldSocket.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(fakeSockets).toHaveLength(2)
+    await vi.waitFor(() => expect(apiPatch).toHaveBeenCalledTimes(1))
+    expect(order.indexOf('replacement socket')).toBeGreaterThanOrEqual(0)
+    expect(order.indexOf('replacement socket')).toBeLessThan(order.indexOf('patch'))
+    await update
+  })
+
+  it('handover snapshots visible messages when its queued operation starts', async () => {
+    const store = useProjectStore()
+    const held = deferred<ChatInfo>()
+    apiPatch.mockImplementationOnce(() => held.promise)
+    apiPost.mockResolvedValueOnce({ chat_id: 'snapshot', provider: 'claude', model: 'sonnet' })
+    apiGet.mockResolvedValue([])
+    store.messages.snapshot = [{ role: 'user', content: 'old text', timestamp: '' }]
+    const update = store.updateChat('snapshot', { mode: 'plan' })
+    const handover = store.handoverChat('snapshot', { provider: 'claude', model: 'sonnet' })
+    store.messages.snapshot = [
+      { role: 'user', content: '  new visible text  ', timestamp: '' },
+      { role: 'assistant', content: '   ', timestamp: '' },
+    ]
+    held.resolve({ chat_id: 'snapshot', mode: 'plan' } as ChatInfo)
+    await update
+    await handover
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/snapshot/handover', {
+      provider: 'claude', model: 'sonnet',
+      messages: [{ role: 'user', content: 'new visible text', timestamp: '' }],
+    })
+  })
+
+  it('releases the queue after a post-response handover failure', async () => {
+    const store = useProjectStore()
+    store.activeChatId = 'ws-failure'
+    store.connectWs('ws-failure')
+    const initialSocket = fakeSockets[0]
+    apiPost.mockResolvedValueOnce({ chat_id: 'ws-failure', provider: 'claude', model: 'sonnet' })
+    apiGet.mockResolvedValueOnce([])
+    apiPatch.mockResolvedValueOnce({ chat_id: 'ws-failure', mode: 'plan' })
+    class ThrowingWebSocket {
+      constructor() { throw new Error('replacement socket failed') }
+    }
+    vi.stubGlobal('WebSocket', ThrowingWebSocket)
+    const handover = store.handoverChat('ws-failure', { provider: 'claude', model: 'sonnet' })
+    const update = store.updateChat('ws-failure', { mode: 'plan' })
+    await expect(handover).rejects.toThrow('replacement socket failed')
+    await expect(update).resolves.toBeUndefined()
+    expect(initialSocket.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(apiPatch).toHaveBeenCalledTimes(1)
+  })
+
+  it('staged thinking after handover does not deadlock', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValue([])
+    apiPost.mockResolvedValueOnce({ chat_id: 'thinking', provider: 'claude', model: 'sonnet' })
+    apiPatch.mockResolvedValueOnce({ chat_id: 'thinking', thinking_level: 'high' })
+    await store.handoverChat('thinking', { provider: 'claude', model: 'sonnet' })
+    await expect(store.updateChat('thinking', { thinking_level: 'high' })).resolves.toBeUndefined()
+    expect(apiPatch).toHaveBeenCalledWith('/api/chats/thinking', { thinking_level: 'high' })
+
+    apiPost.mockRejectedValueOnce(new Error('handover rejected'))
+    apiPatch.mockResolvedValueOnce({ chat_id: 'thinking', mode: 'bypass' })
+    const rejected = store.handoverChat('thinking', { provider: 'claude', model: 'sonnet' })
+    const mode = store.updateChat('thinking', { mode: 'bypass' })
+    await expect(rejected).rejects.toThrow('handover rejected')
+    await expect(mode).resolves.toBeUndefined()
+    expect(store.chats.find(chat => chat.chat_id === 'thinking')?.mode).toBe('bypass')
+  })
 })
 
 describe('chat websocket URL containment', () => {
@@ -468,6 +1748,93 @@ describe('per-chat WS auto-reconnect', () => {
     expect(store.currentStreamingText).toBe('')
     expect(store.currentTimeline.some(e => e.kind === 'tool' && e.content.includes('Bash'))).toBe(true)
     expect(store.currentTimeline.some(e => e.kind === 'tool' && e.content.includes('Read'))).toBe(false)
+  })
+
+  test('a subagent call is one card: its launch keeps it running and its children nest under it', () => {
+    const store = useProjectStore()
+    const chatId = 'c-subagent-card'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'text_delta', text: 'Launching. ' })
+    send({ type: 'tool_use', tool_name: 'subagent', tool_input: '[general] Sleep 5 then reply done', tool_use_id: 'sa1' })
+    // A re-announce of the call is the same card, not a second one.
+    send({ type: 'tool_use', tool_name: 'subagent', tool_input: '[general] Sleep 5 then reply done', tool_use_id: 'sa1' })
+    send({ type: 'tool_result', tool_use_id: 'sa1', background: true })
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'sleep 5', tool_use_id: 'k1', parent_tool_use_id: 'sa1' })
+    send({ type: 'text_delta', text: 'child words', parent_tool_use_id: 'sa1' })
+
+    const cards = store.currentTimeline.filter(e => e.kind === 'subagent')
+    expect(cards).toHaveLength(1)
+    const [entry] = cards
+    if (entry.kind !== 'subagent') throw new Error('Expected a subagent card')
+    expect(entry.card).toMatchObject({ state: 'running', agent_type: 'general', step_count: 1 })
+    expect(entry.card.description).toBe('Sleep 5 then reply done')
+    expect(entry.card.steps).toEqual([{ kind: 'activity', line: '⚙️ shell sleep 5', tool_use_id: 'k1' }])
+    expect(store.currentTimeline.some(e => e.kind === 'tool' && e.content.includes('shell'))).toBe(false)
+    expect(store.currentTimeline.map(e => e.kind)).toEqual(['text', 'subagent'])
+    // The child's words never reach the parent's streaming reply.
+    expect(store.streamingTextFor(chatId)).toBe('')
+
+    send({ type: 'tool_result', tool_use_id: 'sa1', subagent_status: 'completed' })
+    expect(entry.card.state).toBe('done')
+
+    send({ type: 'result', text: 'Launching. The subagent replied done.' })
+    const row = store.messagesFor(chatId).find(m => m.tool_name === '_subagent')
+    expect(row?.content).toBe('Subagent: Sleep 5 then reply done')
+    expect(row?.subagent).toMatchObject({ tool_use_id: 'sa1', state: 'done', step_count: 1 })
+    expect(row?.subagent?.steps).toHaveLength(1)
+  })
+
+  test('a shell call is one card: a background launch stays running, a foreground failure settles it', () => {
+    const store = useProjectStore()
+    const chatId = 'c-shell-card'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: '', tool_use_id: 'sh1', shell: true })
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ping 127.0.0.1', tool_use_id: 'sh1', shell: true, shell_background: true })
+    // A re-announce of the call is the same card, not a second one.
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ping 127.0.0.1', tool_use_id: 'sh1', shell: true, shell_background: true })
+    send({ type: 'tool_result', tool_name: 'shell', tool_use_id: 'sh1', background: true, shell_id: 'sh_1' })
+
+    const [first] = store.currentTimeline.filter(e => e.kind === 'shell')
+    if (first?.kind !== 'shell') throw new Error('Expected a shell card')
+    expect(store.currentTimeline.filter(e => e.kind === 'shell')).toHaveLength(1)
+    expect(first.card).toMatchObject({ command: 'ping 127.0.0.1', background: true, state: 'running' })
+    // A shell call has no activity line of its own.
+    expect(store.currentTimeline.some(e => e.kind === 'tool')).toBe(false)
+
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'make', tool_use_id: 'sh2', shell: true })
+    send({ type: 'tool_result', tool_name: 'shell', tool_use_id: 'sh2', exit_code: 2, output_tail: 'boom' })
+    const second = store.currentTimeline.find(e => e.kind === 'shell' && e.card.tool_use_id === 'sh2')
+    if (second?.kind !== 'shell') throw new Error('Expected a shell card')
+    expect(second.card).toMatchObject({ state: 'failed', exit_code: 2, output_tail: 'boom' })
+
+    send({ type: 'result', text: 'Pinged and built.' })
+    const rows = store.messagesFor(chatId).filter(m => m.tool_name === '_shell')
+    expect(rows.map(m => m.shell?.state)).toEqual(['running', 'failed'])
+    expect(rows[0]?.shell).toMatchObject({ tool_use_id: 'sh1', background: true, command: 'ping 127.0.0.1' })
+  })
+
+  test('a subagent card keeps only its launch result when the child is still running', () => {
+    const store = useProjectStore()
+    const chatId = 'c-subagent-running'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'Agent', tool_input: '[general] Long job', tool_use_id: 'sa2' })
+    send({ type: 'tool_result', tool_use_id: 'sa2', background: true })
+    send({ type: 'result', text: '' })
+
+    const row = store.messagesFor(chatId).find(m => m.tool_name === '_subagent')
+    expect(row?.subagent?.state).toBe('running')
   })
 
   test('a tool call and its result keep one line and mark a failed call', () => {
@@ -2350,58 +3717,6 @@ describe('result frames and unread state', () => {
   })
 })
 
-describe('move to background', () => {
-  test('tracks backgroundable calls from tool_use frames and clears them on result', () => {
-    const store = useProjectStore()
-    const chatId = 'c-backgroundable'
-    store.connectWs(chatId)
-    const socket = fakeSockets[0]
-    const frame = (data: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(data) })
-    frame({ type: 'tool_use', tool_name: 'shell', tool_use_id: 'c1', backgroundable: true })
-    expect(store.backgroundableCalls[chatId]).toHaveProperty('c1')
-    frame({ type: 'tool_result', tool_use_id: 'c1' })
-    expect(store.backgroundableCalls[chatId]).toEqual({})
-    frame({ type: 'tool_use', tool_name: 'shell', tool_use_id: 'c2', backgroundable: true })
-    frame({ type: 'result', text: 'done', is_error: false, effective_model: 'opus', usage: {}, session_id: 's1' })
-    expect(store.backgroundableCalls[chatId]).toBeUndefined()
-  })
-
-  test('a file-touching shell call is still tracked', () => {
-    const store = useProjectStore()
-    const chatId = 'c-backgroundable-file'
-    store.connectWs(chatId)
-    fakeSockets[0].onmessage?.({ data: JSON.stringify({
-      type: 'tool_use', tool_name: 'shell', tool_use_id: 'c1', backgroundable: true,
-      file_touch: { file_path: 'out.txt', action: 'created' },
-    }) })
-    expect(store.backgroundableCalls[chatId]).toHaveProperty('c1')
-  })
-
-  test('moveChatToBackground posts and toasts when nothing moved', async () => {
-    const store = useProjectStore()
-    apiPost.mockResolvedValueOnce({ moved: false })
-    expect(await store.moveChatToBackground('c')).toBe(false)
-    expect(apiPost).toHaveBeenCalledWith('/api/chats/c/move-to-background', {})
-    expect(store.toasts.at(-1)?.title).toBe('Nothing to move')
-    apiPost.mockResolvedValueOnce({ moved: true })
-    const toastCount = store.toasts.length
-    expect(await store.moveChatToBackground('c')).toBe(true)
-    expect(store.toasts).toHaveLength(toastCount)
-    apiPost.mockRejectedValueOnce(new Error('offline'))
-    expect(await store.moveChatToBackground('c')).toBe(false)
-    expect(store.toasts.at(-1)?.title).toBe('Could not move to background')
-  })
-})
-
-describe('stop a background task', () => {
-  test('stopBackgroundTask posts to the chat-scoped route with the id escaped', async () => {
-    const store = useProjectStore()
-    apiPost.mockResolvedValueOnce({ ok: true })
-    await store.stopBackgroundTask('c1', 'task/1')
-    expect(apiPost).toHaveBeenLastCalledWith('/api/chats/c1/background-tasks/task%2F1/stop', {})
-  })
-})
-
 describe('ephemeral status events', () => {
   test('does not render Claude requesting status as a system message', () => {
     apiGet.mockResolvedValue([])
@@ -2522,12 +3837,33 @@ describe('ephemeral status events', () => {
   })
 })
 
+describe('subagent trace lines', () => {
+  test('renders a subagent tool call as a card whose child lines nest under it', () => {
+    const store = useProjectStore()
+    const chatId = 'c-subagent-line'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const send = (event: Record<string, unknown>) => fakeSockets[0].onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'Agent', tool_input: '[general] Explore the repo', tool_use_id: 'p1' })
+    send({ type: 'tool_use', tool_name: 'Read', tool_input: 'a.py', tool_use_id: 'c1', parent_tool_use_id: 'p1' })
+
+    expect(store.currentTimeline.some(e => e.kind === 'tool')).toBe(false)
+    const card = store.currentTimeline.find(e => e.kind === 'subagent')
+    if (!card || card.kind !== 'subagent') throw new Error('Expected a subagent card')
+    expect(card.card.description).toBe('Explore the repo')
+    expect(card.card.agent_type).toBe('general')
+    expect(card.card.steps).toHaveLength(1)
+    expect(card.card.steps[0]).toMatchObject({ kind: 'activity', tool_use_id: 'c1' })
+    expect(card.card.steps[0]).toMatchObject({ line: expect.stringMatching(/Read a\.py$/) })
+  })
+})
+
 describe('subagent thinking deltas', () => {
-  test('do not leak a subagent thinking delta into the parent turn trace or messages', () => {
+  test('drops subagent thinking: do not leak a subagent thinking delta into the parent turn trace or messages', () => {
     // Regression: thinking deltas fired from inside a Task subagent arrive
-    // with parent_tool_use_id set. The subagent's transcript belongs to its
-    // own read-only view, so accumulating the
-    // delta into the parent's thinking buffer used to produce a stray
+    // with parent_tool_use_id set. Subagent reasoning is not shown, so
+    // accumulating the delta into the parent's thinking buffer used to produce a stray
     // _thinking message at the end of the parent turn's trace block and
     // persist it into the chat history after the result event.
     apiGet.mockResolvedValue([])
@@ -2737,7 +4073,7 @@ describe('server-owned chat pins', () => {
 })
 
 describe('needs-you chat actions', () => {
-  // A transient needs-you action on a chat (an MCP sign-in, ...). The engine
+  // A transient needs-you action on a chat (a command to run, ...). The engine
   // owns it and sends it on the chat row, the snapshot and the event; the
   // client holds a copy under the same read-start watermark as the offers.
 
@@ -2758,10 +4094,10 @@ describe('needs-you chat actions', () => {
 
   const action = (id: string, over: Partial<ChatAction> = {}): ChatAction => ({
     id,
-    kind: 'mcp_auth',
+    kind: 'command',
     origin: 'engine',
     state: 'open',
-    params: { server: 'linear', provider: 'opencode' },
+    params: { command: 'echo review-only' },
     error: '',
     created_at: 1,
     ...over,
@@ -2844,10 +4180,57 @@ describe('needs-you chat actions', () => {
     const sock = events(store)
     expect(store.chatNeedsYou('c-1')).toBe(false)
 
-    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1')])))
+    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1', { kind: 'command', params: { command: 'echo review-only' } })])))
     expect(store.chatNeedsYou('c-1')).toBe(true)
 
     sock.onmessage?.(frame(actionsChanged('c-1', [])))
+    expect(store.chatNeedsYou('c-1')).toBe(false)
+  })
+
+  test.each(['open', 'working', 'waiting', 'done', 'failed'] as const)(
+    'an action in %s state creates attention and clears with its card',
+    (state) => {
+      const store = useProjectStore()
+      store.chats = [chatInfo('c-1')]
+      const sock = events(store)
+      const card = action('a1', { state })
+      sock.onmessage?.(frame(actionsChanged('c-1', [card])))
+      expect(store.chatActions['c-1']).toEqual([card])
+      expect(store.chatNeedsYou('c-1')).toBe(true)
+      sock.onmessage?.(frame(actionsChanged('c-1', [])))
+      expect(store.chatActions['c-1']).toBeUndefined()
+      expect(store.chatNeedsYou('c-1')).toBe(false)
+    },
+  )
+
+  test.each(['command', 'gws_auth', 'permission_mode', 'device_code', 'system_setting', 'restart', 'limit'] as const)(
+    'a %s action creates attention',
+    (kind) => {
+      const store = useProjectStore()
+      store.chats = [chatInfo('c-1')]
+      store.chatActions['c-1'] = [action('other', { kind })]
+      expect(store.chatNeedsYou('c-1')).toBe(true)
+    },
+  )
+
+  test('snapshot and subsequent event retain and clear an action', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+    sock.onmessage?.(frame(snapshotFrame({ chat_actions: { 'c-1': [action('card')] } })))
+    expect(store.chatActions['c-1']).toEqual([action('card')])
+    expect(store.chatNeedsYou('c-1')).toBe(true)
+    sock.onmessage?.(frame(actionsChanged('c-1', [])))
+    expect(store.chatActions['c-1']).toBeUndefined()
+  })
+
+  test('memory pass remains excluded even with a real blocker and an action', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1', {
+      last_error: 'failed turn',
+      helper: { kind: 'memory_pass', state: 'running' } as never,
+    })]
+    store.chatActions['c-1'] = [action('card'), action('command', { kind: 'command' })]
     expect(store.chatNeedsYou('c-1')).toBe(false)
   })
 
@@ -2862,7 +4245,7 @@ describe('needs-you chat actions', () => {
 
   test('startChatAction posts to the start route and adopts the returned action', async () => {
     const store = useProjectStore()
-    apiPost.mockResolvedValueOnce({ action: action('a1', { state: 'waiting', params: { server: 'linear', provider: 'opencode', url: 'https://mcp.linear.app/authorize' } }) })
+    apiPost.mockResolvedValueOnce({ action: action('a1', { state: 'waiting', params: { url: 'https://example.com/authorize' } }) })
     const result = await store.startChatAction('c-1', 'a1')
     expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/a1/start', {})
     expect(result?.state).toBe('waiting')
@@ -2898,21 +4281,6 @@ describe('needs-you chat actions', () => {
     expect(store.chatActions['c-1']?.[0]?.state).toBe('waiting')
   })
 
-  test('requestMcpAuth posts the server and adopts the returned card', async () => {
-    const store = useProjectStore()
-    apiPost.mockResolvedValueOnce({ action: action('a1', { params: { server: 'notion', provider: 'opencode' } }) })
-    const result = await store.requestMcpAuth('c-1', 'notion')
-    expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/mcp-auth', { server: 'notion' })
-    expect(result?.id).toBe('a1')
-    expect(store.chatActions['c-1']?.[0]?.id).toBe('a1')
-  })
-
-  test('requestMcpAuth rethrows a refusal', async () => {
-    const store = useProjectStore()
-    apiPost.mockRejectedValueOnce(Object.assign(new Error('invalid_state'), { status: 400, payload: { error: 'invalid_state', action: null } }))
-    await expect(store.requestMcpAuth('c-1', 'notion')).rejects.toThrow('invalid_state')
-  })
-
   test('dismissChatAction applies the remaining list', async () => {
     const store = useProjectStore()
     const sock = events(store)
@@ -2935,28 +4303,6 @@ describe('needs-you chat actions', () => {
     expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a9'])
   })
 
-  test('turnOffChatActionServer applies the remaining list', async () => {
-    const store = useProjectStore()
-    const sock = events(store)
-    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1'), action('a2')])))
-    apiPost.mockResolvedValueOnce({ actions: [action('a2')], reload: { reloaded: [], pending: [] } })
-    await expect(store.turnOffChatActionServer('c-1', 'a1')).resolves.toBe('turned_off')
-    expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/a1/turn-off', {})
-    expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a2'])
-  })
-
-  test('a turn-off refusal keeps the card and rethrows', async () => {
-    const store = useProjectStore()
-    const sock = events(store)
-    sock.onmessage?.(frame(actionsChanged('c-1', [action('a1', { state: 'open' })])))
-    apiPost.mockRejectedValueOnce(Object.assign(new Error('config_has_comments'), {
-      status: 400,
-      payload: { error: 'config_has_comments', action: action('a1', { state: 'open' }) },
-    }))
-    await expect(store.turnOffChatActionServer('c-1', 'a1')).rejects.toThrow('config_has_comments')
-    expect(store.chatActions['c-1']?.map(a => a.id)).toEqual(['a1'])
-  })
-
   test('continueChatAction posts to the continue route', async () => {
     const store = useProjectStore()
     apiPost.mockResolvedValueOnce({ actions: [], delivery: 'started' })
@@ -2966,7 +4312,7 @@ describe('needs-you chat actions', () => {
 
   test('submitChatActionCallback posts the url to the callback route and adopts the action', async () => {
     const store = useProjectStore()
-    apiPost.mockResolvedValueOnce({ action: action('a1', { state: 'waiting', params: { server: 'linear', provider: 'opencode', url: 'https://x/authorize', callback_used: '1' } }) })
+    apiPost.mockResolvedValueOnce({ action: action('a1', { state: 'waiting', params: { url: 'https://x/authorize', callback_used: '1' } }) })
     await expect(store.submitChatActionCallback('c-1', 'a1', 'http://127.0.0.1:5/cb?code=x')).resolves.toEqual({ ok: true })
     expect(apiPost).toHaveBeenCalledWith('/api/chats/c-1/actions/a1/callback', { url: 'http://127.0.0.1:5/cb?code=x' })
     expect(store.chatActions['c-1']?.[0]?.params.callback_used).toBe('1')
@@ -3473,8 +4819,8 @@ describe('queued message replay handling', () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
     store.queuedMessages[chatId] = [
-      { id: 'q-1', text: 'msg A', delivery: 'queue' },
-      { id: 'q-2', text: 'msg B', delivery: 'queue' },
+      { id: 'q-1', text: 'msg A' },
+      { id: 'q-2', text: 'msg B' },
     ]
     store.connectWs(chatId)
 
@@ -3488,7 +4834,7 @@ describe('queued message replay handling', () => {
     })
 
     expect(store.queuedMessages[chatId]).toEqual([
-      { id: 'q-2', text: 'msg B', delivery: 'queue' },
+      { id: 'q-2', text: 'msg B' },
     ])
   })
 
@@ -3496,8 +4842,8 @@ describe('queued message replay handling', () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
     store.queuedMessages[chatId] = [
-      { id: 'q-1', text: 'same prompt', delivery: 'queue' },
-      { id: 'q-2', text: 'same prompt', delivery: 'queue' },
+      { id: 'q-1', text: 'same prompt' },
+      { id: 'q-2', text: 'same prompt' },
     ]
     store.connectWs(chatId)
 
@@ -3510,7 +4856,7 @@ describe('queued message replay handling', () => {
     })
 
     expect(store.queuedMessages[chatId]).toEqual([
-      { id: 'q-2', text: 'same prompt', delivery: 'queue' },
+      { id: 'q-2', text: 'same prompt' },
     ])
   })
 
@@ -3518,8 +4864,8 @@ describe('queued message replay handling', () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
     store.queuedMessages[chatId] = [
-      { id: 'q-1', text: 'follow-up A', delivery: 'queue' },
-      { id: 'q-2', text: 'follow-up B', delivery: 'queue' },
+      { id: 'q-1', text: 'follow-up A' },
+      { id: 'q-2', text: 'follow-up B' },
     ]
     store.connectWs(chatId)
 
@@ -3532,15 +4878,15 @@ describe('queued message replay handling', () => {
     })
 
     expect(store.queuedMessages[chatId]).toEqual([
-      { id: 'q-1', text: 'follow-up A', delivery: 'queue' },
-      { id: 'q-2', text: 'follow-up B', delivery: 'queue' },
+      { id: 'q-1', text: 'follow-up A' },
+      { id: 'q-2', text: 'follow-up B' },
     ])
   })
 
   test('clears local queued chips when server history contains the flushed user turn', async () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
-    store.queuedMessages[chatId] = [{ id: 'q-1', text: 'msg A', delivery: 'queue' }]
+    store.queuedMessages[chatId] = [{ id: 'q-1', text: 'msg A' }]
     apiGet.mockResolvedValue([
       { role: 'user', content: 'initial', sent_at: '', turn_index: 0 },
       { role: 'assistant', content: 'reply', sent_at: '' },
@@ -5099,7 +6445,6 @@ describe('latest status sync', () => {
           { role: 'assistant', content: 'done', sent_at: '2026-07-06T10:00:00Z' },
         ])
       }
-      if (path === `/api/chats/${chatId}/subagents`) return Promise.resolve([])
       return Promise.resolve([])
     })
 
@@ -5141,7 +6486,6 @@ describe('latest status sync', () => {
           { role: 'assistant', content: 'I\'m in the ciao repo, not ciaobot. Let me cd:' },
         ])
       }
-      if (path === `/api/chats/${chatId}/subagents`) return Promise.resolve([])
       return Promise.resolve([])
     })
 
@@ -5151,99 +6495,6 @@ describe('latest status sync', () => {
     expect(store.projectStreaming[chatId]).toBe(true)
     expect(store.isStreaming).toBe(true)
     expect(store.streamingText[chatId]).toBe('I\'m in the ciao repo')
-  })
-})
-
-describe('background agents indicator', () => {
-  test('tracks the running count and only reconciles on a drop', () => {
-    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
-    // /messages returns a settled assistant turn so the reconcile fired on a
-    // drop resolves on its first pass (no lingering timers after teardown).
-    apiGet.mockImplementation((path: string) =>
-      path.endsWith('/messages')
-        ? Promise.resolve([{ role: 'assistant', content: 'ok', sent_at: '' }])
-        : Promise.resolve([]),
-    )
-    const store = useProjectStore()
-    const chatId = 'c-bg'
-    store.activeChatId = chatId
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-    const fire = (remaining: number) =>
-      sock.onmessage?.({
-        data: JSON.stringify({ type: 'chat_subagents_ready', chat_id: chatId, project_id: 'p1', remaining }),
-      })
-
-    fire(2) // initial announcement
-    expect(store.backgroundAgents[chatId]).toBe(2)
-    fire(3) // a subagent spawned children — still just a badge update
-    expect(store.backgroundAgents[chatId]).toBe(3)
-    fire(2) // one finished (drop)
-    expect(store.backgroundAgents[chatId]).toBe(2)
-    fire(0) // all finished
-    expect(store.backgroundAgents[chatId]).toBeUndefined()
-    expect(store.activeBackgroundAgents).toBe(0)
-  })
-
-  test('ignores an older poll that resolves after a newer poll', async () => {
-    const responses: Array<(value: unknown) => void> = []
-    apiGet.mockImplementation((path: string) => {
-      if (path === '/api/subagents/running') {
-        return new Promise(resolve => responses.push(resolve))
-      }
-      return Promise.resolve([])
-    })
-    const store = useProjectStore()
-
-    const older = store.refreshRunningSubagents()
-    const newer = store.refreshRunningSubagents()
-    responses[1]({ chats: {} })
-    await newer
-    responses[0]({ chats: { 'chat-finished': [{ agent_id: 'stale-agent' }] } })
-    await older
-
-    expect(store.runningSubagents).toEqual({})
-  })
-
-  test('does not set toast or unread marker on background agent completion', () => {
-    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    const chatId = 'c-follow-up'
-    store.activeChatId = 'some-other-chat'
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-    const fire = (remaining: number) =>
-      sock.onmessage?.({
-        data: JSON.stringify({ type: 'chat_subagents_ready', chat_id: chatId, project_id: 'p1', remaining }),
-      })
-
-    fire(1)
-    expect(store.backgroundAgents[chatId]).toBe(1)
-
-    fire(0)
-    expect(store.toasts).toHaveLength(0)
-    expect(store.unread[chatId]).toBeUndefined()
-
-    store.backgroundAgents[chatId] = 1
-
-    fire(0)
-    expect(store.toasts).toHaveLength(0)
-    expect(store.unread[chatId]).toBeUndefined()
-  })
-
-  test('a new turn keeps the background-agents count (agents outlive turns)', () => {
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    const chatId = 'c-bg2'
-    store.activeChatId = chatId
-    store.backgroundAgents[chatId] = 4
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-    sock.onmessage?.({
-      data: JSON.stringify({ type: 'chat_streaming_started', chat_id: chatId, project_id: 'p1' }),
-    })
-    expect(store.backgroundAgents[chatId]).toBe(4)
   })
 
   test('active-only syncLatest preserves locally-held archived chats', async () => {
@@ -5272,23 +6523,127 @@ describe('background agents indicator', () => {
     expect(store.chats.find(c => c.chat_id === activeId)?.title).toBe('Fresh')
     expect(store.chats.some(c => c.chat_id === archivedId && c.archived)).toBe(true)
   })
+})
 
-  test('the events snapshot replaces background-agent counts wholesale', () => {
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    store.backgroundAgents['c-stale'] = 7
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-    sock.onmessage?.({
-      data: JSON.stringify({
-        type: 'snapshot',
-        active_streams: [],
-        background_agents: { 'c-live': 2 },
-        chat_pins: {},
-      }),
-    })
-    expect(store.backgroundAgents['c-stale']).toBeUndefined()
-    expect(store.backgroundAgents['c-live']).toBe(2)
+describe('store disposal', () => {
+  test('a disposed store stops its liveness watchdog and window listeners', async () => {
+    // The watcher-owned polls were only half the leak. `checkWsLiveness` and the
+    // focus/blur/visibility listeners are registered at setup time, so every
+    // store a test builds kept a real-clock 2s timer and a live focus handler
+    // for the rest of the run — and `checkWsLiveness` can reach `apiGet` and
+    // push a FakeWebSocket onto the module-level array later tests read.
+    // Hidden, so the assertion is this store's socket and focus frame: a visible
+    // page would also poll from stores earlier tests stranded on an untracked pinia.
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
+    try {
+      const store = useProjectStore()
+      apiGet.mockImplementation(() => Promise.resolve([]))
+      const chatId = 'c-dispose-live'
+      store.activeChatId = chatId
+      // A frame time of 0 is "never", so open the sockets after the clock moves.
+      await vi.advanceTimersByTimeAsync(1)
+      store.connectWs(chatId)
+      store.connectEventsWs()
+      const chatSock = fakeSockets.find(s => s.url.includes('/ws/chat/'))!
+      const events = fakeSockets.find(s => s.url.includes('/ws/events'))!
+
+      store.$dispose()
+      const socketsBefore = fakeSockets.length
+      const sendsBefore = chatSock.send.mock.calls.length
+      apiGet.mockClear()
+
+      // Nothing the disposed store registered may still fire. A leftover
+      // watchdog would see the events socket go stale and close it; a leftover
+      // focus listener would send another focus frame.
+      await vi.advanceTimersByTimeAsync(30_000)
+      window.dispatchEvent(new Event('focus'))
+      window.dispatchEvent(new Event('blur'))
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(apiGet.mock.calls).toEqual([])
+      expect(fakeSockets.length).toBe(socketsBefore)
+      expect(events.readyState).toBe(FakeWebSocket.OPEN)
+      expect(chatSock.send.mock.calls.length).toBe(sendsBefore)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a store left on a superseded pinia is disposed too', async () => {
+    // A test that swaps the pinia mid-run strands its first store on an
+    // instance `getActivePinia()` can no longer reach. Disposing only the
+    // survivor left that one holding its watchdog and listeners, which is the
+    // leak this file's cleanup exists to prevent — so the cleanup tracks every
+    // pinia it created rather than the current one.
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
+    try {
+      const stranded = useProjectStore()
+      stranded.activeChatId = 'c1'
+      stranded.streaming = { c1: true }
+      // A frame time of 0 is "never", so open the sockets after the clock moves.
+      await vi.advanceTimersByTimeAsync(1)
+      stranded.connectWs('c1')
+      stranded.connectEventsWs()
+      const chatSock = fakeSockets.find(s => s.url.includes('/ws/chat/'))!
+      const events = fakeSockets.find(s => s.url.includes('/ws/events'))!
+      await Promise.resolve()
+
+      setActivePinia(createPinia())
+      const current = useProjectStore()
+      expect(current).not.toBe(stranded)
+
+      // Both are reachable for disposal, which is what afterEach relies on.
+      expect(piniasCreated.length).toBeGreaterThanOrEqual(2)
+      for (const pinia of piniasCreated) {
+        pinia._s.forEach((store) => store.$dispose())
+      }
+
+      const sendsBefore = chatSock.send.mock.calls.length
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(30_000)
+      window.dispatchEvent(new Event('focus'))
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(apiGet.mock.calls).toEqual([])
+      expect(events.readyState).toBe(FakeWebSocket.OPEN)
+      expect(chatSock.send.mock.calls.length).toBe(sendsBefore)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a disposed store does not resume a settled-reply retry it already scheduled', async () => {
+    // The open path re-fetches /messages on delays while it waits for a settled
+    // reply. Those waits are timers the store owns; a disposed store must cancel
+    // them rather than resume and call the API, or an earlier test's store keeps
+    // calling it on the real clock during a later test.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-dispose-retry'
+      const unsettled: ChatMessage = { role: 'user', content: 'Question', timestamp: '2026-08-27T00:00:00Z', turn_index: 0 }
+      store.activeChatId = chatId
+      store.messages[chatId] = [unsettled]
+      apiGet.mockImplementation((path: string) => {
+        if (!String(path).includes('/messages')) return Promise.resolve([])
+        return Promise.resolve([unsettled])
+      })
+
+      void store.loadMessages(chatId, { waitForSettledReply: true })
+      // The first fetch lands and the first retry wait is now pending.
+      await vi.advanceTimersByTimeAsync(0)
+      expect(apiGet.mock.calls.filter(c => String(c[0]).includes('/messages')).length).toBeGreaterThan(0)
+
+      store.$dispose()
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(apiGet.mock.calls).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -5347,7 +6702,7 @@ describe('parked pending_queue chips', () => {
 
   test('an idle chat payload with pending_queue becomes chips', () => {
     const store = useProjectStore()
-    store.queuedMessages.idle = [{ id: 'old', text: 'stale chip', delivery: 'queue' }]
+    store.queuedMessages.idle = [{ id: 'old', text: 'stale chip' }]
     store.reconcileChatList([
       chat({
         chat_id: 'idle',
@@ -5355,14 +6710,14 @@ describe('parked pending_queue chips', () => {
       }),
     ])
     expect(store.queuedMessages.idle).toEqual([
-      { id: 'q-1', text: 'after the error', images: ['shot.png'], delivery: 'queue', steering: false, waiting: true },
+      { id: 'q-1', text: 'after the error', images: ['shot.png'], waiting: true },
     ])
   })
 
   test('a parked chat payload while streaming adds missing waiting chips ahead of the live ones', () => {
     const store = useProjectStore()
     store.streaming.live = true
-    store.queuedMessages.live = [{ id: 'q-live', text: 'live', delivery: 'queue' }]
+    store.queuedMessages.live = [{ id: 'q-live', text: 'live' }]
     store.reconcileChatList([
       chat({ chat_id: 'live', pending_queue: [{ id: 'q-wait', text: 'held' }, { id: 'q-live', text: 'live' }] }),
     ])
@@ -5372,16 +6727,16 @@ describe('parked pending_queue chips', () => {
   test('an empty pending_queue during streaming does not clear existing chips', () => {
     const store = useProjectStore()
     store.streaming.live = true
-    store.queuedMessages.live = [{ id: 'q-live', text: 'still queued', delivery: 'queue' }]
+    store.queuedMessages.live = [{ id: 'q-live', text: 'still queued' }]
     store.reconcileChatList([
       chat({ chat_id: 'live', pending_queue: [] }),
     ])
-    expect(store.queuedMessages.live).toEqual([{ id: 'q-live', text: 'still queued', delivery: 'queue' }])
+    expect(store.queuedMessages.live).toEqual([{ id: 'q-live', text: 'still queued' }])
   })
 
   test('an empty pending_queue on an idle chat clears parked chips', () => {
     const store = useProjectStore()
-    store.queuedMessages.idle = [{ id: 'q-1', text: 'after the error', delivery: 'queue' }]
+    store.queuedMessages.idle = [{ id: 'q-1', text: 'after the error' }]
     store.reconcileChatList([
       chat({ chat_id: 'idle', pending_queue: [] }),
     ])
@@ -5742,7 +7097,7 @@ describe('chat_streaming_done clears stale streaming for inactive chats', () => 
     expect(store.chats[0].repo_location).toEqual({ ...loc, exists: false })
   })
 
-  it("turn_verification sets verification on the turn's last assistant row", () => {
+  it("turn_verification sets verification on only the turn's last assistant row", () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
     const verification = {
@@ -5758,7 +7113,11 @@ describe('chat_streaming_done clears stale streaming for inactive chats', () => 
     store.messages = {
       'c-v': [
         { role: 'user', content: 'q', timestamp: '2026-11-12T10:00:00Z', turn_index: 0 } as ChatMessage,
-        { role: 'assistant', content: 'a', timestamp: '2026-11-12T10:00:01Z' } as ChatMessage,
+        { role: 'assistant', content: 'first reply', timestamp: '2026-11-12T10:00:01Z' } as ChatMessage,
+        { role: 'system', content: 'tool activity', timestamp: '2026-11-12T10:00:02Z' } as ChatMessage,
+        { role: 'assistant', content: 'last reply', timestamp: '2026-11-12T10:00:03Z' } as ChatMessage,
+        { role: 'user', content: 'next question', timestamp: '2026-11-12T10:01:00Z', turn_index: 1 } as ChatMessage,
+        { role: 'assistant', content: 'next answer', timestamp: '2026-11-12T10:01:01Z' } as ChatMessage,
       ],
     }
     store.connectEventsWs()
@@ -5766,7 +7125,41 @@ describe('chat_streaming_done clears stale streaming for inactive chats', () => 
     sock.onmessage?.({
       data: JSON.stringify({ type: 'turn_verification', chat_id: 'c-v', turn_index: 0, verification }),
     })
-    expect(store.messages['c-v'][1].verification).toEqual(verification)
+    expect(store.messages['c-v'].map(row => row.verification)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      verification,
+      undefined,
+      undefined,
+    ])
+  })
+
+  it('turn_verification ignores an unknown turn and a turn without an assistant row', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const rows: ChatMessage[] = [
+      { role: 'user', content: 'q', timestamp: '2026-11-12T10:00:00Z', turn_index: 0 },
+      { role: 'assistant', content: 'another turn has an answer', timestamp: '2026-11-12T10:00:01Z' },
+      { role: 'user', content: 'next question', timestamp: '2026-11-12T10:01:00Z', turn_index: 1 },
+    ]
+    store.messages = { 'c-v': rows }
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    const verification = {
+      supported: 1,
+      unsupported: 0,
+      general: 0,
+      claims: [{ text: 'Lisbon is the capital', status: 'supported' as const, source: 'notes/geo.md' }],
+      sources: ['notes/geo.md'],
+    }
+
+    for (const turn_index of [9, 1]) {
+      sock.onmessage?.({
+        data: JSON.stringify({ type: 'turn_verification', chat_id: 'c-v', turn_index, verification }),
+      })
+      expect(rows.map(row => row.verification)).toEqual([undefined, undefined, undefined])
+    }
   })
 
   test('an inactive chat finishing clears its orphaned local streaming flag', () => {
@@ -6277,6 +7670,100 @@ describe('deep-link chat navigation', () => {
     expect(localStorage.getItem('ciao-active-workspace')).toBe('santo')
   })
 
+  test('workspace events invalidate before rename and fence an older read', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+    await store.fetchWorkspaces()
+    let finishOld!: (value: unknown) => void
+    apiGet.mockReturnValueOnce(new Promise(resolve => { finishOld = resolve }))
+    const old = store.fetchWorkspaces()
+    const states: string[] = []
+    const stop = watch(() => store.activeWorkspace, () => states.push(store.workspaceRegistryStatus), { flush: 'sync' })
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    apiGet.mockImplementation(async (path: string) => path === '/api/workspaces'
+      ? { workspaces: [{ name: 'renamed' }] }
+      : [])
+    events.onmessage?.({ data: JSON.stringify({ type: 'workspaces_changed', from: 'personal', to: 'renamed' }) })
+    expect(states).toEqual(['loading'])
+    finishOld({ workspaces: [{ name: 'personal' }] })
+    await old
+    expect(store.workspaceRegistryStatus).toBe('loading')
+    expect(store.activeWorkspace).toBe('renamed')
+    await vi.waitFor(() => expect(store.workspaceRegistryStatus).toBe('ready'))
+    expect(store.workspaces.map(w => w.name)).toEqual(['renamed'])
+    stop()
+  })
+
+  test.each([true, false])('event (rename=%s) fences a blocked read throughout the debounce', async rename => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+    await store.fetchWorkspaces()
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    const old = deferred<unknown>()
+    const fresh = deferred<unknown>()
+    apiGet.mockReturnValueOnce(old.promise)
+    const oldRead = store.fetchWorkspaces()
+    const observed: Array<[string, string, string[]]> = []
+    const stop = watch(
+      () => [store.workspaceRegistryStatus, store.activeWorkspace, store.workspaces] as const,
+      () => observed.push([store.workspaceRegistryStatus, store.activeWorkspace, store.workspaces.map(w => w.name)]),
+      { flush: 'sync' },
+    )
+    vi.useFakeTimers()
+    try {
+      apiGet.mockImplementation((path: string) => path === '/api/workspaces' ? fresh.promise : Promise.resolve([]))
+      const revision = store.workspaceRegistryRevision
+      events.onmessage?.({ data: JSON.stringify(rename
+        ? { type: 'workspaces_changed', from: 'personal', to: 'renamed' }
+        : { type: 'workspaces_changed' }) })
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      if (rename) expect(observed).toContainEqual(['loading', 'renamed', ['personal']])
+      old.resolve({ workspaces: [{ name: 'old' }], active: 'old' })
+      await oldRead
+      expect(store.workspaces.map(w => w.name)).toEqual(['personal'])
+      expect(store.activeWorkspace).toBe(rename ? 'renamed' : 'personal')
+      await vi.advanceTimersByTimeAsync(149)
+      expect(apiGet).not.toHaveBeenCalledWith('/api/projects')
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      await vi.advanceTimersByTimeAsync(1)
+      expect(apiGet).toHaveBeenCalledWith('/api/projects')
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      const name = rename ? 'renamed' : 'personal'
+      fresh.resolve({ workspaces: [{ name }] })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(store.workspaceRegistryStatus).toBe('ready')
+      expect(store.workspaces.map(w => w.name)).toEqual([name])
+      expect(store.workspaceRegistryRevision).toBe(revision + 1)
+      expect(observed.filter(([status]) => status === 'ready')).toEqual([['ready', name, [name]]])
+    } finally {
+      stop()
+      vi.useRealTimers()
+    }
+  })
+
+  test('a rename event invalidates a ready registry before changing selection', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValueOnce({ workspaces: [{ name: 'personal' }] })
+    await store.fetchWorkspaces()
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    const selectionStates: string[] = []
+    const stop = watch(() => store.activeWorkspace, () => selectionStates.push(store.workspaceRegistryStatus), { flush: 'sync' })
+    vi.useFakeTimers()
+    try {
+      events.onmessage?.({ data: JSON.stringify({ type: 'workspaces_changed', from: 'personal', to: 'renamed' }) })
+      expect(selectionStates).toEqual(['loading'])
+      expect(store.workspaceRegistryStatus).toBe('loading')
+      expect(store.activeWorkspace).toBe('renamed')
+      expect(apiGet).toHaveBeenCalledTimes(1)
+    } finally {
+      stop()
+      vi.useRealTimers()
+    }
+  })
+
   test('updateWorkspace adopts renamed.from into the active workspace', async () => {
     const store = useProjectStore()
     store.activeWorkspace = 'personal'
@@ -6505,7 +7992,7 @@ describe('workspace and chat transitions', () => {
           active: 'home',
           provider_options: [
             { value: 'claude', label: 'Claude' },
-            { value: 'opencode', label: 'opencode' },
+            { value: 'opencode', label: 'OpenCode' },
           ],
         })
       }
@@ -6963,6 +8450,34 @@ describe('workspace and chat transitions', () => {
     expect(store.activeChatId).toBe('c2')
     expect(routerPush).toHaveBeenCalledWith('/chat/c2')
     expect(apiPost).toHaveBeenCalledWith('/api/chats/c2/read', {})
+  })
+
+  test('deleteChat keeps socket and beside pane when the server refuses', async () => {
+    // The server answers 409 while the chat is still stopping: nothing about
+    // the chat is gone, so its socket and beside pane must stay as they were.
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj 1', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c1', project_id: 'p1', title: 'Chat 1', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      { chat_id: 'c2', project_id: 'p1', title: 'Chat 2', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeWorkspace = 'personal'
+    store.activeChatId = 'c2'
+    apiGet.mockResolvedValue([])
+    store.connectWs('c1')
+    store.besideChatId = 'c1'
+    const socketsBefore = fakeSockets.length
+    apiDel.mockRejectedValue(new Error('This chat is still stopping. Try again when stopping finishes.'))
+
+    await expect(store.deleteChat('c1')).rejects.toThrow('still stopping')
+
+    expect(store.chats.find(c => c.chat_id === 'c1')).toBeDefined()
+    expect(store.besideChatId).toBe('c1')
+    expect(fakeSockets.length).toBe(socketsBefore)
+    expect(fakeSockets[0].readyState).toBe(FakeWebSocket.OPEN)
+    expect(store.activeChatId).toBe('c2')
   })
 
   test('deleteChat clears any lingering draft for the deleted chat', async () => {
@@ -7477,7 +8992,6 @@ describe('switchChat workspace alignment', () => {
   test('automatically switches activeWorkspace to match target chat workspace', async () => {
     apiGet.mockImplementation((url: string) => {
       if (url.includes('/messages')) return Promise.resolve([])
-      if (url.includes('/subagents')) return Promise.resolve([])
       return Promise.resolve([])
     })
     const store = useProjectStore()
@@ -7495,28 +9009,6 @@ describe('switchChat workspace alignment', () => {
 
     expect(store.activeWorkspace).toBe('work')
     expect(store.activeChatId).toBe('c-work')
-  })
-
-  // `/chat/:chatId/subagent/:agentId` carries the same chatId, so matching on
-  // that alone made the chat's own sidebar row a dead click while one of its
-  // subagents was open.
-  test('navigates back to the chat from one of its subagent views', async () => {
-    const { router } = await import('../router')
-    const store = useProjectStore()
-    store.projects = [
-      { project_id: 'p1', name: 'Proj', workspace: 'personal' } as unknown as ProjectInfo,
-    ]
-    store.chats = [
-      { chat_id: 'c1', project_id: 'p1', title: 'Chat' } as unknown as ChatInfo,
-    ]
-    store.activeChatId = 'c1'
-    router.currentRoute.value.params = { chatId: 'c1', agentId: 'a1b2c3d4' }
-    routerPush.mockClear()
-
-    await store.switchChat('c1')
-
-    expect(routerPush).toHaveBeenCalledWith('/chat/c1')
-    router.currentRoute.value.params = {}
   })
 })
 
@@ -8526,438 +10018,6 @@ describe('chatLastSnippet', () => {
   })
 })
 
-describe('running subagent poll', () => {
-  // The server keeps a row "running" until the agent's transcript goes idle,
-  // which lags the parent turn by up to 60s. One refresh on the falling edge
-  // therefore left rows spinning in the sidebar until the next turn.
-  function mockRunning(rows: Record<string, unknown[]>): void {
-    apiGet.mockImplementation((path: string) => {
-      if (path === '/api/subagents/running') return Promise.resolve({ chats: rows })
-      return Promise.resolve([])
-    })
-  }
-
-  test('keeps polling after work stops until the rows clear', async () => {
-    const store = useProjectStore()
-    const row = [{ agent_id: 'a1', description: 'digging', subagent_type: '', status: 'running', is_async: true, turn_index: 0 }]
-    mockRunning({ c1: row })
-
-    vi.useFakeTimers()
-    try {
-      store.streaming = { c1: true }
-      await vi.advanceTimersByTimeAsync(0)
-      expect(store.runningSubagents.c1).toHaveLength(1)
-
-      // Work stops, but the server still names the agent.
-      store.streaming = { c1: false }
-      await vi.advanceTimersByTimeAsync(0)
-      await vi.advanceTimersByTimeAsync(8000)
-      expect(store.runningSubagents.c1).toHaveLength(1)
-
-      // The transcript finally goes idle; the drain picks that up and the row
-      // disappears without needing another turn.
-      mockRunning({})
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(store.runningSubagents.c1).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a disposed store stops polling', async () => {
-    // The watcher owns the interval, so stopping the watcher is not enough —
-    // an interval it already created keeps firing on its own. Without the
-    // store's onScopeDispose cleanup, every test in this file left one behind
-    // and they went on making requests for the rest of the run.
-    const store = useProjectStore()
-    const row = [{ agent_id: 'a1', description: 'digging', subagent_type: '', status: 'running', is_async: true, turn_index: 0 }]
-    mockRunning({ c1: row })
-
-    vi.useFakeTimers()
-    try {
-      store.streaming = { c1: true }
-      await vi.advanceTimersByTimeAsync(0)
-      await vi.advanceTimersByTimeAsync(8000)
-      expect(apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length).toBeGreaterThan(0)
-
-      store.$dispose()
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(30_000)
-      expect(apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running')).toEqual([])
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a disposed store stops its liveness watchdog and window listeners', async () => {
-    // The watcher-owned polls were only half the leak. `checkWsLiveness` and the
-    // focus/blur/visibility listeners are registered at setup time, so every
-    // store a test builds kept a real-clock 2s timer and a live focus handler
-    // for the rest of the run — and `checkWsLiveness` can reach `apiGet` and
-    // push a FakeWebSocket onto the module-level array later tests read.
-    const store = useProjectStore()
-    apiGet.mockImplementation(() => Promise.resolve([]))
-
-    vi.useFakeTimers()
-    try {
-      store.$dispose()
-      const socketsBefore = fakeSockets.length
-      apiGet.mockClear()
-
-      // Nothing the disposed store registered may still fire.
-      await vi.advanceTimersByTimeAsync(30_000)
-      window.dispatchEvent(new Event('focus'))
-      window.dispatchEvent(new Event('blur'))
-      document.dispatchEvent(new Event('visibilitychange'))
-      await vi.advanceTimersByTimeAsync(0)
-
-      expect(apiGet.mock.calls).toEqual([])
-      expect(fakeSockets.length).toBe(socketsBefore)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a store left on a superseded pinia is disposed too', async () => {
-    // A test that swaps the pinia mid-run strands its first store on an
-    // instance `getActivePinia()` can no longer reach. Disposing only the
-    // survivor left that one holding its watchdog and listeners, which is the
-    // leak this file's cleanup exists to prevent — so the cleanup tracks every
-    // pinia it created rather than the current one.
-    const stranded = useProjectStore()
-    stranded.streaming = { c1: true }
-    await Promise.resolve()
-
-    setActivePinia(createPinia())
-    const current = useProjectStore()
-    expect(current).not.toBe(stranded)
-
-    // Both are reachable for disposal, which is what afterEach relies on.
-    expect(piniasCreated.length).toBeGreaterThanOrEqual(2)
-    for (const pinia of piniasCreated) {
-      pinia._s.forEach((store) => store.$dispose())
-    }
-
-    apiGet.mockClear()
-    vi.useFakeTimers()
-    try {
-      await vi.advanceTimersByTimeAsync(30_000)
-      window.dispatchEvent(new Event('focus'))
-      await vi.advanceTimersByTimeAsync(0)
-      expect(apiGet.mock.calls).toEqual([])
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a disposed store does not resume a settled-reply retry it already scheduled', async () => {
-    // The open path re-fetches /messages on delays while it waits for a settled
-    // reply. Those waits are timers the store owns; a disposed store must cancel
-    // them rather than resume and call the API, or an earlier test's store keeps
-    // calling it on the real clock during a later test.
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      const chatId = 'c-dispose-retry'
-      const unsettled: ChatMessage = { role: 'user', content: 'Question', timestamp: '2026-08-27T00:00:00Z', turn_index: 0 }
-      store.activeChatId = chatId
-      store.messages[chatId] = [unsettled]
-      apiGet.mockImplementation((path: string) => {
-        if (!path.includes('/messages')) return Promise.resolve([])
-        return Promise.resolve([unsettled])
-      })
-
-      void store.loadMessages(chatId, { waitForSettledReply: true })
-      // The first fetch lands and the first retry wait is now pending.
-      await vi.advanceTimersByTimeAsync(0)
-      expect(apiGet.mock.calls.filter(c => String(c[0]).includes('/messages')).length).toBeGreaterThan(0)
-
-      store.$dispose()
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(30_000)
-      expect(apiGet.mock.calls).toEqual([])
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('the drain is bounded, so a row the server never retires cannot poll forever', async () => {
-    const store = useProjectStore()
-    const row = [{ agent_id: 'a1', description: 'stuck', subagent_type: '', status: 'running', is_async: true, turn_index: 0 }]
-    mockRunning({ c1: row })
-
-    vi.useFakeTimers()
-    try {
-      store.streaming = { c1: true }
-      await vi.advanceTimersByTimeAsync(0)
-      store.streaming = { c1: false }
-      await vi.advanceTimersByTimeAsync(0)
-
-      await vi.advanceTimersByTimeAsync(95_000)
-      // Count from a clean slate rather than diffing two totals: the totals
-      // include anything else that polled this endpoint, so a stray request
-      // between the two reads used to fail this test for reasons that had
-      // nothing to do with the drain.
-      apiGet.mockClear()
-
-      await vi.advanceTimersByTimeAsync(60_000)
-      const pollsAfterDeadline = apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length
-      expect(pollsAfterDeadline).toBe(0)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a shell row keeps the poll alive past the drain budget until the server omits it', async () => {
-    const store = useProjectStore()
-    const shell = [{ agent_id: 'task:b1', description: 'sleep 3600', subagent_type: 'shell', status: 'running', is_async: true, turn_index: null, stoppable: true }]
-    let rows: unknown[] = shell
-    apiGet.mockImplementation((path: string) => {
-      if (path === '/api/subagents/running') return Promise.resolve({ chats: rows.length ? { c1: rows } : {} })
-      return Promise.resolve([])
-    })
-    const polls = () => apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length
-
-    vi.useFakeTimers()
-    try {
-      store.streaming = { c1: true }
-      await vi.advanceTimersByTimeAsync(0)
-      store.streaming = { c1: false }
-      await vi.advanceTimersByTimeAsync(0)
-
-      await vi.advanceTimersByTimeAsync(95_000)
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(60_000)
-      expect(polls()).toBeGreaterThan(10)
-
-      rows = []
-      await vi.advanceTimersByTimeAsync(8_000)
-      expect(store.runningSubagentsFor('c1')).toEqual([])
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(30_000)
-      expect(polls()).toBe(0)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a shell row discovered while nothing is working starts the poll', async () => {
-    const store = useProjectStore()
-    const shell = [{ agent_id: 'task:b1', description: 'sleep 3600', subagent_type: 'shell', status: 'running', is_async: true, turn_index: null }]
-    mockRunning({ c1: shell })
-
-    vi.useFakeTimers()
-    try {
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(0)
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(120_000)
-      expect(apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length).toBeGreaterThan(10)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-})
-
-describe('running-row reconciliation while the engine count is zero', () => {
-  // The engine count (`backgroundAgents`, from chat_subagents_ready) and the
-  // cheap running list (/api/subagents/running) are separate owners. A row the
-  // list names while the count is 0 on an idle chat used to start nothing: the
-  // full-list poll was gated on the count alone and the running poll only
-  // started on a working edge.
-  const row = { agent_id: 'a1', description: 'digging', subagent_type: '', status: 'running', is_async: true, turn_index: 0 }
-  let running: Record<string, unknown[]>
-  const calls = (suffix: string) => apiGet.mock.calls.filter(c => String(c[0]).endsWith(suffix)).length
-  function mockEndpoints(): void {
-    apiGet.mockImplementation((path: string) => {
-      if (path === '/api/subagents/running') return Promise.resolve({ chats: running })
-      if (path === '/api/chats/c1/subagents') return Promise.resolve([{ ...row, messages: [] }])
-      return Promise.resolve([])
-    })
-  }
-
-  beforeEach(() => {
-    running = { c1: [row] }
-    mockEndpoints()
-  })
-
-  test('known running rows keep an idle active chat refreshing when the event count is zero', async () => {
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(0)
-      expect(store.backgroundAgents.c1).toBeUndefined()
-      expect(store.isStreaming).toBe(false)
-
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(calls('/subagents')).toBeGreaterThan(0)
-      expect(calls('/api/subagents/running')).toBeGreaterThan(0)
-      // The engine count is never written from the cheap list.
-      expect(store.backgroundAgents.c1).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('running-row discovery immediately refreshes the full active list once', async () => {
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      apiGet.mockClear()
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(0)
-      expect(apiGet.mock.calls.filter(c => c[0] === '/api/chats/c1/subagents')).toHaveLength(1)
-      expect(store.subagents.c1).toHaveLength(1)
-
-      // A second refresh that still lists the row is not a new discovery.
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(0)
-      expect(apiGet.mock.calls.filter(c => c[0] === '/api/chats/c1/subagents')).toHaveLength(1)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('completion and disposal stop both polls', async () => {
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(4000)
-
-      running = {}
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(store.runningSubagents.c1).toBeUndefined()
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(30_000)
-      expect(apiGet.mock.calls).toEqual([])
-
-      // Disposal while rows are still known.
-      running = { c1: [row] }
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(4000)
-      store.$dispose()
-      apiGet.mockClear()
-      await vi.advanceTimersByTimeAsync(30_000)
-      expect(apiGet.mock.calls).toEqual([])
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a failed running request does not clear the known rows or stop the poll', async () => {
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      await store.refreshRunningSubagents()
-      apiGet.mockImplementation((path: string) =>
-        path === '/api/subagents/running' ? Promise.reject(new Error('offline')) : Promise.resolve([]))
-      await vi.advanceTimersByTimeAsync(8000)
-      expect(store.runningSubagents.c1).toHaveLength(1)
-
-      mockEndpoints()
-      running = {}
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(store.runningSubagents.c1).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('a dedicated subagent view does not trigger full-list polling', async () => {
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      store.setSubagentViewActive('c1')
-      apiGet.mockClear()
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(12_000)
-      expect(calls('/api/chats/c1/subagents')).toBe(0)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('rows for another chat do not poll the active chat', async () => {
-    vi.useFakeTimers()
-    try {
-      running = { other: [row] }
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      apiGet.mockClear()
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(12_000)
-      expect(calls('/api/chats/c1/subagents')).toBe(0)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test('late old responses do not restore completed agents', async () => {
-    vi.useFakeTimers()
-    try {
-      const store = useProjectStore()
-      store.activeChatId = 'c1'
-      const pending: Array<(v: unknown) => void> = []
-      apiGet.mockImplementation((path: string) => {
-        if (path === '/api/subagents/running') return Promise.resolve({ chats: running })
-        if (path === '/api/chats/c1/subagents') return new Promise(resolve => pending.push(resolve))
-        return Promise.resolve([])
-      })
-      await store.refreshRunningSubagents()
-      await vi.advanceTimersByTimeAsync(4000)
-      expect(pending.length).toBeGreaterThanOrEqual(2)
-      const last = pending.length - 1
-      pending[last]([{ ...row, status: 'completed', messages: [] }])
-      await vi.advanceTimersByTimeAsync(0)
-      pending[0]([{ ...row, status: 'running', messages: [] }])
-      await vi.advanceTimersByTimeAsync(0)
-      expect(store.subagents.c1?.[0]?.status).toBe('completed')
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-})
-
-describe('loadSubagent', () => {
-  test('fetches one agent and merges it without dropping the others', async () => {
-    const store = useProjectStore()
-    store.subagents = {
-      c1: [
-        { agent_id: 'a1', messages: [], description: 'first' },
-        { agent_id: 'a2', messages: [], description: 'second' },
-      ],
-    } as never
-
-    apiGet.mockResolvedValue([{ agent_id: 'a2', messages: [{ role: 'assistant', content: 'fresh' }], description: 'second' }])
-
-    await store.loadSubagent('c1', 'a2')
-
-    expect(apiGet).toHaveBeenCalledWith('/api/chats/c1/subagents?agent_id=a2')
-    expect(store.subagents.c1).toHaveLength(2)
-    expect(store.subagents.c1[0].agent_id).toBe('a1')
-    expect(store.subagents.c1[1].messages).toHaveLength(1)
-  })
-
-  test('matches across the agent- prefix rather than adding a duplicate row', async () => {
-    const store = useProjectStore()
-    store.subagents = { c1: [{ agent_id: 'agent-a1', messages: [], description: 'first' }] } as never
-    apiGet.mockResolvedValue([{ agent_id: 'a1', messages: [{ role: 'assistant', content: 'fresh' }] }])
-
-    await store.loadSubagent('c1', 'a1')
-
-    expect(store.subagents.c1).toHaveLength(1)
-    expect(store.subagents.c1[0].messages).toHaveLength(1)
-  })
-})
-
 describe('memory pass surfaces', () => {
   function seedProjects(store: ReturnType<typeof useProjectStore>) {
     store.activeWorkspace = 'personal'
@@ -9075,6 +10135,13 @@ describe('delegated task signals', () => {
     expect(store.chatIsAttentionItem(chat)).toBe(true)
     expect(store.attentionChatCount).toBe(1)
     expect(store.chatNeedsYou('c-plain')).toBe(false)
+  })
+
+  test('a scoped blocked task still needs you, but another workspace does not', async () => {
+    const store = await seeded([taskRow({ attempt_outcome: 'blocked' })])
+    expect(store.chatNeedsYou('c-task')).toBe(true)
+    store.projects[0].workspace = 'other'
+    expect(store.chatNeedsYou('c-task')).toBe(false)
   })
 
   test('the project counts a chat whose task stopped for the user', async () => {
@@ -9220,8 +10287,8 @@ describe('failed chats count as needs you', () => {
   })
 })
 
-describe('queue delivery: queue or steer', () => {
-  const chatId = 'chat-steer'
+describe('queue entries and settings events', () => {
+  const chatId = 'chat-queue'
 
   function frames(socket: FakeWebSocket, type: string) {
     return socket.send.mock.calls
@@ -9234,13 +10301,11 @@ describe('queue delivery: queue or steer', () => {
   }
 
   async function setup() {
-    const { applyKeyboardSettings } = await import('../composables/useKeyboardSettings')
-    applyKeyboardSettings({ mid_turn_delivery: 'queue' })
     const store = useProjectStore()
     store.activeChatId = chatId
     store.connectWs(chatId)
     store.streaming[chatId] = true
-    return { store, socket: fakeSockets[fakeSockets.length - 1], applyKeyboardSettings }
+    return { store, socket: fakeSockets[fakeSockets.length - 1] }
   }
 
   it('requests a take without changing the queue and applies only successful results', async () => {
@@ -9259,167 +10324,36 @@ describe('queue delivery: queue or steer', () => {
     expect(frames(socket, 'queue_take_ack')[0]).toEqual({ type: 'queue_take_ack', entry_id: 'a' })
   })
 
-  it('sends delivery steer for a mid-turn message when the preference is steer', async () => {
-    const { store, socket, applyKeyboardSettings } = await setup()
-    applyKeyboardSettings({ mid_turn_delivery: 'steer' })
-    store.sendMessage(chatId, 'change course')
-    const [frame] = frames(socket, 'message')
-    expect(frame).toMatchObject({ text: 'change course', delivery: 'steer' })
-    expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'steer', steering: true })
-    applyKeyboardSettings({ mid_turn_delivery: 'queue' })
-  })
-
-  it('sends delivery queue by default', async () => {
+  it('a mid-turn message is queued with no delivery field', async () => {
     const { store, socket } = await setup()
-    store.sendMessage(chatId, 'later')
-    expect(frames(socket, 'message')[0]).toMatchObject({ delivery: 'queue' })
-    expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
+    expect(store.sendMessage(chatId, 'change course')).toBe(true)
+    const frame = frames(socket, 'message')[0]
+    expect(frame).toMatchObject({ text: 'change course', mode: 'queue' })
+    expect(Object.keys(frame)).not.toContain('delivery')
+    expect(store.queuedMessages[chatId]).toHaveLength(1)
+    expect(Object.keys(store.queuedMessages[chatId][0]).sort()).toEqual(['id', 'images', 'text'])
   })
 
-  it('steers a message with images when the preference is steer', async () => {
-    const { store, socket, applyKeyboardSettings } = await setup()
-    applyKeyboardSettings({ mid_turn_delivery: 'steer' })
-    store.pendingImages = ['shot.png']
-    store.sendMessage(chatId, 'look at this')
-    expect(frames(socket, 'message')[0]).toMatchObject({ delivery: 'steer', images: ['shot.png'] })
-    expect(store.queuedMessages[chatId][0].steering).toBe(true)
-    applyKeyboardSettings({ mid_turn_delivery: 'queue' })
-  })
-
-  it('folds a steered event into the transcript once', async () => {
+  it('sendQueuedNow sends queue_send_now while a turn runs and while idle', async () => {
     const { store, socket } = await setup()
-    store.messages[chatId] = []
     emit(socket, { type: 'queue_state', queue: [
-      { id: 'a', text: 'one', delivery: 'steer', steering: true },
-      { id: 'b', text: 'two', delivery: 'queue', steering: false },
+      { id: 'a', text: 'one', waiting: true },
+      { id: 'b', text: 'two', waiting: true },
+      { id: 'c', text: 'three', waiting: true },
     ] })
-    const steered = { type: 'steered', entry_ids: ['a'], text: 'one', turn_index: 3, sent_at: '2026-10-15T10:00:00Z', delivery_id: 'd1' }
-    emit(socket, steered)
-    emit(socket, steered)
-    const bubbles = (store.messages[chatId] || []).filter(m => m.role === 'user' && m.content === 'one')
-    expect(bubbles).toHaveLength(1)
-    expect(bubbles[0]).toMatchObject({ steered: true, turn_index: 3 })
-    expect(store.queuedMessages[chatId].map(q => q.id)).toEqual(['b'])
-  })
-
-  it('steered event carries origin onto the message', async () => {
-    const { store, socket } = await setup()
-    store.messages[chatId] = []
-    emit(socket, { type: 'steered', entry_ids: ['w'], text: '[Ciaobot] 1 background run finished.', turn_index: 4, sent_at: '2026-10-19T10:00:00Z', delivery_id: 'd1', origin: 'background_run' })
-    emit(socket, { type: 'steered', entry_ids: ['t'], text: 'typed', turn_index: 5, sent_at: '2026-10-19T10:00:01Z', delivery_id: 'd2' })
-    const msgs = store.messages[chatId] || []
-    expect(msgs.find(m => m.role === 'user' && m.turn_index === 4)).toMatchObject({ steered: true, origin: 'background_run' })
-    expect(msgs.find(m => m.role === 'user' && m.turn_index === 5)?.origin).toBeUndefined()
-  })
-
-  it('steer_fallback flips chips to queue and sets a notice', async () => {
-    const { store, socket } = await setup()
-    emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'steer', steering: true }] })
-    emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
-    expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
-    expect(store.steerNotice[chatId]).toContain('Steering missed the reply')
-    emit(socket, { type: 'result', text: 'done' })
-    emit(socket, { type: 'user_echo', text: 'one', turn_index: 5, entry_id: 'a' })
-    // The notice outlives the reply that ended and the turn that flushed it.
-    expect(store.steerNotice[chatId]).toContain('Steering missed the reply')
-  })
-
-  it('the fallback notice clears after 8 seconds and on the next send', async () => {
-    vi.useFakeTimers()
-    try {
-      const { store, socket } = await setup()
-      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
-      vi.advanceTimersByTime(7900)
-      expect(store.steerNotice[chatId]).toBeDefined()
-      vi.advanceTimersByTime(200)
-      expect(store.steerNotice[chatId]).toBeUndefined()
-
-      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
-      store.sendMessage(chatId, 'next')
-      expect(store.steerNotice[chatId]).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('a Steering lock the server never answers reverts to queue after 15 seconds with a notice', async () => {
-    vi.useFakeTimers()
-    try {
-      const { store, socket } = await setup()
-      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
-      store.setQueuedDelivery(chatId, ['a'], 'steer')
-      expect(store.queuedMessages[chatId][0].steering).toBe(true)
-      vi.advanceTimersByTime(14000)
-      expect(store.queuedMessages[chatId][0].steering).toBe(true)
-      vi.advanceTimersByTime(1500)
-      expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
-      expect(store.steerNotice[chatId]).toBeTruthy()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('a disposed store never reverts a pending steer lock or fires the notice timer', async () => {
-    vi.useFakeTimers()
-    try {
-      const { store, socket } = await setup()
-      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
-      store.setQueuedDelivery(chatId, ['a'], 'steer')
-      store.$dispose()
-      vi.advanceTimersByTime(20000)
-      expect(store.queuedMessages[chatId][0].steering).toBe(true)
-      expect(store.steerNotice[chatId]).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('clearQueued cancels the lock and notice timers', async () => {
-    vi.useFakeTimers()
-    try {
-      const { store, socket } = await setup()
-      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
-      store.setQueuedDelivery(chatId, ['a'], 'steer')
-      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
-      store.setQueuedDelivery(chatId, ['a'], 'steer')
-      expect(store.steerNotice[chatId]).toBeUndefined()
-      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
-      expect(store.steerNotice[chatId]).toBeDefined()
-      store.clearQueued(chatId)
-      expect(store.steerNotice[chatId]).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('a steer answered by steer_fallback or queue_state cancels the lock timer', async () => {
-    vi.useFakeTimers()
-    try {
-      const { store, socket } = await setup()
-      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
-      store.setQueuedDelivery(chatId, ['a'], 'steer')
-      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'steer', steering: true }] })
-      vi.advanceTimersByTime(16000)
-      expect(store.queuedMessages[chatId][0].steering).toBe(true)
-      expect(store.steerNotice[chatId]).toBeUndefined()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('a steer-default send arms the lock timer too', async () => {
-    vi.useFakeTimers()
-    const { applyKeyboardSettings } = await import('../composables/useKeyboardSettings')
-    try {
-      const { store } = await setup()
-      applyKeyboardSettings({ mid_turn_delivery: 'steer' })
-      store.sendMessage(chatId, 'go')
-      vi.advanceTimersByTime(15500)
-      expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
-    } finally {
-      applyKeyboardSettings({ mid_turn_delivery: 'queue' })
-      vi.useRealTimers()
-    }
+    socket.send.mockClear()
+    store.sendQueuedNow(chatId, ['b', 'a'])
+    expect(frames(socket, 'queue_send_now')).toEqual([
+      { type: 'queue_send_now', entry_ids: ['a', 'b'] },
+    ])
+    socket.send.mockClear()
+    store.streaming[chatId] = false
+    store.sendQueuedNow(chatId, ['c', 'a'])
+    expect(frames(socket, 'queue_send_now')).toEqual([
+      { type: 'queue_send_now', entry_ids: ['a', 'c'] },
+    ])
+    // Nothing is changed optimistically: the echo removes the entries.
+    expect(store.queuedMessages[chatId].map(q => q.id)).toEqual(['a', 'b', 'c'])
   })
 
   it('reads the waiting flag from queue_state, and the server flag wins over the chat record', async () => {
@@ -9429,13 +10363,13 @@ describe('queue delivery: queue or steer', () => {
     ])
     expect(store.queuedMessages[chatId][0].waiting).toBe(true)
     emit(socket, { type: 'queue_state', queue: [
-      { id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: true },
-      { id: 'l', text: 'live', delivery: 'queue', steering: false, waiting: false },
+      { id: 'w', text: 'held', waiting: true },
+      { id: 'l', text: 'live', waiting: false },
     ] })
     expect(store.queuedMessages[chatId].map(q => !!q.waiting)).toEqual([true, false])
     // The server says it is live now (adopted into the turn).
     emit(socket, { type: 'queue_state', queue: [
-      { id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: false },
+      { id: 'w', text: 'held', waiting: false },
     ] })
     expect(store.queuedMessages[chatId][0].waiting).toBe(false)
   })
@@ -9443,17 +10377,17 @@ describe('queue delivery: queue or steer', () => {
   it('an entry that arrives only via queue_state after a reload is waiting', async () => {
     const { store, socket } = await setup()
     expect(store.queuedMessages[chatId]).toBeUndefined()
-    emit(socket, { type: 'queue_state', queue: [{ id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: true }] })
+    emit(socket, { type: 'queue_state', queue: [{ id: 'w', text: 'held', waiting: true }] })
     expect(store.queuedMessages[chatId][0]).toMatchObject({ id: 'w', waiting: true })
   })
 
-  it('a queued event is live, and steering an entry clears its waiting mark', async () => {
+  it('a queued event is live, and a queue_state entry can be waiting', async () => {
     const { store, socket } = await setup()
-    emit(socket, { type: 'queued', id: 'n', text: 'new', delivery: 'queue', waiting: false })
-    expect(store.queuedMessages[chatId][0].waiting).toBe(false)
-    emit(socket, { type: 'queue_state', queue: [{ id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: true }] })
-    store.setQueuedDelivery(chatId, ['w'], 'steer')
-    expect(store.queuedMessages[chatId][0].waiting).toBe(false)
+    emit(socket, { type: 'queued', id: 'n', text: 'new', waiting: false })
+    expect(store.queuedMessages[chatId][0]).toMatchObject({ id: 'n', waiting: false })
+    expect(Object.keys(store.queuedMessages[chatId][0])).not.toContain('delivery')
+    emit(socket, { type: 'queue_state', queue: [{ id: 'w', text: 'held', waiting: true }] })
+    expect(store.queuedMessages[chatId][0].waiting).toBe(true)
   })
 
   it('prompt_cancelled removes the bubble and partials for that turn; a resend shows once', async () => {
@@ -9470,16 +10404,17 @@ describe('queue delivery: queue or steer', () => {
     expect(bubbles()).toHaveLength(1)
   })
 
-  it('snapshot and keyboard_settings_changed carry the preference', async () => {
+  it('keyboard_settings_changed applies the send mode', async () => {
     const { useKeyboardSettings } = await import('../composables/useKeyboardSettings')
     const store = useProjectStore()
     apiGet.mockResolvedValue([])
     store.connectEventsWs()
     const sock = fakeSockets[fakeSockets.length - 1]
-    sock.onmessage?.({ data: JSON.stringify({ type: 'keyboard_settings_changed', keyboard_shortcuts: {}, keyboard_send_mode: 'modifier', mid_turn_delivery: 'steer', revision: 'r1' }) })
-    expect(useKeyboardSettings().settings.value.mid_turn_delivery).toBe('steer')
-    sock.onmessage?.({ data: JSON.stringify({ type: 'keyboard_settings_changed', keyboard_shortcuts: {}, keyboard_send_mode: 'modifier', mid_turn_delivery: 'queue', revision: 'r2' }) })
-    expect(useKeyboardSettings().settings.value.mid_turn_delivery).toBe('queue')
+    sock.onmessage?.({ data: JSON.stringify({ type: 'keyboard_settings_changed', keyboard_shortcuts: {}, keyboard_send_mode: 'enter', revision: 'r1' }) })
+    expect(useKeyboardSettings().settings.value.keyboard_send_mode).toBe('enter')
+    expect(Object.keys(useKeyboardSettings().settings.value)).not.toContain('mid_turn_delivery')
+    sock.onmessage?.({ data: JSON.stringify({ type: 'keyboard_settings_changed', keyboard_shortcuts: {}, keyboard_send_mode: 'modifier', revision: 'r2' }) })
+    expect(useKeyboardSettings().settings.value.keyboard_send_mode).toBe('modifier')
   })
 
   it('appearance_settings_changed applies the value', async () => {
@@ -9997,84 +10932,25 @@ describe('chatsHealth', () => {
   })
 })
 
-describe('stopBackgroundTask', () => {
-  const shellRow = (id: string) => ({ agent_id: `task:${id}`, description: id, subagent_type: 'shell', stoppable: true })
 
-  beforeEach(() => {
-    setActivePinia(newPinia())
-    apiPost.mockReset()
-    apiPost.mockResolvedValue({ ok: true })
-    vi.useFakeTimers()
-  })
-  afterEach(() => vi.useRealTimers())
-
-  it('counts a chat holding only a native shell as busy', () => {
+describe('chatIsWorking', () => {
+  test('chatIsWorking is true only while a turn streams', () => {
     const store = useProjectStore()
-    expect(store.anyChatBusy).toBe(false)
-    store.runningSubagents = { c1: [shellRow('b1')] } as never
-    expect(store.anyChatBusy).toBe(true)
+    expect(store.chatIsWorking('c1')).toBe(false)
+    store.streaming = { c1: true }
     expect(store.chatIsWorking('c1')).toBe(true)
-  })
+    store.streaming = {}
+    expect(store.chatIsWorking('c1')).toBe(false)
 
-  it('posts to the stop route and marks the task stopping, per chat', async () => {
-    const store = useProjectStore()
-    await store.stopBackgroundTask('c1', 'b1')
-    expect(apiPost).toHaveBeenCalledWith('/api/chats/c1/background-tasks/b1/stop', {})
-    expect(store.stoppingTasks).toEqual({ c1: { b1: true } })
-    expect(store.stopTaskErrors).toEqual({})
-  })
-
-  it('ignores a second stop while one is pending', async () => {
-    const store = useProjectStore()
-    await store.stopBackgroundTask('c1', 'b1')
-    await store.stopBackgroundTask('c1', 'b1')
-    expect(apiPost).toHaveBeenCalledTimes(1)
-  })
-
-  it('lets go of the lock after 15 s so Stop can be retried', async () => {
-    const store = useProjectStore()
-    await store.stopBackgroundTask('c1', 'b1')
-    vi.advanceTimersByTime(14_999)
-    expect(store.stoppingTasks.c1?.b1).toBe(true)
-    vi.advanceTimersByTime(1)
-    expect(store.stoppingTasks.c1?.b1).toBeUndefined()
-    await store.stopBackgroundTask('c1', 'b1')
-    expect(apiPost).toHaveBeenCalledTimes(2)
-  })
-
-  it('records an error and releases the lock when the stop is rejected, clearing it on retry', async () => {
-    const store = useProjectStore()
-    apiPost.mockRejectedValueOnce(new Error('boom'))
-    await store.stopBackgroundTask('c1', 'b1')
-    expect(store.stoppingTasks.c1?.b1).toBeUndefined()
-    expect(store.stopTaskErrors.c1?.b1).toBe('Could not stop this process. Try again.')
-    await store.stopBackgroundTask('c1', 'b1')
-    expect(store.stopTaskErrors.c1?.b1).toBeUndefined()
-    expect(store.stoppingTasks.c1?.b1).toBe(true)
-  })
-
-  it('releases a task, and its error, once its row leaves the running list', async () => {
-    const store = useProjectStore()
-    store.runningSubagents = { c1: [shellRow('b1'), shellRow('b2')] } as unknown as typeof store.runningSubagents
-    await store.stopBackgroundTask('c1', 'b1')
-    await store.stopBackgroundTask('c1', 'b2')
-    store.stopTaskErrors = { c1: { b2: 'Could not stop this process. Try again.' } }
-    store.runningSubagents = { c1: [shellRow('b2')] } as unknown as typeof store.runningSubagents
-    await nextTick()
-    expect(store.stoppingTasks.c1?.b1).toBeUndefined()
-    expect(store.stoppingTasks.c1?.b2).toBe(true)
-    store.runningSubagents = {}
-    await nextTick()
-    expect(store.stoppingTasks).toEqual({})
-    expect(store.stopTaskErrors).toEqual({})
-  })
-
-  it('stops its timers when the store is disposed', async () => {
-    const store = useProjectStore()
-    const before = vi.getTimerCount()
-    await store.stopBackgroundTask('c1', 'b1')
-    expect(vi.getTimerCount()).toBe(before + 1)
-    store.$dispose()
-    expect(vi.getTimerCount()).toBe(0)
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'snapshot',
+        active_streams: [],
+        chat_pins: {},
+      }),
+    })
+    expect(store.chatIsWorking('c1')).toBe(false)
   })
 })

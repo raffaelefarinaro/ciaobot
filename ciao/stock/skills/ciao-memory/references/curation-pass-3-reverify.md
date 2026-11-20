@@ -38,7 +38,7 @@ For each item:
    - `needs_review`: the rule refused to write it unattended and one `note_edit` proposal is queued for the user. Report it under **What needs you** and move on.
    - `unverified`: nothing this pass reached could settle it, and nothing was written. It will be asked again.
    - `conflict`: the note moved since you read it. Re-read it and judge the text that is actually there.
-   - `already_checked`: a check for this exact revision is in its cooldown or waiting on a proposal.
+   - `already_checked`: a check for this exact revision is in its cooldown or waiting on a proposal. The reply names the reason; an attended chat can re-verify an `unverified` one, this pass cannot.
    - `failed`: the note could not be used at all.
 5. Record the key you settled with `ciao curation-progress --holder <lease.holder> --key <key>`, so the next run resumes instead of re-asking.
 

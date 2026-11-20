@@ -634,6 +634,7 @@ def test_the_store_holds_no_board_and_never_completes_a_task(tmp_path: Path) -> 
         "live_by_task",
         "newest_by_task",
         "list_for_task",
+        "attempts_for_chat",
         "recover_interrupted",
         "bind_revision",
         "continue_turn",
@@ -988,3 +989,31 @@ def test_task_rules_sit_after_instructions_and_before_earlier_attempts() -> None
     prompt = build_prompt(**common, task_rules="<task-rules>\nRULE\n</task-rules>")
     assert prompt.index("Ask first.") < prompt.index("RULE") < prompt.index("Earlier attempts")
     assert prompt.replace("\n\n<task-rules>\nRULE\n</task-rules>", "") == baseline
+
+
+# ── Lookup by chat (#3239-a) ─────────────────────────────────────────
+
+
+def test_attempts_for_chat_returns_that_chats_attempts_newest_first(tmp_path: Path) -> None:
+    clock = _Clock()
+    store = _store(tmp_path, clock=clock)
+    first = _start(store, chat_id="chat-1").attempt
+    clock.advance(5)
+    second = _start(store, task_id=OTHER_TASK_ID, chat_id="chat-1").attempt
+    assert store.attempts_for_chat("chat-1") == (second, first)
+
+
+def test_attempts_for_chat_misses_other_chats_and_an_unwritten_store(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    assert store.attempts_for_chat("chat-1") == ()
+    _start(store, chat_id="chat-2")
+    assert store.attempts_for_chat("chat-1") == ()
+    assert store.attempts_for_chat("chat-2")[0].chat_id == "chat-2"
+
+
+def test_attempts_for_chat_raises_on_an_unreadable_store(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.path.write_text("{not json", encoding="utf-8")
+    with pytest.raises(TaskAttemptError) as raised:
+        store.attempts_for_chat("chat-1")
+    assert raised.value.code == "read_failed"

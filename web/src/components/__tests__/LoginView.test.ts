@@ -117,6 +117,7 @@ describe('LoginView setup wizard tests', () => {
           name: 'claude',
           ok: false,
           auth: 'missing',
+          state: 'failed',
           command: 'claude auth login',
           detail: 'Run OAuth'
         }
@@ -138,7 +139,7 @@ describe('LoginView setup wizard tests', () => {
     expect(wrapper.text()).toContain('claude auth login')
     expect(wrapper.text()).toContain('Keep the terminal that started Ciaobot open while you finish this setup')
     expect(wrapper.text()).toContain('you can close the terminal and keep using this tab')
-    // The same wizard runs on Windows and Linux: no macOS-only app names.
+    // The same wizard runs on Linux too: no macOS-only app names.
     expect(wrapper.text()).not.toContain('Server.app')
 
     // feature tour fills the 2-column grid: six tiles, no empty slot
@@ -148,100 +149,6 @@ describe('LoginView setup wizard tests', () => {
     expect(tourItems[5].text()).toContain('Create, preview, edit, and restore workspace files right from the UI.')
     expect(wrapper.text()).toContain('// tour + local setup')
     expect(wrapper.text()).toContain('First launch from Terminal')
-  })
-
-  it('hides terminal-only setup content for native bootstrap', async () => {
-    mockApiGet.mockResolvedValue({ configured: false, bootstrap: true, native_bootstrap: true, mode: 'bootstrap', suggested_workspace: null, providers: { claude: { name: 'claude', ok: false, auth: 'missing', command: 'claude auth login', detail: 'Run OAuth' } } })
-    const wrapper = await mountLoginView()
-    expect(wrapper.find('.login-shell-bar').exists()).toBe(false)
-    expect(wrapper.find('.setup-run-note').exists()).toBe(false)
-    expect(wrapper.find('.setup-tour').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('// tour + local setup')
-    expect(wrapper.find('#setup-password').exists()).toBe(true)
-    expect(wrapper.find('#setup-workspace').element).toHaveProperty('value', '~/Ciaobot')
-    expect(wrapper.text()).toContain('claude auth login')
-  })
-
-  it('latches native mode when a poll first reports it', async () => {
-    let status = { configured: false, bootstrap: true, mode: 'bootstrap', native_bootstrap: false, suggested_workspace: null as string | null, providers: {} }
-    mockApiGet.mockImplementation(() => Promise.resolve(status))
-    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
-    const wrapper = await mountLoginView()
-    try {
-      expect((wrapper.get('#setup-workspace').element as HTMLInputElement).value).toBe('~/ciaobot')
-      status = { ...status, native_bootstrap: true }
-      await vi.advanceTimersByTimeAsync(2000)
-      expect(wrapper.find('.login-shell-bar').exists()).toBe(false)
-      expect((wrapper.get('#setup-workspace').element as HTMLInputElement).value).toBe('~/Ciaobot')
-      status = { ...status, native_bootstrap: false }
-      await vi.advanceTimersByTimeAsync(2000)
-      expect(wrapper.find('.login-shell-bar').exists()).toBe(false)
-      expect((wrapper.get('#setup-workspace').element as HTMLInputElement).value).toBe('~/Ciaobot')
-    } finally { wrapper.unmount(); vi.useRealTimers() }
-  })
-
-  it('keeps native restart copy after an in-flight poll', async () => {
-    const status = { configured: false, bootstrap: true, mode: 'bootstrap', native_bootstrap: true, suggested_workspace: null, providers: {} }
-    let resolvePoll!: (value: unknown) => void
-    let calls = 0
-    mockApiGet.mockImplementation((path: string) => {
-      if (path !== '/api/setup-status') return Promise.resolve({ mode: 'scratch', existing_workspaces: [] })
-      if (++calls === 1) return Promise.resolve(status)
-      return new Promise(resolve => { resolvePoll = resolve })
-    })
-    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
-    const wrapper = await mountLoginView()
-    try {
-      await wrapper.get('#setup-password').setValue('hunter2')
-      await wrapper.get('#setup-password-confirm').setValue('hunter2')
-      await vi.advanceTimersByTimeAsync(2000)
-      mockApiPost.mockResolvedValue({ ok: true })
-      await wrapper.get('form').trigger('submit.prevent')
-      await nextTick()
-      resolvePoll({ ...status, native_bootstrap: false })
-      await Promise.resolve(); await nextTick()
-      expect(wrapper.text()).toContain('Setup saved. Ciaobot is starting on this Mac.')
-      expect(wrapper.text()).not.toContain('Keep the terminal')
-      expect(wrapper.text()).not.toContain('restarting')
-      expect(wrapper.text()).not.toContain('// ciaobot is loading config ...')
-    } finally { wrapper.unmount(); vi.useRealTimers() }
-  })
-
-  it('uses status suggestions until the user edits the folder', async () => {
-    let status = { configured: false, bootstrap: true, mode: 'bootstrap', native_bootstrap: true, suggested_workspace: '/first' as string | null, providers: {} }
-    mockApiGet.mockImplementation((path: string) => {
-      if (path.startsWith('/api/setup/list-dirs')) return Promise.resolve({ path: '/chosen', display_path: '/chosen', parent: '/', dirs: [] })
-      if (path.startsWith('/api/setup/inspect-folder')) return Promise.resolve({ mode: 'scratch', existing_workspaces: [] })
-      return Promise.resolve(status)
-    })
-    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
-    const wrapper = await mountLoginView()
-    const value = () => (wrapper.get('#setup-workspace').element as HTMLInputElement).value
-    try {
-      expect(value()).toBe('/first')
-      status = { ...status, suggested_workspace: '/second' }
-      await vi.advanceTimersByTimeAsync(2000)
-      expect(value()).toBe('/second')
-      status = { ...status, suggested_workspace: null }
-      await vi.advanceTimersByTimeAsync(2000)
-      expect(value()).toBe('~/Ciaobot')
-      await wrapper.get('#setup-workspace').setValue('/typed')
-      status = { ...status, suggested_workspace: '/third' }
-      await vi.advanceTimersByTimeAsync(2000)
-      expect(value()).toBe('/typed')
-    } finally { wrapper.unmount(); vi.useRealTimers() }
-
-    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
-    const pickerWrapper = await mountLoginView()
-    try {
-      await pickerWrapper.get('#setup-workspace-browse').trigger('click')
-      await Promise.resolve(); await nextTick()
-      await pickerWrapper.get('.picker-select').trigger('click')
-      expect((pickerWrapper.get('#setup-workspace').element as HTMLInputElement).value).toBe('/chosen')
-      status = { ...status, suggested_workspace: '/fourth' }
-      await vi.advanceTimersByTimeAsync(2000)
-      expect((pickerWrapper.get('#setup-workspace').element as HTMLInputElement).value).toBe('/chosen')
-    } finally { pickerWrapper.unmount(); vi.useRealTimers() }
   })
 
   it('hides port and python inputs behind the Advanced toggle', async () => {
@@ -335,7 +242,7 @@ describe('LoginView setup wizard tests', () => {
         bootstrap: true,
         mode: 'bootstrap',
         providers: {
-          claude: { name: 'claude', ok: true, auth: 'oauth', command: 'claude auth login', detail: 'Ready' }
+          claude: { name: 'claude', ok: true, auth: 'oauth', state: 'ready', command: 'claude auth login', detail: 'Ready' }
         }
       })
     })
@@ -462,6 +369,7 @@ describe('LoginView setup wizard tests', () => {
           name: 'opencode',
           ok: false,
           auth: 'not_installed',
+          state: 'not_installed',
           command: 'curl -fsSL https://opencode.ai/v2/install | bash',
           detail: 'opencode is not installed on this machine.',
           install_url: 'https://opencode.ai/download',
@@ -491,6 +399,7 @@ describe('LoginView setup wizard tests', () => {
           name: 'claude',
           ok: false,
           auth: 'not_installed',
+          state: 'not_installed',
           command: 'curl -fsSL https://claude.ai/install.sh | bash',
           detail: 'Claude Code is not installed on this machine.',
           install_url: 'https://code.claude.com/docs/en/quickstart#step-1-install-claude-code',
@@ -523,6 +432,7 @@ describe('LoginView setup wizard tests', () => {
           name: 'claude',
           ok: false,
           auth: 'not_installed',
+          state: 'not_installed',
           command: 'curl -fsSL https://claude.ai/install.sh | bash',
           detail: 'Claude Code is not installed on this machine.',
           path_command: 'echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.zshrc && source ~/.zshrc',
@@ -553,6 +463,7 @@ describe('LoginView setup wizard tests', () => {
           name: 'claude',
           ok: false,
           auth: 'not_installed',
+          state: 'not_installed',
           command: 'curl -fsSL https://claude.ai/install.sh | bash',
           detail: 'Claude Code is not installed on this machine.',
           path_command: 'echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.zshrc && source ~/.zshrc',
@@ -589,6 +500,7 @@ describe('LoginView setup wizard tests', () => {
             name: 'claude',
             ok: false,
             auth: 'not_installed',
+            state: 'not_installed',
             command: 'curl -fsSL https://claude.ai/install.sh | bash',
             detail: 'Claude Code is not installed on this machine.',
             path_command: 'echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.zshrc',
@@ -622,6 +534,7 @@ describe('LoginView setup wizard tests', () => {
           name: 'claude',
           ok: false,
           auth: 'missing',
+          state: 'failed',
           command: 'claude auth login',
           detail: 'Run Claude OAuth.',
         },
@@ -645,6 +558,7 @@ describe('LoginView setup wizard tests', () => {
           name: 'claude',
           ok: false,
           auth: 'not_installed',
+          state: 'not_installed',
           command: 'curl -fsSL https://claude.ai/install.sh | bash',
           detail: 'The Claude desktop app is installed (/Applications/Claude.app), but…',
           install_url: 'https://code.claude.com/docs/en/quickstart#step-1-install-claude-code',
@@ -668,6 +582,7 @@ describe('LoginView setup wizard tests', () => {
           name: 'claude',
           ok: true,
           auth: 'oauth',
+          state: 'ready',
           command: 'claude auth login',
           detail: 'Ready'
         }
@@ -703,7 +618,7 @@ describe('LoginView setup wizard tests', () => {
     })
     const payload = mockApiPost.mock.calls[0][1]
     expect(payload).not.toHaveProperty('push_contact')
-    expect(wrapper.text()).toContain('restarting')
+    expect(wrapper.find('.restarting-body img.wordmark').exists()).toBe(true)
     expect(wrapper.text()).toContain('// ciaobot is loading config ...')
     expect(wrapper.text()).toContain('Keep the terminal that started it open until it says setup is complete')
   })
@@ -948,41 +863,5 @@ describe('LoginView setup wizard tests', () => {
         } finally { restore() }
       })
     })
-  })
-})
-
-describe('installer folder suggestion', () => {
-  const bootstrap = (suggested?: string) => ({
-    configured: false,
-    bootstrap: true,
-    mode: 'bootstrap',
-    workspace_root: '/scratch',
-    vault_root: '/scratch/memory-vault',
-    ...(suggested ? { suggested_workspace: suggested } : {}),
-    providers: {},
-  })
-
-  it('seeds the main folder from the installer suggestion', async () => {
-    mockApiGet.mockResolvedValue(bootstrap('/Users/ada/Notes'))
-    const wrapper = await mountLoginView()
-    const field = wrapper.get('#setup-workspace').element as HTMLInputElement
-    expect(field.value).toBe('/Users/ada/Notes')
-  })
-
-  it('keeps the default folder when the installer suggests none', async () => {
-    mockApiGet.mockResolvedValue(bootstrap())
-    const wrapper = await mountLoginView()
-    const field = wrapper.get('#setup-workspace').element as HTMLInputElement
-    expect(field.value).toBe('~/ciaobot')
-  })
-
-  it('never overwrites a folder the user typed', async () => {
-    mockApiGet.mockResolvedValue(bootstrap('/Users/ada/Notes'))
-    const wrapper = await mountLoginView()
-    const input = wrapper.get('#setup-workspace')
-    await input.setValue('/Users/ada/Other')
-    await flushPromises()
-    const field = input.element as HTMLInputElement
-    expect(field.value).toBe('/Users/ada/Other')
   })
 })

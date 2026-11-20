@@ -18,7 +18,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -29,13 +29,16 @@ from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
     ChatContext,
+    ContextCompactedEvent,
     ImageAttachment,
     ModelCapabilityQuestionEvent,
     ModelChangedEvent,
     PermissionRequestEvent,
     PromptCancelledEvent,
+    LATE_WAKE_NOTICE,
     ResultEvent,
-    SteerDeliveredEvent,
+    SessionTitleEvent,
+    ShellFinishedEvent,
     StreamEvent,
     SystemStatusEvent,
     ThinkingEvent,
@@ -43,7 +46,7 @@ from ciao.models import (
 )
 from ciao.provider_service import ProviderService, capabilities_for
 from ciao.providers.connect_errors import annotate_reauth
-from ciao.providers.opencode import QuestionResponseResult
+from ciao.providers.base import QuestionResponseResult
 from ciao.sessions import StateStore
 from ciao.transcripts import (
     FinalAnswerTracker,
@@ -62,7 +65,7 @@ from ciao.web.chat_broker import (
     public_queue,
 )
 from ciao.web.file_snapshots import SnapshotStore
-from ciao import repo_location, vault_verification
+from ciao import provider_registry, repo_location, vault_verification
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ciao.web.project_chats import ChatInfo
@@ -146,7 +149,6 @@ class ChatStreamingHost(Protocol):
     _events: EventsHub
     _snapshots: SnapshotStore
     _shutting_down: bool
-    verify_vault_answers_enabled: Callable[[], bool]
 
     def _save(self, *, reason: str = ...) -> None: ...
 
@@ -161,14 +163,6 @@ class ChatStreamingHost(Protocol):
     def _vault_root_for_chat(self, chat_id: str) -> Path | None: ...
 
     async def reload_provider(self, chat_id: str) -> bool: ...
-
-    def _fallback_steers(
-        self, chat_id: str, stream: ChatStream, reason: str
-    ) -> None: ...
-
-    def on_steer_delivered(
-        self, chat_id: str, stream: ChatStream, steer_id: str
-    ) -> None: ...
 
     def on_prompt_cancelled(
         self,
@@ -194,8 +188,6 @@ class ChatStreamingHost(Protocol):
         self, chat: ChatInfo, request: AgentRequest, event: ToolUseEvent
     ) -> None: ...
 
-    async def warm_gh_token(self, chat: ChatInfo) -> None: ...
-
     def build_agent_request(
         self,
         chat: ChatInfo,
@@ -209,7 +201,7 @@ class ChatStreamingHost(Protocol):
         compact: bool = False,
     ) -> AgentRequest: ...
 
-    async def _model_capable(self, model: str, chat: ChatInfo) -> bool: ...
+    def _agent_accepts_images(self, chat: ChatInfo) -> bool: ...
 
     async def _capability_candidates(
         self, chat: ChatInfo, model: str
@@ -260,13 +252,13 @@ class ChatStreamingHost(Protocol):
         self, chat_id: str, user_text: str, assistant_text: str
     ) -> None: ...
 
-    async def _verify_turn_and_publish(
-        self, chat_id: str, turn_index: int, answer: str, note_paths: list[Path]
-    ) -> None: ...
+    def apply_adapter_title(self, chat_id: str, title: str) -> bool: ...
 
-    def _start_subagent_watcher(self, chat_id: str, project_id: str) -> None: ...
 
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None: ...
+
+    def _release_recovery_claim(self, chat_id: str) -> None: ...
+    def _owns_retry(self, chat_id: str, stream: ChatStream) -> bool: ...
     def _settle_schedule_retry(self, chat_id: str, *, succeeded: bool) -> None: ...
 
     @staticmethod
@@ -296,7 +288,11 @@ class ChatStreamingHost(Protocol):
 
     def _flush_result_announce(self, chat_id: str) -> bool: ...
 
-    def _background_count_now(self, chat_id: str) -> int: ...
+    def _background_work_outstanding(self, chat_id: str) -> bool: ...
+    def _note_shell_finished(self, chat_id: str, event: ShellFinishedEvent) -> None: ...
+    def _release_shell_finished_waiting(self, chat_id: str) -> None: ...
+    def _continuation_started(self, chat_id: str) -> str | None: ...
+    def _take_claimed_notice(self, chat_id: str, *, adopt: bool) -> str | None: ...
 
     def _spawn_detached(
         self, coro: Coroutine[object, object, object], name: str
@@ -335,8 +331,6 @@ class ChatStreamingHost(Protocol):
 
     def _start_between_turns_drain(self, chat_id: str, project_id: str) -> None: ...
 
-    def _schedule_action_detection(self, chat_id: str) -> None: ...
-
     async def _drain_between_turns(self, chat_id: str, project_id: str) -> None: ...
 
 
@@ -359,6 +353,11 @@ class StreamOutcome:
     tool_events: list[dict[str, Any]] = field(default_factory=list)
 
 
+# How long a background Stop waits for the idle drain to unwind before its
+# handoff gives up on it and releases the teardown registration.
+_STOP_HANDOFF_DRAIN_TIMEOUT_S = 10.0
+
+
 class ChatStreaming:
     """Own chat drive-loop, provider-stream, and drain lifecycles."""
 
@@ -366,8 +365,13 @@ class ChatStreaming:
         self._host = host
         self._turn_perf_started: dict[tuple[str, int], float] = {}
         self._between_turn_drains: dict[str, asyncio.Task[None]] = {}
-        self._last_drain_result: dict[str, tuple[str, bool]] = {}
         self._drive_tasks: dict[str, tuple[ChatStream, asyncio.Task[None]]] = {}
+        # A background Stop's shared teardown: the drain unwind plus the
+        # provider abort. A foreground drive joins it before it enters.
+        self._stop_handoffs: dict[str, asyncio.Task[None]] = {}
+        # A foreground drive that has not entered the provider yet. The event
+        # is its withdrawal signal: Stop sets it to wake the wait.
+        self._pre_entry: dict[str, tuple[ChatStream, asyncio.Event]] = {}
 
     @property
     def turn_perf_started(self) -> dict[tuple[str, int], float]:
@@ -377,16 +381,109 @@ class ChatStreaming:
     def between_turn_drains(self) -> dict[str, asyncio.Task[None]]:
         return self._between_turn_drains
 
-    @property
-    def last_drain_results(self) -> dict[str, tuple[str, bool]]:
-        return self._last_drain_result
+    def _drain_pending(self, chat_id: str) -> asyncio.Task[None] | None:
+        task = self._between_turn_drains.get(chat_id)
+        return task if task is not None and not task.done() else None
 
     def has_live_drain(self, chat_id: str) -> bool:
-        task = self._between_turn_drains.get(chat_id)
-        return task is not None and not task.done()
+        return self._drain_pending(chat_id) is not None
 
-    def discard_drain_result(self, chat_id: str) -> None:
-        self._last_drain_result.pop(chat_id, None)
+    def teardown_unsettled(self, chat_id: str) -> bool:
+        """True while a Stop handoff or a not-yet-entered drive is outstanding.
+
+        An idle or cancelling drain never counts: every Claude chat has one
+        between turns, and a stuck one must not make the chat undeletable.
+        """
+        return chat_id in self._stop_handoffs or chat_id in self._pre_entry
+
+    def pending_stop_handoff(self, chat_id: str) -> asyncio.Task[None] | None:
+        task = self._stop_handoffs.get(chat_id)
+        if task is None or task.done():
+            return None
+        return task
+
+    async def join_stop_handoff(self, chat_id: str) -> None:
+        task = self.pending_stop_handoff(chat_id)
+        if task is not None:
+            await self._join_task(task)
+
+    def begin_background_stop(
+        self, chat_id: str, finish: Callable[[], Awaitable[None]]
+    ) -> asyncio.Task[None]:
+        """Start (or share) the teardown that follows a background Stop."""
+        pending = self.pending_stop_handoff(chat_id)
+        if pending is not None:
+            return pending
+
+        async def _handoff() -> None:
+            try:
+                await asyncio.wait_for(
+                    self._host._await_between_turns_drain(chat_id),
+                    _STOP_HANDOFF_DRAIN_TIMEOUT_S,
+                )
+            except TimeoutError:
+                # A drain that ignores cancellation must not hold the
+                # registration forever: it would keep the chat undeletable.
+                logger.warning(
+                    "Drain for chat %s did not unwind within %.0fs of Stop; "
+                    "continuing the handoff",
+                    chat_id,
+                    _STOP_HANDOFF_DRAIN_TIMEOUT_S,
+                )
+            try:
+                await finish()
+            except Exception:
+                logger.exception("Background stop teardown failed for chat %s", chat_id)
+
+        task = asyncio.create_task(_handoff())
+        self._stop_handoffs[chat_id] = task
+
+        def _settled(finished: asyncio.Task[None]) -> None:
+            if self._stop_handoffs.get(chat_id) is finished:
+                self._stop_handoffs.pop(chat_id, None)
+
+        task.add_done_callback(_settled)
+        return task
+
+    def request_pre_entry_stop(self, chat_id: str, stream: ChatStream) -> bool:
+        """Wake a drive still waiting on its predecessor so it withdraws."""
+        slot = self._pre_entry.get(chat_id)
+        if slot is None or slot[0] is not stream:
+            return False
+        slot[1].set()
+        return True
+
+    async def _join_predecessors(self, chat_id: str) -> None:
+        await self._host._await_between_turns_drain(chat_id)
+        await self.join_stop_handoff(chat_id)
+
+    async def _await_predecessor(self, chat_id: str, stream: ChatStream) -> bool:
+        """Wait for the previous drain and stop handoff; True if Stop withdrew us."""
+        slot = self._pre_entry.get(chat_id)
+        if self._drain_pending(chat_id) is None and self.pending_stop_handoff(chat_id) is None:
+            # Nothing to wait for: stay synchronous, as a drive with no
+            # predecessor always was, so a cancel lands in the turn itself.
+            await self._host._await_between_turns_drain(chat_id)
+            if slot is not None and slot[0] is stream:
+                self._pre_entry.pop(chat_id, None)
+            return stream.user_stopped
+        event = slot[1] if slot is not None and slot[0] is stream else asyncio.Event()
+        join = asyncio.create_task(self._join_predecessors(chat_id))
+        stopper = asyncio.create_task(event.wait())
+        try:
+            await asyncio.wait({join, stopper}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            stream.finish()
+            self._host._broker.clear(chat_id, stream)
+            raise
+        finally:
+            join.cancel()
+            stopper.cancel()
+            await asyncio.gather(join, stopper, return_exceptions=True)
+            current = self._pre_entry.get(chat_id)
+            if current is not None and current[0] is stream:
+                self._pre_entry.pop(chat_id, None)
+        return stream.user_stopped
 
     def drive_task(
         self, chat_id: str, stream: ChatStream | None = None
@@ -435,11 +532,7 @@ class ChatStreaming:
         unattended: bool,
         compact: bool = False,
     ) -> None:
-        # The one place a turn begins, so it is the one place a subscriber hears
-        # about it. Announced before the task exists: the drive loop is the turn,
-        # and a watcher that subscribes after it would miss the whole of it.
-        if not unattended:
-            self._host.notify_turn_started(chat_id, stream)
+        self._pre_entry[chat_id] = (stream, asyncio.Event())
         task = asyncio.create_task(
             self.drive(
                 chat_id=chat_id,
@@ -460,8 +553,27 @@ class ChatStreaming:
             current = self._drive_tasks.get(chat_id)
             if current is not None and current[1] is finished:
                 self._drive_tasks.pop(chat_id, None)
+            # A drive cancelled before its first step never reaches
+            # ``_await_predecessor``'s cleanup; the slot is identity-checked on
+            # the stream so a newer admission's slot stays.
+            slot = self._pre_entry.get(chat_id)
+            if slot is not None and slot[0] is stream:
+                self._pre_entry.pop(chat_id, None)
 
         task.add_done_callback(_clear)
+        if not unattended:
+            try:
+                self._host.notify_turn_started(chat_id, stream)
+            except Exception:
+                logger.exception("Turn-start notification failed for chat %s", chat_id)
+
+    def _clear_stable_context(self, chat_id: str) -> None:
+        """Forget the stable-context marker so the next user turn re-sends the stable facts."""
+        chat = self._host._chats.get(chat_id)
+        if chat is not None:
+            chat.context_digest = ""
+            chat.context_session_id = ""
+            self._host._save()
 
     def _save_at_turn_end(self, chat_id: str) -> None:
         """Persist the registry at turn end without letting a failed write skip teardown.
@@ -518,7 +630,10 @@ class ChatStreaming:
         vault_root: Path | None = None
         agent_root: Path | None = None
         vault_root_resolved = False
-        await self._host._await_between_turns_drain(chat_id)
+        withdrawn = await self._await_predecessor(chat_id, stream)
+        # A compaction is a command, never a chip; only the first pass can be
+        # withdrawn, so the flag is consumed there.
+        withdraw_pending = withdrawn and not compact
 
         hidden_turn = False
         retry_armed = False
@@ -543,10 +658,8 @@ class ChatStreaming:
                 turn_answer_ready = False
                 turn_vault_reads: list[Path] = []
                 turn_succeeded = False
-                # The turn index the answer is filed under: the last steer that
-                # landed in this turn (its final answer row), else the turn itself.
+                # The turn index the answer is filed under.
                 turn_verify_index: int | None = None
-                stream.steered_turn_indexes.clear()
                 stream.running_turn_index = current_turn_index
                 turn_steps = TextStepJoiner()
                 turn_segment = FinalAnswerTracker()
@@ -582,11 +695,6 @@ class ChatStreaming:
                                 chat_id, stream, run_prompt, run_images, run_turn_index
                             )
                             prompt_cancelled = True
-                            continue
-                        if isinstance(event, SteerDeliveredEvent):
-                            self._host.on_steer_delivered(
-                                chat_id, stream, event.delivery_id
-                            )
                             continue
                         payload = event_to_json(event)
                         if payload and isinstance(
@@ -633,20 +741,7 @@ class ChatStreaming:
                                 rec["completed_at"] = completed_at
                                 if duration_ms is not None:
                                     rec["duration_ms"] = duration_ms
-                                turn_verify_index = (
-                                    stream.steered_turn_indexes[-1]
-                                    if stream.steered_turn_indexes
-                                    else run_turn_index
-                                )
-                                # Steers delivered into this turn finish with it.
-                                for steered_index in stream.steered_turn_indexes:
-                                    steered_rec = cm.user_turn_timings.setdefault(
-                                        str(steered_index), {}
-                                    )
-                                    steered_rec["completed_at"] = completed_at
-                                    if duration_ms is not None:
-                                        steered_rec["duration_ms"] = duration_ms
-                                stream.steered_turn_indexes.clear()
+                                turn_verify_index = run_turn_index
                                 sent_at_rec = rec.get("sent_at", "")
                                 self._host._save()
                             else:
@@ -674,11 +769,10 @@ class ChatStreaming:
                         ):
                             # The compacted session no longer holds the stable
                             # context, so the next user turn must re-send it.
-                            compacted = self._host._chats.get(chat_id)
-                            if compacted is not None:
-                                compacted.context_digest = ""
-                                compacted.context_session_id = ""
-                                self._host._save()
+                            self._clear_stable_context(chat_id)
+                        if isinstance(event, ContextCompactedEvent):
+                            # The agent compacted its own session mid-turn.
+                            self._clear_stable_context(chat_id)
                         turn_steps.feed(event)
                         turn_segment.feed(event)
                         if isinstance(
@@ -887,13 +981,32 @@ class ChatStreaming:
                     # re-announcing the previous turn's answer.
                     last_assistant_text = ""
                     last_answer_text = ""
-                    stream.publish(
-                        self._host._stop_result_payload(
+                    if withdraw_pending:
+                        # Stop landed while the drive waited on its
+                        # predecessor: the prompt never reached the provider,
+                        # so it returns to the waiting queue as a chip.
+                        withdraw_pending = False
+                        self._host.on_prompt_cancelled(
                             chat_id,
-                            turn_index=current_turn_index,
-                            text=turn_steps.text,
+                            stream,
+                            current_prompt,
+                            current_images,
+                            current_turn_index,
                         )
-                    )
+                        current_turn_index = None
+                        stream.publish(
+                            self._host._stop_result_payload(
+                                chat_id, turn_index=None, text=""
+                            )
+                        )
+                    else:
+                        stream.publish(
+                            self._host._stop_result_payload(
+                                chat_id,
+                                turn_index=current_turn_index,
+                                text=turn_steps.text,
+                            )
+                        )
                 else:
                     turn_task = asyncio.create_task(
                         _run_turn(), name=f"chat-turn-{chat_id}"
@@ -1012,18 +1125,7 @@ class ChatStreaming:
                                     "Failed to persist stream error for chat %s",
                                     chat_id,
                                 )
-                        if chat_service._is_retryable_provider_startup_error(error_msg):
-                            _arm_retry(
-                                chat_id,
-                                stream,
-                                kind="startup",
-                                current_prompt=current_prompt,
-                                current_images=current_images,
-                                had_progress=had_provider_progress,
-                                reason=error_msg,
-                                unattended=turn_unattended,
-                            )
-                        elif chat_service._is_retryable_quota_error(error_msg):
+                        if chat_service._is_retryable_quota_error(error_msg):
                             _arm_retry(
                                 chat_id,
                                 stream,
@@ -1056,7 +1158,6 @@ class ChatStreaming:
                                 reason=error_msg,
                                 unattended=turn_unattended,
                             )
-                        self._host._fallback_steers(chat_id, stream, "finished")
                         parked = stream.drain_pending()
                         if parked:
                             cm_park = self._host._chats.get(chat_id)
@@ -1075,24 +1176,7 @@ class ChatStreaming:
                     # including an explicitly empty one: keeping the previous
                     # turn's text here would re-announce it (#2139 review).
                     last_answer_text = turn_answer_text
-                if (
-                    turn_succeeded
-                    and turn_vault_reads
-                    and turn_verify_index is not None
-                    and turn_answer_text.strip()
-                    and self._host.verify_vault_answers_enabled()
-                ):
-                    asyncio.create_task(
-                        self._host._verify_turn_and_publish(
-                            chat_id,
-                            turn_verify_index,
-                            turn_answer_text,
-                            list(turn_vault_reads),
-                        )
-                    )
-
                 if question_paused:
-                    self._host._fallback_steers(chat_id, stream, "finished")
                     parked = stream.drain_pending()
                     if parked:
                         cm_park = self._host._chats.get(chat_id)
@@ -1102,9 +1186,6 @@ class ChatStreaming:
                             stream.publish_queue_state(cm_park.pending_queue)
                     break
 
-                # A steer the provider never confirmed goes back to the queue
-                # and flushes (or parks) below like any other entry.
-                self._host._fallback_steers(chat_id, stream, "finished")
                 next_pending = stream.drain_one()
                 skipped_blank = False
                 while next_pending is not None and not (
@@ -1155,10 +1236,6 @@ class ChatStreaming:
                         current_turn_index = None
                         compact = False
                         hidden_turn = True
-                        stream.moved_to_background = False
-                        stream.move_epoch += 1
-                        stream.move_in_flight = 0
-                        stream.move_succeeded = False
                         continue
                 # Stop can arrive while provider reload is awaiting. The
                 # earlier snapshot was consumed before that await, so recheck
@@ -1222,6 +1299,7 @@ class ChatStreaming:
                     break
                 if chat_meta2 is not None:
                     chat_meta2.pending_question = ""
+                    self._host._release_shell_finished_waiting(chat_id)
                     turn_index2 = chat_meta2.user_turn_count
                     chat_meta2.user_turn_count = turn_index2 + 1
                     if merged_image_refs:
@@ -1263,13 +1341,6 @@ class ChatStreaming:
                 current_turn_index = turn_index2
                 compact = False
                 hidden_turn = False
-                # This is a new turn: a move that backgrounded the previous one
-                # has already had its reply, and the turn-end announce is
-                # evaluated once per drive on its LAST turn (#1413 review round 1).
-                stream.moved_to_background = False
-                stream.move_epoch += 1
-                stream.move_in_flight = 0
-                stream.move_succeeded = False
         finally:
             _late_fallback = chat_service._fallback_title(prompt) if prompt else None
             if (
@@ -1322,8 +1393,9 @@ class ChatStreaming:
                     if had_error
                     else ""
                 )
-                # A terminal SSE frame is not proof that a native V2 permission
-                # was delivered. Keep the persisted card until the response
+                chat_meta.failure_id = uuid.uuid4().hex if had_error else ""
+                # A terminal result event is not proof that a pending permission
+                # request was delivered. Keep the persisted card until the response
                 # endpoint returns success or an authoritative stale result.
                 self._save_at_turn_end(chat_id)
             repo_loc: dict[str, Any] | None = None
@@ -1364,40 +1436,42 @@ class ChatStreaming:
                 "project_id": project_id,
                 "is_error": had_error,
                 "last_error": chat_meta.last_error if chat_meta is not None else "",
+                "failure_id": chat_meta.failure_id if chat_meta is not None else "",
             }
             if repo_loc is not None:
                 done["repo_location"] = repo_loc
             self._host._events.publish(done)
-            chat_for_watcher = self._host._chats.get(chat_id)
+            chat_for_drain = self._host._chats.get(chat_id)
             follow_up_expected = False
             if (
-                chat_for_watcher is not None
-                and chat_for_watcher.session_id
-                and capabilities_for(chat_for_watcher.provider).background_subagents
+                chat_for_drain is not None
+                and chat_for_drain.session_id
+                and capabilities_for(chat_for_drain.provider).background_subagents
             ):
-                self._host._start_subagent_watcher(chat_id, project_id)
                 self._host._start_between_turns_drain(chat_id, project_id)
                 # A chat with a live drain gets a native follow-up turn when
                 # its background work finishes; an interim "I'll report back"
-                # announce is parked for it and released at count zero (see
+                # announce is parked for it and released when the provider
+                # reports no background work, or when the drain ends (see
                 # `drain_between_turns`).
                 follow_up_expected = True
             self._host._discard_result_announce(chat_id)
+            owns_retry = self._host._owns_retry(chat_id, stream)
+            if turn_succeeded and not had_error and is_retry and not stream.network_retry_armed and owns_retry:
+                chat_now = self._host._chats.get(chat_id)
+                if chat_now is not None and chat_now.retry_status == "pending":
+                    self._host._clear_chat_retry(chat_now)
             if not had_error and last_answer_text.strip():
                 snippet = self._host._result_snippet(last_answer_text)
                 chat_now = self._host._chats.get(chat_id)
                 if chat_now is not None:
-                    if chat_now.retry_status == "pending" and is_retry and not stream.network_retry_armed:
-                        self._host._clear_chat_retry(chat_now)
                     chat_now.last_activity_at = chat_service._now_iso()
                     chat_now.last_snippet = snippet
                     self._save_at_turn_end(chat_id)
                 title = chat_now.title if chat_now else "Ciaobot"
-                # A turn the user moved to the background (#1413) ends on an interim
-                # reply whatever its wording; the wake carries the real result.
-                interim = follow_up_expected and (
-                    stream.moved_to_background
-                    or self._host._is_interim_subagent_text(last_answer_text)
+                # Interim "I'll report back" text parks the announce for the wake.
+                interim = follow_up_expected and self._host._is_interim_subagent_text(
+                    last_answer_text
                 )
                 if interim:
                     self._host._park_result_announce(
@@ -1420,12 +1494,26 @@ class ChatStreaming:
                 and not began_compact
                 and not retry_armed
                 and not stream.network_retry_armed
+                and owns_retry
             ):
                 chat_unsettled = self._host._chats.get(chat_id)
                 if chat_unsettled is not None and chat_unsettled.retry_status == "pending":
-                    logger.info("chat %s retry failed without re-arming; stopping it", chat_id)
-                    self._host._clear_chat_retry(chat_unsettled, status="stopped")
-            if (stream.network_retry_turn or is_retry) and not began_compact:
+                    recovery = chat_unsettled.retry_recovery
+                    if recovery == "" or (isinstance(recovery, dict) and recovery.get("manual") is True):
+                        logger.info("chat %s retry failed without re-arming; stopping it", chat_id)
+                        self._host._clear_chat_retry(chat_unsettled, status="stopped")
+            if is_retry and owns_retry:
+                current_chat = self._host._chats.get(chat_id)
+                marker = current_chat.retry_recovery if current_chat is not None else ""
+                if current_chat is not None and isinstance(marker, dict) and marker.get("claim"):
+                    if had_error:
+                        try:
+                            self._host._release_recovery_claim(chat_id)
+                        except Exception:
+                            logger.exception("Could not release recovery claim for %s", chat_id)
+                    else:
+                        self._host._clear_chat_retry(current_chat, status="stopped")
+            if (stream.network_retry_turn or is_retry) and not began_compact and owns_retry:
                 self._host._settle_schedule_retry(
                     chat_id, succeeded=not had_error and bool(last_assistant_text.strip())
                 )
@@ -1438,9 +1526,6 @@ class ChatStreaming:
                 self._host._memory_pass_turn_finished(chat_id),
                 f"memory-pass-{chat_id}",
             )
-            # Needs-you cards: an MCP server that wants a sign-in becomes a card.
-            if chat_meta is not None:
-                self._host._schedule_action_detection(chat_id)
             if refresh_cancelled:
                 raise asyncio.CancelledError
 
@@ -1471,29 +1556,11 @@ class ChatStreaming:
 
         async for event in provider.execute_streaming(request):
             streamed_steps.feed(event)
+            if isinstance(event, SessionTitleEvent):
+                # The agent's own title goes to the chat, not to the PWA stream.
+                self._host.apply_adapter_title(chat_id, event.title)
+                continue
             if (
-                isinstance(event, ResultEvent)
-                and chat.provider == "claude"
-                and stream is not None
-                and stream.user_stopped
-                and event.is_error
-                and (not event.result or _is_sdk_internal_diagnostic(event.result))
-            ):
-                # A user Stop makes the SDK end on an error frame that is not
-                # an answer: either empty (#952) or a non-empty SDK/CLI
-                # diagnostic (``[ede_diagnostic] ...``, ``ResultError``, exit
-                # code). Normalize it at this boundary, before journaling or
-                # publication, into a non-error partial carrying the text that
-                # was already streamed. Substantive errors and normal
-                # completions are untouched, and a genuine non-stop failure
-                # stays an error.
-                event = replace(
-                    event,
-                    result=streamed_steps.text,
-                    is_error=False,
-                    stopped=True,
-                )
-            elif (
                 isinstance(event, ResultEvent)
                 and stream is not None
                 and stream.user_stopped
@@ -1506,16 +1573,6 @@ class ChatStreaming:
                 # opencode joins its parts with separators. Persisting that
                 # tail would drop every earlier block on reload (#1223).
                 event = replace(event, result=streamed_steps.text, stopped=True)
-            elif (
-                isinstance(event, ResultEvent)
-                and chat.provider == "claude"
-                and event.is_error
-                and _is_sdk_internal_diagnostic(event.result)
-            ):
-                # A non-stop failure whose only text is an SDK internal must
-                # not become the durable/rendered reply. Keep it an error, but
-                # replace the internal with actionable prose.
-                event = replace(event, result=_SDK_INTERNAL_ERROR_MESSAGE)
             if (
                 isinstance(event, ResultEvent)
                 and event.stopped
@@ -1530,8 +1587,11 @@ class ChatStreaming:
                 outcome.had_error = bool(event.is_error)
                 outcome.stopped = bool(event.stopped)
                 outcome.effective_model = event.effective_model or chat.model
+                # An ACP agent picks its own model when the chat has none; the chat keeps what it resolved.
+                descriptor = provider_registry.get(chat.provider)
                 if (
-                    chat.provider == "opencode"
+                    descriptor is not None
+                    and descriptor.acp_spec_path
                     and not chat.model
                     and outcome.effective_model
                 ):
@@ -1586,8 +1646,12 @@ class ChatStreaming:
                     changed = True
                 if changed:
                     self._host._save()
-            if isinstance(event, SystemStatusEvent) and (event.status or "").startswith(
-                "Compacted context"
+            # A compaction marks the turn on its own event, so the marker is not
+            # re-committed even when no status line precedes it. The status
+            # line is still honoured for providers that report only that.
+            if isinstance(event, ContextCompactedEvent) or (
+                isinstance(event, SystemStatusEvent)
+                and (event.status or "").startswith("Compacted context")
             ):
                 compacted_this_turn = True
                 if chat.context_digest or chat.context_session_id:
@@ -1724,7 +1788,6 @@ class ChatStreaming:
             chat.handover_context_pending and chat.handover_messages
         )
 
-        await self._host.warm_gh_token(chat)
         request = self._host.build_agent_request(
             chat,
             prompt=prompt,
@@ -1743,7 +1806,7 @@ class ChatStreaming:
         had_error = False
         tool_events: list[dict[str, Any]] = []
 
-        if images and not await self._host._model_capable(request.model, chat):
+        if images and not self._host._agent_accepts_images(chat):
             if unattended:
                 yield SystemStatusEvent(
                     type="system",
@@ -1953,38 +2016,102 @@ class ChatStreaming:
             self._host._state.set_quota(quota)
         self._host._state.update_session(chat.session_id or None, ctx)
 
+    @staticmethod
+    def _request_drain_cancel(task: asyncio.Task[None]) -> None:
+        """Ask a drain to cancel once: a second request would hit its cleanup."""
+        if not task.done() and task.cancelling() == 0:
+            task.cancel()
+
+    @staticmethod
+    async def _join_task(task: asyncio.Task[None]) -> None:
+        """Wait for ``task`` without owning it.
+
+        The task's own cancellation or failure is swallowed; the waiter's own
+        cancellation still propagates, and never cancels the joined task.
+        """
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling() > 0:
+                raise
+        except Exception:  # noqa: BLE001
+            return
+
     def cancel_between_turns_drain(self, chat_id: str) -> None:
         """Fire-and-forget cancel; pair with await_between_turns_drain."""
         task = self._between_turn_drains.get(chat_id)
-        if task is not None and not task.done():
-            task.cancel()
+        if task is not None:
+            self._request_drain_cancel(task)
 
     async def await_between_turns_drain(self, chat_id: str) -> None:
-        """Wait until this chat's drain has fully unwound."""
-        task = self._between_turn_drains.pop(chat_id, None)
+        """Wait until this chat's drain has fully unwound.
+
+        The task stays registered while it unwinds, so every waiter joins the
+        same cleanup instead of the second one returning early.
+        """
+        task = self._between_turn_drains.get(chat_id)
         if task is None:
             return
         if not task.done():
-            task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            return
-        except Exception:  # noqa: BLE001
-            return
+            self._request_drain_cancel(task)
+            await self._join_task(task)
+        if self._between_turn_drains.get(chat_id) is task:
+            self._between_turn_drains.pop(chat_id, None)
 
     def start_between_turns_drain(self, chat_id: str, project_id: str) -> None:
         provider_service = self._host._providers.get(chat_id)
         if provider_service is None or not provider_service.can_drain:
             return
-        self._host._cancel_between_turns_drain(chat_id)
-        task = asyncio.create_task(self._host._drain_between_turns(chat_id, project_id))
+        owner = self._host._broker.get(chat_id)
+        if owner is not None and not owner.background:
+            return
+        old = self._between_turn_drains.get(chat_id)
+        if old is not None and not old.done() and old.cancelling() == 0:
+            # A live, uncancelled drain is already the reader.
+            return
+        if old is not None and not old.done():
+            # A withdrawn Stop cancelled this drain while a foreground turn
+            # waited. Chain a replacement behind its unwind so a background wake
+            # is not lost and two readers never overlap.
+            coro = self._replacement_drain(old, chat_id, project_id)
+        else:
+            coro = self._host._drain_between_turns(chat_id, project_id)
+        task = asyncio.create_task(coro)
         self._between_turn_drains[chat_id] = task
 
-    def _record_opencode_wake_turn(self, chat_id: str, event: ResultEvent) -> None:
-        """File the execution OpenCode ran after background work finished.
+        def _settled(finished: asyncio.Task[None]) -> None:
+            if self._between_turn_drains.get(chat_id) is finished:
+                self._between_turn_drains.pop(chat_id, None)
+            if not finished.cancelled():
+                finished.exception()
 
-        OpenCode's own session store holds the wake, but the durable transcript
+        task.add_done_callback(_settled)
+
+    async def _replacement_drain(
+        self, old: asyncio.Task[None], chat_id: str, project_id: str
+    ) -> None:
+        try:
+            await self._join_task(old)
+        except asyncio.CancelledError:
+            # A waiter cancelled this replacement while the old drain still
+            # unwinds. The replacement is the only registered handle on that
+            # cleanup, so it must outlive the old drain before it ends, or the
+            # next waiter would return while the old drain is untracked.
+            await asyncio.wait({old})
+            raise
+        provider_service = self._host._providers.get(chat_id)
+        if provider_service is None or not provider_service.can_drain:
+            return
+        owner = self._host._broker.get(chat_id)
+        if owner is not None and not owner.background:
+            return
+        await self._host._drain_between_turns(chat_id, project_id)
+
+    def _record_wake_turn(self, chat_id: str, event: ResultEvent) -> None:
+        """File a turn the provider ran on its own after background work finished.
+
+        The provider's own session store holds the wake, but the durable transcript
         is the fallback copy a reload reads when that store is unreadable. The
         notice is the turn's prompt; ``origin`` keeps it a system row. A wake
         whose wake item was missed has no notice and records nothing, by design.
@@ -1992,7 +2119,6 @@ class ChatStreaming:
         chat = self._host._chats.get(chat_id)
         if (
             chat is None
-            or chat.provider != "opencode"
             or event.origin != "task-notification"
             or not event.wake_notice
             or not (event.result or "").strip()
@@ -2033,30 +2159,64 @@ class ChatStreaming:
             return
         stream: ChatStream | None = None
         cancelled = False
+        superseded = False
+        events = provider_service.drain_events()
 
         def close_stream(had_error: bool, last_error: str = "") -> None:
             nonlocal stream
             if stream is None:
                 return
+            # ``get`` hides a finished stream, so read ownership first. A
+            # drain a foreground admission replaced closes its own subscribers
+            # but must not publish a global done over the live turn.
+            owned = self._host._broker.get(chat_id) is stream
             stream.finish()
             self._host._broker.clear(chat_id, stream)
-            self._host._events.publish(
-                {
-                    "type": "chat_streaming_done",
-                    "chat_id": chat_id,
-                    "project_id": project_id,
-                    "is_error": had_error,
-                    "last_error": last_error,
-                }
-            )
+            if owned:
+                self._host._events.publish(
+                    {
+                        "type": "chat_streaming_done",
+                        "chat_id": chat_id,
+                        "project_id": project_id,
+                        "is_error": had_error,
+                        "last_error": last_error,
+                    }
+                )
             stream = None
 
         try:
             # The final text block of the follow-up execution now streaming.
             # Reset per terminal result: each wake is its own turn (#2139).
             drain_segment = FinalAnswerTracker()
-            async for event in provider_service.drain_events():
+            # The live card of a notice a continuation claimed; published before the continuation's text.
+            pending_echo: str | None = None
+            async for event in events:
+                # A shell notice is recorded before the supersede check below: the queue
+                # gave it up already, so a drain a foreground turn replaces must not lose it.
+                if isinstance(event, ShellFinishedEvent):
+                    self._host._note_shell_finished(chat_id, event)
+                    continue
+                # No await sits in this body, so one check covers every side
+                # effect of the iteration: a cancelled drain or one a
+                # foreground admission replaced must not touch chat state.
+                current_task = asyncio.current_task()
+                owner = self._host._broker.get(chat_id)
+                if (
+                    current_task is not None and current_task.cancelling() > 0
+                ) or (owner is not None and not owner.background):
+                    superseded = True
+                    break
+                if isinstance(event, ContextCompactedEvent):
+                    self._clear_stable_context(chat_id)
+                if isinstance(event, AssistantTextDelta) and event.parent_tool_use_id is None:
+                    # A provider's own continuation starts speaking: it answers the shells that ended.
+                    claimed_text = self._host._continuation_started(chat_id)
+                    if claimed_text:
+                        pending_echo = claimed_text
                 drain_segment.feed(event)
+                if isinstance(event, SessionTitleEvent):
+                    self._host.apply_adapter_title(chat_id, event.title)
+                    continue
                 if (
                     isinstance(event, ResultEvent)
                     and event.origin
@@ -2091,6 +2251,10 @@ class ChatStreaming:
                             "background": True,
                         }
                     )
+                if pending_echo is not None:
+                    # The same card a wake draws: the notice, then the reply it produced.
+                    stream.publish({"type": "user_echo", "text": pending_echo, "origin": "background_run"})
+                    pending_echo = None
                 stream.publish(payload)
                 if isinstance(event, PermissionRequestEvent):
                     self._host._notify_permission(chat_id, event)
@@ -2101,10 +2265,16 @@ class ChatStreaming:
                     )
                     drain_segment = FinalAnswerTracker()
                     is_error = bool(event.is_error)
-                    self._record_opencode_wake_turn(chat_id, event)
-                    settled = self._host._background_count_now(chat_id) == 0
-                    if settled:
-                        self._last_drain_result[chat_id] = (text, is_error)
+                    if event.origin == "task-notification":
+                        # The continuation closes: its turn takes the notice it claimed, if any.
+                        # Only the provider's default notice is replaced; a real one is kept.
+                        claimed = self._host._take_claimed_notice(
+                            chat_id, adopt=event.wake_notice == LATE_WAKE_NOTICE
+                        )
+                        if claimed:
+                            event.wake_notice = claimed
+                    self._record_wake_turn(chat_id, event)
+                    settled = not self._host._background_work_outstanding(chat_id)
                     chat_now = self._host._chats.get(chat_id)
                     last_error = (
                         annotate_reauth(
@@ -2116,10 +2286,6 @@ class ChatStreaming:
                         else ""
                     )
                     close_stream(is_error, last_error)
-                    if provider_service.background_work_outstanding:
-                        # The wake launched more background work; the watcher
-                        # that counted the first batch has already exited.
-                        self._host._start_subagent_watcher(chat_id, project_id)
                     if (
                         not is_error
                         and answer_text
@@ -2134,6 +2300,7 @@ class ChatStreaming:
                             ]
                             chat_now.last_response_status = "success"
                             chat_now.last_error = ""
+                            chat_now.failure_id = ""
                             self._host._save()
                         title = chat_now.title if chat_now else "Ciaobot"
                         if settled:
@@ -2146,9 +2313,9 @@ class ChatStreaming:
                                 f"archive-proposal-helper-{chat_id}",
                             )
                         else:
-                            # Agents still running: this follow-up replaces the
-                            # parked announce; the one that lands at zero
-                            # announces once.
+                            # Background work still running: this follow-up
+                            # replaces the parked announce; the one that lands
+                            # once the provider reports none announces once.
                             self._host._park_result_announce(
                                 chat_id, project_id, title, snippet
                             )
@@ -2172,6 +2339,7 @@ class ChatStreaming:
                                 else "empty"
                             )
                             chat_now.last_error = last_error
+                            chat_now.failure_id = uuid.uuid4().hex if is_error else ""
                             self._host._save()
                         if settled:
                             self._host._flush_result_announce(chat_id)
@@ -2188,17 +2356,17 @@ class ChatStreaming:
             logger.exception("Between-turns drain failed for chat %s", chat_id)
         finally:
             close_stream(False)
-            if not cancelled:
+            # A ``break`` leaves the generator suspended until the loop's
+            # asyncgen hook closes it on a later tick. Close it here so its
+            # reader is gone before this task ends and a foreground turn or
+            # the next drain starts reading.
+            try:
+                await events.aclose()
+            except Exception:
+                logger.warning(
+                    "Closing the between-turns reader failed for chat %s",
+                    chat_id,
+                    exc_info=True,
+                )
+            if not cancelled and not superseded:
                 self._host._flush_result_announce(chat_id)
-
-    async def wait_for_drain_result(
-        self, chat_id: str, *, timeout_s: float = 180.0
-    ) -> tuple[str, bool] | None:
-        """Wait for the drain's next follow-up result recorded at background count zero."""
-        deadline = time.perf_counter() + timeout_s
-        while time.perf_counter() < deadline:
-            result = self._last_drain_result.get(chat_id)
-            if result is not None:
-                return result
-            await asyncio.sleep(1)
-        return None

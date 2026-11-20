@@ -4,42 +4,24 @@ One-time setup for external tools and CLI dependencies.
 
 The Chat details window displays project context and a link to its canonical document; this is a presentation of existing context, with no new integration, configuration, or change to what providers receive.
 
-SDK-level wiring notes (fallback_model, hooks, setting_sources) live in the module docstring of `ciao/providers/claude.py`.
+Claude's disable options reach the claude-agent-acp adapter as `_meta.claudeCode.options`; `ciao/providers/acp/agents.py` owns that mapping.
 
 ## Install
 
-### Windows 11 (x64 or ARM64)
-
-```powershell
-irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex
-```
-
-The installer is per user and needs no administrator rights. It installs the engine into a `uv tool` environment, puts `ciao.exe` on your user `PATH`, creates the workspace (`%USERPROFILE%\Ciaobot`, or `-Workspace DIR`), registers the per-user logon task `\Ciaobot\Engine` and starts it. Options are `-Workspace`, `-NoStart` and `-Uninstall`; because `iex` cannot take arguments, pass them through a script block. The full guide, including logs and troubleshooting, is [docs/WINDOWS.md](docs/WINDOWS.md). For engine updates and rollback, see [the Windows update guide](docs/WINDOWS.md#update-and-rollback).
-
 ### Upgrading from the macOS app
 
-v1.0.0 retires the macOS `Ciaobot.app`; the PWA is now served by the engine.
-There is no data migration and no vault change. If you still run the app, run
-the installer with `--migrate`: it hands the engine the app currently manages
-over to the terminal installer, keeps your workspace, password, chats,
-schedules and push subscriptions, and removes the old `Ciaobot.app` bundle.
+v1.0.0 retires the macOS `Ciaobot.app` as a separate updater; the PWA is served
+by the engine. The `--migrate` hand-over that moved an app-managed engine to the
+terminal installer is no longer shipped, so an app user does not re-run an
+installer to switch. Your workspace folder, its notes and chats are kept.
 
-```bash
-curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh -s -- --migrate
-```
-
-If the installer cannot tell whether your Mac is the host or a client, it says
-so and asks for `--as-host` or `--as-client <url>`.
-
-Should the automatic removal not be able to run — a `/Applications` install the
-account cannot write, for instance — the installer says so and leaves the bundle
-alone, and `ciao desktop uninstall` removes it by hand. That command takes the
-bundle (`~/Applications`, or `/Applications` for older installs; `--app-dir`
-points elsewhere) with its LaunchAgents and any `~/.local/bin/ciao` shim that
-pointed inside it. Your workspace folder and its notes are kept. Updates after
-that are the same one-liner again, or **Settings → General** in the PWA, which
-stages and applies the engine package update in the background; there is no
-in-app app updater.
+To remove the old bundle, quit Ciaobot.app and drag it to the Trash (it lives in
+`~/Applications`, or `/Applications` for older installs). If
+`~/Library/LaunchAgents/com.ciao.menubar.plist` is still there, unload it with
+`launchctl bootout gui/$(id -u)/com.ciao.menubar` and delete the file. If
+`~/.local/bin/ciao` points inside the bundle, re-run the installer to replace
+it. Updates after that come from Ciaobot for Mac, which updates itself
+(Sparkle) and the engine with it.
 
 ## CLI Tools
 
@@ -56,32 +38,52 @@ the installer says which one applies:
   - bash (login shells read `~/.bash_profile`, not `~/.bashrc`):
     `echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bash_profile && source ~/.bash_profile`
   - fish: `fish_add_path $HOME/.local/bin`.
-  - Windows (PowerShell): the wizard substitutes your real directory for the
-    `C:\Users\you` below —
-    `$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true); $v = $k.GetValue('Path', '', 'DoNotExpandEnvironmentNames'); $k.SetValue('Path', 'C:\Users\you\.local\bin' + $(if ($v) { ';' + $v }), [Microsoft.Win32.RegistryValueKind]::ExpandString)`
-    — then open a new terminal so the change takes effect. It reads the old
-    value unexpanded and writes it back as `REG_EXPAND_SZ`, so a PATH that
-    holds `%USERPROFILE%`-style entries keeps both those entries and its
-    registry type; `[Environment]::SetEnvironmentVariable` would freeze them
-    to today's expanded paths and change the type to `REG_SZ`.
 - Another `ciao` already exists (the name collides with Ciao Prolog, among
   others): the installer never overwrites it, so call Ciaobot's engine by its
   full path instead.
 
-On Windows the installer does not write a shim: `ciao.exe` lives in the `uv tool` bin directory (`uv tool dir --bin`), which the installer adds to the user `PATH`.
-
 Provider logins do not depend on the shim: the setup wizard hands out each
 provider's own login command (`claude auth login`, `opencode auth login`).
 
-## OpenCode
+## Claude
 
-Ciaobot requires **OpenCode 2.0.16 or newer in the 2.x line**. OpenCode 1 is
-not supported because its server API was replaced in V2. Settings reports older
-or unidentifiable installs with an explicit upgrade message, and chat startup
-fails closed rather than probing retired V1 routes.
+Claude runs through `claude-agent-acp`, the Agent Client Protocol adapter for Claude Code. The adapter is pinned at `@agentclientprotocol/claude-agent-acp@0.108.1` in `ciao/adapter_install.py`, and it drives the `claude` CLI that Ciaobot resolves (`CLAUDE_CODE_EXECUTABLE`). Node 22 or newer is required.
+
+Ciaobot first looks for the adapter already on this machine. When `claude-agent-acp` resolves on the PATH to a copy whose `package.json` names `@agentclientprotocol/claude-agent-acp@0.108.1` and whose real path is not inside a world-writable folder, Ciaobot uses that copy and installs nothing. The Settings card then says it is using the adapter found at that path. Ciaobot never modifies, reinstalls or copies a machine-wide adapter, and a copy at any other version is left alone.
+
+Otherwise Ciaobot installs the adapter itself, once, into a private folder outside the app (`~/Library/Application Support/Ciaobot/adapters` on macOS; the engine's state folder beside the install receipt on Linux). Each managed adapter has its own folder there, and its install is `npm ci` against a lockfile shipped in the engine (`ciao/stock/adapters/<name>/`), so every package is pinned by integrity hash. It uses the machine's own `npm` with `--omit=optional --ignore-scripts` and no shell. npm's environment is an allowlist: the terminal PATH with the checked `node` first, the home and temp folders, the locale, the certificate and proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lowercase forms, `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`), and any `npm_config_*` or `NPM_CONFIG_*` variable the user set. Provider keys, tokens and `NODE_OPTIONS` are dropped. The adapter then runs under the machine's own `node`. The prefix and each adapter folder must be owned by the current user and closed to other users (mode 0700), or the adapter is not used. The optional native Claude package the adapter can pull in (about 340 MB) is left out, because the user's own `claude` does the work.
+
+The install starts in the background at engine startup, only when `claude` is present and the adapter is missing or not the pin. Startup does not wait for it: the Settings card shows the adapter as being installed while the install holds its lock. A failed install is shown on the Settings card and is not retried by the engine; the card's Install button runs the same line in a terminal.
 
 ```bash
-npm install -g @opencode/cli        # works on Windows too
+<engine python> -m ciao.adapter_install claude-agent-acp   # the Settings install line; takes the same lock as the engine
+claude auth login                   # the Settings sign-in action runs this in a terminal
+```
+
+The adapter reads the `claude` executable from `CLAUDE_CODE_EXECUTABLE`, which Ciaobot sets only to an absolute, executable path; a relative path is never passed. With that variable set it passes MCP servers to the CLI as an argument (`--mcp-config`) rather than in the SDK's initialize request. An MCP server's `env` and `headers` therefore appear on the adapter's command line, visible to other users on the machine through the process list. Ciaobot does not write them to a file.
+
+Sign-in is handled by the Claude CLI. Ciaobot never reads or stores a Claude credential.
+
+## Codex
+
+Codex runs through `codex-acp`, the Agent Client Protocol adapter for OpenAI's Codex CLI. The adapter is pinned at `@agentclientprotocol/codex-acp@2.7.0` in `ciao/adapter_install.py`, found and installed the same way as the Claude adapter (see above). It does not install `@openai/codex` itself: Ciaobot runs the user's own `codex` by setting `CODEX_PATH`. When no `codex` resolves, the Settings install line also installs the CLI globally, at the version the adapter is built against (`@openai/codex@0.166.0`). Node 22 or newer is required.
+
+```bash
+npm install -g @openai/codex@0.166.0                  # only when no codex resolves
+<engine python> -m ciao.adapter_install codex-acp     # the Settings install line; takes the same lock as the engine
+codex login                         # the Settings sign-in action runs this in a terminal
+```
+
+Sign-in is handled entirely by the Codex CLI. Ciaobot does not implement, prompt for, or store any Codex credential, and it has no API-key field. Settings only checks `codex login status`, which reads the exit code and nothing else, so a token that command prints never reaches the PWA or the log. The adapter starts only when the codex CLI and node resolve; the `codex` it runs is the one on the terminal PATH, which the adapter receives in `CODEX_PATH`.
+
+## OpenCode
+
+Ciaobot requires **OpenCode 2.3.2 or newer in the 2.x line**. OpenCode 1 is
+not supported. The 2.3.2 floor is the release that ships `opencode acp` child
+session updates and the background-shell fix.
+
+```bash
+npm install -g @opencode/cli
 # or: brew install anomalyco/tap/opencode-v2
 # or: curl -fsSL https://opencode.ai/v2/install | bash
 ciao auth opencode                  # opens `opencode auth login`
@@ -90,13 +92,10 @@ ciao auth opencode                  # opens `opencode auth login`
 The npm package `opencode-ai` and the `sst/tap` Homebrew tap are OpenCode 1 and do not work with Ciaobot, and `opencode upgrade` does not move a 1.x install to 2.x. If you installed OpenCode 1 that way, run `npm uninstall -g opencode-ai` first, because it also provides an `opencode` command.
 
 OpenCode is bring-your-own-provider: it authenticates against whichever model
-backends you connect, and Ciaobot lists enabled models from active providers
-via the V2 `/api/provider` and `/api/model` endpoints. Ciaobot runs one
-`opencode serve` process per active chat on an ephemeral loopback port
-protected by a per-process `OPENCODE_SERVER_PASSWORD`. Startup reads the server
-identity from `/api/info`, requires the tested 2.0.16+ API, and verifies the
-operations Ciaobot uses against `/openapi.json`. Chat output arrives on the
-`/api/event` SSE stream.
+backends you connect, and Ciaobot lists the models its ACP session reports.
+Ciaobot runs one `opencode acp` process per active chat over stdio, the Agent
+Client Protocol. Chat output, permission cards and subagent activity arrive as
+ACP session updates.
 
 Workspace assets need almost no projection: OpenCode discovers
 `.claude/skills/`, `.agents/skills/`, and `AGENTS.md` natively, so
@@ -106,38 +105,29 @@ Ciaobot reads provider configuration and live chat status without editing
 `opencode.json` or launching a server from Settings. Keep existing MCP entries
 in the provider configuration. See the [OpenCode V2 MCP documentation](https://opencode.ai/v2/docs/mcp-servers/).
 
-Ciaobot sends V2 text/file prompts with queued delivery. A message the user
-steers into a running turn is sent with `delivery: "steer"` (images as files) and
-joins that turn at its next step boundary; delivery is attributed by inbox id, and
-Stop cancels a steer still waiting in the inbox.
-V2 has no stable per-prompt system field, so compact core/runtime context rides
-in the text behind markers that transcript replay and session handovers strip.
-The provider normalizes V2's flat message records once at the HTTP boundary;
-transcript rendering and child-session reads continue to use a small internal
-part representation. Fork, interrupt, tool approvals, forms (rendered as
-AskUserQuestion cards), and background subagents are native. When a chat is
-archived, deleted, or reset, Ciaobot disconnects its server and then calls
-`DELETE /api/session/{id}` to reclaim the persisted OpenCode session; cleanup
-is fail-open if the provider is unavailable.
+Ciaobot sends prompts over ACP with queued delivery (one prompt at a time per
+session). The unified core context rides in the text of the first prompt of each
+session, after a compaction and after a handover. Fork, interrupt, tool approvals, and background
+subagents are native. Forms (AskUserQuestion cards) are not wired under ACP: the ACP provider has no
+`respond_question` override and emits no form events, so a form reply gets the base refusal
+"Native question responses are not supported by this provider" and an ACP session shows no form card. When a chat is
+archived, deleted, or reset, Ciaobot closes its ACP session and asks the agent to
+delete the persisted session (`session/delete`) when the agent advertises it;
+cleanup is fail-open if the agent is unavailable.
 
 ### Auto mode approvals
 
 OpenCode chats follow the chat's permission mode (the per-provider default
-from Settings → Providers, Auto unless changed). In Auto the V2
-session permission ruleset allows routine tools while routing every `shell`
-action to `ask`; Manual routes every tool to `ask` and Bypass suppresses
-routine cards. V2 `glob` and `grep` resources are search patterns/regexes
-rather than file paths, so those search actions require an explicit approval
-card in every mode (including `bypass`) to prevent silent enumeration of
-credential-bearing paths. In every mode, including Bypass, credential-path
-denies (`**/.env`, `**/.runtime/**`, `**/secrets/**`, plus the resolved
-`CIAO_RUNTIME_ROOT`) are appended last for OpenCode's V2 native file/search
-actions. When the runtime root is inside the session location, the rules also
-include its workspace-relative spelling because V2 internal resources are
-relative. They do not cover `shell`, because a shell command cannot be
-path-scoped by a glob. In Manual and Auto a shell command such as `cat .env`
-still raises an approval card; in Bypass it runs without one, so Bypass does
-not protect those files from shell access. Each `ask` surfaces an approval card
+from Settings → Providers, Auto unless changed). The V2 session permission
+ruleset is a mode wildcard, last-match-wins. Plan asks for every action and
+then allows `read`, `glob` and `grep`. Normal (Manual) asks for every action.
+Auto allows routine tools and routes every `shell` action to `ask`. Bypass
+allows every action. `glob` and `grep` follow those wildcards: allowed in
+plan and auto, ask in normal. There are no credential-path denies. File tools
+can read the workspace `.env` and `.runtime`. Bypass and shell were never
+covered by a path rule: a shell command such as `cat .env` still raises an
+approval card in normal and auto, and in bypass it runs without one. Each
+`ask` surfaces an approval card
 in the chat that the operator approves or denies. Native form cards validate
 required, scalar, length, item-count, format, and pattern constraints before
 submission; cards remain mounted until the server acknowledges delivery and
@@ -261,7 +251,7 @@ calls). Usually pre-installed.
 
 ## MCP Connectors (via claude.ai)
 
-These MCP servers reach the session through the claude.ai connector bridge. They are enabled per-workspace on claude.ai; no local install required. Availability is session-scoped: new connectors only surface after a fresh Claude Code session. A workspace's **claude.ai connectors** switch (Settings → Overview, `claude_ai_connectors` in the registry) turns them off for that workspace's Claude chats by setting `ENABLE_CLAUDEAI_MCP_SERVERS=false` on the spawned Claude Code process. Memory passes always run with them off.
+These MCP servers reach the session through the claude.ai connector bridge. They are enabled per-workspace on claude.ai; no local install required. Availability is session-scoped: new connectors only surface after a fresh Claude Code session. Claude context trimming's **claude.ai connectors** option (Settings → Overview, trim key `setting:claude_ai_connectors`, default on) turns them off for that workspace's Claude chats by setting `ENABLE_CLAUDEAI_MCP_SERVERS=false` on the spawned Claude Code process. A registry row that still has `claude_ai_connectors: false` and no trim entry for that key is read once as trimmed; the next save drops the old field. Memory passes always run with them off.
 
 | Connector | Scope | Used by |
 |---|---|---|
@@ -276,13 +266,11 @@ If a connector's tools don't show up, the fix is on the claude.ai side: toggle t
 
 ### Provider-owned MCP servers
 
-Claude Code and OpenCode own their MCP configuration and authentication. Settings → MCP reads provider-native configuration and already running chat sessions; it edits provider files only to turn one server off or on (`POST /api/mcp/servers/enabled`) and never stores credentials; Claude Code or OpenCode sessions running outside Ciaobot keep their connections until they restart. When an open chat reports that a server needs a sign-in, its **Sign in** signs in through that chat's sign-in card, which may start that chat's OpenCode server just as the card does in the chat; a sign-in with the provider CLI only reaches sessions started afterwards. The status endpoint reports configured servers separately from per-chat connection states. No live chat means the connection has not been checked. An unreadable configuration or provider status remains unknown.
+Claude Code and OpenCode own their MCP configuration, on/off state and authentication. Ciaobot keeps no MCP inventory or status and never reads or writes that configuration or any credential. Settings → MCP shows one button per installed agent that types the agent's own MCP command (`claude mcp`, `opencode mcp`) into the in-app terminal for the workspace; Chat details has the same button for the chat's agent. Sign in, add, remove and turn servers on or off in the CLI. A change applies to new chats; a running chat loads it after `ciao chat reload`.
 
-To add a Claude server to just this workspace, run Claude Code from that workspace root and use `claude mcp add --scope local <name> -- <command> [args...]` for stdio, or `claude mcp add --scope local --transport http <name> <url>` for HTTP. Authenticate with `/mcp` in Claude Code or `claude mcp login <name>`. Claude's `local` scope is user-specific to the current project; `project` scope writes `.mcp.json` and requires project approval. Every server declared in the workspace's own `.mcp.json` or local scope loads in its Claude chats; to block one, add `mcp__<name>` to the workspace's `disallowed_tools`. See [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
+To add a Claude server to just this workspace, run Claude Code from that workspace root and use `claude mcp add --scope local <name> -- <command> [args...]` for stdio, or `claude mcp add --scope local --transport http <name> <url>` for HTTP. Authenticate with `/mcp` in Claude Code or `claude mcp login <name>`. The standalone `/mcp` in a Ciaobot chat instead opens Chat details → MCP for that chat's provider and workspace; it is not a provider CLI command. Claude's `local` scope is user-specific to the current project; `project` scope writes `.mcp.json` and requires project approval. Every server declared in the workspace's own `.mcp.json` or local scope loads in its Claude chats; to block one, add `mcp__<name>` to the workspace's `disallowed_tools`. See [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
 
 To add an OpenCode server, run `opencode mcp add <name> --url <url>` from the workspace for a remote server, or `opencode mcp add <name> -- <command> [args...]` for a local stdio server. Authenticate with `opencode mcp auth <name>`; use `/mcps` in OpenCode to inspect or connect servers. Project scope is the default; `--global` applies to all projects. See [OpenCode V2 MCP documentation](https://opencode.ai/v2/docs/mcp-servers/).
-
-Sandboxed OpenCode sessions read the Node/npm runtime from their effective PATH and use a separate npm cache at `~/.cache/ciaobot-opencode-sandbox/npm`. The engine supplies `npm_config_cache` internally; operators do not configure it. The ordinary user npm cache and runtime installation remain unwritable.
 
 Keep secrets in provider-supported credential stores or environment variables referenced by provider configuration. Do not put bearer tokens directly in `.mcp.json` or `opencode.json`.
 
@@ -293,6 +281,10 @@ presents bootstrap onboarding, which asks the user to create or adopt the
 workspace and choose the password.
 
 ## Environment Variables
+
+### Anthropic credentials for Claude chats
+
+The CLIs and ACP adapters inherit the engine's process environment, so provider credentials set there (for example `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`) are handled by the CLI itself; only Ciaobot's own `CIAO_*` internals and the PWA token are withheld. The in-app terminal filters its environment on purpose differently: it strips secrets (`*_TOKEN`, `*_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, and similar), while agent processes inherit the engine environment minus `CIAO_*` and `PWA_AUTH_TOKEN`.
 
 Copy `.env.example` to `.env` and fill in the engine-level settings first:
 
@@ -310,7 +302,7 @@ removing it.
 
 **Ciaobot agent control plane:**
 
-- The CLI-first agent surface is the only control path and is always on; there is no enable/disable switch and no alternative surface. The former embedded MCP endpoint was removed in the S6 break. External MCP servers are owned and configured by Claude Code or OpenCode; Settings → MCP is a read-only inventory and live status view.
+- The CLI-first agent surface is the only control path and is always on; there is no enable/disable switch and no alternative surface. The former embedded MCP endpoint was removed in the S6 break. External MCP servers are owned and configured by Claude Code or OpenCode; Settings → MCP reads inventory and live status without starting sessions; its explicit on/off controls write provider configuration.
 - `CIAO_AGENT_TOKEN` / `CIAO_AGENT_URL`: internal. Ciaobot hands the scoped short-lived token and the `POST /agent/v1/{op}` base URL to the managed provider's foreground shell so `ciao <noun> <verb>` commands can call the control plane (D-01). Background runs strip the token. Operators must not configure or persist either.
 
 The endpoint is mounted at `http://127.0.0.1:<PWA_PORT>/agent/v1/{op}`. Ciaobot generates a scoped short-lived token and configures its managed provider process. See [docs/AGENT_CLI.md](docs/AGENT_CLI.md).
@@ -339,8 +331,8 @@ Workspace-specific integrations can still be set in `.env`, but the public `.env
 their own CLIs; Ciaobot stores none of their credentials, and there are no
 API-key fields to fill in.
 
-**Reaching any other model.** Ciaobot talks to exactly two providers: Claude
-Code (Anthropic) and opencode (everything else). opencode is
+**Reaching any other model.** Ciaobot talks to three providers: Claude
+Code (Anthropic), Codex (OpenAI) and opencode (everything else). opencode is
 bring-your-own-provider, so Ollama, OpenRouter, LM Studio, or any
 OpenAI-compatible endpoint is configured *in opencode* — see its own docs — and
 Ciaobot picks it up automatically: `GET /api/models` lists whatever opencode
@@ -369,81 +361,6 @@ read; leftover values are ignored rather than erroring.
 Jira project tables, Airtable base/table IDs, and similar skill-specific
 reference data belong next to the workspace skill that uses them, not in this
 repository-wide document.
-
-## Server host signing rehearsal (CI only)
-
-The signed, notarized macOS server host is exercised by a separate manual
-workflow, `.github/workflows/server-host-signing-rehearsal.yml` (#2331), before
-any production activation. It uploads no release asset and distributes nothing:
-the Apple notary submission inside the release build is the only network write,
-and candidate files stay on the runner. `publish.yml` is unchanged and keeps
-publishing the ad-hoc host, so none of these names is needed for an ordinary
-release.
-
-| Name | GitHub storage | Meaning |
-|---|---|---|
-| `SERVER_HOST_CERTIFICATE_P12_BASE64` | environment secret | exported Developer ID Application identity, base64-encoded |
-| `SERVER_HOST_CERTIFICATE_PASSWORD` | environment secret | p12 import password |
-| `SERVER_HOST_NOTARY_KEY_P8_BASE64` | environment secret | base64 of the App Store Connect API key (`.p8`) used for notarization |
-| `SERVER_HOST_NOTARY_KEY_ID` | protected environment variable | the API key identifier (an identifier, not a secret) |
-| `SERVER_HOST_NOTARY_ISSUER_ID` | protected environment variable | the App Store Connect issuer UUID (an identifier, not a secret) |
-| `SERVER_HOST_SIGNING_IDENTITY` | protected environment variable | the exact certificate selector, never an auto-pick |
-| `SERVER_HOST_TEAM_ID` | protected environment variable | the expected ten-character Apple team |
-| `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | existing release secrets | sign the candidate manifest with the unchanged public verifier |
-
-Provisioning is the operator's job, done only in the GitHub environment
-`server-host-signing-rehearsal`: store the three new secrets (certificate data,
-its password and the API key), set the four variables (signing identity, team,
-key id, issuer), reuse the existing manifest-signing secrets, and configure
-required reviewers plus allowed branches (`develop`, `main`). The API key must
-be a notarization-capable App Store Connect API key; its key id and issuer UUID
-are identifiers, not secrets.
-Never put these values in the repository, a `.env`, a workspace, an issue or a
-chat. An agent does not export identities, create the secrets or read keychain
-material; a missing input fails the requested run.
-
-To run it: Actions → `server-host-signing-rehearsal` → Run workflow, pick
-`develop` or `main`, and check `confirm_no_release_upload`. An unchecked box is a
-refusal, not a skipped rehearsal, and the environment approval must come from a
-reviewer. The workflow refuses any other ref before it binds a credential,
-records the dispatched commit, builds the PWA and wheel, installs the wheel in a
-clean Python 3.13 environment and runs `scripts/rehearse-server-host-signing.py`
-with that interpreter. It uses no dependency cache and every npm command runs
-with audits and funding traffic disabled, so the Apple notary submission remains
-the only network write.
-
-The helper creates a temporary random-password keychain and notary profile in a
-per-run scratch directory it created itself, records that exact path in a
-sibling receipt (cleared by the workflow's first `claim-scratch` step, before
-the guard and gated so cleanup runs only when that claim succeeded, so it can
-only describe this job), and restores the prior default keychain and the
-whole prior search list. An interruption first terminates and reaps the
-in-flight tool where the process is still schedulable, and a signal during a
-running restore — first or later — is deferred until cleanup finishes. It deletes its certificate, decoded
-API key, keychain and profile by independent attempts on every recoverable path,
-including an interrupted build and build, notarization, manifest or verification
-failures; an unrecoverable failure (SIGKILL, a filesystem error, a child that
-never exits) is reported and may leave material in the run-scoped directory,
-which the runner discards. Credentials stay out of
-argv: the keychain password is fed to `security` on stdin and the App Store
-Connect API key is passed to `notarytool` as the path to an owner-only file, with
-one accepted residual — `security import -P` takes the p12 passphrase in one
-short-lived process, because Apple's CLI has no stdin option for it. It verifies
-the final extracted app (signature, expected team and requirement, hardened
-runtime, timestamp, entitlements, notarization ticket, staple and Gatekeeper),
-authenticates the exact archive in a signed candidate manifest whose signer is
-installed before any signing credential is present, and writes a sanitized
-`verification.json` plus a summary the workflow may append to the job summary.
-Submissions use only the keychain profile, so no account address, password or
-key material appears in any spawned argv. A failed run writes an explicitly
-incomplete report naming only its stage and code. The workflow's `always()`
-cleanup deletes only the path named by the helper's `.owned` receipt, so a
-pre-existing directory is never adopted.
-
-These are CI inputs, not runtime configuration: no `CIAO_*` variable mirrors
-them, nothing in `ciao` reads them, and setting them in a local `.env` does
-nothing. The rehearsal is prepared and tested, not operationally proven; the
-promotion gate is in [`docs/SERVER_HOST_RELEASE.md`](docs/SERVER_HOST_RELEASE.md).
 
 ## Ciaobot Server Operation
 
@@ -474,7 +391,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
   authentication; an invalid path is reported as unavailable.
 - `CIAO_GWS_BIN` (test isolation only): absolute path to an executable that `ciao gws` and the Google token health check run instead of `gws`. Set by `ciao eval tasks` for tasks requiring `gws_fake`, so evals never reach Google. When set it is used as-is, with no lookup and no fallback. It is read from the process environment only, unlike `CIAO_OPENCODE_BIN`, which is read from the workspace configuration. A value that is not an absolute path is an error: `ciao gws` exits 2 with `CIAO_GWS_BIN must be an absolute path`, and the token health check reports the token as invalid with that message. Whitespace-only counts as unset. POSIX only.
 - `CIAO_ENGINE_PATH` (internal): legacy override for the engine executable the
-  CLI runs. It is still read by `ciao/cli.py`, and on Windows `ciao service start` uses it as the interpreter (`python.exe` or `pythonw.exe`) when it has to register the logon task, but nothing sets it any more
+  CLI runs. It is still read by `ciao/cli.py`, but nothing sets it any more
   (the bundled launcher that used to is gone), so an operator never needs to.
 - Session cookies are HttpOnly. Production/domain-scoped cookies are also Secure, and state-changing browser requests must come from the same origin (host, scheme and effective port) via `Origin` or `Referer`, or from a host a proxy declared in `X-Forwarded-Host`.
 - Ciaobot sends baseline security headers from the Starlette app, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
@@ -501,10 +418,10 @@ See [Linux hosting](docs/LINUX.md) for provisioning, HTTPS, updates, and recover
 - `CIAO_NO_BROWSER`: set to any value to stop a first-run `ciao run` from auto-opening the setup wizard in the default browser (the wizard URL is still printed). Auto-open already only happens on interactive terminals, never under launchd or CI.
 - `CIAO_WORKSPACE`: set by the service definition (and by `ciao run` started inside a set-up workspace, which is found through its `.runtime/workspaces.json` or, for a pre-1.0 install not yet started on this release, a `.env` with a non-empty `CIAO_WORKSPACES`; setup no longer writes `CIAO_WORKSPACE=.` into `.env`). The filesystem workspace root for operational state, `.runtime/`, `.env`, canonical `skills/`, `subagents/`, and `commands/`, the generated `.claude/` catalog, and the active agent root's `AGENTS.md` (the install root on the shared layout, or a per-workspace root after re-rooting). Default `.`. `.agents/skills/` remains a legacy native-discovery path and is not generated by sync. Setting it inside that `.env` cannot move the install, because the engine finds `.env` inside the folder the service definition names; move it with Settings → Advanced → Ciaobot folder → Move… (on the computer running Ciaobot) or `ciao workspace-move <new folder> [--apply]`; on Linux the administrator runs it with `sudo` (docs/LINUX.md).
 - `CIAO_VAULT_ROOT`: durable memory/vault root. Default `<CIAO_WORKSPACE>/memory-vault`. Set this to an external notes folder when operational state should stay out of synced notes.
-- `CIAO_VAULT_DIR`: legacy vault-directory redirect recognized by installer bootstrap freshness checks; do not inherit it when starting a genuinely fresh install.
+- `CIAO_VAULT_DIR`: legacy vault-directory key that the Mac takeover plan still recognises in an old service definition; do not inherit it when starting a genuinely fresh install.
 - `CIAO_WORKSPACES`: **retired and no longer read as a workspace source.** It used to override `.runtime/workspaces.json` on every start, so a workspace created, edited or archived in Settings could silently revert on the next restart. The workspace list is now runtime state owned by the app: Settings → Overview → All workspaces writes `.runtime/workspaces.json`, and that file is the only source. On the first server start after upgrading, an install that still sets the variable has its workspaces imported into the registry once (every one when no registry file exists, otherwise only names the registry does not already define; existing entries are never overwritten, a workspace with an archive in `.archived-workspaces/` is skipped rather than re-registered). A `.runtime/workspaces-env-imported.json` marker makes that import one-shot, so a workspace later removed in Settings stays removed. After that the variable is inert: startup logs a warning and the `legacy-env-ignored` operator tile asks you to remove it from `.env`; Ciaobot does not edit `.env` for you.
-- `.runtime/workspaces.json` (not an environment variable): the workspace registry, a JSON list of objects with `name`, `vault_root`, `default_provider`, `disallowed_tools`, `claude_ai_connectors` (boolean, default `true`), `claude_trim` (sparse map of trim-option key → bool, see `ciao/claude_trim.py`), `gws_profile` and `color`. `vault_root` is relative to `CIAO_WORKSPACE` unless absolute. Fresh setup and ordinary PWA workspace creation derive `<CIAO_VAULT_ROOT>/<name>`, while existing-folder setup preserves the selected root until a model-guided migration updates the registry. Later Settings updates preserve the stored path. If the file is missing, Ciaobot bootstraps one registry entry per directory in the vault that looks like a workspace (a folder containing `People/`, `Projects/`, `journal/` or a `MEMORY.md`), falling back to a single `personal` workspace when none do. It used to manufacture `personal` and `work` unconditionally, which left an install unable to re-root: a registered workspace with no vault directory refuses the plan. Schedules assigned to a workspace inherit its current `default_provider` on every run unless an explicit override is stored; the model comes from that provider's operator default (Settings → Providers) — a workspace no longer pins one, and a `default_model` key in the registry is ignored. Example: `[{"name":"default","vault_root":"memory-vault/default","default_provider":"claude","gws_profile":"personal"}]`.
-- File viewer path policy: the file/binary/image viewers and the in-PWA editor have **no workspace sandbox**; the workspace File access setting confines the agent and its shell, not the viewer. They read (and, for the editor and snapshot-restore, write) any path on disk. Relative paths still anchor to the workspace root. The extension allowlist (no `.env`, no key files) and the size caps are the only remaining guards, so secrets in allowlisted files elsewhere on the machine are reachable from an authenticated PWA session.
+- `.runtime/workspaces.json` (not an environment variable): the workspace registry, a JSON list of objects with `name`, `vault_root`, `default_provider`, `disallowed_tools`, `claude_trim` (sparse map of trim-option key → bool, see `ciao/claude_trim.py`; `setting:claude_ai_connectors` hides the Claude account's connectors), `gws_profile` and `color`. `vault_root` is relative to `CIAO_WORKSPACE` unless absolute. Fresh setup and ordinary PWA workspace creation derive `<CIAO_VAULT_ROOT>/<name>`, while existing-folder setup preserves the selected root until a model-guided migration updates the registry. Later Settings updates preserve the stored path. If the file is missing, Ciaobot bootstraps one registry entry per directory in the vault that looks like a workspace (a folder containing `People/`, `Projects/`, `journal/` or a `MEMORY.md`), falling back to a single `personal` workspace when none do. It used to manufacture `personal` and `work` unconditionally, which left an install unable to re-root: a registered workspace with no vault directory refuses the plan. Schedules assigned to a workspace inherit its current `default_provider` on every run unless an explicit override is stored; the model comes from that provider's operator default (Settings → Providers) — a workspace no longer pins one, and a `default_model` key in the registry is ignored. Example: `[{"name":"default","vault_root":"memory-vault/default","default_provider":"claude","gws_profile":"personal"}]`.
+- File viewer path policy: the file/binary/image viewers and the in-PWA editor have **no workspace sandbox**. They read (and, for the editor and snapshot-restore, write) any path on disk. Relative paths still anchor to the workspace root. The extension allowlist (no `.env`, no key files) and the size caps are the only remaining guards, so secrets in allowlisted files elsewhere on the machine are reachable from an authenticated PWA session.
 - `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND`: optional override for `gws`; the server defaults it to `file` at startup for headless auth.
 
 Session insights models are chosen per provider in Settings → Providers.
@@ -518,11 +435,11 @@ not a new filesystem sandbox. Existing viewer extension and size guards remain.
 - `ciao gws-auth-helper <profile>`: interactive headless OAuth re-authentication when `gws auth login` cannot open a browser.
 - `CLAUDE_DEFAULT_MODEL_PERSONAL` / `CLAUDE_DEFAULT_MODEL_WORK` / `CIAO_DISALLOWED_TOOLS_PERSONAL` / `CIAO_DISALLOWED_TOOLS_WORK`: **removed 2026-08-20 and no longer read.** They configured the two hardcoded `personal`/`work` entries of the bootstrap registry, which now derives its workspaces from the vault instead, so they could not describe a workspace named anything else. Put `disallowed_tools` on the workspace in `.runtime/workspaces.json`, which works for any name; the default model is now a per-provider operator setting (Settings → Providers), not a per-workspace one.
 - `CIAO_MEMORY_DIR`: legacy override for the old `~/.ciao/memory.md` + `user.md` directory during the one-release migration window. Default `~/.ciao`. Not used for new writes; safe to unset after migration.
-- **Image-capability pre-flight**: before dispatch, a turn that carries images checks whether the selected model can see them. Anthropic's and OpenAI's current models all accept images, so only OpenCode is consulted — it is bring-your-own-provider, and each V2 catalog entry lists supported modalities in `capabilities.input`. An unstated answer counts as capable, so a cold catalog never blocks a turn. A non-vision model pauses the turn on a `model_capability_question` (30s window): the PWA offers the models OpenCode states accept images, an "Open picker" escape hatch, and Cancel. Switch re-dispatches on the picked model; cancel/timeout close the turn with a `status` bubble; the images are never silently dropped. Text-only and unattended (loop/schedule) turns skip the question. Implemented in `ciao/providers/opencode.py::model_accepts_images` and the pre-flight in `ciao/web/project_chats.py::ProjectChatManager.stream_chat`.
+- **Image-capability pre-flight**: before dispatch, a turn that carries images checks whether the chat's agent accepts images. Gating is agent-level under ACP: `promptCapabilities.image` from the agent's `initialize` response. Only an explicit `false` refuses, so an agent that has not stated it, or has no connection yet, never blocks a turn. A non-vision model pauses the turn on a `model_capability_question` (30s window): the PWA offers the candidates `_capability_candidates` returns, an "Open picker" escape hatch, and Cancel. Switch re-dispatches on the picked model; cancel/timeout close the turn with a `status` bubble; the images are never silently dropped. Text-only and unattended (loop/schedule) turns skip the question. Implemented in `ciao/providers/acp/provider.py::agent_accepts_images`, `ProjectChatManager._agent_accepts_images`, and the pre-flight in `ciao/web/chat_streaming.py`.
 - **Web Push timing** (not configurable): a completed turn pushes 30 seconds after it ends. Rapid replies to the same chat cancel the previous timer and start a new one (coalesce into a single push). Permission requests and model questions push immediately (no delay). Unanswered permission requests re-fire every 30 seconds, up to 3 times, until the user approves/denies or the turn ends. Marking a chat read sends a separate clear control to all registered Web Push subscriptions and the macOS notification log.
 - `CIAO_PYTHON`: path to a specific Python binary for `scripts/dev.sh` (e.g. when Homebrew breaks `ensurepip`).
 - `CIAO_PATH`: baked into the launchd plist's `EnvironmentVariables` at setup time so developer-mode subprocesses (npm, node, git) are found despite launchd's minimal default PATH. Not an operator env var; it's a `com.ciao.server.plist.tmpl` placeholder rendered from the user's shell PATH.
-- Installer and release-build variables: `CIAO_APP_DIR` overrides the per-user app directory, `CIAO_ARCHIVE_NAME` and `CIAO_VERIFIER_NAME` override release asset names, and `CIAO_RELEASE_BASE_URL` selects a private release mirror for an explicit `--version` (the embedded archive signature is still mandatory). `CIAO_BUNDLED_APP` marks the embedded runtime for internal mode detection. `CIAO_PYTHON_ARM64_URL`, `CIAO_PYTHON_ARM64_SHA256`, `CIAO_PYTHON_X86_64_URL`, and `CIAO_PYTHON_X86_64_SHA256` are retired: the release workflow used to require them when assembling the embedded runtimes, and nothing reads them now. `CIAO_EXECUTABLE` is a LaunchAgent template token, not an operator environment variable.
+- Installer and release-build variables: `CIAO_ARCHIVE_NAME` and `CIAO_VERIFIER_NAME` override release asset names, and `CIAO_RELEASE_BASE_URL` selects a private release mirror for an explicit `--version` (the embedded archive signature is still mandatory). `CIAO_PYTHON_ARM64_URL`, `CIAO_PYTHON_ARM64_SHA256`, `CIAO_PYTHON_X86_64_URL`, and `CIAO_PYTHON_X86_64_SHA256` are retired: the release workflow used to require them when assembling the embedded runtimes, and nothing reads them now. `CIAO_EXECUTABLE` is a LaunchAgent template token, not an operator environment variable.
 - `CIAO_ALLOW_LAUNCH_AGENT_REPOINT`: set to `1`/`true`/`yes` (case-insensitive) to allow `setup_workspace`/`_write_launchd_plist` and `ciao setup` to repoint the live `~/Library/LaunchAgents/com.ciao.server.plist` to a different workspace without `confirm_repoint=True`/`--yes`. For automation that intentionally moves the install; leave unset for the safe default (refuse). `CIAO_LAUNCH_AGENTS_DIR` (test-only) already isolates the suite by redirecting the plist location.
 - `CIAO_EVAL_MAX_CALLS`: hard call ceiling for one `ciao eval run` (the bounded model-backed behavioral probe). Default `40`. The runner stops claiming new probes at the ceiling and records the remainder as `budget_exhausted` rather than continuing to spend. The deterministic `ciao eval contracts` half never calls a model and ignores it.
 - `CIAO_EVAL_MAX_COST_USD`: hard estimated-cost ceiling (USD) for one `ciao eval run`. Default `2.0`. `run_oneshot` returns text rather than a cost, so cost is enforced as a declared per-call upper bound (`calls × CIAO_EVAL_COST_PER_CALL_USD`); the report records the estimate used.
@@ -532,7 +449,7 @@ not a new filesystem sandbox. Existing viewer extension and size guards remain.
 
 ### Injected CLI context variables
 
-The Ciaobot server injects the following environment variables into every spawned agent CLI subprocess (`claude` or `opencode serve`):
+The Ciaobot server injects the following environment variables into every spawned agent CLI subprocess (`claude`, `codex` or `opencode acp`):
 
 - `CIAO_WORKSPACE`: the filesystem workspace root path. This is operator config forwarded for compatibility; it is not the logical chat workspace.
 - `CIAO_ACTIVE_WORKSPACE`: the logical workspace name derived per turn from `chat -> project -> project.workspace`.
@@ -558,7 +475,7 @@ Ciaobot runs on macOS under launchd.
 - `ciao setup --workspace <path> --load-launchd` renders and loads the LaunchAgent.
 - The packaged launchd template is `ciao/stock/deploy/com.ciao.server.plist.tmpl`.
 - Start and stop: `ciao service start` / `ciao service stop` (or `launchctl unload ~/Library/LaunchAgents/com.ciao.server.plist`). Both refuse while chats are actively running unless `--force` is passed.
-- Updates: re-run the one-line installer, or use **Settings → General** in the PWA, which stages and applies the engine package update in the background. There is no in-app app updater.
+- Updates: macOS: the app updates itself (Sparkle). Linux: see docs/LINUX.md.
 - Remote access is not configured by the public app. Use localhost by default, or put Tailscale or another user-owned network layer in front of the local server.
 - A dropped non-image chat file is converted locally: supported documents are
   converted from the drop's own source and only Markdown is kept in the active

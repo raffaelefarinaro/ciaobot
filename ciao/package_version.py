@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -14,9 +15,10 @@ from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    pass
+    from pathlib import Path
 
 from ciao import __version__, install_receipt
+from ciao.os_support.processes import isolated_probe_flags
 
 
 DEFAULT_GITHUB_REPO = "raffaelefarinaro/ciaobot"
@@ -34,6 +36,12 @@ def latest_release_redirect_url(repo: str | None = None) -> str:
     """
     repo = (repo or DEFAULT_GITHUB_REPO).strip("/")
     return f"https://github.com/{repo}/releases/latest"
+
+
+# The newest stable release page, where the 2.0 Mac app DMG is attached (#3205).
+# Releases attach Ciaobot-<version>.dmg (the name carries the version), so a
+# direct download URL cannot be stable; the page always resolves.
+MAC_APP_DOWNLOAD_URL = f"https://github.com/{DEFAULT_GITHUB_REPO}/releases/latest"
 
 
 def _release_page_request(url: str) -> urllib.request.Request:
@@ -253,20 +261,81 @@ def package_changelog(
     }
 
 
-_BUNDLE_RUNTIME_MARKER = "Ciaobot.app/Contents/Resources/ciao-runtime"
+# The Mac app is always built as Ciaobot.app (mac/scripts/build-app.sh).
+_APP_ENGINE_MARKER = re.compile(r"Ciaobot\.app/Contents/Resources/engine/")
 
 
 def _inside_app_bundle(path: str | os.PathLike[str] | None) -> bool:
-    """Whether ``path`` resolves inside a Ciaobot.app embedded runtime."""
+    """Whether ``path`` lies under ``Ciaobot.app/Contents/Resources/engine/``."""
     if not path:
         return False
     from pathlib import Path
 
     try:
-        resolved = str(Path(path).resolve())
+        resolved = Path(path).resolve().as_posix()
     except (OSError, RuntimeError, ValueError):
-        resolved = str(path)
-    return _BUNDLE_RUNTIME_MARKER in resolved or _BUNDLE_RUNTIME_MARKER in str(path)
+        resolved = Path(path).as_posix()
+    return bool(
+        _APP_ENGINE_MARKER.search(resolved)
+        or _APP_ENGINE_MARKER.search(Path(path).as_posix())
+    )
+
+
+def app_engine_root() -> Path | None:
+    """The bundled engine directory (``.../Contents/Resources/engine``), or None.
+
+    Derived from ``sys.executable`` (``<root>/bin/python3.12``); the root must
+    hold ``bin/ciao``.
+    """
+    if not running_from_app_bundle():
+        return None
+    from pathlib import Path
+
+    exe = Path(sys.executable)
+    for candidate in (exe, exe.resolve()):
+        root = candidate.parent.parent
+        if _inside_app_bundle(root / "bin") and (root / "bin" / "ciao").is_file():
+            return root.resolve()
+    return None
+
+
+def ciao_shim_path() -> Path:
+    """Where the engine publishes its ``ciao`` shim (the S2 engine state dir)."""
+    from pathlib import Path
+
+    return Path.home() / "Library" / "Application Support" / "Ciaobot" / "engine" / "bin" / "ciao"
+
+
+def ensure_ciao_shim(engine_root: Path) -> Path:
+    """Write the ``ciao`` shim for ``engine_root`` and return its directory.
+
+    Only ``ciao`` is exposed to agent shells; putting the engine's whole ``bin``
+    on PATH would also make ``python3`` resolve to its pip-less CPython. The
+    file is replaced atomically (0755) and left alone when already current, so
+    it is regenerated at every start, including after the app moved.
+    """
+    import shlex
+    import tempfile
+    from pathlib import Path
+
+    shim = ciao_shim_path()
+    content = f'#!/bin/sh\nexec {shlex.quote(str(engine_root / "bin" / "ciao"))} "$@"\n'
+    try:
+        if shim.read_text(encoding="utf-8") == content and shim.stat().st_mode & 0o777 == 0o755:
+            return shim.parent
+    except OSError:
+        pass
+    shim.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=shim.parent, prefix=".ciao-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, shim)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    return shim.parent
 
 
 def _imported_ciao_file() -> str | None:
@@ -294,16 +363,10 @@ def _in_source_checkout(ciao_file: str | None) -> bool:
 def running_from_app_bundle() -> bool:
     """Whether this process is the engine embedded in Ciaobot.app.
 
-    Decided from where the ``ciao`` package and the interpreter actually live,
-    not from ``CIAO_BUNDLED_APP`` alone: the bundled launcher exports that
-    marker, so every shell a Ciaobot chat opens inherits it, and a source dev
-    server started from such a shell would otherwise call itself bundled and
-    refuse every redeploy.
-
-    The imported package wins over the interpreter. The bundled launcher also
-    prepends the bundle's ``bin`` to ``PATH``, so ``ciao dev`` run from an app
-    shell can reuse the bundled interpreter while importing ``ciao`` from the
-    checkout it was started in; that server is a source checkout.
+    Decided from where the ``ciao`` package and the interpreter actually live.
+    The imported package wins over the interpreter: ``ciao dev`` run from an
+    app shell can reuse the bundled interpreter while importing ``ciao`` from
+    the checkout it was started in, and that server is a source checkout.
     """
     ciao_file = _imported_ciao_file()
     if _inside_app_bundle(ciao_file):
@@ -317,9 +380,7 @@ def detect_install_mode() -> str:
     """Return the runtime distribution mode: bundled_app, editable, installer or unknown."""
     # Bundle location is authoritative when the package itself lives inside
     # the app bundle. A package imported from a git checkout is `editable`
-    # even on the bundled interpreter (see ``running_from_app_bundle``). An
-    # inherited CIAO_BUNDLED_APP marker without a bundle location does not
-    # count.
+    # even on the bundled interpreter (see ``running_from_app_bundle``).
     try:
         if running_from_app_bundle():
             return "bundled_app"
@@ -340,7 +401,53 @@ def detect_install_mode() -> str:
     except Exception:
         pass
 
+    # The Linux one-line installer runs `uv tool install`, which writes
+    # uv-receipt.toml into the tool env root, the interpreter's prefix. Checked
+    # after the editable test, so a source checkout on Linux stays `editable`.
+    from pathlib import Path
+
+    if sys.platform.startswith("linux") and (Path(sys.prefix) / "uv-receipt.toml").is_file():
+        return "uv_tool"
+
     return "unknown"
+
+
+@functools.cache
+def _host_is_apple_silicon() -> bool:
+    """Apple silicon, including a Python running under Rosetta."""
+    import platform as host
+    import subprocess
+
+    if host.machine() == "arm64":
+        return True
+    try:
+        probe = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "hw.optional.arm64"],
+            capture_output=True, text=True, encoding="utf-8", timeout=2, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.stdout.strip() == "1"
+
+
+def needs_mac_app_switch(
+    *,
+    host_platform: str = sys.platform,
+    install_mode: str | None = None,
+    apple_silicon: bool | None = None,
+) -> bool:
+    """Whether this engine is a 1.x-installer Mac install that should move into Ciaobot for Mac.
+
+    Only installer-managed engines on Apple silicon qualify: the bundled engine
+    is the app already, a checkout is a developer's on purpose, and the app
+    runs no local engine on Intel (#3129).
+    """
+    if host_platform != "darwin":
+        return False
+    mode = install_mode if install_mode is not None else detect_install_mode()
+    if mode != "installer":
+        return False
+    return apple_silicon if apple_silicon is not None else _host_is_apple_silicon()
 
 
 _VERSION_OUTPUT_RE = re.compile(r"[0-9][0-9A-Za-z.\-+]*")
@@ -357,7 +464,7 @@ def installed_version(timeout_s: float = 10.0) -> str | None:
 
     try:
         result = subprocess.run(
-            [sys.executable, "-I", "-c", "import ciao; print(ciao.__version__)"],
+            [sys.executable, *isolated_probe_flags(), "-c", "import ciao; print(ciao.__version__)"],
             capture_output=True,
             text=True, encoding="utf-8",
             timeout=timeout_s,
@@ -446,17 +553,34 @@ def update_package(
         # Before the Linux branch on purpose. Ownership, not platform, decides
         # the answer: a Linux `systemd-user` engine installed by the shell
         # installer is a managed install, and answering with the generic
-        # administrator workflow (no `ciao update stage`) was the #567 review
-        # finding — the platform check ran first and swallowed this branch.
-        #
-        # The command follows the platform, not just the mode: install.sh exits
-        # on Linux with "this installer supports macOS only", so pointing a
-        # Linux installer engine at it would be advice that cannot work.
+        # administrator workflow was the #567 review finding — the platform
+        # check ran first and swallowed this branch. The engine no longer
+        # updates itself: on macOS the app does, and on Linux the administrator
+        # reinstalls from docs/LINUX.md.
+        if sys.platform == "darwin":
+            installer_error = (
+                "This engine was installed by the Ciaobot installer and no longer "
+                "updates itself. Ciaobot for Mac updates it."
+            )
+            return {"ok": False, "mode": mode, "error": installer_error, "command": ""}
         return {
             "ok": False,
             "mode": mode,
-            "error": "This engine was installed by the Ciaobot installer. Stage an update with `ciao update stage`; applying it from the app arrives in a later release.",
-            "command": "ciao update stage" if sys.platform.startswith("linux") else "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install-engine.sh | sh",
+            "error": (
+                "This engine was installed by the Ciaobot installer and no longer "
+                "updates itself. Run `ciao update` as the account that owns it; "
+                "see docs/LINUX.md."
+            ),
+            "command": "ciao update",
+        }
+    if mode == "uv_tool":
+        # The Linux one-line install. `ciao update` re-runs the latest installer,
+        # so the answer names the command rather than a manual reinstall.
+        return {
+            "ok": False,
+            "mode": mode,
+            "error": "Update by running `ciao update` as this account; it re-runs the latest installer.",
+            "command": "ciao update",
         }
     if sys.platform.startswith("linux"):
         # The documented Linux install is `pip install -e`, which

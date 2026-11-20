@@ -1,5 +1,5 @@
 import { devices, expect, test, type Locator, type Page } from '@playwright/test'
-import { boot, isolate, releasePointerInSameTask } from '../support/app'
+import { boot, isolate, releasePointerInSameTask, type BootOptions } from '../support/app'
 
 /**
  * Placing cards on the board: the card surface's pointer drag within and across
@@ -33,6 +33,8 @@ const TASKS = [
 interface Sent { path: string; body: Record<string, unknown> }
 
 interface Hold {
+  /** Keep the initial task read in flight while loading geometry is visible. */
+  read?: Promise<void>
   /** Keep a POST /order answer in flight until the test releases it. */
   order?: Promise<void>
   /** Keep a cross-lane PATCH answer in flight until the test releases it. */
@@ -65,9 +67,10 @@ async function serve(page: Page, hold: Hold = {}): Promise<Sent[]> {
     into.splice(at < 0 ? into.length : at, 0, id)
     version += 1
   }
-  await page.route(/\/api\/tasks(?:\?|$)/, route => route.fulfill({
-    json: { workspace: 'alpha', tasks: rows, order: order() },
-  }))
+  await page.route(/\/api\/tasks(?:\?|$)/, async route => {
+    await hold.read
+    await route.fulfill({ json: { workspace: 'alpha', tasks: rows, order: order() } })
+  })
   await page.route(/\/api\/tasks\/(\d{32})\/order$/, async route => {
     await hold.order
     const body = route.request().postDataJSON() as Record<string, unknown>
@@ -92,15 +95,55 @@ async function serve(page: Page, hold: Hold = {}): Promise<Sent[]> {
   return sent
 }
 
-async function open(page: Page, id: string, hold: Hold = {}): Promise<Sent[]> {
+async function open(page: Page, id: string, hold: Hold = {}, options: BootOptions = {}): Promise<Sent[]> {
   await isolate(page, id)
   const sent = await serve(page, hold)
-  await boot(page, '/tasks', '.task-card')
+  await boot(page, '/tasks', '.task-card[data-task-id]', options)
   return sent
 }
 
 const lane = (page: Page, name: string) => page.locator('.task-lanes').getByRole('region', { name, exact: true })
 const titles = (page: Page, name: string) => lane(page, name).locator('.task-card .task-open').allTextContents()
+
+test('open waits for real task cards while the first read is held', async ({ page }) => {
+  let release!: () => void
+  const read = new Promise<void>(resolve => { release = resolve })
+  let waiting!: () => void
+  const readyWait = new Promise<void>(resolve => { waiting = resolve })
+  let opened = false
+  const opening = open(page, 'task-reorder-held-read', { read }, {
+    beforeReady: async () => {
+      await expect(page.getByRole('status', { name: 'Loading tasks', exact: true })).toBeVisible()
+      await expect(page.locator('.task-card')).toHaveCount(6)
+      await expect(page.locator('.task-card[data-task-id]')).toHaveCount(0)
+    },
+    onReadyWait: waiting,
+  }).then(sent => {
+    opened = true
+    return sent
+  })
+  try {
+    await Promise.race([readyWait, opening])
+    // Observe the missing real-card readiness condition, not an elapsed-time sleep.
+    const notReady = await expect(page.locator('.task-card[data-task-id]').first())
+      .toBeVisible({ timeout: 1000 })
+      .then(() => null, (error: Error) => error)
+    expect(notReady, 'real cards cannot be ready while the read is held').not.toBeNull()
+    expect(opened, 'open must still be pending with only placeholder cards').toBe(false)
+    await expect(page.getByRole('status', { name: 'Loading tasks', exact: true })).toBeVisible()
+
+    release()
+    const sent = await opening
+    expect(opened).toBe(true)
+    await expect(page.locator('.task-card[data-task-id]')).toHaveCount(TASKS.length)
+    await expect(page.locator(`.task-card[data-task-id="${TASKS[0]!.id}"]`)).toContainText('Plan the offsite')
+    await expect(page.getByRole('status', { name: 'Loading tasks', exact: true })).toHaveCount(0)
+    expect(sent).toHaveLength(0)
+  } finally {
+    release()
+    await opening.finally(() => page.unroute(/\/api\/tasks(?:\?|$)/))
+  }
+})
 
 test('repro: settled neighbours remain in place after drop', async ({ page }) => {
   const sent = await open(page, 'drag-drop-settled')

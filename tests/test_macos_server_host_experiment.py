@@ -61,9 +61,9 @@ def test_identity_is_separate_from_pwa_and_previous_experiment() -> None:
     # These are the actual constants, imported rather than copied. The menu bar ID
     # stays a literal because ciao/cli.py:392 spells it inline with no constant to
     # import.
-    from ciao import cli, macos_service
+    from ciao import cli
 
-    reserved = {macos_service.DESKTOP_BUNDLE_ID, "local.ciaobot.menubar", *cli._OUR_BUNDLE_IDS}
+    reserved = {"local.ciaobot.app", "local.ciaobot.menubar", *cli._OUR_BUNDLE_IDS}
     assert BUILD.BUNDLE_ID not in reserved
     # The earlier direct AX probe lives in a separate, uncommitted checkout, so its
     # bundle ID is not a constant here and is deliberately not asserted.

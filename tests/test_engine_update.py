@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import io
 import json
 import os
 import plistlib
 import shutil
 import subprocess
-import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -16,8 +14,6 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-
-import sys
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -27,22 +23,17 @@ import ciao.engine_update as engine_update
 import ciao.update_host as update_host
 from ciao.engine_update import (
     OPERATION_NAME,
+    PHASES,
     PREVIOUS_ENV_NAME,
     SERVER_LABEL,
     Operation,
-    UpdateError,
-    UpdateInProgress,
     acquire_lock,
-    apply_update,
-    default_fetch,
-    find_uv,
     main,
     read_operation,
     recover_apply,
     recover_interrupted_apply,
     release_lock,
     run_apply,
-    stage_update,
     write_operation,
 )
 from ciao.update_host import (
@@ -58,17 +49,13 @@ from ciao.install_receipt import InstallReceipt, read_receipt, write_receipt
 from ciao.release_manifest import (
     artifact_entry,
     build_manifest,
-    installer_artifact_entry,
     verify_manifest,
 )
-from ciao.os_support.private import is_private
 
 # The minisign helpers are copied from tests/test_release_manifest.py rather
 # than imported, so a change there cannot silently change what these tests
 # actually sign.
 TRUSTED = "timestamp:1\tfile:ciaobot-engine-manifest.json"
-
-RELEASE_BASE = "https://example.test/releases/download"
 
 # What the release's wheel declares, and the directory uv names the tool env
 # after. Both are read by the swap rather than spelled out anywhere in
@@ -82,15 +69,6 @@ RELEASE_BASE = "https://example.test/releases/download"
 TOOL_NAME = "ciaobot"
 TOOL_DIR_NAME = "ciao_bot"
 ENTRY_POINTS = ("ciao", "ciaobot")
-
-
-# MacUpdateHost: launchd's gui/<uid> domain (os.getuid), SIGHUP, and the POSIX
-# shebang entry-point shims a macOS env carries. These tests patch
-# sys.platform to darwin to drive it from any OS; on Windows those calls do not
-# exist. The Windows update host (#857) carries its own tests.
-mac_update_host = pytest.mark.skipif(
-    sys.platform == "win32", reason="drives MacUpdateHost (launchd gui/<uid>, SIGHUP, shebang shims)"
-)
 
 
 def _fake_wheel(path: Path, version: str) -> Path:
@@ -135,135 +113,6 @@ def _sign(data: bytes, priv: Ed25519PrivateKey, key_id: bytes) -> str:
         f"trusted comment: {TRUSTED}\n"
         f"{base64.b64encode(global_sig).decode()}\n"
     )
-
-
-class FakeRelease:
-    """A release directory served through a fake ``release_base`` URL."""
-
-    def __init__(self, root: Path, version: str, wheel: Path) -> None:
-        self.root = root
-        self.version = version
-        self.dir = root / f"v{version}"
-        self.dir.mkdir(parents=True)
-        # What the release actually serves; tampering with this is what a
-        # digest mismatch is.
-        self.wheel = self.dir / wheel.name
-        shutil.copy(wheel, self.wheel)
-        self.entry = artifact_entry(self.wheel, kind="wheel")
-        self.manifest = self.dir / "ciaobot-engine-manifest.json"
-        self.signature = self.dir / "ciaobot-engine-manifest.json.sig"
-
-    def publish(self, key: tuple[Ed25519PrivateKey, str, bytes]) -> None:
-        """Write the manifest and signature the way a real release does."""
-        priv, public_key, key_id = key
-        raw = json.dumps(
-            build_manifest(
-                self.version, [self.entry], created="2026-09-25T10:00:00+00:00"
-            )
-        ).encode()
-        self.manifest.write_bytes(raw)
-        self.signature.write_text(_sign(raw, priv, key_id), encoding="utf-8")
-        self.public_key = public_key
-
-    def serve(self, url: str, dest: Path, **kwargs: Any) -> None:
-        # `**kwargs` absorbs the download bounds `engine_update` passes for
-        # the wheel (`max_bytes`); the fake release serves whatever the manifest
-        # is sized to, so there is nothing to enforce here.
-        shutil.copy(self.root / url.split("/download/", 1)[1], dest)
-
-
-@pytest.fixture
-def release(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeRelease:
-    """A signed fake release, plus the public key `engine_update` will read.
-
-    `verify_manifest` binds its default key at definition time, so the only way
-    a test key can reach it is via the module attribute `engine_update` reads
-    explicitly at call time.
-    """
-    key = _keypair()
-    wheel = _fake_wheel(tmp_path / "src" / "ciaobot-1.2.3-py3-none-any.whl", "1.2.3")
-    rel = FakeRelease(tmp_path / "rel", "1.2.3", wheel)
-    rel.publish(key)
-    monkeypatch.setattr("ciao.release_manifest.RELEASE_PUBLIC_KEY", rel.public_key)
-    return rel
-
-
-@pytest.fixture
-def fake_run() -> tuple[Any, list[list[str]]]:
-    """A `run` that records argv, fakes `uv tool install`, and reports 1.2.3."""
-    calls: list[list[str]] = []
-
-    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        calls.append(list(argv))
-        if "tool" in argv:
-            _fake_tool_install(kwargs)
-        if "freeze" in argv:
-            return subprocess.CompletedProcess(
-                argv, 0, f"{TOOL_NAME}=={TO_VERSION}\n", ""
-            )
-        stdout = "1.2.3\n" if "-c" in argv else ""
-        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
-
-    return run, calls
-
-
-@mac_update_host
-def test_stage_update_happy_path(tmp_path: Path, release: FakeRelease, fake_run) -> None:
-    run, calls = fake_run
-    envs: list[dict[str, str] | None] = []
-
-    def recording(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        envs.append(kwargs.get("env"))
-        return run(argv, **kwargs)
-
-    op = stage_update(
-        "1.2.3",
-        current_version="1.2.2",
-        state_dir=tmp_path / "state",
-        release_base=RELEASE_BASE,
-        fetch=release.serve,
-        run=recording,
-        uv="/fake/uv",
-        python_version="3.13",
-    )
-
-    assert op.phase == "staged"
-    assert op.from_version == "1.2.2"
-    assert op.to_version == "1.2.3"
-    assert op.id.endswith("-1.2.3")
-    assert op.wheel_sha256 == release.entry["sha256"]
-
-    # A real tool env in a tool dir of this update's own, so the apply can move
-    # it into the live env's place — its `uv-receipt.toml` and its entry points
-    # are part of what the swap has to install. Found by reading the directory,
-    # under the name uv chose for the distribution rather than the one the
-    # distribution is spelled: spelling it out is the mistake this pins down.
-    env_dir = Path(op.stage_dir) / "tool" / TOOL_DIR_NAME
-    assert TOOL_DIR_NAME != TOOL_NAME
-    assert calls[0] == ["/fake/uv", "tool", "install", "--python", "3.13", op.wheel]
-    assert (env_dir / "uv-receipt.toml").is_file()
-    assert op.env_python == str(env_dir / "bin" / "python")
-    # Pinned to this update's own directories: an inherited `UV_TOOL_DIR` would
-    # build the env somewhere the apply does not know to look, and the version
-    # check below would then be checking a directory nothing will ever move.
-    staged_env_vars = envs[0]
-    assert staged_env_vars is not None
-    assert staged_env_vars["UV_TOOL_DIR"] == str(Path(op.stage_dir) / "tool")
-    assert staged_env_vars["UV_TOOL_BIN_DIR"] == str(Path(op.stage_dir) / "bin")
-
-    assert calls[1][:3] == [op.env_python, "-I", "-c"]
-    # What the update brings in, recorded from the env itself: the apply moves
-    # that env rather than resolving anything, so this is the only place the
-    # dependency set of an update is ever known.
-    assert calls[2] == ["/fake/uv", "pip", "freeze", "--python", op.env_python]
-    assert op.env_freeze == f"{TOOL_NAME}=={TO_VERSION}"
-
-    assert read_operation(tmp_path / "state") == op
-    record = tmp_path / "state" / "operation.json"
-    assert is_private(record)
-    assert is_private(tmp_path / "state")
-    # The staged env is really on disk, not just described by the record.
-    assert (env_dir / "bin" / "python").exists()
 
 
 def test_read_operation_reads_a_record_written_before_env_freeze(
@@ -330,312 +179,29 @@ def test_read_operation_ignores_the_retired_host_fields(
     assert not hasattr(op, "host_status")
 
 
-def test_stage_update_rejects_bad_signature(
-    tmp_path: Path, release: FakeRelease, fake_run
-) -> None:
-    run, calls = fake_run
-    manifest = json.loads(release.manifest.read_text(encoding="utf-8"))
-    manifest["created"] = "2099-01-01T00:00:00+00:00"
-    release.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+def test_update_cli_has_no_stage_or_apply(capsys: pytest.CaptureFixture[str]) -> None:
+    """`ciao update` keeps only the receiving verbs of the 1.x -> 2.x hop.
 
-    with pytest.raises(UpdateError):
-        stage_update(
-            "1.2.3",
-            current_version="1.2.2",
-            state_dir=tmp_path / "state",
-            release_base=RELEASE_BASE,
-            fetch=release.serve,
-            run=run,
-            uv="/fake/uv",
-        )
-
-    op = read_operation(tmp_path / "state")
-    assert op is not None
-    assert op.phase == "failed"
-    assert op.error
-    # Nothing is installed from a manifest that did not verify.
-    assert calls == []
-
-
-def test_stage_update_rejects_wheel_digest_mismatch(
-    tmp_path: Path, release: FakeRelease, fake_run
-) -> None:
-    run, calls = fake_run
-    # Swap the served bytes after signing: the manifest is valid, the download
-    # is not, which is exactly the case a digest check exists for.
-    release.wheel.write_bytes(b"a different wheel" * 64)
-
-    with pytest.raises(UpdateError, match="does not match"):
-        stage_update(
-            "1.2.3",
-            current_version="1.2.2",
-            state_dir=tmp_path / "state",
-            release_base=RELEASE_BASE,
-            fetch=release.serve,
-            run=run,
-            uv="/fake/uv",
-        )
-
-    assert calls == []
-    op = read_operation(tmp_path / "state")
-    assert op is not None
-    assert op.phase == "failed"
-
-
-@mac_update_host
-def test_stage_update_rejects_version_check_mismatch(
-    tmp_path: Path, release: FakeRelease
-) -> None:
-    calls: list[list[str]] = []
-
-    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        calls.append(list(argv))
-        if "tool" in argv:
-            _fake_tool_install(kwargs)
-        return subprocess.CompletedProcess(argv, 0, stdout="9.9.9\n", stderr="")
-
-    with pytest.raises(UpdateError):
-        stage_update(
-            "1.2.3",
-            current_version="1.2.2",
-            state_dir=tmp_path / "state",
-            release_base=RELEASE_BASE,
-            fetch=release.serve,
-            run=run,
-            uv="/fake/uv",
-        )
-
-    op = read_operation(tmp_path / "state")
-    assert op is not None
-    assert op.phase == "failed"
-    assert "9.9.9" in op.error
-
-
-def test_stage_update_already_current_writes_no_record(
-    tmp_path: Path, release: FakeRelease
-) -> None:
-    with pytest.raises(UpdateError, match="already on 1.2.3"):
-        stage_update("1.2.3", current_version="1.2.3", state_dir=tmp_path / "state")
-
-    assert read_operation(tmp_path / "state") is None
-    assert not (tmp_path / "state" / "1.2.3").exists()
-
-
-@mac_update_host
-def test_stage_update_lock_blocks_concurrent_run(
-    tmp_path: Path, release: FakeRelease, fake_run
-) -> None:
-    run, _ = fake_run
-    state = tmp_path / "state"
-    state.mkdir()
-    handle = acquire_lock(state)
-    try:
-        with pytest.raises(UpdateInProgress):
-            stage_update(
-                "1.2.3",
-                current_version="1.2.2",
-                state_dir=state,
-                release_base=RELEASE_BASE,
-                fetch=release.serve,
-                run=run,
-                uv="/fake/uv",
-            )
-    finally:
-        release_lock(handle)
-
-    # The lock is released with the run, so the next attempt can take it.
-    assert (
-        stage_update(
-            "1.2.3",
-            current_version="1.2.2",
-            state_dir=state,
-            release_base=RELEASE_BASE,
-            fetch=release.serve,
-            run=run,
-            uv="/fake/uv",
-        ).phase
-        == "staged"
-    )
-
-
-@mac_update_host
-def test_stage_update_copies_previous_receipt(
-    tmp_path: Path, release: FakeRelease, fake_run
-) -> None:
-    run, _ = fake_run
-    # conftest already isolated the receipt path to a tmp dir.
-    from ciao import install_receipt
-
-    receipt_path = install_receipt.default_receipt_path()
-    write_receipt(
-        InstallReceipt(
-            version="1.2.2",
-            executable="/u/.local/bin/ciao",
-            python="/u/.local/share/uv/tools/ciaobot/bin/python",
-            service_backend="launchd",
-            service_label="com.ciao.server",
-            installed_at="2026-09-25T16:00:00+00:00",
-        ),
-        receipt_path,
-    )
-
-    op = stage_update(
-        "1.2.3",
-        current_version="1.2.2",
-        state_dir=tmp_path / "state",
-        release_base=RELEASE_BASE,
-        fetch=release.serve,
-        run=run,
-        uv="/fake/uv",
-    )
-
-    assert op.previous_receipt.endswith("previous-receipt.json")
-    assert Path(op.previous_receipt).read_bytes() == receipt_path.read_bytes()
-
-
-@mac_update_host
-def test_find_uv_prefers_receipt_then_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def _executable(path: Path) -> str:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("#!/bin/sh\n", encoding="utf-8")
-        path.chmod(0o755)
-        return str(path)
-
-    receipt_uv = _executable(tmp_path / "from-receipt" / "uv")
-    which_uv = _executable(tmp_path / "from-path" / "uv")
-    home = tmp_path / "home"
-    _executable(home / ".local" / "bin" / "uv")
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    monkeypatch.setattr(shutil, "which", lambda name: which_uv if name == "uv" else None)
-
-    # The receipt wins: it is the uv that built the running environment.
-    assert find_uv(receipt_uv) == receipt_uv
-    # Then PATH.
-    assert find_uv() == which_uv
-    # Then the installer's well-known location.
-    monkeypatch.setattr(shutil, "which", lambda name: None)
-    assert find_uv() == str(home / ".local" / "bin" / "uv")
-    # Nothing findable is a clear failure, not a guess.
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "empty-home"))
-    with pytest.raises(UpdateError, match="uv"):
-        find_uv(str(tmp_path / "absent" / "uv"))
-
-
-@mac_update_host
-def test_find_uv_refuses_a_missing_or_unusable_receipt_uv(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    home = tmp_path / "home"
-    _write_executable(home / ".local" / "bin" / "uv")
-    which_uv = _write_executable(tmp_path / "from-path" / "uv")
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    monkeypatch.setattr(shutil, "which", lambda name: which_uv if name == "uv" else None)
-    not_executable = tmp_path / "noexec" / "uv"
-    not_executable.parent.mkdir(parents=True)
-    not_executable.write_text("#!/bin/sh\n", encoding="utf-8")
-    not_executable.chmod(0o644)
-    directory = tmp_path / "a-directory"
-    directory.mkdir()
-
-    # A recorded uv that is gone, not executable or not a file is an error
-    # naming it, never a fall-through to PATH or ~/.local/bin/uv.
-    for receipt_uv in (tmp_path / "gone" / "uv", not_executable, directory):
-        with pytest.raises(UpdateError, match="install receipt names uv at"):
-            find_uv(str(receipt_uv))
-
-
-def _write_executable(path: Path) -> str:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("#!/bin/sh\n", encoding="utf-8")
-    path.chmod(0o755)
-    return str(path)
-
-
-def test_default_fetch_retries_then_succeeds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    payload = b"downloaded bytes"
-    calls: list[str] = []
-    attempts = {"n": 0}
-
-    class _Response(io.BytesIO):
-        def __enter__(self) -> _Response:
-            return self
-
-        def __exit__(self, *args: Any) -> None:
-            self.close()
-
-    def urlopen(request: Any, timeout: float = 0.0) -> _Response:
-        calls.append(request.full_url)
-        attempts["n"] += 1
-        if attempts["n"] == 1:
-            raise urllib.error.URLError("temporary failure")
-        return _Response(payload)
-
-    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
-    slept: list[float] = []
-    monkeypatch.setattr(time, "sleep", lambda seconds: slept.append(seconds))
-
-    dest = tmp_path / "out" / "file.bin"
-    default_fetch("https://example.test/file.bin", dest)
-
-    assert dest.read_bytes() == payload
-    assert len(calls) == 2
-    assert slept == [2]
-    # The interrupted download leaves no .part for a later run to trip over.
-    assert list(dest.parent.glob("*.part")) == []
-
-
-def test_cli_stage_refuses_non_installer_mode(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "editable")
-
-    assert main(["stage"]) == 2
-
-    assert "only for engines installed with" in capsys.readouterr().err
+    Staging and applying moved to the Mac app and the Linux installer (#3130
+    P6), so argparse refuses both verbs rather than running them. The
+    mutation this guards is re-adding either subparser: then the verb parses
+    and the exit code is no longer 2.
+    """
+    for verb in ("stage", "apply"):
+        with pytest.raises(SystemExit) as refused:
+            main([verb])
+        assert refused.value.code == 2
+        assert f"invalid choice: '{verb}'" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    usage = capsys.readouterr().out
+    assert "{status,run-apply,run-recover}" in usage
 
 
 def test_cli_status_without_record(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["status"]) == 0
 
     assert "no update staged" in capsys.readouterr().out
-
-
-# A `run(..., check=True)` failure carries uv's reason in the captured stderr,
-# not in `str(exc)`, which is only "returned non-zero exit status 1". The record
-# must keep the real explanation, or `ciao update status` and the UI show an
-# operator an unexplained failure. (Round 1 review finding.)
-@mac_update_host
-def test_stage_update_keeps_uv_stderr_in_failed_record(
-    tmp_path: Path, release: FakeRelease, fake_run
-) -> None:
-    good_run, _ = fake_run
-
-    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        if "tool" in argv:
-            raise subprocess.CalledProcessError(
-                1, argv, output="", stderr="no matching distribution"
-            )
-        return good_run(argv, **kwargs)
-
-    with pytest.raises(UpdateError, match="no matching distribution"):
-        stage_update(
-            "1.2.3",
-            current_version="1.2.2",
-            state_dir=tmp_path / "state",
-            release_base=RELEASE_BASE,
-            fetch=release.serve,
-            run=run,
-            uv="/fake/uv",
-        )
-
-    op = read_operation(tmp_path / "state")
-    assert op is not None
-    assert op.phase == "failed"
-    assert "no matching distribution" in op.error
 
 
 # The record's phase is what an operator reads. Printing every record as
@@ -661,14 +227,309 @@ def test_cli_status_reports_failed_phase(capsys: pytest.CaptureFixture[str]) -> 
     assert "boom" in out
 
 
-# ── the apply half (#570) ────────────────────────────────────────────────
+# A 1.x updater staged a 2.0 env and wrote a `staged` record, then was removed
+# (#3130). Nothing else ever retires that record, so `status` kept reporting an
+# update that could never apply, with its whole env on disk (#3410).
+def _legacy_staged_record(state: Path, stage_dir: Path) -> None:
+    state.mkdir(parents=True, exist_ok=True)
+    (state / OPERATION_NAME).write_text(
+        json.dumps(
+            {
+                "id": "20261118T101500Z-op1",
+                "phase": "staged",
+                "from_version": "1.10.0",
+                "to_version": "2.0.0",
+                "started_at": "2026-11-18T10:15:00+00:00",
+                "updated_at": "2026-11-18T10:18:00+00:00",
+                "error": "",
+                "stage_dir": str(stage_dir),
+                "wheel": "ciaobot-2.0.0-py3-none-any.whl",
+                "wheel_sha256": "0" * 64,
+                "env_python": str(stage_dir / "env" / "bin" / "python"),
+                "env_freeze": "ciaobot==2.0.0",
+                "previous_receipt": "",
+            }
+        )
+    )
+
+
+def test_status_retires_legacy_staged_record_and_its_env(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state = tmp_path / "update-state"
+    stage_dir = state / "stage-20261118T101500Z-op1"
+    (stage_dir / "env" / "bin").mkdir(parents=True)
+    (stage_dir / "env" / "bin" / "python").write_text("")
+    _legacy_staged_record(state, stage_dir)
+
+    assert main(["status"]) == 0
+
+    assert "no update staged" in capsys.readouterr().out
+    assert not stage_dir.exists()
+    assert not (state / OPERATION_NAME).exists()
+
+
+def test_retire_staged_refuses_a_directory_outside_the_state_dir(tmp_path: Path) -> None:
+    state = tmp_path / "update-state"
+    outside = tmp_path / "somebody-elses-data"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep")
+    _legacy_staged_record(state, outside)
+
+    assert engine_update.retire_staged(state) is False
+
+    assert (outside / "keep.txt").read_text() == "keep"
+    assert read_operation(state) is not None
+
+
+def test_retire_staged_refuses_a_symlink_that_leaves_the_state_dir(tmp_path: Path) -> None:
+    state = tmp_path / "update-state"
+    state.mkdir()
+    outside = tmp_path / "somebody-elses-data"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep")
+    link = state / "stage-link"
+    link.symlink_to(outside, target_is_directory=True)
+    _legacy_staged_record(state, link)
+
+    assert engine_update.retire_staged(state) is False
+
+    assert (outside / "keep.txt").read_text() == "keep"
+    assert link.is_symlink()
+
+
+def test_retire_staged_leaves_an_in_flight_record_alone(tmp_path: Path) -> None:
+    state = tmp_path / "update-state"
+    stage_dir = state / "stage-applying"
+    stage_dir.mkdir(parents=True)
+    _legacy_staged_record(state, stage_dir)
+    record = json.loads((state / OPERATION_NAME).read_text())
+    record["phase"] = "applying"
+    (state / OPERATION_NAME).write_text(json.dumps(record))
+
+    assert engine_update.retire_staged(state) is False
+
+    assert stage_dir.is_dir()
+    assert read_operation(state) is not None
+    assert read_operation(state).phase == "applying"  # type: ignore[union-attr]
+
+
+def test_retire_staged_is_idempotent(tmp_path: Path) -> None:
+    state = tmp_path / "update-state"
+    stage_dir = state / "stage-once"
+    stage_dir.mkdir(parents=True)
+    _legacy_staged_record(state, stage_dir)
+
+    assert engine_update.retire_staged(state) is True
+    assert engine_update.retire_staged(state) is False
+
+    assert not stage_dir.exists()
+    assert read_operation(state) is None
+
+
+def test_retire_staged_waits_out_a_running_update(tmp_path: Path) -> None:
+    state = tmp_path / "update-state"
+    stage_dir = state / "stage-busy"
+    stage_dir.mkdir(parents=True)
+    _legacy_staged_record(state, stage_dir)
+
+    handle = acquire_lock(state)
+    try:
+        assert engine_update.retire_staged(state) is False
+    finally:
+        release_lock(handle)
+
+    assert stage_dir.is_dir()
+    assert read_operation(state) is not None
+
+
+def _staged_env(state: Path, name: str = "stage-op1") -> Path:
+    stage_dir = state / name
+    (stage_dir / "env" / "bin").mkdir(parents=True)
+    (stage_dir / "env" / "bin" / "python").write_text("")
+    return stage_dir
+
+
+def test_status_survives_a_failed_rmtree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `status` is read by the 0.5.x app: an OSError here must not become a
+    # traceback on stderr or a non-zero exit (#3410 review).
+    state = tmp_path / "update-state"
+    stage_dir = _staged_env(state)
+    _legacy_staged_record(state, stage_dir)
+
+    def busy(path: object, *args: object, **kwargs: object) -> None:
+        raise PermissionError("busy")
+
+    monkeypatch.setattr(engine_update.shutil, "rmtree", busy)
+
+    assert main(["status"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.startswith("staged 2.0.0 in ")
+    assert stage_dir.is_dir()
+    assert read_operation(state) is not None
+    assert engine_update.retire_staged(state) is False
+
+
+def test_retire_staged_survives_a_failed_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state = tmp_path / "update-state"
+    stage_dir = _staged_env(state)
+    _legacy_staged_record(state, stage_dir)
+    real_unlink = Path.unlink
+
+    def refuse_record(self: Path, missing_ok: bool = False) -> None:
+        if self.name == OPERATION_NAME:
+            raise PermissionError("read-only volume")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", refuse_record)
+
+    assert engine_update.retire_staged(state) is False
+    assert main(["status"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_status_survives_an_unwritable_state_dir(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The lock file cannot be created, so the lock step raises before anything
+    # is touched; the record stays readable and `status` still answers.
+    state = tmp_path / "update-state"
+    stage_dir = _staged_env(state)
+    _legacy_staged_record(state, stage_dir)
+    state.chmod(0o500)
+    try:
+        assert engine_update.retire_staged(state) is False
+        assert main(["status"]) == 0
+    finally:
+        state.chmod(0o700)
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert stage_dir.is_dir()
+
+
+def test_retire_staged_skips_an_operation_path_that_is_a_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state = tmp_path / "update-state"
+    (state / OPERATION_NAME).mkdir(parents=True)
+
+    assert engine_update.retire_staged(state) is False
+    assert main(["status"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert (state / OPERATION_NAME).is_dir()
+
+
+def test_retire_staged_refuses_a_symlinked_state_dir(tmp_path: Path) -> None:
+    real = tmp_path / "real-updates"
+    real.mkdir()
+    stage_dir = _staged_env(real)
+    _legacy_staged_record(real, stage_dir)
+    link = tmp_path / "updates-link"
+    link.symlink_to(real, target_is_directory=True)
+    # The record names the env through the link, so only the state-dir check
+    # (not the parent comparison) can refuse it.
+    _legacy_staged_record(real, link / stage_dir.name)
+
+    assert engine_update.retire_staged(link) is False
+
+    assert stage_dir.is_dir()
+    assert read_operation(real) is not None
+
+
+def test_retire_staged_refuses_an_intermediate_symlink(tmp_path: Path) -> None:
+    state = tmp_path / "update-state"
+    state.mkdir()
+    outside = tmp_path / "elsewhere"
+    victim = _staged_env(outside, name="stage-victim")
+    (state / "mid").symlink_to(outside, target_is_directory=True)
+    _legacy_staged_record(state, state / "mid" / "stage-victim")
+
+    assert engine_update.retire_staged(state) is False
+
+    assert victim.is_dir()
+    assert read_operation(state) is not None
+
+
+@pytest.mark.parametrize(
+    "where",
+    ["state-itself", "parent", "nested", "non-stage-sibling", "dotdot"],
+)
+def test_retire_staged_refuses_paths_that_are_not_a_stage_child(
+    tmp_path: Path, where: str
+) -> None:
+    state = tmp_path / "update-state"
+    keep = _staged_env(state, name="stage-keep")
+    sibling = state / "backups"
+    sibling.mkdir()
+    (sibling / "data.txt").write_text("keep")
+    nested = _staged_env(state / "stage-outer", name="stage-inner")
+    targets = {
+        "state-itself": str(state),
+        "parent": str(tmp_path),
+        "nested": str(nested),
+        "non-stage-sibling": str(sibling),
+        "dotdot": str(state / "stage-keep" / ".." / "backups"),
+    }
+    _legacy_staged_record(state, Path(targets[where]))
+
+    assert engine_update.retire_staged(state) is False
+
+    assert keep.is_dir()
+    assert (sibling / "data.txt").read_text() == "keep"
+    assert nested.is_dir()
+    assert read_operation(state) is not None
+
+
+def test_retire_staged_refuses_a_relative_stage_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Relative state dir and relative record: the parent comparison alone would
+    # accept this, so only the absolute-path rule refuses it.
+    monkeypatch.chdir(tmp_path)
+    state = Path("update-state")
+    state.mkdir()
+    relative = state / "stage-relative"
+    relative.mkdir()
+    _legacy_staged_record(state, relative)
+
+    assert engine_update.retire_staged(state) is False
+
+    assert relative.is_dir()
+    assert read_operation(state) is not None
+
+
+@pytest.mark.parametrize("phase", PHASES[PHASES.index("staged") + 1 :])
+def test_retire_staged_leaves_every_later_phase_alone(tmp_path: Path, phase: str) -> None:
+    state = tmp_path / "update-state"
+    stage_dir = _staged_env(state)
+    _legacy_staged_record(state, stage_dir)
+    record = json.loads((state / OPERATION_NAME).read_text())
+    record["phase"] = phase
+    (state / OPERATION_NAME).write_text(json.dumps(record))
+
+    assert engine_update.retire_staged(state) is False
+
+    assert stage_dir.is_dir()
+    op = read_operation(state)
+    assert op is not None
+    assert op.phase == phase
+
+
+# ── the receiving half (#570): fakes for launchd, uv, HTTP and the env ───
 #
 # launchd, uv, the engine's HTTP surface, the clock and sleep are all fakes
 # here: nothing below may start a service, move a real environment, or open a
 # socket. The engine fake is the interesting one — it is driven by the same
 # two events the real engine is (a launchd bootout, a service start), so a
-# transaction that stops the engine and swaps it is observable end to end
-# without a machine.
+# swap and its rollback are observable end to end without a machine.
 
 PORT = 8443
 BASE = f"http://localhost:{PORT}"
@@ -709,17 +570,6 @@ def _write_tool_env(env: Path, version: str) -> Path:
         encoding="utf-8",
     )
     return python
-
-
-def _fake_tool_install(kwargs: dict[str, Any], version: str = TO_VERSION) -> None:
-    """Stand in for `uv tool install`: write the env into the tool dir pinned.
-
-    The tool dir comes from the `UV_TOOL_DIR` the caller pinned rather than from
-    the wheel's own argument, because that pinned directory is where the code
-    afterwards looks for what uv built — the one fact a fake has to agree on.
-    """
-    tool_dir = Path((kwargs.get("env") or {})["UV_TOOL_DIR"])
-    _write_tool_env(tool_dir / TOOL_DIR_NAME, version)
 
 
 def _env_version(env: Path) -> str:
@@ -765,6 +615,10 @@ class _FakeEngine:
         self.starts = 0
         self.launchctl_calls: list[list[str]] = []
         self.posts: list[str] = []
+        self.bodies: list[dict[str, Any] | None] = []
+        # What the drain reports for scheduled work; None models an engine that
+        # predates the field and so cannot say.
+        self.schedule_work: int | None = 0
         self.active_script: list[list[str]] = []
         self.polls = 0
         # True while the engine never runs out of work, so a drain cannot
@@ -785,17 +639,21 @@ class _FakeEngine:
     def version(self) -> str:
         return _env_version(self.live_env)
 
-    def post(self, url: str) -> dict[str, Any]:
+    def post(self, url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         self.posts.append(url)
+        self.bodies.append(body)
         if self.post_error is not None:
             raise self.post_error
         if url.endswith("/api/admin/drain"):
             # The drain is polled by asking again, so this is where the active
             # chat list is read from.
             self.polls += 1
+            answer: dict[str, Any] = {"draining": True}
+            if self.schedule_work is not None:
+                answer["schedule_work_count"] = self.schedule_work
             if self.active_script:
-                return {"draining": True, "active_chat_ids": self.active_script.pop(0)}
-            return {"draining": True, "active_chat_ids": ["still-busy"] if self.busy else []}
+                return {**answer, "active_chat_ids": self.active_script.pop(0)}
+            return {**answer, "active_chat_ids": ["still-busy"] if self.busy else []}
         return {}
 
     def get(self, url: str) -> dict[str, Any] | None:
@@ -862,7 +720,7 @@ def _staged(
 ) -> tuple[Operation, Path, Path, _FakeEngine]:
     """A staged update with its wheel, env, live env, receipt and record.
 
-    Built the way the staging half leaves it, so `apply_update` and `run_apply`
+    Built the way the 1.x staging half leaves it, so `run_apply`
     see a real transaction rather than a convenient one: a uv tool env of the
     update's own, with uv's bin dir beside it, and a live install whose entry
     points are links into *its* env.
@@ -918,19 +776,6 @@ def _staged(
     )
     write_operation(op, state)
     return op, state, receipt_path, _FakeEngine(live_env)
-
-
-def _apply(engine: _FakeEngine, state: Path, **kwargs: Any) -> Operation:
-    return apply_update(
-        state_dir=state,
-        port=PORT,
-        http_post=engine.post,
-        launchctl=engine.launchctl,
-        uid=501,
-        sleep=kwargs.pop("sleep", lambda seconds: None),
-        clock=kwargs.pop("clock", _FakeClock()),
-        **kwargs,
-    )
 
 
 def _run(engine: _FakeEngine, op: Operation, state: Path, receipt_path: Path, **kwargs: Any) -> Operation:
@@ -1008,7 +853,7 @@ def _recover_apply(
 def _recorder(calls: list[str]) -> Any:
     """An injected `http_post` that records every URL it is handed."""
 
-    def post(url: str) -> dict[str, Any]:
+    def post(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         calls.append(url)
         return {}
 
@@ -1016,22 +861,10 @@ def _recorder(calls: list[str]) -> Any:
 
 
 def _install_recovery_agent(state: Path, op: Operation) -> Path:
-    """The durable agent's plist, as `apply_update` writes it before the stop."""
+    """The durable agent's plist, as the 1.x apply writes it before the stop."""
     return update_host._write_recover_plist(
         op, op.env_python or str(Path(op.stage_dir) / "env" / "bin" / "python"), state
     )
-
-
-def _agent_program(state: Path) -> str:
-    """The durable agent's `ProgramArguments[0]`, read off the plist on disk.
-
-    The program is the whole question — a net whose program is a path that does
-    not exist is not a net — so it is read where launchd reads it, rather than
-    out of whatever the test last computed.
-    """
-    plist, _ = update_host._recovery_plists(state)
-    with plist.open("rb") as handle:
-        return plistlib.load(handle)["ProgramArguments"][0]
 
 
 def _login_recover_plist() -> Path:
@@ -1124,7 +957,7 @@ def _loaded_hosted_job(
 
 
 # What a real `com.ciao.updater` is running when a swap is in flight: the verb
-# `apply_update` writes, with the one-shot's own arguments beside it.
+# the 1.x apply writes, with the one-shot's own arguments beside it.
 _RUN_APPLY_ARGUMENTS = (
     "-I",
     "-m",
@@ -1277,256 +1110,6 @@ def phases(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return seen
 
 
-def test_apply_drains_then_bootstraps_updater(tmp_path: Path) -> None:
-    op, state, _, engine = _staged(tmp_path)
-    # Two readings with work, then a settled engine: one empty reading is not
-    # a drained engine.
-    engine.active_script = [["c1"], ["c1"], [], [], []]
-
-    result = _apply(engine, state)
-
-    # The drain is polled by POSTing it again rather than by reading
-    # a separate chat list.
-    # Every request the engine saw is the drain itself.
-    assert engine.posts == [f"{BASE}/api/admin/drain"] * 5
-    assert result.phase == "applying"
-    assert read_operation(state) == result
-    # Two readings with work in flight, then exactly three settled ones: a
-    # single empty reading is not a drained engine.
-    assert engine.polls == 5
-
-    # Bootout before bootstrap for each of the two jobs it loads here, and the
-    # plist handed to launchctl is the one on disk. The updater performs the
-    # swap; the recovery agent behind it is the net for a swap that never
-    # finishes (`test_apply_installs_a_durable_recovery_agent`).
-    assert [call[0] for call in engine.launchctl_calls] == [
-        "bootout",
-        "bootstrap",
-        "bootout",
-        "bootstrap",
-    ]
-    assert engine.booted_out(UPDATER_LABEL)
-    plist_path = Path(
-        next(
-            call[-1]
-            for call in engine.launchctl_calls
-            if call[-1] == str(state / UPDATER_PLIST_NAME)
-        )
-    )
-    assert plist_path.is_file()
-    assert is_private(plist_path)
-
-    plist = plistlib.loads(plist_path.read_bytes())
-    assert plist["Label"] == UPDATER_LABEL
-    # A relaunching updater would re-run the swap every few seconds.
-    assert plist["KeepAlive"] is False
-    assert plist["RunAtLoad"] is True
-    # Its own process group, so booting the engine out cannot take it with it.
-    assert plist["AbandonProcessGroup"] is True
-    # From the staged env: the job must not be running the env it replaces. That
-    # env is a uv tool env of this update's own, under the stage dir — the
-    # directory the apply moves into the live env's place, so this job is running
-    # an env the swap *does* consume, and `run_apply` re-points the durable
-    # recovery agent at the `previous-env` it keeps for exactly that reason.
-    staged_env = Path(op.stage_dir) / "tool" / TOOL_DIR_NAME
-    assert op.env_python == str(staged_env / "bin" / "python")
-    assert not Path(op.env_python).is_relative_to(engine.live_env)
-    assert plist["ProgramArguments"] == [
-        op.env_python,
-        "-I",
-        "-m",
-        "ciao.engine_update",
-        "run-apply",
-        "--operation",
-        op.id,
-    ]
-    assert plist["StandardOutPath"] == str(Path(op.stage_dir) / "updater.log")
-    assert plist["StandardErrorPath"] == str(Path(op.stage_dir) / "updater.log")
-
-
-def test_apply_drain_timeout_cancels_and_leaves_engine(tmp_path: Path) -> None:
-    _, state, _, engine = _staged(tmp_path)
-    engine.busy = True  # a turn that never settles
-
-    with pytest.raises(UpdateError, match="left untouched"):
-        _apply(engine, state, drain_timeout=5.0)
-
-    record = read_operation(state)
-    assert record is not None
-    assert record.phase == "failed"
-    assert "drain timed out after 5s" in record.error
-    assert "left untouched" in record.error
-    # Admission is reopened: an engine left refusing turns is worse than the
-    # update it was waiting for. The cancel is the last thing asked of the
-    # engine — everything before it is the drain itself, polled by re-POSTing.
-    assert engine.posts[-1] == f"{BASE}/api/admin/drain/cancel"
-    assert set(engine.posts) == {f"{BASE}/api/admin/drain", f"{BASE}/api/admin/drain/cancel"}
-    # Nothing was stopped, and no updater job was started.
-    assert engine.launchctl_calls == []
-    assert not (state / UPDATER_PLIST_NAME).exists()
-
-
-def test_apply_passes_drain_owner_to_cancel(tmp_path: Path) -> None:
-    """An unattended apply names its owner on the drain and on the cancel."""
-    _, state, _, engine = _staged(tmp_path)
-    engine.busy = True  # the drain can never finish, so the cancel must land
-    seen: list[tuple[str, dict[str, Any] | None]] = []
-
-    def post(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
-        seen.append((url, body))
-        return engine.post(url)
-
-    with pytest.raises(UpdateError, match="left untouched"):
-        apply_update(
-            state_dir=state,
-            port=PORT,
-            http_post=post,
-            launchctl=engine.launchctl,
-            uid=501,
-            sleep=lambda seconds: None,
-            clock=_FakeClock(),
-            drain_timeout=5.0,
-            drain_owner="auto-1",
-        )
-
-    # Every request the handshake made — the drain, each poll and the cancel —
-    # carries the owner, so the engine can refuse a cancel from anything else.
-    assert seen
-    assert all(body == {"owner": "auto-1"} for _url, body in seen)
-    assert seen[-1][0] == f"{BASE}/api/admin/drain/cancel"
-    assert {url for url, _body in seen} == {
-        f"{BASE}/api/admin/drain",
-        f"{BASE}/api/admin/drain/cancel",
-    }
-
-    # A manual apply sends no body at all, so its handshake is byte-identical
-    # to the one it has always sent.
-    _, manual_state, _, manual_engine = _staged(tmp_path / "manual")
-    manual_engine.busy = True
-    manual_seen: list[tuple[str, dict[str, Any] | None]] = []
-
-    def manual_post(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
-        manual_seen.append((url, body))
-        return manual_engine.post(url)
-
-    with pytest.raises(UpdateError, match="left untouched"):
-        apply_update(
-            state_dir=manual_state,
-            port=PORT,
-            http_post=manual_post,
-            launchctl=manual_engine.launchctl,
-            uid=501,
-            sleep=lambda seconds: None,
-            clock=_FakeClock(),
-            drain_timeout=5.0,
-        )
-
-    assert manual_seen
-    assert all(body is None for _url, body in manual_seen)
-
-
-def _apply_with_post(engine: _FakeEngine, state: Path, post: Any) -> Operation:
-    return apply_update(
-        state_dir=state,
-        port=PORT,
-        http_post=post,
-        launchctl=engine.launchctl,
-        uid=501,
-        sleep=lambda seconds: None,
-        clock=_FakeClock(),
-    )
-
-
-def test_apply_drain_request_timeout_names_the_step(tmp_path: Path) -> None:
-    _, state, _, engine = _staged(tmp_path)
-    posts: list[str] = []
-
-    def post(url: str) -> dict[str, Any]:
-        posts.append(url)
-        if url.endswith("/drain/cancel"):
-            return {}
-        raise TimeoutError("timed out")
-
-    with pytest.raises(UpdateError, match="did not answer the drain request within 30s"):
-        _apply_with_post(engine, state, post)
-
-    record = read_operation(state)
-    assert record is not None
-    assert record.phase == "failed"
-    assert "nothing was stopped or swapped" in record.error
-    assert posts[-1] == f"{BASE}/api/admin/drain/cancel"
-    assert engine.launchctl_calls == []
-
-
-def test_apply_drain_poll_timeout_names_the_poll(tmp_path: Path) -> None:
-    _, state, _, engine = _staged(tmp_path)
-    calls = {"drain": 0}
-
-    def post(url: str) -> dict[str, Any]:
-        if url.endswith("/drain/cancel"):
-            return {}
-        calls["drain"] += 1
-        if calls["drain"] == 1:
-            return {"active_chat_ids": ["c1"]}
-        raise urllib.error.URLError(TimeoutError("timed out"))
-
-    with pytest.raises(UpdateError) as info:
-        _apply_with_post(engine, state, post)
-
-    assert "drain status poll" in str(info.value)
-    assert "within 30s" in str(info.value)
-
-
-def test_apply_drain_refused_reports_the_engine_reason(tmp_path: Path) -> None:
-    _, state, _, engine = _staged(tmp_path)
-
-    def post(url: str) -> dict[str, Any]:
-        if url.endswith("/drain/cancel"):
-            return {}
-        raise urllib.error.HTTPError(
-            url, 409, "Conflict", {}, io.BytesIO(b'{"error": "a restart is already draining"}')  # type: ignore[arg-type]
-        )
-
-    with pytest.raises(UpdateError) as info:
-        _apply_with_post(engine, state, post)
-
-    assert "refused the drain request (HTTP 409: a restart is already draining)" in str(info.value)
-
-
-def test_apply_unreachable_engine_names_the_drain_request(tmp_path: Path) -> None:
-    _, state, _, engine = _staged(tmp_path)
-
-    def post(url: str) -> dict[str, Any]:
-        if url.endswith("/drain/cancel"):
-            return {}
-        raise urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
-
-    with pytest.raises(UpdateError) as info:
-        _apply_with_post(engine, state, post)
-
-    assert str(info.value).startswith("could not reach the running engine for the drain request:")
-
-
-def test_apply_failed_cancel_is_recorded(tmp_path: Path) -> None:
-    _, state, _, engine = _staged(tmp_path)
-
-    def post(url: str) -> dict[str, Any]:
-        raise TimeoutError("timed out")
-
-    with pytest.raises(UpdateError) as info:
-        _apply_with_post(engine, state, post)
-
-    message = str(info.value)
-    assert "did not answer the drain request" in message
-    assert (
-        "reopening chats also failed (the running engine did not answer the drain cancel within 30s"
-        in message
-    )
-    record = read_operation(state)
-    assert record is not None
-    assert record.error == message
-
-
 def test_drain_requests_use_the_drain_timeout() -> None:
     seen: list[float] = []
 
@@ -1548,16 +1131,6 @@ def test_drain_requests_use_the_drain_timeout() -> None:
     engine_update._get_json("http://localhost/x", opener=opener)
 
     assert seen == [30.0, 5.0]
-
-
-def test_apply_refuses_without_staged_update(tmp_path: Path) -> None:
-    state = tmp_path / "empty"
-    state.mkdir()
-
-    with pytest.raises(UpdateError, match="nothing staged"):
-        _apply(_FakeEngine(tmp_path / "tools" / TOOL_DIR_NAME), state)
-
-    assert read_operation(state) is None
 
 
 def test_run_apply_happy_path(tmp_path: Path, phases: list[str]) -> None:
@@ -1647,7 +1220,6 @@ def test_run_apply_offline_apply_succeeds(tmp_path: Path) -> None:
     assert (engine.live_env / "uv-receipt.toml").is_file()
 
 
-@mac_update_host
 def test_run_apply_entry_point_shims_point_at_the_new_env(tmp_path: Path) -> None:
     op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
     bin_dir = tmp_path / "bin"
@@ -1705,7 +1277,6 @@ def test_run_apply_falls_back_to_rollback_when_shims_cannot_be_written(
     assert engine.up is True
 
 
-@mac_update_host
 def test_run_apply_refuses_an_entry_point_the_staged_path_survives_in(
     tmp_path: Path,
 ) -> None:
@@ -1913,42 +1484,6 @@ def test_run_apply_prunes_older_previous_env_only_after_success(tmp_path: Path) 
 # just what the assertion is.
 
 
-def test_apply_interrupt_reopens_admission(tmp_path: Path) -> None:
-    _, state, _, engine = _staged(tmp_path)
-    engine.busy = True  # a turn that never settles
-
-    def interrupt(seconds: float) -> None:
-        raise KeyboardInterrupt
-
-    with pytest.raises(KeyboardInterrupt):
-        _apply(engine, state, drain_timeout=600.0, sleep=interrupt)
-
-    record = read_operation(state)
-    assert record is not None
-    # Ctrl-C, SIGHUP and SIGTERM are the ordinary ways a wait of up to ten
-    # minutes ends. Skipping the cancel on any of them leaves the engine
-    # refusing every turn with nothing in the record to say why.
-    assert record.phase == "failed"
-    assert engine.posts[-1] == f"{BASE}/api/admin/drain/cancel"
-    # The engine was never stopped, so the staged env is intact and the apply
-    # can simply be run again.
-    assert engine.launchctl_calls == []
-    assert _env_version(engine.live_env) == FROM_VERSION
-
-
-def test_apply_after_failed_apply_names_the_failure(tmp_path: Path) -> None:
-    op, state, _, engine = _staged(tmp_path)
-    op.phase = "failed"
-    op.error = "drain timed out after 5s; the running engine was left untouched"
-    write_operation(op, state)
-
-    with pytest.raises(UpdateError, match="last apply failed: drain timed out after 5s"):
-        _apply(engine, state)
-
-    # Nothing was drained this time: the refusal is before the drain.
-    assert engine.posts == []
-
-
 def test_run_apply_preflight_refusal_reopens_admission(tmp_path: Path) -> None:
     op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
     # The receipt the swap replaces is gone. The pre-flight refuses here,
@@ -1991,7 +1526,7 @@ def test_run_apply_refuses_when_the_install_changed(tmp_path: Path) -> None:
     assert result.phase == "failed"
     assert "the installed engine is 1.3.0" in result.error
     assert f"staged from {FROM_VERSION}" in result.error
-    assert "ciao update stage" in result.error
+    assert "stage the update again" in result.error
     assert engine.posts == [f"{BASE}/api/admin/drain/cancel"]
     # The install the user actually has is untouched.
     assert _env_version(engine.live_env) == "1.3.0"
@@ -2125,71 +1660,6 @@ def test_local_opener_bypasses_the_system_proxy() -> None:
         assert helper.__kwdefaults__["opener"] == opener.open  # type: ignore[index]
 
 
-def test_default_fetch_caps_the_download_and_leaves_nothing_behind(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    payload = b"far more than the manifest described" * 1024
-
-    class _Response(io.BytesIO):
-        def __enter__(self) -> _Response:
-            return self
-
-        def __exit__(self, *args: Any) -> None:
-            self.close()
-
-    monkeypatch.setattr(
-        urllib.request, "urlopen", lambda request, timeout=0.0: _Response(payload)
-    )
-    slept: list[float] = []
-    monkeypatch.setattr(time, "sleep", lambda seconds: slept.append(seconds))
-
-    dest = tmp_path / "out" / "big.bin"
-    with pytest.raises(UpdateError, match="larger than"):
-        default_fetch("https://example.test/big.bin", dest, max_bytes=1024)
-
-    # Not retried: the server is answering fine, it is just serving something
-    # this release does not describe.
-    assert slept == []
-    assert not dest.exists()
-    # The oversized bytes are dropped rather than left for a retry to find.
-    assert list(dest.parent.glob("*.part")) == []
-
-
-def test_cli_apply_rejects_an_unusable_drain_timeout(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    # A timeout below the floor is a typo, and `inf` is worse than one: it
-    # removes the deadline, so a drain that never completes keeps the engine
-    # refusing turns with no upper bound on when that ends. Both are refused
-    # as arguments, before anything is drained.
-    for value in ("0", "-5", "0.5", "inf", "nan", "soon"):
-        with pytest.raises(SystemExit):
-            main(["apply", "--drain-timeout", value])
-        assert "--drain-timeout" in capsys.readouterr().err, value
-
-    # The default is still the long one, and the floor is accepted.
-    assert engine_update._drain_timeout_arg("600") == 600.0
-    assert engine_update._drain_timeout_arg("1") == 1.0
-
-
-@mac_update_host
-def test_cli_apply_reports_an_interrupted_apply(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setattr(
-        "ciao.package_version.detect_install_mode", lambda: "installer"
-    )
-
-    def interrupt(**kwargs: Any) -> Any:
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(engine_update, "apply_update", interrupt)
-
-    assert main(["apply"]) == 130
-
-    assert "cancelled" in capsys.readouterr().err
-
-
 def test_status_prints_new_phases(capsys: pytest.CaptureFixture[str]) -> None:
     write_operation(
         Operation(
@@ -2245,7 +1715,7 @@ def test_recover_interrupted_apply_bootstraps_a_detached_recovery_job(
     assert engine.booted_out(UPDATER_LABEL)
     assert Path(engine.launchctl_calls[-1][-1]) == plist_path
     plist = plistlib.loads(plist_path.read_bytes())
-    # The same one-shot, abandon-process-group job `apply_update` uses, in its
+    # The same one-shot, abandon-process-group job the 1.x apply uses, in its
     # recovery role — the one that survives the bootout of the engine.
     assert plist["Label"] == UPDATER_LABEL
     assert plist["RunAtLoad"] is True
@@ -2488,182 +1958,6 @@ def test_run_apply_allows_a_missing_server_plist(
 # launchd, the service starter, the engine's HTTP surface, the clock and sleep
 # are doubles throughout, and `acquire_lock` in these tests is the real lock —
 # no real launchd, no real env and no socket is touched.
-
-
-def test_apply_installs_a_durable_recovery_agent(tmp_path: Path) -> None:
-    op, state, receipt_path, engine = _staged(tmp_path)
-
-    _apply(engine, state)
-
-    # Installed behind the updater, before `run_apply` stops anything, and from
-    # the staged env: the swap replaces the live one, so a recovery that ran out
-    # of it would be fixing the fire with the fuel.
-    recover_plist = state / RECOVER_PLIST_NAME
-    assert recover_plist.is_file()
-    assert is_private(recover_plist)
-    plist = plistlib.loads(recover_plist.read_bytes())
-    assert plist["Label"] == RECOVER_LABEL
-    assert plist["ProgramArguments"] == [
-        op.env_python,
-        "-I",
-        "-m",
-        "ciao.engine_update",
-        "run-recover",
-        "--operation",
-        op.id,
-    ]
-    # Loaded and then *re-checked*: unlike the one-shot updater, this job has to
-    # still be there after the reboot, the logout and the death of the job that
-    # installed it. A one-shot `RunAtLoad` would not be.
-    assert plist["RunAtLoad"] is True
-    assert plist["StartInterval"] == 30
-    # A failed tick must not become a relaunch loop, and the engine's bootout
-    # must not take the net down with it.
-    assert plist["KeepAlive"] is False
-    assert plist["AbandonProcessGroup"] is True
-    # Its own log beside the updater's: two jobs writing into one file would
-    # interleave their output into something nobody can read.
-    assert plist["StandardOutPath"] == str(Path(op.stage_dir) / "recover.log")
-    assert plist["StandardErrorPath"] == str(Path(op.stage_dir) / "recover.log")
-
-    # A job registered with `bootstrap` lives in launchd's database for this
-    # login only; the login-time scan — the one thing that re-registers agents
-    # after a reboot or a logout — reads the LaunchAgents directory and nothing
-    # else. Without this second copy the plist above describes a net that
-    # disappears with the crash it was installed for.
-    login_plist = _login_recover_plist()
-    assert login_plist.is_file()
-    assert login_plist.read_bytes() == recover_plist.read_bytes()
-    assert is_private(login_plist)
-
-
-def test_apply_installs_the_recovery_agent_before_the_engine_is_stopped(
-    tmp_path: Path,
-) -> None:
-    op, state, receipt_path, engine = _staged(tmp_path)
-
-    _apply(engine, state)
-    # On disk from the moment the apply hands off, so the swap below runs with the
-    # net in place and takes it away again itself.
-    assert (state / RECOVER_PLIST_NAME).is_file()
-    result = _run(engine, op, state, receipt_path)
-
-    assert result.phase == "applied"
-    calls = engine.launchctl_calls
-
-    def where(action: str, endswith: str) -> int:
-        return next(
-            i
-            for i, call in enumerate(calls)
-            if call[0] == action and call[-1].endswith(endswith)
-        )
-
-    # The whole point of the ordering: the net is in place before the engine is
-    # stopped, because the crash window it covers is one where nothing inside the
-    # engine can run to notice.
-    assert where("bootstrap", RECOVER_PLIST_NAME) < where("bootout", SERVER_LABEL)
-
-
-def test_the_swap_re_points_the_recovery_agent_away_from_the_staged_env(
-    tmp_path: Path,
-) -> None:
-    op, state, receipt_path, engine = _staged(tmp_path)
-    staged_python = op.env_python
-    previous_python = str(Path(op.stage_dir) / PREVIOUS_ENV_NAME / "bin" / "python")
-
-    _apply(engine, state)
-
-    # Out of the staged env, which is the one env the swap is about to move into
-    # the live env's place.
-    assert _agent_program(state) == staged_python
-    assert Path(staged_python).is_file()
-
-    # Read in the gap the swap itself opens — between the rename and the entry
-    # points being repaired — which is the window where `com.ciao.server` cannot
-    # start at all and launchd is the only thing left that can finish the job.
-    mid_swap: list[str] = []
-
-    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        mid_swap.append(_agent_program(state))
-        return engine.probe_run(argv, **kwargs)
-
-    def killed(starts: int) -> dict[str, Any]:
-        raise KeyboardInterrupt
-
-    engine.readiness = killed
-    with pytest.raises(KeyboardInterrupt):
-        _run(engine, op, state, receipt_path, run=run)
-
-    # Killed where the reviewer's own reproduction dies: the record sits in
-    # `verifying_start` with the engine up, and `main.py` already deferred at
-    # that boot, so nothing is going to re-invoke the startup hook.
-    record = read_operation(state)
-    assert record is not None
-    assert record.phase == "verifying_start"
-    # The staged env is gone — consumed by the swap, which installs it as the
-    # live one — and the net is not: its program is the env the swap kept.
-    assert not Path(staged_python).exists()
-    assert _env_version(engine.live_env) == TO_VERSION
-    assert Path(previous_python).is_file()
-    assert mid_swap == [previous_python]
-    assert _agent_program(state) == previous_python
-    assert Path(_agent_program(state)).is_file()
-
-
-def test_a_recovery_agent_that_cannot_be_re_pointed_does_not_fail_the_swap(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    op, state, receipt_path, engine = _staged(tmp_path)
-    _apply(engine, state)
-    # Nothing left for the re-point to write over: the record of the agent is a
-    # directory. The swap is fine on its own terms, and this is the same bargain
-    # `apply_update` makes: a missing net must not cost the operator an update
-    # that works — `recover_interrupted_apply` still covers the paths where the
-    # engine comes back.
-    (state / RECOVER_PLIST_NAME).unlink()
-    (state / RECOVER_PLIST_NAME).mkdir()
-
-    with caplog.at_level("WARNING"):
-        result = _run(engine, op, state, receipt_path)
-
-    assert result.phase == "applied"
-    assert result.error == ""
-    # Loudly: the operator has to be able to tell this from a swap that was
-    # never covered at all.
-    assert "could not re-point" in caplog.text
-    assert _env_version(engine.live_env) == TO_VERSION
-    assert (Path(op.stage_dir) / PREVIOUS_ENV_NAME).exists()
-
-
-def test_a_successful_swap_retires_the_recovery_agent(tmp_path: Path) -> None:
-    op, state, receipt_path, engine = _staged(tmp_path)
-
-    _apply(engine, state)
-    assert (state / RECOVER_PLIST_NAME).is_file()
-    result = _run(engine, op, state, receipt_path)
-
-    assert result.phase == "applied"
-    # The update is a fact about the machine, not a transaction to be recovered,
-    # so the job is booted out *and* both of its plists deleted: leaving either
-    # behind means the next 30 seconds — or the next login — re-reads a settled
-    # record.
-    assert engine.booted_out(RECOVER_LABEL)
-    assert not (state / RECOVER_PLIST_NAME).exists()
-    assert not _login_recover_plist().exists()
-    retired = max(
-        i
-        for i, call in enumerate(engine.launchctl_calls)
-        if call[0] == "bootout" and call[-1].endswith(RECOVER_LABEL)
-    )
-    stopped = next(
-        i
-        for i, call in enumerate(engine.launchctl_calls)
-        if call[0] == "bootout" and call[-1].endswith(SERVER_LABEL)
-    )
-    assert stopped < retired
-    # The agent's own retirement is not a rollback, and must not look like one.
-    assert engine.starts == 1
-    assert _env_version(engine.live_env) == TO_VERSION
 
 
 def test_a_rolled_back_swap_retires_the_recovery_agent(tmp_path: Path) -> None:
@@ -3165,7 +2459,6 @@ def test_run_apply_still_refuses_an_entry_point_the_receipt_does_not_name(
 # the host serves; the interpreter is what names the engine install the job runs.
 
 
-@mac_update_host
 def test_run_apply_allows_a_hosted_job_serving_the_receipt_env(
     tmp_path: Path,
 ) -> None:
@@ -3190,7 +2483,6 @@ def test_run_apply_allows_a_hosted_job_serving_the_receipt_env(
     assert engine.starts == 1
 
 
-@mac_update_host
 def test_run_apply_refuses_a_hosted_job_serving_a_foreign_env(
     tmp_path: Path,
 ) -> None:
@@ -3221,7 +2513,6 @@ def test_run_apply_refuses_a_hosted_job_serving_a_foreign_env(
     assert engine.run_calls == []
 
 
-@mac_update_host
 def test_a_hosted_command_with_a_non_python_interpreter_refuses(
     tmp_path: Path,
 ) -> None:
@@ -3258,7 +2549,6 @@ def test_a_hosted_command_with_a_non_python_interpreter_refuses(
     assert engine.starts == 0
 
 
-@mac_update_host
 def test_a_loaded_revision_one_host_is_refused_without_touching_anything(
     tmp_path: Path,
 ) -> None:
@@ -3282,7 +2572,6 @@ def test_a_loaded_revision_one_host_is_refused_without_touching_anything(
     assert _env_version(engine.live_env) == FROM_VERSION
 
 
-@mac_update_host
 def test_an_ordinary_engine_update_leaves_the_host_definition_and_bytes_untouched(
     tmp_path: Path,
 ) -> None:
@@ -3311,7 +2600,6 @@ def test_an_ordinary_engine_update_leaves_the_host_definition_and_bytes_untouche
     assert executable.read_bytes() == host_before
 
 
-@mac_update_host
 def test_a_failed_hosted_update_rolls_back_to_the_same_hosted_state(
     tmp_path: Path,
 ) -> None:
@@ -3345,12 +2633,11 @@ def test_a_failed_hosted_update_rolls_back_to_the_same_hosted_state(
 def test_an_ordinary_engine_update_leaves_the_direct_definition_untouched(
     tmp_path: Path,
 ) -> None:
-    # D2 on the shape Windows actually uses: the service definition runs the
-    # engine directly (`<env>/bin/python -m ciao.cli ...`), with no native host
-    # and no launchd. The swap moves the *engine* env and must leave the service
-    # definition bytes exactly as they were — on Windows and everywhere else.
-    # No launchctl is needed: a direct-loaded job is recognised through the same
-    # `server_command` seam, so this runs in the native Windows job.
+    # D2 on the direct shape: the service definition runs the engine directly
+    # (`<env>/bin/python -m ciao.cli ...`), with no native host. The swap moves
+    # the *engine* env and must leave the service definition bytes exactly as
+    # they were. A direct-loaded job is recognised through the `server_command`
+    # seam.
     op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
     definition_plist = _write_server_plist(engine.live_env / "bin" / "python")
     definition_before = definition_plist.read_bytes()
@@ -3568,26 +2855,6 @@ def test_the_receipt_entry_point_is_compared_resolved(tmp_path: Path) -> None:
     assert engine_update._runs_the_receipt_install(other, env, executable) is False
 
 
-@pytest.mark.parametrize(
-    ("platform", "host_platform", "expected"),
-    [
-        ("darwin", "macosx-11.0-arm64", "3.13"),
-        ("linux", "linux-x86_64", "3.13"),
-        ("win32", "win-amd64", "cpython-3.13-windows-x86_64-none"),
-        ("win32", "win-arm64", "cpython-3.13-windows-aarch64-none"),
-    ],
-)
-def test_python_request_keeps_the_running_version_and_windows_architecture(
-    monkeypatch: pytest.MonkeyPatch, platform: str, host_platform: str, expected: str
-) -> None:
-    # An x64 engine on Windows on Arm must restage as x64: a bare version lets
-    # uv pick an Arm64 interpreter, for which cryptography ships no wheel.
-    monkeypatch.setattr(engine_update.sys, "platform", platform)
-    monkeypatch.setattr(engine_update.sys, "version_info", SimpleNamespace(major=3, minor=13))
-    monkeypatch.setattr(engine_update.sysconfig, "get_platform", lambda: host_platform)
-    assert engine_update.python_request() == expected
-
-
 def test_pick_wheel_ignores_installer_artifacts(tmp_path: Path) -> None:
     # #2483: a manifest that lists the installer scripts still yields exactly one
     # wheel to the updater, because the updater filters by kind.
@@ -3599,7 +2866,7 @@ def test_pick_wheel_ignores_installer_artifacts(tmp_path: Path) -> None:
     raw = json.dumps(
         build_manifest(
             "1.2.3",
-            [installer_artifact_entry(installer), wheel],
+            [artifact_entry(installer, kind="installer", platform="macos"), wheel],
             created="2026-09-25T10:00:00+00:00",
         )
     ).encode()

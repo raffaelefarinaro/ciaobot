@@ -330,26 +330,26 @@ def test_get_answers_200_for_a_state_nobody_could_prove(
 ) -> None:
     recorder = _Recorder()
     recorder.status_result = service_login.LoginStatus(
-        platform="windows",
+        platform="macos",
         supported=True,
         installed=None,
         enabled=None,
         can_change=False,
-        reason="Task Scheduler did not return the engine task's definition.",
-        setup_command='schtasks.exe /Query /TN "\\Ciaobot\\Engine" /XML',
+        reason="launchctl print-disabled failed, so the sign-in state is unknown.",
+        setup_command=None,
     )
     with _client(recorder, monkeypatch, tmp_path) as client:
         response = client.get("/api/service/login", headers=_signed(client))
 
     assert response.status_code == 200
     assert response.json() == {
-        "platform": "windows",
+        "platform": "macos",
         "supported": True,
         "installed": None,
         "enabled": None,
         "can_change": False,
-        "reason": "Task Scheduler did not return the engine task's definition.",
-        "setup_command": 'schtasks.exe /Query /TN "\\Ciaobot\\Engine" /XML',
+        "reason": "launchctl print-disabled failed, so the sign-in state is unknown.",
+        "setup_command": None,
     }
 
 
@@ -438,9 +438,9 @@ def test_a_verification_failure_is_503_and_never_200(
 ) -> None:
     recorder = _Recorder()
     recorder.set_result = service_login.LoginUnavailable(
-        "Task Scheduler reported the change, but the re-read sign-in state is False.",
+        "launchctl reported the change, but the re-read sign-in state is False.",
         service_login.LoginStatus(
-            platform="windows",
+            platform="macos",
             supported=True,
             installed=True,
             enabled=False,
@@ -486,7 +486,7 @@ def test_neither_route_reaches_the_operating_system_itself(
     def _unavailable(*_args: Any, **_kwargs: Any) -> None:  # pragma: no cover
         raise AssertionError("the route reached the operating system")
 
-    for name in ("_launchctl_run", "_query_task_xml", "_set_task_enabled", "_uid"):
+    for name in ("_launchctl_run", "_uid"):
         monkeypatch.setattr(service_login, name, _unavailable)
 
     recorder = _Recorder()

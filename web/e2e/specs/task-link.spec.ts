@@ -1,9 +1,13 @@
-import { expect, test, type Page } from '@playwright/test'
+import { devices, expect, test, type CDPSession, type Page } from '@playwright/test'
 import { COMPOSER, boot, fixtureWrites, isolate, quiesce } from '../support/app'
 
 const TASK_ID = '0123456789abcdef0123456789abcdef'
 const TITLE = 'Reply to Ivo in the Feedback Tracker'
 const EDITOR = '.task-detail-sheet'
+const TOUCH_MIN = 44
+const MEASURE_ATTEMPTS = 3
+const touchSessions = new WeakMap<Page, CDPSession>()
+const { defaultBrowserType: _defaultBrowserType, ...iPhone13 } = devices['iPhone 13']
 
 /**
  * Why this is a browser test: whether a link opens a second tab, reloads the
@@ -27,6 +31,55 @@ async function openTaskLink(page: Page) {
   // A full page load would clear this marker; opening in place keeps it.
   await page.evaluate(() => { (window as unknown as { __kept: boolean }).__kept = true })
   return link
+}
+
+async function ensureCoarsePointer(page: Page) {
+  const coarse = () => page.waitForFunction(() => matchMedia('(pointer: coarse)').matches, null, { timeout: 3000 })
+    .then(() => true, () => false)
+  if (await coarse()) return
+  let session = touchSessions.get(page)
+  if (!session) {
+    session = await page.context().newCDPSession(page)
+    touchSessions.set(page, session)
+  }
+  await session.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 })
+  if (await coarse()) return
+  throw new Error('page is not a coarse pointer; task editor sizes would be fine-pointer ones')
+}
+
+async function measureTaskEditor(page: Page, beforeMeasure?: () => Promise<void>) {
+  for (let attempt = 1; attempt <= MEASURE_ATTEMPTS; attempt += 1) {
+    await ensureCoarsePointer(page)
+    await quiesce(page)
+    await beforeMeasure?.()
+    const small = await page.evaluate(({ selector, min }) => {
+      // Check in the same evaluation as the reads so a fine-pointer layout is discarded.
+      if (!matchMedia('(pointer: coarse)').matches) return null
+      const selectorList = 'button, a[href], [role=button], [role=switch], [role=tab], [role=checkbox], '
+        + '[role=radio], [role=menuitem], [role=option], input:not([type=hidden]), select, summary'
+      const bad: string[] = []
+      for (const raw of Array.from(document.querySelectorAll(`${selector} :is(${selectorList})`))) {
+        const el = raw instanceof HTMLInputElement && (raw.type === 'checkbox' || raw.type === 'radio')
+          ? (raw.closest('label') ?? raw)
+          : raw
+        const parent = el.parentElement
+        if (el.tagName === 'A' && parent && ['P', 'LI'].includes(parent.tagName)
+          && Array.from(parent.childNodes).some(node => node.nodeType === Node.TEXT_NODE && (node.textContent ?? '').trim() !== '')) {
+          continue
+        }
+        const cs = getComputedStyle(el)
+        if (cs.visibility === 'hidden') continue
+        const rect = el.getBoundingClientRect()
+        if (rect.width === 0 || rect.height === 0) continue
+        if (rect.height < min - 0.5 || rect.width < min - 0.5) {
+          bad.push(`"${(el.getAttribute('aria-label') || el.textContent || '').trim().slice(0, 40)}" ${Math.round(rect.height)}×${Math.round(rect.width)}`)
+        }
+      }
+      return bad
+    }, { selector: EDITOR, min: TOUCH_MIN })
+    if (small) return small
+  }
+  throw new Error(`page lost coarse pointer before all ${MEASURE_ATTEMPTS} task editor measurements`)
 }
 
 test.describe('a task link in a chat reply', () => {
@@ -158,44 +211,47 @@ test.describe('a task link in a chat reply', () => {
 })
 
 test.describe('the task editor over a chat on a phone', () => {
-  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true })
+  test.use(iPhone13)
 
   test.beforeEach(async ({ page }, testInfo) => {
     await isolate(page, `task-link-phone-${testInfo.workerIndex}-${testInfo.testId}`)
   })
 
-  test('meets the 44px touch minimum', async ({ page }) => {
+  async function openEditor(page: Page) {
     const link = await openTaskLink(page)
     await link.click()
     await expect(page.locator(EDITOR)).toBeVisible()
-    // Measure only once the sheet's styles (including the coarse-pointer sizes)
-    // have applied: a size read before them is the fine-pointer one.
-    await quiesce(page)
+  }
 
-    const small = await page.evaluate((selector) => {
-      const selectorList = 'button, a[href], [role=button], [role=switch], [role=tab], [role=checkbox], '
-        + '[role=radio], [role=menuitem], [role=option], input:not([type=hidden]), select, summary'
-      const bad: string[] = []
-      for (const raw of Array.from(document.querySelectorAll(`${selector} :is(${selectorList})`))) {
-        const el = raw instanceof HTMLInputElement && (raw.type === 'checkbox' || raw.type === 'radio')
-          ? (raw.closest('label') ?? raw)
-          : raw
-        const parent = el.parentElement
-        // An inline prose link sits among sentence text (WCAG 2.5.8 exception).
-        if (el.tagName === 'A' && parent && ['P', 'LI'].includes(parent.tagName)
-          && Array.from(parent.childNodes).some(node => node.nodeType === Node.TEXT_NODE && (node.textContent ?? '').trim() !== '')) {
-          continue
-        }
-        const cs = getComputedStyle(el)
-        if (cs.visibility === 'hidden') continue
-        const rect = el.getBoundingClientRect()
-        if (rect.width === 0 || rect.height === 0) continue
-        if (rect.height < 43.5 || rect.width < 43.5) {
-          bad.push(`"${(el.getAttribute('aria-label') || el.textContent || '').trim().slice(0, 40)}" ${Math.round(rect.height)}×${Math.round(rect.width)}`)
-        }
-      }
-      return bad
-    }, EDITOR)
+  async function loseTouchProfile(page: Page) {
+    const session = await page.context().newCDPSession(page)
+    await session.send('Emulation.setTouchEmulationEnabled', { enabled: false })
+    expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(false)
+    expect(await page.evaluate(() => navigator.maxTouchPoints)).toBe(0)
+  }
+
+  test('meets the 44px touch minimum', async ({ page }) => {
+    await openEditor(page)
+    expect(await measureTaskEditor(page)).toEqual([])
+  })
+
+  test('repairs a dropped touch profile before measuring', async ({ page }) => {
+    await openEditor(page)
+    await loseTouchProfile(page)
+    expect(await measureTaskEditor(page)).toEqual([])
+    expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true)
+  })
+
+  test('discards a fine-pointer read if touch is lost between repair and measurement', async ({ page }) => {
+    await openEditor(page)
+    let flipped = false
+    const small = await measureTaskEditor(page, async () => {
+      if (flipped) return
+      flipped = true
+      await loseTouchProfile(page)
+    })
+    expect(flipped).toBe(true)
     expect(small).toEqual([])
+    expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true)
   })
 })

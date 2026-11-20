@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -16,7 +17,7 @@ from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig
 from ciao.setup_marker import read_setup_vault_mode
-from ciao.setup_status import claude_auth_status, setup_status
+from ciao.setup_status import claude_auth_status, claude_status_probe, setup_status
 from ciao.web.auth import AuthMiddleware
 from ciao.web.routes_api import (
     provider_connection_action,
@@ -33,6 +34,11 @@ _LOOPBACK_PEER = ("127.0.0.1", 50000)
 
 
 @pytest.fixture(autouse=True)
+def _stub_auth_list(monkeypatch):
+    monkeypatch.setattr("ciao.opencode_cli.bounded_output", lambda *a, **k: (0, b"[]"))
+
+
+@pytest.fixture(autouse=True)
 def claude_cli_present(monkeypatch):
     """Pretend the ``claude`` CLI is installed.
 
@@ -43,6 +49,8 @@ def claude_cli_present(monkeypatch):
     monkeypatch.setattr(
         "ciao.setup_status.claude_cli_path", lambda: "/usr/local/bin/claude"
     )
+    # Claude chats run through the ACP adapter, so the adapter counts as installed too.
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: "ready")
     monkeypatch.setattr("ciao.setup_status._cli_version", lambda binary: "2.0.0 (Claude Code)")
     monkeypatch.setattr(
         "ciao.setup_status.claude_auth_status",
@@ -176,7 +184,7 @@ def test_setup_status_survives_a_deleted_working_directory(tmp_path, monkeypatch
     # A config without an explicit workspace_root has no root to fall back to,
     # but the payload must still be produced instead of raising.
     bare = setup_status(
-        SimpleNamespace(pwa_auth_token="test-token", suggested_workspace=None), env={}
+        SimpleNamespace(pwa_auth_token="test-token"), env={}
     )
     assert isinstance(bare["checks"], list)
     assert "providers" in bare
@@ -434,12 +442,7 @@ def test_setup_status_reports_a_missing_claude_cli_as_an_install_step(
     assert "not installed" in claude["detail"]
     # The installer drops `claude` into ~/.local/bin, which a default macOS
     # PATH omits, so the wizard offers the PATH line as a second step.
-    if sys.platform == "win32":
-        # A persistent user-PATH update through the registry (C10).
-        assert claude["path_command"].startswith("$k = [Microsoft.Win32.Registry]::CurrentUser")
-        assert ".local" in claude["path_command"]
-    else:
-        assert "$HOME/.local/bin" in claude["path_command"]
+    assert "$HOME/.local/bin" in claude["path_command"]
 
 
 def test_setup_status_names_the_desktop_app_when_only_the_cli_is_missing(
@@ -480,18 +483,54 @@ def test_setup_status_offers_claudes_own_login_not_ciao_auth(tmp_path, monkeypat
     assert claude["command"] == "claude auth login"
 
 
-def test_setup_status_names_a_bundled_claude_by_path(tmp_path, monkeypatch) -> None:
-    """Ciaobot normally runs the `claude` bundled with the Agent SDK, which is
-    on nobody's PATH: when the user's own shell has no `claude`, a bare
-    `claude auth login` would fail for them too."""
-    bundled = "/opt/sdk/claude_agent_sdk/_bundled/claude"
-    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: bundled)
+def _unpatched_claude_cli_path():
+    """The real ``claude_cli_path``: the autouse fixture above replaces the module attribute."""
+    import importlib.util
+
+    from ciao import setup_status as module
+
+    spec = importlib.util.spec_from_file_location("ciao._setup_status_unpatched", module.__file__)
+    fresh = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fresh)
+    return fresh
+
+
+def test_claude_cli_path_resolves_the_users_cli_through_the_engine_path(monkeypatch) -> None:
+    fresh = _unpatched_claude_cli_path()
+    monkeypatch.setattr(
+        "ciao.tool_path.resolve_tool",
+        lambda name: "/opt/user/bin/claude" if name == "claude" else None,
+    )
+
+    assert fresh.claude_cli_path() == "/opt/user/bin/claude"
+
+
+def test_claude_cli_path_falls_back_to_the_login_path_then_is_empty(monkeypatch) -> None:
+    fresh = _unpatched_claude_cli_path()
+
+    def unresolvable(name: str) -> str:
+        raise OSError("no tool path")
+
+    monkeypatch.setattr("ciao.tool_path.resolve_tool", unresolvable)
+    monkeypatch.setattr(fresh.shutil, "which", lambda name: "/usr/bin/claude")
+    assert fresh.claude_cli_path() == "/usr/bin/claude"
+
+    monkeypatch.setattr(fresh.shutil, "which", lambda name: None)
+    assert fresh.claude_cli_path() == ""
+
+
+def test_setup_status_names_the_claude_by_absolute_path(tmp_path, monkeypatch) -> None:
+    """Ciaobot runs the `claude` it resolves by absolute path, which the user's
+    shell may not find: when it does not, a bare `claude auth login` would fail
+    for them too."""
+    resolved = "/usr/local/bin/claude"
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: resolved)
     monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
     config = _config(tmp_path)
 
     claude = setup_status(config, env={})["providers"]["claude"]
 
-    assert claude["command"] == f"{bundled} auth login"
+    assert claude["command"] == f"{resolved} auth login"
 
 
 def test_setup_status_offers_the_path_line_for_a_cli_the_terminal_cannot_find(
@@ -509,26 +548,7 @@ def test_setup_status_offers_the_path_line_for_a_cli_the_terminal_cannot_find(
 
     claude = setup_status(config, env={})["providers"]["claude"]
 
-    if sys.platform == "win32":
-        # A persistent user-PATH update through the registry (C10).
-        assert claude["path_command"].startswith("$k = [Microsoft.Win32.Registry]::CurrentUser")
-        assert ".local" in claude["path_command"]
-    else:
-        assert claude["path_command"].startswith("echo 'export PATH=\"$HOME/.local/bin")
-
-
-def test_setup_status_offers_no_path_line_for_the_bundled_cli(tmp_path, monkeypatch) -> None:
-    """The CLI inside the app is not something to add to a user's PATH -- the
-    login command names it in full instead."""
-    bundled = "/opt/sdk/claude_agent_sdk/_bundled/claude"
-    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: bundled)
-    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: bundled)
-    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
-    config = _config(tmp_path)
-
-    claude = setup_status(config, env={})["providers"]["claude"]
-
-    assert "path_command" not in claude
+    assert claude["path_command"].startswith("echo 'export PATH=\"$HOME/.local/bin")
 
 
 def test_setup_status_offers_no_path_line_when_the_terminal_finds_claude(
@@ -544,7 +564,6 @@ def test_setup_status_offers_no_path_line_when_the_terminal_finds_claude(
     assert "path_command" not in claude
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shells and their rc files; Windows is the test below")
 def test_claude_path_command_names_the_file_a_login_shell_reads(monkeypatch) -> None:
     """macOS terminals start login shells: bash reads ~/.bash_profile, and
     ~/.bashrc would fix only the shell the user is sitting in."""
@@ -556,23 +575,6 @@ def test_claude_path_command_names_the_file_a_login_shell_reads(monkeypatch) -> 
     assert claude_path_command() == "fish_add_path $HOME/.local/bin"
     monkeypatch.delenv("SHELL")
     assert "~/.zshrc" in claude_path_command()
-
-
-def test_claude_path_command_on_windows_is_a_powershell_line(monkeypatch) -> None:
-    """The wizard used to hand Windows nothing at all, which left the user
-    one command short with nothing to copy."""
-    from ciao.setup_status import claude_path_command
-
-    monkeypatch.setattr("ciao.os_support.shell_hints.sys.platform", "win32")
-
-    line = claude_path_command(r"C:\Users\me\.local\bin")
-
-    assert line.startswith(
-        "$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true);"
-        r" $v = $k.GetValue('Path', '', 'DoNotExpandEnvironmentNames'); "
-        r"$k.SetValue('Path', 'C:\Users\me\.local\bin'"
-    )
-    assert "export" not in line
 
 
 def test_claude_path_command_delegates_to_the_helper(monkeypatch) -> None:
@@ -599,22 +601,18 @@ def test_setup_status_route_is_public_before_login(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
-    app.state.installer_bootstrap = False
-    app.state.installer_run_id = None
     app.state.serializer = serializer
 
     resp = TestClient(app).get("/api/setup-status")
 
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["native_bootstrap"] is False
     assert {
         "configured",
         "bootstrap",
         "mode",
         "workspace_root",
         "vault_root",
-        "suggested_workspace",
         "checks",
         "providers",
         "provider_ready",
@@ -622,60 +620,9 @@ def test_setup_status_route_is_public_before_login(tmp_path) -> None:
     assert payload["checks"][0]["id"] == "workspace"
 
 
-def test_setup_status_route_reports_native_bootstrap_context(tmp_path) -> None:
-    config = _config(tmp_path)
-    config.suggested_workspace = tmp_path / "suggested-workspace"
-    (tmp_path / "memory-vault").mkdir()
-    serializer = URLSafeTimedSerializer("test-secret")
-    app = Starlette(
-        routes=[Route("/api/setup-status", setup_status_endpoint, methods=["GET"])],
-        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
-    )
-    app.state.config = config
-    app.state.installer_bootstrap = False
-    app.state.installer_run_id = None
-    app.state.native_bootstrap = {
-        "run_id": "native-run-id-sentinel-76-a91f",
-        "workspace": "/private/native-bootstrap-workspace-sentinel-76-a91f",
-    }
-    app.state.serializer = serializer
-
-    resp = TestClient(app).get("/api/setup-status")
-
-    assert resp.status_code == 200
-    payload = resp.json()
-    assert payload["native_bootstrap"] is True
-    assert {
-        "configured",
-        "bootstrap",
-        "mode",
-        "workspace_root",
-        "vault_root",
-        "suggested_workspace",
-        "checks",
-        "providers",
-        "provider_ready",
-    } <= payload.keys()
-    assert payload["suggested_workspace"] == str(config.suggested_workspace)
-    assert "native-run-id-sentinel-76-a91f" not in resp.text
-    assert "/private/native-bootstrap-workspace-sentinel-76-a91f" not in resp.text
-
-
-
 def _fake_engine_python(tmp_path: Path) -> str:
-    """The interpreter setup points the service at.
-
-    POSIX setup only writes it into the plist, so a made-up path will do. The
-    Windows task renderer accepts only python.exe/pythonw.exe and checks that
-    pythonw.exe exists (the task runs hidden), so there it is two empty files.
-    """
-    if sys.platform != "win32":
-        return "/opt/ciao/bin/python"
-    bin_dir = tmp_path / "fake-python"
-    bin_dir.mkdir(exist_ok=True)
-    for name in ("python.exe", "pythonw.exe"):
-        (bin_dir / name).write_bytes(b"")
-    return str(bin_dir / "python.exe")
+    """The interpreter setup points the service at; setup only writes it into the plist, so a made-up path will do."""
+    return "/opt/ciao/bin/python"
 
 def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monkeypatch) -> None:
     # Guard the env handoff assertions below: monkeypatch restores these
@@ -691,8 +638,6 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
-    app.state.installer_bootstrap = False
-    app.state.installer_run_id = None
     app.state.serializer = serializer
     app.state.request_restart = restarts.append
 
@@ -733,14 +678,7 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     assert f"CIAO_VAULT_ROOT={notes}" in env_text
     assert (notes / "MEMORY.md").is_file()
     assert not (workspace / "memory-vault" / "MEMORY.md").exists()
-    # The platform's service definition: the plist, or the Task Scheduler XML
-    # on Windows.
-    if sys.platform == "win32":
-        from ciao import windows_service
-
-        assert (launch_agents / windows_service.TASK_FILE_NAME).is_file()
-    else:
-        assert (launch_agents / "com.ciao.server.plist").is_file()
+    assert (launch_agents / "com.ciao.server.plist").is_file()
     # The wizard no longer writes the retired rumps launcher bundle or its
     # LaunchAgent; Ciaobot.app is the menu bar.
     assert not (apps / "Ciaobot Server.app").exists()
@@ -755,8 +693,6 @@ def _finish_client(tmp_path) -> TestClient:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
-    app.state.installer_bootstrap = False
-    app.state.installer_run_id = None
     app.state.serializer = serializer
     app.state.request_restart = lambda code: None
     return TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER)
@@ -986,8 +922,6 @@ def test_setup_finish_foreground_handoff_to_launchd(tmp_path, monkeypatch) -> No
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
-    app.state.installer_bootstrap = False
-    app.state.installer_run_id = None
     app.state.serializer = serializer
     app.state.request_restart = restarts.append
 
@@ -1073,8 +1007,6 @@ def test_setup_finish_handoff_goes_through_the_backend(
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
-    app.state.installer_bootstrap = False
-    app.state.installer_run_id = None
     app.state.serializer = serializer
     app.state.request_restart = restarts.append
 
@@ -1091,6 +1023,95 @@ def test_setup_finish_handoff_goes_through_the_backend(
     assert calls == [handoff_result]
     expected = 0 if handoff_result else routes_api.RESTART_EXIT_CODE
     assert restarts == [expected]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="launchd handoff is macOS-only")
+def test_setup_finish_in_app_mode_never_hands_off_to_launchd(
+    tmp_path, monkeypatch
+) -> None:
+    """The Mac app owns the bundled engine: no plist, no handoff helper, and
+    the restart keeps the plain in-place restart code for the app to watch."""
+    import ciao.web.routes_api as routes_api
+    from ciao import package_version
+    from ciao.config import RESTART_EXIT_CODE
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CIAO_WORKSPACE", "")
+    monkeypatch.setenv("PWA_PORT", "")
+    monkeypatch.setattr(routes_api, "_interactive_foreground_run", lambda: True)
+    monkeypatch.setattr(
+        package_version, "running_from_app_bundle", lambda: True
+    )
+    # The app-mode finish must not even reach the launchd handoff seam, let
+    # alone the detached loader helper (Popen) or launchctl itself.
+    handoff_calls: list[bool] = []
+
+    class FakeBackend:
+        """Answers the handoff seam loudly; the rest stays real."""
+
+        name = "fake"
+
+        def agents_dir(self) -> Path:
+            return Path(home / "Library" / "LaunchAgents")
+
+        def live_agents_dir(self) -> Path:
+            return Path(home / "Library" / "LaunchAgents")
+
+        def is_live_agents_dir(self, path: Path) -> bool:
+            return Path(path) == self.live_agents_dir()
+
+        def schedule_server_handoff(self) -> bool:
+            handoff_calls.append(True)
+            return True
+
+    monkeypatch.setattr(
+        routes_api.service_backend, "current_backend", lambda: FakeBackend()
+    )
+    real_popen = routes_api.subprocess.Popen
+    popen_calls: list[list[str]] = []
+
+    def fake_popen(cmd, *a, **k):
+        if cmd and cmd[0] == "/bin/sh":
+            popen_calls.append(list(cmd))
+            return SimpleNamespace(pid=1)
+        return real_popen(cmd, *a, **k)
+
+    monkeypatch.setattr(routes_api.subprocess, "Popen", fake_popen)
+    real_run = routes_api.subprocess.run
+
+    def fake_run(cmd, *a, **k):
+        if cmd and cmd[0] == "launchctl":
+            pytest.fail("launchctl must not be called in app mode")
+        return real_run(cmd, *a, **k)
+
+    monkeypatch.setattr(routes_api.subprocess, "run", fake_run)
+
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    restarts: list[int] = []
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+    app.state.request_restart = restarts.append
+
+    resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
+        "/api/setup/finish",
+        json={
+            "password": "wizard-pass",
+            "workspace": str(tmp_path / "workspace"),
+            "app_dir": str(tmp_path / "Applications"),
+        },
+    )
+
+    assert resp.status_code == 200
+    assert handoff_calls == [], "app mode must not reach the launchd handoff seam"
+    assert not (home / "Library" / "LaunchAgents" / "com.ciao.server.plist").is_file()
+    assert popen_calls == [], "no detached launchd loader in app mode"
+    assert restarts == [RESTART_EXIT_CODE]
 
 
 def test_setup_finish_requires_a_password(tmp_path) -> None:
@@ -1137,8 +1158,6 @@ def test_setup_finish_requires_workspace(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
-    app.state.installer_bootstrap = False
-    app.state.installer_run_id = None
     app.state.serializer = serializer
 
     resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
@@ -1160,8 +1179,6 @@ def test_setup_finish_defaults_vault_inside_workspace(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
-    app.state.installer_bootstrap = False
-    app.state.installer_run_id = None
     app.state.serializer = serializer
 
     workspace = tmp_path / "workspace"
@@ -1205,8 +1222,6 @@ def test_setup_finish_accepts_0000_host(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
-    app.state.installer_bootstrap = False
-    app.state.installer_run_id = None
     app.state.serializer = serializer
 
     resp = TestClient(app, base_url="http://0.0.0.0:8443", client=_LOOPBACK_PEER).post(
@@ -1242,8 +1257,6 @@ def test_setup_finish_refuses_a_protected_folder_without_a_host(
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
-    app.state.installer_bootstrap = False
-    app.state.installer_run_id = None
     app.state.serializer = serializer
     workspace = home / "Documents" / "ws"
 
@@ -1271,8 +1284,6 @@ def test_setup_finish_requires_bootstrap_mode(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
-    app.state.installer_bootstrap = False
-    app.state.installer_run_id = None
     app.state.serializer = serializer
 
     resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
@@ -1292,8 +1303,6 @@ def test_setup_finish_is_localhost_only(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
-    app.state.installer_bootstrap = False
-    app.state.installer_run_id = None
     app.state.serializer = serializer
 
     resp = TestClient(app, base_url="https://ciao.example").post(
@@ -1320,8 +1329,6 @@ def test_setup_routes_refuse_a_lan_peer_claiming_localhost(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
-    app.state.installer_bootstrap = False
-    app.state.installer_run_id = None
     app.state.serializer = serializer
     app.state.request_restart = lambda code: None
 
@@ -1359,8 +1366,6 @@ def _folder_picker_client(
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
-    app.state.installer_bootstrap = False
-    app.state.installer_run_id = None
     app.state.serializer = serializer
     return TestClient(app, base_url=base_url, client=peer)
 
@@ -1486,74 +1491,14 @@ def test_tcc_protected_location_flags_desktop(monkeypatch, tmp_path) -> None:
     assert setup_status.tcc_protected_location(home / "Desktop" / "Cowork") is None
 
 
-def test_discover_claude_mcps_filters_connected_and_caches(monkeypatch, tmp_path) -> None:
-    from ciao import setup_status
-
-    setup_status.clear_claude_discovery_cache()
-    monkeypatch.setattr(setup_status, "_claude_mcps_inflight", None)
-    calls = {"n": 0}
-    config = tmp_path / ".claude.json"
-    config.write_text(
-        json.dumps(
-            {
-                "projects": {
-                    str(tmp_path.resolve()): {
-                        "disabledMcpServers": [
-                            "claude.ai Excalidraw",
-                            "claude.ai Gmail",
-                            "claude.ai Google Calendar",
-                            "claude.ai Google Drive",
-                        ]
-                    }
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    class FakeResult:
-        stdout = (
-            "claude.ai Airtable: https://example - ✔ Connected\n"
-            "claude.ai Slack: https://example - ! Needs authentication\n"
-            "claude.ai Gmail: https://example - ✔ Connected\n"
-            "claude.ai Excalidraw: https://example - ✔ Connected\n"
-            "claude.ai Figma: https://example - ✔ Connected\n"
-            "n8n_mcp: ✔ Connected\n"
-            "notion: ✔ Connected\n"
-        )
-        stderr = ""
-
-    def fake_run(*_args, **_kwargs):
-        calls["n"] += 1
-        return FakeResult()
-
-    monkeypatch.setattr(setup_status.shutil, "which", lambda _name: "/bin/claude")
-    monkeypatch.setattr(setup_status.subprocess, "run", fake_run)
-
-    assert setup_status.discover_claude_mcps(
-        tmp_path, config_path=config
-    ) == ["Airtable", "Figma"]
-    assert setup_status.discover_claude_mcps(
-        tmp_path, config_path=config
-    ) == ["Airtable", "Figma"]
-    assert calls["n"] == 1
-
-    setup_status.clear_claude_discovery_cache()
-    assert setup_status.discover_claude_mcps(
-        tmp_path, config_path=config
-    ) == ["Airtable", "Figma"]
-    assert calls["n"] == 2
-
-
 async def test_provider_verify_action_busts_claude_discovery_cache(
     monkeypatch, tmp_path
 ) -> None:
     """Verify must not just echo the up-to-5-minute discovery cache.
 
-    A stale "Configured MCP Servers" list that never reflects a connector the
-    user just disconnected (or reconnected) would be worse than showing
-    nothing, so hitting Verify for Claude has to bust the discovery cache
-    before recomputing the payload. Other providers don't have this cache, so
+    A stale skills list that never reflects a skill the user just added or
+    removed would be worse than showing nothing, so hitting Verify for Claude
+    has to bust the discovery cache before recomputing the payload. Other providers don't have this cache, so
     they should be left alone.
     """
     from ciao.web import routes_api
@@ -1565,10 +1510,12 @@ async def test_provider_verify_action_busts_claude_discovery_cache(
 
     def fake_payload(_config):
         calls["payload"] += 1
-        return {"connections": {"claude": {"mcps": ["Airtable"]}, "opencode": {}}}
+        return {"connections": {"claude": {"skills": ["pdf"]}, "opencode": {}}}
 
     monkeypatch.setattr("ciao.setup_status.clear_claude_discovery_cache", fake_clear)
     monkeypatch.setattr(routes_api, "_provider_config_payload", fake_payload)
+    monkeypatch.setattr("ciao.opencode_cli.opencode_credential_inventory",
+                        lambda: {"status": "complete", "providers": []})
 
     config = _config(tmp_path)
     request = SimpleNamespace(
@@ -1577,12 +1524,51 @@ async def test_provider_verify_action_busts_claude_discovery_cache(
     )
 
     response = await provider_connection_action(request)
-    assert json.loads(response.body) == {"mcps": ["Airtable"]}
+    assert json.loads(response.body) == {"skills": ["pdf"]}
     assert calls == {"clear": 1, "payload": 1}
 
     request.path_params["provider"] = "opencode"
     await provider_connection_action(request)
     assert calls == {"clear": 1, "payload": 2}
+
+
+async def test_opencode_verify_invalidates_models_before_probe(monkeypatch, tmp_path):
+    from ciao.web import routes_api
+    import ciao.opencode_cli as mod
+
+    calls = []
+    from ciao.providers.acp.agents import OpencodeAcpProvider
+    monkeypatch.setattr(OpencodeAcpProvider, "invalidate_model_catalog", classmethod(lambda cls: calls.append("invalidate")))
+    monkeypatch.setattr(mod, "opencode_credential_inventory",
+                        lambda: (calls.append("inventory") or {"status": "complete", "providers": []}))
+    monkeypatch.setattr(routes_api, "_provider_config_payload",
+                        lambda config: (calls.append("payload") or
+                                        {"connections": {"opencode": {}, "claude": {"ready": True}}}))
+    monkeypatch.setattr("ciao.setup_status.clear_claude_discovery_cache", lambda: calls.append("claude-clear"))
+    request = SimpleNamespace(path_params={"provider": "opencode", "action": "verify"},
+                              app=SimpleNamespace(state=SimpleNamespace(config=_config(tmp_path))))
+    await provider_connection_action(request)
+    assert calls == ["invalidate", "payload", "inventory"]
+    calls.clear()
+    request.path_params["provider"] = "claude"
+    response = await provider_connection_action(request)
+    assert json.loads(response.body) == {"ready": True}
+    assert calls == ["claude-clear", "payload"]
+    calls.clear()
+    await routes_api.provider_config_settings(request)
+    assert calls == ["payload", "inventory"]
+    calls.clear()
+    monkeypatch.setattr(routes_api.host_terminal, "action_command", lambda action: "fake login")
+    monkeypatch.setattr(routes_api, "host_browser_request", lambda request: False)
+    request.path_params.update(provider="opencode", action="connect")
+    await provider_connection_action(request)
+    assert calls == []
+    monkeypatch.setattr(routes_api, "_auth_command_for_provider", lambda provider: ["fake", "auth", "login"])
+    monkeypatch.setattr(routes_api.subprocess, "run",
+                        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""))
+    request.path_params["action"] = "logout"
+    await provider_connection_action(request)
+    assert calls == []
 
 
 async def test_provider_logout_action_runs_auth_logout(monkeypatch, tmp_path) -> None:
@@ -1605,12 +1591,8 @@ async def test_provider_logout_action_runs_auth_logout(monkeypatch, tmp_path) ->
 
     monkeypatch.setattr(routes_api.subprocess, "run", fake_run)
     monkeypatch.setattr(routes_api.asyncio, "to_thread", fake_to_thread)
-    # The derivation is under test, not where this machine keeps `claude`: the
-    # SDK wheel bundles the CLI on macOS and Linux but not on Windows, so a
-    # runner without it on PATH answered "Claude CLI not found" instead.
-    from ciao.providers import claude as claude_provider
-
-    monkeypatch.setattr(claude_provider, "get_bundled_claude_path", lambda: str(tmp_path / "claude"))
+    # The derivation is under test, not where this machine keeps `claude`.
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: str(tmp_path / "claude"))
 
     config = _config(tmp_path)
     request = SimpleNamespace(
@@ -1740,24 +1722,6 @@ def test_discover_claude_system_skills_lists_synced_skills_and_loaded_plugins(
     ]
 
 
-def test_claude_probe_reports_bundled_skills_once_a_chat_recorded_them(
-    monkeypatch, tmp_path
-) -> None:
-    from ciao import setup_status
-
-    monkeypatch.setattr(setup_status, "_claude_bundled_skills", None)
-    monkeypatch.setattr(
-        setup_status, "_claude_status", lambda *_a, **_k: {"name": "claude", "ok": True}
-    )
-    probe = lambda: setup_status.claude_status_probe({}, config_path=tmp_path / "c.yaml")  # noqa: E731
-
-    assert "bundled_skills" not in probe()
-
-    setup_status.record_claude_bundled_skills(["simplify", "code-review", " "])
-
-    assert probe()["bundled_skills"] == ["code-review", "simplify"]
-
-
 def test_discover_claude_system_skills_falls_back_to_installed_plugins(
     monkeypatch, tmp_path
 ) -> None:
@@ -1818,550 +1782,57 @@ def test_discover_claude_system_skills_falls_back_when_cli_fails(
     ]
 
 
-# ── Claude MCP discovery cache ──────────────────────────────────────────
-# `claude mcp list` measures ~12s on a real install and sits on the
-# Settings -> Models & providers load path, so the cache decides whether that tab is
-# usable. A plain TTL made every visit past the window pay it again.
+# ── Claude discovery warm-up ───────────────────────────────────────────
 
 
-def test_expired_mcp_cache_serves_stale_and_refreshes_in_background(monkeypatch):
-    import threading
-    import time as _time
-
-    from ciao import setup_status as ss
-
-    calls = []
-    done = threading.Event()
-
-    def slow_discovery(**kwargs):
-        calls.append(1)
-        if len(calls) > 1:
-            done.set()
-        return [f"mcp-{len(calls)}"]
-
-    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", slow_discovery)
-    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
-    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
-    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
-
-    # First call has nothing to serve, so it waits.
-    assert ss.discover_claude_mcps(None) == ["mcp-1"]
-    assert len(calls) == 1
-
-    # Expire the entry; the next call must return the stale value immediately
-    # rather than paying the discovery again.
-    stamp, ws_key, value, gen = ss._claude_mcps_cache
-    monkeypatch.setattr(
-        ss,
-        "_claude_mcps_cache",
-        (stamp - ss._CLAUDE_DISCOVERY_TTL_SECONDS - 1, ws_key, value, gen),
-    )
-    assert ss.discover_claude_mcps(None) == ["mcp-1"]
-
-    # ...and a refresh runs behind it.
-    assert done.wait(timeout=5), "background refresh never ran"
-    deadline = _time.monotonic() + 5
-    while ss._claude_mcps_cache[2] != ("mcp-2",) and _time.monotonic() < deadline:
-        _time.sleep(0.01)
-    assert ss._claude_mcps_cache[2] == ("mcp-2",)
-
-
-def test_a_fresh_mcp_cache_does_not_refresh(monkeypatch):
-    from ciao import setup_status as ss
-
-    calls = []
-    monkeypatch.setattr(
-        ss, "_discover_claude_mcps_uncached", lambda **kw: calls.append(1) or ["a"]
-    )
-    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
-    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
-    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
-
-    ss.discover_claude_mcps(None)
-    ss.discover_claude_mcps(None)
-    assert len(calls) == 1, "a fresh entry must not spawn a discovery"
-
-
-# An empty discovery usually means the health pass timed out, not that nothing
-# is connected, so it must expire fast instead of poisoning the tab for the
-# full five-minute success TTL.
-
-
-def test_a_fresh_empty_mcp_cache_serves_without_refresh(monkeypatch):
-    from ciao import setup_status as ss
-
-    calls = []
-    monkeypatch.setattr(
-        ss, "_discover_claude_mcps_uncached", lambda **kw: calls.append(1) or []
-    )
-    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
-    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
-    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
-
-    assert ss.discover_claude_mcps(None) == []
-    assert ss.discover_claude_mcps(None) == []
-    assert len(calls) == 1, "a fresh (empty) entry must not spawn a discovery"
-
-
-def test_an_empty_mcp_cache_expires_fast_and_recovers(monkeypatch):
-    import threading
-    import time as _time
-
-    from ciao import setup_status as ss
-
-    calls = []
-    done = threading.Event()
-
-    def discovery(**kwargs):
-        calls.append(1)
-        if len(calls) > 1:
-            done.set()
-        return [] if len(calls) == 1 else ["recovered"]
-
-    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", discovery)
-    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
-    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
-    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
-
-    assert ss.discover_claude_mcps(None) == []
-    assert calls == [1]
-
-    # Age the entry past the empty TTL but well short of the success TTL: the
-    # stale empty list still serves instantly, but a refresh must kick off.
-    stamp, ws_key, value, gen = ss._claude_mcps_cache
-    assert value == ()
-    aged = stamp - (ss._CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS + 1)
-    monkeypatch.setattr(ss, "_claude_mcps_cache", (aged, ws_key, value, gen))
-
-    assert ss.discover_claude_mcps(None) == []
-    assert done.wait(timeout=5), "empty cache must re-discover in the background"
-    deadline = _time.monotonic() + 5
-    while ss._claude_mcps_cache[2] != ("recovered",) and _time.monotonic() < deadline:
-        _time.sleep(0.01)
-    assert ss._claude_mcps_cache[2] == ("recovered",)
-
-
-def test_warm_claude_discovery_cache_populates_both_caches(monkeypatch, tmp_path):
+def test_warm_claude_discovery_cache_populates_the_skills_cache_only(monkeypatch):
     import time
 
     from ciao import setup_status as ss
 
-    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
-    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
-    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
     monkeypatch.setattr(ss, "_claude_skills_cache", None)
     seen = []
 
-    def fake_mcps(workspace_root=None, **kwargs):
-        seen.append(("mcps", workspace_root))
-        return ["Airtable"]
-
     def fake_skills():
-        seen.append(("skills", None))
+        seen.append("skills")
         return ["skill-creator"]
 
-    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", fake_mcps)
     monkeypatch.setattr(ss, "_discover_claude_system_skills_uncached", fake_skills)
+    runs: list[object] = []
+    monkeypatch.setattr(ss.subprocess, "run", lambda *a, **k: runs.append(a))
 
-    ss.warm_claude_discovery_cache(tmp_path)
+    ss.warm_claude_discovery_cache()
 
     deadline = time.monotonic() + 5
-    while len(seen) < 2 and time.monotonic() < deadline:
+    while ss._claude_skills_cache is None and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert ("mcps", tmp_path) in seen
-    assert ("skills", None) in seen
-    assert ss._claude_mcps_cache is not None
-    assert ss._claude_mcps_cache[2] == ("Airtable",)
+    assert seen == ["skills"]
+    assert runs == [], "the warm-up must run no CLI probe"
     assert ss._claude_skills_cache is not None
     assert ss._claude_skills_cache[1] == ("skill-creator",)
 
 
-def test_requests_wait_for_an_in_flight_warmup(monkeypatch, tmp_path):
-    """A request arriving mid-warm-up reuses the probe instead of stacking one.
-
-    The warm-up thread and the request path must share a single
-    `claude mcp list` run: otherwise a Providers visit right after startup
-    blocks for another full health pass and pays for a duplicate probe.
-    """
-    import threading
-    import time as _time
-
+def test_status_does_not_run_claude_mcp_list(monkeypatch, tmp_path) -> None:
+    """Building the provider status never shells out to `claude mcp ...`."""
     from ciao import setup_status as ss
-
-    calls = []
-    release = threading.Event()
-    request_done = threading.Event()
-
-    def slow_probe(**kwargs):
-        calls.append(1)
-        release.wait(timeout=5)
-        return ["Airtable"]
-
-    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", slow_probe)
-    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
-    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
-    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
-
-    ss.warm_claude_discovery_cache(tmp_path)
-
-    # Wait until the warm-up thread owns the in-flight probe.
-    deadline = _time.monotonic() + 5
-    while not calls and _time.monotonic() < deadline:
-        _time.sleep(0.01)
-    assert calls == [1], "warm-up probe never started"
-
-    results: list[list[str]] = []
-
-    def request() -> None:
-        results.append(ss.discover_claude_mcps(tmp_path))
-        request_done.set()
-
-    waiter = threading.Thread(target=request)
-    waiter.start()
-    _time.sleep(0.05)
-    assert len(calls) == 1, "a second probe must not start mid-warm-up"
-
-    release.set()
-    assert request_done.wait(timeout=5), "request never served"
-    waiter.join(timeout=5)
-    assert results == [["Airtable"]]
-    assert len(calls) == 1, "request must reuse the warm-up probe"
-
-
-def test_clear_preserves_an_in_flight_probe(monkeypatch, tmp_path):
-    """Verify's cache bust must not unregister a still-running warm-up probe.
-
-    Clearing only the cached values keeps the single-flight registration: the
-    next payload waits for the in-flight probe instead of claiming ownership
-    and stacking a second blocking `claude mcp list`.
-    """
-    import threading
-    import time as _time
-
-    from ciao import setup_status as ss
-
-    calls = []
-    release = threading.Event()
-    request_done = threading.Event()
-
-    def slow_probe(**kwargs):
-        calls.append(1)
-        release.wait(timeout=5)
-        return ["Airtable"]
-
-    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", slow_probe)
-    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
-    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
-    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
-
-    ss.warm_claude_discovery_cache(tmp_path)
-    deadline = _time.monotonic() + 5
-    while not calls and _time.monotonic() < deadline:
-        _time.sleep(0.01)
-    assert calls == [1], "warm-up probe never started"
 
     ss.clear_claude_discovery_cache()
-    assert ss._claude_mcps_inflight is not None, "clear dropped an active probe"
+    argvs: list[list[str]] = []
 
-    results: list[list[str]] = []
+    def fake_run(cmd, *args, **kwargs):
+        argvs.append(list(cmd))
+        return SimpleNamespace(stdout="{}", stderr="", returncode=0)
 
-    def request() -> None:
-        results.append(ss.discover_claude_mcps(tmp_path))
-        request_done.set()
+    monkeypatch.setattr(ss, "claude_cli_path", lambda: "/bin/claude")
+    monkeypatch.setattr(ss.subprocess, "run", fake_run)
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(ss, "_discover_claude_system_skills_uncached", lambda: [])
 
-    waiter = threading.Thread(target=request)
-    waiter.start()
-    _time.sleep(0.05)
-    assert len(calls) == 1, "clear must not let a second probe start"
+    data = ss.setup_status(_config(tmp_path), env={}, claude_config_path=tmp_path / ".claude.json")
 
-    release.set()
-    assert request_done.wait(timeout=5), "request never served"
-    waiter.join(timeout=5)
-    # The surviving probe started pre-clear, so its result is generation-stamped
-    # stale: the waiter re-probes rather than serving it — but only after the
-    # first probe fully finished (never two probes at once).
-    assert results == [["Airtable"]]
-    assert len(calls) == 2
-
-
-def test_verify_reprobes_after_waiting_out_a_preclear_probe(monkeypatch, tmp_path):
-    """A probe that started before Verify's bust must not be served or kept.
-
-    The startup warm-up may still be running when the user changes a connector
-    and clicks Verify. The cache clear preserves the in-flight probe, but its
-    result reflects pre-change configuration: the waiter must discard it,
-    re-probe with current configuration (without overlapping the old run),
-    and cache only the fresh result.
-    """
-    import threading
-    import time as _time
-
-    from ciao import setup_status as ss
-
-    calls = []
-    release = threading.Event()
-    request_done = threading.Event()
-
-    def probe(**kwargs):
-        calls.append(1)
-        if len(calls) == 1:
-            release.wait(timeout=5)
-            return ["Stale"]
-        return ["Fresh"]
-
-    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", probe)
-    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
-    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
-    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
-
-    ss.warm_claude_discovery_cache(tmp_path)
-    deadline = _time.monotonic() + 5
-    while not calls and _time.monotonic() < deadline:
-        _time.sleep(0.01)
-    assert calls == [1], "warm-up probe never started"
-
-    ss.clear_claude_discovery_cache()
-
-    results: list[list[str]] = []
-
-    def request() -> None:
-        results.append(ss.discover_claude_mcps(tmp_path))
-        request_done.set()
-
-    waiter = threading.Thread(target=request)
-    waiter.start()
-    _time.sleep(0.05)
-    assert len(calls) == 1, "no probe may overlap the in-flight one"
-
-    release.set()
-    assert request_done.wait(timeout=5), "waiter never re-probed"
-    waiter.join(timeout=5)
-    assert results == [["Fresh"]], "pre-clear result must not be served"
-    assert len(calls) == 2, "waiter must re-probe after the invalidated result"
-
-    # Only the fresh result may be cached, and it must serve without a re-probe.
-    assert ss.discover_claude_mcps(tmp_path) == ["Fresh"]
-    assert len(calls) == 2
-
-
-def test_stale_refresh_joins_the_single_flight(monkeypatch, tmp_path):
-    """The empty-TTL background refresh must register as the active probe.
-
-    Otherwise a Verify bust during the refresh claims ownership and stacks a
-    second concurrent `claude mcp list` racing the background cache write.
-    """
-    import threading
-    import time as _time
-
-    from ciao import setup_status as ss
-
-    calls = []
-    release = threading.Event()
-
-    def slow_probe(**kwargs):
-        calls.append(1)
-        release.wait(timeout=5)
-        return ["Refreshed"]
-
-    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", slow_probe)
-    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
-    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
-
-    # Seed a cache entry the refresh path will treat as expired-empty.
-    stamp = _time.monotonic() - (ss._CLAUDE_DISCOVERY_EMPTY_TTL_SECONDS + 1)
-    monkeypatch.setattr(
-        ss,
-        "_claude_mcps_cache",
-        (stamp, str(tmp_path), (), ss._claude_mcps_generation),
-    )
-
-    assert ss.discover_claude_mcps(tmp_path) == []
-
-    deadline = _time.monotonic() + 5
-    while len(calls) < 1 and _time.monotonic() < deadline:
-        _time.sleep(0.01)
-    assert calls == [1], "expired-empty entry must start the background refresh"
-
-    deadline = _time.monotonic() + 5
-    while ss._claude_mcps_inflight is None and _time.monotonic() < deadline:
-        _time.sleep(0.01)
-    assert ss._claude_mcps_inflight is not None, "refresh never joined single-flight"
-
-    # A Verify-style bust + payload during the refresh must wait, not re-probe.
-    ss.clear_claude_discovery_cache()
-    assert ss._claude_mcps_inflight is not None
-
-    results: list[list[str]] = []
-    request_done = threading.Event()
-
-    def request() -> None:
-        results.append(ss.discover_claude_mcps(tmp_path))
-        request_done.set()
-
-    waiter = threading.Thread(target=request)
-    waiter.start()
-    _time.sleep(0.05)
-    assert len(calls) == 1, "payload must not stack a probe on the refresh"
-
-    release.set()
-    assert request_done.wait(timeout=5), "payload never served"
-    waiter.join(timeout=5)
-    # The refresh's result was stamped pre-clear (old generation), so the
-    # payload discards it and re-probes with the current generation.
-    assert results == [["Refreshed"]]
-    assert len(calls) == 2
-
-
-def test_waiter_reacquires_ownership_when_warmup_targets_another_root(
-    monkeypatch, tmp_path
-):
-    """A waiter never starts a probe while another is in flight.
-
-    If the in-flight warm-up finishes without a usable entry for the waiter's
-    workspace root (here: a different root), the waiter loops and reacquires
-    ownership instead of running a duplicate probe alongside it.
-    """
-    import threading
-    import time as _time
-
-    from ciao import setup_status as ss
-
-    other_root = tmp_path.parent / "other-ws-root"
-    other_root.mkdir()
-
-    calls: list[object] = []
-    order: list[str] = []
-    release = threading.Event()
-    request_done = threading.Event()
-
-    def probe(workspace_root=None, **kwargs):
-        calls.append(workspace_root)
-        if workspace_root == other_root:
-            order.append("request-start")
-            return ["Other"]
-        order.append("warmup-start")
-        release.wait(timeout=5)
-        order.append("warmup-end")
-        return ["Warm"]
-
-    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", probe)
-    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
-    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
-    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
-
-    ss.warm_claude_discovery_cache(tmp_path)
-
-    deadline = _time.monotonic() + 5
-    while not calls and _time.monotonic() < deadline:
-        _time.sleep(0.01)
-    assert order == ["warmup-start"], "warm-up probe never started"
-
-    results: list[list[str]] = []
-
-    def request() -> None:
-        results.append(ss.discover_claude_mcps(other_root))
-        request_done.set()
-
-    waiter = threading.Thread(target=request)
-    waiter.start()
-    _time.sleep(0.05)
-    assert calls == [tmp_path], "waiter must not probe while warm-up owns"
-
-    release.set()
-    assert request_done.wait(timeout=5), "waiter never reacquired ownership"
-    waiter.join(timeout=5)
-    assert results == [["Other"]]
-    assert order == ["warmup-start", "warmup-end", "request-start"], (
-        "request probe must start only after the warm-up finished"
-    )
-    assert calls == [tmp_path, other_root]
-
-
-def test_verify_reprobes_when_the_preclear_probe_already_landed(monkeypatch, tmp_path):
-    """A pre-clear result that lands before Verify's payload is still stale.
-
-    The waiter path already discards a generation-stale result, but the
-    warm-up can just as easily finish in the gap between Verify's cache bust
-    and the payload it builds next. Serving that cached answer (and only
-    refreshing in the background) would report the configuration the user just
-    changed, so the request must re-probe synchronously instead.
-    """
-    import time
-
-    from ciao import setup_status as ss
-
-    calls: list[int] = []
-
-    def probe(**kwargs):
-        calls.append(1)
-        return ["Fresh"]
-
-    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", probe)
-    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
-    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
-    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
-
-    # Verify busts the cache while a probe is running...
-    ss.clear_claude_discovery_cache()
-    # ...and that probe lands (with its pre-clear generation) before the
-    # payload request arrives.
-    ws_key = str(ss._resolve_root(tmp_path))
-    monkeypatch.setattr(
-        ss,
-        "_claude_mcps_cache",
-        (time.monotonic(), ws_key, ("Stale",), ss._claude_mcps_generation - 1),
-    )
-
-    assert ss.discover_claude_mcps(tmp_path) == ["Fresh"]
-    assert calls == [1], "the pre-clear result must not be served"
-    # The fresh result carries the current generation and serves from cache.
-    assert ss.discover_claude_mcps(tmp_path) == ["Fresh"]
-    assert calls == [1]
-
-
-def test_winning_ownership_after_a_probe_lands_serves_its_result(monkeypatch, tmp_path):
-    """Taking single-flight ownership re-checks the cache before probing.
-
-    A request that fails to acquire ownership, then wins it on the next loop
-    because the owner finished in between, must serve the result the owner
-    just cached instead of paying for a duplicate `claude mcp list`.
-    """
-    import time
-
-    from ciao import setup_status as ss
-
-    calls: list[int] = []
-
-    def probe(**kwargs):
-        calls.append(1)
-        return ["Duplicate"]
-
-    monkeypatch.setattr(ss, "_discover_claude_mcps_uncached", probe)
-    monkeypatch.setattr(ss, "_claude_mcps_cache", None)
-    monkeypatch.setattr(ss, "_claude_mcps_refreshing", False)
-    monkeypatch.setattr(ss, "_claude_mcps_inflight", None)
-
-    ws_key = str(ss._resolve_root(tmp_path))
-    real_acquire = ss._acquire_mcps_probe
-
-    def acquire_after_owner_lands():
-        event = real_acquire()
-        if event is not None and ss._claude_mcps_cache is None:
-            # The previous owner finished between the cache read and this
-            # acquire, stamping its result as current.
-            ss._claude_mcps_cache = (
-                time.monotonic(),
-                ws_key,
-                ("Airtable",),
-                ss._claude_mcps_generation,
-            )
-        return event
-
-    monkeypatch.setattr(ss, "_acquire_mcps_probe", acquire_after_owner_lands)
-
-    assert ss.discover_claude_mcps(tmp_path) == ["Airtable"]
-    assert calls == [], "the landed result must be served instead of re-probed"
-    assert ss._claude_mcps_inflight is None, "ownership must be handed back"
+    assert argvs, "the probe must still run the CLI for version and auth"
+    assert not any("mcp" in argv for argv in argvs)
+    assert "mcps" not in data["providers"]["claude"]
 
 
 def test_a_registry_marks_a_set_up_workspace(tmp_path: Path) -> None:
@@ -2426,20 +1897,11 @@ def test_cloud_synced_location_recognises_sync_folders(tmp_path) -> None:
         ("darwin", home / "Library/Application Support/x", None),
         ("linux", home / "Dropbox/ws", "Dropbox"),
         ("linux", home / "Library/Mobile Documents/x", None),
-        ("win32", home / "iCloudDrive/ws", "iCloud Drive"),
     ]
     for platform, path, expected in cases:
-        assert cloud_synced_location(path, platform=platform, home=home, env={}) == expected, path
-
-    corp = tmp_path / "corp"
-    assert (
-        cloud_synced_location(corp / "ws", platform="win32", home=home, env={"OneDrive": str(corp)})
-        == "OneDrive"
-    )
-    assert cloud_synced_location(corp / "ws", platform="win32", home=home, env={}) is None
+        assert cloud_synced_location(path, platform=platform, home=home) == expected, path
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
 def test_cloud_synced_location_follows_symlinks(tmp_path) -> None:
     from ciao.setup_status import cloud_synced_location
 
@@ -2577,31 +2039,16 @@ def _tested_record(running: str) -> dict:
         "ciaobot": running,
         "recorded": "2026-10-20",
         "providers": {
-            "opencode": {"status": "tested", "version": "2.1.0", "package": "@opencode/cli"},
-            "claude": {"status": "tested", "version": "2.1.301", "source": "claude-agent-sdk 0.2.168"},
+            "opencode": {"status": "tested", "version": "2.4.0", "package": "@opencode/cli"},
+            "claude": {"status": "tested", "version": "2.1.301", "source": "claude 2.1.301"},
         },
     }
-
-
-def test_claude_row_marks_bundled_release_check(tmp_path, monkeypatch) -> None:
-    import ciao
-    from ciao import provider_versions
-
-    bundled = "/opt/sdk/claude_agent_sdk/_bundled/claude"
-    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: bundled)
-    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: bundled)
-    monkeypatch.setattr(provider_versions, "load_record", lambda: _tested_record(ciao.__version__))
-    config = _config(tmp_path)
-
-    claude = setup_status(config, env={})["providers"]["claude"]
-
-    assert claude["release_check"] == {"state": "bundled", "tested": "2.1.301"}
 
 
 def test_opencode_unsupported_row_keeps_v2_migration_text(monkeypatch) -> None:
     import ciao
     from ciao import provider_versions
-    from ciao.providers import opencode
+    from ciao import opencode_cli as opencode
 
     monkeypatch.setattr(opencode, "resolve_opencode_binary", lambda *a, **k: "/bin/opencode")
     monkeypatch.setattr(
@@ -2615,17 +2062,17 @@ def test_opencode_unsupported_row_keeps_v2_migration_text(monkeypatch) -> None:
     assert row["auth"] == "unsupported_version"
     assert row["detail"] == opencode.OPENCODE_V2_REQUIRED
     assert row["terminal_action"] == "opencode-install"
-    assert row["release_check"] == {"state": "unsupported", "tested": "2.1.0"}
+    assert row["release_check"] == {"state": "unsupported", "tested": "2.4.0"}
 
 
 def test_opencode_ok_row_carries_a_below_tested_release_check(monkeypatch) -> None:
     import ciao
     from ciao import provider_versions
-    from ciao.providers import opencode
+    from ciao import opencode_cli as opencode
 
     monkeypatch.setattr(opencode, "resolve_opencode_binary", lambda *a, **k: "/bin/opencode")
     monkeypatch.setattr(
-        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout="opencode v2.0.32\n", returncode=0)
+        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout="opencode v2.3.2\n", returncode=0)
     )
     monkeypatch.setattr(opencode, "_credential_count", lambda *a, **k: 1)
     monkeypatch.setattr(provider_versions, "load_record", lambda: _tested_record(ciao.__version__))
@@ -2634,7 +2081,7 @@ def test_opencode_ok_row_carries_a_below_tested_release_check(monkeypatch) -> No
 
     assert row["release_check"]["state"] == "below_tested"
     assert row["release_check"]["terminal_action"] == "opencode-update"
-    assert row["release_check"]["command"].endswith("upgrade 2.1.0")
+    assert row["release_check"]["command"].endswith("upgrade 2.4.0")
 
 
 def test_clearing_the_discovery_cache_rereads_a_system_cli_version(monkeypatch) -> None:
@@ -2660,25 +2107,6 @@ def test_clearing_the_discovery_cache_rereads_a_system_cli_version(monkeypatch) 
         probe.cache_clear()
 
 
-def test_setup_status_reports_the_installer_folder_suggestion(tmp_path) -> None:
-    config = CiaoConfig(
-        pwa_auth_token="test-token",
-        workspace_root=tmp_path,
-        state_path=tmp_path / ".runtime" / "state.json",
-        media_root=tmp_path / ".runtime" / "media",
-        bootstrap_mode=True,
-        suggested_workspace=tmp_path / "notes",
-    )
-
-    assert setup_status(config, env={})["suggested_workspace"] == str(tmp_path / "notes")
-
-
-def test_setup_status_has_no_suggestion_on_a_configured_install(tmp_path) -> None:
-    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
-
-    assert setup_status(config, env={})["suggested_workspace"] is None
-
-
 def _setup_api_client(tmp_path) -> TestClient:
     config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
     serializer = URLSafeTimedSerializer("test-secret")
@@ -2691,8 +2119,6 @@ def _setup_api_client(tmp_path) -> TestClient:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
-    app.state.installer_bootstrap = False
-    app.state.installer_run_id = None
     app.state.serializer = serializer
     app.state.request_restart = lambda code: None
     return TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER)
@@ -2954,3 +2380,253 @@ def test_completed_legacy_import_inspection_does_not_list_removed_workspaces(
 
     assert inspect.status_code == 200, inspect.text
     assert "research" not in inspect.json()["existing_workspaces"]
+
+
+def test_claude_mcp_command_uses_bare_name_on_terminal_path(monkeypatch) -> None:
+    from ciao.setup_status import claude_mcp_command
+
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: "/usr/bin/claude")
+
+    assert claude_mcp_command("/x y/claude") == "claude mcp"
+
+
+def test_claude_mcp_command_quotes_the_bundled_binary(monkeypatch) -> None:
+    from ciao.setup_status import claude_mcp_command
+
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "/x y/claude")
+
+    assert claude_mcp_command() == "'/x y/claude' mcp"
+
+
+def test_installed_claude_row_carries_mcp_command(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
+
+    # Signed out (the autouse fixture) and signed in are both installed rows.
+    signed_out = setup_status(_config(tmp_path), env={})["providers"]["claude"]
+    _sign_in_claude(monkeypatch)
+    signed_in = setup_status(_config(tmp_path), env={})["providers"]["claude"]
+
+    assert signed_out["mcp_command"] == "/usr/local/bin/claude mcp"
+    assert signed_in["mcp_command"] == "/usr/local/bin/claude mcp"
+
+
+def test_missing_claude_row_has_no_mcp_command(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "")
+    monkeypatch.setattr("ciao.setup_status.claude_app_path", lambda: "")
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
+
+    claude = setup_status(_config(tmp_path), env={})["providers"]["claude"]
+
+    assert claude["auth"] == "not_installed"
+    assert "mcp_command" not in claude
+
+
+def test_claude_cli_without_the_acp_adapter_is_not_ready(monkeypatch) -> None:
+    from ciao import adapter_install
+
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: "adapter_missing")
+
+    row = claude_status_probe({}, config_path=Path("/nonexistent"))
+
+    assert row["ok"] is False
+    # One message for the card and the startup phase: the card's own button
+    # is named, and the npm line is the fallback. Never the circular
+    # "use Install in Settings → Providers" text, which is shown inside it.
+    assert row["detail"] == (
+        "The ACP adapter claude-agent-acp 0.108.1 is not installed for Ciaobot yet. "
+        "Install it with the button below, or run: "
+        f"{adapter_install.install_command(adapter_install.CLAUDE_ADAPTER)}"
+    )
+    assert "Settings → Providers" not in row["detail"]
+    assert row["command"] == adapter_install.install_command(adapter_install.CLAUDE_ADAPTER)
+    assert row["command"].endswith("-m ciao.adapter_install claude-agent-acp")
+    assert row["terminal_action"] == "claude-install"
+    assert row["state"] == "adapter_missing"
+
+
+def test_claude_adapter_on_node_too_old_says_so(monkeypatch) -> None:
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: "node_old")
+
+    row = claude_status_probe({}, config_path=Path("/nonexistent"))
+
+    assert row["ok"] is False
+    assert "Node 22 or newer" in row["detail"]
+
+
+_FAKE_CODEX = """#!/bin/sh
+if [ "$1" = "--version" ]; then echo "codex-cli 0.166.0"; exit 0; fi
+if [ "$1" = "login" ] && [ "$2" = "status" ]; then
+  echo "{printed}"
+  echo "{printed}" >&2
+  exit {code}
+fi
+exit 2
+"""
+
+
+from ciao.setup_status import codex_status_probe  # noqa: E402
+
+
+def _fake_codex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, code: int, printed: str = "ok") -> None:
+    script = tmp_path / "codex"
+    script.write_text(_FAKE_CODEX.format(code=code, printed=printed), encoding="utf-8")
+    script.chmod(0o755)
+    from ciao.providers.acp import agents
+
+    monkeypatch.setattr(agents, "codex_binary", lambda: str(script))
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: "ready")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fake CLI is a POSIX shell script")
+def test_codex_status_probe_missing_adapter_not_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_codex(tmp_path, monkeypatch, code=0)
+    from ciao import adapter_install, host_terminal
+
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: "adapter_missing")
+    row = codex_status_probe({})
+    assert row["auth"] == "not_installed"
+    assert row["ok"] is False
+    assert row["terminal_action"] == "codex-install"
+    # The CLI resolves, so the line installs only the pinned adapter.
+    assert row["command"] == adapter_install.install_command(adapter_install.CODEX_ADAPTER)
+    assert row["command"] == host_terminal.codex_install_command()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fake CLI is a POSIX shell script")
+def test_codex_status_probe_logged_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_codex(tmp_path, monkeypatch, code=1)
+    row = codex_status_probe({})
+    assert row["auth"] == "logged_out"
+    assert row["ok"] is False
+    assert row["version"] == "0.166.0"
+    assert row["terminal_action"] == "codex-login"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fake CLI is a POSIX shell script")
+def test_codex_status_probe_signed_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_codex(tmp_path, monkeypatch, code=0)
+    row = codex_status_probe({})
+    assert row["auth"] == "signed_in"
+    assert row["ok"] is True
+    assert "terminal_action" not in row
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fake CLI is a POSIX shell script")
+def test_codex_status_probe_never_logs_token_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    token = "sk-live-TOKEN-7f3a9c"
+    _fake_codex(tmp_path, monkeypatch, code=0, printed=f"Logged in as {token}")
+    caplog.set_level(logging.DEBUG)
+    row = codex_status_probe({})
+    assert row["ok"] is True
+    assert token not in json.dumps(row)
+    assert token not in caplog.text
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fake CLI is a POSIX shell script")
+def test_codex_status_probe_child_env_drops_secrets_and_keeps_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import setup_status
+
+    _fake_codex(tmp_path, monkeypatch, code=0)
+    monkeypatch.setenv("CIAO_PROBE_TEST_API_KEY", "sk-probe-secret-123")
+    seen: list[dict[str, str] | None] = []
+    real_run = subprocess.run
+
+    def spy(argv, **kwargs):  # type: ignore[no-untyped-def]
+        seen.append(kwargs.get("env"))
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(setup_status.subprocess, "run", spy)
+    codex_status_probe(dict(os.environ))
+    assert len(seen) == 2
+    for env in seen:
+        assert env is not None
+        assert "CIAO_PROBE_TEST_API_KEY" not in env
+        assert "sk-probe-secret-123" not in env.values()
+        assert env.get("PATH") == os.environ.get("PATH")
+
+
+def test_setup_finish_has_no_native_branch() -> None:
+    """The native installer is gone: no native state reaches the app factory and
+    no hidden native flag parses, so setup finish has only the legacy paths."""
+    import inspect
+
+    from ciao import cli
+    from ciao.web.app import create_app
+
+    assert "native_bootstrap" not in inspect.signature(create_app).parameters
+    with pytest.raises(SystemExit) as caught:
+        cli.build_parser().parse_args(["run", "--installer-native-fd", "5"])
+    assert caught.value.code == 2
+    with pytest.raises(SystemExit) as caught:
+        cli.build_parser().parse_args(["run", "--installer-native-workspace", "/tmp/x"])
+    assert caught.value.code == 2
+
+
+def _claude_state_row(monkeypatch, *, cli: str, adapter: str, logged_in: bool) -> dict:
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: cli)
+    monkeypatch.setattr("ciao.setup_status.claude_app_path", lambda: "")
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: adapter)
+    monkeypatch.setattr("ciao.setup_status._cli_version", lambda binary: "2.1.326 (Claude Code)")
+    monkeypatch.setattr("ciao.setup_status.discover_claude_system_skills", lambda: [])
+    monkeypatch.setattr("ciao.provider_versions.release_check", lambda *a, **k: {"state": "current"})
+    monkeypatch.setattr(
+        "ciao.setup_status.claude_auth_status",
+        lambda *args, **kwargs: {"logged_in": logged_in, "email": "user@example.test", "org_name": ""},
+    )
+    return claude_status_probe({}, config_path=Path("/nonexistent"))
+
+
+def test_claude_state_not_installed_is_explicit_and_links_the_install_guide(monkeypatch) -> None:
+    row = _claude_state_row(monkeypatch, cli="", adapter="", logged_in=False)
+
+    assert row["state"] == "not_installed"
+    assert row["auth"] == "not_installed"
+    assert row["ok"] is False
+    assert row["install_url"].startswith("https://code.claude.com/")
+    assert row["terminal_action"] == "claude-install"
+
+
+def test_claude_state_adapter_missing_is_not_the_not_installed_state(monkeypatch) -> None:
+    row = _claude_state_row(monkeypatch, cli="/fake/claude", adapter="adapter_missing", logged_in=True)
+
+    assert row["state"] == "adapter_missing"
+    assert row["ok"] is False
+    assert "install_url" not in row
+
+
+def test_claude_state_ready_when_cli_adapter_and_login_are_present(monkeypatch) -> None:
+    row = _claude_state_row(monkeypatch, cli="/fake/claude", adapter="ready", logged_in=True)
+
+    assert row["state"] == "ready"
+    assert row["ok"] is True
+
+
+def test_claude_state_failed_when_signed_out(monkeypatch) -> None:
+    row = _claude_state_row(monkeypatch, cli="/fake/claude", adapter="ready", logged_in=False)
+
+    assert row["state"] == "failed"
+    assert row["auth"] == "missing"
+    assert row["ok"] is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fake CLI is a POSIX shell script")
+def test_codex_not_installed_links_the_codex_install_guide(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_codex(tmp_path, monkeypatch, code=0)
+    from ciao.providers.acp import agents
+    from ciao.setup_status import CODEX_INSTALL_DOCS_URL
+
+    monkeypatch.setattr(agents, "codex_binary", lambda: None)
+    row = codex_status_probe({})
+
+    assert row["state"] == "not_installed"
+    assert row["install_url"] == CODEX_INSTALL_DOCS_URL
+

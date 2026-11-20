@@ -7,6 +7,11 @@ from fnmatch import fnmatchcase
 from importlib import resources
 from pathlib import Path
 
+import pytest
+
+from ciao import agent_cli
+from ciao.skills_inventory import MAX_SKILL_BYTES
+
 
 EXPECTED_COMMANDS = {
     "interrogation.md",
@@ -24,6 +29,53 @@ PRIVATE_MARKERS = {
     "PrivateCo",
     "/Users/private",
 }
+
+
+def _over_budget(text: str) -> bool:
+    return len(text.encode("utf-8")) > MAX_SKILL_BYTES
+
+
+def test_stock_skill_entries_fit_existing_context_budget() -> None:
+    skills = resources.files("ciao.stock").joinpath("skills")
+    entries = [p.joinpath("SKILL.md") for p in skills.iterdir() if p.is_dir() and p.joinpath("SKILL.md").is_file()]
+    assert any(p.parent.name == "ciao-cli" for p in entries)
+    for entry in entries:
+        text = entry.read_text(encoding="utf-8")
+        assert not _over_budget(text), f"{entry}: {len(text.encode('utf-8'))} bytes"
+
+
+def test_stock_skill_budget_uses_utf8_bytes() -> None:
+    assert not _over_budget("x" * MAX_SKILL_BYTES)
+    assert _over_budget("x" * (MAX_SKILL_BYTES + 1))
+    assert _over_budget("é" * (MAX_SKILL_BYTES // 2 + 1))
+
+
+def test_cli_reference_links_resolve_to_packaged_files() -> None:
+    skill = resources.files("ciao.stock").joinpath("skills", "ciao-cli")
+    entry = skill.joinpath("SKILL.md").read_text(encoding="utf-8")
+    for path in ("reference.md", "references/memory-and-review.md", "references/workspace-operations.md",
+                 "references/tasks.md", "references/automation-and-status.md"):
+        assert f"]({path})" in entry
+        assert skill.joinpath(*path.split("/")).read_text(encoding="utf-8").strip()
+    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "skills/**/*" in pyproject["tool"]["setuptools"]["package-data"]["ciao.stock"]
+
+
+@pytest.mark.parametrize(("path", "topics"), [
+    ("ciao-memory/SKILL.md", ("note",)),
+    ("ciao-capabilities/SKILL.md", ("schedule", "webhook")),
+    ("ciao-capabilities/references/automations.md", ("schedule", "webhook")),
+    ("ciao-capabilities/references/memory.md", ("vault", "project", "chat")),
+])
+def test_stock_skill_help_lookups_use_bounded_topics(path: str, topics: tuple[str, ...]) -> None:
+    text = resources.files("ciao.stock").joinpath("skills", *path.split("/")).read_text(encoding="utf-8")
+    assert "`ciao help`" not in text
+    if path.endswith("references/memory.md"):
+        assert "ciao help <topic>" in text
+    for topic in topics:
+        assert f"ciao help {topic}" in text
+        args = agent_cli.build_parser().parse_args(["help", topic])
+        assert args.noun == "help" and args.topic == topic
 
 
 def test_stock_package_contains_memory_skill_commands_and_schedules() -> None:
@@ -87,10 +139,11 @@ def test_baseline_authoring_does_not_ship_as_optional_skills() -> None:
     assert not skills.joinpath("sop-authoring/SKILL.md").is_file()
 
 
-def test_support_works_under_workspace_scope() -> None:
+def test_support_names_the_scoped_evidence_command() -> None:
     support = resources.files("ciao.stock").joinpath("skills/ciao-support/SKILL.md").read_text(encoding="utf-8")
     assert "ciao context logs" in support
-    assert "file_access=workspace only" in support
+    assert "file_access=" not in support
+    assert "workspace-only" not in support.lower().replace(" ", "-")
     assert "api.github.com/search/issues" in support
     assert "issues/new?title=" in support
 
@@ -158,7 +211,6 @@ def test_stock_curation_skill_carries_the_new_passes() -> None:
     assert "(xN)" in skill and "x3" in skill
     assert "Put pass reports in `Workspace/Curation-Log.md`" in skill
     assert "Curation-Log.md" in skill
-    assert "search: false" in skill
     assert "aliases:" in skill
     assert "last_full_pass" in skill
     assert "ciao vault-index --write" in skill
@@ -576,3 +628,56 @@ def test_decision_rules_reference_is_evidence_only_and_review_gated() -> None:
     ):
         assert phrase in section, phrase
     assert "never accept anything" in section
+
+
+def test_curation_prompt_points_at_the_lifecycle_and_keeps_its_guardrails() -> None:
+    """#3101: the prompt is short and names the lifecycle reference, which orders every command."""
+    prompt = _curation_prompt()
+    assert "references/curation-run-lifecycle.md" in prompt
+    assert "Put pass reports in `Workspace/Curation-Log.md`" in prompt
+    assert "create it if needed" not in prompt
+    assert "Rotate the logs" not in prompt
+    assert "move its body to a dated archive" not in prompt
+    assert len(prompt.encode("utf-8")) < 8192
+
+
+def test_curation_prompt_blocks_rotation_and_names_it_under_what_needs_you() -> None:
+    prompt = _curation_prompt()
+    assert "blocked in this release" in prompt
+    assert "Do not move, rename, create, or edit either log yourself" in prompt
+    assert "Name each overdue log under **What needs you**" in prompt
+    assert "Do not record a blocked key as done" in prompt
+
+
+def test_lifecycle_reference_orders_the_one_report_and_the_progress_after_it() -> None:
+    section = _reference("curation-run-lifecycle.md")
+    assert "ciao curation-log-append --holder <lease.holder> --log curation --text-file" in section
+    assert "One technical report" in section
+    assert "Only after that append succeeded" in section
+    assert "hygiene:os-audit" in section.split("3b.", 1)[1].split("## 4.", 1)[0]
+    assert "ciao curation-progress --holder <lease.holder> --key <key>" in section
+    assert "ciao curation-end --holder <lease.holder> --status ok|failed" in section
+
+
+def test_lifecycle_reference_has_the_failure_and_75_rules() -> None:
+    section = _reference("curation-run-lifecycle.md")
+    assert "Do not retry the append, because a retry can duplicate the report" in section
+    assert "Exit 75 from any command means the lease is no longer yours: stop at once" in section
+    assert "Exit 1 is a state error: stop" in section
+    assert "--status failed" in section
+    assert "Do not clear the lease" in section
+
+
+def test_lifecycle_reference_has_the_blocked_only_and_one_report_rules() -> None:
+    section = _reference("curation-run-lifecycle.md")
+    assert "blocked-only night" in section and "no technical report" in section
+    assert "one aggregate line" in section
+
+
+def test_skill_proposal_reference_reports_only_the_planned_named_files() -> None:
+    section = _reference("curation-pass-9-skill-proposals.md")
+    assert "planned" in section
+    assert "lifecycle step 3b" in section
+    assert "do not run `ciao skill-drafts`" in section
+    assert "Settle nothing" in section
+    assert "one aggregate line" in section

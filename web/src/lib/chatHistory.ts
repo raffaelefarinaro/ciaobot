@@ -7,6 +7,8 @@
 
 import { isPlausibleFilePath } from './filePaths'
 import { isHostConnectionUnavailableMessage } from './chatWs'
+import { subagentCardFromHistory } from './subagentCard'
+import { shellCardFromHistory } from './shellCard'
 import type { ChatMessage, TurnOrigin, TurnVerification } from './types'
 
 export function stripLegacyContextPrefix(content: string): string {
@@ -157,7 +159,6 @@ export function mergeMessageFields(sMsg: ChatMessage, lMsg: ChatMessage): ChatMe
   // Loop/schedule marker observed live but missing on the server row (older
   // servers, or a row built before the turn was recorded) — keep the ↻.
   if (lMsg.unattended && !sMsg.unattended) merged.unattended = lMsg.unattended
-  if (lMsg.steered && !sMsg.steered) merged.steered = lMsg.steered
   if (lMsg.origin && !sMsg.origin) merged.origin = lMsg.origin
   if (!merged.timestamp && lMsg.timestamp) merged.timestamp = lMsg.timestamp
   return merged
@@ -332,7 +333,7 @@ export function mergeMetadata(server: ChatMessage[], local: ChatMessage[]): Chat
   return mergedMessages
 }
 
-export type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean; steered?: boolean; origin?: TurnOrigin; sent_context?: string; usage?: Record<string, string>; quota?: Record<string, unknown>; effective_model?: string; verification?: TurnVerification }
+export type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean; origin?: TurnOrigin; sent_context?: string; usage?: Record<string, string>; quota?: Record<string, unknown>; effective_model?: string; verification?: TurnVerification; subagent?: unknown; shell?: unknown }
 
 export const toChatMessage = (m: ServerRow) => ({
   role: m.role as 'user' | 'assistant' | 'system',
@@ -356,8 +357,6 @@ export const toChatMessage = (m: ServerRow) => ({
   // send time; without mapping it here a reload made automated turns
   // read as user-authored.
   unattended: m.unattended || undefined,
-  // A message sent into the running turn (steered), recorded by the host.
-  steered: m.steered || undefined,
   // Who the engine wrote this turn for (wake, automation, webhook, ...).
   origin: m.origin || undefined,
   // The handover pack the engine recorded on a handover marker; the card shows it.
@@ -366,6 +365,10 @@ export const toChatMessage = (m: ServerRow) => ({
   file_path: m.file_path,
   action: m.action,
   tool: m.tool,
+  // _subagent card; journals from before cards carry only the title, so the card is normalised.
+  subagent: subagentCardFromHistory(m.subagent) ?? undefined,
+  // _shell card; undefined for every other row.
+  shell: shellCardFromHistory(m.shell) ?? undefined,
   phase: m.phase,
   // Envelope annotations (absolute index + lazy marker). Undefined on
   // legacy flat responses.
@@ -391,6 +394,8 @@ export function isLiveTraceRow(m: ChatMessage): boolean {
     m.tool_name === '_activity'
     || m.tool_name === '_thinking'
     || m.tool_name === '_filecard'
+    || m.tool_name === '_subagent'
+    || m.tool_name === '_shell'
   )
 }
 
@@ -406,9 +411,10 @@ export function isLiveTraceRow(m: ChatMessage): boolean {
  * rendering the reply once whole and then again in pieces.
  *
  * The server's copy is authoritative once the turn has settled, which is what
- * a window row for an assistant answer carrying a completion `timestamp` says
- * (only the turn-final row gets one, from `_overlay_assistant_timings`). Until
- * then the live tail is all the user has, so it stays.
+ * a window row for an assistant answer or error carrying a completion
+ * `timestamp` says (only the turn-final row gets one, from
+ * `_overlay_assistant_timings`). Until then the live tail is all the user has,
+ * so it stays.
  *
  * Settling is judged per turn: the tail is split at user bubbles, and only a
  * turn whose own settled answer arrived in `windowRows` loses its live copies.
@@ -416,10 +422,10 @@ export function isLiveTraceRow(m: ChatMessage): boolean {
  * reconciled, so one refresh may settle several turns at once, while a
  * follow-up still streaming keeps its trace.
  *
- * Only trace rows go. An un-indexed plain system row is a client-side notice
- * — the failed-send warning `recoverUnackedSend` pushes — with no server
- * counterpart to replace it, and an un-indexed user bubble is handled by the
- * optimistic-bubble pruning instead.
+ * Trace rows go. A client-side `Error: …` notice also goes when its exact
+ * message appears as a settled server error row. Other un-indexed system rows
+ * are notices with no server counterpart to replace them, and an un-indexed
+ * user bubble is handled by optimistic-bubble pruning instead.
  */
 export function dropSupersededLiveTail(
   merged: ChatMessage[], tailStart: number, windowRows: ChatMessage[],
@@ -429,7 +435,6 @@ export function dropSupersededLiveTail(
     if (
       typeof row.i === 'number'
       && row.role === 'assistant'
-      && !row.is_error
       && Boolean(row.timestamp)
     ) settledIndices.add(row.i)
   }
@@ -466,12 +471,30 @@ export function dropSupersededLiveTail(
     const carried: Partial<ChatMessage> = {}
     const rows: ChatMessage[] = []
     let target = -1
+    const settledErrors = turn.filter(
+      row => row.role === 'assistant'
+        && row.is_error
+        && typeof row.i === 'number'
+        && settledIndices.has(row.i),
+    )
     for (const row of turn) {
+      if (
+        typeof row.i !== 'number'
+        && row.role === 'system'
+        && /^Error:\s*/i.test(row.content)
+        && settledErrors.some(
+          error => error.content.replace(/^Error:\s*/i, '').trim()
+            === row.content.replace(/^Error:\s*/i, '').trim(),
+        )
+      ) {
+        changed = true
+        continue
+      }
       if (typeof row.i !== 'number' && isLiveTraceRow(row)) {
         if (row.usage) carried.usage = row.usage
         if (row.effective_model) carried.effective_model = row.effective_model
         if (row.quota) carried.quota = row.quota
-        // A vault check that landed live on the streamed row before reconcile.
+        // A legacy verdict that landed live on the streamed row before reconcile.
         if (row.verification) carried.verification = row.verification
         changed = true
         continue

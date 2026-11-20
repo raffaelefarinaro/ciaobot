@@ -10,6 +10,21 @@ from __future__ import annotations
 
 from ciao import core_prompt as mi
 
+SHELL_BAN = "Do not start background shells"
+SUBAGENT_OK = "Dispatching a background subagent (the Agent tool with `run_in_background`) is allowed."
+
+
+def test_core_no_longer_bans_background_shells() -> None:
+    core = mi.unified_core()
+    assert SHELL_BAN not in core
+    assert "Ciaobot cannot track them" not in core
+    assert SUBAGENT_OK in core
+    assert "subagent" in core
+
+
+def test_core_has_no_native_background_tool_advice() -> None:
+    assert "native subagent and background tools" not in mi.unified_core()
+
 
 def test_system_prompt_payload_returns_instructions_for_empty() -> None:
     payload = mi.system_prompt_payload("")
@@ -78,16 +93,6 @@ def test_system_prompt_keeps_diagnostic_entrypoint_compact() -> None:
     assert ".runtime/ciao.stderr.log" not in append
     assert "Public GitHub issues" in append
     assert "ciao context logs" in append
-
-
-def test_system_prompt_states_workspace_scope_limits() -> None:
-    payload = mi.system_prompt_payload("")
-    assert payload is not None
-    append = payload["append"]
-    assert "file_access=workspace only" in append
-    assert "Do not probe excluded paths or retry denied access" in append
-    assert "Settings → Overview → File access" in append
-    assert "do not assume integrations are signed out" in append
 
 
 def test_system_prompt_includes_project_canonical_doc_notes() -> None:
@@ -223,9 +228,9 @@ def test_rules_carry_a_reason_in_the_same_bullet() -> None:
     assert "output lands in transcripts and replies" in bullet("never quote credentials")
     assert "public and permanent" in bullet("Public GitHub issues")
     # Secret handling moves with the webhook procedure, reachable via help.
-    from pathlib import Path
+    from ciao import agent_cli
 
-    reference = (Path(mi.__file__).parent / "stock/skills/ciao-cli/SKILL.md").read_text(encoding="utf-8")
+    reference = agent_cli._help_text()
     assert "never save a copy in notes, memory or source files" in reference
 
 
@@ -253,8 +258,13 @@ def test_core_routes_write_procedures_out_of_the_always_loaded_prompt() -> None:
     assert "[expires:" not in text
     assert "A note without frontmatter cannot be indexed" not in text
     assert "Every Ciaobot operation is a `ciao <noun> <verb>" not in text
-    assert "run_in_background" not in text
     assert "`Agent`/`Task`" not in text
+    # Background shells are tracked now, so the core carries no shell ban. The
+    # subagent sentence stays, and it is the only run_in_background mention.
+    assert SHELL_BAN not in text
+    assert "Ciaobot cannot track them" not in text
+    assert text.count(SUBAGENT_OK) == 1
+    assert text.count("run_in_background") == 1
 
 
 def test_core_synopsis_only_offers_agent_allowed_task_move_columns() -> None:
@@ -281,3 +291,11 @@ def test_disclosed_memory_procedures_remain_available() -> None:
         "`ciao file surface",
     ):
         assert instruction in procedures, instruction
+
+
+def test_system_prompt_points_operator_steps_to_sidebar_terminal() -> None:
+    payload = mi.system_prompt_payload("")
+    assert payload is not None
+    text = payload["append"]
+    for fact in ("Chat details → Open → Terminal", "engine's computer", "cannot drive", "bypass permissions", "dedicated sign-in", "`/mcp`", "navigation", "provider TUI"):
+        assert fact in text

@@ -1,5 +1,5 @@
 <template>
-  <div ref="panelEl" class="chat-panel" data-rail-host :class="{ 'chat-panel--rail': railShown }" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handlePanelClick">
+  <div ref="panelEl" class="chat-panel" data-rail-host :class="{ 'chat-panel--rail': railShown, 'chat-rise': riseOwned }" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handlePanelClick">
     <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files to add their accessible path</div>
 
     <!-- Header. No page tag: the project context control below and the chat
@@ -7,15 +7,8 @@
          repeat what the transcript underneath already says. This is also the
          most crowded header in the app, so the room goes to those two pieces
          and the action icons. -->
-    <!-- No brand mark here. This is the densest header in the app - breadcrumb,
-         model picker, agent pill, archive - and the centred wordmark was
-         squeezing the chat title down to a few characters. The breadcrumb
-         already says where you are, and the mark is a click-to-reload
-         shortcut available on every other view. -->
     <PaneHeader
-      :brand="false"
       phone-overflow
-      :active-bg-agents="view.activeBackgroundAgents"
       @open-sidebar="$emit('open-sidebar')"
     >
       <template #title>
@@ -49,7 +42,8 @@
                 :items="titleRail.items.value"
                 group-label="Chats in this workspace"
                 :current-id="chat.chat_id"
-                @select="titleRail.select"
+                :busy="titleRail.switching.value"
+                @select="onTitleRailSelect"
                 @rename="startEditTitle"
                 @lean="railLean = $event"
                 @pull="emit('pull', $event)"
@@ -237,12 +231,10 @@
         <ChatTurnActivity
           v-if="item.kind === 'trace'"
           :steps="item.steps"
-          :subs="item.subs"
           :outputs="item.outputs"
           :outputs-open="Boolean(openOutputs[i])"
           :outputs-id="domId(`outputs-${i}`)"
           :open="Boolean(openTraces[i])"
-          :chat-id="chat.chat_id"
           :thinking-expanded="thinkingExpanded"
           :render-markdown="renderMarkdown"
           :render-activity-line="renderActivityLine"
@@ -314,12 +306,6 @@
               <!-- An automation's tick, not something the reader typed.
                    Without this the two are indistinguishable in the
                    transcript. -->
-              <div v-if="item.msg.steered" class="message-meta">
-                <span
-                  class="steered-mark"
-                  title="Sent into the running reply"
-                >steered</span>
-              </div>
               <div v-if="item.msg.unattended && !item.msg.origin" class="message-meta">
                 <span
                   class="unattended-mark"
@@ -367,38 +353,24 @@
             :known-paths="knownFilePaths"
           >
             <template v-if="errorHasActions(i, item.msg.content)" #actions>
-              <template v-if="retryOwnerIdx === i && chat.retry">
-                <ChatRetryState
-                  :retry="chat.retry"
-                  :provider="chat.provider"
-                  :streaming="view.isStreaming"
-                  :chat-id="chat.chat_id"
-                  @continue="openRecoveryPicker(null)"
-                  @try-now="tryRetryNow"
-                  @stop="stopRetry"
-                />
-                <!-- The retry state does not replace the diagnosis chat. -->
-                <div v-if="errorBubbleAction(i, item.msg.content) === 'fix'" class="error-actions">
-                  <button class="retry-btn fix-btn" @click="openFixChat(i)">Fix this error</button>
-                </div>
-              </template>
-              <template v-else>
               <div class="error-actions">
                 <button
-                  v-if="lastUserBefore(i) && !hasLaterItem(i)"
+                  v-if="!hasPendingRetry && lastUserBefore(i) && !hasLaterItem(i)"
                   class="retry-btn"
+                  :disabled="!recoveryForError(i) || view.isStreaming"
                   @click="retryFromError(i)"
                 >Retry</button>
                 <!-- See errorBubbleAction for which fix a known error gets. -->
                 <button
                   v-if="errorBubbleAction(i, item.msg.content) === 'retry-hourly'"
                   class="retry-btn fix-btn"
+                  :disabled="!recoveryForError(i) || view.isStreaming"
                   @click="retryHourlyFromError(i)"
                 >Retry every hour</button>
                 <button
                   v-else-if="errorBubbleAction(i, item.msg.content) === 'switch-model'"
                   class="retry-btn fix-btn"
-                  :disabled="view.isStreaming"
+                  :disabled="view.isStreaming || !recoveryForError(i)"
                   @click="openRecoveryPicker(i)"
                 >Switch model</button>
                 <button
@@ -407,15 +379,16 @@
                   @click="openFixChat(i)"
                 >Fix this error</button>
               </div>
+              <p v-if="!recoveryForError(i) && !hasPendingRetry">Recovery is unavailable until this failure and its history are verified. Recovery sends “continue”, not the original request.</p>
+              <p v-else-if="recoveryForError(i) && !hasPendingRetry">Recovery sends “continue”, not the original request. The provider may no longer have the session.</p>
               <ProviderSignInHint
-                v-if="isProviderAuthError(item.msg.content) && lastUserBefore(i) && !hasLaterItem(i) && !chat.archived"
+                v-if="!hasPendingRetry && isProviderAuthError(item.msg.content) && lastUserBefore(i) && !hasLaterItem(i) && !chat.archived"
                 :provider="chat.provider"
                 action-label="Retry"
-                :action-disabled="view.isStreaming"
+                :action-disabled="view.isStreaming || !recoveryForError(i)"
                 :chat-id="chat.chat_id"
                 @action="retryFromError(i)"
               />
-              </template>
             </template>
           </InjectedPromptCard>
         </div>
@@ -499,7 +472,6 @@
                 <span v-if="formatTokenUsage(item.meta.usage)" class="tokens-group" v-html="formatTokenUsage(item.meta.usage)"></span>
               </div>
             </div>
-            <TurnVerificationBadge v-if="item.meta?.verification" :verification="item.meta.verification" />
           </div>
         </div>
         <!-- System message (errors, etc) -->
@@ -527,13 +499,17 @@
       </template>
       </template>
 
-      <!-- A pending retry whose failure is not the transcript's last row (or
-           has none) gets its own error card; otherwise the last error row
-           carries the retry state itself. -->
-      <div v-if="retryPending && chat.retry && retryOwnerIdx === -1" class="message-wrap injected-prompt-wrap">
+      <div v-if="store.unknownRecoveryOutcomes[chat.chat_id] || store.recoveryOutcomeStorageUnavailable" class="message-wrap" role="alert">
+        The recovery outcome is unknown. It may already be scheduled or have run. Check its status and reconcile the chat before trying again.
+        <button type="button" class="retry-btn" @click="checkUnknownRecovery">Check recovery status</button>
+        <button type="button" class="retry-btn" @click="stopObservedRecovery">Stop observed recovery</button>
+        <button v-if="!store.recoveryOutcomeStorageUnavailable" type="button" class="retry-btn" @click="acknowledgeUnknownRecovery">I checked the chat</button>
+      </div>
+      <!-- The stored reason does not prove that a transcript error owns this schedule. -->
+      <div v-if="retryPending && chat.retry" class="message-wrap injected-prompt-wrap">
         <InjectedPromptCard
-          :prompt="errorNoticePrompt(chat.retry.last_error || '')"
-          :raw="chat.retry.last_error || ''"
+          :prompt="retryScheduledNotice(chat.retry.last_error || '')"
+          raw=""
           :chat-title="chat.title"
           :known-paths="knownFilePaths"
         >
@@ -542,6 +518,7 @@
               :retry="chat.retry"
               :provider="chat.provider"
               :streaming="view.isStreaming"
+              :recovery-ready="!!readyRecovery && readyRecovery.chatId === chat.chat_id && readyRecovery.failureId === chat.failure_id && !store.recoveryOutcomeStorageUnavailable && !store.unknownRecoveryOutcomes[chat.chat_id]"
               :chat-id="chat.chat_id"
               @continue="openRecoveryPicker(null)"
               @try-now="tryRetryNow"
@@ -585,7 +562,7 @@
           <span class="sr-only">, {{ liveTraceOpen ? 'expanded' : 'collapsed' }}</span>
         </button>
         <div
-          v-if="liveTraceOpen && (view.currentTimeline.length || view.currentStreamingText || view.currentStreamingThinking || liveSubagents.length)"
+          v-if="liveTraceOpen && (view.currentTimeline.length || view.currentStreamingText || view.currentStreamingThinking)"
           ref="liveTraceBodyEl"
           class="trace-body"
           @click="onLiveTraceBodyClick"
@@ -603,6 +580,14 @@
                   v-html="renderActivityLine(line)"
                 ></div>
               </div>
+            </div>
+            <div v-else-if="entry.kind === 'shell'" class="trace-step trace-step--shell">
+              <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 4 4-4 4M11 16h8" /></svg></span>
+              <ShellCard :card="entry.card" />
+            </div>
+            <div v-else-if="entry.kind === 'subagent'" class="trace-step trace-step--subagent">
+              <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11h14v8H5zM12 4v3M9 15h.01M15 15h.01" /></svg></span>
+              <SubagentCard :card="entry.card" @open-file="openFileCard" />
             </div>
             <div v-else-if="entry.kind === 'filecard'" class="trace-step trace-step--file">
               <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l3 3v15H6z" /></svg></span>
@@ -664,11 +649,6 @@
           <div v-if="view.currentStreamingText" class="trace-step trace-step--note trace-step--now">
             <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z" /></svg></span>
             <div class="trace-text trace-streaming" v-html="renderMarkdown(view.currentStreamingText)"></div>
-          </div>
-          <!-- Subagents for the in-flight turn nest in the live trace -->
-          <div v-if="liveSubagents.length" class="trace-step trace-step--subagent">
-            <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3" /><path d="M6 20a6 6 0 0 1 12 0" /></svg></span>
-            <SubagentPanel :subagents="liveSubagents" :chat-id="chat.chat_id" />
           </div>
         </div>
       </div>
@@ -911,23 +891,21 @@
       </div>
     </div>
 
-    <!-- Needs-you cards: what this chat is waiting on the user for (an MCP
-         sign-in, ...). Above the queue and the composer. Keyed by id: a
-         replaced action is a new card. The stack folds several untouched
-         sign-ins into one row and caps its height, so the transcript keeps
-         its room. -->
-    <NeedsYouStack :chat-id="chat.chat_id" :actions="needsYouActions" @release-focus="focusComposerAfterCard" />
+    <!-- Needs-you cards: generic actions this chat is waiting on the user for.
+         Kept above the queue and composer, keyed by action id so a replaced
+         action becomes a new card. MCP recovery remains in Chat details. -->
+    <NeedsYouStack :chat-id="chat.chat_id" :actions="needsYouActions" />
 
     <!-- Queued messages (sent while a response was already streaming). -->
     <div v-if="view.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
-      <div v-if="steerAllIds.length >= 2" class="queued-head">
+      <div v-if="!view.isStreaming && waitingIds.length >= 2" class="queued-head">
         <span class="queued-count">{{ view.currentQueued.length }} queued</span>
         <button
           type="button"
-          class="queued-steer-all"
-          :title="view.isStreaming ? 'Send these into the running reply as one message' : 'Send these now as one message'"
-          @click="steerQueued($event, steerAllIds, 'steer')"
-        >{{ view.isStreaming ? 'Steer all' : 'Send all now' }}</button>
+          class="queued-send-all"
+          title="Send these now as one message"
+          @click="sendNow($event, waitingIds)"
+        >Send all now</button>
       </div>
       <div
         v-for="(q, i) in view.currentQueued"
@@ -935,47 +913,24 @@
         class="queued-chip"
         tabindex="-1"
         :data-queue-id="q.id"
-        :class="{ 'is-steering': q.steering }"
         :title="queuedChipTitle(q)"
       >
-        <span class="queued-steering">{{ q.steering ? 'Steering…' : '' }}</span>
         <div class="queued-body">
           <div v-if="q.images?.length" class="queued-images">
             <img v-for="img in q.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="queued-image-thumb" />
           </div>
           <span class="queued-text">{{ queuedDisplayText(q.text) }}</span>
         </div>
-        <div v-if="!q.steering" class="queued-controls">
-          <div
-            v-if="view.isStreaming && !q.waiting"
-            class="queued-mode"
-            role="group"
-            :aria-label="`What “${queuedExcerpt(q.text)}” will do`"
-          >
-            <button
-              type="button"
-              class="queued-mode-option"
-              :aria-pressed="q.delivery === 'queue'"
-              title="Send as the next message when the reply finishes"
-              @click="q.delivery === 'queue' || steerQueued($event, [q.id], 'queue')"
-            >Queue</button>
-            <button
-              type="button"
-              class="queued-mode-option"
-              :aria-pressed="q.delivery === 'steer'"
-              title="Send into the running reply now"
-              @click="q.delivery === 'steer' || steerQueued($event, [q.id], 'steer')"
-            >Steer</button>
-          </div>
-          <span v-else class="queued-label">Waiting</span>
+        <div class="queued-controls">
+          <span v-if="view.isStreaming" class="queued-label">{{ q.waiting ? 'Waiting' : 'Queued' }}</span>
           <div class="queued-actions">
             <button
               v-if="q.waiting || !view.isStreaming"
               type="button"
               class="queued-send-now"
-              :title="view.isStreaming ? 'Send this into the running reply now' : 'Start a turn with this message now'"
-              @click="steerQueued($event, [q.id], 'steer')"
-            >{{ view.isStreaming ? 'Steer' : 'Send now' }}</button>
+              :title="view.isStreaming ? 'Run after this reply' : 'Start a turn with this message now'"
+              @click="sendNow($event, [q.id])"
+            >{{ view.isStreaming ? 'Send next' : 'Send now' }}</button>
             <button
               class="queued-action"
               :disabled="i === 0"
@@ -1001,20 +956,12 @@
         </div>
       </div>
     </div>
-    <!-- One live region for the whole queue, always mounted: a chip that
-         appears already in the Steering state is announced by this text
-         changing, not by a new element. -->
-    <span class="queue-live sr-only" aria-live="polite">{{ steeringAnnouncement }}</span>
-    <p v-if="queueEditNotice" class="queue-edit-notice steer-notice" role="status">{{ queueEditNotice }}</p>
-    <!-- Outside the queue block: the fallback reply usually empties it, and a
-         collapsed dock hides it, but the notice must still be read. -->
-    <p v-if="store.steerNotice[chat.chat_id]" class="steer-notice" role="status">{{ store.steerNotice[chat.chat_id] }}</p>
+    <p v-if="queueEditNotice" class="queue-edit-notice queue-notice" role="status">{{ queueEditNotice }}</p>
 
     <!-- Dock strip: one counted line for everything not expanded above, so the
          dock never grows past one card plus this. Rendered whenever there is
          anything to collapse OR anything already expanded, so the disclosure
-         works in both directions. Background agents and runs are not here: they
-         are the composer bar's activity cluster. -->
+         works in both directions. -->
     <div v-if="dockStripVisible" class="dock-strip-wrap">
       <!-- aria-live sits on an inner span: an explicit role="status" on the
            button would override its implicit button role and drop
@@ -1169,6 +1116,7 @@
             @focus="handleInputFocus"
             @click="refreshComposerPickers"
           ></textarea>
+          <p v-if="isMcpToken" :id="domId('mcp-shortcut-hint')" class="hint">{{ mcpUnavailableReason || 'Open MCP settings — no message is sent' }}</p>
           <div
             class="input-actions composer-bar"
             ref="composerBarEl"
@@ -1182,6 +1130,7 @@
             <div class="model-picker-wrap composer-model" ref="modelPickerRef">
               <button
                 type="button"
+                ref="composerModelTrigger"
                 class="model-picker-summary composer-chip"
                 :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${chipModelLabel}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
                 aria-haspopup="listbox"
@@ -1195,51 +1144,66 @@
               <ModelSelector
                 v-if="showModelPicker"
                 triggerless
+                mobile-sheet
                 :model-value="canonicalTier(activeModelId)"
                 :active-models="activeModelHighlights"
-                :sections="chatModelSections"
+                :sections="pickerModelSections"
                 :filter-section="capabilityPickerSection"
                 placeholder="Model"
                 placement="top-start"
                 :labelled-by="isRecoveryPicker ? domId('model-picker-recovery-title') : ''"
                 :described-by="isRecoveryPicker ? domId('model-picker-recovery-note') : ''"
                 @select="selectModel"
-                @close="showModelPicker = false"
+                @close="handleModelPickerClose"
               >
-                <!-- Recovery only. Here a pick is not a model change but a
-                     retry of the turn that failed, so the picker says so
-                     before the user chooses. The thinking chips below it are
-                     the current model's set: a pick applies and retries in
-                     one go, so there is no moment where the chips could
-                     follow a model the user has not chosen yet. The note
-                     says so, and a staged level the chosen model does not
-                     offer is dropped when the pick is applied. -->
                 <template v-if="isRecoveryPicker" #header>
                   <div class="model-picker-recovery">
-                    <p :id="domId('model-picker-recovery-title')" class="model-picker-recovery__title">Choose a model to retry immediately</p>
+                    <p :id="domId('model-picker-recovery-title')" class="model-picker-recovery__title">Continue with the current model</p>
                     <p :id="domId('model-picker-recovery-note')" class="model-picker-recovery__note">
-                      Choosing a model retries the failed request and may incur usage charges. A Thinking level you pick here applies to that retry, within the levels the current model offers.
+                      Choose the current model to send “continue”; this may incur usage charges. Model and Thinking changes are unavailable during recovery.
                     </p>
                   </div>
                 </template>
                 <template #footer>
-                  <div
-                    v-if="showThinkingLevels"
-                    class="thinking-levels"
-                  >
-                    <span :id="domId('thinking-levels-label')" class="thinking-levels__label">Thinking</span>
-                    <div class="thinking-levels__chips" role="group" :aria-labelledby="domId('thinking-levels-label')">
-                      <button
-                        v-for="level in ['', ...filteredThinkingLevels]"
-                        :key="level"
-                        type="button"
-                        class="thinking-chip"
-                        :class="{ 'thinking-chip--active': thinkingChipLevel === level }"
-                        :aria-pressed="thinkingChipLevel === level"
-                        @click="selectThinking(level)"
-                      >
-                        {{ level ? level.charAt(0).toUpperCase() + level.slice(1) : 'Auto' }}
-                      </button>
+                  <div class="picker-footer-groups">
+                    <div v-if="showThinkingLevels" class="thinking-levels">
+                      <span :id="domId('thinking-levels-label')" class="thinking-levels__label">Thinking</span>
+                      <div class="thinking-levels__chips" role="group" :aria-labelledby="domId('thinking-levels-label')">
+                        <button
+                          v-for="level in ['', ...filteredThinkingLevels]"
+                          :key="level"
+                          type="button"
+                          class="thinking-chip"
+                          :class="{ 'thinking-chip--active': thinkingChipLevel === level }"
+                          :aria-pressed="thinkingChipLevel === level"
+                          :disabled="isRecoveryPicker || modeWritePending"
+                          @click="selectThinking(level)"
+                        >
+                          {{ level ? level.charAt(0).toUpperCase() + level.slice(1) : 'Auto' }}
+                        </button>
+                      </div>
+                    </div>
+                    <div v-if="!isRecoveryPicker" class="permission-modes">
+                      <span :id="domId('permission-mode-label')" class="thinking-levels__label">Permission mode</span>
+                      <div class="permission-modes__choices" role="group" :aria-labelledby="domId('permission-mode-label')">
+                        <button
+                          v-for="mode in permissionModes"
+                          :key="mode"
+                          type="button"
+                          class="thinking-chip permission-mode"
+                          :class="{ 'thinking-chip--active': chat.mode === mode }"
+                          :aria-pressed="chat.mode === mode"
+                          :disabled="modeWritePending"
+                          @click="selectPermissionMode(mode)"
+                        >
+                          <span>{{ PERMISSION_MODE_COPY[mode].name }}</span>
+                          <span class="permission-mode__description">{{ PERMISSION_MODE_COPY[mode].allows }}</span>
+                          <span v-if="chat.mode === mode" class="permission-mode__check" aria-hidden="true">✓</span>
+                        </button>
+                      </div>
+                      <p v-if="!isBridgeMode(chat.mode)" class="permission-modes__unknown">Current mode is unknown.</p>
+                      <p class="permission-modes__note">Changes apply to subsequent turns, not the reply already running. Already queued or external turns may start before a change is saved.</p>
+                      <p v-if="modeWritePending" class="permission-modes__status" role="status">Saving permission mode… Sending from this composer is paused.</p>
                     </div>
                   </div>
                 </template>
@@ -1249,32 +1213,22 @@
               <input type="file" multiple hidden @change="handleFileSelect" />
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </label>
-            <!-- Background work the turn left running: agents and shells, right
-                 against Send. Fills the bar's free space, so it is also the spacer. -->
+            <span class="composer-spacer" aria-hidden="true"></span>
             <ComposerActivity
-              :chat-id="chat.chat_id"
-              :agent-count="composerAgentCount"
-              :agents="runningRows"
+              :chat-id="chatId"
+              :agents="runningWork.agents"
+              :shells="runningWork.shells"
               :now="nowTs"
-              :stop-task="stopShell"
-              :stopping="store.stoppingTasks[chat.chat_id]"
-              :stop-errors="store.stopTaskErrors[chat.chat_id]"
-              @open-details="openRunDetails"
             />
-            <span v-if="inputText.trim()" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
+            <span v-if="inputText.trim() && !isMcpToken" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
             <button
-              v-if="showMoveToBackground"
-              ref="moveBtnEl"
+              v-if="view.isStreaming && isMcpToken"
               type="button"
-              class="composer-chip composer-move-bg"
-              :disabled="movingToBackground"
-              aria-label="Move to background"
-              title="Move the running command or subagent to the background. The reply ends now and the result arrives when it finishes."
-              @click="moveToBackground"
-            >
-              <span class="composer-move-bg-long">Move to background</span>
-              <span class="composer-move-bg-short" aria-hidden="true">Background</span>
-            </button>
+              class="btn-small"
+              :aria-label="mcpActionLabel"
+              :aria-describedby="domId('mcp-shortcut-hint')"
+              @click="send"
+            >{{ mcpActionLabel }}</button>
             <!-- While streaming: empty composer → stop; any draft → queue. -->
             <button
               class="send-btn"
@@ -1282,6 +1236,7 @@
               :disabled="!showStopAction && !canSend"
               :title="primaryActionTitle"
               :aria-label="primaryActionLabel"
+              :aria-describedby="isMcpToken && !showStopAction ? domId('mcp-shortcut-hint') : undefined"
               @click="primaryAction"
             >
               <svg v-if="showStopAction" class="stop-icon" width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" /></svg>
@@ -1371,6 +1326,12 @@
           </button>
         </div>
       </section>
+      <section v-if="!chat.archived" class="cd-section cd-block chat-rail-mcp" :aria-labelledby="domId('chat-rail-mcp')">
+        <div class="cd-head"><h3 :id="domId('chat-rail-mcp')" class="cd-heading chat-mcp-heading" tabindex="-1">MCP</h3></div>
+        <ProviderMcpButton v-if="mcpConnection" :connection="mcpConnection" :chat-id="chat.chat_id" />
+        <p v-if="mcpUnavailableReason" class="hint">{{ mcpUnavailableReason }}</p>
+        <p v-if="mcpLoadError" role="alert">{{ mcpLoadError }}</p>
+      </section>
       <!-- The linked repository; the header's `code` badge opens here. -->
       <div v-if="project?.repo" ref="railRepoEl" class="chat-rail-repo cd-block" tabindex="-1">
         <ChatRepoSection
@@ -1393,43 +1354,6 @@
           @compact="compactContext"
         />
       </div>
-      <section
-        v-if="runningRows.length"
-        ref="railRunningEl"
-        class="cd-section cd-block chat-rail-running"
-        :aria-labelledby="domId('chat-rail-running')"
-        tabindex="-1"
-      >
-        <div class="cd-head">
-          <h3 :id="domId('chat-rail-running')" class="cd-heading">Running</h3>
-          <span class="cd-count">{{ runningRows.length }}</span>
-        </div>
-        <!-- One list, agents first: an agent has a transcript to open, a shell only a Stop. -->
-        <div class="cd-rows">
-          <router-link
-            v-for="sub in runningSubagents"
-            :key="sub.agent_id"
-            :to="subagentPath(chat.chat_id, sub.agent_id)"
-            class="cd-row cd-row--link chat-rail-agent"
-          >
-            <span class="cd-icon"><ActivityGlyph kind="working" /></span>
-            <span class="cd-main">
-              <span class="cd-primary">{{ subagentLabel(sub) }}</span>
-              <span class="cd-detail">Agent<template v-if="sub.subagent_type"> · {{ sub.subagent_type }}</template></span>
-            </span>
-            <span class="cd-trail" aria-hidden="true"><AppIcon name="arrow" /></span>
-          </router-link>
-          <ShellRows
-            v-if="runningShells.length"
-            variant="rail"
-            :rows="runningShells"
-            :now="nowTs"
-            :stop-task="stopShell"
-            :stopping="store.stoppingTasks[chat.chat_id]"
-            :errors="store.stopTaskErrors[chat.chat_id]"
-          />
-        </div>
-      </section>
       <section v-if="railTools.length" class="cd-section cd-block chat-rail-tools" :aria-labelledby="domId('chat-rail-tools')">
         <div class="cd-head">
           <h3 :id="domId('chat-rail-tools')" class="cd-heading">Skills and MCP</h3>
@@ -1498,20 +1422,20 @@ import { useKeyboardSettings } from '../composables/useKeyboardSettings'
 import { memoryPassChatId, memoryPassSource } from '../lib/memoryPass'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useTerminalStore } from '../stores/terminal'
-// Subagent transcripts carry `turn_index` (the user turn that dispatched
-// them, parsed server-side from the session JSONL), so each panel anchors
-// under the turn that spawned its agents.
-import SubagentPanel from './SubagentPanel.vue'
 import AgentContextSection from './AgentContextSection.vue'
 import { latestContextUsage } from '../lib/contextUsage'
 import ChatTurnActivity from './ChatTurnActivity.vue'
+import SubagentCard from './SubagentCard.vue'
+import ShellCard from './ShellCard.vue'
+import ComposerActivity from './ComposerActivity.vue'
+import { NO_RUNNING_WORK } from '../lib/runningWork'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { recordSentPrompt } from '../lib/chatDrafts'
 import { splitAttachmentBlock, type AttachedFile } from '../lib/chatAttachments'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useArchiveChat } from '../composables/useArchiveChat'
-import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatMessage, SubagentTranscript, TurnVerification } from '../lib/types'
+import type { AgentAssetsResponse, RuntimeProvider, ModelsResponse, ChatInfo, ChatMessage, ProviderConfigSettings, ProviderConnection, TurnVerification } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
@@ -1524,6 +1448,7 @@ import { chatDetailsClosed, rememberChatDetails } from '../lib/chatDetailsPref'
 import { useChatView } from '../composables/useChatView'
 import { useFileMentions, type FileMentionContext } from '../composables/useFileMentions'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
+import ProviderMcpButton from './ProviderMcpButton.vue'
 import NeedsYouStack from './NeedsYouStack.vue'
 import { actionCopy } from '../lib/chatActions'
 import ModelSelector from './ModelSelector.vue'
@@ -1531,7 +1456,6 @@ import { ARCHIVE_ACTION_LABEL } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
 import ProviderSignInHint from './ProviderSignInHint.vue'
 import ChatRetryState from './ChatRetryState.vue'
-import TurnVerificationBadge from './TurnVerificationBadge.vue'
 import TaskOriginNote from './TaskOriginNote.vue'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import { isLiveAttemptState } from '../lib/taskBoard'
@@ -1539,18 +1463,16 @@ import type { TaskAttemptActionResponse } from '../lib/types'
 import TaskHandoverCard from './TaskHandoverCard.vue'
 import { parseTaskHandover, type TaskHandover } from '../lib/taskHandover'
 import InjectedPromptCard from './InjectedPromptCard.vue'
-import { errorNoticePrompt, parseInjectedPrompt, type InjectedPrompt } from '../lib/injectedPrompt'
+import { errorNoticePrompt, parseInjectedPrompt, retryScheduledNotice, type InjectedPrompt } from '../lib/injectedPrompt'
 import { linkifyText, type FileMentionTargets } from '../lib/filePaths'
 import { isChatId } from '../lib/chatLinks'
-import { sectionsFromModelsResponse } from '../lib/modelSections'
-import { canOfferMoveToBackground, shouldRestoreFocus } from '../lib/moveToBackground'
+import { providerForModelSection, sectionKeyForProvider, sectionsFromModelsResponse } from '../lib/modelSections'
+import { isBridgeMode, PERMISSION_MODE_COPY, type BridgeMode } from '../lib/permissionModes'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
 import { errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
-import ShellRows from './ShellRows.vue'
-import ComposerActivity from './ComposerActivity.vue'
 import ComposerUploadProgress from './ComposerUploadProgress.vue'
 import ActivityGlyph from './ActivityGlyph.vue'
 import {
@@ -1601,7 +1523,6 @@ import { useChatComposer } from '../composables/useChatComposer'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 import SlashCommandPicker from './SlashCommandPicker.vue'
-import { isShellRow, subagentLabel, subagentPath } from '../lib/subagentIds'
 import { handleAppLinkClick } from '../lib/appLinks'
 
 /** The footer facts for one turn: when it landed, how long it took, which
@@ -1619,7 +1540,7 @@ type RenderItemInput =
   | { kind: 'user'; msg: ChatMessage; turnIndex?: number }
   | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; turnIndex?: number; meta?: TurnMeta }
   | { kind: 'system'; msg: ChatMessage }
-  | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[]; turnIndex?: number }
+  | { kind: 'trace'; steps: ChatMessage[]; outputs?: TraceOutput[]; turnIndex?: number }
 
 type RenderItem = RenderItemInput & { key: string }
 
@@ -1674,7 +1595,10 @@ function dedupeRenderItemKeys(items: RenderItem[]): RenderItem[] {
 // `filePinned`: a file is docked beside this chat (ChatLayout's split view).
 // `beside`: this is the second pane of a split.
 // `inactive`: the other pane has the keyboard.
-const props = defineProps<{ chatId: string; filePinned?: boolean; beside?: boolean; inactive?: boolean }>()
+// `riseForInstance`: the layout names the one panel instance whose arrival rise
+// is running. Compared against this instance's own token, so a same-id
+// replacement never carries the class (#3086).
+const props = defineProps<{ chatId: string; filePinned?: boolean; beside?: boolean; inactive?: boolean; riseForInstance?: symbol | null }>()
 const emit = defineEmits<{
   close: []
   // The second pane's rail picked another chat: the layout shows it in this pane.
@@ -1684,7 +1608,16 @@ const emit = defineEmits<{
   // the layout moves the pane and decides whether to close.
   pull: [dy: number]
   'pull-end': [dy: number, velocity: number]
+  // DOM lifecycle of this instance (not transcript readiness): the layout starts
+  // a chat's arrival rise only once the main panel of the selected chat mounts.
+  'pane-mounted': [pane: { chatId: string; instance: symbol; beside: boolean }]
+  'pane-unmounted': [pane: { chatId: string; instance: symbol; beside: boolean }]
 }>()
+const paneInstance = Symbol('chat-pane')
+const riseOwned = computed(() => !props.beside && props.riseForInstance === paneInstance)
+const paneIdentity = () => ({ chatId: props.chatId, instance: paneInstance, beside: !!props.beside })
+onMounted(() => emit('pane-mounted', paneIdentity()))
+onBeforeUnmount(() => emit('pane-unmounted', paneIdentity()))
 
 const store = useProjectStore()
 const view = useChatView(() => props.chatId)
@@ -1735,9 +1668,8 @@ const {
 } = composer
 const isContinuing = ref(false)
 
-// Ticks once a second while streaming, a background run is going or a native
-// shell is listed (see the watch below `runningRows`), so the live
-// elapsed-time labels advance.
+// Ticks once a second while a turn is streaming, so the live elapsed-time
+// labels advance.
 const nowTs = ref(Date.now())
 let clockTimer: ReturnType<typeof setInterval> | null = null
 
@@ -1751,53 +1683,25 @@ const hasComposerContent = computed(() =>
 // Send waits for every upload in flight to settle, so a file is never sent
 // before the server has it.
 const uploadsInFlight = computed(() => uploads.value.length > 0)
-const canSend = computed(() => hasComposerContent.value && !uploadsInFlight.value)
+const isMcpToken = computed(() => inputText.value.trim().toLowerCase() === '/mcp')
+const modeWritePending = computed(() => (store.pendingChatModeWrites[chat.value?.chat_id || ''] || 0) > 0)
+const canSend = computed(() => isMcpToken.value || (!modeWritePending.value && hasComposerContent.value && !uploadsInFlight.value))
 // Empty composer while a turn is in flight → stop; otherwise the same
 // button queues/sends the draft.
-const showStopAction = computed(() => view.isStreaming && !hasComposerContent.value && !uploadsInFlight.value)
-const moveBtnEl = ref<HTMLButtonElement | null>(null)
+const showStopAction = computed(() => view.isStreaming && (isMcpToken.value || !hasComposerContent.value))
 const composerBarEl = ref<HTMLElement | null>(null)
-const movingToBackground = ref(false)
-const showMoveToBackground = computed(() =>
-  view.isStreaming && canOfferMoveToBackground(view.activeBackgroundableCalls, nowTs.value),
-)
-async function moveToBackground() {
-  if (movingToBackground.value || !chat.value) return
-  const chipEl = moveBtnEl.value
-  const hadFocus = document.activeElement === chipEl
-  movingToBackground.value = true
-  try {
-    await store.moveChatToBackground(chat.value.chat_id)
-  } finally {
-    movingToBackground.value = false
-  }
-  // The chip goes away the moment the turn ends, so focus has to be handed
-  // somewhere that is still there — but only when it is still ours, which
-  // `shouldRestoreFocus` decides.
-  if (hadFocus) {
-    const active = document.activeElement
-    if (shouldRestoreFocus(chipEl, active)) {
-      // Never the send/stop button. It is a single element in three states —
-      // enabled Stop while the turn runs, enabled Send once a draft exists,
-      // disabled Send with an empty draft — and the move we just asked for ends
-      // the turn, so it can be disabled a moment after we focus it; a disabled
-      // control cannot hold focus and it falls to <body> (rounds 1 and 3). The
-      // bar is the one target here that is always focusable and never raises
-      // the on-screen keyboard, which is why the textarea is not used below
-      // COMPOSER_FOCUS_MIN_WIDTH.
-      if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
-      else composerBarEl.value?.focus()
-    }
-  }
-}
 const primaryActionTitle = computed(() => {
   if (showStopAction.value) return 'Stop'
+  if (isMcpToken.value) return mcpActionLabel.value
+  if (modeWritePending.value) return 'Wait for the permission mode to save'
   if (uploadsInFlight.value) return 'Wait for the upload to finish'
   if (view.isStreaming) return 'Queue message (sends when current turn finishes)'
   return 'Send'
 })
 const primaryActionLabel = computed(() => {
   if (showStopAction.value) return 'Stop generation'
+  if (isMcpToken.value) return mcpActionLabel.value
+  if (modeWritePending.value) return 'Wait for the permission mode to save'
   if (uploadsInFlight.value) return 'Wait for the upload to finish'
   if (view.isStreaming) return 'Queue message'
   return 'Send message'
@@ -1820,6 +1724,31 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const titleInputEl = ref<HTMLInputElement | null>(null)
 const chat = computed(() => view.chat!)
+// Chat details shows one button that opens the chat's agent CLI MCP settings.
+// The command is the provider row's `mcp_command`, read once from the engine
+// the first time Chat details opens; the browser never builds it.
+const mcpConnection = ref<ProviderConnection | null>(null)
+const mcpLoadError = ref('')
+let mcpLoading = false
+const mcpUnavailableReason = computed(() => mcpConnection.value && !mcpConnection.value.mcp_command
+  ? "No MCP command is available for this chat's agent."
+  : '')
+const mcpActionLabel = computed(() => mcpUnavailableReason.value ? 'Why MCP settings are unavailable' : 'Open MCP settings')
+async function loadMcpConnection() {
+  if (mcpConnection.value || mcpLoading) return
+  mcpLoading = true
+  mcpLoadError.value = ''
+  try {
+    const res = await api.get<ProviderConfigSettings>('/api/settings/providers')
+    const row = res.connections?.[chat.value?.provider ?? '']
+    if (row) mcpConnection.value = row
+    else mcpLoadError.value = "Could not find this chat's agent."
+  } catch (e) {
+    mcpLoadError.value = `Could not look up the MCP command: ${(e as Error)?.message || e}`
+  } finally {
+    mcpLoading = false
+  }
+}
 
 const titleRail = useChatRail(() => view.chat?.chat_id ?? '', props.beside ? id => emit('select-chat', id) : undefined)
 const titleRailOn = computed(() => titleRail.items.value.length > 1)
@@ -1828,6 +1757,13 @@ const titleRailOn = computed(() => titleRail.items.value.length > 1)
 const railLean = ref(0)
 const railArrival = ref<-1 | 1 | 0>(takeChatRailArrival(props.beside))
 const titleRailRef = ref<InstanceType<typeof TitleRail> | null>(null)
+async function onTitleRailSelect(id: string): Promise<void> {
+  try {
+    await titleRail.select(id)
+  } catch {
+    railLean.value = 0
+  }
+}
 // The rail slides the neighbour in before switching, like a swipe; without it mounted, step directly.
 function selectAdjacentChat(direction: -1 | 1): boolean {
   if (!titleRailOn.value) return false
@@ -1930,18 +1866,10 @@ watch(() => chat.value.provider, () => {
 
 const queueEditNotice = ref('')
 
-// Entries that "Steer all" combines: queue-mode ones not already handed over,
-// in list order.
-const steerAllIds = computed(() =>
-  view.currentQueued.filter(q => q.delivery === 'queue' && !q.steering).map(q => q.id),
-)
+// Entries that "Send all now" combines, in list order.
+const waitingIds = computed(() => view.currentQueued.map(q => q.id))
 
-const steeringAnnouncement = computed(() => {
-  const n = view.currentQueued.filter(q => q.steering).length
-  return n ? `Steering ${n} ${n === 1 ? 'message' : 'messages'}` : ''
-})
-
-// When the chip that holds focus leaves the queue (it was steered, sent or
+// When the chip that holds focus leaves the queue (it was sent or
 // removed), focus would fall to <body>. Hand it to the composer instead.
 watch(
   () => view.currentQueued.map(q => q.id),
@@ -1972,20 +1900,18 @@ function queuedExcerpt(text: string): string {
 // The clicked button is replaced once the chip changes state, which would drop
 // keyboard focus to the page. Hand it to the chip (or the composer when the
 // chip is gone) so the next Tab starts from a sensible place.
-function steerQueued(event: Event, ids: string[], delivery: 'queue' | 'steer') {
+function sendNow(event: Event, ids: string[]) {
   const chip = (event.currentTarget as HTMLElement | null)?.closest<HTMLElement>('.queued-chip') ?? null
-  store.setQueuedDelivery(chat.value.chat_id, ids, delivery)
+  store.sendQueuedNow(chat.value.chat_id, ids)
   void nextTick(() => {
     if (chip?.isConnected) chip.focus()
     else inputEl.value?.focus()
   })
 }
 
-function queuedChipTitle(q: { delivery: string; steering?: boolean }): string {
-  if (q.steering) return 'Handed to the running reply; waiting for it to take the message'
-  if (!view.isStreaming) return 'Held until you send it, edit it or remove it'
-  return q.delivery === 'steer'
-    ? 'Will be sent into the running reply'
+function queuedChipTitle(q: { waiting?: boolean }): string {
+  return !view.isStreaming || q.waiting
+    ? 'Held until you send it, edit it or remove it'
     : 'Will be sent when current response finishes'
 }
 
@@ -2190,8 +2116,8 @@ const inspectorOutputs = computed<TraceOutput[]>(() => collapseOutputsByName(mer
     .reverse()
     .map(outputs => outputs && [...outputs].reverse()),
 ).filter(output => !isScratchPath(output.file_path))))
-// Every activity line this chat has produced: its turns, the subagents they
-// ran, and the turn in flight. The rail reads skills and MCP tools from it.
+// Every activity line this chat has produced: its turns and the turn in
+// flight. The rail reads skills and MCP tools from it.
 const chatActivityLines = computed<string[]>(() => {
   const lines: string[] = []
   const take = (messages: ChatMessage[] | undefined) => {
@@ -2202,7 +2128,6 @@ const chatActivityLines = computed<string[]>(() => {
   for (const item of renderItems.value) {
     if (item.kind !== 'trace') continue
     take(item.steps)
-    for (const sub of item.subs ?? []) take(sub.messages)
   }
   for (const entry of view.currentTimeline) {
     if (entry.kind === 'tool') lines.push(...activityLines(entry.content))
@@ -2282,16 +2207,13 @@ function compactContext() {
   void store.compactChat(chat.value.chat_id)
 }
 
-// The poll's rows include background shells (`subagent_type: "shell"`); the
-// composer lists those as processes, everything else counts as an agent.
-const runningRows = computed(() => (chat.value ? store.runningSubagentsFor(chat.value.chat_id) : []))
-const runningSubagents = computed(() => runningRows.value.filter(sub => !isShellRow(sub)))
-function stopShell(taskId: string) {
-  if (chat.value) void store.stopBackgroundTask(chat.value.chat_id, taskId)
-}
-const runningShells = computed(() => runningRows.value.filter(isShellRow))
+// What the chat is running now (its agents and background shells). Shown beside Send
+// whenever something runs, streaming or not, so a background shell keeps its place.
+const runningWork = computed(() => (props.chatId ? store.runningWorkFor(props.chatId) : NO_RUNNING_WORK))
+const hasRunningWork = computed(() => runningWork.value.agents.length > 0 || runningWork.value.shells.length > 0)
+
 watch(
-  () => view.isStreaming || runningShells.value.length > 0,
+  () => view.isStreaming || hasRunningWork.value,
   (ticking) => {
     if (ticking && !clockTimer) {
       nowTs.value = Date.now()
@@ -2303,9 +2225,6 @@ watch(
   },
   { immediate: true },
 )
-// Same rule as the sidebar row (ChatSignals): the watcher's pushed count and
-// the running-subagent poll tick on different clocks, so take the larger.
-const composerAgentCount = computed(() => Math.max(view.activeBackgroundAgents, runningSubagents.value.length))
 
 
 // On a pane wide enough for the rail beside a full reading column, Chat
@@ -2328,6 +2247,7 @@ const isWidePane = ref(false)
 const railOpen = ref(!props.filePinned && !chatDetailsClosed())
 const railShown = computed(() => isWidePane.value && railOpen.value)
 const drawerShown = computed(() => !isWidePane.value && inspectorOpen.value)
+watch([railShown, drawerShown], ([rail, drawer]) => { if (rail || drawer) void loadMcpConnection() }, { immediate: true })
 let panelObserver: ResizeObserver | null = null
 onMounted(() => {
   if (typeof ResizeObserver === 'undefined' || !panelEl.value) return
@@ -2348,7 +2268,6 @@ onMounted(() => {
 onBeforeUnmount(() => { panelObserver?.disconnect() })
 
 const railHideButton = ref<HTMLButtonElement | null>(null)
-const railRunningEl = ref<HTMLElement | null>(null)
 
 /**
  * Show Chat details: in place on a wide pane, as the drawer otherwise. Focus
@@ -2356,12 +2275,12 @@ const railRunningEl = ref<HTMLElement | null>(null)
  * drops on a trigger that just unmounted. The drawer's focus trap places it,
  * so the named section has to be its initial focus rather than a later move.
  */
-type DetailsTarget = 'close' | 'running' | 'context' | 'repo'
+type DetailsTarget = 'close' | 'context' | 'repo' | 'mcp'
 const detailsTarget = ref<DetailsTarget>('close')
 const detailsFocusEl = computed<HTMLElement | null>(() => {
-  if (detailsTarget.value === 'running') return railRunningEl.value ?? railHideButton.value
   if (detailsTarget.value === 'context') return railContextEl.value ?? railHideButton.value
   if (detailsTarget.value === 'repo') return railRepoEl.value ?? railHideButton.value
+  if (detailsTarget.value === 'mcp') return railEl.value?.querySelector<HTMLElement>('.chat-mcp-heading') ?? railHideButton.value
   return railHideButton.value
 })
 // Bumped when a caller points at the agent context, so its Always loaded
@@ -2385,8 +2304,12 @@ function showDetails(target: DetailsTarget = 'close') {
   void nextTick(() => {
     reveal()
     const el = detailsFocusEl.value
-    el?.focus()
-    if (el && target !== 'close') el.scrollIntoView({ block: 'nearest' })
+    el?.focus({ preventScroll: target === 'mcp' })
+    if (el && target === 'mcp' && railEl.value) {
+      const rail = railEl.value
+      const header = rail.querySelector<HTMLElement>('.chat-rail-head')
+      rail.scrollTo({ top: Math.max(0, rail.scrollTop + el.getBoundingClientRect().top - rail.getBoundingClientRect().top - (header?.getBoundingClientRect().height ?? 0) - 8), behavior: 'auto' })
+    } else if (el && target !== 'close') el.scrollIntoView({ block: 'nearest' })
   })
 }
 function closeDetails() {
@@ -2396,12 +2319,7 @@ function closeDetails() {
   if (!detailsFromMenu) void nextTick(() => inspectorTrigger.value?.focus())
 }
 function toggleWorkDetails() {
-  showDetails()
-}
-// The composer bar's activity cluster opens Chat details at Running; a finished
-// run's notice can outlive the section it points at.
-function openRunDetails() {
-  showDetails('running')
+  showDetails('close')
 }
 function openProjectKnowledge() {
   showDetails('context')
@@ -2476,6 +2394,10 @@ let messagesResizeObserver: ResizeObserver | null = null
 const showScrollBtn = computed(() => Boolean(messagesEl.value && view.activeMessages.length > 0 && !isNearBottom.value))
 const showModelPicker = ref(false)
 const modelPickerRef = ref<HTMLElement>()
+const composerModelTrigger = ref<HTMLButtonElement | null>(null)
+const permissionModes: BridgeMode[] = ['normal', 'auto', 'bypass', 'plan']
+let pickerGeneration = 0
+watch(showModelPicker, () => { pickerGeneration += 1 }, { flush: 'sync' })
 
 // Which picker is open. 'normal' is the composer's model chip: a pick there
 // only changes the model. 'recovery' is opened from a failed turn - the
@@ -2485,8 +2407,7 @@ type PickerMode = 'normal' | 'recovery'
 
 interface RecoveryContext {
   chatId: string
-  // The error bubble to resend. Null for a deferred retry, which the engine
-  // resumes on its own schedule.
+  failureId: string
   errorIdx: number | null
 }
 
@@ -2521,10 +2442,12 @@ function resetPickerState() {
 }
 
 watch(() => chat.value?.chat_id, () => {
+  pickerGeneration += 1
   resetPickerState()
 })
 
 onBeforeUnmount(() => {
+  pickerGeneration += 1
   resetPickerState()
 })
 
@@ -2641,17 +2564,10 @@ type ProviderKey = RuntimeProvider
 type BucketKey = ProviderKey
 type TierAlias = 'haiku' | 'sonnet' | 'opus' | 'fable'
 
-const BUCKET_DEFS: { key: BucketKey; label: string; provider: ProviderKey }[] = [
-  { key: 'claude', label: 'Claude', provider: 'claude' },
-  { key: 'opencode', label: 'opencode', provider: 'opencode' },
-]
-
-// ModelSelector names the Claude section 'anthropic' (the models are Anthropic's,
-// the runner is Claude Code), so the two vocabularies need one hop between them.
-const SECTION_BY_BUCKET: Record<BucketKey, string> = {
-  claude: 'anthropic',
-  opencode: 'opencode',
-}
+// One bucket per registry provider, labelled by the registry's short label.
+const BUCKET_DEFS = computed<{ key: BucketKey; label: string }[]>(() =>
+  (modelsResponse.value?.providers ?? []).map(item => ({ key: item.id, label: item.short_label })),
+)
 
 
 function toggleTrace(i: number) {
@@ -2695,8 +2611,8 @@ function onLiveBodyScroll() {
 }
 
 // Click on an expanded activity/thinking bubble body collapses it, unless the
-// click landed on an interactive descendant (a link, file card/chip, subagent
-// panel, inline code, copy button, or anything stopPropagation-bearing).
+// click landed on an interactive descendant (a link, file card/chip,
+// inline code, copy button, or anything stopPropagation-bearing).
 // Selection drags that happen to end inside the body are ignored so users
 // can highlight text without accidentally closing the bubble.
 function isInteractiveTraceChild(target: EventTarget | null): boolean {
@@ -2704,7 +2620,6 @@ function isInteractiveTraceChild(target: EventTarget | null): boolean {
   if (target.closest('a')) return true
   if (target.closest('button, [role="button"]')) return true
   if (target.closest('.file-card, .answer-outputs')) return true
-  if (target.closest('.subagent-rows')) return true
   if (target.closest('code, pre, kbd')) return true
   return false
 }
@@ -2810,7 +2725,7 @@ function scrollToBottom() {
 // later. The height of the transcript keeps changing for a few hundred
 // milliseconds after its rows first paint — the history fetch resolves after
 // the skeleton has already been measured, images and avatars load, the
-// subagent fetch adds trace blocks, the composer resizes — and each of those
+// composer resizes — and each of those
 // growths leaves the viewport where it was, i.e. at the top. The
 // stick-to-bottom watcher only catches up on the *next* change, so the
 // correction was always visible as a scroll.
@@ -3288,7 +3203,7 @@ function cancelCapability(q: { request_id: string }) {
 // Section key (ModelSelector) for a bucket, used to preselect the backend when
 // the capability card opens the full picker.
 function capabilitySectionForBucket(bucket: BucketKey): string {
-  return SECTION_BY_BUCKET[bucket] || 'anthropic'
+  return sectionKeyForProvider(bucket)
 }
 
 const capabilityPickerSection = ref('')
@@ -3312,6 +3227,10 @@ const chatModelSections = computed(() => {
     return section
   })
 })
+const pickerModelSections = computed(() => chatModelSections.value.map(section => ({
+  ...section,
+  disabled: section.disabled || (pickerMode.value === 'normal' && modeWritePending.value),
+})))
 
 // The model id the chat is running on, as stored. A tier alias stays an alias
 // here: the provider resolves it per turn against its own catalog, so there is
@@ -3955,8 +3874,19 @@ if (typeof document !== 'undefined') {
 //     every chat you tap into, and iOS zooms the page on focus besides.
 const COMPOSER_FOCUS_MIN_WIDTH = 768
 
+// Startup may await slow assets; a newer interaction owns focus from then on.
+const startupFocusEvents = ['pointerdown', 'keydown', 'focusin'] as const
+let startupFocusCancelled = false
+function cancelStartupFocus(): void {
+  startupFocusCancelled = true
+  for (const event of startupFocusEvents) {
+    document.removeEventListener(event, cancelStartupFocus, true)
+  }
+}
+
 function focusComposerOnOpen(): void {
   if (props.inactive) return
+  if (detailsTarget.value === 'mcp' && (railShown.value || drawerShown.value)) return
   if (window.innerWidth < COMPOSER_FOCUS_MIN_WIDTH) return
   if (questionCardVisible.value || pendingApprovals.value.length) return
   focusComposer()
@@ -3993,6 +3923,9 @@ async function loadModels(): Promise<void> {
 }
 
 onMounted(async () => {
+  for (const event of startupFocusEvents) {
+    document.addEventListener(event, cancelStartupFocus, true)
+  }
   window.addEventListener('ciao:native-file-drag-enter', onNativeDragEnter)
   window.addEventListener('ciao:native-file-drag-leave', onNativeDragLeave)
   window.addEventListener('ciao:native-file-drop', onNativeDrop)
@@ -4019,11 +3952,15 @@ onMounted(async () => {
       messagesEl.value.scrollTop = messagesEl.value.scrollHeight
       pinToBottom()
     }
-    focusComposerOnOpen()
+    if (!startupFocusCancelled) {
+      cancelStartupFocus()
+      focusComposerOnOpen()
+    }
   })
 })
 
 onBeforeUnmount(() => {
+  cancelStartupFocus()
   composer.persistDraft()
   window.removeEventListener('ciao:native-file-drag-enter', onNativeDragEnter)
   window.removeEventListener('ciao:native-file-drag-leave', onNativeDragLeave)
@@ -4263,7 +4200,7 @@ const liveStepPreview = computed(() => {
   if (view.currentStreamingThinking) return 'Thinking…'
   if (view.currentStreamingText) return 'Writing response…'
   const last = view.currentTimeline[view.currentTimeline.length - 1]
-  if (last?.kind === 'tool' || last?.kind === 'filecard') return liveStepLabel.value || 'Working…'
+  if (last?.kind === 'tool' || last?.kind === 'filecard' || last?.kind === 'subagent' || last?.kind === 'shell') return liveStepLabel.value || 'Working…'
   if (last?.kind === 'status') return last.content
   if (last?.kind === 'text') return 'Sharing an update…'
   return 'Thinking…'
@@ -4364,39 +4301,13 @@ function attachTurnMeta(items: RenderItem[], meta: TurnMeta | null): void {
   if (last && last.kind === 'assistant') last.meta = meta
 }
 
-const renderData = computed<{
-  items: RenderItem[]
-  liveSubs: SubagentTranscript[]
-  liveStandaloneSubs: SubagentTranscript[]
-}>(() => {
+const renderItems = computed<RenderItem[]>(() => {
   const items: RenderItem[] = []
   let buffer: ChatMessage[] = []
 
-  // Subagent transcripts grouped by the user turn that dispatched them.
-  // Entries without a resolvable turn (older sessions, remote chats) attach
-  // to the last turn so they stay visible.
-  const subsByTurn = new Map<number, SubagentTranscript[]>()
-  const unanchoredSubs: SubagentTranscript[] = []
-  for (const sub of view.activeSubagents) {
-    if (typeof sub.turn_index === 'number') {
-      const list = subsByTurn.get(sub.turn_index) || []
-      list.push(sub)
-      subsByTurn.set(sub.turn_index, list)
-    } else {
-      unanchoredSubs.push(sub)
-    }
-  }
   let currentTurnIndex: number | null = null
   // The current turn's footer facts, carried across flushes of one turn.
   let turnMeta: TurnMeta | null = null
-
-  const takeForegroundSubs = (turnIndex: number | null): SubagentTranscript[] => {
-    if (turnIndex === null) return []
-    const subs = subsByTurn.get(turnIndex)
-    if (!subs?.length) return []
-    subsByTurn.delete(turnIndex)
-    return subs
-  }
 
   const flushTurn = (isFinal = false) => {
     if (!buffer.length) return
@@ -4423,12 +4334,10 @@ const renderData = computed<{
     // a normal assistant bubble; the trailing tools just join the trace.
 
     if (finalMsg && isInterruptedTail(finalMsg, trailing)) {
-      const traceSubs = takeForegroundSubs(currentTurnIndex)
       items.push(withKey({
         kind: 'trace',
         steps: buffer.slice(),
         turnIndex: currentTurnIndex ?? undefined,
-        ...(traceSubs.length ? { subs: traceSubs } : {}),
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
       }))
       buffer = []
@@ -4447,7 +4356,6 @@ const renderData = computed<{
       return
     }
 
-    const traceSubs = takeForegroundSubs(currentTurnIndex)
     // Earlier explicitly completed replies are bubbles of their own; the rest
     // is Activity. Only the final reply owns the turn footer and Outputs.
     const turnItems: RenderItem[] = buildTurnParts(buffer, finalIdx).map((part) =>
@@ -4455,13 +4363,11 @@ const renderData = computed<{
         ? withKey({ kind: 'assistant', msg: part.msg, turnIndex: currentTurnIndex ?? undefined })
         : withKey({ kind: 'trace', steps: part.steps, turnIndex: currentTurnIndex ?? undefined }),
     )
-    // Foreground subagents and (when there's no answer bubble) file outputs
-    // belong to the one Activity trace that sits right before the reply. Reuse
-    // the trailing trace if there is one; otherwise mint an empty one so those
-    // attachments still have a home adjacent to the answer.
-    const needsHost =
-      traceSubs.length > 0
-      || ((!finalMsg || finalMsg.is_error) && turnOutputs.length > 0)
+    // When there's no answer bubble, file outputs belong to the one Activity
+    // trace that sits right before the reply. Reuse the trailing trace if
+    // there is one; otherwise mint an empty one so the outputs still have a
+    // home adjacent to the answer.
+    const needsHost = (!finalMsg || finalMsg.is_error) && turnOutputs.length > 0
     const last = turnItems[turnItems.length - 1]
     let host = last && last.kind === 'trace' ? last : null
     if (!host && needsHost) {
@@ -4469,7 +4375,6 @@ const renderData = computed<{
       turnItems.push(host)
     }
     if (host) {
-      if (traceSubs.length) host.subs = traceSubs
       if ((!finalMsg || finalMsg.is_error) && turnOutputs.length) host.outputs = turnOutputs
     }
     for (const it of turnItems) items.push(it)
@@ -4498,6 +4403,8 @@ const renderData = computed<{
       && msg.tool_name !== '_activity'
       && msg.tool_name !== '_thinking'
       && msg.tool_name !== '_filecard'
+      && msg.tool_name !== '_subagent'
+      && msg.tool_name !== '_shell'
     ) {
       flushTurn()
       items.push(withKey({ kind: 'system', msg }))
@@ -4508,94 +4415,9 @@ const renderData = computed<{
     }
   }
   flushTurn(true)
-  // Only the latest messages are loaded, so subagents of older turns find no
-  // rendered turn to attach to. A finished one stays out of view until its turn
-  // loads; it must not pile into the live trace or the last turn's trace.
-  let firstRenderedTurn: number | null = null
-  for (const it of items) {
-    if (it.kind === 'user' && typeof it.turnIndex === 'number') { firstRenderedTurn = it.turnIndex; break }
-  }
-  const belongsToUnloadedTurn = (sub: SubagentTranscript): boolean =>
-    sub.status !== 'running'
-    && typeof sub.turn_index === 'number'
-    && firstRenderedTurn !== null
-    && sub.turn_index < firstRenderedTurn
-  // While streaming, the in-flight turn's subagents nest in the live trace,
-  // along with any still running from an earlier turn. Finished agents of
-  // earlier rendered turns were already placed by flushTurn.
-  if (view.isStreaming) {
-    const live = [...subsByTurn.values()].flat().concat(unanchoredSubs)
-      .filter(sub => !belongsToUnloadedTurn(sub))
-    return { items, liveSubs: live, liveStandaloneSubs: [] }
-  }
-  // Anything still unplaced (turn not in history yet, or no turn info):
-  // attach anchored subagents to their actual user-turn's trace block so a
-  // late-finishing agent doesn't drift to the most recent trace. Unanchored
-  // leftovers still fall back to the last trace block, or a fresh block if
-  // there is none.
-  const leftovers = [...subsByTurn.values()].flat().concat(unanchoredSubs)
-    .filter(sub => !belongsToUnloadedTurn(sub))
-  if (leftovers.length) {
-    const anchored = new Map<number, SubagentTranscript[]>()
-    const unanchored: SubagentTranscript[] = []
-    for (const sub of leftovers) {
-      if (typeof sub.turn_index === 'number') {
-        const list = anchored.get(sub.turn_index) || []
-        list.push(sub)
-        anchored.set(sub.turn_index, list)
-      } else {
-        unanchored.push(sub)
-      }
-    }
-
-    // Attach each anchored group to the matching turn's trace block. If the
-    // turn has no trace block (e.g. the model replied with plain text), mint
-    // one right before the first assistant/system item of that turn.
-    for (const [turnIdx, subs] of anchored) {
-      let turnStart = -1
-      for (let i = 0; i < items.length; i++) {
-        const it = items[i]
-        if (it.kind === 'user' && it.turnIndex === turnIdx) {
-          turnStart = i
-        }
-      }
-      if (turnStart === -1) {
-        // Matching user turn isn't rendered yet; keep with unanchored fallback.
-        unanchored.push(...subs)
-        continue
-      }
-      let traceIdx = -1
-      for (let i = turnStart + 1; i < items.length && items[i].kind !== 'user'; i++) {
-        if (items[i].kind === 'trace') traceIdx = i
-      }
-      if (traceIdx >= 0) {
-        const host = items[traceIdx]
-        if (host.kind === 'trace') {
-          host.subs = [...(host.subs || []), ...subs]
-        }
-      } else {
-        let insertAt = turnStart + 1
-        while (insertAt < items.length && items[insertAt].kind === 'user') insertAt++
-        items.splice(insertAt, 0, withKey({ kind: 'trace', steps: [], subs, turnIndex: turnIdx }))
-      }
-    }
-
-    if (unanchored.length) {
-      let lastTrace: RenderItem | undefined
-      for (let i = items.length - 1; i >= 0; i--) {
-        if (items[i].kind === 'trace') { lastTrace = items[i]; break }
-      }
-      if (lastTrace && lastTrace.kind === 'trace') {
-        lastTrace.subs = [...(lastTrace.subs || []), ...unanchored]
-      } else {
-        items.push(withKey({ kind: 'trace', steps: [], subs: unanchored }))
-      }
-    }
-  }
-  return { items: dedupeRenderItemKeys(items), liveSubs: [], liveStandaloneSubs: [] }
+  return dedupeRenderItemKeys(items)
 })
 
-const renderItems = computed<RenderItem[]>(() => renderData.value.items)
 // Completed final reply bubbles are the only discovery input; the trace,
 // system rows and an errored reply are never scanned for mentions.
 const assistantBubbleMessages = computed(() => renderItems.value
@@ -4603,7 +4425,6 @@ const assistantBubbleMessages = computed(() => renderItems.value
   .map(i => i.msg))
 const fileMentions = useFileMentions(() => fileMentionContext.value, () => assistantBubbleMessages.value, () => view.isStreaming)
 const transcriptEmpty = computed(() => renderItems.value.length === 0)
-const liveSubagents = computed<SubagentTranscript[]>(() => renderData.value.liveSubs)
 
 // One consistent full-screen state for "this chat isn't ready to show yet" —
 // previously this forked three ways depending on whether stale cached
@@ -4842,6 +4663,16 @@ function handleInputFocus() {
 
 function send() {
   if (chat.value.archived) return
+  if (isMcpToken.value) {
+    if (mcpUnavailableReason.value) return
+    composer.clearDraft(chat.value.chat_id)
+    slash.dismiss()
+    mentionPicker.dismiss()
+    showDetails('mcp')
+    nextTick(autoResize)
+    return
+  }
+  if (modeWritePending.value) return
   if (uploadsInFlight.value) return
   const text = inputText.value.trim()
   const hasAttachments = view.pendingImages.length > 0 || view.pendingFiles.length > 0
@@ -4904,21 +4735,83 @@ function lastUserBefore(errorIdx: number): { text: string; images: string[] } | 
 function hasLaterItem(errorIdx: number): boolean {
   return renderItems.value.slice(errorIdx + 1).some(it => it.kind !== 'trace')
 }
-// A pending retry shows on the transcript's last row when that row is the
-// failure (a trace after it does not count); -1 when no error row owns it.
-const retryPending = computed(() => chat.value?.retry?.status === 'pending' && !view.isStreaming)
-const retryOwnerIdx = computed(() => {
-  if (!retryPending.value) return -1
-  const items = renderItems.value
-  for (let k = items.length - 1; k >= 0; k--) {
-    const it = items[k]
-    if (it.kind === 'trace') continue
-    const isError = (it.kind === 'assistant' && it.msg.is_error)
-      || (it.kind === 'system' && isErrorMsg(it.msg.content))
-    return isError ? k : -1
+const hasPendingRetry = computed(() => chat.value?.retry?.status === 'pending')
+const retryPending = computed(() => hasPendingRetry.value && !view.isStreaming)
+const readyRecovery = ref<{ chatId: string; failureId: string; rowIndex: number } | null>(null)
+let recoveryReadGeneration = 0
+watch(
+  () => [chat.value?.chat_id, chat.value?.failure_id, view.isStreaming,
+    renderItems.value.map(it => 'msg' in it ? `${it.kind}:${it.msg.i}:${it.msg.content}` : it.kind).join('|')],
+  async () => {
+    const generation = ++recoveryReadGeneration
+    readyRecovery.value = null
+    const chatId = chat.value?.chat_id
+    if (!chatId || view.isStreaming) return
+    const index = renderItems.value.findIndex((_it, i) => isErrorItem(i) && !hasLaterItem(i))
+    const item = renderItems.value[index]
+    if (!item || !('msg' in item) || typeof item.msg.i !== 'number') return
+    const displayed = item.msg
+    const rowIndex = item.msg.i
+    try {
+      const path = `/api/chats/${encodeURIComponent(chatId)}`
+      const before = await api.get<ChatInfo>(path)
+      type Page = { items: ChatMessage[]; total?: number; hasMore?: boolean; nextOffset?: number | null }
+      const history = await api.get<Page | ChatMessage[]>(`${path}/messages?limit=50`)
+      const rows = Array.isArray(history) ? history : [...history.items]
+      if (!Array.isArray(history)) {
+        let page = history
+        let offset = 0
+        while (!rows.some(row => row.role === 'user') && page.hasMore) {
+          if (typeof page.nextOffset !== 'number' || page.nextOffset <= offset) return
+          offset = page.nextOffset
+          page = await api.get<Page>(`${path}/messages?offset=${offset}&limit=50`)
+          if (page.total !== history.total) return
+          rows.unshift(...page.items)
+        }
+      }
+      const after = await api.get<ChatInfo>(path)
+      const last = [...rows].reverse().find(row => !row.tool_name && ['user', 'assistant', 'system'].includes(row.role))
+      const lastUser = [...rows].reverse().find(row => row.role === 'user')
+      if (generation !== recoveryReadGeneration || chat.value?.chat_id !== chatId || view.isStreaming
+          || !before.failure_id || before.failure_id !== after.failure_id || chat.value.failure_id !== after.failure_id || !after.recovery_eligible
+          || before.user_turn_count !== after.user_turn_count || typeof after.user_turn_count !== 'number'
+          || lastUser?.turn_index !== after.user_turn_count - 1
+          || !last || last.i !== displayed.i || last.content.trim() !== displayed.content.trim()
+          || !(last.is_error || (last.role === 'system' && isErrorMsg(last.content)))) return
+      readyRecovery.value = { chatId, failureId: after.failure_id, rowIndex }
+    } catch {
+      // A failed or lagging read cannot establish which failure is displayed.
+    }
+  }, { immediate: true },
+)
+function recoveryForError(errorIdx: number) {
+  const item = renderItems.value[errorIdx]
+  const ready = readyRecovery.value
+  return ready && !store.recoveryOutcomeStorageUnavailable && !store.unknownRecoveryOutcomes[ready.chatId] && item && 'msg' in item && item.msg.i === ready.rowIndex && !hasLaterItem(errorIdx)
+    ? ready : null
+}
+async function checkUnknownRecovery() {
+  const chatId = chat.value.chat_id
+  try {
+    const status = await store.checkRecoveryStatus(chatId)
+    store.pushToast({ chat_id: chatId, title: 'Recovery status', body: `Status: ${status.status}; mode: ${status.mode}; state: ${status.recovery_state || 'not reported'}. Refresh and reconcile the chat before taking further action.` })
+  } catch (e) {
+    store.pushErrorToast('Recovery status unavailable', `Do not retry yet. Refresh and reconcile the chat. ${errorMessage(e)}`)
   }
-  return -1
-})
+}
+async function acknowledgeUnknownRecovery() {
+  const chatId = chat.value.chat_id
+  if (!await askConfirm('Check the chat history and recovery status first. A continuation may already have run. Clear this warning only after reconciling its effects.', {
+    title: 'Clear recovery warning?', confirmLabel: 'I checked the chat',
+  })) return
+  if (chat.value?.chat_id !== chatId) return
+  try {
+    await store.acknowledgeRecoveryReconciled(chatId)
+    store.pushToast({ chat_id: chatId, title: 'Recovery warning cleared', body: 'Refresh the chat to verify the current failure before continuing.' })
+  } catch (e) {
+    store.pushErrorToast('Recovery is not reconciled', errorMessage(e))
+  }
+}
 // The next row that is not a trace, or -1.
 function nextNonTraceIdx(idx: number): number {
   const items = renderItems.value
@@ -4949,34 +4842,20 @@ function retryFailedFrom(errorIdx: number): boolean {
 // Whether the notice's actions slot has anything to draw. The same
 // conditions the template uses for each button and the sign-in hint.
 function errorHasActions(errorIdx: number, content: string): boolean {
-  if (retryOwnerIdx.value === errorIdx) return true
-  const canRetry = Boolean(lastUserBefore(errorIdx)) && !hasLaterItem(errorIdx)
+  const canRetry = !hasPendingRetry.value && Boolean(lastUserBefore(errorIdx)) && !hasLaterItem(errorIdx)
   const signIn = isProviderAuthError(content) && canRetry && !chat.value.archived
   return canRetry || errorBubbleAction(errorIdx, content) !== null || signIn
 }
-function retryFromError(errorIdx: number) {
-  if (chat.value.archived) return
-  const prior = lastUserBefore(errorIdx)
-  if (!prior) return
-  // Build a PreparedMessage so sendMessage sends the prior turn's image
-  // refs alongside the text. We bypass prepareMessage (which would pull
-  // from the live composer) and pass `prepared` to skip the
-  // consumePreparedAttachments drain — a retry must not erase whatever
-  // the user has currently staged for a fresh send.
-  // The turn is tagged as a retry: it is a new turn the user asked to run
-  // again, and the engine records the tag per turn. The tag is the only
-  // thing the client chooses; the text never decides it.
-  return store.sendMessage(
-    chat.value.chat_id,
-    prior.text,
-    {
-      composed: prior.text,
-      imageRefs: prior.images.length ? prior.images : undefined,
-      fileComments: [],
-      chatComments: [],
-      origin: 'retry',
-    },
-  )
+async function retryFromError(errorIdx: number) {
+  const ready = recoveryForError(errorIdx)
+  if (!ready || chat.value.archived || hasPendingRetry.value) return
+  try {
+    await store.continueRecovery(ready.chatId, ready.failureId, true)
+  } catch (e) {
+    store.pushErrorToast('Could not continue', store.unknownRecoveryOutcomes[ready.chatId]
+      ? 'The outcome is unknown. Check recovery status and reconcile the chat; do not retry yet.'
+      : `The failure may have changed or another retry is pending. Inspect the saved schedule. ${errorMessage(e)}`)
+  }
 }
 
 // A known error gets its own fix instead of a diagnosis chat: a usage limit
@@ -4989,23 +4868,25 @@ function retryFromError(errorIdx: number) {
 function errorBubbleAction(errorIdx: number, content: string): 'retry-hourly' | 'switch-model' | 'fix' | null {
   const action = errorQuickAction(content)
   if (action === 'fix') return 'fix'
+  if (hasPendingRetry.value) return null
   if (chat.value.archived) return 'fix'
   if (hasLaterItem(errorIdx)) return null
   if (action === 'switch-model') return 'switch-model'
   if (!lastUserBefore(errorIdx)) return 'fix'
   if (action === 'sign-in') return null
-  return chat.value.retry?.status === 'pending' ? null : 'retry-hourly'
+  return 'retry-hourly'
 }
 
 // Arm the chat's hourly deferred retry with the turn that hit the limit.
 async function retryHourlyFromError(errorIdx: number) {
-  if (chat.value.archived) return
-  const prior = lastUserBefore(errorIdx)
-  if (!prior) return
+  const ready = recoveryForError(errorIdx)
+  if (!ready || chat.value.archived || hasPendingRetry.value) return
   try {
-    await store.setChatRetry(chat.value.chat_id, prior.text, prior.images)
+    await store.continueRecovery(ready.chatId, ready.failureId, false)
   } catch (e) {
-    store.pushErrorToast('Could not schedule the retry', `${(e as Error)?.message || e}`)
+    store.pushErrorToast('Could not schedule the retry', store.unknownRecoveryOutcomes[ready.chatId]
+      ? 'The outcome is unknown. Check recovery status and reconcile the chat; do not retry yet.'
+      : `The failure may have changed or another retry is pending. Inspect the saved schedule. ${errorMessage(e)}`)
   }
 }
 
@@ -5026,12 +4907,69 @@ async function openFixChat(errorIdx: number) {
 
 async function tryRetryNow() {
   if (!chat.value || view.isStreaming) return
-  await store.tryChatRetryNow(chat.value.chat_id)
+  const chatId = chat.value.chat_id
+  if (store.recoveryOutcomeStorageUnavailable || store.unknownRecoveryOutcomes[chatId]) {
+    store.pushErrorToast('Recovery outcome unknown', 'Check recovery status and reconcile the chat; do not retry yet.')
+    return
+  }
+  const ready = readyRecovery.value
+  if (chat.value.retry?.mode === 'continue_recovery') {
+    if (!ready || ready.chatId !== chatId) {
+      store.pushErrorToast('Cannot continue yet', 'Refresh the chat to verify the current failure.')
+      return
+    }
+    try { await store.continueRecovery(chatId, ready.failureId, true) }
+    catch (e) { store.pushErrorToast('Could not continue', errorMessage(e)) }
+    return
+  }
+  const scheduleId = chat.value.retry?.schedule_id
+  if (!scheduleId) {
+    store.pushErrorToast('Cannot run scheduled prompt', 'The saved schedule cannot be verified safely.')
+    return
+  }
+  if (!await askConfirm('This repeats the saved prompt and may repeat actions already performed.', {
+    title: 'Run scheduled prompt?', confirmLabel: 'Run scheduled prompt',
+  })) return
+  if (chat.value?.chat_id !== chatId) return
+  try { await store.tryChatRetryNow(chatId, scheduleId) }
+  catch (e) { store.pushErrorToast('Could not run scheduled prompt', `The schedule may have changed. Inspect it before trying again. ${errorMessage(e)}`) }
 }
 
 async function stopRetry() {
   if (!chat.value) return
-  await store.stopChatRetry(chat.value.chat_id)
+  if (chat.value.retry?.mode !== 'continue_recovery') {
+    const chatId = chat.value.chat_id
+    const scheduleId = chat.value.retry?.schedule_id
+    if (!scheduleId) {
+      store.pushErrorToast('Cannot stop scheduled prompt', 'The saved schedule cannot be verified safely.')
+      return
+    }
+    if (!await askConfirm('Stop this scheduled prompt? A replacement schedule will not be stopped.', {
+      title: 'Stop scheduled prompt?', confirmLabel: 'Stop trying',
+    })) return
+    if (chat.value?.chat_id !== chatId) return
+    try { await store.stopChatRetry(chatId, scheduleId) }
+    catch (e) { store.pushErrorToast('Could not stop scheduled prompt', `The schedule may have changed. Inspect it before trying again. ${errorMessage(e)}`) }
+    return
+  }
+  await stopObservedRecovery()
+}
+
+async function stopObservedRecovery() {
+  const chatId = chat.value.chat_id
+  try {
+    const status = await store.checkRecoveryStatus(chatId)
+    if (chat.value?.chat_id !== chatId || status.status !== 'pending' || status.mode !== 'continue_recovery' || !status.recovery_id) {
+      throw new Error('The saved recovery changed. Refresh the chat before stopping it.')
+    }
+    const recoveryId = status.recovery_id
+    if (!await askConfirm('Stop the currently observed continuation schedule? An in-flight or replaced recovery cannot be stopped here.', {
+      title: 'Stop continuation?', confirmLabel: 'Stop trying',
+    })) return
+    if (chat.value?.chat_id === chatId) await store.stopRecovery(chatId, recoveryId)
+  } catch (e) {
+    store.pushErrorToast('Could not stop continuation', errorMessage(e))
+  }
 }
 
 // Open the picker for a recovery: the retry card's "Continue with..." or the
@@ -5040,8 +4978,11 @@ async function stopRetry() {
 // while the picker is open.
 function openRecoveryPicker(errorIdx: number | null) {
   if (!chat.value || chat.value.archived) return
+  if (errorIdx !== null && hasPendingRetry.value) return
   if (view.isStreaming) return
-  recoveryContext.value = { chatId: chat.value.chat_id, errorIdx }
+  const ready = errorIdx === null ? readyRecovery.value : recoveryForError(errorIdx)
+  if (!ready || ready.chatId !== chat.value.chat_id) return
+  recoveryContext.value = { chatId: ready.chatId, failureId: ready.failureId, errorIdx }
   pickerMode.value = 'recovery'
   stagedThinkingLevel.value = null
   showModelPicker.value = true
@@ -5085,6 +5026,45 @@ function toggleModelPicker() {
   showModelPicker.value = true
 }
 
+function handleModelPickerClose(reason: 'escape' | 'other' | 'close') {
+  const chatId = chat.value?.chat_id
+  const mode = pickerMode.value
+  const generation = pickerGeneration
+  const focusedAtClose = document.activeElement
+  const closingPicker = modelPickerRef.value
+  const closingPopover = closingPicker?.querySelector('.model-selector__popover')
+  const focusWasInClosingPicker = !!focusedAtClose
+    && (!!closingPicker?.contains(focusedAtClose) || !!closingPopover?.contains(focusedAtClose))
+  showModelPicker.value = false
+  if ((reason !== 'escape' && reason !== 'close') || mode !== 'normal') return
+  void nextTick(() => {
+    const active = document.activeElement
+    const focusStillBelongsToPicker = (focusWasInClosingPicker && active === focusedAtClose)
+      || (!!active && !!closingPicker?.contains(active))
+      || (!!active && !!closingPopover?.contains(active))
+    const focusWasLost = !active || active === document.body
+    if (chat.value?.chat_id === chatId
+      && pickerMode.value === 'normal'
+      && pickerGeneration === generation + 1
+      && (focusStillBelongsToPicker || focusWasLost)
+      && composerModelTrigger.value?.isConnected
+      && !composerModelTrigger.value.disabled) composerModelTrigger.value.focus()
+  })
+}
+
+async function selectPermissionMode(mode: BridgeMode) {
+  const chatId = chat.value?.chat_id
+  if (!chatId || !isBridgeMode(mode) || chat.value.mode === mode || modeWritePending.value) return
+  try {
+    await store.updateChat(chatId, { mode })
+  } catch (e) {
+    store.pushErrorToast(
+      'Could not change permission mode',
+      `${errorMessage(e)} The server may have saved it. Reopen the chat to check.`,
+    )
+  }
+}
+
 function tierAlias(model: string): TierAlias | null {
   const normalized = model.trim().toLowerCase()
   return normalized === 'haiku' || normalized === 'sonnet' || normalized === 'opus' || normalized === 'fable'
@@ -5119,7 +5099,7 @@ function routingProviderLabel(bucket: string | undefined, provider: string): str
 }
 
 function bucketLabel(bucket: BucketKey): string {
-  return BUCKET_DEFS.find((def) => def.key === bucket)?.label || 'Claude'
+  return BUCKET_DEFS.value.find((def) => def.key === bucket)?.label || bucket
 }
 
 // Which provider owns a model id. Membership in a provider's catalog is
@@ -5127,7 +5107,8 @@ function bucketLabel(bucket: BucketKey): string {
 // the catalog has not reported yet.
 function bucketForSelectedModel(model: string): BucketKey {
   const response = modelsResponse.value
-  if ((response?.opencode_models || []).includes(model)) return 'opencode'
+  const owner = (response?.providers ?? []).find(item => response?.provider_models?.[item.id]?.includes(model))
+  if (owner) return owner.id
   if (model.includes('/')) return 'opencode'
   return 'claude'
 }
@@ -5175,14 +5156,13 @@ async function runRecovery(recovery: RecoveryContext) {
   // The user may have moved to another chat while the picker was open: the
   // retry belongs to the chat it was captured in.
   if (chat.value?.chat_id !== recovery.chatId) return
-  if (recovery.errorIdx !== null) {
-    retryFromError(recovery.errorIdx)
-    return
-  }
-  await store.tryChatRetryNow(recovery.chatId)
+  await store.continueRecovery(recovery.chatId, recovery.failureId, true)
 }
 
 async function selectModel(value: string | string[], sectionKey = '') {
+  if (pickerMode.value === 'normal' && modeWritePending.value) return
+  const intentChatId = chat.value?.chat_id
+  const intentGeneration = pickerGeneration
   // One pick at a time: a second click while the first is still applying
   // must not start a second turn.
   if (modelSelectBusy.value) return
@@ -5195,15 +5175,18 @@ async function selectModel(value: string | string[], sectionKey = '') {
   // pick (which drops the recovery) and a confirmation dialog can sit over a
   // chat that changes.
   const recovery = pickerMode.value === 'recovery' ? recoveryContext.value : null
-  const chatId = chat.value.chat_id
-  const sectionBucket: Partial<Record<string, BucketKey>> = {
-    anthropic: 'claude',
-    opencode: 'opencode',
+  if (recovery?.errorIdx != null && hasPendingRetry.value) {
+    showModelPicker.value = false
+    return
   }
-  // Picking from the Anthropic section is an explicit handover to Claude Code,
+  const chatId = chat.value.chat_id
+  // Picking from a provider's section is an explicit handover to that provider,
   // never a tier change on whichever provider is active. To change tier while
   // staying on a provider, pick that provider's own model instead.
-  const targetBucket = sectionBucket[sectionKey] || bucketForSelectedModel(model)
+  const sectionProvider = sectionKey ? providerForModelSection(sectionKey) : ''
+  const targetBucket = BUCKET_DEFS.value.some(def => def.key === sectionProvider)
+    ? sectionProvider
+    : bucketForSelectedModel(model)
   const currentEntry = canonicalTier(chat.value.model)
   const sameModelAndRoute = canonicalTier(model) === currentEntry && targetBucket === activeBucket.value
   if (sameModelAndRoute && !recovery) {
@@ -5216,12 +5199,17 @@ async function selectModel(value: string | string[], sectionKey = '') {
   // CLI with its own session, so the new one has never seen this chat.
   const targetRoute = targetBucket
   const currentRoute = activeBucket.value
+  if (recovery && targetRoute !== currentRoute) {
+    showModelPicker.value = false
+    store.pushErrorToast('Cannot continue with another provider', 'The original provider session is required to continue this failure.')
+    return
+  }
   const updates: {
     provider: ProviderKey
     model: string
     thinking_level?: string
   } = {
-    provider: (BUCKET_DEFS.find(def => def.key === targetBucket)?.provider || 'claude') as ProviderKey,
+    provider: targetBucket,
     model,
   }
   const targetLevels = modelsResponse.value?.model_reasoning_levels?.[model]
@@ -5229,6 +5217,16 @@ async function selectModel(value: string | string[], sectionKey = '') {
   // when the catalog says that model cannot do it, the retry falls back to
   // the provider default.
   const staged = recovery ? stagedThinkingLevel.value : null
+  if (recovery && (recovery.chatId !== chatId || chat.value.failure_id !== recovery.failureId)) {
+    showModelPicker.value = false
+    store.pushErrorToast('Cannot continue this failure', 'The failure has changed. Refresh the chat before continuing.')
+    return
+  }
+  if (recovery && (!sameModelAndRoute || staged !== null)) {
+    showModelPicker.value = false
+    store.pushErrorToast('Cannot change model during recovery', 'Model and thinking changes cannot yet be guarded against a newer turn. Choose the current model to continue.')
+    return
+  }
   if (staged !== null) {
     const providerLevels = modelsResponse.value?.thinking_levels?.[updates.provider]
     const allowed = targetLevels?.length ? targetLevels : providerLevels
@@ -5257,6 +5255,7 @@ async function selectModel(value: string | string[], sectionKey = '') {
         if (!ok) return
         // The user answered a dialog: the chat may have moved under it.
         if (chat.value?.chat_id !== chatId) return
+        if (recovery?.errorIdx != null && hasPendingRetry.value) return
         const applied = await applyModelChoice(chatId, updates, true, staged)
         if (!applied) return
       } else {
@@ -5275,28 +5274,35 @@ async function selectModel(value: string | string[], sectionKey = '') {
     }
   } finally {
     modelSelectBusy.value = false
-    showModelPicker.value = false
+    if (chat.value?.chat_id === intentChatId && pickerGeneration === intentGeneration) {
+      showModelPicker.value = false
+    }
   }
 }
 
 async function selectThinking(level: string) {
+  const intentChatId = chat.value?.chat_id
+  const intentGeneration = pickerGeneration
   if (pickerMode.value === 'recovery') {
     // A recovery stages the level for the retry: the model that is about to
     // be picked may not support it, and the picker stays open until then.
     stagedThinkingLevel.value = level
     return
   }
+  if (modeWritePending.value) return
   // '' = provider default. Safe mid-chat: it never invalidates the
   // provider session, so no handover is involved.
   try {
     await store.updateChat(chat.value.chat_id, { thinking_level: level })
-    showModelPicker.value = false
+    if (chat.value?.chat_id === intentChatId && pickerGeneration === intentGeneration) {
+      showModelPicker.value = false
+    }
   } catch (e) {
     store.pushErrorToast('Could not change the thinking level', errorMessage(e))
   }
 }
 
-/* Close picker on click outside or Escape */
+/* Refresh available models on open and clear picker-specific state on close. */
 watch(showModelPicker, (open) => {
   if (!open) {
     // A capability-card "Open picker" filtered the sections; drop the filter
@@ -5311,20 +5317,6 @@ watch(showModelPicker, (open) => {
   // still loading when the chat opened would otherwise stay missing from the
   // picker until the chat is reopened. The server caches the list.
   void loadModels()
-  const clickHandler = (e: MouseEvent) => {
-    if (modelPickerRef.value && !modelPickerRef.value.contains(e.target as Node)) {
-      showModelPicker.value = false
-    }
-  }
-  const keyHandler = (e: KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      showModelPicker.value = false
-    }
-  }
-  setTimeout(() => {
-    window.addEventListener('click', clickHandler, { once: true })
-    window.addEventListener('keydown', keyHandler, { once: true })
-  }, 0)
 })
 
 /** The task note's Mark done already asked, and said the chat would be archived. */
@@ -5595,7 +5587,7 @@ onMounted(() => {
 /* The header's own button rules set `position: relative`, which would let the
    floating trigger's `top` push this one below the header's centre line. */
 .work-inspector-trigger--header {
-  position: static;
+  position: relative;
   top: auto;
   right: auto;
   flex: none;
@@ -5604,6 +5596,7 @@ onMounted(() => {
   background: transparent;
   color: var(--fg2);
 }
+.chat-mcp-heading:focus { outline: 2px solid var(--accent); outline-offset: 3px; }
 .work-inspector-trigger--header:hover {
   color: var(--fg);
   border-color: transparent;
@@ -5629,6 +5622,7 @@ onMounted(() => {
   padding: 7px;
   color: var(--fg2);
 }
+.chat-rail--drawer .chat-rail-hide { min-width: var(--touch); min-height: var(--touch); }
 @media (pointer: coarse) {
   .chat-rail-hide { min-width: var(--touch); min-height: var(--touch); }
 }
@@ -6396,33 +6390,6 @@ details[open] > .activity-summary::before {
   border-top: 1px solid var(--border);
 }
 
-/* "N agents" header pill: background subagents still running after the
-   parent turn ended (view.activeBackgroundAgents, fed by /ws/events). */
-.bg-agents-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 9px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: 11px;
-  color: var(--fg2);
-  white-space: nowrap;
-}
-
-.bg-agents-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent2);
-  animation: bg-agents-pulse 1.6s ease-in-out infinite;
-}
-
-@keyframes bg-agents-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
-}
-
 /* Message content (markdown) */
 .message-content {
   min-width: 0;
@@ -6752,15 +6719,6 @@ details[open] > .activity-summary::before {
   text-align: right;
 }
 
-/* Marks a request sent into the running reply. Same treatment as the
-   automation mark: a property of the message, not part of the timestamp. */
-.steered-mark {
-  color: var(--accent);
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  margin-right: 6px;
-}
-
 /* Marks a turn fired by an automation. Accent-coloured so it reads as a
    property of the message, not as part of the timestamp next to it. */
 .unattended-mark {
@@ -6991,26 +6949,6 @@ details[open] > .activity-summary::before {
   background: none;
 }
 
-/* Focus lands here from the composer bar's activity cluster; the outline says where. */
-.chat-rail-running:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 4px;
-  border-radius: var(--radius-xs);
-}
-
-.bg-agents-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  flex-shrink: 0;
-  animation: bg-agents-pulse 1.4s ease-in-out infinite;
-}
-
-@keyframes bg-agents-pulse {
-  0%, 100% { opacity: 0.35; }
-  50% { opacity: 1; }
-}
 
 
 /* Slash-command picker styles are shared with SlashCommandPicker.vue through
@@ -7055,6 +6993,11 @@ details[open] > .activity-summary::before {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.composer-spacer {
+  flex: 1;
+  min-width: 0;
 }
 
 
@@ -7193,11 +7136,6 @@ details[open] > .activity-summary::before {
   white-space: nowrap;
 }
 
-.composer-move-bg { flex: none; margin-right: 6px; }
-.composer-move-bg:disabled { opacity: 0.6; cursor: progress; }
-.composer-move-bg:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.composer-move-bg-short { display: none; }
-
 .composer-model-dot {
   width: 7px;
   height: 7px;
@@ -7209,7 +7147,6 @@ details[open] > .activity-summary::before {
 /* Touch layouts keep full 44px targets for every composer control. */
 @media (pointer: coarse), (max-width: 700px) {
   .composer-chip { min-height: var(--touch); }
-  .composer-move-bg { min-width: var(--touch); }
   .image-btn,
   .send-btn { width: var(--touch); height: var(--touch); }
 }
@@ -7217,8 +7154,6 @@ details[open] > .activity-summary::before {
 @media (max-width: 700px) {
   .composer-kbd { display: none; }
   .composer-chip-label { max-width: 16ch; }
-  .composer-move-bg-long { display: none; }
-  .composer-move-bg-short { display: inline; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -7311,7 +7246,7 @@ details[open] > .activity-summary::before {
 }
 
 /* Queued message chips. Each chip is the message text, then one control row:
-   the delivery toggle on the left, the edit actions on the right. In a wide
+   the status on the left, the edit actions on the right. In a wide
    pane the two share a line; in a narrow one the controls wrap under the text
    instead of the text being squeezed between them. */
 .queued-messages {
@@ -7351,14 +7286,6 @@ details[open] > .activity-summary::before {
   color: var(--fg2);
 }
 .queued-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.queued-chip.is-steering { opacity: 0.85; padding: 8px 12px; }
-.queued-steering {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--accent);
-  flex-shrink: 0;
-}
-.queued-steering:empty { display: none; }
 /* The body's grow factor dwarfs the controls': on a shared line the text takes
    the free space and the controls sit at their own width on the right; once
    wrapped, the controls are alone on their line and stretch to push the
@@ -7404,32 +7331,6 @@ details[open] > .activity-summary::before {
   color: var(--accent);
   flex-shrink: 0;
 }
-.queued-mode {
-  display: inline-flex;
-  flex-shrink: 0;
-  padding: 2px;
-  gap: 2px;
-  background: var(--bg);
-  border-radius: var(--radius-sm);
-}
-.queued-mode-option {
-  background: none;
-  border: none;
-  border-radius: calc(var(--radius-sm) - 2px);
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  font-weight: 600;
-  padding: 3px 10px;
-  cursor: pointer;
-}
-.queued-mode-option[aria-pressed="true"] { background: var(--accent); color: var(--bg); }
-.queued-mode-option:not([aria-pressed="true"]):hover { background: var(--bg2); color: var(--fg); }
-/* Inset and in --fg: the pressed option is filled with --accent, so an accent
-   ring would vanish on it. */
-.queued-mode-option:focus-visible {
-  outline: 2px solid var(--fg);
-  outline-offset: -2px;
-}
 .queued-actions {
   display: flex;
   align-items: center;
@@ -7437,7 +7338,7 @@ details[open] > .activity-summary::before {
   flex-shrink: 0;
   margin-left: auto;
 }
-.queued-steer-all,
+.queued-send-all,
 .queued-send-now {
   background: none;
   color: var(--accent);
@@ -7449,9 +7350,9 @@ details[open] > .activity-summary::before {
   cursor: pointer;
   flex-shrink: 0;
 }
-.queued-steer-all:hover,
+.queued-send-all:hover,
 .queued-send-now:hover { background: var(--bg2); }
-.queued-steer-all:disabled,
+.queued-send-all:disabled,
 .queued-send-now:disabled { opacity: 0.4; cursor: not-allowed; }
 .queued-action,
 .queued-remove {
@@ -7472,7 +7373,7 @@ details[open] > .activity-summary::before {
 .queued-remove:hover { color: var(--fg); background: var(--bg2); }
 .queued-action:disabled,
 .queued-remove:disabled { opacity: 0.3; cursor: not-allowed; }
-.queued-steer-all:focus-visible,
+.queued-send-all:focus-visible,
 .queued-send-now:focus-visible,
 .queued-action:focus-visible,
 .queued-remove:focus-visible {
@@ -7480,9 +7381,8 @@ details[open] > .activity-summary::before {
   outline-offset: -2px;
 }
 @media (pointer: coarse) {
-  .queued-steer-all,
-  .queued-send-now,
-  .queued-mode-option {
+  .queued-send-all,
+  .queued-send-now {
     min-height: 44px;
   }
   .queued-action,
@@ -7490,10 +7390,8 @@ details[open] > .activity-summary::before {
     width: 44px;
     height: 44px;
   }
-  .queued-mode { padding: 0; gap: 0; }
-  .queued-mode-option { min-width: 64px; }
 }
-.steer-notice {
+.queue-notice {
   padding: 0 0 6px;
   margin: 0;
   font-size: 12px;
@@ -7545,9 +7443,9 @@ details[open] > .activity-summary::before {
 :global(:root.keyboard-open .question-form-card) { max-height: calc(var(--app-h) * 0.6); }
 /* A short pane (a phone in landscape) cannot hold an open question card and
    the two-row composer (#2774). While the question waits, the composer folds
-   to one row: the prompt and the send/stop action. The model picker, attach,
-   hints and Move to background come back when the card closes (answer or
-   cancel the question first). Keep the media query in sync with
+   to one row: the prompt and the send/stop action. The model picker, attach
+   and hints come back when the card closes (answer or cancel the question
+   first). Keep the media query in sync with
    SHORT_PANE_QUERY in the script. */
 @media (max-height: 500px) {
   .composer-surface--question {
@@ -7562,8 +7460,7 @@ details[open] > .activity-summary::before {
   .composer-surface--question > .composer-bar { flex: none; padding: 0; border-top: 0; }
   .composer-surface--question .composer-model,
   .composer-surface--question .image-btn,
-  .composer-surface--question .composer-kbd,
-  .composer-surface--question .composer-move-bg { display: none; }
+  .composer-surface--question .composer-kbd { display: none; }
 }
 .question-card-header {
   display: flex;
@@ -7927,10 +7824,65 @@ details[open] > .activity-summary::before {
 
 .thinking-levels {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-2);
+  min-width: 0;
   padding: 2px 4px;
+}
+
+.picker-footer-groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.permission-modes {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.permission-modes__choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* Every tile in the grid is as tall as the tallest one, so a two-line
+     description (Plan) does not leave its neighbour (Bypass) shorter. */
+  grid-auto-rows: 1fr;
+  gap: 4px;
+}
+
+.permission-mode {
+  position: relative;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  min-width: 0;
+  min-height: 44px;
+  height: auto;
+  gap: 2px;
+  text-align: left;
+  white-space: normal;
+}
+
+.permission-mode__description,
+.permission-modes__note,
+.permission-modes__unknown,
+.permission-modes__status {
+  margin: 0;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.3;
+}
+
+.permission-mode__check {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+}
+
+.permission-mode:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .thinking-levels__label {
@@ -7938,10 +7890,16 @@ details[open] > .activity-summary::before {
   color: var(--fg2);
 }
 
-/* Segmented control, the same shape as Settings → Providers' thinking picker. */
+/* Segmented control, the same shape as Settings → Providers' thinking picker.
+   One row at the popover width: segments keep their size and the row scrolls
+   sideways rather than wrapping Max onto a second line. */
 .thinking-levels__chips {
-  display: inline-flex;
-  flex-wrap: wrap;
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  max-width: 100%;
+  min-width: 0;
+  scrollbar-width: thin;
   padding: 2px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -7961,6 +7919,11 @@ details[open] > .activity-summary::before {
   font-size: var(--text-sm);
   cursor: pointer;
   transition: background 120ms var(--ease), color 120ms var(--ease);
+}
+
+.thinking-levels__chips .thinking-chip {
+  flex: 1 0 auto;
+  justify-content: center;
 }
 
 .thinking-chip:hover {
@@ -8124,10 +8087,10 @@ details[open] > .activity-summary::before {
   }
   .chat-archive-btn:hover { color: var(--fg); }
   .chat-archive-label { display: none; }
-  /* PaneHeader drops every pane title to --text-sm on narrow screens, which is
-     right for a title competing with a page tag and a wordmark. This header has
-     neither, and the title has its own full-width row, so it keeps body size and
-     stays the anchor of the block. Two-line clamp is inherited from PaneHeader. */
+  /* PaneHeader drops pane titles to --text-sm on narrow screens when they
+     share the compact header grid. This title has its own full-width row, so it
+     keeps body size and stays the anchor of the block. Two-line clamp is
+     inherited from PaneHeader. */
   .header-breadcrumb .pane-title.chat-title {
     font-size: var(--text-base);
     line-height: 1.25;

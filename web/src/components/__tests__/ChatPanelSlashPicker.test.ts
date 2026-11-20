@@ -110,7 +110,7 @@ async function mountPanel(): Promise<VueWrapper> {
   vi.spyOn(api, 'get').mockImplementation((path: string) => {
     if (path === '/api/models') return Promise.resolve(MODELS_RESPONSE) as never
     if (path.startsWith('/api/commands')) {
-      return Promise.resolve({ commands: [command('review')], skills: [] }) as never
+      return Promise.resolve({ commands: [command('review'), command('mcp')], skills: [] }) as never
     }
     return Promise.resolve([]) as never
   })
@@ -122,7 +122,6 @@ async function mountPanel(): Promise<VueWrapper> {
       stubs: {
         PaneHeader: PaneHeaderStub,
         ModelSelector: ChildStub,
-        SubagentPanel: ChildStub,
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,
         RouterLink: ChildStub,
@@ -186,6 +185,21 @@ describe('ChatPanel slash-command picker', () => {
 
     expect(wrapper.emitted('close')).toHaveLength(1)
     expect(textareaValue(wrapper)).toBe('a plain draft')
+    wrapper.unmount()
+  })
+
+  it('selects the picker before navigating on the next modifier chord', async () => {
+    const wrapper = await mountPanel()
+    const input = wrapper.get('textarea.chat-input')
+    await input.setValue('/mc')
+    expect(wrapper.find('.commands-picker').exists()).toBe(true)
+    await input.trigger('keydown', { key: 'Enter' })
+    expect(textareaValue(wrapper).trim()).toBe('/mcp')
+    expect(wrapper.find('.chat-rail').exists()).toBe(false)
+    await input.trigger('keydown', { key: 'Enter', metaKey: true })
+    await flushPromises()
+    expect(textareaValue(wrapper)).toBe('')
+    expect(wrapper.find('.chat-rail').exists()).toBe(true)
     wrapper.unmount()
   })
 })

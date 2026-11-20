@@ -75,7 +75,6 @@ function workspaces(names: string[], primary = 'personal'): WorkspacesResponse {
     })),
     active: names[0] ?? null,
     primary,
-    default_agent_fs_scope: 'workspace',
     provider_options: [{ value: 'claude', label: 'Claude' }],
   }
 }
@@ -90,7 +89,7 @@ async function mountOverview(active = 'work') {
   useProjectStore().activeWorkspace = active
   const { default: SettingsView } = await import('../SettingsView.vue')
   const wrapper = mount(SettingsView, {
-    global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: Stub } },
+    global: { plugins: [router], stubs: { Teleport: true } },
   })
   await flushPromises()
   await nextTick()
@@ -357,12 +356,11 @@ describe('Settings > Workspace Overview editor controls', () => {
     }
   })
 
-  it('discards unsaved workspace edits without changing permissions', async () => {
+  it('discards unsaved workspace edits without saving', async () => {
     const { api } = await import('../../lib/api')
     const wrapper = await mountOverview()
     try {
       await changeAccent(wrapper)
-      await wrapper.find('#workspace-file-access-work').setValue('machine')
       await nextTick()
 
       await wrapper.find('.workspace-discard').trigger('click')
@@ -371,12 +369,11 @@ describe('Settings > Workspace Overview editor controls', () => {
       expect(api.patch).not.toHaveBeenCalled()
       expect(wrapper.find('.workspace-save').exists()).toBe(false)
 
-      // The form shows the saved accent and the saved File access again.
+      // The form shows the saved accent again.
       const active = workspaceCard(wrapper).findAll('.workspace-color-swatch')
         .filter(b => b.attributes('aria-checked') === 'true')
       expect(active).toHaveLength(1)
       expect(active[0]!.attributes('aria-label')).toBe('Rose Pink')
-      expect((wrapper.find('#workspace-file-access-work').element as HTMLSelectElement).value).toBe('')
     } finally {
       wrapper.unmount()
     }

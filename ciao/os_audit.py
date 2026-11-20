@@ -149,8 +149,7 @@ def _user_skill_roots() -> tuple[Path, ...]:
     """User-global skill folders OpenCode also loads, in full, into every chat.
 
     OpenCode's own global folder (``$XDG_CONFIG_HOME/opencode/skills``) plus the
-    Claude Code and ``.agents`` folders it reads the same way; the same set the
-    OpenCode sandbox exposes read-only (``_sandboxed_server_dirs``).
+    Claude Code and ``.agents`` folders it reads the same way.
     """
     home = Path.home()
     config_home = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")

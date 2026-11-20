@@ -10,6 +10,7 @@ failure the caller can act on (400).
 
 from __future__ import annotations
 
+import json
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,7 +25,7 @@ from starlette.testclient import TestClient
 from ciao.app_settings import AppSettingsStore
 from ciao.backup_service import SETUP_CHAT_TITLE, BackupService
 from ciao.claude_trim import catalog_payload
-from ciao.config import CiaoConfig, default_agent_fs_scope
+from ciao.config import CiaoConfig
 from ciao.legacy_node_state import LegacyNodeState
 from ciao.local_session import LocalSessionManager
 from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
@@ -200,10 +201,8 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "default_provider": "claude",
                 "gws_profile": "personal",
                 "disallowed_tools": None,
-                "claude_ai_connectors": True,
                 "claude_trim": {},
                 "color": "amber",
-                "agent_fs_scope": None,
                 "memory_handover": "off",
                 "provider_overrides": {},
             },
@@ -213,10 +212,8 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "default_provider": "claude",
                 "gws_profile": "work",
                 "disallowed_tools": [],
-                "claude_ai_connectors": True,
                 "claude_trim": {},
                 "color": "amber",
-                "agent_fs_scope": None,
                 "memory_handover": "off",
                 "provider_overrides": {},
             },
@@ -225,9 +222,9 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
         "primary": "personal",
         "provider_options": [
             {"value": "claude", "label": "Anthropic (via Claude Code)"},
-            {"value": "opencode", "label": "opencode"},
+            {"value": "opencode", "label": "OpenCode"},
+            {"value": "codex", "label": "OpenAI (via Codex)"},
         ],
-        "default_agent_fs_scope": default_agent_fs_scope(),
         "claude_trim_options": catalog_payload(),
     }
 
@@ -317,7 +314,6 @@ class _FakePCM:
         self.streamed = None
         self.chats: list[_FakeChat] = []
         self.sent: list[dict] = []
-        self.granted: list[str] = []
 
     def list_projects(self, workspace):
         assert workspace == "personal"
@@ -331,9 +327,6 @@ class _FakePCM:
         chat = _FakeChat(title=title or "")
         self.chats.append(chat)
         return chat
-
-    def grant_data_root(self, chat_id):
-        self.granted.append(chat_id)
 
     def start_stream(self, chat_id, prompt, images=None):
         self.streamed = {"chat_id": chat_id, "prompt": prompt}
@@ -628,15 +621,10 @@ def test_the_setup_chat_sends_the_prompt_and_a_second_call_reuses_it(
     assert second.json()["reused"] is True
     assert second.json()["chat_id"] == first.json()["chat_id"]
     assert len(pcm.chats) == 1
-    # The reused chat is granted the data root too, so a setup chat opened
-    # before the grant existed can create the repository (#1328).
-    assert pcm.granted == [first.json()["chat_id"]]
     # Sent, not drafted: exactly one turn, carrying exactly the copied text.
     assert len(pcm.sent) == 1
     assert pcm.sent[0]["prompt"] == prompt
     assert pcm.created["title"] == SETUP_CHAT_TITLE
-    # The one chat granted the data root, where the repository is created.
-    assert pcm.created["grants_data_root"] is True
 
 
 def test_an_archived_setup_chat_is_replaced_not_re_entered(tmp_path: Path) -> None:
@@ -746,3 +734,47 @@ def test_the_setup_routes_need_a_session(tmp_path: Path) -> None:
 
     assert client.get("/api/local/backup/setup-prompt").status_code == 401
     assert client.post("/api/local/backup/setup-chat").status_code == 401
+
+
+def test_a_stored_data_root_grant_loads_and_is_dropped_on_save(tmp_path: Path) -> None:
+    """A chat record that still says grants_data_root loads, and the next save omits the key."""
+    from ciao.sessions import StateStore
+    from ciao.transcripts import TranscriptStore
+    from ciao.web.project_chats import ProjectChatManager
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    store = runtime / "web_projects.json"
+    store.write_text(json.dumps({
+        "version": 1,
+        "projects": {
+            "p1": {
+                "name": "General",
+                "workspace": "personal",
+                "context": "",
+                "created_at": "t",
+                "order": 0,
+                "vault_folder": "",
+                "kind": "",
+            }
+        },
+        "chats": {
+            "c1": {"project_id": "p1", "title": "Setup", "grants_data_root": True}
+        },
+    }), encoding="utf-8")
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+    )
+    manager = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=store,
+    )
+    assert manager.get_chat("c1") is not None
+    manager._save()
+    saved = json.loads(store.read_text(encoding="utf-8"))
+    assert "grants_data_root" not in saved["chats"]["c1"]

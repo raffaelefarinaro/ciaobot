@@ -15,7 +15,7 @@ const mounted: VueWrapper[] = []
 
 async function mountForm(): Promise<VueWrapper> {
   const tasks = useTaskStore()
-  tasks.fetchModels = vi.fn(async () => {}) as typeof tasks.fetchModels
+  tasks.fetchModels = vi.fn(async () => ({ status: 'success' as const, workspace: 'work', generation: 0 }))
   tasks.createSchedule = vi.fn(async () => {}) as unknown as typeof tasks.createSchedule
   const projects = useProjectStore()
   projects.activeWorkspace = 'work'
@@ -41,6 +41,22 @@ describe('NewScheduleForm', () => {
   })
   afterEach(() => {
     while (mounted.length) mounted.pop()?.unmount()
+  })
+
+  it('keeps focus on the prompt when dismissing the real model picker by clicking it', async () => {
+    const tasks = useTaskStore()
+    tasks.fetchModels = vi.fn(async () => ({ status: 'success' as const, workspace: 'personal', generation: 0 }))
+    const wrapper = mount(NewScheduleForm, { attachTo: document.body })
+    mounted.push(wrapper)
+    await flushPromises()
+    await wrapper.get('.model-selector__trigger').trigger('click')
+    await flushPromises()
+    const prompt = wrapper.get<HTMLTextAreaElement>('#nsf-prompt').element
+    prompt.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }))
+    prompt.focus()
+    await flushPromises()
+    expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
+    expect(document.activeElement).toBe(prompt)
   })
 
   it('uses the detail page sections, prompt first, with no uppercase field labels', async () => {

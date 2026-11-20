@@ -143,6 +143,44 @@ def test_each_related_note_carries_its_revision_and_due_flag(tmp_path: Path) -> 
     assert found["People/Luca.md"].due is True
 
 
+def _unverified_sofia(vault: Path, *, proposal_id: str = "") -> None:
+    checked = _note(vault, "People/Sofia.md", "Maurizio is VP Marketing.")
+    nv.record_note_check(
+        vault,
+        nv.NoteCheck(
+            relative_path="People/Sofia.md",
+            content_revision=mr.content_revision(checked.read_text(encoding="utf-8")),
+            outcome="unverified",
+            checked_at=TODAY,
+            retry_after=TODAY + timedelta(days=30),
+            proposal_id=proposal_id,
+        ),
+    )
+
+
+def test_an_unverified_check_is_reopenable_only_for_an_attended_caller(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    _note(vault, TARGET)
+    _unverified_sofia(vault)
+
+    attended = _by_path(_related(vault, attended=True))["People/Sofia.md"]
+    unattended = _by_path(_related(vault))["People/Sofia.md"]
+
+    # The cooldown is unchanged: due is the worklist's answer for both callers.
+    assert attended.due is False
+    assert unattended.due is False
+    assert attended.reopenable is True
+    assert unattended.reopenable is False
+
+
+def test_a_pending_proposal_is_never_reopenable(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    _note(vault, TARGET)
+    _unverified_sofia(vault, proposal_id="proposal-1")
+
+    assert _by_path(_related(vault, attended=True))["People/Sofia.md"].reopenable is False
+
+
 def test_a_note_that_never_goes_stale_is_not_due(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     _note(vault, TARGET)
@@ -218,8 +256,11 @@ class _Install:
 class _Plane:
     def __init__(self, install: _Install) -> None:
         self.config = install
+        # No chat is visible to this stub, so every turn reads as attended.
+        self.pcm = SimpleNamespace(get_chat=lambda _chat_id: None)
 
     _workspace = cp.CiaoControlPlane._workspace
+    _unattended_turn = cp.CiaoControlPlane._unattended_turn
     note_related = cp.CiaoControlPlane.note_related
 
 

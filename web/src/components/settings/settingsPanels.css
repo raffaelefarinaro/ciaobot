@@ -560,6 +560,13 @@
   margin: 0;
   padding: 0 0 6px 16px;
 }
+@media (pointer: coarse) {
+  .set-subrow-hint a {
+    display: inline-flex;
+    align-items: center;
+    min-height: var(--touch);
+  }
+}
 
 /* A section's "how this works" link. Layout only: colour and underline come
    from the global `a` rule, so it stays self-describing. Unlike `.set-link`
@@ -911,19 +918,6 @@
   cursor: default;
 }
 
-/* A File access link briefly tints the row it found. The animation carries no
-   meaning: the focus ring on the select is the durable cue, and reduced motion
-   keeps that while dropping the tint. */
-.workspace-card--target {
-  animation: workspace-link-target 1.6s var(--ease);
-}
-@keyframes workspace-link-target {
-  0% { background-color: color-mix(in srgb, var(--accent) 14%, transparent); }
-  100% { background-color: transparent; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .workspace-card--target { animation: none; }
-}
 .workspace-edit-actions {
   display: flex;
   align-items: center;

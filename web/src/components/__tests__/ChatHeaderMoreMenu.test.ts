@@ -156,6 +156,31 @@ describe('ChatHeaderMoreMenu', () => {
     expect(trigger().getAttribute('aria-label')).toBe('More chat actions')
   })
 
+  it.each([
+    { unread: 0, label: 'More chat actions', dot: false },
+    { unread: 3, label: 'More chat actions, 3 unread notifications', dot: true },
+  ])('labels the trigger for $unread unread', async ({ unread, label, dot }) => {
+    await mountMenu({ unread })
+    expect(trigger().getAttribute('aria-label')).toBe(label)
+    expect(wrapper!.find('.chat-more-dot').exists()).toBe(dot)
+    expect(useNotificationInboxStore().count).toBe(unread)
+    await openMenu()
+    const details = itemNamed('Chat details')!
+    expect(details.querySelector('span')?.textContent).toBe('Chat details')
+    expect(details.getAttribute('aria-describedby')).toBeNull()
+  })
+
+  it('Chat details emits details and returns menu focus', async () => {
+    const { wrapper: w } = await mountMenu()
+    await openMenu()
+    const details = itemNamed('Chat details')!
+    expect(details.getAttribute('aria-label')).toBeNull()
+    details.click()
+    await settle()
+    expect(w.emitted('details')).toHaveLength(1)
+    expect(document.activeElement).toBe(trigger())
+  })
+
   it('Back goes back in app history', async () => {
     nav.canBack.value = true
     await mountMenu({ canArchive: false })

@@ -193,7 +193,6 @@ def update_command(provider: str, tested: str, binary: str) -> str:
     ``tested`` is validated before it is interpolated and the binary is quoted,
     because the host terminal runs this string as shell text.
     """
-    from ciao import host_terminal
     from ciao.tool_path import resolve_on_terminal_path
 
     if provider not in PROVIDERS:
@@ -212,8 +211,6 @@ def update_command(provider: str, tested: str, binary: str) -> str:
         same = False
     if same:
         name = provider
-    elif host_terminal.host_platform() == host_terminal.PLATFORM_WINDOWS:
-        name = "& " + host_terminal._ps_quote(binary)
     else:
         name = shlex.quote(binary)
     return f"{name} upgrade {tested}" if provider == "opencode" else f"{name} update"
@@ -223,7 +220,6 @@ def release_check(
     provider: str,
     installed_text: str,
     *,
-    bundled: bool = False,
     binary: str = "",
     record: Mapping[str, Any] | None = None,
     running_version: str | None = None,
@@ -235,7 +231,7 @@ def release_check(
     the previous record. A develop checkout or dev install reports the last
     release's version until the next cut, so it compares against that release's
     record; that is safe because ``below_tested`` only ever points up to a
-    version a release was tested with, and bundled Claude never gets a command.
+    version a release was tested with.
     """
     if record is None:
         try:
@@ -251,14 +247,12 @@ def release_check(
     if tested is None or record.get("ciaobot") != running_version:
         return {"state": "untested"}
     if provider == "opencode":
-        from ciao.providers.opencode import _server_version_error
+        from ciao.opencode_cli import cli_version_error
 
-        if _server_version_error({"version": tested}) is not None:
+        if cli_version_error({"version": tested}) is not None:
             return {"state": "untested"}
-    if bundled:
-        return {"state": "bundled", "tested": tested}
     if provider == "opencode":
-        if _server_version_error({"version": installed_text}) is not None:
+        if cli_version_error({"version": installed_text}) is not None:
             return {"state": "unsupported", "tested": tested}
     installed = parse_cli_version(installed_text)
     order = compare_versions(installed, tested) if installed else None
@@ -303,8 +297,7 @@ def _probe_version(binary: str) -> str:
 def current_checks() -> dict[str, dict[str, str]]:
     """``release_check`` for each installed provider; absent providers have no row."""
     from ciao import setup_status
-    from ciao.providers.claude import get_bundled_claude_path
-    from ciao.providers.opencode import resolve_opencode_binary
+    from ciao.opencode_cli import resolve_opencode_binary
 
     checks: dict[str, dict[str, str]] = {}
     try:
@@ -317,13 +310,8 @@ def current_checks() -> dict[str, dict[str, str]]:
         )
     claude_path = setup_status.claude_cli_path()
     if claude_path:
-        bundled_path = get_bundled_claude_path()
-        bundled = bool(bundled_path) and claude_path == str(bundled_path)
         checks["claude"] = release_check(
-            "claude",
-            "" if bundled else _probe_version(claude_path),
-            bundled=bundled,
-            binary=claude_path,
+            "claude", _probe_version(claude_path), binary=claude_path
         )
     return checks
 
