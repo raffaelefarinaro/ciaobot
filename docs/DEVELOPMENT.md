@@ -20,6 +20,11 @@ Page-load behavior is covered by `tests/test_static_asset_compression.py` and
 `web/src/lib/chatComponents.test.ts`, plus `AppEngineOffline.test.ts` for the
 bounded startup request and display delay. Static gzip is limited to hashed
 JavaScript/CSS, while chat code is prefetched only for chat deep links.
+The Home-to-chat rise is covered by `ChatLayoutAsyncChunk.test.ts` (held chunk),
+`ChatLayoutRiseLifecycle.test.ts` (ordering, cancellation, same-id replacement,
+refused navigation), `ChatPanelRiseContract.test.ts` (the production panel's
+instance-owned class), and the held-chunk cases in `web/e2e/specs/chat-motion.spec.ts`
+(page clock, reduced motion) (#3086).
 
 `tests/test_is_session_local.py` covers batched chat-list availability, including
 session creation/deletion and newly used working directories between requests.

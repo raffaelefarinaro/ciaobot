@@ -54,7 +54,7 @@
         </div>
         <!-- Split view when a file is pinned and holds the slot -->
         <template v-if="fileInTile">
-          <ChatPanel v-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" file-pinned :inactive="besideInTile && focusedPane === 'beside'" @close="closeChat" :rising="chatRising" @mounted="onChatPanelMounted" :style="pullStyle" @pull="onItemPull" @pull-end="onItemPullEnd" @open-sidebar="sidebarCollapsed = false" />
+          <ChatPanel v-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" file-pinned :inactive="besideInTile && focusedPane === 'beside'" @close="closeChat" :rise-for-instance="risingMain?.instance ?? null" @pane-mounted="onMainPaneMounted" @pane-unmounted="onMainPaneUnmounted" :style="pullStyle" @pull="onItemPull" @pull-end="onItemPullEnd" @open-sidebar="sidebarCollapsed = false" />
           <!-- The route names a chat the catalog has not delivered yet: the
                pane is on its way, so it shows the skeleton rather than
                nothing (#1651). -->
@@ -150,7 +150,7 @@
             @open-sidebar="sidebarCollapsed = false"
           />
           <template v-else-if="store.activeChat">
-            <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" :inactive="besideInTile && focusedPane === 'beside'" @close="closeChat" :rising="chatRising" @mounted="onChatPanelMounted" :style="pullStyle" @pull="onItemPull" @pull-end="onItemPullEnd" @open-sidebar="sidebarCollapsed = false">
+            <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" :inactive="besideInTile && focusedPane === 'beside'" @close="closeChat" :rise-for-instance="risingMain?.instance ?? null" @pane-mounted="onMainPaneMounted" @pane-unmounted="onMainPaneUnmounted" :style="pullStyle" @pull="onItemPull" @pull-end="onItemPullEnd" @open-sidebar="sidebarCollapsed = false">
               <template #below-header>
                 <!-- Narrow shared pin: a compact native opener for the chat's
                      server-owned pin, not a forced split pane and never an
@@ -284,9 +284,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import HomeNoticeReopen from './HomeNoticeReopen.vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter, type RouteLocationNormalized } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { terminalPanelWanted } from '../lib/terminalPanel'
 import { readBesideChat, writeBesideChat } from '../lib/chatSplit'
@@ -1119,12 +1119,6 @@ function onChatSelected() {
  * otherwise it springs back.
  */
 /**
- * Opening a chat from Home (or any page that is not a chat) raises it from below:
- * the reverse of pulling it down to close. Switching between chats (the title
- * rail, archive-to-next) does not, since those slide sideways.
- */
-const chatRising = ref(false)
-/**
  * Switching to a chat that has a pinned file: the chat slides in first, then its
  * file follows from the right (the tile stays hidden for the chat's slide).
  *
@@ -1155,29 +1149,128 @@ watch([activePinKey, fileInTile], ([key, inTile]) => {
   tileArriving.value = true
   tileTimer = setTimeout(() => { tileArriving.value = false; tileTimer = null }, TILE_ARRIVAL_MS)
 }, { flush: 'post' })
+// Opening a chat from Home (or any non-chat page) raises it from below, the
+// reverse of pulling it down. Switching between chats slides sideways instead.
+//
+// Selecting the chat only arms the rise (`pendingRise`). Its 340 ms starts when
+// the real main ChatPanel for that chat has mounted (`mountedMain`) and the route
+// has reached the chat: a lazy chunk slower than the window would otherwise spend
+// the whole rise on the unmarked skeleton (#3086). The class itself is owned by
+// the receiving panel instance (`riseForInstance`), never by a parent boolean.
+interface PaneRecord { chatId: string; instance: symbol }
+interface PendingRise { chatId: string; originPath: string; originEpoch: number }
+const RISE_MS = 340
+const pendingRise = shallowRef<PendingRise | null>(null)
+const mountedMain = shallowRef<PaneRecord | null>(null)
+const risingMain = shallowRef<PaneRecord | null>(null)
 let riseTimer: ReturnType<typeof setTimeout> | null = null
 let bootSettledAt = 0
-// Selecting the chat only arms the rise. Its 340 ms starts when the real
-// ChatPanel mounts: a lazy chunk slower than the window would otherwise spend
-// the whole rise on the skeleton, which is not marked, and the panel would
-// arrive with no motion (#3086).
-let risePending = false
+// Epochs: `routeEpoch` moves on each actual route.path edge; `selectionEpoch` on
+// each actual raw activeChatId edge. `failedSelectionEpoch` vetoes arming for a
+// selection whose navigation was refused, even if the catalog row arrives later.
+let routeEpoch = 0
+let selectionEpoch = 0
+let failedSelectionEpoch: number | null = null
 watch(() => store.bootstrapped, ready => { if (ready && !bootSettledAt) bootSettledAt = Date.now() }, { immediate: true })
-watch(() => store.activeChat?.chat_id, (id, was) => {
-  if (!id || was || !bootSettledAt || Date.now() - bootSettledAt < 800) return
-  if (prefersReducedMotion()) return
-  risePending = true
-})
-// Leaving for a non-chat page before the panel arrived cancels the arm, so a
-// later visit to that chat does not rise.
-watch(() => route.path, path => { if (!path.startsWith('/chat/')) risePending = false })
-function onChatPanelMounted(): void {
-  if (!risePending) return
-  risePending = false
-  chatRising.value = true
-  if (riseTimer) clearTimeout(riseTimer)
-  riseTimer = setTimeout(() => { chatRising.value = false; riseTimer = null }, 340)
+
+function stopRising(): void {
+  if (riseTimer) { clearTimeout(riseTimer); riseTimer = null }
+  risingMain.value = null
 }
+function cancelRise(): void {
+  pendingRise.value = null
+  stopRising()
+}
+function chatPath(chatId: string): string { return `/chat/${chatId}` }
+
+// Actual route edges only. Sync, so the epoch is current before any post-flush check.
+watch(() => route.path, path => {
+  routeEpoch += 1
+  if (pendingRise.value && path !== chatPath(pendingRise.value.chatId)) pendingRise.value = null
+  if (risingMain.value && path !== chatPath(risingMain.value.chatId)) stopRising()
+}, { flush: 'sync' })
+
+// Raw selection: each id edge invalidates its predecessor, even inside one tick.
+watch(() => store.activeChatId, id => {
+  selectionEpoch += 1
+  failedSelectionEpoch = null
+  if (pendingRise.value && pendingRise.value.chatId !== id) pendingRise.value = null
+  if (risingMain.value && risingMain.value.chatId !== id) stopRising()
+}, { flush: 'sync' })
+
+// Resolved eligibility: a chat appearing from nothing, after bootstrap settles.
+watch(() => store.activeChat?.chat_id, (id, was) => {
+  if (id === was) return
+  cancelRise()
+  if (!id || was) return
+  if (!bootSettledAt || Date.now() - bootSettledAt < 800) return
+  if (prefersReducedMotion()) return
+  if (failedSelectionEpoch === selectionEpoch) return
+  pendingRise.value = { chatId: id, originPath: route.path, originEpoch: routeEpoch }
+  reconcileRise()
+}, { flush: 'post' })
+watch(() => route.path, reconcileRise, { flush: 'post' })
+
+/** Start only when the pending chat, the mounted main panel, the resolved and raw selection and the committed route all agree. */
+function reconcileRise(): void {
+  const pending = pendingRise.value
+  const mounted = mountedMain.value
+  if (!pending || !mounted) return
+  const resolved = store.activeChat?.chat_id
+  if (pending.chatId !== mounted.chatId || resolved !== mounted.chatId || store.activeChatId !== resolved) return
+  if (route.path !== chatPath(pending.chatId)) return
+  pendingRise.value = null
+  if (prefersReducedMotion()) return
+  stopRising()
+  const record: PaneRecord = { chatId: mounted.chatId, instance: mounted.instance }
+  risingMain.value = record
+  riseTimer = setTimeout(() => {
+    // Identity, not chat id or instance: an already queued callback never ends a newer rise.
+    if (risingMain.value === record) risingMain.value = null
+    riseTimer = null
+  }, RISE_MS)
+}
+
+function onMainPaneMounted(pane: { chatId: string; instance: symbol; beside: boolean }): void {
+  if (pane.beside) return
+  if (pane.chatId !== store.activeChat?.chat_id || pane.chatId !== store.activeChatId) return
+  // A replacement never inherits the running rise, even for the same chat id.
+  if (mountedMain.value && mountedMain.value.instance !== pane.instance) stopRising()
+  mountedMain.value = { chatId: pane.chatId, instance: pane.instance }
+  reconcileRise()
+}
+function onMainPaneUnmounted(pane: { chatId: string; instance: symbol; beside: boolean }): void {
+  if (pane.beside) return
+  // An old instance's unmount cannot clear a newer instance's readiness or rise.
+  if (mountedMain.value?.instance === pane.instance) mountedMain.value = null
+  if (risingMain.value?.instance === pane.instance) stopRising()
+}
+
+// A navigation the router refused (aborted, cancelled, superseded or thrown)
+// cancels the arrival for that chat: no route edge is guaranteed in these cases.
+function refuseChatNavigation(to: RouteLocationNormalized, fromPath: string): void {
+  if (to.path === fromPath) return
+  const targetChatId = to.path.startsWith('/chat/') ? String(to.params.chatId ?? '') : ''
+  if (!targetChatId || targetChatId !== store.activeChatId) return
+  const pending = pendingRise.value
+  if (pending && pending.chatId === targetChatId && route.path === pending.originPath && routeEpoch === pending.originEpoch) {
+    pendingRise.value = null
+    failedSelectionEpoch = selectionEpoch
+  } else if (!pending && route.path === fromPath) {
+    failedSelectionEpoch = selectionEpoch
+  }
+}
+const removeNavigationOutcome = [
+  router.afterEach((to, from, failure) => { if (failure) refuseChatNavigation(to, from.path) }),
+  router.onError((_error, to, from) => refuseChatNavigation(to, from.path)),
+]
+onBeforeUnmount(() => {
+  for (const remove of removeNavigationOutcome) remove()
+  pendingRise.value = null
+  mountedMain.value = null
+  failedSelectionEpoch = null
+  stopRising()
+})
 // The same rise for an automation opened from the automation list; the title
 // rail moves between automations sideways instead.
 const scheduleRising = ref(false)
@@ -2180,6 +2273,8 @@ onBeforeUnmount(() => {
 }
 @media (prefers-reduced-motion: reduce) {
   .chat-split-side { animation: none; }
+  /* Chat arrival only: the shared .chat-rise also moves project and schedule panels. */
+  .chat-panel.chat-rise { animation: none; }
 }
 
 .sidebar-resizer,
