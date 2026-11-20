@@ -9034,12 +9034,16 @@ class ProjectChatManager:
         self, chat_id: str, project_id: str, title: str, snippet: str
     ) -> None:
         """Publish ``chat_result_ready`` and queue a delayed result push."""
+        chat = self._chats.get(chat_id)
         self._events.publish({
             "type": "chat_result_ready",
             "chat_id": chat_id,
             "project_id": project_id,
             "title": title,
             "snippet": snippet,
+            # Native clients have no PWA store guard, so the pass is marked
+            # explicitly; an unknown chat is not a pass.
+            "memory_pass": chat is not None and self._is_memory_pass(chat),
         })
         self._schedule_push(chat_id, title, snippet)
 

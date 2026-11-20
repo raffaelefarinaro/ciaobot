@@ -384,6 +384,38 @@ final class EventStreamTests: XCTestCase {
         XCTAssertNil(ChatEventDecoder.decode(Data(repeating: 0x20, count: ChatEventDecoder.maximumMessageBytes + 1)))
     }
 
+    func testDecoderReadsTheMemoryPassMarkerAndTreatsItsAbsenceAsFalse() {
+        let pass = Data("""
+        {"type":"chat_result_ready","chat_id":"chat-1","project_id":"p1","title":"Memory pass","snippet":"Done","memory_pass":true}
+        """.utf8)
+        XCTAssertEqual(
+            ChatEventDecoder.decode(pass),
+            .resultReady(chatID: "chat-1", title: "Memory pass", snippet: "Done", workspace: "", memoryPass: true)
+        )
+
+        let ordinary = Data("""
+        {"type":"chat_result_ready","chat_id":"chat-1","project_id":"p1","title":"Answer","snippet":"Done","memory_pass":false}
+        """.utf8)
+        XCTAssertEqual(
+            ChatEventDecoder.decode(ordinary),
+            .resultReady(chatID: "chat-1", title: "Answer", snippet: "Done", workspace: "", memoryPass: false)
+        )
+
+        // An older server never sends the marker; the result is an ordinary one.
+        let older = Data(#"{"type":"chat_result_ready","chat_id":"chat-1","title":"Answer","snippet":"Done"}"#.utf8)
+        XCTAssertEqual(
+            ChatEventDecoder.decode(older),
+            .resultReady(chatID: "chat-1", title: "Answer", snippet: "Done", workspace: "", memoryPass: false)
+        )
+
+        // Only a JSON boolean counts; a number is not the marker.
+        let numeric = Data(#"{"type":"chat_result_ready","chat_id":"chat-1","title":"Answer","snippet":"Done","memory_pass":1}"#.utf8)
+        XCTAssertEqual(
+            ChatEventDecoder.decode(numeric),
+            .resultReady(chatID: "chat-1", title: "Answer", snippet: "Done", workspace: "", memoryPass: false)
+        )
+    }
+
     func testDecoderBoundsServerStrings() {
         let longTitle = String(repeating: "t", count: ChatEventDecoder.maximumTitleCharacters + 10)
         let longSnippet = String(repeating: "s", count: ChatEventDecoder.maximumSnippetCharacters + 10)
@@ -391,7 +423,7 @@ final class EventStreamTests: XCTestCase {
         let payload = """
         {"type":"chat_result_ready","chat_id":"chat-1","title":"\(longTitle)","snippet":"\(longSnippet)","workspace":"\(longWorkspace)"}
         """
-        guard case .resultReady(_, let title, let snippet, let workspace)? = ChatEventDecoder.decode(Data(payload.utf8)) else {
+        guard case .resultReady(_, let title, let snippet, let workspace, _)? = ChatEventDecoder.decode(Data(payload.utf8)) else {
             return XCTFail("expected a result event")
         }
         XCTAssertEqual(title.count, ChatEventDecoder.maximumTitleCharacters)
@@ -403,7 +435,7 @@ final class EventStreamTests: XCTestCase {
         // A single-workspace server omits the field on purpose and an older one
         // never sent it; both must decode as "no workspace", not fail.
         let payload = #"{"type":"chat_result_ready","chat_id":"chat-1","title":"Answer","snippet":"Done"}"#
-        guard case .resultReady(_, _, _, let workspace)? = ChatEventDecoder.decode(Data(payload.utf8)) else {
+        guard case .resultReady(_, _, _, let workspace, _)? = ChatEventDecoder.decode(Data(payload.utf8)) else {
             return XCTFail("a result without a workspace is still a result")
         }
         XCTAssertEqual(workspace, "")
