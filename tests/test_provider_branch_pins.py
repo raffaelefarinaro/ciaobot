@@ -250,3 +250,191 @@ def test_every_runtime_provider_is_pinned() -> None:
     from ciao import provider_registry
 
     assert {item.id for item in provider_registry.descriptors()} == set(PROVIDERS)
+
+
+# Ids that are not a registered runtime provider. "" is a legacy chat with no
+# provider key: the session-file sites treat it as Claude, every other site as
+# an unknown provider. None is never a registered id and takes the non-Claude side.
+EDGE_IDS = ("unknown", "", None)
+ALL_IDS = (*PROVIDERS, *EDGE_IDS)
+SESSION_FILE_IDS = ("claude", "")  # sites that probe Claude's <session>.jsonl for "" too
+
+
+def _probes_session_file(provider: str | None) -> bool:
+    return provider in SESSION_FILE_IDS
+
+
+# 8. is_session_local: probes Claude's session file for claude and for legacy "";
+#    every other id, None included, is local without a probe.
+@pytest.mark.parametrize("provider", ALL_IDS)
+@pytest.mark.parametrize("probe_result", [True, False])
+def test_is_session_local_probes_session_file_only_for_claude(
+    tmp_path: Path, provider, probe_result: bool
+) -> None:
+    manager = _bare_manager()
+    probes: list[str] = []
+
+    def probe(session_id, agent_root=None):
+        probes.append(session_id)
+        return probe_result
+
+    manager._claude_session_exists = probe
+    manager._agent_root_for_chat = lambda chat_id: tmp_path
+    chat = SimpleNamespace(chat_id="chat-1", session_id="sess-1", provider=provider)
+    expected = probe_result if _probes_session_file(provider) else True
+    assert manager.is_session_local(chat) is expected
+    assert probes == (["sess-1"] if _probes_session_file(provider) else [])
+
+
+# 9. list_chats_dicts: the local flag for a claude chat is whether its
+#    <session>.jsonl exists under the agent root; other ids are local without a file.
+@pytest.mark.parametrize("provider", ALL_IDS)
+@pytest.mark.parametrize("file_exists", [True, False])
+def test_list_chats_dicts_local_flag_probes_session_file_only_for_claude(
+    tmp_path: Path, monkeypatch, provider, file_exists: bool
+) -> None:
+    from ciao.web import project_chats as pc
+
+    session_id = "7b3a2c1e-5d4f-4e2a-9b8c-1234567890ab"
+    manager = _bare_manager()
+    chat = ChatInfo(
+        chat_id="chat-1", project_id="p", title="T", provider=provider or "",
+        session_id=session_id,
+    )
+    # ChatInfo keeps the id it was given, so set None explicitly for that case.
+    chat.provider = provider
+    manager.list_chats = lambda project_id=None: [chat]
+    manager._agent_root_for_chat = lambda chat_id: tmp_path
+    monkeypatch.setattr(pc, "_global_sessions_present", lambda ids: set())
+    if file_exists:
+        projects = pc._claude_projects_dir(tmp_path)
+        projects.mkdir(parents=True, exist_ok=True)
+        (projects / f"{session_id}.jsonl").write_text("{}", encoding="utf-8")
+    (row,) = manager.list_chats_dicts()
+    expected = file_exists if _probes_session_file(provider) else True
+    assert row["local"] is expected
+
+
+# 10. Every replaced site, for the unregistered ids. The flag lookup is the same for all
+#     of them, so a change to get() or to a default fails here for every site.
+FLAG_NAMES = (
+    "session_blob_on_disk", "workspace_cli_settings", "tier_model_aliases",
+    "claude_ai_connectors_toggle", "title_from_session_events", "session_jsonl_history",
+)
+
+
+@pytest.mark.parametrize("provider", EDGE_IDS)
+@pytest.mark.parametrize("name", FLAG_NAMES)
+def test_flag_is_false_for_unregistered_ids(provider, name: str) -> None:
+    from ciao import provider_registry
+
+    assert provider_registry.flag(provider, name) is False
+
+
+@pytest.mark.parametrize("name", FLAG_NAMES)
+def test_flags_are_set_on_claude_only_among_the_registered_providers(name: str) -> None:
+    from ciao import provider_registry
+
+    assert [p for p in PROVIDERS if provider_registry.flag(p, name)] == ["claude"]
+
+
+@pytest.mark.parametrize("provider", ALL_IDS)
+def test_workspace_cli_layer_edge_ids(provider) -> None:
+    manager = _bare_manager()
+    manager._projects = {}
+    manager._config = SimpleNamespace(
+        disallowed_tools_for_workspace=lambda workspace: ["WebSearch"],
+        claude_settings_for_workspace=lambda workspace: {"a": 1},
+    )
+    chat = SimpleNamespace(provider=provider, project_id="none")
+    assert manager.disallowed_tools_for_chat(chat) == (["WebSearch"] if provider == "claude" else [])
+    assert manager.claude_settings_for_chat(chat) == ({"a": 1} if provider == "claude" else None)
+
+
+@pytest.mark.parametrize("provider", EDGE_IDS)
+def test_tier_alias_edge_ids_take_the_provider_default(provider) -> None:
+    manager = _bare_manager()
+    manager._config = SimpleNamespace(
+        default_model_for_provider=lambda p, workspace=None: f"default-for-{p}"
+    )
+    assert manager._model_for_provider("sonnet", provider, "work") == f"default-for-{provider}"
+
+
+@pytest.mark.parametrize("provider", EDGE_IDS)
+def test_connectors_env_edge_ids_never_set_the_variable(tmp_path: Path, provider) -> None:
+    manager = _real_manager(tmp_path, connectors=False)
+    project = manager.create_project("Notes", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Chat", provider="claude")
+    chat.provider = provider
+    assert ENV_VAR not in manager._build_extra_env(chat)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", EDGE_IDS)
+async def test_title_native_read_edge_ids_read_natively(provider) -> None:
+    manager = _bare_manager()
+    manager._config = SimpleNamespace()
+    manager._save = lambda **_kwargs: None
+    manager._titling = set()
+    manager._chats = {"chat-1": ChatInfo(
+        chat_id="chat-1", project_id="p", title="New Chat", provider="claude",
+        session_id="sess-1", title_origin="default",
+    )}
+    manager._chats["chat-1"].provider = provider
+    calls: list[str] = []
+
+    async def fake_adopt(chat_id, is_target):
+        calls.append(chat_id)
+        return (False, None)
+
+    async def fake_llm(chat, user_text, assistant_text):
+        return "LLM Title"
+
+    manager._adopt_native_title = fake_adopt
+    manager._llm_chat_title = fake_llm
+    assert await manager.auto_title_if_default("chat-1", "hello") == "LLM Title"
+    assert calls == ["chat-1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", EDGE_IDS)
+async def test_history_edge_ids_serve_the_local_transcript(tmp_path: Path, monkeypatch, provider) -> None:
+    async def no_acp_rows(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(transcript_service, "_acp_history_rows", no_acp_rows)
+    current = [{"role": "assistant", "text": "LOCAL"}]
+    pcm = SimpleNamespace(
+        _transcripts=SimpleNamespace(current_messages=lambda ctx, p: current),
+        _agent_root_for_chat=lambda chat_id: tmp_path,
+    )
+    chat = SimpleNamespace(
+        chat_id="chat-1", session_id="sess-1", provider=provider, previous_session_ids=[],
+        handover_messages=[], user_turn_timings={}, turn_verification={},
+    )
+    rows = await transcript_service._assemble_chat_messages(pcm, SimpleNamespace(workspace_root=tmp_path), chat)
+    assert rows == current
+
+
+@pytest.mark.parametrize("provider", EDGE_IDS)
+def test_half_archived_edge_ids_heal_without_a_session_probe(tmp_path: Path, provider) -> None:
+    # None is skipped: the reconcile site builds a path from chat.provider, so a None
+    # provider raises before and after this change. No load path produces None
+    # (`cd.get("provider") or "claude"`).
+    if provider is None:
+        pytest.skip("reconcile builds a path from chat.provider; None is never loaded")
+    manager = _half_archived_manager(tmp_path, "claude", blob=True)
+    manager._chats["chat-half"].provider = provider
+    manager._reconcile_half_archived_chats()
+    assert manager._chats["chat-half"].archived is True
+
+
+@pytest.mark.parametrize("provider", EDGE_IDS)
+def test_recovery_edge_ids_need_the_audit_record(tmp_path: Path, provider) -> None:
+    # The transcript's provider is coerced with `or`, so None and "" reach the
+    # recovery site as "claude". Only an unknown id is a real non-Claude case.
+    if provider is None:
+        pytest.skip("transcript provider is coerced to a string before the site")
+    manager = _recovery_manager(tmp_path, provider or "claude", audit="absent", blob=True)
+    manager._recover_orphaned_active_chats()
+    assert ("chat-orphan" in manager._chats) is (provider == "")

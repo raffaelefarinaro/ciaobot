@@ -72,7 +72,7 @@ def test_base_provider_has_no_mcp_management_seam(name: str) -> None:
 # with its count, so an edit that moves a line does not break the guard, while a new
 # branch does. Claude-only behaviour lives on ProviderDescriptor flags instead.
 _PROVIDER_ID_BRANCH = re.compile(
-    r"(?:==|!=)\s*[\"'](?:claude|opencode)[\"']|\bin\s*\{[^}]*[\"'](?:claude|opencode)[\"']"
+    r"(?:==|!=)\s*[\"'](?:claude|opencode)[\"']|\bin\s*[({\[][^)}\]]*[\"'](?:claude|opencode)[\"']"
 )
 _ALLOWED_PROVIDER_ID_BRANCHES: dict[tuple[str, str], int] = {
     # Command directories differ per agent (.opencode/commands vs .claude/commands).
@@ -93,3 +93,31 @@ def test_web_sources_branch_on_no_acp_provider_id_outside_allowlist() -> None:
             if _PROVIDER_ID_BRANCH.search(line):
                 found[(path.name, line.strip())] += 1
     assert found == Counter(_ALLOWED_PROVIDER_ID_BRANCHES)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'if provider == "claude":',
+        'if chat.provider in ("", "claude"):',
+        'if provider not in ["claude"]:',
+        'if provider in ["opencode"]:',
+        'if provider in {"claude", "codex"}:',
+        'if provider not in ("opencode",):',
+    ],
+)
+def test_branch_pattern_flags_claude_and_opencode_membership(line: str) -> None:
+    assert _PROVIDER_ID_BRANCH.search(line)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'if provider in ("codex",):',
+        'name = "claude"',
+        'label = f"{provider} ready"',
+        'if provider in ("claude-code",):',
+    ],
+)
+def test_branch_pattern_ignores_other_ids_and_plain_strings(line: str) -> None:
+    assert not _PROVIDER_ID_BRANCH.search(line)

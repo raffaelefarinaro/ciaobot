@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from importlib import import_module
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from ciao.providers.acp.spec import AgentSpec
@@ -216,6 +216,22 @@ def require(provider: str) -> ProviderDescriptor:
     if descriptor is None:
         raise ValueError(f"Unknown provider '{provider}'")
     return descriptor
+
+
+ProviderFlag = Literal[
+    "session_blob_on_disk",
+    "workspace_cli_settings",
+    "tier_model_aliases",
+    "claude_ai_connectors_toggle",
+    "title_from_session_events",
+    "session_jsonl_history",
+]
+
+
+def flag(provider: str | None, name: ProviderFlag) -> bool:
+    """Whether a registered provider sets a behaviour flag; False for unknown ids and None."""
+    descriptor = _BY_ID.get(provider) if provider else None
+    return descriptor is not None and bool(getattr(descriptor, name))
 
 
 def label(provider: str, *, short: bool = False) -> str:

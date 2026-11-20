@@ -4,9 +4,26 @@ import asyncio
 
 import pytest
 from pathlib import Path
+from dataclasses import fields
+
 from types import SimpleNamespace
 
 from ciao.providers.base import BaseProvider
+from ciao.provider_registry import ProviderDescriptor
+
+# Every boolean flag on ProviderDescriptor at its registry default (False). A stub
+# inherits them, so a new flag cannot break the stubs in this file.
+_FLAG_DEFAULTS = {f.name: f.default for f in fields(ProviderDescriptor) if f.default is False}
+
+
+class _StubDescriptor:
+    id = "stub"
+    acp_spec_path = ""
+    factory_path = ""
+
+
+for _name, _value in _FLAG_DEFAULTS.items():
+    setattr(_StubDescriptor, _name, _value)
 from ciao.providers.acp.agents import OpencodeAcpProvider
 from ciao.providers.acp.agents import OpencodeAcpProvider
 from ciao.web.project_chats import ProjectChatManager
@@ -495,9 +512,7 @@ async def test_registered_third_adapter_supplies_native_title(monkeypatch) -> No
                 "Later title",
             )
 
-    class Descriptor:
-        acp_spec_path = ""
-        title_from_session_events = False
+    class Descriptor(_StubDescriptor):
 
         def factory(self):
             return ThirdProvider
@@ -563,9 +578,7 @@ async def test_unsupported_adapter_returns_none_without_construction(monkeypatch
             raise AssertionError("run_streaming must not be entered")
             yield  # pragma: no cover
 
-    class Descriptor:
-        acp_spec_path = ""
-        title_from_session_events = False
+    class Descriptor(_StubDescriptor):
 
         def factory(self):
             factory_calls.append(1)
@@ -654,9 +667,7 @@ async def test_adapter_read_failure_keeps_failure_log(monkeypatch, caplog) -> No
         async def native_title_candidates(cls, workspace_root, session_id, **_kwargs):
             raise RuntimeError("adapter storage unreadable")
 
-    class Descriptor:
-        acp_spec_path = ""
-        title_from_session_events = False
+    class Descriptor(_StubDescriptor):
 
         def factory(self):
             return ExplodingProvider
@@ -685,9 +696,7 @@ async def test_factory_resolution_failure_keeps_failure_log(monkeypatch, caplog)
 
     from ciao import provider_registry
 
-    class Descriptor:
-        acp_spec_path = ""
-        title_from_session_events = False
+    class Descriptor(_StubDescriptor):
 
         def factory(self):
             raise RuntimeError("factory import cannot resolve")
@@ -728,9 +737,7 @@ async def test_native_title_cancellation_propagates(monkeypatch) -> None:
         async def native_title_candidates(cls, workspace_root, session_id, **_kwargs):
             raise asyncio.CancelledError()
 
-    class Descriptor:
-        acp_spec_path = ""
-        title_from_session_events = False
+    class Descriptor(_StubDescriptor):
 
         def factory(self):
             return CancellingProvider
@@ -768,9 +775,7 @@ async def test_rename_during_third_adapter_read_wins(monkeypatch) -> None:
             await release.wait()
             return ("Clean summary",)
 
-    class Descriptor:
-        acp_spec_path = ""
-        title_from_session_events = False
+    class Descriptor(_StubDescriptor):
 
         def factory(self):
             return PausingProvider
@@ -814,9 +819,7 @@ async def test_removed_chat_during_third_adapter_read_is_not_resurrected(monkeyp
             await release.wait()
             return ("Clean summary",)
 
-    class Descriptor:
-        acp_spec_path = ""
-        title_from_session_events = False
+    class Descriptor(_StubDescriptor):
 
         def factory(self):
             return PausingProvider
@@ -1141,8 +1144,8 @@ async def test_acp_chat_title_is_read_once_with_no_wait_and_no_poll(monkeypatch)
             return ("New session - 2026-08-18T12:20:10.198Z",)
 
     descriptor = SimpleNamespace(
-        id="opencode", acp_spec_path="tests:SPEC", factory=lambda: FakeAcpProvider,
-        title_from_session_events=False,
+        **_FLAG_DEFAULTS, id="opencode", acp_spec_path="tests:SPEC",
+        factory=lambda: FakeAcpProvider,
     )
     monkeypatch.setattr(provider_registry, "get", lambda _provider: descriptor)
     slept: list[float] = []
