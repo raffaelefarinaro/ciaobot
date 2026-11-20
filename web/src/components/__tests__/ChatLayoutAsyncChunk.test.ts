@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { flushPromises, mount } from '@vue/test-utils'
-import { defineComponent, h, onMounted } from 'vue'
+import { defineComponent, h, onBeforeUnmount, onMounted } from 'vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import { useTerminalStore } from '../../stores/terminal'
@@ -279,18 +279,28 @@ describe('workspace terminal lazy mount', () => {
   )
 })
 
-// #3086: the 340 ms Home-to-chat rise starts when the real panel mounts, not
-// when the chat is selected. The stub follows the production contract: a
-// `rising` prop that puts `chat-rise` on its own root, and a `mounted` event
-// from its real mount hook.
+// #3086: the 340 ms Home-to-chat rise starts when the real main panel mounts,
+// not when the chat is selected. The stub follows the ChatPanel contract: a
+// per-instance token, `pane-mounted`/`pane-unmounted` from its real hooks, and
+// `chat-rise` on its own root only when `riseForInstance` names its token. The
+// lifecycle matrix (ordering, cancellation, replacement, navigation failure) is
+// in ChatLayoutRiseLifecycle.test.ts; the production ChatPanel is in
+// ChatPanelRiseContract.test.ts.
 describe('chat rise waits for the real chat panel', () => {
   const RealPanelStub = defineComponent({
     name: 'RealPanelStub',
-    props: { chatId: { type: String, required: true }, rising: { type: Boolean, default: false } },
-    emits: ['mounted'],
+    props: {
+      chatId: { type: String, required: true },
+      beside: { type: Boolean, default: false },
+      riseForInstance: { type: Symbol, default: null },
+    },
+    emits: ['pane-mounted', 'pane-unmounted'],
     setup(props, { emit }) {
-      onMounted(() => emit('mounted'))
-      return () => h('div', { class: ['chat-panel', { 'chat-rise': props.rising }] })
+      const instance = Symbol('chat-pane')
+      const identity = () => ({ chatId: props.chatId, instance, beside: props.beside })
+      onMounted(() => emit('pane-mounted', identity()))
+      onBeforeUnmount(() => emit('pane-unmounted', identity()))
+      return () => h('div', { class: ['chat-panel', { 'chat-rise': !props.beside && props.riseForInstance === instance }] })
     },
   })
 
@@ -301,7 +311,7 @@ describe('chat rise waits for the real chat panel', () => {
 
   // delay 0: the chunk is ready at once. delay 1000: the chunk outlives the
   // 340 ms window, which is the case that used to leave the panel unmarked.
-  it.each([0, 1000])('rises the real panel after a %i ms chunk wait', async (delay) => {
+  it.each([0, 1000])('rises the real panel for the full window after a %i ms chunk wait', async (delay) => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
     vi.setSystemTime(new Date('2026-11-20T10:00:00Z'))
     setActivePinia(createPinia())
@@ -347,10 +357,12 @@ describe('chat rise waits for the real chat panel', () => {
     await router.push('/chat/chat-1')
     await flushPromises()
 
+    vi.advanceTimersByTime(delay)
+    await flushPromises()
+    // Still pending past the window: the skeleton is on screen and nothing is marked.
     expect(wrapper.find('[role="status"][aria-label="Loading conversation"]').exists()).toBe(true)
     expect(wrapper.find('.chat-panel').exists()).toBe(false)
 
-    vi.advanceTimersByTime(delay)
     releaseChunk(RealPanelStub)
     await flushPromises()
 
@@ -365,4 +377,3 @@ describe('chat rise waits for the real chat panel', () => {
     wrapper.unmount()
   })
 })
-

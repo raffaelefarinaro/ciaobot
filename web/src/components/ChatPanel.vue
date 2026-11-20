@@ -1,5 +1,5 @@
 <template>
-  <div ref="panelEl" class="chat-panel" data-rail-host :class="{ 'chat-panel--rail': railShown, 'chat-rise': rising }" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handlePanelClick">
+  <div ref="panelEl" class="chat-panel" data-rail-host :class="{ 'chat-panel--rail': railShown, 'chat-rise': riseOwned }" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handlePanelClick">
     <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files to add their accessible path</div>
 
     <!-- Header. No page tag: the project context control below and the chat
@@ -1594,7 +1594,10 @@ function dedupeRenderItemKeys(items: RenderItem[]): RenderItem[] {
 // `filePinned`: a file is docked beside this chat (ChatLayout's split view).
 // `beside`: this is the second pane of a split.
 // `inactive`: the other pane has the keyboard.
-const props = defineProps<{ chatId: string; filePinned?: boolean; beside?: boolean; inactive?: boolean; rising?: boolean }>()
+// `riseForInstance`: the layout names the one panel instance whose arrival rise
+// is running. Compared against this instance's own token, so a same-id
+// replacement never carries the class (#3086).
+const props = defineProps<{ chatId: string; filePinned?: boolean; beside?: boolean; inactive?: boolean; riseForInstance?: symbol | null }>()
 const emit = defineEmits<{
   close: []
   // The second pane's rail picked another chat: the layout shows it in this pane.
@@ -1604,11 +1607,16 @@ const emit = defineEmits<{
   // the layout moves the pane and decides whether to close.
   pull: [dy: number]
   'pull-end': [dy: number, velocity: number]
-  // The real panel is in the DOM: the layout starts a chat's arrival rise here,
-  // not when the chat was selected, so a slow chunk does not use up the rise.
-  mounted: []
+  // DOM lifecycle of this instance (not transcript readiness): the layout starts
+  // a chat's arrival rise only once the main panel of the selected chat mounts.
+  'pane-mounted': [pane: { chatId: string; instance: symbol; beside: boolean }]
+  'pane-unmounted': [pane: { chatId: string; instance: symbol; beside: boolean }]
 }>()
-onMounted(() => emit('mounted'))
+const paneInstance = Symbol('chat-pane')
+const riseOwned = computed(() => !props.beside && props.riseForInstance === paneInstance)
+const paneIdentity = () => ({ chatId: props.chatId, instance: paneInstance, beside: !!props.beside })
+onMounted(() => emit('pane-mounted', paneIdentity()))
+onBeforeUnmount(() => emit('pane-unmounted', paneIdentity()))
 
 const store = useProjectStore()
 const view = useChatView(() => props.chatId)
