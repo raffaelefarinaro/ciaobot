@@ -15,10 +15,18 @@ from pathlib import Path
 from collections.abc import Collection
 
 from ciao import job_runs
-from ciao.error_log import DEBUG_LOG_NAME, ERROR_LOG_NAME, tail_debug_log, tail_error_log
+from ciao.error_log import (
+    DEBUG_LOG_NAME,
+    ERROR_LOG_NAME,
+    split_error_records,
+    tail_debug_log,
+    tail_error_records,
+)
 from ciao.redact import redact_text
 
-DEFAULT_LOG_LINES = 200
+# The error-log tail is capped by records (an ERROR line plus its traceback), not physical lines.
+DEFAULT_LOG_RECORDS = 200
+DEFAULT_DEBUG_LOG_LINES = 200
 DEFAULT_MAX_FAILED_JOBS = 20
 DEFAULT_MAX_FAILURE_AGE_DAYS = 7
 
@@ -171,7 +179,7 @@ def _failure_ts(failure: dict) -> str:
 def build_issue_report(
     workspace_root: Path,
     *,
-    log_lines: int = DEFAULT_LOG_LINES,
+    log_records: int = DEFAULT_LOG_RECORDS,
     max_failed_jobs: int = DEFAULT_MAX_FAILED_JOBS,
     exclude_schedule_ids: Collection[str] | None = None,
     failures_since: datetime | None = None,
@@ -184,18 +192,18 @@ def build_issue_report(
     ``since`` floor, so a caller that has already processed a report can keep
     its own acknowledged failures out of the next one.
     """
-    error_log = tail_error_log(workspace_root, log_lines)
-    debug_log = tail_debug_log(workspace_root, log_lines)
+    error_log = tail_error_records(workspace_root, log_records)
+    debug_log = tail_debug_log(workspace_root, DEFAULT_DEBUG_LOG_LINES)
     failed_jobs = recent_job_failures(
         max_failed_jobs,
         exclude_schedule_ids=exclude_schedule_ids,
         since=failures_since,
     )
-    error_line_count = sum(1 for line in error_log.splitlines() if line.strip())
+    error_record_count = len(split_error_records(error_log))
     debug_line_count = sum(1 for line in debug_log.splitlines() if line.strip())
     report = {
         "error_log": error_log,
-        "error_log_lines": error_line_count,
+        "error_log_records": error_record_count,
         "error_log_path": str(workspace_root / ".runtime" / ERROR_LOG_NAME),
         "debug_log": debug_log,
         "debug_log_lines": debug_line_count,

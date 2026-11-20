@@ -2516,7 +2516,8 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ProviderSignInHint.vue",
       "web/src/components/SettingsView.vue",
       "web/src/components/onboarding/OnboardingRuntimeStage.vue",
-      "web/src/components/settings/GoogleConnectDialog.vue"
+      "web/src/components/settings/GoogleConnectDialog.vue",
+      "web/src/components/settings/ProviderInstallBlock.vue"
     ],
     "variants": [],
     "variantNotes": "Host-only/done/error. Detailed variants are unassessed.",
@@ -5499,6 +5500,14 @@ export const inventory: InventoryEntry[] = [
           "startup-view--phase-failed"
         ],
         "note": "A phase with status 'failed' renders statusLabel's 'Needs attention' with the is-failed error class."
+      },
+      {
+        "name": "phase-skipped",
+        "coverage": "covered",
+        "storyIds": [
+          "startup-view--phase-skipped"
+        ],
+        "note": "A phase with status 'skipped' (a provider CLI the user never installed) renders the neutral 'Skipped' label with the is-skipped class, never 'Needs attention'."
       },
       {
         "name": "phase-message",
@@ -8772,6 +8781,106 @@ export const inventory: InventoryEntry[] = [
     "loading": {
       "status": "none",
       "detail": "No read or loading branch at open: everything arrives through the injected Google accounts state. Reads happen only on explicit actions (Check again), which the covered states declare; OAuth writes stay undeclared and fail closed."
+    },
+    "migration": {
+      "status": "unassessed",
+      "note": "Inventory admission does not approve a design migration."
+    }
+  },
+  {
+    "id": "components-settings-provider-state-badge",
+    "name": "ProviderStateBadge",
+    "family": "Settings",
+    "kind": "component",
+    "owner": {
+      "path": "web/src/components/settings/ProviderStateBadge.vue",
+      "anchor": "<template>"
+    },
+    "sources": [],
+    "consumers": [
+      "web/src/components/SettingsView.vue"
+    ],
+    "variants": ["ready", "failed", "not_installed", "adapter_missing"],
+    "variantNotes": "The row's state as words with a leading mark: ready uses the ok tone, failed and adapter_missing the error tone, and not_installed the neutral tone (a hollow mark and muted text, never the error colour).",
+    "states": [
+      {
+        "name": "ready",
+        "coverage": "covered",
+        "storyIds": ["provider-status-row--badge-ready"],
+        "note": "Connected in the ok tone for Claude; CLI ready for OpenCode."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": ["provider-status-row--badge-failed"],
+        "note": "Not connected in the error tone for an installed CLI that is signed out or failed."
+      },
+      {
+        "name": "not-installed",
+        "coverage": "covered",
+        "storyIds": ["provider-status-row--badge-not-installed"],
+        "note": "Not installed in the neutral tone: a hollow mark and muted text, never the error colour or the words Not connected."
+      },
+      {
+        "name": "adapter-missing",
+        "coverage": "covered",
+        "storyIds": ["provider-status-row--badge-adapter-missing"],
+        "note": "An installed CLI without its ACP adapter keeps the error tone and Not connected."
+      }
+    ],
+    "loading": {
+      "status": "none",
+      "detail": "The state is supplied by the parent from the engine payload; the badge does no loading."
+    },
+    "migration": {
+      "status": "unassessed",
+      "note": "Inventory admission does not approve a design migration."
+    }
+  },
+  {
+    "id": "components-settings-provider-install-block",
+    "name": "ProviderInstallBlock",
+    "family": "Settings",
+    "kind": "component",
+    "owner": {
+      "path": "web/src/components/settings/ProviderInstallBlock.vue",
+      "anchor": "<template>"
+    },
+    "sources": [],
+    "consumers": [
+      "web/src/components/SettingsView.vue"
+    ],
+    "variants": ["not_installed", "adapter_missing", "ready", "failed"],
+    "variantNotes": "Shown only when the CLI or its adapter is missing: the install line, one installation guide link when the engine gives one, and a user-initiated Install in Terminal. Nothing installs by itself.",
+    "states": [
+      {
+        "name": "not-installed",
+        "coverage": "covered",
+        "storyIds": ["provider-status-row--install-not-installed"],
+        "note": "The install text names the CLI's own guide link and the Install in Terminal button."
+      },
+      {
+        "name": "adapter-missing",
+        "coverage": "covered",
+        "storyIds": ["provider-status-row--install-adapter-missing"],
+        "note": "The npm adapter line and Install in Terminal; no guide link, since the CLI itself is present."
+      },
+      {
+        "name": "ready",
+        "coverage": "covered",
+        "storyIds": ["provider-status-row--install-ready"],
+        "note": "Renders nothing: an installed, ready CLI has no install step."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": ["provider-status-row--install-failed"],
+        "note": "Renders nothing: an installed CLI that is signed out has no install step."
+      }
+    ],
+    "loading": {
+      "status": "none",
+      "detail": "The install step reads the host-terminal capability on mount, as the Install in Terminal button does everywhere else."
     },
     "migration": {
       "status": "unassessed",

@@ -561,7 +561,7 @@ def _opencode_inventory(binary: str) -> _Inventory:
 def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> dict[str, Any]:
     """Bounded, credential-free opencode install/auth status for Settings."""
     from ciao.provider_versions import release_check
-    from ciao.setup_status import _provider
+    from ciao.setup_status import PROVIDER_STATE_NOT_INSTALLED, _provider
 
     binary: str | None
     try:
@@ -587,6 +587,7 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
             name="opencode",
             ok=False,
             auth="not_installed",
+            state=PROVIDER_STATE_NOT_INSTALLED,
             command=opencode_install_command(),
             detail="opencode is not installed on this machine.",
             version="not installed",

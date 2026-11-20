@@ -107,6 +107,20 @@ export const PhaseFailed: Story = {
   },
 }
 
+export const PhaseSkipped: Story = {
+  // A provider CLI the user never installed: neutral Skipped, never Needs attention.
+  args: {
+    overallReady: true,
+    phases: [phase('connect_codex', 'skipped', 'Codex and its ACP adapter are not both installed on this machine.')],
+  },
+  play: async ({ canvasElement }) => {
+    expect(canvasElement.textContent).toContain('Connecting to Codex')
+    expect(canvasElement.textContent).toContain('Skipped')
+    expect(canvasElement.textContent).not.toContain('Needs attention')
+    expect(canvasElement.querySelector('.startup-phase.is-skipped')).toBeTruthy()
+  },
+}
+
 export const PhaseMessage: Story = {
   // The `v-if="phase.message"` line under a phase row.
   args: { phases: [phase('server_starting', 'in_progress', 'the service came up once already')] },

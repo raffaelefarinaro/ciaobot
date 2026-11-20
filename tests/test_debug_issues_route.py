@@ -50,7 +50,7 @@ def test_debug_issues_reports_errors_in_dev_mode(tmp_path: Path) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["has_issues"] is True
-    assert data["error_log_lines"] == 1
+    assert data["error_log_records"] == 1
     assert "boom" in data["report_text"]
     assert isinstance(data["failed_jobs"], list)
 

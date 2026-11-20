@@ -74,8 +74,8 @@ export function bootstrapStatus(overrides: Partial<SetupStatus> = {}): SetupStat
 /** Both providers ready: the wizard's status card shows the ok badge. */
 export function providersReady(): Record<string, SetupProviderStatus> {
   return {
-    claude: { ok: true, auth: 'configured', detail: 'ready' },
-    opencode: { ok: true, auth: 'configured', detail: 'ready' },
+    claude: { ok: true, auth: 'configured', state: 'ready', detail: 'ready' },
+    opencode: { ok: true, auth: 'configured', state: 'ready', detail: 'ready' },
   }
 }
 
@@ -85,13 +85,14 @@ export function providersSetupNeeded(): Record<string, SetupProviderStatus> {
     claude: {
       ok: false,
       auth: 'not_installed',
+      state: 'not_installed',
       detail: 'not yet installed',
       command: 'provider-cli login',
       path_command: 'export PATH="$HOME/.provider/bin:$PATH"',
       install_url: 'https://install.example.test/provider',
       app_path: 'Storybook Desktop app',
     },
-    opencode: { ok: false, auth: 'not_installed', detail: 'not installed', command: 'opencode login' },
+    opencode: { ok: false, auth: 'not_installed', state: 'not_installed', detail: 'not installed', command: 'opencode login' },
   }
 }
 

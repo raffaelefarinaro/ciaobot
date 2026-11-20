@@ -69,7 +69,7 @@ def _seed_issues(
 
     These tests used to hand ``run_startup_triage`` a hand-rolled report dict
     whose error count lived under ``error_line_count`` — a key
-    ``build_issue_report`` has never emitted (it emits ``error_log_lines``).
+    ``build_issue_report`` has never emitted (it emits ``error_log_records``).
     The fixture and the gate agreed with each other and both disagreed with
     the producer, so the error-log half of the gate was dead in production
     while the suite stayed green. Seeding the real error log and run records
@@ -137,7 +137,7 @@ async def test_error_log_alone_dispatches_triage_chat(tmp_path: Path, caplog) ->
     assert len(pcm.dispatched) == 1
     # The operator reads these counts; the gate no longer supplies them, so
     # they are asserted separately from the dispatch decision.
-    assert "4 error line(s) and 0 failed job run(s)" in caplog.text
+    assert "4 error record(s) and 0 failed job run(s)" in caplog.text
 
 
 @pytest.mark.asyncio

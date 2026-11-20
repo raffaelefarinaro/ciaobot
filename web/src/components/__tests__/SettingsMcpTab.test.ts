@@ -9,15 +9,15 @@ import { api } from '../../lib/api'
 const providers = {
   connections: {
     claude: {
-      name: 'claude', label: 'Claude Code', ok: true, auth: 'ok', command: 'claude auth login',
+      name: 'claude', label: 'Claude Code', ok: true, auth: 'ok', state: 'ready', command: 'claude auth login',
       mcp_command: 'claude mcp',
     },
     opencode: {
-      name: 'opencode', label: 'OpenCode', ok: true, auth: 'ok', command: 'opencode auth login',
+      name: 'opencode', label: 'OpenCode', ok: true, auth: 'ok', state: 'ready', command: 'opencode auth login',
       mcp_command: 'opencode mcp',
     },
     missing: {
-      name: 'missing', label: 'Missing', ok: false, auth: 'not_installed', command: '',
+      name: 'missing', label: 'Missing', ok: false, auth: 'not_installed', state: 'not_installed', command: '',
     },
   },
 }
