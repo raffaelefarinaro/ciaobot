@@ -11,13 +11,14 @@ const meta = {
 export default meta
 type Story = StoryObj<typeof meta>
 
-// The supplied wordmark artwork: one image per theme, the theme class on <html>
-// decides which one shows. The accessible name is always Ciaobot.
+// The supplied wordmark artwork: one image whose source follows the theme
+// (the theme-light class on <html>). The accessible name is always Ciaobot.
 export const Default: Story = {
   play: async ({ canvas }) => {
     const mark = canvas.getByRole('img', { name: 'Ciaobot' })
+    expect(mark.tagName).toBe('IMG')
     expect(mark.classList.contains('wordmark--md')).toBe(true)
-    expect(mark.querySelectorAll('img')).toHaveLength(2)
+    expect(mark.getAttribute('src')).toMatch(/brand\/ciaobot-wordmark(-light)?\.png$/)
   },
 }
 
@@ -44,5 +45,7 @@ export const Narrow: Story = {
     expect(mark.classList.contains('wordmark--md')).toBe(true)
     expect(box?.getBoundingClientRect().width).toBeLessThanOrEqual(390)
     expect(mark.getBoundingClientRect().width).toBeLessThanOrEqual(box?.getBoundingClientRect().width ?? 0)
+    // max-height keeps the artwork's ratio: it is never squashed in the narrow row.
+    expect(mark.getBoundingClientRect().height).toBeLessThanOrEqual(22)
   },
 }

@@ -49,7 +49,7 @@ type Story = StoryObj<typeof meta>
 /** The plain box has no fake window chrome, and the brand is the image wordmark. */
 const expectPlainBoxWithWordmark = (canvasElement: HTMLElement) => {
   expect(canvasElement.querySelector('.login-shell-bar')).toBeNull()
-  expect(canvasElement.querySelector('.login-shell .wordmark img')).toBeTruthy()
+  expect(canvasElement.querySelector('.login-shell img.wordmark')).toBeTruthy()
 }
 const tokenInput = (canvasElement: HTMLElement) => canvasElement.querySelector('#login-token') as HTMLInputElement
 const loginSubmit = (canvasElement: HTMLElement) => canvasElement.querySelector('.login-submit') as HTMLButtonElement
