@@ -18,7 +18,9 @@ restoration and edit state keep their normal lifecycle. The item peek host
 mode) loads the same way, on the first task link opened over a chat; Back
 closes it through `useOverlayBackEntry`. Home does
 not fetch
-these optional modules. The engine status request is bounded and shared between
+these optional modules. The chat rise starts when the real chat panel mounts,
+not when the chat is selected, so a slow chunk leaves the skeleton unmarked and
+the panel rises when it arrives. The engine status request is bounded and shared between
 startup progress and outage monitoring; a ready response within the brief
 startup display delay avoids showing the curtain on a warm load.
 

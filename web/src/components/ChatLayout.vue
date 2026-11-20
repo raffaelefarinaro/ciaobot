@@ -54,7 +54,7 @@
         </div>
         <!-- Split view when a file is pinned and holds the slot -->
         <template v-if="fileInTile">
-          <ChatPanel v-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" file-pinned :inactive="besideInTile && focusedPane === 'beside'" @close="closeChat" :class="{ 'chat-rise': chatRising }" :style="pullStyle" @pull="onItemPull" @pull-end="onItemPullEnd" @open-sidebar="sidebarCollapsed = false" />
+          <ChatPanel v-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" file-pinned :inactive="besideInTile && focusedPane === 'beside'" @close="closeChat" :rising="chatRising" @mounted="onChatPanelMounted" :style="pullStyle" @pull="onItemPull" @pull-end="onItemPullEnd" @open-sidebar="sidebarCollapsed = false" />
           <!-- The route names a chat the catalog has not delivered yet: the
                pane is on its way, so it shows the skeleton rather than
                nothing (#1651). -->
@@ -150,7 +150,7 @@
             @open-sidebar="sidebarCollapsed = false"
           />
           <template v-else-if="store.activeChat">
-            <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" :inactive="besideInTile && focusedPane === 'beside'" @close="closeChat" :class="{ 'chat-rise': chatRising }" :style="pullStyle" @pull="onItemPull" @pull-end="onItemPullEnd" @open-sidebar="sidebarCollapsed = false">
+            <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" :inactive="besideInTile && focusedPane === 'beside'" @close="closeChat" :rising="chatRising" @mounted="onChatPanelMounted" :style="pullStyle" @pull="onItemPull" @pull-end="onItemPullEnd" @open-sidebar="sidebarCollapsed = false">
               <template #below-header>
                 <!-- Narrow shared pin: a compact native opener for the chat's
                      server-owned pin, not a forced split pane and never an
@@ -1157,14 +1157,27 @@ watch([activePinKey, fileInTile], ([key, inTile]) => {
 }, { flush: 'post' })
 let riseTimer: ReturnType<typeof setTimeout> | null = null
 let bootSettledAt = 0
+// Selecting the chat only arms the rise. Its 340 ms starts when the real
+// ChatPanel mounts: a lazy chunk slower than the window would otherwise spend
+// the whole rise on the skeleton, which is not marked, and the panel would
+// arrive with no motion (#3086).
+let risePending = false
 watch(() => store.bootstrapped, ready => { if (ready && !bootSettledAt) bootSettledAt = Date.now() }, { immediate: true })
 watch(() => store.activeChat?.chat_id, (id, was) => {
   if (!id || was || !bootSettledAt || Date.now() - bootSettledAt < 800) return
   if (prefersReducedMotion()) return
+  risePending = true
+})
+// Leaving for a non-chat page before the panel arrived cancels the arm, so a
+// later visit to that chat does not rise.
+watch(() => route.path, path => { if (!path.startsWith('/chat/')) risePending = false })
+function onChatPanelMounted(): void {
+  if (!risePending) return
+  risePending = false
   chatRising.value = true
   if (riseTimer) clearTimeout(riseTimer)
   riseTimer = setTimeout(() => { chatRising.value = false; riseTimer = null }, 340)
-})
+}
 // The same rise for an automation opened from the automation list; the title
 // rail moves between automations sideways instead.
 const scheduleRising = ref(false)

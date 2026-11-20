@@ -1,5 +1,5 @@
 <template>
-  <div ref="panelEl" class="chat-panel" data-rail-host :class="{ 'chat-panel--rail': railShown }" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handlePanelClick">
+  <div ref="panelEl" class="chat-panel" data-rail-host :class="{ 'chat-panel--rail': railShown, 'chat-rise': rising }" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handlePanelClick">
     <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files to add their accessible path</div>
 
     <!-- Header. No page tag: the project context control below and the chat
@@ -1594,7 +1594,7 @@ function dedupeRenderItemKeys(items: RenderItem[]): RenderItem[] {
 // `filePinned`: a file is docked beside this chat (ChatLayout's split view).
 // `beside`: this is the second pane of a split.
 // `inactive`: the other pane has the keyboard.
-const props = defineProps<{ chatId: string; filePinned?: boolean; beside?: boolean; inactive?: boolean }>()
+const props = defineProps<{ chatId: string; filePinned?: boolean; beside?: boolean; inactive?: boolean; rising?: boolean }>()
 const emit = defineEmits<{
   close: []
   // The second pane's rail picked another chat: the layout shows it in this pane.
@@ -1604,7 +1604,11 @@ const emit = defineEmits<{
   // the layout moves the pane and decides whether to close.
   pull: [dy: number]
   'pull-end': [dy: number, velocity: number]
+  // The real panel is in the DOM: the layout starts a chat's arrival rise here,
+  // not when the chat was selected, so a slow chunk does not use up the rise.
+  mounted: []
 }>()
+onMounted(() => emit('mounted'))
 
 const store = useProjectStore()
 const view = useChatView(() => props.chatId)
