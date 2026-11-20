@@ -85,6 +85,7 @@ export const inventory: InventoryEntry[] = [
     "consumers": [
       "web/src/components/ChatPanel.vue",
       "web/src/components/ChatSignals.vue",
+      "web/src/components/ComposerActivity.vue",
       "web/src/components/NeedsYouCard.vue",
       "web/src/components/ProjectSidebar.vue",
       "web/src/components/ProposalReviewPanel.vue",
@@ -93,15 +94,22 @@ export const inventory: InventoryEntry[] = [
     ],
     "variants": [
       "working",
+      "run",
       "alert"
     ],
-    "variantNotes": "One mark per kind: working is a 3x3 pixel grid with one lit pixel chasing the perimeter, alert is a filled still triangle. Shape and motion carry the meaning, never hue.",
+    "variantNotes": "One mark per kind: working is a 3x3 pixel grid with one lit pixel chasing the perimeter, run is a shell prompt with a blinking block cursor (a background shell), alert is a filled still triangle. Shape and motion carry the meaning, never hue.",
     "states": [
       {
         "name": "working",
         "coverage": "covered",
         "storyIds": ["activity-glyph--working"],
         "note": "Working renders the nine-cell grid with one fixed dim centre; its reduced-motion frame is the checker."
+      },
+      {
+        "name": "run",
+        "coverage": "covered",
+        "storyIds": ["activity-glyph--run"],
+        "note": "Run renders a drawn `$` prompt and one block cursor that blinks; its reduced-motion frame is the still cursor."
       },
       {
         "name": "alert",
@@ -958,6 +966,87 @@ export const inventory: InventoryEntry[] = [
     "loading": {
       "status": "none",
       "detail": "No fetch: the card is built from the live stream or a history row that is already loaded. Live cards grow while the turn runs; history cards are fixed."
+    },
+    "migration": {
+      "status": "unassessed",
+      "note": "Inventory admission does not approve a design migration."
+    }
+  },
+  {
+    "id": "components-composer-activity",
+    "name": "ComposerActivity",
+    "family": "Chat, messages, composer, activity and context",
+    "kind": "component",
+    "owner": {
+      "path": "web/src/components/ComposerActivity.vue",
+      "anchor": "<template>"
+    },
+    "sources": [],
+    "consumers": [
+      "web/src/components/ChatPanel.vue"
+    ],
+    "variants": [
+      "one agent",
+      "shells only",
+      "both",
+      "many",
+      "compact",
+      "none"
+    ],
+    "variantNotes": "The chips beside Send for what the chat runs now: an agent chip (working glyph) and a shell chip (run glyph), each opening a list of its running rows. Shown only while something runs; compact folds each chip to glyph and count in a narrow bar. Rows are text: no stop, token or transcript control.",
+    "states": [
+      {
+        "name": "one agent",
+        "coverage": "covered",
+        "storyIds": [
+          "composer-activity--one-agent"
+        ],
+        "note": "One agent, singular label, working glyph."
+      },
+      {
+        "name": "shells only",
+        "coverage": "covered",
+        "storyIds": [
+          "composer-activity--shells-only"
+        ],
+        "note": "Background shells only; no agent chip."
+      },
+      {
+        "name": "both",
+        "coverage": "covered",
+        "storyIds": [
+          "composer-activity--both"
+        ],
+        "note": "Agents chip first, then shells."
+      },
+      {
+        "name": "many",
+        "coverage": "covered",
+        "storyIds": [
+          "composer-activity--many"
+        ],
+        "note": "Plural counts for both chips."
+      },
+      {
+        "name": "compact",
+        "coverage": "covered",
+        "storyIds": [
+          "composer-activity--compact"
+        ],
+        "note": "Narrow bar: each chip is its glyph and count."
+      },
+      {
+        "name": "none",
+        "coverage": "covered",
+        "storyIds": [
+          "composer-activity--none"
+        ],
+        "note": "Nothing runs: no chip rendered."
+      }
+    ],
+    "loading": {
+      "status": "none",
+      "detail": "No fetch of its own: the rows come from the chat's running cards. The elapsed time ticks from the shared clock."
     },
     "migration": {
       "status": "unassessed",

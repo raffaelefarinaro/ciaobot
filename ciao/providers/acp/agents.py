@@ -46,7 +46,8 @@ CLAUDE = AgentSpec(
     env={"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_ARTIFACT": "1"},
     # The claude.ai connectors switch travels only in _meta.claudeCode.options.env (see below).
     unset_env=("ENABLE_CLAUDEAI_MCP_SERVERS",),
-    client_meta={},
+    # Background shells: the adapter then sends `terminal_exit` when a background Bash ends.
+    client_meta={"terminal_output_delta": True},
     modes={
         "plan": (ModeChoice("mode", ("plan",)),),
         "normal": (ModeChoice("mode", ("default",)),),

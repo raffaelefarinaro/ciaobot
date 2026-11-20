@@ -22,6 +22,7 @@ import {
   shellTitle,
   type ShellCard,
 } from '../lib/shellCard'
+import { runningWorkFrom, type RunningWork, type WorkCard } from '../lib/runningWork'
 import { useTaskSignalsStore } from './taskSignals'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
 import { parseCompactedStatus, type CompactTokens } from '../lib/contextUsage'
@@ -399,9 +400,10 @@ export const useProjectStore = defineStore('projects', () => {
     | { kind: 'filecard'; content: string; file_path: string; action: string; tool: string; tool_use_id?: string }
     | { kind: 'status'; content: string }
     // One subagent call; its children are in `card.steps`, not in the trace lines.
-    | { kind: 'subagent'; card: SubagentCard }
+    // `started_at` is when the live card was created (epoch ms): the running-work elapsed time.
+    | { kind: 'subagent'; card: SubagentCard; started_at?: number }
     // One shell call; its output tail and state are on the card, not in the trace lines.
-    | { kind: 'shell'; card: ShellCard }
+    | { kind: 'shell'; card: ShellCard; started_at?: number }
   const streamingTimeline = ref<Record<string, StreamEntry[]>>({})  // per-chat interleaved tool/text entries
   // per-chat ids of refused calls this turn; the live label reads them (#1618)
   const deniedToolUseIds = ref<Record<string, string[]>>({})
@@ -1142,6 +1144,25 @@ export const useProjectStore = defineStore('projects', () => {
   function timelineFor(chatId: string): StreamEntry[] { return streamingTimeline.value[chatId] || [] }
   function deniedToolUseIdsFor(chatId: string): string[] { return deniedToolUseIds.value[chatId] || [] }
   function streamStartedAtFor(chatId: string): number { return streamStartedAt.value[chatId] || 0 }
+
+  /**
+   * What the chat is running now: its subagents and background shells, running cards only.
+   * The live timeline is read first, then the reloaded history rows, so a turn in progress
+   * and a chat reopened mid-run both show the same rows.
+   */
+  function runningWorkFor(chatId: string): RunningWork {
+    const live: WorkCard[] = []
+    for (const entry of streamingTimeline.value[chatId] || []) {
+      if (entry.kind === 'subagent') live.push({ kind: 'subagent', card: entry.card, started_at: entry.started_at })
+      else if (entry.kind === 'shell') live.push({ kind: 'shell', card: entry.card, started_at: entry.started_at })
+    }
+    const history: WorkCard[] = []
+    for (const message of messagesFor(chatId)) {
+      if (message.subagent) history.push({ kind: 'subagent', card: message.subagent })
+      else if (message.shell) history.push({ kind: 'shell', card: message.shell })
+    }
+    return runningWorkFrom(live, history)
+  }
 
   /** The chat open beside the active one in ChatLayout's split, or null. Live viewing state only:
    *  ChatLayout owns when it is shown and where the choice is remembered (lib/chatSplit.ts). */
@@ -6539,6 +6560,7 @@ export const useProjectStore = defineStore('projects', () => {
             streamingTimeline.value[chatId].push({
               kind: 'subagent',
               card: newSubagentCard(event.tool_use_id, event.tool_input || ''),
+              started_at: Date.now(),
             })
           }
           break
@@ -6584,6 +6606,7 @@ export const useProjectStore = defineStore('projects', () => {
             streamingTimeline.value[chatId].push({
               kind: 'shell',
               card: newShellCard(event.tool_use_id, event.tool_input || '', event.shell_background === true),
+              started_at: Date.now(),
             })
           }
         }
@@ -7147,7 +7170,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages,
     isViewedChat, viewedChatIds, chatById, messagesFor, isMessageHistoryLoading, isChatWakeStreaming,
     streamingTextFor, streamingThinkingFor, queuedFor, timelineFor,
-    deniedToolUseIdsFor, streamStartedAtFor, pendingImagesFor, pendingFilesFor, pendingCommentsFor, pendingChatCommentsFor,
+    deniedToolUseIdsFor, streamStartedAtFor, runningWorkFor, pendingImagesFor, pendingFilesFor, pendingCommentsFor, pendingChatCommentsFor,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, currentActivity, currentTimeline, currentDeniedToolUseIds, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, chatFailed, chatNeedsYou, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
     recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatIsWorking, workspaceIsStreaming, projectFor,

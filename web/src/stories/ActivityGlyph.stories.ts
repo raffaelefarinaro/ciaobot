@@ -40,3 +40,16 @@ export const Alert: Story = {
     expect(glyph?.querySelectorAll('.activity-glyph-pixel')).toHaveLength(0)
   },
 }
+
+// A background run: a shell prompt, `$` and a blinking block cursor, sitting on
+// the same line as the working grid. The cursor is the only motion it has.
+export const Run: Story = {
+  args: { kind: 'run' },
+  play: async ({ canvasElement }) => {
+    const glyph = canvasElement.querySelector('.activity-glyph--run')
+    expect(glyph?.getAttribute('aria-hidden')).toBe('true')
+    expect(glyph?.querySelector('.activity-glyph-prompt')).not.toBeNull()
+    expect(glyph?.querySelectorAll('.activity-glyph-cursor')).toHaveLength(1)
+    expect(glyph?.querySelectorAll('.activity-glyph-pixel')).toHaveLength(0)
+  },
+}

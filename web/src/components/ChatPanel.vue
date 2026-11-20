@@ -1214,6 +1214,12 @@
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </label>
             <span class="composer-spacer" aria-hidden="true"></span>
+            <ComposerActivity
+              :chat-id="chatId"
+              :agents="runningWork.agents"
+              :shells="runningWork.shells"
+              :now="nowTs"
+            />
             <span v-if="inputText.trim() && !isMcpToken" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
             <button
               v-if="view.isStreaming && isMcpToken"
@@ -1421,6 +1427,8 @@ import { latestContextUsage } from '../lib/contextUsage'
 import ChatTurnActivity from './ChatTurnActivity.vue'
 import SubagentCard from './SubagentCard.vue'
 import ShellCard from './ShellCard.vue'
+import ComposerActivity from './ComposerActivity.vue'
+import { NO_RUNNING_WORK } from '../lib/runningWork'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { recordSentPrompt } from '../lib/chatDrafts'
@@ -2164,8 +2172,13 @@ function compactContext() {
   void store.compactChat(chat.value.chat_id)
 }
 
+// What the chat is running now (its agents and background shells). Shown beside Send
+// whenever something runs, streaming or not, so a background shell keeps its place.
+const runningWork = computed(() => (props.chatId ? store.runningWorkFor(props.chatId) : NO_RUNNING_WORK))
+const hasRunningWork = computed(() => runningWork.value.agents.length > 0 || runningWork.value.shells.length > 0)
+
 watch(
-  () => view.isStreaming,
+  () => view.isStreaming || hasRunningWork.value,
   (ticking) => {
     if (ticking && !clockTimer) {
       nowTs.value = Date.now()
