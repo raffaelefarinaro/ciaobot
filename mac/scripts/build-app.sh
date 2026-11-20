@@ -48,6 +48,28 @@ if [ -e "$build_dir" ] || [ -L "$build_dir" ]; then
         || { echo "refusing symlinked build directory: $build_dir" >&2; exit 1; }
 fi
 
+# The app's versions come from the committed project version in
+# ../pyproject.toml. CFBundleVersion is major*10000 + minor*100 + patch, so
+# 2.0.0 is build 20000, above the build 14 that 0.5.0 shipped. Minor and patch
+# must stay below 100 or two releases could share a build number, and any
+# other shape is refused here, before the Swift build.
+[ -f ../pyproject.toml ] && [ ! -L ../pyproject.toml ] \
+    || { echo "pyproject.toml is missing or a symlink next to the mac/ directory" >&2; exit 1; }
+version_lines=$(grep -c '^version = ' ../pyproject.toml || true)
+[ "$version_lines" = 1 ] \
+    || { echo "pyproject.toml must have exactly one 'version = ' line, found $version_lines" >&2; exit 1; }
+short_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' ../pyproject.toml)
+printf '%s' "$short_version" \
+    | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+    || { echo "pyproject.toml version must be MAJOR.MINOR.PATCH, got: $short_version" >&2; exit 1; }
+version_major=${short_version%%.*}
+version_rest=${short_version#*.}
+version_minor=${version_rest%%.*}
+version_patch=${version_rest#*.}
+[ "$version_minor" -lt 100 ] && [ "$version_patch" -lt 100 ] \
+    || { echo "pyproject.toml version $short_version: minor and patch must each be below 100" >&2; exit 1; }
+bundle_build=$((version_major * 10000 + version_minor * 100 + version_patch))
+
 swift build -c release
 binary_dir=$(swift build -c release --show-bin-path)
 [ -d "$build_dir" ] && [ ! -L "$build_dir" ] \
@@ -203,8 +225,8 @@ cat > "$bundle/Contents/Info.plist" <<PLIST
 <key>CFBundleIdentifier</key><string>local.ciaobot.mac</string>
 <key>CFBundleName</key><string>Ciaobot</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.5.0</string>
-<key>CFBundleVersion</key><string>14</string>
+<key>CFBundleShortVersionString</key><string>$short_version</string>
+<key>CFBundleVersion</key><string>$bundle_build</string>
 <key>LSMinimumSystemVersion</key><string>$minimum_system_version</string>
 <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
 <key>NSHighResolutionCapable</key><true/>

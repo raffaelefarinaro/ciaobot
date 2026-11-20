@@ -139,6 +139,23 @@ fi
 command -v gh >/dev/null 2>&1 \
     || die "gh is not installed; install the GitHub CLI to publish a release"
 
+# release-on-main creates the release for a version tag before the DMG exists.
+# When that release is there, the DMG goes onto it; otherwise the release is
+# created here. The probe's output is discarded, and only its status matters.
+set -- release view "$tag"
+if [ -n "$repo" ]; then
+    set -- "$@" --repo "$repo"
+fi
+if gh "$@" >/dev/null 2>&1; then
+    set -- release upload "$tag" "$asset"
+    if [ -n "$repo" ]; then
+        set -- "$@" --repo "$repo"
+    fi
+    gh "$@" || die "gh release upload failed"
+    printf 'Attached %s to the existing release %s\n' "$asset_name" "$tag"
+    exit 0
+fi
+
 set -- release create "$tag" "$asset"
 if [ -n "$title" ]; then
     set -- "$@" --title "$title"

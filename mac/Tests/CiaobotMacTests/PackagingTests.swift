@@ -159,36 +159,26 @@ final class PackagingTests: XCTestCase {
         )
     }
 
-    func testBuildScriptWritesAPlausibleVersion() throws {
-        let text = try readScript("build-app.sh")
-        let version = try plistValue(named: "CFBundleShortVersionString", in: text)
-        XCTAssertNotNil(
-            version.range(of: #"^[0-9]+(\.[0-9]+){1,2}$"#, options: .regularExpression),
-            "CFBundleShortVersionString must stay a dotted numeric version, got \(version)"
+    /// The build script derives both versions from the committed project
+    /// version (see SparklePackagingTests for the derivation itself). Sparkle
+    /// offers an update only above the build 0.5.0 shipped (14), so the
+    /// committed version must derive a larger CFBundleVersion.
+    func testCommittedProjectVersionClearsTheLegacyBuildNumber() throws {
+        let pyproject = packageRoot.deletingLastPathComponent().appendingPathComponent("pyproject.toml")
+        let text = try String(contentsOf: pyproject, encoding: .utf8)
+        let line = try XCTUnwrap(
+            text.split(separator: "\n").first { $0.hasPrefix("version = ") },
+            "pyproject.toml has no version line"
         )
-        let build = try plistValue(named: "CFBundleVersion", in: text)
-        XCTAssertNotNil(
-            build.range(of: #"^[0-9]+$"#, options: .regularExpression),
-            "CFBundleVersion must stay numeric, got \(build)"
-        )
-    }
-
-    /// Sparkle compares `CFBundleVersion` as an integer, so a published build
-    /// number may never be reused or lowered. Pinning one exact version here
-    /// would make every release fail CI; the floor is raised only when a build
-    /// is actually published.
-    func testUpdaterReleaseUsesANewBuildNumber() throws {
-        let text = try readScript("build-app.sh")
-        let version = try plistValue(named: "CFBundleShortVersionString", in: text)
-        XCTAssertNotNil(
-            version.range(of: #"^0\.[0-9]+"#, options: .regularExpression),
-            "the updater preview line stays in 0.x, got \(version)"
-        )
-        let build = try XCTUnwrap(Int(try plistValue(named: "CFBundleVersion", in: text)))
-        XCTAssertGreaterThanOrEqual(
-            build, 11,
-            "build 11 shipped as 0.2.0; never reuse or lower a published CFBundleVersion"
-        )
+        let parts = line.dropFirst("version = ".count)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            .split(separator: ".")
+            .compactMap { Int($0) }
+        guard parts.count == 3 else {
+            return XCTFail("pyproject.toml version must be MAJOR.MINOR.PATCH: \(line)")
+        }
+        let build = parts[0] * 10000 + parts[1] * 100 + parts[2]
+        XCTAssertGreaterThan(build, 14, "build 0.5.0 shipped as 14; the committed version derives \(build)")
     }
 
     /// Every Sparkle key is emitted from the committed public config, and only
@@ -469,6 +459,36 @@ final class PackagingTests: XCTestCase {
         XCTAssertNotEqual(result.status, 0, result.output)
         XCTAssertTrue(result.output.contains("Ciaobot-<version>.dmg"), result.output)
         XCTAssertNil(try ghCallsIfAny(in: fixture.ghLog))
+    }
+
+    /// release-on-main creates the release for a version tag before the DMG
+    /// is built. When that release exists, the DMG is uploaded onto it and no
+    /// second release is created.
+    func testPublishReleaseUploadsOntoAnExistingRelease() throws {
+        let fixture = try makePublishFixture()
+        let dmg = fixture.directory.appendingPathComponent("Ciaobot-2.0.0.dmg")
+        try Data("stand-in disk image\n".utf8).write(to: dmg)
+        var environment = fixture.environment
+        environment["FAKE_GH_VIEW_STATUS"] = "0"
+
+        let result = try run(
+            "/bin/sh",
+            [publishScript.path,
+             "--tag", "v2.0.0",
+             "--asset", dmg.path,
+             "--notes", fixture.notes.path,
+             "--repo", "owner/name"],
+            environment: environment
+        )
+
+        XCTAssertEqual(result.status, 0, result.output)
+        let calls = try XCTUnwrap(try ghCallsIfAny(in: fixture.ghLog), "the DMG must be uploaded through gh")
+        XCTAssertEqual(calls.count, 1, "one gh mutation, no second release: \(calls)")
+        let call = calls[0]
+        XCTAssertEqual(Array(call.prefix(3)), ["release", "upload", "v2.0.0"], "\(call)")
+        XCTAssertTrue(call.contains(dmg.path), "the DMG is the uploaded asset: \(call)")
+        XCTAssertFalse(call.contains("create"), "an existing release is never created again: \(call)")
+        XCTAssertEqual(Array(call.suffix(2)), ["--repo", "owner/name"], "\(call)")
     }
 
     func testPublishReleaseScriptIsExecutable() {
@@ -874,6 +894,11 @@ final class PackagingTests: XCTestCase {
         let ghLog = directory.appendingPathComponent("gh.log")
         try writeExecutable("""
         #!/bin/sh
+        # The existence probe is not a mutation: it is not logged, and it
+        # reports the release as absent unless a test says otherwise.
+        if [ "$1 $2" = "release view" ]; then
+            exit "${FAKE_GH_VIEW_STATUS:-1}"
+        fi
         [ -n "${FAKE_GH_LOG:-}" ] && {
             for argument in "$@"; do printf '%s|' "$argument"; done
             printf '\\n'

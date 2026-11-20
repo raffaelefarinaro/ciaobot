@@ -1,0 +1,358 @@
+name: release rehearsal
+
+# #3131 L7: builds the artifact set a release would publish (the engine wheel,
+# the stamped Linux installer, the signed engine manifest and its signature), then
+# proves it on a clean Linux VM and packages the ad-hoc Mac app. Nothing here
+# creates a release, uploads to one, tags, or publishes. The outputs are workflow
+# artifacts only.
+#
+# Dispatch from develop or main, never from another branch:
+#   gh workflow run release-rehearsal.yml --ref develop
+
+on:
+  workflow_dispatch:
+
+env:
+  # Same literal as publish.yml and release-smoke.yml: the one release that ships
+  # the wheel-only manifest 1.x engines read (#3131 Q3).
+  LEGACY_MANIFEST_VERSION: "2.0.0"
+
+# Read-only for the whole run. Nothing here needs to write to the repository.
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    # The signing step reads TAURI_SIGNING_PRIVATE_KEY and its password. The
+    # maintainer must move both secrets into this Environment and restrict its
+    # deployment branches to develop and main. Until that is done, the in-file ref
+    # guard is only a convenience.
+    environment: release-signing
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Refuse refs other than develop and main
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" != branch ]; then
+            echo "dispatch from a branch: develop or main" >&2
+            exit 1
+          fi
+          case "$REF_NAME" in
+            develop|main) ;;
+            *)
+              echo "refusing to rehearse '$REF_NAME': only develop and main" >&2
+              exit 1
+              ;;
+          esac
+      # Nothing after this step pushes with git: the run never writes back.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: "0.13.8"
+      - name: Read the release version from pyproject.toml
+        id: version
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if ! [[ $version =~ $semver ]]; then
+            echo "pyproject.toml has no release version: '$version'" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Decide whether the 1.x update gate runs
+        id: legacy
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Only the 2.0.0 release ships the wheel-only manifest that 1.x engines
+          # read, so the 1.x gate runs for that version and no other.
+          if [ "$VERSION" = "$LEGACY_MANIFEST_VERSION" ]; then
+            echo "legacy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "legacy=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::1.x update gate skipped for $VERSION: only $LEGACY_MANIFEST_VERSION ships the 1.x manifest"
+          fi
+      - name: Build PWA assets
+        working-directory: web
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+      - name: Build engine wheel
+        run: |
+          set -euo pipefail
+          uv build --wheel --out-dir dist
+      - name: Verify engine wheel in a clean environment
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          test -f "dist/ciaobot-${VERSION}-py3-none-any.whl"
+          uv venv --python 3.13 "$RUNNER_TEMP/engine-check"
+          uv pip install --python "$RUNNER_TEMP/engine-check/bin/python" dist/ciaobot-*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/engine-check/bin/python" -m ciao.release_manifest check-static
+      - name: Stamp the Linux installer
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          ws="$GITHUB_WORKSPACE"
+          mkdir -p "$ws/rehearsal"
+          # Run from outside the checkout so the wheel's own ciao is the one that
+          # stamps, the same as publish.yml.
+          (cd "$RUNNER_TEMP" && "$RUNNER_TEMP/engine-check/bin/python" -m ciao.release_manifest stamp-installer \
+            --template "$ws/scripts/install.sh" \
+            --version "$VERSION" \
+            --wheel "$ws/dist/ciaobot-$VERSION-py3-none-any.whl" \
+            --out "$ws/rehearsal/install.sh")
+          cp "$ws/dist/ciaobot-$VERSION-py3-none-any.whl" "$ws/rehearsal/"
+      - name: Write engine manifest
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          ws="$GITHUB_WORKSPACE"
+          (cd "$RUNNER_TEMP" && "$RUNNER_TEMP/engine-check/bin/python" -m ciao.release_manifest build \
+            --version "$VERSION" --out "$ws/rehearsal/ciaobot-engine-manifest.json" \
+            "$ws/rehearsal/ciaobot-$VERSION-py3-none-any.whl")
+      - name: Sign engine manifest
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # The only step that sees the signing secret. It signs the manifest
+          # file and nothing else; the verification below runs without it.
+          (cd "$GITHUB_WORKSPACE/rehearsal" && npx --yes @tauri-apps/cli@2.11.4 signer sign ciaobot-engine-manifest.json)
+      - name: Verify the signed manifest and its wheel
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          ws="$GITHUB_WORKSPACE/rehearsal"
+          (cd "$RUNNER_TEMP" && "$RUNNER_TEMP/engine-check/bin/python" -m ciao.release_manifest verify \
+            "$ws/ciaobot-engine-manifest.json" "$ws/ciaobot-engine-manifest.json.sig" \
+            --asset "$ws/ciaobot-$VERSION-py3-none-any.whl")
+      - name: Run the 1.x update gate against the rehearsal files
+        if: steps.legacy.outputs.legacy == 'true'
+        timeout-minutes: 15
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The gate reads the release from a file:// URL: the same layout
+          # publish.yml stages, with the 1.x wheel fetched from its release.
+          ws="$GITHUB_WORKSPACE/rehearsal"
+          legacy="$RUNNER_TEMP/legacy/v$VERSION"
+          mkdir -p "$legacy"
+          cp "$ws/ciaobot-$VERSION-py3-none-any.whl" "$ws/ciaobot-engine-manifest.json" "$ws/ciaobot-engine-manifest.json.sig" "$legacy/"
+          python3 scripts/legacy-update-gate.py \
+            --target "$VERSION" \
+            --release-root "$RUNNER_TEMP/legacy" \
+            --uv "$(command -v uv)"
+      - name: Upload the rehearsal artifact set
+        uses: actions/upload-artifact@v7
+        with:
+          name: rehearsal-${{ github.sha }}-${{ github.run_attempt }}
+          path: rehearsal/
+          if-no-files-found: error
+          retention-days: 14
+
+  linux:
+    needs: engine
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.engine.outputs.version }}
+    steps:
+      - name: Download the rehearsal artifact set
+        uses: actions/download-artifact@v7
+        with:
+          name: rehearsal-${{ github.sha }}-${{ github.run_attempt }}
+          path: rehearsal
+      - name: Install from the rehearsal files
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          # The runner user has passwordless sudo, which ciao service install
+          # uses to write the unit. The workspace is explicit so the checks
+          # below read the same .env the service runs from.
+          workspace="$RUNNER_TEMP/ciaobot-rehearsal-ws"
+          echo "SMOKE_WORKSPACE=$workspace" >> "$GITHUB_ENV"
+          install_log="$RUNNER_TEMP/linux-install.log"
+          # The login URL ciao setup prints is a credential, and so is a bare
+          # login token line: both are redacted before anything reaches the job log.
+          show_log() {
+            sed -E -e 's#(Open Ciaobot: ).*#\1[redacted]#' \
+              -e 's#https?://[^[:space:]]*(token|setup)[^[:space:]]*#[redacted]#g' \
+              -e 's#^[A-Za-z0-9_-]{32,}$#[redacted]#' "$install_log"
+          }
+          rehearsal="$GITHUB_WORKSPACE/rehearsal"
+          wheels=("$rehearsal"/ciaobot-*.whl)
+          if [ "${#wheels[@]}" -ne 1 ] || [ ! -f "${wheels[0]}" ]; then
+            echo "expected exactly one wheel in the artifact, found ${#wheels[@]}" >&2
+            exit 1
+          fi
+          # The installer must pin this version and the wheel beside it, byte for byte.
+          grep -Fx "CIAOBOT_VERSION=$VERSION" "$rehearsal/install.sh"
+          digest="$(sha256sum "${wheels[0]}" | cut -d' ' -f1)"
+          grep -Fx "WHEEL_SHA256=$digest" "$rehearsal/install.sh"
+          if ! { sh "$rehearsal/install.sh" --wheel "${wheels[0]}" --workspace "$workspace"; } > "$install_log" 2>&1; then
+            show_log
+            echo "the rehearsal installer failed" >&2
+            exit 1
+          fi
+          show_log
+          test -x "$HOME/.local/bin/ciao"
+          [ "$("$HOME/.local/bin/ciao" --version)" = "ciao $VERSION" ]
+      - name: Check the service answers
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          # The port comes from the workspace the installer set up, and falls
+          # back to the default the engine uses when .env does not name one.
+          port=$(awk -F= '/^PWA_PORT=/{print $2}' "$SMOKE_WORKSPACE/.env" 2>/dev/null | tr -d '"' | tail -1 || true)
+          [ -n "$port" ] || port=8443
+          for _ in $(seq 1 90); do
+            systemctl is-active --quiet ciaobot && break
+            sleep 1
+          done
+          systemctl is-active --quiet ciaobot
+          for _ in $(seq 1 90); do
+            curl -fsS --max-time 5 "http://127.0.0.1:$port/api/startup-status" >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS --max-time 5 "http://127.0.0.1:$port/api/startup-status" | jq -e '.desktop_api_version == 1'
+      - name: Re-run the installer (same-version reinstall)
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          # Same version, no workspace flag: this is a same-version reinstall, not
+          # an upgrade. The installed unit keeps the workspace it records. The
+          # service step restarts the unit, so the main PID must change.
+          pid_before=$(systemctl show -p MainPID --value ciaobot.service)
+          [ "$pid_before" -gt 0 ]
+          rehearsal="$GITHUB_WORKSPACE/rehearsal"
+          wheels=("$rehearsal"/ciaobot-*.whl)
+          update_log="$RUNNER_TEMP/linux-update.log"
+          if ! { sh "$rehearsal/install.sh" --wheel "${wheels[0]}"; } > "$update_log" 2>&1; then
+            sed -E -e 's#(Open Ciaobot: ).*#\1[redacted]#' \
+              -e 's#https?://[^[:space:]]*(token|setup)[^[:space:]]*#[redacted]#g' \
+              -e 's#^[A-Za-z0-9_-]{32,}$#[redacted]#' "$update_log"
+            echo "the update run of the rehearsal installer failed" >&2
+            exit 1
+          fi
+          test -x "$HOME/.local/bin/ciao"
+          [ "$("$HOME/.local/bin/ciao" --version)" = "ciao $VERSION" ]
+          port=$(awk -F= '/^PWA_PORT=/{print $2}' "$SMOKE_WORKSPACE/.env" 2>/dev/null | tr -d '"' | tail -1 || true)
+          [ -n "$port" ] || port=8443
+          for _ in $(seq 1 90); do
+            systemctl is-active --quiet ciaobot && break
+            sleep 1
+          done
+          systemctl is-active --quiet ciaobot
+          for _ in $(seq 1 90); do
+            curl -fsS --max-time 5 "http://127.0.0.1:$port/api/startup-status" >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS --max-time 5 "http://127.0.0.1:$port/api/startup-status" | jq -e '.desktop_api_version == 1'
+          pid_after=$(systemctl show -p MainPID --value ciaobot.service)
+          [ "$pid_after" -gt 0 ]
+          [ "$pid_after" != "$pid_before" ]
+      - name: Diagnostics
+        if: failure()
+        run: |
+          redact() {
+            sed -E -e 's#(Open Ciaobot: ).*#\1[redacted]#' \
+              -e 's#https?://[^[:space:]]*(token|setup)[^[:space:]]*#[redacted]#g' \
+              -e 's#^[A-Za-z0-9_-]{32,}$#[redacted]#'
+          }
+          echo "--- install log ---"
+          redact < "$RUNNER_TEMP/linux-install.log" 2>/dev/null | tail -200 || true
+          echo "--- update log ---"
+          redact < "$RUNNER_TEMP/linux-update.log" 2>/dev/null | tail -200 || true
+          echo "--- service ---"
+          systemctl status ciaobot --no-pager 2>&1 | head -60 | redact || true
+          echo "--- journal ---"
+          sudo -n journalctl -u ciaobot -n 200 --no-pager 2>&1 | redact || true
+          echo "--- runtime logs ---"
+          # Allowlist only: the workspace .runtime directory holds the login
+          # token file, so no other file in it is opened.
+          debug_log="${SMOKE_WORKSPACE:-$HOME/Ciaobot}/.runtime/server_debug.log"
+          if [ -f "$debug_log" ]; then
+            echo "== server_debug.log"
+            tail -80 "$debug_log" | redact || true
+          fi
+
+  mac-adhoc:
+    # The ad-hoc Mac app (#3128 F). It is not signed with a Developer ID and is
+    # not notarized, so it cannot go through make-dmg.sh, which refuses both. The
+    # signed and notarized DMG comes from #3128 G's mac-app-signing-rehearsal.yml
+    # when the credentials exist. Do not duplicate it here.
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Refuse refs other than develop and main
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" != branch ]; then
+            echo "dispatch from a branch: develop or main" >&2
+            exit 1
+          fi
+          case "$REF_NAME" in
+            develop|main) ;;
+            *)
+              echo "refusing to rehearse '$REF_NAME': only develop and main" >&2
+              exit 1
+              ;;
+          esac
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Package the ad-hoc app
+        working-directory: mac
+        run: |
+          set -euo pipefail
+          # Fresh output directory in the workspace: package-app.sh refuses an
+          # output that already holds an artifact.
+          scripts/package-app.sh --output "$GITHUB_WORKSPACE/rehearsal-package"
+      # The archive is named Ciaobot-<CFBundleShortVersionString>-adhoc.zip. build-app.sh
+      # writes that key as a fixed 0.5.0 today, not the engine version, so the name is
+      # not checked against $VERSION here. The app version sync (#3131 L8) changes that.
+      - name: Upload the ad-hoc app archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: rehearsal-adhoc-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            rehearsal-package/Ciaobot-*-adhoc.zip
+            rehearsal-package/MANIFEST.txt
+            rehearsal-package/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14

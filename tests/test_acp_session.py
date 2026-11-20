@@ -204,7 +204,7 @@ async def test_cancel_answers_pending_permission_cancelled_then_cancels_session(
     }]
     async with _started(tmp_path, prompts=[{"steps": steps}]) as harness:
         task = asyncio.create_task(_collect(harness))
-        for _ in range(100):
+        for _ in range(1000):
             if harness.broker.has("call-1"):
                 break
             await asyncio.sleep(0.01)
@@ -212,6 +212,12 @@ async def test_cancel_answers_pending_permission_cancelled_then_cancels_session(
             raise AssertionError("permission was never asked")
         await harness.session.cancel()
         await asyncio.wait_for(task, timeout=5)
+        # The fake agent logs from its own process: wait until both calls are on disk.
+        for _ in range(1000):
+            methods = _methods(harness.calls)
+            if "permission_outcome" in methods and "session/cancel" in methods:
+                break
+            await asyncio.sleep(0.01)
         calls = read_calls(harness.calls)
         outcome_at = next(i for i, call in enumerate(calls) if call["method"] == "permission_outcome")
         cancel_at = next(i for i, call in enumerate(calls) if call["method"] == "session/cancel")
@@ -223,7 +229,7 @@ async def test_cancel_answers_pending_permission_cancelled_then_cancels_session(
 async def test_cancel_yields_stopped_result(tmp_path: Path) -> None:
     async with _started(tmp_path, prompts=[{"steps": [{"await_cancel": True}]}]) as harness:
         task = asyncio.create_task(_collect(harness, "stop-me"))
-        for _ in range(100):
+        for _ in range(1000):
             if "session/prompt" in _methods(harness.calls):
                 break
             await asyncio.sleep(0.01)
