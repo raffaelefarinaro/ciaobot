@@ -779,9 +779,11 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   The "On this page" navigation is built from the rendered sections in DOM order,
   so it follows that order. The MCP tab is one button per installed agent
   (`ProviderMcpButton.vue`). The button is labelled "Open MCP settings in {cli}"
-  and types that agent's server-built `mcp_command` into the in-app terminal via
-  `composables/useRunInTerminal.ts`, falling back to a copy when the terminal is
-  not ready. *Ask Ciao to add one* still starts a chat titled "Add an MCP server".
+  and starts that agent's CLI (`mcp_command`) in the in-app terminal via
+  `composables/useRunInTerminal.ts`, then types `mcp_slash` (`/mcp`, or `/mcps` for OpenCode) once the CLI
+  has drawn and gone quiet; the follow-up is never sent before the first output,
+  and it is abandoned when the session ends or the wait reaches 8 s with no output.
+  It falls back to a copy of the launch command when the terminal is not ready. *Ask Ciao to add one* still starts a chat titled "Add an MCP server".
   Changes apply to new chats; a running chat loads them after `ciao chat reload`.
   The page does not read MCP servers or turn them on or off. The Providers tab instead shows generic sign-in commands for the user to copy or type manually, and opens the selected workspace's browser terminal without sending input. Verify rereads provider and model information; OpenCode configuration is not credential verification and completed model reads do not prove catalog availability.
   Chat details has an MCP section that holds the same `ProviderMcpButton.vue`

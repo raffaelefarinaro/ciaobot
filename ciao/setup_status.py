@@ -241,6 +241,11 @@ def _check(
 # missing (a choice, not a fault); `adapter_missing` is the CLI present but its
 # ACP adapter absent, which keeps the card's red state.
 PROVIDER_STATE_NOT_INSTALLED = "not_installed"
+
+#: The follow-up the PWA types into a CLI's terminal once it has started: the
+#: slash command that opens that CLI's own MCP view. Claude Code and Codex use
+#: ``/mcp``; a provider that names it differently passes its own to ``_provider``.
+MCP_SLASH_COMMAND = "/mcp"
 PROVIDER_STATE_ADAPTER_MISSING = "adapter_missing"
 PROVIDER_STATE_READY = "ready"
 PROVIDER_STATE_FAILED = "failed"
@@ -265,6 +270,7 @@ def _provider(
     path_command: str = "",
     terminal_action: str = "",
     mcp_command: str = "",
+    mcp_slash: str = MCP_SLASH_COMMAND,
     release_check: dict[str, str] | None = None,
     adapter: str = "",
     adapter_state: str = "",
@@ -300,6 +306,7 @@ def _provider(
         row["terminal_action"] = terminal_action
     if mcp_command:
         row["mcp_command"] = mcp_command
+        row["mcp_slash"] = mcp_slash
     if adapter:
         row["adapter"] = adapter
     if adapter_state:
@@ -556,6 +563,7 @@ def codex_status_probe(
             version=version,
             install_url=CODEX_INSTALL_DOCS_URL,
             terminal_action="codex-install",
+            mcp_command=codex_launch_command(),
         )
     try:
         status = subprocess.run(
@@ -575,6 +583,7 @@ def codex_status_probe(
             detail="codex login status did not answer.",
             version=version,
             terminal_action="codex-login",
+            mcp_command=codex_launch_command(),
         )
     if status.returncode == 0:
         return _provider(
@@ -585,6 +594,7 @@ def codex_status_probe(
             detail="Signed in to Codex.",
             version=version,
             adapter=adapter_install.describe(adapter_install.CODEX_ADAPTER, "ready"),
+            mcp_command=codex_launch_command(),
         )
     return _provider(
         name="codex",
@@ -594,6 +604,7 @@ def codex_status_probe(
         detail="Codex is installed but not signed in. Run the sign-in command in a terminal.",
         version=version,
         terminal_action="codex-login",
+        mcp_command=codex_launch_command(),
     )
 
 
@@ -731,22 +742,23 @@ def claude_auth_command(cli_path: str = "") -> str:
     return f"{shlex.quote(binary)} auth login" if binary else "claude auth login"
 
 
-def claude_mcp_command(cli_path: str = "") -> str:
-    """Terminal command that opens Claude Code's own MCP management.
+def claude_launch_command(cli_path: str = "") -> str:
+    """Terminal line that starts Claude Code; the PWA then types ``mcp_slash``.
 
     Same PATH rule as ``claude_auth_command``: the bare word only when the
     user's terminal resolves it, else the binary named by absolute path.
     """
-    from ciao.tool_path import resolve_on_terminal_path
+    from ciao.tool_path import terminal_launch_command
 
-    try:
-        in_terminal = resolve_on_terminal_path("claude")
-    except Exception:
-        in_terminal = None
-    if in_terminal:
-        return "claude mcp"
-    binary = cli_path or claude_cli_path()
-    return f"{shlex.quote(binary)} mcp" if binary else "claude mcp"
+    return terminal_launch_command("claude", cli_path or claude_cli_path())
+
+
+def codex_launch_command() -> str:
+    """Terminal line that starts the Codex CLI; the PWA then types ``mcp_slash``."""
+    from ciao.providers.acp.agents import codex_binary
+    from ciao.tool_path import terminal_launch_command
+
+    return terminal_launch_command("codex", codex_binary())
 
 
 def claude_app_path() -> str:
@@ -868,7 +880,7 @@ def _claude_status(
             cli_path=binary,
             release_check=check,
             terminal_action="claude-login",
-            mcp_command=claude_mcp_command(binary),
+            mcp_command=claude_launch_command(binary),
             adapter=adapter_install.describe(adapter_install.CLAUDE_ADAPTER, "ready"),
         )
     # No fallback on unparseable probe output: a timeout or process error is
@@ -899,7 +911,7 @@ def _claude_status(
             release_check=check,
             path_command=claude_path_hint(binary),
             terminal_action="claude-install",
-            mcp_command=claude_mcp_command(binary),
+            mcp_command=claude_launch_command(binary),
         )
     app_path = claude_app_path()
     auth_command = claude_auth_command(binary)
@@ -923,7 +935,7 @@ def _claude_status(
         # the user is about to be handed a command to type into that terminal.
         path_command=claude_path_hint(binary),
         terminal_action="claude-login",
-        mcp_command=claude_mcp_command(binary),
+        mcp_command=claude_launch_command(binary),
     )
 
 

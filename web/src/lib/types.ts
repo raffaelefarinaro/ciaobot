@@ -983,8 +983,10 @@ export interface ProviderConnection {
   path_command?: string
   /** Terminal action that runs the command shown for this row, when the engine offers one. */
   terminal_action?: HostTerminalAction
-  /** The agent CLI's own MCP command (`claude mcp`), typed into the in-app terminal. Absent when the CLI is not installed. */
+  /** The agent CLI's launch command (`claude`, `opencode`, `codex`), typed into the in-app terminal. Absent when the CLI is not installed. */
   mcp_command?: string
+  /** The input typed after the CLI has started, once it has drawn its screen: the slash command that opens its MCP view (`/mcp`, or `/mcps` for OpenCode). */
+  mcp_slash?: string
   /** How the installed CLI compares with the version this release was tested with. */
   release_check?: ProviderReleaseCheck
   /** Desktop app found while the CLI is missing. */

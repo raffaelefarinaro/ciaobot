@@ -122,8 +122,15 @@ OPENCODE_INSTALL_DOCS_URL = "https://opencode.ai/download"
 OPENCODE_LOGIN_COMMAND = "opencode auth login"
 
 
-#: Opens OpenCode's own MCP management; typed into the terminal by the PWA.
-OPENCODE_MCP_COMMAND = "opencode mcp"
+#: OpenCode's MCP view is the ``mcps`` slash command (not ``/mcp``).
+OPENCODE_MCP_SLASH = "/mcps"
+
+
+def opencode_launch_command(binary: str | None) -> str:
+    """Terminal line that starts OpenCode; the PWA then types ``mcp_slash``."""
+    from ciao.tool_path import terminal_launch_command
+
+    return terminal_launch_command("opencode", binary)
 
 
 def opencode_install_command() -> str:
@@ -632,7 +639,8 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
         auth=auth,
         command=OPENCODE_LOGIN_COMMAND,
         terminal_action="opencode-login",
-        mcp_command=OPENCODE_MCP_COMMAND,
+        mcp_command=opencode_launch_command(binary),
+        mcp_slash=OPENCODE_MCP_SLASH,
         detail=detail,
         version=version or "unknown",
         skills=found.skills,
