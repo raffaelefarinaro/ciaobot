@@ -331,8 +331,8 @@ Workspace-specific integrations can still be set in `.env`, but the public `.env
 their own CLIs; Ciaobot stores none of their credentials, and there are no
 API-key fields to fill in.
 
-**Reaching any other model.** Ciaobot talks to exactly two providers: Claude
-Code (Anthropic) and opencode (everything else). opencode is
+**Reaching any other model.** Ciaobot talks to three providers: Claude
+Code (Anthropic), Codex (OpenAI) and opencode (everything else). opencode is
 bring-your-own-provider, so Ollama, OpenRouter, LM Studio, or any
 OpenAI-compatible endpoint is configured *in opencode* — see its own docs — and
 Ciaobot picks it up automatically: `GET /api/models` lists whatever opencode

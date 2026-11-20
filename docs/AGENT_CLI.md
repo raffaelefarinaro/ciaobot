@@ -55,7 +55,7 @@ flowchart LR
 - The scope is also not a containment boundary against the model itself. The
   same process holds native Read/Bash/Edit over its workspace root, so the
   control plane is the *convenient* path to Ciaobot state, not the only one.
-  Ciaobot does not restrict the native file tools by path on either provider:
+  Ciaobot does not restrict the native file tools by path on any provider:
   `.env` (which holds `PWA_AUTH_TOKEN`), `.runtime/` and `secrets/` are as
   readable as any other file in the workspace.
 - A chat whose control plane is unavailable fails the turn:
@@ -92,7 +92,7 @@ Claude routes it through its classifier and opencode keeps its generic
 because a prompt-injected model could start a Bash input with an allowlisted
 prefix (`ciao help >/dev/null; <cmd>`) and the shell suffix would run without a
 card. There is no `AGENT_CLI_ALLOW_PATTERNS` / `AGENT_CLI_ASK_PATTERNS` and no
-`Bash(ciao …)` allow-list on either provider.
+`Bash(ciao …)` allow-list on any provider.
 
 Users who want no cards switch to `bypass`, which grants the full `allow`
 wildcard. The server-side floor (mode gates, `unattended_forbidden`, workspace
