@@ -229,6 +229,30 @@ def test_curation_adds_untrusted_content_line_to_read_skills(name: str) -> None:
     assert gws_skills.curate_gws_skill(name, out) == out
 
 
+def test_curation_adds_attendee_caution_after_prerequisite_in_calendar() -> None:
+    text = (
+        "---\nname: x\n---\n\n# calendar\n\n> **PREREQUISITE:** Read `../gws-shared/SKILL.md` for "
+        "auth, global flags, and security rules. If missing, run `gws generate-skills` to create "
+        "it.\n\n## API Resources\n\nbody\n"
+    )
+    out = gws_skills.curate_gws_skill("gws-calendar", text)
+    assert out.count("resets every RSVP") == 1
+    assert "`responseStatus`" in out
+    prereq = out.index("> **PREREQUISITE:**")
+    assert prereq < out.index("> [!CAUTION]") < out.index("## API Resources")
+    assert gws_skills.curate_gws_skill("gws-calendar", out) == out
+
+
+def test_curation_leaves_other_skills_without_attendee_caution() -> None:
+    out = gws_skills.curate_gws_skill("gws-calendar-insert", "# s\n\nbody\n")
+    assert "resets every RSVP" not in out
+
+
+def test_committed_gws_calendar_carries_attendee_caution() -> None:
+    committed = (_STOCK_SKILLS / "gws-calendar" / "SKILL.md").read_text(encoding="utf-8")
+    assert "resets every RSVP" in committed
+
+
 def test_curation_leaves_other_skills_without_untrusted_line() -> None:
     assert _UNTRUSTED not in gws_skills.curate_gws_skill("gws-sheets", "# s\n\nbody\n")
 
