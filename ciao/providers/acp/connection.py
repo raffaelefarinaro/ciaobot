@@ -35,6 +35,7 @@ from acp.schema import ClientCapabilities
 
 from ciao import __version__
 from ciao.adapter_install import ADAPTERS, AdapterNotReady, launch_argv
+from ciao.os_support.child_env import child_env
 from ciao.os_support.processes import descendant_processes, process_table, signal_processes
 from ciao.providers.acp.spec import AgentSpec
 from ciao.redact import redact_text
@@ -183,7 +184,7 @@ def agent_base_env(unset: tuple[str, ...]) -> dict[str, str]:
     """
     env = {
         key: value
-        for key, value in os.environ.items()
+        for key, value in child_env().items()
         if not key.startswith("CIAO_")
         and key not in _ENGINE_INTERNAL_ENV_KEYS
         and key not in unset
