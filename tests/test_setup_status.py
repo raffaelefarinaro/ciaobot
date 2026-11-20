@@ -2434,8 +2434,7 @@ def test_claude_cli_without_the_acp_adapter_is_not_ready(monkeypatch) -> None:
         "The ACP adapter claude-agent-acp 0.108.1 is not installed for Ciaobot yet."
     )
     assert row["command"] == adapter_install.install_command(adapter_install.CLAUDE_ADAPTER)
-    assert "--omit=optional" in row["command"] and "--prefix" in row["command"]
-    assert "@agentclientprotocol/claude-agent-acp@0.108.1" in row["command"]
+    assert row["command"].endswith("-m ciao.adapter_install claude-agent-acp")
     assert row["terminal_action"] == "claude-install"
 
 

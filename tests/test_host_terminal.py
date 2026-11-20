@@ -432,9 +432,9 @@ def test_codex_actions_are_allowlisted_constants(monkeypatch: pytest.MonkeyPatch
     # No codex resolves here (conftest), so the line installs the CLI and then the pinned adapter.
     command = host_terminal.action_command("codex-install")
     assert command == host_terminal.codex_install_command()
-    assert command.startswith(f"{adapter_install.CODEX_CLI_INSTALL} && npm install ")
-    assert "@agentclientprotocol/codex-acp@2.7.0" in command
-    assert "--omit=optional" in command and "--ignore-scripts" in command
+    assert command.startswith(f"{adapter_install.CODEX_CLI_INSTALL} && ")
+    assert command.endswith(adapter_install.install_command(adapter_install.CODEX_ADAPTER))
+    assert "ciao.adapter_install codex-acp" in command
     assert " -g " not in command.replace(adapter_install.CODEX_CLI_INSTALL, "")
     monkeypatch.setattr(agents, "codex_binary", lambda: "/opt/tools/codex")
     assert host_terminal.codex_install_command() == adapter_install.install_command(

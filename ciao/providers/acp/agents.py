@@ -99,9 +99,10 @@ def claude_session_options(request: AgentRequest) -> dict[str, Any]:
 
 def _claude_cli_env() -> dict[str, str]:
     """Point the adapter at the user's own ``claude``, and its login, when one resolves."""
+    from ciao.adapter_install import absolute_executable
     from ciao.setup_status import claude_cli_path
 
-    path = claude_cli_path()
+    path = absolute_executable(claude_cli_path() or None)
     return {"CLAUDE_CODE_EXECUTABLE": path} if path else {}
 
 
@@ -198,9 +199,13 @@ class CodexAcpProvider(AcpProvider):
     def spawn_env(cls) -> dict[str, str]:
         """The user's own ``codex`` as ``CODEX_PATH``, when one resolves.
 
-        Without it codex-acp would run the codex it bundles, which Ciaobot does not install.
+        Without it codex-acp would run the codex it bundles, which Ciaobot does not install. A
+        relative or non-executable result is left unset, so the variable never names a path the
+        adapter would resolve against its own working directory.
         """
-        path = codex_binary()
+        from ciao.adapter_install import absolute_executable
+
+        path = absolute_executable(codex_binary())
         return {"CODEX_PATH": path} if path else {}
 
 

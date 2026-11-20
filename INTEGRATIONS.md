@@ -49,14 +49,14 @@ provider's own login command (`claude auth login`, `opencode auth login`).
 
 Claude runs through `claude-agent-acp`, the Agent Client Protocol adapter for Claude Code. The adapter is pinned at `@agentclientprotocol/claude-agent-acp@0.108.1` in `ciao/adapter_install.py`, and it drives the `claude` CLI that Ciaobot resolves (`CLAUDE_CODE_EXECUTABLE`). Node 22 or newer is required.
 
-Ciaobot installs the adapter itself, once, into a private folder outside the app (`~/Library/Application Support/Ciaobot/adapters` on macOS; the engine's state folder beside the install receipt on Linux). It uses the machine's own `npm` with `--omit=optional --ignore-scripts` and no shell, and it runs the adapter under the machine's own `node`. The native Claude package the adapter can pull in optionally (about 340 MB) is left out, because the user's own `claude` does the work. The install starts at engine startup only when `claude` is present and the adapter is missing or not the pin. A failed install is shown on the Settings card and is not retried by the engine; the card's Install button runs the same line in a terminal.
+Ciaobot installs the adapter itself, once, into a private folder outside the app (`~/Library/Application Support/Ciaobot/adapters` on macOS; the engine's state folder beside the install receipt on Linux). Each adapter has its own folder there, and its install is `npm ci` against a lockfile shipped in the engine (`ciao/stock/adapters/<name>/`), so every package is pinned by integrity hash. It uses the machine's own `npm` with `--omit=optional --ignore-scripts` and no shell, with an allowlisted environment (no provider keys or tokens), and it runs the adapter under the machine's own `node`. The folder must be owned by the current user and not writable by others, or it is not used. The native Claude package the adapter can pull in optionally (about 340 MB) is left out, because the user's own `claude` does the work. The install starts at engine startup only when `claude` is present and the adapter is missing or not the pin. A failed install is shown on the Settings card and is not retried by the engine; the card's Install button runs the same line in a terminal. The adapter's native Claude package is left out even though its lockfile is pinned, so a Claude install does not pull the 340 MB binary.
 
 ```bash
-npm install --no-audit --no-fund --omit=optional --ignore-scripts --prefix "<adapters folder>" @agentclientprotocol/claude-agent-acp@0.108.1
+<engine python> -m ciao.adapter_install claude-agent-acp   # the Settings install line; takes the same lock as the engine
 claude auth login                   # the Settings sign-in action runs this in a terminal
 ```
 
-The adapter reads the `claude` executable from `CLAUDE_CODE_EXECUTABLE`, so with that variable set it passes MCP servers to the CLI as an argument (`--mcp-config`) rather than in the SDK's initialize request. An MCP server's `env` and `headers` therefore appear on the adapter's command line, visible to other users on the machine through the process list. Ciaobot does not write them to a file.
+The adapter reads the `claude` executable from `CLAUDE_CODE_EXECUTABLE`, which Ciaobot sets only to an absolute, executable path; a relative path is never passed. With that variable set it passes MCP servers to the CLI as an argument (`--mcp-config`) rather than in the SDK's initialize request. An MCP server's `env` and `headers` therefore appear on the adapter's command line, visible to other users on the machine through the process list. Ciaobot does not write them to a file.
 
 Sign-in is handled by the Claude CLI. Ciaobot never reads or stores a Claude credential.
 
@@ -66,7 +66,7 @@ Codex runs through `codex-acp`, the Agent Client Protocol adapter for OpenAI's C
 
 ```bash
 npm install -g @openai/codex@0.166.0                  # only when no codex resolves
-npm install --no-audit --no-fund --omit=optional --ignore-scripts --prefix "<adapters folder>" @agentclientprotocol/codex-acp@2.7.0
+<engine python> -m ciao.adapter_install codex-acp     # the Settings install line; takes the same lock as the engine
 codex login                         # the Settings sign-in action runs this in a terminal
 ```
 

@@ -149,9 +149,19 @@ def test_claude_spec_env_disables_auto_memory_and_artifact() -> None:
     assert dict(CLAUDE.env) == {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_ARTIFACT": "1"}
 
 
-def test_claude_executable_env_points_at_user_cli(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "/opt/bin/claude")
-    assert ClaudeAcpProvider.spawn_env() == {"CLAUDE_CODE_EXECUTABLE": "/opt/bin/claude"}
+def _user_cli(tmp_path: Path) -> str:
+    """A real executable file, never run: the env passes only an absolute, executable CLI."""
+    path = tmp_path / "bin" / "claude"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n", encoding="utf-8")
+    path.chmod(0o755)
+    return str(path)
+
+
+def test_claude_executable_env_points_at_user_cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cli = _user_cli(tmp_path)
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: cli)
+    assert ClaudeAcpProvider.spawn_env() == {"CLAUDE_CODE_EXECUTABLE": cli}
     monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "")
     assert ClaudeAcpProvider.spawn_env() == {}
 
@@ -246,6 +256,7 @@ def test_codex_and_opencode_session_meta_is_empty(disallowed: list[str]) -> None
 
 @pytest.mark.asyncio
 async def test_claude_oneshot_runs_the_acp_agent_with_no_tools_meta(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: dict[str, Any] = {}
@@ -255,7 +266,8 @@ async def test_claude_oneshot_runs_the_acp_agent_with_no_tools_meta(
         return "answer"
 
     monkeypatch.setattr(acp_oneshot, "run_acp_oneshot", fake_run)
-    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "/opt/bin/claude")
+    cli = _user_cli(tmp_path)
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: cli)
 
     result = await oneshot.run_oneshot("hi", system_prompt="sys", model="opus[1m]")
 
@@ -263,7 +275,7 @@ async def test_claude_oneshot_runs_the_acp_agent_with_no_tools_meta(
     assert seen["spec"] is CLAUDE
     assert seen["model"] == "opus"  # the fast-mode suffix is dropped for one-shots
     assert seen["session_meta"] == ClaudeAcpProvider.oneshot_meta()
-    assert seen["env"]["CLAUDE_CODE_EXECUTABLE"] == "/opt/bin/claude"
+    assert seen["env"]["CLAUDE_CODE_EXECUTABLE"] == cli
 
 
 # -- the slash capsule (parity row 14) -------------------------------------------------
@@ -349,7 +361,8 @@ async def test_spawn_env_carries_the_user_cli_into_the_agent_process(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config, _calls = _install(monkeypatch, tmp_path, sessions=["a"])
-    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "/opt/bin/claude")
+    cli = _user_cli(tmp_path)
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: cli)
     spawned: dict[str, str] = {}
     original = AcpConnection.open
 
@@ -364,7 +377,7 @@ async def test_spawn_env_carries_the_user_cli_into_the_agent_process(
 
     await _turn(service, request)
 
-    assert spawned["CLAUDE_CODE_EXECUTABLE"] == "/opt/bin/claude"
+    assert spawned["CLAUDE_CODE_EXECUTABLE"] == cli
 
 
 @pytest.mark.asyncio
@@ -630,14 +643,15 @@ _PROVIDER_KEYS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN")
 
 
 def test_spawn_env_is_the_user_cli_and_no_credential_filter(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "/opt/bin/claude")
+    cli = _user_cli(tmp_path)
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: cli)
     for key in _PROVIDER_KEYS:
         monkeypatch.setenv(key, f"value-for-{key.lower()}")
 
     # Credentials reach the agent through the inherited engine env, not through spawn_env.
-    assert ClaudeAcpProvider.spawn_env() == {"CLAUDE_CODE_EXECUTABLE": "/opt/bin/claude"}
+    assert ClaudeAcpProvider.spawn_env() == {"CLAUDE_CODE_EXECUTABLE": cli}
 
 
 @pytest.mark.asyncio

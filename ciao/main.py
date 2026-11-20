@@ -730,8 +730,11 @@ async def _run_server_locked(
         """Install a pinned ACP adapter once, when its CLI is there. "" when it is ready."""
         from ciao import adapter_install
 
-        tracker.phase(phase).message = "installing the adapter…"
-        return await asyncio.to_thread(adapter_install.install_at_startup, adapter)
+        def announce() -> None:
+            # Only when an install is about to run, so a ready adapter shows no install phase.
+            tracker.phase(phase).message = "installing the adapter…"
+
+        return await asyncio.to_thread(adapter_install.install_at_startup, adapter, announce)
 
     # Start provider checks in the background
     tracker.start("connect_claude_code")

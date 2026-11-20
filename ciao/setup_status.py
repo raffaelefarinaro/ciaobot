@@ -476,7 +476,7 @@ def codex_status_probe(
 ) -> dict[str, Any]:
     """Codex install and login state for Settings.
 
-    Installed means both ``codex`` and ``codex-acp`` resolve. Signed in means ``codex login status``
+    Installed means ``codex`` resolves and the pinned ``codex-acp`` adapter is ready. Signed in means ``codex login status``
     exits 0. Only the exit code is read: the command's output is never stored, returned or logged,
     so a token it might print cannot reach the PWA.
     """
