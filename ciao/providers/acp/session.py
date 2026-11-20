@@ -527,7 +527,7 @@ class AcpSession:
             return
         self._close_late()
 
-    def _close_late(self) -> None:
+    def _close_late(self, *, announce: bool = True) -> None:
         if not self._late_open:
             return
         self._late_open = False
@@ -535,7 +535,7 @@ class AcpSession:
         self._quiet_task = None
         if task is not None and task is not asyncio.current_task():
             task.cancel()
-        if self._late_substantive:
+        if announce and self._late_substantive:
             event = result_event(
                 "end_turn",
                 text=self._late_text,
@@ -749,6 +749,11 @@ class AcpSession:
         )
 
     async def cancel(self) -> None:
+        # Stop ends the late turn and the shells the chat was waiting on. Nothing
+        # still open may close into a wake after the user pressed Stop, so the
+        # late close is silent and the shells are no longer watched.
+        self._close_late(announce=False)
+        self._drop_background_shells()
         # The permission response is written by the connection task after the
         # handler returns. ACP requires that cancelled outcome to be on the
         # wire before session/cancel, so wait until those writes have flushed.
@@ -777,15 +782,21 @@ class AcpSession:
         """True while a tracked background shell runs, or its end notice is still on its way."""
         return self._shells.tracking or bool(self._deferred_ends) or bool(self._end_tasks)
 
-    async def close(self) -> None:
-        """``session/close`` when the agent advertises it, then nothing else."""
-        self._close_late()
+    def _drop_background_shells(self) -> None:
+        """Stop watching every background shell and forget its pending end notices."""
         if self._shell_task is not None:
             self._shell_task.cancel()
             self._shell_task = None
         for task in list(self._end_tasks):
             task.cancel()
         self._deferred_ends = []
+        self._shells.clear()
+        self._shell_commands.clear()
+
+    async def close(self) -> None:
+        """``session/close`` when the agent advertises it, then nothing else."""
+        self._close_late()
+        self._drop_background_shells()
         if self._cap_object("sessionCapabilities", "close") and self.session_id:
             await self._connection.conn.close_session(session_id=self.session_id)
 

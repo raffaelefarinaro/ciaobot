@@ -91,6 +91,10 @@ class ShellLiveness:
         )
         return True
 
+    def clear(self) -> None:
+        """Stop tracking every shell (the session was stopped or closed); none is settled by it."""
+        self._tracked.clear()
+
     def release(self, call_id: str) -> TrackedShell | None:
         """End tracking of *call_id* because the provider settled it. The shell, or None if not tracked.
 

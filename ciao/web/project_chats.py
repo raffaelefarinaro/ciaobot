@@ -5156,6 +5156,16 @@ class ProjectChatManager:
         with self._chat_lifecycle_guard(chat_id):
             return self._delete_chat_guarded(chat_id)
 
+    def _discard_held_shell_notices(self, chat_id: str) -> None:
+        """Drop the finished-shell notices held for a chat that the person stopped (they never wake it)."""
+        self._shell_finished_pending.pop(chat_id, None)
+        self._shell_finished_waiting.pop(chat_id, None)
+        for key in [key for key in self._shell_notice_due if key[0] == chat_id]:
+            del self._shell_notice_due[key]
+        flush = self._shell_finished_flushes.pop(chat_id, None)
+        if flush is not None:
+            flush.cancel()
+
     def _forget_shell_wake_state(self, chat_id: str) -> None:
         """Drop every shell-wake record of a chat: its pending and held notices, its wake limit, its flush."""
         self._shell_finished_pending.pop(chat_id, None)
@@ -10075,6 +10085,8 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is not None and chat.retry_status == "pending":
             self.stop_chat_retry(chat_id)
+        # A Stop also discards the finished shells held for this chat: their wake must not follow it.
+        self._discard_held_shell_notices(chat_id)
         stream = self._broker.get(chat_id)
         if stream is not None:
             stream.user_stopped = True
@@ -10098,10 +10110,25 @@ class ProjectChatManager:
                 await self._streaming.join_stop_handoff(chat_id)
                 return True
         provider = self._providers.get(chat_id)
-        if provider is None:
-            return False
         turn_task = stream.turn_task if stream is not None else None
         drive_task = self._streaming.drive_task(chat_id, stream)
+        if provider is None:
+            if stream is None or turn_task is None or turn_task.done():
+                return False
+            # A turn is registered but its provider is gone, so nothing can stop it politely:
+            # cancel the turn task and clear the stream rather than leave it registered.
+            stream.force_closing = True
+            turn_task.cancel()
+            try:
+                await turn_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001 — teardown is best-effort
+                logger.debug("Turn errored while stopping chat %s", chat_id, exc_info=True)
+            if drive_task is not None:
+                await self._streaming.wait_for_drive_cleanup(chat_id, stream, self._STOP_GRACE_S)
+            self._broker.clear(chat_id, stream)
+            return True
         if turn_task is None or turn_task.done():
             if drive_task is not None:
                 return await self._streaming.wait_for_drive_cleanup(

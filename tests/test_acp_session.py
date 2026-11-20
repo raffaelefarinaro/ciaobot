@@ -424,6 +424,41 @@ async def test_close_finishes_open_late_turn(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_ends_an_open_late_turn_and_its_shells_without_a_wake(tmp_path: Path) -> None:
+    # Stop (cancel) ends the late turn and the shells it was tracking; neither may wake the chat.
+    async with _started(tmp_path, spec_quiet_period_s=30) as harness:
+        session = harness.session
+        session.on_update({
+            "sessionId": session.session_id,
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "background"},
+        })
+        session._shells.track_unpolled("call-1", command="sleep 60")
+        assert session.late_turn_open and session.background_shells_running
+
+        await session.cancel()
+
+        assert session.late_turn_open is False
+        assert session.background_shells_running is False
+        # The fake agent logs from its own process: wait until the cancel is on disk.
+        for _ in range(1000):
+            if "session/cancel" in _methods(harness.calls):
+                break
+            await asyncio.sleep(0.01)
+        assert _methods(harness.calls).count("session/cancel") == 1
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(_late_result(session), timeout=0.3)
+
+
+async def _late_result(session: AcpSession) -> ResultEvent:
+    # Only a result wakes the chat; the text chunk queued before Stop is not one.
+    async for event in session.late_events():
+        if isinstance(event, ResultEvent):
+            return event
+    raise AssertionError("late stream ended")
+
+
+@pytest.mark.asyncio
 async def test_foreground_prompt_closes_open_late_turn_first(tmp_path: Path) -> None:
     async with _started(tmp_path, spec_quiet_period_s=5) as harness:
         harness.session.on_update({
