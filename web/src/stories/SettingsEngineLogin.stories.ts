@@ -3,6 +3,7 @@ import { expect, waitFor } from 'storybook/test'
 import SettingsEngineLogin from '../components/settings/SettingsEngineLogin.vue'
 import type { FixtureRoute } from './fixtureBoundary'
 import { connectedRender, json, neverSettles } from './settingsGeneralFixture'
+import { setDesktopClientForStory } from '../lib/pwaPlatform'
 
 const LOGIN = '/api/service/login'
 const REFUSED = 'storybook-alpha refused the change'
@@ -221,7 +222,6 @@ export const Narrow: Story = {
 // The Mac app owns Start at Login: the row says so and offers no CLI command.
 // The desktop flag is read when the owner mounts, so it is set for this story
 // alone and cleared when its play function ends.
-const DESKTOP_FLAG = '__CIAOBOT_DESKTOP__'
 const macApp = loginStory([() => json(status({
   installed: false,
   enabled: null,
@@ -232,7 +232,7 @@ const macApp = loginStory([() => json(status({
 export const MacAppNoCliService: Story = {
   parameters: macApp.parameters,
   render: (args, context) => {
-    ;(globalThis as Record<string, unknown>)[DESKTOP_FLAG] = true
+    setDesktopClientForStory(true)
     return macApp.render!(args, context)
   },
   play: async ({ canvas }) => {
@@ -242,7 +242,7 @@ export const MacAppNoCliService: Story = {
       expect(canvas.queryByText('storybook-alpha service setup')).toBeNull()
       expect(canvas.queryByRole('button', { name: 'Copy' })).toBeNull()
     } finally {
-      delete (globalThis as Record<string, unknown>)[DESKTOP_FLAG]
+      setDesktopClientForStory(false)
     }
   },
 }
