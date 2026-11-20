@@ -131,24 +131,27 @@ def test_authorize_holder_follows_only_the_live_lease(tmp_path) -> None:
     run = cr.begin_run(vault, holder="live", ttl_s=60, now=now)
     before = cr.state_path(vault).read_bytes()
 
-    assert cr.authorize_holder(
-        vault, holder=run.holder, clock=lambda: now + timedelta(seconds=1)
-    )
-    assert not cr.authorize_holder(
-        vault, holder="someone-else", clock=lambda: now + timedelta(seconds=1)
-    )
-    assert not cr.authorize_holder(
-        vault, holder="", clock=lambda: now + timedelta(seconds=1)
-    )
-    assert not cr.authorize_holder(
-        vault, holder=run.holder, clock=lambda: now + timedelta(seconds=120)
-    )
+    def allowed(holder: str, at: timedelta) -> bool:
+        with cr.authorize_holder(
+            vault, holder=holder, clock=lambda: now + at
+        ) as answer:
+            return answer
+
+    assert allowed(run.holder, timedelta(seconds=1))
+    assert not allowed("someone-else", timedelta(seconds=1))
+    assert not allowed("", timedelta(seconds=1))
+    assert not allowed(run.holder, timedelta(seconds=120))
     assert cr.state_path(vault).read_bytes() == before
 
 
 def test_authorize_holder_refuses_a_replaced_lease(tmp_path) -> None:
     vault, now, expired, replacement = _expired_and_replaced_lease(tmp_path)
-    later = lambda: now + timedelta(seconds=3)  # noqa: E731
 
-    assert not cr.authorize_holder(vault, holder=expired.holder, clock=later)
-    assert cr.authorize_holder(vault, holder=replacement.holder, clock=later)
+    def allowed(holder: str) -> bool:
+        with cr.authorize_holder(
+            vault, holder=holder, clock=lambda: now + timedelta(seconds=3)
+        ) as answer:
+            return answer
+
+    assert not allowed(expired.holder)
+    assert allowed(replacement.holder)

@@ -549,7 +549,7 @@ def _promote_to_region(
     deferral_out: list[ReconcileDecision] | None = None,
     receipt_out: dict[str, Any] | None = None,
     expected_revision: str | None = None,
-    authorize: Callable[[], bool] | None = None,
+    authorize: Callable[[], AbstractContextManager[bool]] | None = None,
     operation_id: str = "",
 ) -> tuple[PromotionOutcome, str | None]:
     """Write one region-bound proposal.
@@ -557,11 +557,14 @@ def _promote_to_region(
     Returns ``(outcome, promotable_or_None)``; see :data:`PromotionOutcome`
     for what each status means and which of them leave the fact queued.
 
-    ``expected_revision``, when given, replaces the digest this function would
-    otherwise pin from the body it read; a live body that differs is a
-    ``conflict``. ``authorize`` and ``operation_id`` are forwarded to the region
-    write (see :func:`ciao.memory_receipts.commit_region_change`); a refused
-    authorisation is ``refused``. All three default to today's behaviour.
+    ``expected_revision``, when given, is compared with the digest of the body
+    as read, before any verdict: a difference is a ``conflict`` whatever the
+    verdict would have been. ``authorize`` is a factory for a context manager
+    (see :func:`ciao.memory_receipts.commit_region_change`), entered once for the
+    region write and checked early, released, before a covered or update
+    verdict writes its undo-log trace; a refusal is ``refused`` with nothing
+    written. ``operation_id`` is forwarded to the region write. All three
+    default to today's behaviour.
 
     ``deferral_out``, when given, receives the defer row behind a ``deferred``
     outcome — the one the caller handed in, or the one built here for a stale
@@ -603,8 +606,9 @@ def _promote_to_region(
     from ciao.memory_receipts import (
         AuthorityRefused,
         RevisionConflict,
+        check_authority,
         commit_region_change,
-        content_revision,
+        destination_revision,
     )
     from ciao.memory_tool import (
         MemoryLockError,
@@ -613,7 +617,6 @@ def _promote_to_region(
         read_region,
         release_guide_lock,
         resolve_region,
-        serialize_entries,
     )
 
     promotable = _promotable_text(proposal.text)
@@ -645,8 +648,23 @@ def _promote_to_region(
         # re-reads under its lock and refuses on any drift, so a competing
         # managed write that landed between this read and the commit is a
         # conflict — the fact stays queued — instead of being overwritten.
+        # The caller's digest is compared here, before any verdict below, so a
+        # duplicate, covered or deferred answer made against another body never
+        # settles or annotates the queue row.
+        pinned = destination_revision(entries)
+        if expected_revision is not None and expected_revision != pinned:
+            logger.info(
+                "memory apply: destination changed, fact stays queued (digest)"
+            )
+            return "conflict", promotable
         if expected_revision is None:
-            expected_revision = content_revision(serialize_entries(entries))
+            expected_revision = pinned
+
+        def _allowed_now() -> bool:
+            # An early answer, taken and released before any undo-log trace is
+            # written. The write itself re-checks while holding the authority.
+            return authorize is None or check_authority(authorize)
+
         # Compared with stamps stripped: the same fact promoted on two
         # different days is still the same fact.
         if promotable in {strip_learned_stamp(entry) for entry in entries}:
@@ -691,6 +709,8 @@ def _promote_to_region(
                     promotable[:80],
                 )
             else:
+                if not _allowed_now():
+                    return "refused", promotable
                 _log_consolidation(
                     vault_root,
                     region,
@@ -753,6 +773,8 @@ def _promote_to_region(
                 updated[index - 1] = (
                     f"{strip_learned_stamp(merged)} [{date.today().isoformat()}]"
                 )
+                if not _allowed_now():
+                    return "refused", promotable
                 _log_consolidation(vault_root, region, old)
                 receipt = commit_region_change(
                     guide_path,
@@ -867,7 +889,7 @@ def accept_region_fact(
     deferral_out: list[ReconcileDecision] | None = None,
     receipt_out: dict[str, Any] | None = None,
     expected_revision: str | None = None,
-    authorize: Callable[[], bool] | None = None,
+    authorize: Callable[[], AbstractContextManager[bool]] | None = None,
     operation_id: str = "",
 ) -> tuple[PromotionOutcome, str | None]:
     """Write one approved region fact through the guarded path.
