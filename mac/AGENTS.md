@@ -23,7 +23,7 @@ Traps:
 
 ## Git
 
-All pull requests target `develop` of `raffaelefarinaro/ciaobot`, like the rest of the repository. Releases use the `release-mac` skill (`skills/release-mac/` at the repository root); it carries a release freeze until Mac publishing moves into this repository.
+All pull requests target `develop` of `raffaelefarinaro/ciaobot`, like the rest of the repository. Releases use the `release-mac` skill (`skills/release-mac/` at the repository root). Publishing is operator-only: the Developer ID identity, the notary key and the Sparkle EdDSA private key are used from the operator's keychain, never from CI or an agent session.
 
 ## Agent learnings
 

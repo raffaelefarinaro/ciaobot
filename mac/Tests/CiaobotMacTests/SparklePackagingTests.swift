@@ -477,6 +477,59 @@ final class SparklePackagingTests: XCTestCase {
         XCTAssertTrue(argv[3].hasSuffix("/engine-build"), line)
     }
 
+    /// CFBundleShortVersionString and CFBundleVersion come from the committed
+    /// project version, never from a pinned string: 1.10.0 is build 11000 and
+    /// 2.0.0 is build 20000.
+    func testBuildAppDerivesBundleVersionsFromPyproject() throws {
+        let fixture = try makeFakeBuildRepository(preExistingSymlinkedInfoPlist: false)
+        let pyproject = scratch.appendingPathComponent("pyproject.toml")
+        let info = fixture.repo.appendingPathComponent(".build/Ciaobot.app/Contents/Info.plist")
+
+        for (version, build) in [("1.10.0", "11000"), ("2.0.0", "20000")] {
+            try Data("[project]\nname = \"ciaobot\"\nversion = \"\(version)\"\n".utf8).write(to: pyproject)
+
+            let result = try runFakeBuild(fixture, tag: version)
+
+            XCTAssertEqual(result.status, 0, result.output)
+            let plist = try XCTUnwrap(
+                try PropertyListSerialization.propertyList(from: Data(contentsOf: info), format: nil) as? [String: Any]
+            )
+            XCTAssertEqual(plist["CFBundleShortVersionString"] as? String, version)
+            XCTAssertEqual(plist["CFBundleVersion"] as? String, build)
+        }
+    }
+
+    /// A version that cannot map to a strictly increasing build number is
+    /// refused before the Swift toolchain runs.
+    func testBuildAppRefusesMalformedVersion() throws {
+        let fixture = try makeFakeBuildRepository(preExistingSymlinkedInfoPlist: false)
+        let pyproject = scratch.appendingPathComponent("pyproject.toml")
+
+        // Each shape must fail for its own reason, so a removed check shows up
+        // as a changed message or a successful build.
+        let cases = [
+            ("2.0", "MAJOR.MINOR.PATCH"),
+            ("2.0.0rc1", "MAJOR.MINOR.PATCH"),
+            ("02.0.0", "MAJOR.MINOR.PATCH"),
+            ("2.0.0.1", "MAJOR.MINOR.PATCH"),
+            ("2.100.0", "below 100"),
+            ("2.0.100", "below 100"),
+        ]
+        for (version, reason) in cases {
+            try Data("version = \"\(version)\"\n".utf8).write(to: pyproject)
+
+            let result = try runFakeBuild(fixture, tag: "malformed")
+
+            XCTAssertNotEqual(result.status, 0, "\(version): \(result.output)")
+            XCTAssertTrue(result.output.contains(reason), "\(version): \(result.output)")
+        }
+        XCTAssertFalse(
+            fileManager.fileExists(atPath: fixture.repo.appendingPathComponent(".build/out").path),
+            "a malformed version must be refused before swift build runs"
+        )
+        XCTAssertFalse(fileManager.fileExists(atPath: fixture.repo.appendingPathComponent(".build/Ciaobot.app").path))
+    }
+
     /// The driver runs under python3.12 even though `python3` is 3.15.
     func testEngineBuildPrefersPython312OverPython3() throws {
         let fixture = try makeFakeBuildRepository(preExistingSymlinkedInfoPlist: false)
@@ -921,6 +974,11 @@ final class SparklePackagingTests: XCTestCase {
             at: resolved,
             to: artifactSlice.appendingPathComponent("Sparkle.xcframework")
         )
+
+        // The build reads the project version from ../pyproject.toml, one level
+        // above mac/ (the real pyproject.toml sits at the checkout root).
+        try Data("[project]\nname = \"ciaobot\"\nversion = \"2.0.0\"\n".utf8)
+            .write(to: scratch.appendingPathComponent("pyproject.toml"))
 
         // The build refuses an unclean checkout, so the fake repository is a
         // committed git repository (.build stays untracked).
