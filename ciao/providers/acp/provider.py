@@ -432,7 +432,7 @@ class AcpProvider(BaseProvider):
     @property
     def background_work_outstanding(self) -> bool:
         session = self._session
-        return session is not None and session.late_turn_open
+        return session is not None and (session.late_turn_open or session.background_shells_running)
 
     @property
     def seconds_since_activity(self) -> float:

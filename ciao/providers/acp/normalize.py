@@ -49,15 +49,18 @@ _AGENT_TOOLS = frozenset({"Agent", "Task"})
 _SHELL_TAIL_LINES = 40
 _SHELL_TAIL_CHARS = 4096
 _SHELL_SCAN_CHARS = 65536
-_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+_ANSI = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\^_]|\x1b\][^\n]*"
+)
 # A launch acknowledgement names the shell (OpenCode: "shell ID: sh_…", Claude: "with ID: …"),
 # its pid and the file its output streams to. Each is matched strictly; nothing else is taken.
 _SHELL_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _SHELL_ID_TEXT = re.compile(r"(?:shell ID|with ID): ([A-Za-z0-9_-]{1,64})")
-_SHELL_PID_TEXT = re.compile(r"^PID: (\d{1,9})\s*$", re.MULTILINE)
-_SHELL_PATH_TEXT = re.compile(r"(?:streaming|written) to: (\S+?)(?=\.?\s|$)", re.MULTILINE)
+# The pid and output path come from structured provider metadata only, never from text the
+# command printed (a command may echo "PID: 1234" or "streaming to: ...").
+# No ``..`` or ``.`` segment may appear: the path must be the one the shell really wrote to.
 _SHELL_OUTPUT_PATH = re.compile(
-    r"/(?:[^/\s]+/)*(?:shell/[0-9a-f]{1,64}/sh_[A-Za-z0-9_-]{1,64}\.out|tasks/[A-Za-z0-9_-]{1,64}\.output)"
+    r"/(?:(?!\.{1,2}/)[^/\s]+/)*(?:shell/[0-9a-f]{1,64}/sh_[A-Za-z0-9_-]{1,64}\.out|tasks/[A-Za-z0-9_-]{1,64}\.output)"
 )
 _SHELL_PATH_CHARS = 512
 
@@ -645,15 +648,31 @@ def _remember_shell_frame(call: _Call, u: Mapping[str, Any]) -> None:
         call.exit_code = code
 
 
+def sanitize_output(text: str) -> str:
+    """``text`` with ANSI and OSC sequences and every non-printing character removed.
+
+    Kept: newlines and tabs. Removed: every Unicode category C character (C0 and C1 controls,
+    bidi overrides, zero-width and format characters, tag characters), the line and paragraph
+    separators, and an unterminated OSC sequence to the end of its line.
+    """
+    plain = _ANSI.sub("", text).replace("\r\n", "\n").replace("\r", "\n")
+    return "".join(
+        ch for ch in plain
+        if ch in "\n\t" or (not unicodedata.category(ch).startswith("C") and ch not in _LINE_SEPARATORS)
+    )
+
+
+_LINE_SEPARATORS = frozenset("\u2028\u2029")
+
+
 def shell_output_tail(text: str) -> str:
     """The last ``_SHELL_TAIL_LINES`` lines and ``_SHELL_TAIL_CHARS`` characters of a shell's output.
 
     ANSI sequences and control characters (tabs and newlines aside) are removed. Only the final
     ``_SHELL_SCAN_CHARS`` of ``text`` are read, so a huge output costs a bounded scan.
     """
-    plain = _ANSI.sub("", text[-_SHELL_SCAN_CHARS:]).replace("\r\n", "\n").replace("\r", "\n")
-    kept = "".join(ch for ch in plain if ch in "\n\t" or not unicodedata.category(ch).startswith("C"))
-    tail = "\n".join(kept.split("\n")[-_SHELL_TAIL_LINES:])
+    plain = sanitize_output(text[-_SHELL_SCAN_CHARS:])
+    tail = "\n".join(plain.split("\n")[-_SHELL_TAIL_LINES:])
     return tail[-_SHELL_TAIL_CHARS:].strip("\n")
 
 
@@ -666,21 +685,24 @@ def _shell_id(meta: Mapping[str, Any], task: str, text: str) -> str:
     return match.group(1) if match else ""
 
 
-def _shell_pid(meta: Mapping[str, Any], text: str) -> int | None:
+def _shell_pid(meta: Mapping[str, Any]) -> int | None:
+    """The shell's pid from structured launch metadata (OpenCode ``metadata.pid``); never from text."""
     pid = meta.get("pid")
     if isinstance(pid, int) and not isinstance(pid, bool) and 0 < pid < 2**31:
         return pid
-    match = _SHELL_PID_TEXT.search(text)
-    return int(match.group(1)) if match else None
+    return None
 
 
-def _shell_output_path(text: str) -> str:
-    """The output file a launch acknowledgement names, only when it lies where a shell writes its output."""
-    match = _SHELL_PATH_TEXT.search(text)
-    if match is None:
+def _shell_output_path(meta: Mapping[str, Any]) -> str:
+    """The output file from structured launch metadata, only when it lies where a shell writes its output.
+
+    No provider metadata carries it today (the fixtures show it only in the acknowledgement text,
+    which is never read), so this is empty until an adapter sends ``metadata.outputPath``.
+    """
+    path = meta.get("outputPath")
+    if not isinstance(path, str) or len(path) > _SHELL_PATH_CHARS or ".." in path.split("/"):
         return ""
-    path = match.group(1)
-    return path if len(path) <= _SHELL_PATH_CHARS and _SHELL_OUTPUT_PATH.fullmatch(path) else ""
+    return path if _SHELL_OUTPUT_PATH.fullmatch(path) else ""
 
 
 def _shell_result(
@@ -713,8 +735,8 @@ def _shell_result(
             is_error=False,
             background=True,
             shell_id=_shell_id(meta, known.shell_task, ack_text),
-            shell_pid=_shell_pid(meta, ack_text),
-            output_path=_shell_output_path(ack_text),
+            shell_pid=_shell_pid(meta),
+            output_path=_shell_output_path(meta),
         )
     code = meta.get("exit")
     if not _is_int(code):

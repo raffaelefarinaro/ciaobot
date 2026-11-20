@@ -10,16 +10,14 @@ from __future__ import annotations
 
 from ciao import core_prompt as mi
 
-SHELL_BAN = (
-    "Do not start background shells (`run_in_background` on Bash, `Monitor`, "
-    "a trailing `&`, `nohup`, `setsid`, `disown`): Ciaobot cannot track them."
-)
+SHELL_BAN = "Do not start background shells"
 SUBAGENT_OK = "Dispatching a background subagent (the Agent tool with `run_in_background`) is allowed."
 
 
-def test_core_carries_background_shell_rule() -> None:
+def test_core_no_longer_bans_background_shells() -> None:
     core = mi.unified_core()
-    assert SHELL_BAN in core
+    assert SHELL_BAN not in core
+    assert "Ciaobot cannot track them" not in core
     assert SUBAGENT_OK in core
     assert "subagent" in core
 
@@ -261,12 +259,12 @@ def test_core_routes_write_procedures_out_of_the_always_loaded_prompt() -> None:
     assert "A note without frontmatter cannot be indexed" not in text
     assert "Every Ciaobot operation is a `ciao <noun> <verb>" not in text
     assert "`Agent`/`Task`" not in text
-    # run_in_background appears exactly twice: once in the shell-ban sentence
-    # and once in the sentence allowing a background subagent. Each sentence
-    # appears once, and no other mention may remain.
-    assert text.count(SHELL_BAN) == 1
+    # Background shells are tracked now, so the core carries no shell ban. The
+    # subagent sentence stays, and it is the only run_in_background mention.
+    assert SHELL_BAN not in text
+    assert "Ciaobot cannot track them" not in text
     assert text.count(SUBAGENT_OK) == 1
-    assert text.count("run_in_background") == 2
+    assert text.count("run_in_background") == 1
 
 
 def test_core_synopsis_only_offers_agent_allowed_task_move_columns() -> None:

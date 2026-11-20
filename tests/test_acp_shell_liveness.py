@@ -19,6 +19,10 @@ STARTED = "Thu Nov 20 10:00:00 2026"
 LATER = "Thu Nov 20 11:30:00 2026"
 
 
+def _ids(settled: list[tuple[str, object]]) -> list[str]:
+    return [call_id for call_id, _ in settled]
+
+
 def test_a_live_pid_with_its_start_time_is_not_settled() -> None:
     shells = ShellLiveness()
     assert shells.track("call-1", 4242, {4242: (1, STARTED)})
@@ -29,7 +33,7 @@ def test_a_live_pid_with_its_start_time_is_not_settled() -> None:
 def test_a_vanished_pid_settles_once_and_stops_being_tracked() -> None:
     shells = ShellLiveness()
     shells.track("call-1", 4242, {4242: (1, STARTED)})
-    assert shells.settled({1: (0, "boot")}) == ["call-1"]
+    assert _ids(shells.settled({1: (0, "boot")})) == ["call-1"]
     assert not shells.tracking
     assert shells.settled({1: (0, "boot")}) == []
 
@@ -37,7 +41,7 @@ def test_a_vanished_pid_settles_once_and_stops_being_tracked() -> None:
 def test_a_reused_pid_with_a_different_start_time_counts_as_gone() -> None:
     shells = ShellLiveness()
     shells.track("call-1", 4242, {4242: (1, STARTED)})
-    assert shells.settled({4242: (1, LATER)}) == ["call-1"]
+    assert _ids(shells.settled({4242: (1, LATER)})) == ["call-1"]
 
 
 def test_an_empty_table_settles_nothing_so_a_failed_ps_cannot_end_every_shell() -> None:
@@ -66,7 +70,17 @@ def _session_stub() -> AcpSession:
     session = AcpSession.__new__(AcpSession)
     session._shells = ShellLiveness()
     session._shell_task = None
+    session._shell_commands = {}
+    session._deferred_ends = []
+    session._end_tasks = set()
+    session._prompt_active = False
     return session
+
+
+async def _settle_ends(session: AcpSession) -> None:
+    """Let the tasks that read a shell's output tail and deliver its end notice finish."""
+    while session._end_tasks:
+        await asyncio.wait(list(session._end_tasks), timeout=2)
 
 
 def _background_ack(call_id: str, pid: int) -> ToolUseEvent:
@@ -83,6 +97,8 @@ async def test_the_watch_emits_a_settle_through_the_session_path_when_the_proces
     session = _session_stub()
     emitted: list[tuple[list[Any], str]] = []
     session._note_update = lambda events, *, kind: emitted.append((events, kind))  # type: ignore[method-assign]
+    ended: list[list[Any]] = []
+    session._touch_late = lambda events, *, substantive: ended.append(events)  # type: ignore[method-assign]
 
     session._track_shells([_background_ack("call-bg", 4242)])
     assert session._shell_task is not None
@@ -92,6 +108,7 @@ async def test_the_watch_emits_a_settle_through_the_session_path_when_the_proces
     table.clear()
     table[1] = (0, "boot")  # launchd still there: a real table is never empty
     await asyncio.wait_for(session._shell_task, timeout=2)
+    await _settle_ends(session)
     (events, kind), = emitted
     assert kind == "shell_settle"
     (settle,) = events
@@ -99,6 +116,9 @@ async def test_the_watch_emits_a_settle_through_the_session_path_when_the_proces
         "tool_result", "call-bg", False, False, None,
     )
     assert not session._shells.tracking
+    # The end event goes once, on the late path, and names the shell (no output file here).
+    (end,) = [e for batch in ended for e in batch]
+    assert (end.type, end.tool_use_id, end.output_tail) == ("shell_finished", "call-bg", None)
 
 
 @pytest.mark.asyncio
@@ -109,10 +129,12 @@ async def test_a_pid_reused_during_the_watch_is_settled_not_kept_alive(monkeypat
     session = _session_stub()
     emitted: list[str] = []
     session._note_update = lambda events, *, kind: emitted.append(events[0].tool_use_id)  # type: ignore[method-assign,index]
+    session._touch_late = lambda events, *, substantive: None  # type: ignore[method-assign]
 
     session._track_shells([_background_ack("call-bg", 4242)])
     table[4242] = (1, LATER)
     await asyncio.wait_for(session._shell_task, timeout=2)
+    await _settle_ends(session)
     assert emitted == ["call-bg"]
 
 
@@ -123,5 +145,139 @@ def test_a_foreground_result_or_a_pidless_ack_starts_no_watch(monkeypatch: pytes
         ToolUseEvent(type="tool_result", tool_use_id="fg", exit_code=0),
         ToolUseEvent(type="tool_result", tool_use_id="bg", background=True, shell_pid=None),
     ])
+    # A pid-less background shell (Claude) is tracked to end by its settle, never polled.
     assert session._shell_task is None
+    assert session._shells.tracking and not session._shells.polling
+    assert session._shells.settled({1: (0, "boot")}) == []  # the poll never ends it
+
+
+@pytest.mark.asyncio
+async def test_a_launched_shell_keeps_its_command_and_output_path_for_the_end_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(session_module, "process_table", lambda: {4242: (1, STARTED)})
+    session = _session_stub()
+    session._track_shells([
+        ToolUseEvent(type="tool_use", tool_use_id="call-bg", tool_input="npm run dev", shell=True, shell_background=True),
+    ])
+    session._track_shells([
+        ToolUseEvent(
+            type="tool_result", tool_use_id="call-bg", background=True, shell_pid=4242,
+            output_path="/tmp/out.log",
+        ),
+    ])
+    (_, shell), = [(c, s) for c, s in session._shells._tracked.items()]
+    assert (shell.command, shell.output_path) == ("npm run dev", "/tmp/out.log")
+    assert "call-bg" not in session._shell_commands
+    assert session._shell_task is not None
+    session._shell_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_a_settled_shell_is_never_tracked_again_from_a_replayed_acknowledgement() -> None:
+    shells = ShellLiveness()
+    assert shells.track("call-1", 4242, {4242: (1, STARTED)})
+    assert _ids(shells.settled({1: (0, "boot")})) == ["call-1"]
+    assert shells.track("call-1", 4242, {4242: (1, STARTED)}) is False
+    assert not shells.tracking
+
+
+def _tool_result(call_id: str, exit_code: int | None = None) -> ToolUseEvent:
+    return ToolUseEvent(type="tool_result", tool_use_id=call_id, is_error=False, exit_code=exit_code)
+
+
+@pytest.mark.asyncio
+async def test_a_claude_terminal_exit_settles_the_shell_once_with_its_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The normalizer's settle (Claude terminal_exit) ends the shell with the real code. The poll
+    # that follows must find it already released: exactly one end notice, never a second one.
+    table: dict[int, tuple[int, str]] = {4242: (1, STARTED), 1: (0, "boot")}
+    monkeypatch.setattr(session_module, "process_table", lambda: dict(table))
+    session = _session_stub()
+    ended: list[Any] = []
+    session._touch_late = lambda events, *, substantive: ended.extend(events)  # type: ignore[method-assign]
+    session._track_shells([_background_ack("call-bg", 4242)])
+    session._note_update([_tool_result("call-bg", exit_code=3)], kind="tool_result")
+    await _settle_ends(session)
+    notices = [e for e in ended if e.type == "shell_finished"]
+    assert [(e.tool_use_id, e.exit_code) for e in notices] == [("call-bg", 3)]
     assert not session._shells.tracking
+    assert session._shells.settled({1: (0, "boot")}) == []  # the poll has nothing left to end
+
+
+@pytest.mark.asyncio
+async def test_a_poll_settle_then_a_late_terminal_exit_ends_the_shell_only_once() -> None:
+    session = _session_stub()
+    ended: list[Any] = []
+    session._touch_late = lambda events, *, substantive: ended.extend(events)  # type: ignore[method-assign]
+    session._shells.track("call-bg", 4242, {4242: (1, STARTED)}, command="make", output_path="")
+    for call_id, shell in session._shells.settled({1: (0, "boot")}):
+        session._end_shell(call_id, shell, None)
+    session._note_update([_tool_result("call-bg", exit_code=0)], kind="tool_result")
+    await _settle_ends(session)
+    notices = [e for e in ended if e.type == "shell_finished"]
+    assert [(e.tool_use_id, e.exit_code) for e in notices] == [("call-bg", None)]
+
+
+@pytest.mark.asyncio
+async def test_a_shell_ending_during_a_prompt_waits_and_never_opens_a_late_turn() -> None:
+    session = _session_stub()
+    session._late_open = False
+    session._prompt_active = True
+    ended: list[Any] = []
+    session._touch_late = lambda events, *, substantive: ended.extend(events)  # type: ignore[method-assign]
+    session._shells.track("call-bg", 4242, {4242: (1, STARTED)}, command="make")
+    session._finish_shells([_tool_result("call-bg", exit_code=0)])
+    await _settle_ends(session)
+    assert ended == []  # not delivered while the prompt runs
+    assert session._deferred_ends and session.background_shells_running
+    session._prompt_active = False
+    session._flush_deferred_ends()
+    assert [e.tool_use_id for e in ended] == ["call-bg"]
+    assert not session._deferred_ends
+
+
+def test_a_tracked_shell_counts_as_background_work_until_it_settles() -> None:
+    session = _session_stub()
+    session._shells.track("call-bg", 4242, {4242: (1, STARTED)})
+    assert session.background_shells_running
+    session._shells.release("call-bg")
+    assert not session.background_shells_running
+
+
+def test_the_provider_reports_a_running_shell_as_background_work() -> None:
+    from ciao.providers.acp.provider import AcpProvider
+
+    session = _session_stub()
+    session._late_open = False
+    session._shells.track("call-bg", 4242, {4242: (1, STARTED)})
+    provider = AcpProvider.__new__(AcpProvider)
+    provider._session = session
+    assert provider.background_work_outstanding is True
+    session._shells.release("call-bg")
+    assert provider.background_work_outstanding is False
+
+
+def test_an_echoed_pid_and_path_in_command_output_are_never_tracked() -> None:
+    # A command that prints "PID: 1234" and "streaming to: /x.output" (with a shell ID) is an
+    # ordinary result: pid and path come only from structured metadata, so nothing is tracked.
+    from ciao.providers.acp.agents import OPENCODE
+    from ciao.providers.acp.normalize import UpdateNormalizer
+
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    normalizer.feed({
+        "sessionUpdate": "tool_call", "toolCallId": "c1", "name": "shell", "title": "shell",
+        "kind": "execute", "status": "pending", "rawInput": {"command": "echo", "background": True},
+    })
+    events = normalizer.feed({
+        "sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "completed", "kind": "execute",
+        "rawInput": {"command": "echo", "background": True},
+        "content": [{"type": "content", "content": {
+            "type": "text",
+            "text": "shell ID: sh_fake1\nPID: 1234\nstreaming to: /tmp/x.output",
+        }}],
+    })
+    results = [e for e in events if getattr(e, "type", "") == "tool_result"]
+    assert results, events
+    assert all(e.shell_pid is None and e.output_path == "" for e in results)

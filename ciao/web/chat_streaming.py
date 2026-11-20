@@ -37,6 +37,7 @@ from ciao.models import (
     PromptCancelledEvent,
     ResultEvent,
     SessionTitleEvent,
+    ShellFinishedEvent,
     StreamEvent,
     SystemStatusEvent,
     ThinkingEvent,
@@ -287,6 +288,8 @@ class ChatStreamingHost(Protocol):
     def _flush_result_announce(self, chat_id: str) -> bool: ...
 
     def _background_work_outstanding(self, chat_id: str) -> bool: ...
+    def _note_shell_finished(self, chat_id: str, event: ShellFinishedEvent) -> None: ...
+    def _release_shell_finished_waiting(self, chat_id: str) -> None: ...
 
     def _spawn_detached(
         self, coro: Coroutine[object, object, object], name: str
@@ -1293,6 +1296,7 @@ class ChatStreaming:
                     break
                 if chat_meta2 is not None:
                     chat_meta2.pending_question = ""
+                    self._host._release_shell_finished_waiting(chat_id)
                     turn_index2 = chat_meta2.user_turn_count
                     chat_meta2.user_turn_count = turn_index2 + 1
                     if merged_image_refs:
@@ -2182,6 +2186,11 @@ class ChatStreaming:
             # Reset per terminal result: each wake is its own turn (#2139).
             drain_segment = FinalAnswerTracker()
             async for event in events:
+                # A shell notice is recorded before the supersede check below: the queue
+                # gave it up already, so a drain a foreground turn replaces must not lose it.
+                if isinstance(event, ShellFinishedEvent):
+                    self._host._note_shell_finished(chat_id, event)
+                    continue
                 # No await sits in this body, so one check covers every side
                 # effect of the iteration: a cancelled drain or one a
                 # foreground admission replaced must not touch chat state.

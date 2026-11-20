@@ -12,6 +12,15 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     r"|private[_-]?key|bearer)\s*[:=]\s*)(\S.*)"
 )
 
+# A secret passed as a flag value: `--token X`, `--api-key=X`, `--password X`. The keyword must end
+# the flag name, so `--author Name` is not a secret.
+_SECRET_FLAG_RE = re.compile(
+    r"(?i)(--[a-z0-9-]*?(?:token|secret|password|passwd|api-?key|auth|credential)(?=[=\s])(?:=|\s+))(\S+)"
+)
+
+# An HTTP Authorization header value: `Authorization: Bearer X`, `Authorization: X`.
+_AUTH_HEADER_RE = re.compile(r"(?i)(authorization\s*:\s*)(?:(?:bearer|basic|token)\s+)?\S+")
+
 # A bare, long, space-free base64 run: a PEM body or a raw token carries no
 # keyword of its own, so the assignment rule above would not see it.
 _OPAQUE_BLOB_RE = re.compile(r"^[A-Za-z0-9+/=_-]{40,}$")
@@ -24,7 +33,9 @@ def redact_secret_line(line: str) -> str:
     """Drop the value of a credential-shaped line, keeping its label."""
     if _OPAQUE_BLOB_RE.match(line.strip()):
         return "[redacted]"
-    return _SECRET_ASSIGNMENT_RE.sub(lambda m: m.group(1) + "[redacted]", line)
+    line = _SECRET_ASSIGNMENT_RE.sub(lambda m: m.group(1) + "[redacted]", line)
+    line = _SECRET_FLAG_RE.sub(lambda m: m.group(1) + "[redacted]", line)
+    return _AUTH_HEADER_RE.sub(lambda m: m.group(1) + "[redacted]", line)
 
 
 def redact_text(text: str) -> str:

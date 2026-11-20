@@ -20,6 +20,7 @@ from ciao.models import (
     AssistantTextDelta,
     ContextCompactedEvent,
     ModelCapabilityQuestionEvent,
+    ShellFinishedEvent,
     ModelChangedEvent,
     PermissionRequestEvent,
     PromptCancelledEvent,
@@ -545,6 +546,9 @@ def event_to_json(event: StreamEvent) -> dict | None:
         return None
     if isinstance(event, ContextCompactedEvent):
         # Host bookkeeping only: the drive loop clears the stable-context marker.
+        return None
+    if isinstance(event, ShellFinishedEvent):
+        # Host bookkeeping only: the drive loop wakes the chat with one notice (not journaled).
         return None
     if isinstance(event, AssistantTextDelta):
         payload: dict = {"type": "text_delta", "text": event.text}
