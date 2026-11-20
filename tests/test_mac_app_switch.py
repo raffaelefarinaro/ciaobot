@@ -91,12 +91,14 @@ def test_apple_silicon_probe_under_rosetta(monkeypatch: pytest.MonkeyPatch) -> N
     assert package_version._host_is_apple_silicon() is False
 
 
-def test_download_url_is_the_latest_release_dmg() -> None:
-    """One constant, pointing at the newest stable release's DMG asset."""
+def test_download_url_is_the_latest_release_page() -> None:
+    """One constant: the newest stable release page. Releases attach
+    Ciaobot-<version>.dmg, so a fixed asset URL would 404."""
     assert (
         package_version.MAC_APP_DOWNLOAD_URL
-        == "https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/Ciaobot.dmg"
+        == "https://github.com/raffaelefarinaro/ciaobot/releases/latest"
     )
+    assert not package_version.MAC_APP_DOWNLOAD_URL.endswith(".dmg")
 
 
 def test_tile_on_an_old_mac_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

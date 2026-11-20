@@ -252,7 +252,7 @@ describe('HousekeepingStrip', () => {
       title: 'Switch to the new Ciaobot app',
       detail: 'Your workspaces, chats and settings are kept. Install Ciaobot for Mac on the computer running Ciaobot and it takes over from this install.',
       link_label: 'Download for Mac',
-      link_url: 'https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/Ciaobot.dmg',
+      link_url: 'https://github.com/raffaelefarinaro/ciaobot/releases/latest',
       dismiss_label: 'Not now',
     })]
     const dismissSpy = vi.spyOn(store, 'dismiss').mockResolvedValue({ ok: true, summary: '' })
@@ -262,7 +262,7 @@ describe('HousekeepingStrip', () => {
     const [row] = rows(wrapper)
     const [link] = leads(row)
     expect(link.element.tagName).toBe('A')
-    expect(link.attributes('href')).toBe('https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/Ciaobot.dmg')
+    expect(link.attributes('href')).toBe('https://github.com/raffaelefarinaro/ciaobot/releases/latest')
     expect(link.attributes('target')).toBe('_blank')
     expect(link.attributes('rel')).toContain('noopener')
     expect(link.text()).toBe('Download for Mac')

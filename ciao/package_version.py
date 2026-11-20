@@ -38,9 +38,10 @@ def latest_release_redirect_url(repo: str | None = None) -> str:
     return f"https://github.com/{repo}/releases/latest"
 
 
-# The 2.0 Mac app DMG on the newest stable release (#3205). #3131 owns the
-# asset name; change it here only.
-MAC_APP_DOWNLOAD_URL = f"https://github.com/{DEFAULT_GITHUB_REPO}/releases/latest/download/Ciaobot.dmg"
+# The newest stable release page, where the 2.0 Mac app DMG is attached (#3205).
+# Releases attach Ciaobot-<version>.dmg (the name carries the version), so a
+# direct download URL cannot be stable; the page always resolves.
+MAC_APP_DOWNLOAD_URL = f"https://github.com/{DEFAULT_GITHUB_REPO}/releases/latest"
 
 
 def _release_page_request(url: str) -> urllib.request.Request:
