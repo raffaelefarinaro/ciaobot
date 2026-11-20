@@ -212,6 +212,12 @@ async def test_cancel_answers_pending_permission_cancelled_then_cancels_session(
             raise AssertionError("permission was never asked")
         await harness.session.cancel()
         await asyncio.wait_for(task, timeout=5)
+        # The fake agent logs from its own process: wait until both calls are on disk.
+        for _ in range(1000):
+            methods = _methods(harness.calls)
+            if "permission_outcome" in methods and "session/cancel" in methods:
+                break
+            await asyncio.sleep(0.01)
         calls = read_calls(harness.calls)
         outcome_at = next(i for i, call in enumerate(calls) if call["method"] == "permission_outcome")
         cancel_at = next(i for i, call in enumerate(calls) if call["method"] == "session/cancel")
