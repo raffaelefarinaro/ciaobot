@@ -39,6 +39,15 @@ Two rules the code enforces rather than documents:
   being silently replaced. External edits are not audited — only managed writes
   produce receipts.
 
+A receipt written with an ``operation_id`` belongs to a managed operation that
+owns the decision for its write. Recovery settles such a receipt on the files
+alone and never writes a promotion or dismissal decision for it, so the record
+is left with ``outcome_recorded: false``. The owner must find its receipts with
+:func:`find_receipts_by_operation_id`, verify both effects, and record the
+decision itself, linked to those receipt ids. A receipt without an
+``operation_id`` keeps the pre-existing behaviour: recovery completes the
+decision.
+
 Recovery runs at startup (:func:`recover_pending`) and reconciles every
 receipt interrupted between ``prepared`` and its terminal state by comparing
 the destination on disk against the recorded before/after images. An uncertain
@@ -56,7 +65,7 @@ import stat
 import tempfile
 import threading
 from collections.abc import Callable
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -125,6 +134,62 @@ class RevisionConflict(MemoryReceiptError):
     """The destination changed since the operation was planned."""
 
 
+class AuthorityRefused(MemoryReceiptError):
+    """The caller's authorisation check said the write may no longer proceed,
+    or the check itself could not be completed (fail closed).
+
+    Raised before anything is journalled, so a refusal leaves no receipt.
+    """
+
+
+def destination_revision(entries: list[str]) -> str:
+    """The revision a region write compares against, from the entries as read.
+
+    This is the one digest the write path and its callers share: the commit
+    compares it under the guide lock, the web accept and A2 pin it. Entries
+    are serialized exactly as :func:`ciao.memory_tool.serialize_entries` writes
+    them, so a caller's pin and the commit's check cannot disagree on bytes.
+    """
+    from ciao.memory_tool import serialize_entries
+
+    return content_revision(serialize_entries(entries))
+
+
+def check_authority(authorize: Callable[[], AbstractContextManager[bool]]) -> bool:
+    """Whether ``authorize`` currently allows a write, with nothing held afterwards.
+
+    For a caller that wants an early answer before doing other work. It is not
+    a substitute for the authorisation :func:`commit_region_change` takes and
+    holds around the write: an answer given here can be stale by the time the
+    write runs. Any exception counts as a refusal.
+    """
+    try:
+        with authorize() as allowed:
+            return bool(allowed)
+    except Exception:  # noqa: BLE001 — fail closed: an unreadable check refuses
+        return False
+
+
+def _enter_authority(
+    stack: ExitStack, authorize: Callable[[], AbstractContextManager[bool]]
+) -> None:
+    """Enter ``authorize`` on ``stack`` so it stays held until the stack closes.
+
+    Raises :class:`AuthorityRefused` when the context answers False, and when
+    the check itself raises (a state file that cannot be read is a refusal).
+    """
+    try:
+        allowed = stack.enter_context(authorize())
+    except Exception as exc:  # noqa: BLE001 — fail closed, journal nothing
+        raise AuthorityRefused(
+            "the authorisation for this destination could not be checked"
+        ) from exc
+    if not allowed:
+        raise AuthorityRefused(
+            "the operation is no longer authorised for this destination"
+        )
+
+
 class UndoUnsupported(MemoryReceiptError):
     """The receipt has no before image or an operation this protocol cannot reverse."""
 
@@ -137,6 +202,9 @@ class QueueReceiptUnavailable(MemoryReceiptError):
     """
 
     retryable = True
+
+
+OWNED_OUTCOME_DETAIL = "recovered after crash; the owning operation records its decision"
 
 
 # ── Digest / id helpers ───────────────────────────────────────────────────
@@ -683,8 +751,24 @@ def commit_region_change(
     removed_texts: list[str] | None = None,
     kind: str = "region_apply",
     provenance: dict[str, Any] | None = None,
+    authorize: Callable[[], AbstractContextManager[bool]] | None = None,
+    operation_id: str = "",
 ) -> dict[str, Any]:
     """Replace one region's body through the receipt protocol.
+
+    ``authorize``, when given, is a factory for a context manager whose entry
+    answers whether this write may proceed. It is entered once the revision
+    check has passed, and it stays held through the ``prepared`` row, the
+    guide replacement and the ``applied`` row, so a lease cannot be replaced
+    between the decision and the write (the guide lock is taken before the
+    state lock; see :func:`ciao.curation_run.authorize_holder`). A False answer,
+    or a check that raises, is :class:`AuthorityRefused` with nothing journalled.
+
+    Precondition for ``authorize``: the caller must not already hold the state
+    lock, because that lock is not re-entrant.
+
+    ``operation_id``, when given, is stored on the receipt so the operation
+    that owns the queue effect can be matched to this write.
 
     ``provenance``, when given, is the fact's evidence chain as
     :mod:`ciao.fact_candidates` records it — the transcript message ids it was
@@ -721,6 +805,7 @@ def commit_region_change(
     # failure handler below must settle *that* receipt rather than open a
     # second one; see the comment there.
     opened_rid: str | None = None
+    authority = ExitStack()
     if owned:
         handle = guide_lock(guide)
     try:
@@ -748,6 +833,8 @@ def commit_region_change(
             raise RevisionConflict(
                 "the destination changed since this operation was planned"
             )
+        if authorize is not None:
+            _enter_authority(authority, authorize)
 
         journal = journal_path(vault_root, guide)
         rid = new_receipt_id(
@@ -774,6 +861,8 @@ def commit_region_change(
             "removed_texts": list(removed_texts or []),
             "provenance": dict(provenance or {}),
         }
+        if operation_id:
+            base["operation_id"] = operation_id
         if before_text == after_text:
             # Nothing to write: a no-op still gets a receipt so a caller can
             # distinguish "already satisfied" from "wrote something".
@@ -827,6 +916,7 @@ def commit_region_change(
             logger.debug("memory receipts: failed to record failure", exc_info=True)
         raise
     finally:
+        authority.close()
         if owned and handle is not None:
             from ciao.memory_tool import release_guide_lock
 
@@ -897,8 +987,11 @@ def queue_resolution(
     source: str,
     workspace: str = "",
     vault_root: Path | None = None,
+    operation_id: str = "",
 ):
     """Bracket a queue rewrite with ``prepared`` then ``applied`` receipts.
+
+    ``operation_id``, when given, is stored on both rows.
 
     The body performs the actual removal (with its own content-verified
     rewrite). A crash between the ``prepared`` row and the rewrite is
@@ -942,6 +1035,8 @@ def queue_resolution(
             "before_revision": content_revision(before),
             "before_text": _image(before),
         }
+        if operation_id:
+            base["operation_id"] = operation_id
         # The prepared row is the crash-safety boundary for this rewrite: if it
         # cannot be persisted, a crash after the queue replacement would remove
         # the proposals with nothing for recovery or History to find. Abort
@@ -974,6 +1069,7 @@ def queue_resolution(
                 status=APPLIED,
                 receipt_id=rid,
                 prepared=True,
+                operation_id=operation_id,
             )
 
 
@@ -993,6 +1089,7 @@ def _write_queue_receipt(
     receipt_id: str | None = None,
     prepared: bool = False,
     undoable: bool = True,
+    operation_id: str = "",
 ) -> dict[str, Any]:
     before = before_text
     if before is None:
@@ -1032,6 +1129,8 @@ def _write_queue_receipt(
         "after_text": _image(after),
         "status": status,
     }
+    if operation_id:
+        receipt["operation_id"] = operation_id
     if not undoable:
         # A per-fact history row for a batch that already records its
         # transaction-level before image on one row. It must not offer an undo:
@@ -1386,6 +1485,11 @@ def _reconcile_region(
         return _settle(journal, receipt, CONFLICT, "; ".join(d.message for d in diags))
     current = content_revision(serialize_entries(entries))
     if current == str(receipt.get("after_revision", "")):
+        if operation_owned(receipt):
+            return _settle(
+                journal, receipt, APPLIED, OWNED_OUTCOME_DETAIL,
+                outcome_completed=False,
+            )
         # Complete the decision sidecar *before* the terminal row: a crash
         # between the two would otherwise leave a terminal `applied` receipt
         # that recovery skips, so the fact could be re-filed by the next pass.
@@ -1539,6 +1643,11 @@ def _reconcile_queue(
             "after_revision": content_revision(text),
             "after_text": _image(text),
         }
+        if operation_owned(settled_receipt):
+            return _settle(
+                journal, settled_receipt, APPLIED, OWNED_OUTCOME_DETAIL,
+                outcome_completed=False,
+            )
         if not _complete_outcome(settled_receipt):
             # The sidecar is temporarily unwritable: keep the receipt
             # non-terminal so a later pass retries instead of skipping it.
@@ -1574,6 +1683,35 @@ def _settle(
         settled["outcome_recorded"] = outcome_completed
     _append(journal, settled)
     return settled
+
+
+def operation_owned(receipt: dict[str, Any]) -> bool:
+    """Whether a receipt belongs to a managed operation that records its own decision.
+
+    Such a receipt is settled by recovery without a decision sidecar row
+    (``outcome_recorded`` stays False); the owning operation writes the decision
+    linked to both receipts and finds its receipts with
+    :func:`find_receipts_by_operation_id`.
+    """
+    return bool(receipt.get("operation_id"))
+
+
+def find_receipts_by_operation_id(
+    vault_root: Path | None, operation_id: str
+) -> list[dict[str, Any]]:
+    """Every effective receipt the given operation wrote, read-only.
+
+    The owner of an operation calls this to find the receipts it must finish or
+    verify after a crash. An empty ``operation_id`` matches nothing.
+    """
+    if not operation_id:
+        return []
+    journal = journal_path(vault_root, None)
+    return [
+        receipt
+        for receipt in read_receipts(journal)
+        if receipt.get("operation_id") == operation_id
+    ]
 
 
 def _complete_outcome(receipt: dict[str, Any]) -> bool:

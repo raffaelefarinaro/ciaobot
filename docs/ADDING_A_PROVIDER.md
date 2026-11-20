@@ -36,6 +36,10 @@ lists whatever OpenCode reports.
    `status_probe_path`, `system_skills_path`, `thinking_levels`,
    `default_model` and `default_model_config_key`. Imports resolve on first use,
    so listing providers never imports an agent.
+   The Claude-only behaviours are flags that default to off: `session_blob_on_disk`,
+   `workspace_cli_settings`, `tier_model_aliases`, `claude_ai_connectors_toggle`,
+   `title_from_session_events` and `session_jsonl_history`. A new provider leaves them
+   off unless its CLI really has the same behaviour.
 
 4. **Login and install actions.** Add `<id>-install` and `<id>-login` to
    `ACTION_IDS` in `ciao/host_terminal.py` and to `action_command`. The install
