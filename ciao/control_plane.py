@@ -2039,15 +2039,19 @@ class CiaoControlPlane:
         workspace = self._workspace(principal)
         root = Path(self.config.workspace_vault_root(workspace))
         today = date.today()
+        # The same attended split verify_note makes: a scheduled turn cannot reopen a cooldown.
+        attended = not self._unattended_turn(principal)
 
         def _run() -> dict[str, Any]:
             try:
-                found = find_related_notes(root, path, workspace=workspace, today=today, limit=limit)
+                found = find_related_notes(
+                    root, path, workspace=workspace, today=today, attended=attended, limit=limit
+                )
             except mr.MemoryReceiptError as exc:
                 raise ControlPlaneError("note_related_invalid", str(exc)) from exc
             return found.as_dict()
 
-        reported: dict[str, Any] = await run_read(f"note_related:{root}:{path}:{limit}", _run)
+        reported: dict[str, Any] = await run_read(f"note_related:{root}:{path}:{limit}:{attended}", _run)
         return _ok(reported)
 
     async def note_create(
