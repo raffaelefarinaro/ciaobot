@@ -1,5 +1,6 @@
 import type { AppearancePayload } from './appearance'
 import type { SubagentCard } from './subagentCard'
+import type { ShellCard } from './shellCard'
 
 export type WorkspaceName = string
 
@@ -376,6 +377,8 @@ export interface ChatMessage {
   // Populated when tool_name === '_subagent': one subagent call's card, rendered in the
   // trace with its nested children. `steps` is bounded; `step_count` is the full count.
   subagent?: SubagentCard
+  // Populated when tool_name === '_shell': one shell call's card, its command, state and output tail.
+  shell?: ShellCard
   usage?: Record<string, string>
   quota?: Record<string, unknown>
   images?: string[]
@@ -448,6 +451,9 @@ export type WsEvent =
       file_touch?: { file_path: string; action: string };
       // Populated when one shell command creates/overwrites multiple files.
       file_touches?: Array<{ file_path: string; action: string }>;
+      // A shell call (ACP execute kind): its card is keyed by tool_use_id, `tool_input` is the command.
+      shell?: boolean;
+      shell_background?: boolean;
     }
   // A call's completion, as its own frame. OpenCode emits one after every
   // call; Claude emits none. It marks the call's existing trace line
@@ -464,6 +470,12 @@ export type WsEvent =
       background?: boolean;
       // A subagent's terminal child status (completed, failed, interrupted).
       subagent_status?: string;
+      // A shell call's facts; each is sent only when set.
+      exit_code?: number;
+      output_tail?: string;
+      shell_id?: string;
+      shell_pid?: number;
+      output_path?: string;
     }
   | { type: 'thinking'; text: string; parent_tool_use_id?: string }
   | { type: 'status'; message: string }

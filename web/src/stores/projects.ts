@@ -15,6 +15,13 @@ import {
   subagentTitle,
   type SubagentCard,
 } from '../lib/subagentCard'
+import {
+  newShellCard,
+  rememberShellCall,
+  settleShellCard,
+  shellTitle,
+  type ShellCard,
+} from '../lib/shellCard'
 import { useTaskSignalsStore } from './taskSignals'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
 import { parseCompactedStatus, type CompactTokens } from '../lib/contextUsage'
@@ -393,6 +400,8 @@ export const useProjectStore = defineStore('projects', () => {
     | { kind: 'status'; content: string }
     // One subagent call; its children are in `card.steps`, not in the trace lines.
     | { kind: 'subagent'; card: SubagentCard }
+    // One shell call; its output tail and state are on the card, not in the trace lines.
+    | { kind: 'shell'; card: ShellCard }
   const streamingTimeline = ref<Record<string, StreamEntry[]>>({})  // per-chat interleaved tool/text entries
   // per-chat ids of refused calls this turn; the live label reads them (#1618)
   const deniedToolUseIds = ref<Record<string, string[]>>({})
@@ -6084,6 +6093,14 @@ export const useProjectStore = defineStore('projects', () => {
     return undefined
   }
 
+  // The open card of a shell call in this turn's timeline, if there is one.
+  function _findShellCard(chatId: string, toolUseId: string): ShellCard | undefined {
+    for (const entry of streamingTimeline.value[chatId] || []) {
+      if (entry.kind === 'shell' && entry.card.tool_use_id === toolUseId) return entry.card
+    }
+    return undefined
+  }
+
   function _pushToolLine(chatId: string, line: string, toolUseId?: string) {
     if (!streamingTimeline.value[chatId]) streamingTimeline.value[chatId] = []
     const arr = streamingTimeline.value[chatId]
@@ -6556,6 +6573,21 @@ export const useProjectStore = defineStore('projects', () => {
           break
         }
 
+        // A shell call is one card keyed by its tool_use_id: its command and background flag now,
+        // its state and output tail on the result. Its file cards (below) still show.
+        if (event.shell && event.tool_use_id && !event.parent_tool_use_id) {
+          const known = _findShellCard(chatId, event.tool_use_id)
+          if (known) {
+            rememberShellCall(known, event.tool_input || '', event.shell_background === true)
+          } else {
+            if (!streamingTimeline.value[chatId]) streamingTimeline.value[chatId] = []
+            streamingTimeline.value[chatId].push({
+              kind: 'shell',
+              card: newShellCard(event.tool_use_id, event.tool_input || '', event.shell_background === true),
+            })
+          }
+        }
+
         // File-mutating tool calls (Write/Edit/MultiEdit/NotebookEdit/Bash
         // creates) get their own inline preview card. Backend tags these with
         // `file_touch` / `file_touches` in chat_broker.event_to_json. Subagent
@@ -6577,6 +6609,9 @@ export const useProjectStore = defineStore('projects', () => {
           break
         }
 
+        // The shell card carries a shell call, so it gets no activity line.
+        if (event.shell && event.tool_use_id && !event.parent_tool_use_id) break
+
         const line = event.tool_input
           ? `${toolIcon(event.tool_name)} ${event.tool_name} ${event.tool_input}`
           : `${toolIcon(event.tool_name)} ${event.tool_name}`
@@ -6596,6 +6631,15 @@ export const useProjectStore = defineStore('projects', () => {
           const subagent = _findSubagentCard(chatId, event.tool_use_id)
           if (subagent) {
             settleSubagentCard(subagent, event)
+            break
+          }
+        }
+        // A shell call's result settles its card: a background launch leaves it running, a
+        // foreground result sets its exit state and output tail.
+        if (event.tool_use_id && !event.parent_tool_use_id) {
+          const shell = _findShellCard(chatId, event.tool_use_id)
+          if (shell) {
+            settleShellCard(shell, event)
             break
           }
         }
@@ -6847,6 +6891,14 @@ export const useProjectStore = defineStore('projects', () => {
               timestamp: now,
               tool_name: '_subagent',
               subagent: { ...entry.card, steps: entry.card.steps.slice(0, SUBAGENT_STEP_LIMIT) },
+            })
+          } else if (entry.kind === 'shell') {
+            msgs.push({
+              role: 'system',
+              content: shellTitle(entry.card),
+              timestamp: now,
+              tool_name: '_shell',
+              shell: { ...entry.card },
             })
           } else if (entry.kind === 'status') {
             // Transient trace-only line (e.g. compaction ticks) — never

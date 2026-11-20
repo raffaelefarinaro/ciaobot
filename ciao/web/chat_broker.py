@@ -569,6 +569,17 @@ def event_to_json(event: StreamEvent) -> dict | None:
                 payload["background"] = True
             if event.subagent_status:
                 payload["subagent_status"] = event.subagent_status
+            # A shell call's facts: each key only when set, so older rows and frames are unchanged.
+            if event.shell_id:
+                payload["shell_id"] = event.shell_id
+            if event.shell_pid is not None:
+                payload["shell_pid"] = event.shell_pid
+            if event.output_path:
+                payload["output_path"] = event.output_path
+            if event.exit_code is not None:
+                payload["exit_code"] = event.exit_code
+            if event.output_tail:
+                payload["output_tail"] = event.output_tail
             if event.tool_input:
                 payload["detail"] = event.tool_input
             if event.parent_tool_use_id:
@@ -581,6 +592,10 @@ def event_to_json(event: StreamEvent) -> dict | None:
             payload["tool_input"] = event.tool_input
         if event.tool_use_id:
             payload["tool_use_id"] = event.tool_use_id
+        if event.shell:
+            payload["shell"] = True
+            if event.shell_background:
+                payload["shell_background"] = True
         if event.parent_tool_use_id:
             payload["parent_tool_use_id"] = event.parent_tool_use_id
         if event.request_id:

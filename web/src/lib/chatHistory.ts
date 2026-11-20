@@ -8,6 +8,7 @@
 import { isPlausibleFilePath } from './filePaths'
 import { isHostConnectionUnavailableMessage } from './chatWs'
 import { subagentCardFromHistory } from './subagentCard'
+import { shellCardFromHistory } from './shellCard'
 import type { ChatMessage, TurnOrigin, TurnVerification } from './types'
 
 export function stripLegacyContextPrefix(content: string): string {
@@ -332,7 +333,7 @@ export function mergeMetadata(server: ChatMessage[], local: ChatMessage[]): Chat
   return mergedMessages
 }
 
-export type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean; origin?: TurnOrigin; sent_context?: string; usage?: Record<string, string>; quota?: Record<string, unknown>; effective_model?: string; verification?: TurnVerification; subagent?: unknown }
+export type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean; origin?: TurnOrigin; sent_context?: string; usage?: Record<string, string>; quota?: Record<string, unknown>; effective_model?: string; verification?: TurnVerification; subagent?: unknown; shell?: unknown }
 
 export const toChatMessage = (m: ServerRow) => ({
   role: m.role as 'user' | 'assistant' | 'system',
@@ -366,6 +367,8 @@ export const toChatMessage = (m: ServerRow) => ({
   tool: m.tool,
   // _subagent card; journals from before cards carry only the title, so the card is normalised.
   subagent: subagentCardFromHistory(m.subagent) ?? undefined,
+  // _shell card; undefined for every other row.
+  shell: shellCardFromHistory(m.shell) ?? undefined,
   phase: m.phase,
   // Envelope annotations (absolute index + lazy marker). Undefined on
   // legacy flat responses.
@@ -392,6 +395,7 @@ export function isLiveTraceRow(m: ChatMessage): boolean {
     || m.tool_name === '_thinking'
     || m.tool_name === '_filecard'
     || m.tool_name === '_subagent'
+    || m.tool_name === '_shell'
   )
 }
 

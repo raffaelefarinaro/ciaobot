@@ -261,6 +261,18 @@ class ToolUseEvent(StreamEvent):
     # On a ``tool_result`` that closes an OpenCode subagent: its terminal child status
     # (``completed``, ``failed`` or ``interrupted``). Empty otherwise.
     subagent_status: str = ""
+    # On a ``tool_use`` for a shell call (ACP ``execute`` kind): the call is a shell, and
+    # ``shell_background`` says it was started in the background. ``tool_input`` is its command.
+    shell: bool = False
+    shell_background: bool = False
+    # On a ``tool_result`` for a shell call: the shell's id and pid from its launch
+    # acknowledgement, the validated output path it writes to (never read by Ciaobot), the
+    # foreground exit code (None when the agent sends none), and a bounded output tail.
+    shell_id: str = ""
+    shell_pid: int | None = None
+    output_path: str = ""
+    exit_code: int | None = None
+    output_tail: str = ""
 
 
 _SHELL_TOOL_NAMES = frozenset({"Bash", "bash", "shell"})

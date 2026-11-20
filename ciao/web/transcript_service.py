@@ -646,6 +646,56 @@ class _SubagentCard:
         }
 
 
+class _ShellCard:
+    """One shell call while the journal renders: its command, background flag and settled result.
+
+    Mirrors ``web/src/lib/shellCard.ts``. A background shell's launch acknowledgement leaves it
+    running: its end is not on the wire, so it stays running until a later result for the call.
+    """
+
+    __slots__ = ("tool_use_id", "command", "background", "state", "exit_code", "output_tail")
+
+    def __init__(self, tool_use_id: str) -> None:
+        self.tool_use_id = tool_use_id
+        self.command = ""
+        self.background = False
+        self.state = "running"
+        self.exit_code: int | None = None
+        self.output_tail = ""
+
+    def remember(self, command: str, background: bool) -> None:
+        if command:
+            self.command = command
+        self.background = self.background or background
+
+    def settle(self, record: dict) -> None:
+        if record.get("background"):
+            # The launch acknowledgement: the shell keeps running.
+            self.background = True
+            return
+        code = record.get("exit_code")
+        self.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
+        failed = bool(record.get("is_error")) or (self.exit_code is not None and self.exit_code != 0)
+        self.state = "failed" if failed else "done"
+        self.output_tail = str(record.get("output_tail") or "")
+
+    def row(self) -> dict:
+        return {
+            "role": "system",
+            "content": self.command or "Shell",
+            "tool_name": "_shell",
+            "tool_use_id": self.tool_use_id,
+            "shell": {
+                "tool_use_id": self.tool_use_id,
+                "command": self.command,
+                "background": self.background,
+                "state": self.state,
+                "exit_code": self.exit_code,
+                "output_tail": self.output_tail,
+            },
+        }
+
+
 def _render_acp_journal(
     records: list[dict],
     chat: Any,
@@ -671,6 +721,7 @@ def _render_acp_journal(
     run: _ActivityRun | None = None
     line_at: dict[str, tuple[_ActivityRun, int]] = {}
     cards: dict[str, _SubagentCard] = {}
+    shells: dict[str, _ShellCard] = {}
     filed: set[str] = set()
 
     def flush_text() -> None:
@@ -799,6 +850,17 @@ def _render_acp_journal(
                         "tool": tool,
                     })
                 continue
+            if record.get("shell") and call_id and not parent:
+                # A shell call is one card row, keyed by its call id; a re-announce updates it.
+                shell = shells.get(call_id)
+                if shell is None:
+                    flush_text()
+                    flush_tools()
+                    shell = _ShellCard(call_id)
+                    shells[call_id] = shell
+                    result.append(shell)
+                shell.remember(summary, bool(record.get("shell_background")))
+                continue
             flush_text()
             line = f"{_tool_icon(tool)} {tool}"
             if summary:
@@ -810,6 +872,9 @@ def _render_acp_journal(
             card = cards.get(call_id)
             if card is not None and not parent:
                 card.settle(record)
+            shell = shells.get(call_id)
+            if shell is not None and not parent:
+                shell.settle(record)
         # Any other kind (result, status, permission_request, ...) adds no row: a call
         # is one activity line, and the terminal result's text was streamed.
     flush_text()
@@ -818,7 +883,7 @@ def _render_acp_journal(
     for item in result:
         if isinstance(item, _ActivityRun):
             rows.append({"role": "system", "content": "\n".join(item.lines), "tool_name": "_activity"})
-        elif isinstance(item, _SubagentCard):
+        elif isinstance(item, (_SubagentCard, _ShellCard)):
             rows.append(item.row())
         else:
             rows.append(item)
