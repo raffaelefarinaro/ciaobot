@@ -88,8 +88,10 @@ def test_claude_default_foreground_settles_without_an_exit_code() -> None:
 def test_claude_terminal_foreground_exit_zero_and_background_null_exit() -> None:
     cards = {c["tool_use_id"]: c for c in _shells(_render(_journal("shell_claude_terminal.jsonl")))}
     assert (cards["toolu_shell_cl_fg"]["state"], cards["toolu_shell_cl_fg"]["exit_code"]) == ("done", 0)
+    # The background launch stays running until its terminal_exit arrives; a null exit code
+    # settles it as done with the exit unknown.
     assert (cards["toolu_shell_cl_term_bg"]["state"], cards["toolu_shell_cl_term_bg"]["exit_code"]) == (
-        "running", None,
+        "done", None,
     )
 
 
