@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 import pytest
@@ -1042,15 +1043,94 @@ def test_a_prefix_open_to_the_group_is_refused_not_only_one_open_to_others(prefi
     assert "open to other users" in ai.describe(ai.CLAUDE_ADAPTER, "adapter_missing")
 
 
-def test_an_executable_in_a_group_or_world_writable_folder_is_refused(tmp_path: Path) -> None:
-    folder = tmp_path / "shared"
-    folder.mkdir()
+def _own_folder(path: Path, mode: int) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    path.chmod(mode)
+    return path
+
+
+@pytest.mark.parametrize(
+    ("folder_mode", "accepted"),
+    [(0o755, True), (0o775, True), (0o777, False), (0o757, False)],
+    ids=["own-755", "own-group-writable-775", "world-writable-777", "others-write-757"],
+)
+def test_an_executable_is_judged_by_its_folder_write_bits(tmp_path: Path, folder_mode: int, accepted: bool) -> None:
+    folder = _own_folder(tmp_path / "bin", folder_mode)
     node = _executable(folder / "node")
 
-    folder.chmod(0o775)
+    assert (ai.absolute_executable(node) == node) is accepted
+
+
+def test_a_group_writable_folder_owned_by_another_user_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = _own_folder(tmp_path / "shared", 0o775)
+    node = _executable(folder / "node")
+    real_stat = os.stat
+    target = os.path.realpath(folder)
+
+    def stat_with_another_owner(path: Any, *args: Any, **kwargs: Any) -> Any:
+        st = real_stat(path, *args, **kwargs)
+        if os.path.realpath(path) == target:
+            return SimpleNamespace(st_mode=st.st_mode, st_uid=os.getuid() + 1)
+        return st
+
+    monkeypatch.setattr(ai.os, "stat", stat_with_another_owner)
     assert ai.absolute_executable(node) is None
-    folder.chmod(0o755)
+
+
+def test_a_group_writable_folder_owned_by_root_is_accepted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    folder = _own_folder(tmp_path / "shared", 0o775)
+    node = _executable(folder / "node")
+    real_stat = os.stat
+    target = os.path.realpath(folder)
+
+    def stat_as_root(path: Any, *args: Any, **kwargs: Any) -> Any:
+        st = real_stat(path, *args, **kwargs)
+        if os.path.realpath(path) == target:
+            return SimpleNamespace(st_mode=st.st_mode, st_uid=0)
+        return st
+
+    monkeypatch.setattr(ai.os, "stat", stat_as_root)
     assert ai.absolute_executable(node) == node
+
+
+def test_a_symlink_in_an_open_folder_pointing_into_a_closed_one_is_accepted(tmp_path: Path) -> None:
+    closed = _own_folder(tmp_path / "homebrew-caskroom", 0o755)
+    target = _executable(closed / "codex")
+    link_folder = _own_folder(tmp_path / "homebrew-bin", 0o775)
+    link = link_folder / "codex"
+    link.symlink_to(target)
+
+    assert ai.absolute_executable(str(link)) == str(link)
+
+
+def test_a_symlink_in_a_closed_folder_pointing_into_a_world_writable_one_is_refused(tmp_path: Path) -> None:
+    open_folder = _own_folder(tmp_path / "open", 0o777)
+    target = _executable(open_folder / "codex")
+    link_folder = _own_folder(tmp_path / "closed", 0o755)
+    link = link_folder / "codex"
+    link.symlink_to(target)
+
+    assert ai.absolute_executable(str(link)) is None
+
+
+@pytest.mark.parametrize("bad", ["./node", "node", "", "relative/node", None])
+def test_a_relative_or_missing_path_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad: str | None) -> None:
+    folder = _own_folder(tmp_path / "bin", 0o755)
+    _executable(folder / "node")
+    monkeypatch.chdir(folder)  # an executable named "node" sits in the working directory
+
+    assert ai.absolute_executable(bad) is None
+
+
+def test_a_non_executable_file_is_refused(tmp_path: Path) -> None:
+    folder = _own_folder(tmp_path / "bin", 0o755)
+    inert = folder / "node"
+    inert.write_text("", encoding="utf-8")
+    inert.chmod(0o644)
+
+    assert ai.absolute_executable(str(inert)) is None
 
 
 def test_timeout_drains_the_pipes_once_more_after_the_kill(
@@ -1140,6 +1220,18 @@ def test_a_machine_wide_adapter_at_the_pin_is_used_with_no_npm_call(
     assert npm.calls == []
     assert ai.launch_argv(ai.CLAUDE_ADAPTER) == [ai._node_path(), os.path.realpath(pkg / "dist" / "index.js")]
     assert "using the adapter found at" in ai.describe(ai.CLAUDE_ADAPTER, "ready")
+
+
+def test_a_homebrew_style_machine_wide_adapter_is_accepted_end_to_end(
+    prefix: Path, npm: FakeNpm, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Standard Homebrew: the bin folder is group-writable by the admin group, owned by the user;
+    # the package sits in a 755 folder beneath it.
+    pkg = _global_install(tmp_path, monkeypatch, version=ai.ADAPTERS[ai.CLAUDE_ADAPTER].version)
+    (tmp_path / "global-npm" / "bin").chmod(0o775)
+
+    assert ai.detect(ai.CLAUDE_ADAPTER) == "ready"
+    assert ai.launch_argv(ai.CLAUDE_ADAPTER) == [ai._node_path(), os.path.realpath(pkg / "dist" / "index.js")]
 
 
 def test_a_machine_wide_adapter_at_another_version_is_left_alone_and_the_private_one_is_installed(

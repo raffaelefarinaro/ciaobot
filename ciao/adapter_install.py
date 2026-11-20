@@ -146,19 +146,37 @@ def adapter_prefix() -> Path:
 
 
 def absolute_executable(path: str | None) -> str | None:
-    """``path`` when it is an absolute, executable file in a folder others cannot write; else ``None``.
+    """``path`` when it is an absolute, executable file whose folders are trusted; else ``None``.
 
     A relative path would resolve against the working directory of the process that runs it, so
-    it is refused here, for every executable the adapters are handed. So is a file whose folder
-    is writable by its group or by others, since anyone there could replace it.
+    it is refused here, for every executable the adapters are handed. The folder is judged twice:
+    the folder of ``path`` as given, and the folder of its real path, so a symlink in a closed
+    folder that points into an open one is refused, and so is the reverse. A folder passes when
+    others cannot write to it, and when its group cannot write to it either, unless it is owned by
+    the current user or by root: that is the Homebrew ``admin`` layout, where the group members are
+    the machine's administrators. A group-writable folder owned by anyone else is refused, and so
+    is a world-writable folder, sticky bit or not. Windows is not judged this way and is skipped.
     """
     if not path or not os.path.isabs(path):
         return None
     if not os.path.isfile(path) or not os.access(path, os.X_OK):
         return None
-    if not _windows() and os.stat(os.path.dirname(path)).st_mode & 0o022:
-        return None
+    if not _windows():
+        real = os.path.realpath(path)
+        if not (_trusted_folder(os.path.dirname(path)) and _trusted_folder(os.path.dirname(real))):
+            return None
     return path
+
+
+def _trusted_folder(folder: str) -> bool:
+    """Whether ``folder`` is free of others' write access, and of group write access by strangers."""
+    try:
+        mode = os.stat(folder)
+    except OSError:
+        return False
+    if mode.st_mode & stat.S_IWOTH:
+        return False
+    return not (mode.st_mode & stat.S_IWGRP and mode.st_uid not in (os.getuid(), 0))
 
 
 def _cli_path(name: str) -> str | None:
