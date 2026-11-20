@@ -128,6 +128,7 @@ private final class FakeClientUpdater: ClientUpdateControlling {
         self.unavailableReason = unavailableReason
     }
 
+    var changes: AnyPublisher<Void, Never> { Empty<Void, Never>().eraseToAnyPublisher() }
     func setAutomaticallyInstallsUpdates(_ on: Bool) { automaticallyInstallsUpdates = on }
     func start() { startCount += 1 }
     func checkForUpdates() { checkCount += 1 }

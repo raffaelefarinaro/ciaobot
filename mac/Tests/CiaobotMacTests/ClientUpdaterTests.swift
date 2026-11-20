@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 import Sparkle
 
@@ -11,6 +12,8 @@ private final class FakeUpdaterEngine: ClientUpdaterEngine {
     var canCheckForUpdates = true
     var automaticallyChecksForUpdates = false
     var automaticallyDownloadsUpdates = false
+    let stateSubject = PassthroughSubject<Void, Never>()
+    var stateChanges: AnyPublisher<Void, Never> { stateSubject.eraseToAnyPublisher() }
     private(set) var startCount = 0
     private(set) var checkCount = 0
     private(set) var backgroundCheckCount = 0
@@ -117,6 +120,24 @@ final class ClientUpdaterTests: XCTestCase {
 
     /// An inert build never creates an engine, so the setting reads false and
     /// the setter is a no-op.
+    func testChangesFollowTheEngineAndTheAutomaticSetting() {
+        let engine = FakeUpdaterEngine()
+        let updater = makeUpdater(engine: engine)
+        var count = 0
+        let token = updater.changes.sink { count += 1 }
+
+        updater.setAutomaticallyInstallsUpdates(true)
+        XCTAssertEqual(count, 0, "An unstarted updater has no setting to change, so no change fires.")
+
+        updater.start()
+        engine.stateSubject.send()
+        XCTAssertEqual(count, 1, "Sparkle's own state change reaches the bridge.")
+
+        updater.setAutomaticallyInstallsUpdates(true)
+        XCTAssertEqual(count, 2)
+        token.cancel()
+    }
+
     func testAutomaticInstallSettingIsIgnoredWhenUnavailable() {
         let engine = FakeUpdaterEngine()
         var factoryCount = 0

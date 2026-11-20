@@ -33,9 +33,7 @@ Three questions, deliberately kept apart, in the order they must be asked:
   to match it exactly: identity, revision, protocol, executable digest, both
   CDHashes and the whole file set. Only that match proves this machine installed
   this host. A missing record is a refusal, never a reason to trust a bundle.
-  :func:`verify_superseded_host` is the one narrower proof, against the
-  revision this engine supersedes, so the installer can replace a host it can
-  prove is ours and refuse every other bundle. The record also selects the
+  The record also selects the
   policy: schema-1/revision-4 is the production ad-hoc host, schema-2/revision-5
   is the explicitly signed host. A failed signed check never falls back to
   accepting an ad-hoc signature.
@@ -87,7 +85,6 @@ __all__ = [
     "SIGNED_ENTITLEMENTS",
     "SIGNED_HOST_REVISION",
     "SIGNED_SCHEMA_VERSION",
-    "SUPERSEDED_HOST_PROTOCOLS",
     "MOVE_HOST_PROTOCOL",
     "MINIMUM_SYSTEM_VERSION",
     "NATIVE_TIMEOUT_SECONDS",
@@ -106,9 +103,7 @@ __all__ = [
     "is_adhoc_signed",
     "parse_service_command",
     "read_host_ownership",
-    "read_superseded_ownership",
     "verify_owned_host",
-    "verify_superseded_host",
 ]
 
 #: The fixed bundle identity. These must agree with ``scripts/build-server-host.py``
@@ -122,13 +117,6 @@ HOST_REVISION = 4
 HOST_PROTOCOL_KEY = "CiaobotServerHostProtocol"
 HOST_PROTOCOL = 2
 MINIMUM_SYSTEM_VERSION = "13.0"
-
-#: The superseded host revisions this engine can still prove it owns, each
-#: mapped to the protocol it spoke, so the installer can replace one instead of
-#: refusing the upgrade and leaving the Mac without a host (#1659, #1642).
-#: Revision 2 is the v1.6.0 host, revision 3 the v1.6.1 host. A record of any
-#: other revision is refused by both readers.
-SUPERSEDED_HOST_PROTOCOLS: Mapping[int, int] = MappingProxyType({2: 1, 3: 2})
 
 #: The first host protocol that carries the ``run-move`` operation, so the
 #: workspace move can run as a descendant of the host (#1658). A host below it
@@ -390,21 +378,11 @@ def _policy(
 
     A signing policy is accepted only for the signed revision, and the signed
     revision is accepted only with a signing policy: neither can stand in for
-    the other, and no other revision pair is a runtime policy (2 and 3 remain
-    replacement-only through :func:`verify_superseded_host`).
+    the other, and no other revision pair is a runtime policy.
     """
     if signing is None:
         if revision == HOST_REVISION and protocol == HOST_PROTOCOL:
             return _LEGACY_HOST_POLICY
-        superseded = SUPERSEDED_HOST_PROTOCOLS.get(revision)
-        if superseded is not None and protocol == superseded:
-            return _HostPolicy(
-                revision=revision,
-                protocol=protocol,
-                schema=SCHEMA_VERSION,
-                bundle_files=REQUIRED_BUNDLE_FILES,
-                signing=None,
-            )
         raise ServerHostError(
             f"host revision {revision} / protocol {protocol} is not an accepted "
             f"host identity without an explicit signing policy",
@@ -846,14 +824,6 @@ def _decode_signing(value: object, *, path: Path) -> DeveloperIDSigning:
     return DeveloperIDSigning(team_id)
 
 
-def _decode_record(
-    raw: str, *, path: Path, policy: _HostPolicy
-) -> HostOwnership:
-    """Decode a record against one explicit policy; no field is coerced."""
-    document = _load_document(raw, path=path)
-    return _decode_document(document, path=path, policy=policy)
-
-
 def _decode_current_record(raw: str, *, path: Path) -> HostOwnership:
     """Decode a current record, selecting its policy from its strict schema.
 
@@ -1035,47 +1005,15 @@ def read_host_ownership(path: Path) -> HostOwnership:
     files, schema 2 the explicitly signed revision-5 host with the same files
     plus ``Contents/CodeResources`` and exactly one signing identity. Neither
     schema can claim the other's revision or file set, and nothing is inferred
-    from the bundle. A record of a superseded revision is a different question,
-    answered by :func:`read_superseded_ownership`.
+    from the bundle.
     """
     return _read_current_ownership_record(path)
-
-
-def read_superseded_ownership(path: Path) -> HostOwnership:
-    """Read the ownership record of a superseded host revision.
-
-    The same strict reader, but it accepts a record whose revision is a key of
-    :data:`SUPERSEDED_HOST_PROTOCOLS` and whose protocol is the one that
-    revision spoke. It answers "was this host ours?", not "is this the host
-    this engine speaks to?": the installer uses it to prove a host it may
-    replace. The policy is the historical schema-1 file set, so a schema-2 or
-    signed-revision record is never accepted here.
-    """
-    first_error: ServerHostError | None = None
-    for revision, protocol in SUPERSEDED_HOST_PROTOCOLS.items():
-        try:
-            return _read_ownership_record(
-                path,
-                policy=_policy(revision, protocol, None, code=INVALID_OWNERSHIP),
-            )
-        except ServerHostError as exc:
-            first_error = first_error or exc
-    assert first_error is not None
-    raise first_error
 
 
 def _read_current_ownership_record(path: Path) -> HostOwnership:
     """Read the current record, selecting legacy or signed policy by its schema."""
     raw, record = _read_ownership_text(path)
     ownership = _decode_current_record(raw, path=record)
-    _refuse_record_inside_bundle(record, ownership)
-    return ownership
-
-
-def _read_ownership_record(path: Path, *, policy: _HostPolicy) -> HostOwnership:
-    """Read and strictly decode an ownership record for one policy."""
-    raw, record = _read_ownership_text(path)
-    ownership = _decode_record(raw, path=record, policy=policy)
     _refuse_record_inside_bundle(record, ownership)
     return ownership
 
@@ -1795,10 +1733,8 @@ def inspect_host_bundle(
     record.
 
     ``revision``, ``protocol`` and ``signing`` name the policy the bundle is
-    expected to satisfy. The defaults are the production revision-4 ad-hoc host;
-    :func:`verify_superseded_host` passes a superseded pair, so a bundle of an
-    older revision can be inspected without loosening any other check. The
-    signed revision-5 policy exists only with an explicit
+    expected to satisfy. The defaults are the production revision-4 ad-hoc host.
+    The signed revision-5 policy exists only with an explicit
     :class:`DeveloperIDSigning`, and a signing policy is refused for any other
     revision: the caller states the expected team, ``codesign -dv`` never tells
     this function who signed.
@@ -1904,53 +1840,6 @@ def verify_owned_host(
     # Both snapshots carry the fixed identity constants, so equality is the
     # schema, the signing identity, the executable digest, both CDHashes and the
     # whole file set.
-    if record != inspected:
-        raise ServerHostError(
-            "the installed host bundle does not match its ownership record",
-            code=NOT_OWNED,
-        )
-    return inspected
-
-
-def verify_superseded_host(
-    bundle_path: Path,
-    *,
-    ownership_path: Path | None = None,
-    runner: Runner = subprocess.run,
-) -> HostOwnership:
-    """Prove a bundle is the superseded host this machine installed.
-
-    The upgrade path for a host revision bump (#1659). A revision-2 or -3 host is not
-    the host this engine speaks to, so :func:`verify_owned_host` refuses it;
-    but it is still *ours*, and the installer must be able to replace it rather
-    than leave the Mac without a host. This answers that narrower question: it
-    reads the owner-only record (default :func:`default_ownership_path`) with
-    the superseded revision and protocol, inspects the bundle against the same
-    pair, and requires the canonical bundle path, identity, executable digest,
-    both CDHashes and the whole file set to be equal.
-
-    Only a revision in :data:`SUPERSEDED_HOST_PROTOCOLS` is accepted. A record of any other
-    revision - the current one, an older one this engine never shipped, or a
-    future one - is refused, so this can never prove a host the installer may
-    not replace. It never writes, signs, launches or deletes anything.
-    """
-    record_path = (
-        default_ownership_path() if ownership_path is None else Path(ownership_path)
-    )
-    record = read_superseded_ownership(record_path)
-    inspected = inspect_host_bundle(
-        bundle_path,
-        runner=runner,
-        revision=record.host_revision,
-        protocol=SUPERSEDED_HOST_PROTOCOLS[record.host_revision],
-    )
-
-    if record.bundle_path != inspected.bundle_path:
-        raise ServerHostError(
-            f"the ownership record names {record.bundle_path}, but the bundle is "
-            f"{inspected.bundle_path}",
-            code=NOT_OWNED,
-        )
     if record != inspected:
         raise ServerHostError(
             "the installed host bundle does not match its ownership record",

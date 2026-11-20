@@ -20,9 +20,20 @@ export interface MacNotificationSettings {
   detail: string
 }
 
+/** Sparkle's view of Ciaobot for Mac's updates. `reason` is native text and
+ *  is empty when `available` is true. */
+export interface MacUpdateSettings {
+  available: boolean
+  automatic: boolean
+  canCheck: boolean
+  reason: string
+}
+
 export interface MacAppSettings {
   v: 1
   notifications: MacNotificationSettings | null
+  /** Null when the app predates the updates key or sends no updater. */
+  updates: MacUpdateSettings | null
 }
 
 /** Dispatched on `window` by the Mac app when its state changes. Carries no
@@ -85,20 +96,41 @@ function parseNotifications(raw: unknown): MacNotificationSettings | null | unde
   }
 }
 
+function parseUpdates(raw: unknown): MacUpdateSettings | null {
+  // An absent or malformed block reads as null: the Mac app predates it or
+  // sent something this page does not know, and the card keeps its static
+  // text. It does not make the whole snapshot unusable.
+  if (typeof raw !== 'object' || raw === null) return null
+  const u = raw as Record<string, unknown>
+  const reason = cap(u.reason)
+  if (typeof u.available !== 'boolean' || typeof u.automatic !== 'boolean' || typeof u.canCheck !== 'boolean' || reason === null) return null
+  // The app sends a reason exactly when updates are unavailable, and a check
+  // is possible only when they are. Anything else is not a state it sends.
+  if (u.available !== (reason === '')) return null
+  if (!u.available && (reason.trim() === '' || u.canCheck)) return null
+  return { available: u.available, automatic: u.automatic, canCheck: u.canCheck, reason }
+}
+
 function parse(raw: unknown): MacAppSettings | null {
   if (typeof raw !== 'object' || raw === null) return null
   const r = raw as Record<string, unknown>
   if (r.v !== 1) return null
   const notifications = parseNotifications(r.notifications)
   if (notifications === undefined) return null
-  return { v: 1, notifications }
+  return { v: 1, notifications, updates: parseUpdates(r.updates) }
 }
 
-async function send(op: 'get' | 'notifications'): Promise<MacAppSettings | null> {
+type Request =
+  | { op: 'get' }
+  | { op: 'notifications' }
+  | { op: 'checkForUpdates' }
+  | { op: 'setAutomaticUpdates'; on: boolean }
+
+async function send(request: Request): Promise<MacAppSettings | null> {
   const h = handler()
   if (!h) return null
   try {
-    return parse(await h.postMessage({ op }))
+    return parse(await h.postMessage(request))
   } catch {
     return null
   }
@@ -107,11 +139,23 @@ async function send(op: 'get' | 'notifications'): Promise<MacAppSettings | null>
 /** The current snapshot, or null: no handler, a refused request, or a reply
  *  that is not the v1 shape. */
 export function readMacAppSettings(): Promise<MacAppSettings | null> {
-  return send('get')
+  return send({ op: 'get' })
 }
 
 /** Flip the tray's notification row (or open its System Settings pane). Must
  *  run inside a user gesture; the app refuses it otherwise. */
 export function requestMacNotificationAction(): Promise<MacAppSettings | null> {
-  return send('notifications')
+  return send({ op: 'notifications' })
+}
+
+/** Start Sparkle's update check, the tray's Check for Updates… row. Must run
+ *  inside a user gesture. */
+export function requestMacCheckForUpdates(): Promise<MacAppSettings | null> {
+  return send({ op: 'checkForUpdates' })
+}
+
+/** Set the tray's Install Updates Automatically row. Must run inside a user
+ *  gesture. */
+export function requestMacAutomaticUpdates(on: boolean): Promise<MacAppSettings | null> {
+  return send({ op: 'setAutomaticUpdates', on })
 }

@@ -491,7 +491,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 openChat: { session.openChat(chatID: $0) }
             )
             notifications.start()
-            appSettings.bind(notifications: notifications, systemSettings: systemSettings)
+            // The updater was started above, before the menu was built. Its
+            // `unavailableReason` is fixed at init, but `canCheckForUpdates`
+            // reads false until `start()`, so binding only after start keeps
+            // the bridge from reporting "available" for an updater that has
+            // not started.
+            appSettings.bind(notifications: notifications, systemSettings: systemSettings, updates: updater)
             // One feed pair per saved host. The active host's entry uses the
             // session's own store; every other host uses its snapshot-verified
             // saved sign-in, and a remote host without one is never contacted.
