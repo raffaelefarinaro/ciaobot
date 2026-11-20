@@ -46,7 +46,11 @@ const meta = {
 export default meta
 type Story = StoryObj<typeof meta>
 
-const shellTitle = (canvasElement: HTMLElement) => canvasElement.querySelector('.login-shell-title')
+/** The plain box has no fake window chrome, and the brand is the image wordmark. */
+const expectPlainBoxWithWordmark = (canvasElement: HTMLElement) => {
+  expect(canvasElement.querySelector('.login-shell-bar')).toBeNull()
+  expect(canvasElement.querySelector('.login-shell img.wordmark')).toBeTruthy()
+}
 const tokenInput = (canvasElement: HTMLElement) => canvasElement.querySelector('#login-token') as HTMLInputElement
 const loginSubmit = (canvasElement: HTMLElement) => canvasElement.querySelector('.login-submit') as HTMLButtonElement
 const setupPassword = (canvasElement: HTMLElement) => canvasElement.querySelector('#setup-password') as HTMLInputElement
@@ -75,7 +79,7 @@ export const Login: Story = {
   play: async ({ canvasElement }) => {
     await settled(canvasElement)
     expect(canvasElement.textContent).toContain('Enter your password')
-    expect(shellTitle(canvasElement)?.textContent).toContain('ciaobot@local · log in')
+    expectPlainBoxWithWordmark(canvasElement)
     expect(tokenInput(canvasElement).value).toBe('')
     // The empty field blocks the submit: the control, not just its styling.
     expect(loginSubmit(canvasElement).disabled).toBe(true)
@@ -226,7 +230,7 @@ export const BootstrapSetup: Story = {
   render: () => renderLoginState({ label: 'first-run setup wizard' }),
   play: async ({ canvasElement }) => {
     await wizardReady(canvasElement)
-    expect(shellTitle(canvasElement)?.textContent).toContain('ciaobot@local · first-run setup')
+    expectPlainBoxWithWordmark(canvasElement)
     expect(canvasElement.querySelector('.setup-run-note')).toBeTruthy()
     expect(canvasElement.querySelector('.setup-tour')).toBeTruthy()
     expect(setupWorkspace(canvasElement).value).toBe(LOGIN_WORKSPACE)
@@ -488,7 +492,7 @@ export const Restarting: Story = {
     expect(finishButton(canvasElement).disabled).toBe(false)
     await userEvent.click(finishButton(canvasElement))
     await waitFor(() => expect(canvasElement.querySelector('.restarting-body')).toBeTruthy())
-    expect(shellTitle(canvasElement)?.textContent).toContain('ciaobot@local · restarting')
+    expectPlainBoxWithWordmark(canvasElement)
     expect(canvasElement.querySelector('.line--banner')).toBeTruthy()
     expect(canvasElement.textContent).toContain('// ciaobot is loading config')
     expect(canvasElement.textContent).toContain('finishing setup and moving to the background service.')

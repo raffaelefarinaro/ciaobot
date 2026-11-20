@@ -1,5 +1,5 @@
 const CACHE_NAME = 'ciaobot-v1.10.0'
-const STATIC_ASSETS = ['/', '/index.html', '/manifest.json', '/icons/icon-192.png', '/icons/icon-512.png', '/favicon.png']
+const STATIC_ASSETS = ['/', '/index.html', '/manifest.json', '/icons/icon-192.png', '/icons/icon-512.png', '/favicon.png', '/brand/ciaobot-wordmark.png', '/brand/ciaobot-wordmark-light.png']
 const ICON = '/icons/icon-192.png'
 const BADGE = '/icons/icon-192.png'
 const UNREAD_CACHE = 'ciaobot-unread'
@@ -376,6 +376,7 @@ self.addEventListener('fetch', (event) => {
   const isImmutableAsset =
     url.pathname.startsWith('/assets/') ||
     url.pathname.startsWith('/icons/') ||
+    url.pathname.startsWith('/brand/') ||
     url.pathname === '/favicon.png'
 
   if (isImmutableAsset) {
