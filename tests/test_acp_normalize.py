@@ -250,7 +250,7 @@ def test_turn_text_final_text_is_segment_after_last_top_level_tool() -> None:
     t = TurnText()
     for e in (_delta("a "), _tool("1"), _delta("b "), _tool("2"), _delta("c")):
         t.feed(e)
-    assert t.result == "a b c"
+    assert t.result == "a\n\nb\n\nc"
     assert t.final_text == "c"
     # a refresh of an already-seen call does not start a new segment
     t.feed(_tool("2"))
@@ -259,6 +259,48 @@ def test_turn_text_final_text_is_segment_after_last_top_level_tool() -> None:
     # a tool_result never splits
     t.feed(_tool("2", type_="tool_result"))
     assert t.final_text == "cd"
+
+
+def test_turn_text_tool_call_between_text_is_a_paragraph_break() -> None:
+    t = TurnText()
+    for e in (_delta("A."), _tool("1"), _delta("B.")):
+        t.feed(e)
+    assert t.result == "A.\n\nB."
+
+
+def test_turn_text_break_trims_spaces_and_tabs_at_the_join_only() -> None:
+    t = TurnText()
+    for e in (_delta("A. \t"), _tool("1"), _delta(" \tB. "), _delta("C")):
+        t.feed(e)
+    assert t.result == "A.\n\nB. C"
+
+
+def test_turn_text_back_to_back_chunks_join_unchanged() -> None:
+    t = TurnText()
+    for e in (_delta("A"), _delta("."), _delta(" B")):
+        t.feed(e)
+    assert t.result == "A. B"
+
+
+def test_turn_text_no_extra_break_after_trailing_newline() -> None:
+    t = TurnText()
+    for e in (_delta("A.\n"), _tool("1"), _delta("B.")):
+        t.feed(e)
+    assert t.result == "A.\nB."
+
+
+def test_turn_text_no_leading_break_when_tool_comes_first() -> None:
+    t = TurnText()
+    for e in (_tool("1"), _delta("B.")):
+        t.feed(e)
+    assert t.result == "B."
+
+
+def test_turn_text_no_break_before_leading_newline() -> None:
+    t = TurnText()
+    for e in (_delta("A."), _tool("1"), _delta("\nB.")):
+        t.feed(e)
+    assert t.result == "A.\nB."
 
 
 def test_turn_text_without_tool_call_has_no_final_text() -> None:
@@ -327,7 +369,7 @@ def test_result_event_carries_final_text_and_copies_usage() -> None:
         t.feed(e)
     usage = {"k": "v"}
     event = result_event("end_turn", text=t, session_id="s", model="m", usage=usage)
-    assert (event.result, event.final_text) == ("ab", "b")
+    assert (event.result, event.final_text) == ("a\n\nb", "b")
     usage["k"] = "changed"
     assert event.usage == {"k": "v"}
 
@@ -348,7 +390,7 @@ def test_fixture_replay_claude_turn_text_and_state() -> None:
     for line in (FIXTURES / "updates_claude.jsonl").read_text().splitlines():
         for e in n.feed(json.loads(line)):
             text.feed(e)
-    assert text.result == "Looking at the file. Done."
+    assert text.result == "Looking at the file.\n\nDone."
     assert text.final_text == "Done."
     assert n.compacted is True
     assert n.usage == {"context_used": "2", "context_size": "200000"}
