@@ -919,6 +919,69 @@ async def test_on_ext_after_a_turn_opens_a_late_turn(tmp_path: Path) -> None:
     session._close_late()
 
 
+def _codex_session(tmp_path: Path) -> tuple[AcpSession, Any]:
+    from ciao.providers.acp.agents import CODEX, CodexAcpProvider
+
+    provider = CodexAcpProvider(tmp_path)
+    session = _bare_session(tmp_path, CODEX)
+    provider._session = session  # type: ignore[assignment]
+    return session, provider
+
+
+def _late_state(session: AcpSession) -> tuple[bool, int]:
+    return session.late_turn_open, session._late_queue.qsize()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prompt_active", [False, True])
+async def test_auth_status_update_leaves_the_late_turn_alone(tmp_path: Path, prompt_active: bool) -> None:
+    session, provider = _codex_session(tmp_path)
+    session._prompt_active = prompt_active
+    before = _late_state(session)
+    session.on_ext("auth/status_update", {"state": "authenticated", "accounts": []}, provider.ext_update)
+    assert _late_state(session) == before
+    assert session._queue.qsize() == 0
+    assert provider.background_work_outstanding is False
+
+
+@pytest.mark.asyncio
+async def test_child_update_with_output_still_opens_a_substantive_late_turn(tmp_path: Path) -> None:
+    from ciao.providers.acp.agents import OpencodeAcpProvider
+
+    provider = OpencodeAcpProvider(tmp_path)
+    session = _bare_session(tmp_path)
+    child = {
+        "rootSessionId": "ses_root", "childSessionId": "ses_child", "parentSessionId": "ses_root",
+        "depth": 1, "type": "update",
+        "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "child says"}},
+    }
+    session.on_ext("opencode/session/child_update", child, provider.ext_update)
+    assert session.late_turn_open is True
+    session._close_late()
+    # Substantive: the close emits the late turn's own result, which a bare notification never does.
+    assert any(isinstance(event, ResultEvent) for event in _drain(session._late_queue))
+
+
+@pytest.mark.asyncio
+async def test_child_update_that_yields_no_events_does_not_open_a_late_turn(tmp_path: Path) -> None:
+    from ciao.providers.acp.agents import OpencodeAcpProvider
+
+    provider = OpencodeAcpProvider(tmp_path)
+    session = _bare_session(tmp_path)
+    # A child of another session is not this chat's: the provider drops it.
+    other = {"rootSessionId": "ses_other", "childSessionId": "ses_c", "parentSessionId": "ses_other", "type": "status", "status": "created"}
+    session.on_ext("opencode/session/child_update", other, provider.ext_update)
+    assert session.late_turn_open is False
+    assert session._late_queue.qsize() == 0
+
+
+def _drain(queue: Any) -> list[Any]:
+    items = []
+    while not queue.empty():
+        items.append(queue.get_nowait())
+    return items
+
+
 @pytest.mark.asyncio
 async def test_child_compaction_through_on_ext_is_not_reported_by_the_parent(tmp_path: Path) -> None:
     from ciao.models import ContextCompactedEvent
