@@ -102,6 +102,12 @@ export const routes: RouteRecordRaw[] = [
     component: () => import('./components/ChatLayout.vue'),
     meta: { requiresAuth: true },
   },
+  {
+    // An address no view owns (an old link, a typo such as /usage) lands on
+    // Home instead of rendering an empty shell.
+    path: '/:pathMatch(.*)*',
+    redirect: '/',
+  },
 ]
 
 export const router = createRouter({

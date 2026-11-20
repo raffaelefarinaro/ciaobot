@@ -246,6 +246,28 @@ describe('SettingsEngineLogin when the host has an answer', () => {
   })
 })
 
+describe('SettingsEngineLogin in the Mac app with no CLI service', () => {
+  it('says the app owns Start at Login and shows no CLI command', async () => {
+    ;(globalThis as Record<string, unknown>).__CIAOBOT_DESKTOP__ = true
+    apiGet.mockResolvedValue(status({
+      installed: false,
+      enabled: null,
+      can_change: false,
+      reason: 'The Ciaobot engine service is not installed for this user.',
+      setup_command: 'ciao service start --workspace /Users/me/Ciao',
+    }))
+    const view = await mountPanel()
+
+    expect(stateText(view)).toContain('Managed by Ciaobot for Mac')
+    expect(view.text()).toContain('Ciaobot for Mac starts the engine at login from its menu bar: Settings → Start at Login.')
+    expect(view.text()).not.toContain('ciao service start')
+    expect(view.text()).not.toContain('Not installed for this user')
+    expect(view.find('code.login-command-text').exists()).toBe(false)
+    expect(view.findAll('button').map((b) => b.text())).not.toContain('Copy')
+    expect(actionButton(view).exists()).toBe(false)
+  })
+})
+
 describe('SettingsEngineLogin without a licence to write', () => {
   it('says the service is not installed, shows the setup command, and offers no toggle', async () => {
     apiGet.mockResolvedValue(status({

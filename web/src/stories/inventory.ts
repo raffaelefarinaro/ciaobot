@@ -8553,16 +8553,36 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Inventory status controls the displayed provider availability guidance.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "Provider inventory and sign-in disclosures have no rendered-state story."
+        "name": "configured",
+        "coverage": "covered",
+        "storyIds": [
+          "provider-inventory--configured"
+        ],
+        "note": "complete with reported providers: one honest hint line, each row Configured with its auth method and no verification claim."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "none-reported",
+        "coverage": "covered",
+        "storyIds": [
+          "provider-inventory--none-reported"
+        ],
+        "note": "complete with no providers: No configured providers reported."
+      },
+      {
+        "name": "partially-reported",
+        "coverage": "covered",
+        "storyIds": [
+          "provider-inventory--partially-reported"
+        ],
+        "note": "partial: Some providers may be missing from this inventory."
+      },
+      {
+        "name": "unavailable",
+        "coverage": "covered",
+        "storyIds": [
+          "provider-inventory--unavailable"
+        ],
+        "note": "unknown: OpenCode could not report its configured providers."
       }
     ],
     "loading": {
@@ -9092,6 +9112,14 @@ export const inventory: InventoryEntry[] = [
           "settings-engine-login--not-installed"
         ],
         "note": "installed false: Not installed for this user, the setup lead and the setup command in a code block, and no action."
+      },
+      {
+        "name": "mac-app-no-cli-service",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-engine-login--mac-app-no-cli-service"
+        ],
+        "note": "Mac app (desktop client) with installed false: Managed by Ciaobot for Mac, the Settings → Start at Login pointer, and no CLI command or copy control."
       },
       {
         "name": "unsupported-platform",
