@@ -234,7 +234,7 @@ async def run_startup_triage(pcm, config, resolve_target) -> bool:
     # (``bool(error_log.strip() or failed_jobs)``), so the gate cannot drift
     # from the report again. It used to re-derive the gate from
     # ``error_line_count``, a key ``build_issue_report`` never emits — it
-    # emits ``error_log_lines`` — so the error-log half was always falsy and
+    # emits ``error_log_records`` — so the error-log half was always falsy and
     # a boot with tracebacks but no failed job opened no triage chat.
     if not report.get("has_issues"):
         return False
@@ -260,9 +260,9 @@ async def run_startup_triage(pcm, config, resolve_target) -> bool:
     # chat every restart.
     _record_triage(runtime_dir, now)
     logger.info(
-        "Startup found %s error line(s) and %d failed job run(s); "
+        "Startup found %s error record(s) and %d failed job run(s); "
         "dispatching a triage chat",
-        report.get("error_log_lines", 0),
+        report.get("error_log_records", 0),
         len(report.get("failed_jobs") or []),
     )
     await pcm.dispatch_schedule(entry, entry.prompt, model, mode, provider)

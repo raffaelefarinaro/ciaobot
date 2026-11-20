@@ -17,6 +17,7 @@ function connection(over: Partial<ProviderConnection> = {}): ProviderConnection 
     label: 'Claude Code',
     ok: true,
     auth: 'ok',
+    state: 'ready',
     command: 'claude auth login',
     mcp_command: 'claude mcp',
     ...over,

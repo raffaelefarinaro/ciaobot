@@ -47,6 +47,7 @@ from ciao.port_in_use import (
 )
 from ciao.web.project_chats import ProjectChatManager
 from ciao.web.push import PushManager
+from ciao.setup_status import PROVIDER_STATE_NOT_INSTALLED, startup_phase_detail
 
 if TYPE_CHECKING:
     import uvicorn
@@ -56,7 +57,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-_PhaseStatus = Literal["pending", "in_progress", "done", "failed"]
+_PhaseStatus = Literal["pending", "in_progress", "done", "failed", "skipped"]
 
 @dataclass
 class StartupPhase:
@@ -105,6 +106,18 @@ class StartupTracker:
         self._emit(p)
         self._update_ready()
 
+    def skip(self, name: str, message: str = "") -> None:
+        """Settle a phase that does not apply here (a provider CLI the user never installed).
+
+        Neither done nor failed: the startup view shows it neutrally, and it is
+        not recorded as a job run, since nothing ran and nothing broke.
+        """
+        p = self.phase(name)
+        p.status = "skipped"
+        p.message = message
+        p.finished_at = datetime.now(UTC).isoformat()
+        self._update_ready()
+
     def _emit(self, p: StartupPhase) -> None:
         if self.on_finish is None:
             return
@@ -115,7 +128,7 @@ class StartupTracker:
 
     def _update_ready(self) -> None:
         self.overall_ready = all(
-            p.status in ("done", "failed") for p in self._phases.values()
+            p.status in ("done", "failed", "skipped") for p in self._phases.values()
         )
 
     def to_dict(self) -> dict:
@@ -677,17 +690,20 @@ async def run_provider_startup_check(
 ) -> None:
     """Settle one provider's startup phase from its status probe.
 
-    A probe that raises fails the phase with its exception type when the message
-    is empty (a timeout has none), so the phase never reads "not found: " with
-    nothing after it.
+    A CLI the user never installed is skipped, not failed: it is a choice, not
+    a fault. A probe that raises fails the phase with its exception type when
+    the message is empty (a timeout has none), so the phase never reads "not
+    found: " with nothing after it.
     """
     try:
         status = await asyncio.to_thread(probe)
     except Exception as exc:  # a probe must never block startup
         tracker.fail(phase, f"check failed: {str(exc) or type(exc).__name__}")
         return
-    detail = str(status.get("detail") or "")
-    if status.get("ok"):
+    detail = startup_phase_detail(status)
+    if status.get("state") == PROVIDER_STATE_NOT_INSTALLED:
+        tracker.skip(phase, detail or "not installed")
+    elif status.get("ok"):
         tracker.done(phase, detail or "connected")
     else:
         tracker.fail(phase, detail or "not connected")
