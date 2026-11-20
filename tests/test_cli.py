@@ -5400,3 +5400,39 @@ def test_curation_end_with_a_refused_marker_releases_the_lease_and_says_so(
     assert summary["full_pass_advanced"] is False
     assert summary["status"] == "failed"
     assert cr.load_state(vault).lease == {}
+
+
+def test_curation_plan_names_the_stale_notes_it_did_not_examine(tmp_path, monkeypatch):
+    """The plan says what the stale pass covered: the JSON carries the structured
+    status, the text line names the counts, and `counts_complete` stays False."""
+    from ciao import curation_run as cr
+
+    root, vault = _registered_install(tmp_path)
+    (vault / cr.CURATION_LOG_RELATIVE).write_text(
+        "---\nlast_full_pass: 2026-09-18\n---\n\n# Curation log\n", encoding="utf-8"
+    )
+    for index in range(8):
+        note = vault / "People" / f"Note{index:02d}.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text(
+            f"---\ntype: person\nupdated: 2024-01-{index + 1:02d}\n---\n\n# Note{index:02d}\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "work")
+
+    payload = cli._curation_plan(_curation_args()).payload
+
+    assert payload["counts_complete"] is False
+    coverage = payload["note_coverage"]
+    assert coverage["status"] == "partial"
+    assert coverage["flagged"] == 8
+    assert coverage["planned"] == cr.STALE_NOTE_MAX_ITEMS
+    assert coverage["eligible_deferred"] + coverage["unexamined"] == 3
+    lines = [note for note in payload["coverage_notes"] if note.startswith("stale notes:")]
+    assert lines == [
+        "stale notes: 5 planned of 8 flagged; 3 not examined this run "
+        f"(oldest {coverage['oldest_deferred_age_days']}d overdue)"
+    ]
+    assert "People/" not in lines[0] and "Note0" not in lines[0]

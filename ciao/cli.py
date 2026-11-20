@@ -49,7 +49,7 @@ from ciao.sync_skills import SETUP_MEMORY_FAILED_RC
 if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
     from ciao import skill_proposals
     from ciao.config import CiaoConfig, WorkspaceConfig
-    from ciao.curation_run import Worklist
+    from ciao.curation_run import NoteCoverage, Worklist
 
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
@@ -6106,6 +6106,26 @@ class _CurationPlanningResult:
     remaining: Worklist
 
 
+def _stale_coverage_line(coverage: NoteCoverage | None) -> str:
+    """One coverage note naming the stale notes this run did not examine, or ""."""
+    if coverage is None or coverage.status == "complete":
+        return ""
+    if coverage.status == "unavailable":
+        return "stale notes: not examined this run; the vault scan did not complete"
+    parts = [f"stale notes: {coverage.planned} planned of {coverage.flagged} flagged"]
+    not_examined = coverage.eligible_deferred + coverage.unexamined
+    if not_examined:
+        overdue = ""
+        if coverage.oldest_deferred_age_days is not None:
+            overdue = f" (oldest {coverage.oldest_deferred_age_days}d overdue)"
+        parts.append(f"{not_examined} not examined this run{overdue}")
+    if coverage.undated:
+        parts.append(f"{coverage.undated} undated notes are not covered")
+    if coverage.unreadable:
+        parts.append(f"{coverage.unreadable} unreadable notes are not covered")
+    return "; ".join(parts)
+
+
 def _curation_plan(
     args: argparse.Namespace,
     *,
@@ -6151,6 +6171,9 @@ def _curation_plan(
         coverage_notes.append(
             "category generation was omitted; category clusters were not scanned"
         )
+    stale_coverage = _stale_coverage_line(worklist.note_coverage)
+    if stale_coverage:
+        coverage_notes.append(stale_coverage)
     payload: dict[str, Any] = {
         "workspace": str(workspace),
         "vault_root": str(vault),
