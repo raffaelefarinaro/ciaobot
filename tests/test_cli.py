@@ -5024,3 +5024,129 @@ def test_cli_version_flag_after_subcommand_keeps_routing(monkeypatch: pytest.Mon
     assert cli.main(["prepare-release", "--version", "1.2.3"]) == 0
     assert gws == [["--version"]]
     assert rel == [["--version", "1.2.3"]]
+
+
+# ── curation-log-append (#3101, A1) ───────────────────────────────────────
+
+
+def _append_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    vault = tmp_path / "vault"
+    (vault / "Workspace").mkdir(parents=True)
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path / "ws"))
+    monkeypatch.delenv("CIAO_ACTIVE_WORKSPACE", raising=False)
+    return vault
+
+
+def _append(vault: Path, *extra: str, holder: str, text: bytes, tmp_path: Path) -> int:
+    body = tmp_path / "report.md"
+    body.write_bytes(text)
+    argv = ["curation-log-append", "--vault-root", str(vault), "--log", "curation", "--text-file", str(body), "--json"]
+    if holder:
+        argv += ["--holder", holder]
+    return cli.main([*argv, *extra])
+
+
+def test_curation_log_append_help_warns_that_a_retry_can_duplicate(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["curation-log-append", "--help"])
+    assert raised.value.code == 0
+    assert "duplicate" in capsys.readouterr().out
+
+
+def test_curation_log_append_requires_holder_as_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _append_install(tmp_path, monkeypatch)
+    body = tmp_path / "report.md"
+    body.write_bytes(b"x")
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["curation-log-append", "--vault-root", str(vault), "--log", "curation", "--text-file", str(body)])
+    assert raised.value.code == 2
+
+
+def test_curation_log_append_success_prints_the_bounded_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    lease = cr.begin_run(vault, holder="nightly")
+    capsys.readouterr()
+
+    assert _append(vault, holder=lease.holder, text=b"report body", tmp_path=tmp_path) == 0
+
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"status": "appended", "log": "curation", "bytes_appended": 2 + len(b"report body")}
+
+
+def test_curation_log_append_lost_lease_exits_75_and_prints_no_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    cr.begin_run(vault, holder="nightly")
+    capsys.readouterr()
+
+    assert _append(vault, holder="someone-else", text=b"SECRET-PAYLOAD", tmp_path=tmp_path) == 75
+    captured = capsys.readouterr()
+    assert "appended" not in captured.out
+    assert "SECRET-PAYLOAD" not in captured.err
+    assert not (vault / "Workspace" / "Curation-Log.md").exists()
+
+
+def test_curation_log_append_refuses_an_empty_payload_with_exit_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    lease = cr.begin_run(vault, holder="nightly")
+
+    assert _append(vault, holder=lease.holder, text=b"", tmp_path=tmp_path) == 2
+    assert not (vault / "Workspace" / "Curation-Log.md").exists()
+
+
+def test_curation_log_append_refuses_a_symlinked_log_with_exit_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    target = tmp_path / "elsewhere.md"
+    target.write_text("keep", encoding="utf-8")
+    (vault / "Workspace" / "Curation-Log.md").symlink_to(target)
+    lease = cr.begin_run(vault, holder="nightly")
+    capsys.readouterr()
+
+    assert _append(vault, holder=lease.holder, text=b"x", tmp_path=tmp_path) == 1
+    assert target.read_text(encoding="utf-8") == "keep"
+    assert "appended" not in capsys.readouterr().out
+
+
+def test_curation_plan_reports_oversized_logs_as_blocked_without_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+
+    vault = _append_install(tmp_path, monkeypatch)
+    (vault / "Workspace" / "Curation-Log.md").write_bytes(b"x" * (64 * 1024 + 1))
+    capsys.readouterr()
+
+    rc = cli.main(["curation-plan", "--vault-root", str(vault), "--json"])
+    captured = capsys.readouterr()
+    assert rc == 0, captured.err
+
+    payload = json.loads(captured.out)
+    assert payload["blocked_count"] == 1
+    assert payload["blocked_passes"] == ["logs"]
+    assert all(item["pass"] != "logs" for item in payload["planned"])
+    assert payload["planned_count"] + payload["deferred_count"] == payload["remaining_observed_count"]
+    blocked = [item for item in payload["deferred"] if item["pass"] == "logs"]
+    assert len(blocked) == 1
+    assert "operator archival required" in blocked[0]["reason"]

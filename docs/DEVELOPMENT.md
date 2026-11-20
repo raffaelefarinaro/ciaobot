@@ -388,6 +388,8 @@ ciao dev
 
 ## Testing
 
+Curation log writes (#3101, A1) are verified on macOS and Linux only. `tests/test_curation_log_portability.py` runs real child processes against the canonical state lock, with a pipe handshake rather than sleeps, and it isolates `CIAO_QUEUE_LOCK_DIR` in the parent and the children alike: a parent that locks a different file than its children passes or fails by timing. Windows is skipped by design and unverified. Run it with `PYTHONPATH=$PWD ~/repos/ciaobot/.venv/bin/python -m pytest tests/test_curation_log_portability.py tests/test_curation_logs.py -q`.
+
 Claude slash-invocation regression coverage lives in `tests/test_providers.py`
 (`-k 'slash or non_commands_keep or exact_trusted or forged'`). The SDK wire
 message must start with the native command, while the shared context capsule

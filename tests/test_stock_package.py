@@ -211,7 +211,6 @@ def test_stock_curation_skill_carries_the_new_passes() -> None:
     assert "(xN)" in skill and "x3" in skill
     assert "Put pass reports in `Workspace/Curation-Log.md`" in skill
     assert "Curation-Log.md" in skill
-    assert "search: false" in skill
     assert "aliases:" in skill
     assert "last_full_pass" in skill
     assert "ciao vault-index --write" in skill
@@ -629,3 +628,37 @@ def test_decision_rules_reference_is_evidence_only_and_review_gated() -> None:
     ):
         assert phrase in section, phrase
     assert "never accept anything" in section
+
+
+def test_curation_prompt_appends_reports_through_the_managed_verb() -> None:
+    """#3101: the packaged care run writes its log only through the leased append."""
+    prompt = _curation_prompt()
+    assert "ciao curation-log-append --holder <lease.holder> --log curation --text-file" in prompt
+    assert "Put pass reports in `Workspace/Curation-Log.md`" in prompt
+    assert "create it if needed" not in prompt
+    assert "Rotate the logs" not in prompt
+    assert "move its body to a dated archive" not in prompt
+
+
+def test_curation_prompt_blocks_rotation_and_names_it_under_what_needs_you() -> None:
+    prompt = _curation_prompt()
+    assert "blocked in this release" in prompt
+    assert "Do not move, rename, create, or edit either log yourself" in prompt
+    assert "Name each overdue log under **What needs you**" in prompt
+    assert "Do not record a blocked key as done" in prompt
+
+
+def test_curation_prompt_failure_lifecycle_is_explicit() -> None:
+    prompt = _curation_prompt()
+    assert "ciao curation-end --holder <lease.holder> --status ok|failed" in prompt
+    assert "An append failure ends the run as `failed`" in prompt
+    assert "a retry can duplicate the report" in prompt
+
+
+def test_skill_proposal_reference_reports_only_the_planned_named_files() -> None:
+    section = _reference("curation-pass-9-skill-proposals.md")
+    assert "planned" in section
+    assert "ciao curation-log-append" in section
+    assert "ciao curation-progress --holder <lease.holder> --key <key>" in section
+    assert "do not run `ciao skill-drafts`" in section
+    assert "Settle nothing" in section
