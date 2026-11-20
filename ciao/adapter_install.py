@@ -680,7 +680,7 @@ def _install_locked(name: str, lock_fd: int) -> None:
         raise AdapterInstallError(f"npm finished, but {name} is still {after}.")
     marker = {"version": pin.version, "lock_sha256": _lock_sha256(name)}
     try:
-        _marker_path(name).write_text(json.dumps(marker, sort_keys=True), encoding="utf-8")
+        _marker_path(name).write_text(json.dumps(marker, sort_keys=True), encoding="utf-8", newline="")
     except OSError as exc:
         raise AdapterInstallError(f"the install marker could not be written ({type(exc).__name__}).") from None
 
