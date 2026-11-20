@@ -421,11 +421,14 @@ def warm_claude_discovery_cache() -> None:
 def claude_status_probe(
     env: Mapping[str, str],
     *,
-    config_path: Path,
+    config_path: Path | None = None,
     workspace_root: Path | None = None,
     **_unused: Any,
 ) -> dict[str, Any]:
-    return _claude_status(env, config_path, workspace_root=workspace_root)
+    # Callers that only hold the environment (the engine's startup phases) get
+    # the same config path the Settings card would compute.
+    path = config_path or _claude_config_path_from_env(env)
+    return _claude_status(env, path, workspace_root=workspace_root)
 
 
 def opencode_status_probe(
@@ -731,7 +734,8 @@ def _claude_status(
             command=claude_adapter_install_command(),
             detail=(
                 "Claude Code is installed, but the ACP adapter (claude-agent-acp) is not. "
-                "Use Install in Settings → Providers."
+                "Install the ACP adapter with the button below, or run: "
+                f"{claude_adapter_install_command()}"
             ),
             version=version,
             skills=claude_skills,
