@@ -260,11 +260,9 @@ def test_schedule_routing_uses_the_workspace_override(tmp_path: Path) -> None:
     chat = manager.get_chat(chat_id)
     assert (chat.model, chat.thinking_level, chat.mode) == ("opus", "high", "normal")
 
-    # An explicit entry model and mode still win.
+    # An explicit entry model still wins; a routine has no mode to win with.
     provider, model, _ = manager.schedule_effective_routing(entry(model="haiku"))
     assert model == "haiku"
-    explicit = entry(model="haiku", mode="bypass")
-    assert (explicit.mode or config.default_mode_for_provider(provider, workspace)) == "bypass"
 
     source = inspect.getsource(ciao_main)
     assert "provider, model, workspace = pcm.schedule_effective_routing(entry)" in source
@@ -458,30 +456,19 @@ def _agent_world(tmp_path: Path, parent_mode: str):
     return plane, manager, principal, project
 
 
-def test_agent_created_schedule_stores_the_capped_mode(tmp_path: Path) -> None:
+def test_agent_created_schedule_stores_no_mode(tmp_path: Path) -> None:
+    """An agent's routine carries no mode of its own, so the agent's ceiling is not stored either."""
     plane, _manager_, principal, _project = _agent_world(tmp_path, "normal")
 
     created = plane.schedule_create(
         principal, prompt="Check.", daily_time="09:00", timezone="UTC", frequency="weekly"
     )["data"]
+
     stored = next(
         e for e in plane.schedules.list_entries() if e.schedule_id == created["schedule_id"]
     )
-    assert stored.mode == "normal"
-
-    # An explicit stronger mode is clamped too; a weaker one is honoured.
-    clamped = plane.schedule_create(
-        principal, prompt="Check.", daily_time="09:00", timezone="UTC",
-        frequency="weekly", mode="bypass",
-    )["data"]
-    assert next(
-        e for e in plane.schedules.list_entries() if e.schedule_id == clamped["schedule_id"]
-    ).mode == "normal"
-
-    updated = plane.schedule_update(principal, created["schedule_id"], mode="bypass")["data"]
-    assert next(
-        e for e in plane.schedules.list_entries() if e.schedule_id == updated["schedule_id"]
-    ).mode == "normal"
+    assert not hasattr(stored, "mode")
+    assert "mode" not in created
 
 
 def test_legacy_workspaces_env_import_drops_provider_overrides(tmp_path: Path) -> None:
@@ -539,13 +526,12 @@ def test_invalid_stored_override_warning_does_not_log_the_value(
     assert "SECRET" not in caplog.text
 
 
-def _operator_schedule(plane, project, mode: str):
-    """A routine the operator made (store write), with a saved mode."""
+def _operator_schedule(plane, project):
+    """A routine the operator made (store write)."""
     return plane.schedules.create(
         daily_time_utc="09:00",
         prompt="Original text.",
         model="",
-        mode=mode,
         chat_id=0,
         web_project_id=project.project_id,
         web_project_name=project.name,
@@ -557,85 +543,37 @@ def _stored(plane, schedule_id: str):
     return next(e for e in plane.schedules.list_entries() if e.schedule_id == schedule_id)
 
 
-def test_saved_schedule_mode_is_a_ceiling_at_dispatch() -> None:
-    """Lowering the workspace default later lowers an agent routine's saved mode."""
-    from ciao.execution_modes import MODE_RANK, cap_schedule_mode
+def test_schedule_runs_take_the_workspace_default_mode(tmp_path: Path) -> None:
+    """A routine stores no mode: its chat takes the provider default for its workspace."""
+    from ciao import execution_modes
 
-    assert cap_schedule_mode("", "auto") == "auto"
-    assert cap_schedule_mode("bypass", "normal") == "normal"
-    assert cap_schedule_mode("bypass", "auto") == "auto"
-    # A saved weaker mode stays weaker when the default rises.
-    assert cap_schedule_mode("normal", "bypass") == "normal"
-    assert cap_schedule_mode("auto", "auto") == "auto"
-    # A value that is not a mode cannot raise anything.
-    assert cap_schedule_mode("junk", "normal") == "normal"
-
-    # control_plane and main share one rank object.
-    from ciao import control_plane as cp_module
-
-    assert cp_module._MODE_RANK is MODE_RANK
-
-
-def test_schedule_run_mode_resolves_through_the_real_dispatch_function(tmp_path: Path) -> None:
-    """main._resolve_schedule_target calls schedule_run_mode; exercise it with a real config."""
     config = _config(
         tmp_path,
         {"claude": {"permission_mode": "bypass"}},
         provider_default_modes={"claude": "auto"},
     )
-    assert ciao_main.schedule_run_mode(config, "", "claude", "work") == "bypass"
-    assert ciao_main.schedule_run_mode(config, "normal", "claude", "work") == "normal"
-    # Another workspace has the engine default (auto): a saved bypass drops to it.
-    assert ciao_main.schedule_run_mode(config, "bypass", "claude", "personal") == "auto"
-    # Lowering the workspace override lowers a saved higher mode with it.
-    config.workspaces["work"].provider_overrides = {"claude": {"permission_mode": "manual"}}
-    assert ciao_main.schedule_run_mode(config, "bypass", "claude", "work") == "normal"
-    assert ciao_main.schedule_run_mode(config, "", "claude", "work") == "normal"
-    # The closure in create_app goes through this function, not its own copy.
-    assert "schedule_run_mode(config, entry.mode, provider, workspace)" in " ".join(
-        inspect.getsource(ciao_main).split()
-    )
+    assert config.default_mode_for_provider("claude", "work") == "bypass"
+    assert config.default_mode_for_provider("claude", "personal") == "auto"
+    # The saved-mode ceiling and its dispatch helper are gone.
+    assert not hasattr(execution_modes, "cap_schedule_mode")
+    assert not hasattr(ciao_main, "schedule_run_mode")
+    main_source = " ".join(inspect.getsource(ciao_main).split())
+    assert "mode = config.default_mode_for_provider(provider, workspace)" in main_source
 
 
-def test_agent_edit_of_a_routines_text_is_capped_at_the_callers_mode(tmp_path: Path) -> None:
+def test_agent_edit_of_a_routines_text_does_not_pin_a_mode(tmp_path: Path) -> None:
     plane, _manager_, principal, project = _agent_world(tmp_path, "normal")
+    routine = _operator_schedule(plane, project)
 
-    # Operator routine with no saved mode: an agent rewrite pins it to the caller's ceiling.
-    inherits = _operator_schedule(plane, project, "")
-    plane.schedule_update(principal, inherits.schedule_id, prompt="New text.")
-    assert _stored(plane, inherits.schedule_id).mode == "normal"
+    plane.schedule_update(principal, routine.schedule_id, prompt="New text.")
 
-    # Operator routine saved at bypass: a rewrite cannot keep it there.
-    high = _operator_schedule(plane, project, "bypass")
-    plane.schedule_update(principal, high.schedule_id, prompt="New text.")
-    assert _stored(plane, high.schedule_id).mode == "normal"
-
-    # Naming the mode key: stronger is clamped, "" cannot clear a saved mode.
-    auto = _operator_schedule(plane, project, "bypass")
-    plane.schedule_update(principal, auto.schedule_id, mode="")
-    assert _stored(plane, auto.schedule_id).mode == "normal"
-
-    # An update that touches neither text nor mode leaves the saved mode alone.
-    untouched = _operator_schedule(plane, project, "bypass")
-    plane.schedule_update(principal, untouched.schedule_id, enabled=False)
-    assert _stored(plane, untouched.schedule_id).mode == "bypass"
+    assert _stored(plane, routine.schedule_id).prompt == "New text."
+    assert not hasattr(_stored(plane, routine.schedule_id), "mode")
 
 
 def _webhook(plane, tmp):
     created = plane.workspace_webhook_create("work", name="hook", instructions="Do the thing.")
     return created["trigger"] if "trigger" in created else created
-
-
-def test_agent_switching_a_routines_provider_cannot_raise_its_mode(tmp_path: Path) -> None:
-    """Another provider may be pinned higher in this workspace; the agent's edit must not inherit it."""
-    plane, _manager_, principal, project = _agent_world(tmp_path, "normal")
-    plane.config.workspaces["work"].provider_overrides = {"opencode": {"permission_mode": "bypass"}}
-    routine = _operator_schedule(plane, project, "")
-
-    plane.schedule_update(principal, routine.schedule_id, provider="opencode")
-
-    assert _stored(plane, routine.schedule_id).provider == "opencode"
-    assert _stored(plane, routine.schedule_id).mode == "normal"
 
 
 def test_agent_below_the_workspace_default_cannot_enable_edit_or_rotate_a_webhook(

@@ -6132,7 +6132,7 @@ class ProjectChatManager:
             include_stable=include_stable,
             linked_repo_block=repo_block,
             linked_repo_line=repo_line,
-            permission_mode=self._effective_mode_for_chat(chat, unattended=unattended),
+            permission_mode=chat.mode,
             core=self._core_for_chat(chat),
         )
         if capsule:
@@ -6689,38 +6689,6 @@ class ProjectChatManager:
         overrides = config_workspace.claude_trim if config_workspace is not None else {}
         return bool(effective_trim(overrides)[CONNECTORS_TRIM_KEY])
 
-    def _effective_mode_for_chat(
-        self, chat: ChatInfo, *, unattended: bool = False
-    ) -> BridgeMode:
-        """Pick the runtime permission mode for ``chat``.
-
-        ``unattended`` (an automation run) forces ``bypass``. Nobody is
-        watching such a turn, so every mode that can escalate resolves to an
-        unanswerable prompt: ``_drive`` auto-denies it with "Scheduled runs
-        cannot wait for interactive approval", and the automation fails while
-        reporting success. An automation that fetches a page and writes a snapshot
-        died on its first tool call under the previous default (chats inherit
-        `auto`; ``ScheduleEntry.mode`` also defaults to `auto`). The
-        authorization for these turns happened when the user created the
-        automation, which is the same trade every cron runner makes.
-        Deny rules still apply — they are evaluated before the callback — so
-        the per-workspace denylist (`Skill(schedule)`, harness tools) is not
-        weakened by this.
-
-        Auto mode relies on Anthropic's server-side classifier to decide
-        which tool calls run silently and which escalate, which the Claude
-        Code path reaches directly. Other modes (``plan``, ``bypass``,
-        ``normal``) pass through unchanged: ``plan`` needs no classifier,
-        ``bypass`` is already what we want, and ``normal`` is an explicit
-        user opt-in to be asked every time.
-        """
-        if unattended and chat.mode != "plan":
-            # `plan` is exempt: it cannot escalate (it only proposes), so
-            # forcing bypass would turn a read-only planning tick into a
-            # writing one.
-            return "bypass"
-        return chat.mode
-
     @staticmethod
     def _rotate_session_id(chat: ChatInfo, new_session_id: str) -> None:
         """Record a mid-conversation SDK session rotation (autocompact, or a
@@ -6817,10 +6785,11 @@ class ProjectChatManager:
     ) -> AgentRequest:
         """Resolve all routing parameters and construct an AgentRequest.
 
-        ``unattended`` marks an automation-driven turn, which changes
-        the permission mode (see ``_effective_mode_for_chat``). ``compact``
-        marks a context compaction: the prompt is the bare command, so no
-        capsule, file expansion, images or stable-context marker apply.
+        ``unattended`` marks an automation-driven turn: the capsule tells the
+        model nobody is watching, and the permission broker denies any request
+        it would have to wait on. The turn runs in the chat's own mode.
+        ``compact`` marks a context compaction: the prompt is the bare command,
+        so no capsule, file expansion, images or stable-context marker apply.
         """
         if compact:
             images = None
@@ -6880,7 +6849,7 @@ class ProjectChatManager:
             prompt=full_prompt,
             model=self._runtime_model_for_chat(chat),
             provider=chat.provider,
-            mode=self._effective_mode_for_chat(chat, unattended=unattended),
+            mode=chat.mode,
             display_prompt=final_display_prompt,
             resume_session=resume_session,
             images=images or [],
@@ -9445,9 +9414,10 @@ class ProjectChatManager:
             self._ensure_retry_task(chat.chat_id)
             delivery = "deferred"
         else:
-            # Deliberately NOT unattended: that flag forces bypass mode, and a
-            # chat waking up to merge branches or act on a finished script
-            # should still raise approval cards. The user may well be watching.
+            # Deliberately NOT unattended: that flag makes the permission broker
+            # deny approval requests, and a chat waking up to merge branches or
+            # act on a finished script should still raise approval cards. The
+            # user may well be watching.
             self.start_stream(parent.chat_id, prompt, origin=origin)
             delivery = "started"
         self._events.publish({

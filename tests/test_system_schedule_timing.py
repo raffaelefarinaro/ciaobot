@@ -269,7 +269,7 @@ def test_mcp_system_rejects_non_ascii_clock_digit_without_write(tmp_path: Path) 
 
 def test_mcp_user_schedule_rejects_non_ascii_clock_digit(tmp_path: Path) -> None:
     store = ScheduleStore(tmp_path / ".runtime")
-    entry = store.create(daily_time_utc="08:00", prompt="run", model="", mode="auto", chat_id=0, frequency="daily", workspace="personal")
+    entry = store.create(daily_time_utc="08:00", prompt="run", model="", chat_id=0, frequency="daily", workspace="personal")
     manager = ScheduleManager(store)
     plane = CiaoControlPlane(
         type("Config", (), {"workspace": lambda _self, name: object() if name == "personal" else None,
@@ -444,7 +444,7 @@ def test_system_store_rejects_non_ascii_clock_digit(tmp_path: Path) -> None:
 def test_user_store_rejects_non_ascii_clock_digit(tmp_path: Path) -> None:
     store = ScheduleStore(tmp_path)
     with pytest.raises(ValueError):
-        store.create(daily_time_utc="08:1٢", prompt="run", model="", mode="auto", chat_id=0, frequency="daily")
+        store.create(daily_time_utc="08:1٢", prompt="run", model="", chat_id=0, frequency="daily")
     assert not (tmp_path / "schedules.json").exists()
 
 
@@ -461,7 +461,7 @@ def test_http_system_rejects_non_ascii_clock_digit_without_write(tmp_path: Path)
 
 def test_http_user_schedule_rejects_non_ascii_clock_digit(tmp_path: Path) -> None:
     client, manager = _client(tmp_path)
-    entry = manager.create(daily_time_utc="08:00", prompt="run", model="", mode="auto", chat_id=0, frequency="daily")
+    entry = manager.create(daily_time_utc="08:00", prompt="run", model="", chat_id=0, frequency="daily")
     state_path = tmp_path / ".runtime" / "schedules.json"
     before = state_path.read_bytes()
     response = client.patch(f"/api/schedules/{entry.schedule_id}", json={"time": "08:1٢"})

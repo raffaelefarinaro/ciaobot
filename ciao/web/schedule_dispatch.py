@@ -421,9 +421,10 @@ class ScheduleDispatcher:
                 return None
             interval = getattr(entry, "frequency", "") == "interval"
             if not interval:
-                # Interval runs inherit the chat's own model/mode instead.
+                # Interval runs inherit the chat's own model instead. A run
+                # never restamps the chat's permission mode: the chat keeps the
+                # mode it was opened with, on this run and on the user's reply.
                 target_chat.model = model
-                target_chat.mode = mode
                 # A rehomed replacement was created without a provider arg, so
                 # create_chat defaulted it to the workspace's default — which
                 # can differ from the engine this dispatch resolved (entry
@@ -574,16 +575,15 @@ class ScheduleDispatcher:
         result: dict[str, str] = {"chat_id": target_id}
         outcome = chat_service.ScheduleRunOutcome()
 
-        # Save original model/mode for fixed-chat dispatches. Interval entries
+        # Save the original model for fixed-chat dispatches. Interval entries
         # are exempt: prepare_schedule_chat leaves the chat's settings alone for
         # them, so there is nothing to restore.
         orig_model: str | None = None
-        orig_mode: BridgeMode | None = None
         interval = getattr(entry, "frequency", "") == "interval"
         if not interval and not web_project_id and web_chat_id:
             chat = self._host._chats.get(target_id)
             if chat:
-                orig_model, orig_mode = chat.model, chat.mode
+                orig_model = chat.model
 
         # Placeholder inputs differ by schedule scope. A trusted system routine
         # (startup triage, memory care) may see the engine-wide report; a user
@@ -739,7 +739,6 @@ class ScheduleDispatcher:
         finally:
             if (
                 orig_model is not None
-                and orig_mode is not None
                 and not interval
                 and not web_project_id
                 and web_chat_id
@@ -747,7 +746,6 @@ class ScheduleDispatcher:
                 chat = self._host._chats.get(target_id)
                 if chat:
                     chat.model = orig_model
-                    chat.mode = orig_mode
 
         chat_state = self._host._chats.get(target_id)
         network_retry = False

@@ -4818,9 +4818,8 @@ class CiaoControlPlane:
     # * **No implicit bypass.** The turn is launched through
     #   ``pcm.start_stream(chat_id, prompt)`` with the *default*
     #   ``unattended=False``, exactly as A4's webhook dispatch does.
-    #   ``_effective_mode_for_chat`` turns that flag into ``bypass``, so an
-    #   approval card raised here is an ordinary Needs-you card answered in the
-    #   ordinary chat. The board is a user action, but the constraint is the same:
+    #   Without that flag the turn is interactive, so an approval card raised
+    #   here is an ordinary Needs-you card answered in the ordinary chat. The board is a user action, but the constraint is the same:
     #   nobody asked this turn to run unwatched.
     # * **One live attempt per task, and exactly one chat.** ``start`` holds the
     #   attempt store's workspace lock across its read-then-write, so a double
@@ -5358,9 +5357,8 @@ class CiaoControlPlane:
         """``start_stream`` with the default attendance: the stream, or ``(None, why)``.
 
         The single call site for a delegated turn, and the reason this block is
-        small: ``unattended`` is never named here, so
-        ``ProjectChatManager._effective_mode_for_chat`` cannot force ``bypass`` and
-        an approval card raised by the turn surfaces as an ordinary Needs-you card.
+        small: ``unattended`` is never named here, so the turn is interactive and
+        an approval card raised by it surfaces as an ordinary Needs-you card.
         The recording fake in ``tests/test_task_delegation.py`` asserts the kwargs
         are exactly ``origin``, so a later "just this once" cannot add the flag quietly.
 
@@ -6845,16 +6843,19 @@ class CiaoControlPlane:
 
         An explicit ``workspace`` may only restate the principal's own. Unlike a
         chat turn, a schedule is auto-approved model input that persists a
-        prompt and runs unattended — and unattended dispatch forces the target
-        chat into bypass — so honoring a foreign workspace would let an
+        prompt and runs unattended — and a run's chat acts in its workspace's
+        default mode — so honoring a foreign workspace would let an
         injected or compromised managed chat execute there with that
         workspace's guide, integrations, and filesystem authority, without
         operator approval. Giving a second workspace an automation is operator
         business, done from a chat scoped to it.
 
         A schedule binds to a project (+ workspace), never to a chat: a
-        ``chat_id`` is refused outright (issue #407).
+        ``chat_id`` is refused outright (issue #407). ``mode`` is refused too: a
+        schedule stores no permission mode, so a named one would be dropped.
         """
+        if "mode" in values:
+            raise ControlPlaneError("invalid_fields", "Unknown schedule fields: mode")
         # One boundary for explicit and omitted targets alike: ``_workspace``
         # refuses any name other than the principal's own and still validates
         # that the scoped workspace exists.
@@ -6921,11 +6922,6 @@ class CiaoControlPlane:
             created_at=now,
             model=str(values.get("model") or ""),
             provider=str(values.get("provider") or ""),
-            # An agent-created routine runs unattended later, so its mode is
-            # fixed now at the caller's own ceiling (a requested weaker mode is
-            # honoured, a stronger one is clamped), never left to inherit the
-            # workspace/engine default at dispatch time.
-            mode=self._child_mode(principal, str(values.get("mode") or "") or None),
             # Same zone the Automations page and REST create default to (#2449).
             timezone_name=str(
                 values.get("timezone") or values.get("timezone_name") or DEFAULT_TIMEZONE
@@ -6959,7 +6955,6 @@ class CiaoControlPlane:
             prompt=preview["prompt"],
             model=preview["model"],
             provider=preview["provider"],
-            mode=preview["mode"],
             chat_id=0,
             timezone_name=preview["timezone_name"],
             days_of_week=preview["days_of_week"],
@@ -7049,8 +7044,8 @@ class CiaoControlPlane:
         # validate it here: dispatch-time routing and provider/model inheritance
         # both hang off this field, so silently storing garbage would strand the
         # schedule. The destination is scoped like every other tool too: an
-        # unattended run executes its prompt in bypass inside the target
-        # workspace, so a move there is operator business, not something a
+        # unattended run executes its prompt inside the target workspace with
+        # nobody watching, so a move there is operator business, not something a
         # managed chat can talk a token into.
         if changes.get("workspace") is not None:
             target = self._workspace(principal, str(changes["workspace"]).strip().lower())
@@ -7091,22 +7086,6 @@ class CiaoControlPlane:
             # (unlike `changes`, filtered above).
         aliases = {"daily_time": "daily_time_utc", "timezone": "timezone_name", "chat_id": "web_chat_id", "project_id": "web_project_id"}
         normalized = {aliases.get(key, key): value for key, value in changes.items() if value is not None}
-        if (
-            "mode" in changes
-            or normalized.get("prompt")
-            or "command" in normalized
-            or "provider" in normalized
-        ):
-            # Same ceiling `schedule_create` applies. Rewriting a routine's text
-            # or command, naming its mode, or switching its provider (whose
-            # default may be pinned higher) makes the routine the agent's own
-            # work, so it runs at most at the agent's mode: it can weaken the
-            # saved mode, never keep or set a stronger one, and an empty mode
-            # cannot clear a saved one. An update touching none of these
-            # (enable/disable, workspace) leaves the saved mode alone.
-            normalized["mode"] = self._child_mode(
-                principal, str(normalized.get("mode") or entry.mode or "") or None
-            )
         if project is not None:
             # The recorded name is what survives per-instance project-id
             # regeneration (dispatch re-homes by it), so leaving the previous

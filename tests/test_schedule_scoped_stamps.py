@@ -15,7 +15,7 @@ _NOW = datetime(2026, 6, 15, 8, 0, tzinfo=UTC)
 
 def _due(store: ScheduleStore):
     entry = store.create(
-        daily_time_utc="08:00", prompt="p", model="sonnet", mode="bypass", chat_id=0,
+        daily_time_utc="08:00", prompt="p", model="sonnet", chat_id=0,
         frequency="daily", timezone_name="UTC", title="t",
     )
     # An old created_at so the slot counts as due rather than before first seen.
@@ -102,7 +102,7 @@ async def test_run_now_stamp_keeps_a_concurrent_edit(tmp_path: Path) -> None:
 async def test_interval_start_refuses_a_row_deleted_before_the_stamp(tmp_path: Path) -> None:
     store = ScheduleStore(tmp_path)
     entry = store.create(
-        daily_time_utc="", prompt="p", model="", mode="auto", chat_id=0,
+        daily_time_utc="", prompt="p", model="", chat_id=0,
         frequency="interval", interval_minutes=5, web_chat_id="chat-1", title="t",
     )
     dispatched: list[str] = []
@@ -136,7 +136,7 @@ async def test_stop_cancels_and_joins_tracked_run_tasks(tmp_path: Path) -> None:
 
     manager = ScheduleManager(store=store, dispatch_to_web=dispatch)
     entry = store.create(
-        daily_time_utc="", prompt="p", model="", mode="auto", chat_id=0,
+        daily_time_utc="", prompt="p", model="", chat_id=0,
         frequency="manual", title="t",
     )
     await manager.dispatch_now(entry.schedule_id, now=_NOW)
@@ -160,7 +160,7 @@ async def test_stop_reports_a_run_that_ignores_cancellation(tmp_path: Path) -> N
 
     manager = ScheduleManager(store=store, dispatch_to_web=dispatch)
     entry = store.create(
-        daily_time_utc="", prompt="p", model="", mode="auto", chat_id=0,
+        daily_time_utc="", prompt="p", model="", chat_id=0,
         frequency="manual", title="t",
     )
     await manager.dispatch_now(entry.schedule_id, now=_NOW)
@@ -182,7 +182,7 @@ async def test_work_count_covers_inflight_runs_and_live_tasks(tmp_path: Path) ->
     manager = ScheduleManager(store=store, dispatch_to_web=dispatch)
     assert manager.work_count() == 0
     entry = store.create(
-        daily_time_utc="", prompt="p", model="", mode="auto", chat_id=0,
+        daily_time_utc="", prompt="p", model="", chat_id=0,
         frequency="manual", title="t",
     )
     await manager.dispatch_now(entry.schedule_id, now=_NOW)
@@ -196,7 +196,7 @@ async def test_work_count_covers_inflight_runs_and_live_tasks(tmp_path: Path) ->
 async def test_command_interval_deleted_mid_fire_reports_nothing_started(tmp_path: Path) -> None:
     store = ScheduleStore(tmp_path)
     entry = store.create(
-        daily_time_utc="", prompt="p", model="", mode="auto", chat_id=0,
+        daily_time_utc="", prompt="p", model="", chat_id=0,
         frequency="interval", interval_minutes=5, command="true", title="t",
     )
     dispatched: list[str] = []
