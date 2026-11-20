@@ -80,6 +80,20 @@ def test_pyproject_ships_pwa_static_files() -> None:
     assert "static/**/*" in package_data["ciao.web"]
 
 
+def test_pyproject_ships_both_adapter_lockfiles_with_their_package_json() -> None:
+    """The per-adapter lockfile and its package.json are what the install runs ``npm ci`` against."""
+    pyproject = Path(__file__).parents[1] / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    patterns = data["tool"]["setuptools"]["package-data"]["ciao.stock"]
+    stock = Path(__file__).parents[1] / "ciao" / "stock"
+
+    assert "adapters/*/package.json" in patterns
+    assert "adapters/*/package-lock.json" in patterns
+    for name in ("claude-agent-acp", "codex-acp"):
+        for filename in ("package.json", "package-lock.json"):
+            assert (stock / "adapters" / name / filename).is_file(), (name, filename)
+
+
 @pytest.mark.skipif(importlib.util.find_spec("build") is None, reason="build is required")
 def test_release_wheel_bundles_every_ciao_module(tmp_path: Path) -> None:
     """Build the release wheel and keep its Python modules aligned with ciao/."""

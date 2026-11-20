@@ -107,6 +107,8 @@ namespaces = false
   "schedules.json",
   "provider-versions.json",
   "update-tasks/**/*",
+  "adapters/*/package.json",
+  "adapters/*/package-lock.json",
 ]
 
 [tool.uv]

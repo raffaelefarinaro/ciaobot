@@ -34,7 +34,7 @@ from acp.router import MessageRouter, Route
 from acp.schema import ClientCapabilities
 
 from ciao import __version__
-from ciao.host_terminal import PLATFORM_MACOS, host_platform
+from ciao.adapter_install import ADAPTERS, AdapterNotReady, launch_argv
 from ciao.os_support.processes import descendant_processes, process_table, signal_processes
 from ciao.providers.acp.spec import AgentSpec
 from ciao.redact import redact_text
@@ -178,7 +178,8 @@ def agent_base_env(unset: tuple[str, ...]) -> dict[str, str]:
 
     Every variable is passed through, provider credentials included: each CLI decides what it
     uses, so Ciaobot does not filter them. Only ``CIAO_*`` and the PWA token are withheld, and
-    the spec's ``unset`` names. On non-macOS hosts ``PATH`` is the user's terminal PATH.
+    the spec's ``unset`` names. ``PATH`` is the user's terminal PATH on every platform, so a
+    CLI's ``#!/usr/bin/env node`` shim finds the same node the user's terminal does.
     """
     env = {
         key: value
@@ -188,7 +189,7 @@ def agent_base_env(unset: tuple[str, ...]) -> dict[str, str]:
         and key not in unset
     }
     path = terminal_path()
-    if host_platform() != PLATFORM_MACOS and path:
+    if path:
         env["PATH"] = path
     return env
 
@@ -265,18 +266,29 @@ class AcpConnection:
         env: Mapping[str, str],
         client: acp.Client,
     ) -> AcpConnection:
-        binary = resolve_tool(spec.binary)
-        if binary is None:
-            raise AgentStartError(f"{spec.binary} was not found on PATH.")
-        if not os.path.isabs(binary):
-            # A '.' or empty PATH entry resolves relative to the cwd we are about to set.
-            raise AgentStartError(f"{spec.binary} resolved to a relative path ({binary}); refusing to start it.")
+        if spec.binary in ADAPTERS:
+            # A pinned adapter runs from the private prefix, under the machine's own node. It
+            # never starts while its CLI or node is missing, or the adapter is not the pin.
+            try:
+                argv = await asyncio.to_thread(launch_argv, spec.binary)
+            except AdapterNotReady as exc:
+                raise AgentStartError(str(exc)) from exc
+        else:
+            binary = resolve_tool(spec.binary)
+            if binary is None:
+                raise AgentStartError(f"{spec.binary} was not found on PATH.")
+            if not os.path.isabs(binary):
+                # A '.' or empty PATH entry resolves relative to the cwd we are about to set.
+                raise AgentStartError(f"{spec.binary} resolved to a relative path ({binary}); refusing to start it.")
+            argv = [binary]
+        # The executable the process runs first: node for a managed adapter, which has no version gate.
+        binary = argv[0]
         merged = {**agent_base_env(spec.unset_env), **spec.env, **env}
         merged["PATH"] = prepend_engine_path(merged.get("PATH"))
         # No start_new_session: the agent stays in the engine's process group so the
         # supervisor's group kill reaches it when the engine dies.
         process = await asyncio.create_subprocess_exec(
-            binary,
+            *argv,
             *spec.args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,

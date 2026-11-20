@@ -99,9 +99,10 @@ def claude_session_options(request: AgentRequest) -> dict[str, Any]:
 
 def _claude_cli_env() -> dict[str, str]:
     """Point the adapter at the user's own ``claude``, and its login, when one resolves."""
+    from ciao.adapter_install import absolute_executable
     from ciao.setup_status import claude_cli_path
 
-    path = claude_cli_path()
+    path = absolute_executable(claude_cli_path() or None)
     return {"CLAUDE_CODE_EXECUTABLE": path} if path else {}
 
 
@@ -166,7 +167,7 @@ def claude_auth_command(*, device_auth: bool = False) -> list[str]:
 CODEX = AgentSpec(
     id="codex",
     binary="codex-acp",
-    env={},  # codex-acp uses the codex it bundles; CODEX_PATH stays unset.
+    env={},  # CODEX_PATH is the user's own codex, added by CodexAcpProvider.spawn_env.
     client_meta={},  # No subagents opt-in: a Codex subagent is a plain tool call (plan Q6).
     modes={
         "plan": (
@@ -193,6 +194,19 @@ CODEX = AgentSpec(
 
 class CodexAcpProvider(AcpProvider):
     spec = CODEX
+
+    @classmethod
+    def spawn_env(cls) -> dict[str, str]:
+        """The user's own ``codex`` as ``CODEX_PATH``, when one resolves.
+
+        Without it codex-acp would run the codex it bundles, which Ciaobot does not install. A
+        relative or non-executable result is left unset, so the variable never names a path the
+        adapter would resolve against its own working directory.
+        """
+        from ciao.adapter_install import absolute_executable
+
+        path = absolute_executable(codex_binary())
+        return {"CODEX_PATH": path} if path else {}
 
 
 _OPENCODE_CHILD_UPDATE = "opencode/session/child_update"
@@ -439,11 +453,6 @@ class OpencodeAcpProvider(AcpProvider):
 def codex_binary() -> str | None:
     """The ``codex`` CLI on the terminal PATH, or ``None``. The one lookup Codex code uses."""
     return resolve_tool("codex")
-
-
-def codex_acp_binary() -> str | None:
-    """The ``codex-acp`` adapter on the terminal PATH, or ``None``."""
-    return resolve_tool("codex-acp")
 
 
 def codex_auth_command(*, device_auth: bool = False) -> list[str]:

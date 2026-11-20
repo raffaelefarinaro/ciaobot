@@ -47,7 +47,11 @@ from ciao.port_in_use import (
 )
 from ciao.web.project_chats import ProjectChatManager
 from ciao.web.push import PushManager
-from ciao.setup_status import PROVIDER_STATE_NOT_INSTALLED, startup_phase_detail
+from ciao.setup_status import (
+    PROVIDER_STATE_ADAPTER_MISSING,
+    PROVIDER_STATE_NOT_INSTALLED,
+    startup_phase_detail,
+)
 
 if TYPE_CHECKING:
     import uvicorn
@@ -685,25 +689,56 @@ def provider_startup_phase(provider_id: str) -> str:
     return _STARTUP_PHASE_IDS.get(provider_id, f"connect_{provider_id}")
 
 
+async def check_provider_startup(tracker: StartupTracker, phase: str, descriptor) -> None:
+    """Start the provider's pinned ACP adapter install when its CLI is present, then settle the phase.
+
+    ``adapter_install`` never installs for an absent CLI, and its startup install runs on its own
+    thread, so the phase does not wait on npm. A started install settles the phase as done with the
+    install note; a failed or unavailable one reports through the probe.
+    """
+    from ciao import adapter_install
+
+    installing = False
+    if (adapter := adapter_install.PROVIDER_ADAPTERS.get(descriptor.id)) is not None:
+        try:
+            started = await asyncio.to_thread(adapter_install.start_install_in_background, adapter)
+        except Exception:  # the probe below still reports the adapter's state
+            logger.warning("Could not start the %s adapter install", adapter, exc_info=True)
+        else:
+            installing = started is None
+    await run_provider_startup_check(
+        tracker,
+        phase,
+        partial(descriptor.status_probe, os.environ),
+        installing=installing,
+    )
+
+
 async def run_provider_startup_check(
-    tracker: StartupTracker, phase: str, probe: Callable[[], Mapping[str, Any]]
+    tracker: StartupTracker,
+    phase: str,
+    probe: Callable[[], Mapping[str, Any]],
+    *,
+    installing: bool = False,
 ) -> None:
     """Settle one provider's startup phase from its status probe.
 
     A CLI the user never installed is skipped, not failed: it is a choice, not
     a fault. A probe that raises fails the phase with its exception type when
     the message is empty (a timeout has none), so the phase never reads "not
-    found: " with nothing after it.
+    found: " with nothing after it. A missing adapter while its install runs in
+    the background is done, not failed.
     """
     try:
         status = await asyncio.to_thread(probe)
     except Exception as exc:  # a probe must never block startup
         tracker.fail(phase, f"check failed: {str(exc) or type(exc).__name__}")
         return
-    detail = startup_phase_detail(status)
-    if status.get("state") == PROVIDER_STATE_NOT_INSTALLED:
+    detail = startup_phase_detail(status, installing=installing)
+    state = status.get("state")
+    if state == PROVIDER_STATE_NOT_INSTALLED:
         tracker.skip(phase, detail or "not installed")
-    elif status.get("ok"):
+    elif status.get("ok") or (installing and state == PROVIDER_STATE_ADAPTER_MISSING):
         tracker.done(phase, detail or "connected")
     else:
         tracker.fail(phase, detail or "not connected")
@@ -783,11 +818,7 @@ async def _run_server_locked(
             continue
         phase = provider_startup_phase(descriptor.id)
         tracker.start(phase)
-        asyncio.create_task(
-            run_provider_startup_check(
-                tracker, phase, partial(descriptor.status_probe, os.environ)
-            )
-        )
+        asyncio.create_task(check_provider_startup(tracker, phase, descriptor))
 
     # Rename each root's legacy CLAUDE.md onto AGENTS.md, once. Both providers
     # discover AGENTS.md natively now, but Claude Code only falls back to it

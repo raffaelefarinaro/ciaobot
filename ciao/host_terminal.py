@@ -30,11 +30,6 @@ PLATFORM_MACOS, PLATFORM_LINUX, PLATFORM_OTHER = ("macos", "linux", "other")
 # also accepts the flag (documented under `allow-scripts`); an npm that predates it
 # only warns about an unknown config key and runs the scripts anyway.
 GWS_INSTALL_COMMAND = "npm install -g --allow-scripts=@googleworkspace/cli @googleworkspace/cli"
-# Both packages pinned: the adapter bundles @openai/codex ^0.166.0, and the CLI here must match
-# the one `codex login` writes credentials for. Bump deliberately with the adapter pin.
-CODEX_INSTALL_COMMAND = (
-    "npm install -g @openai/codex@0.166.0 @agentclientprotocol/codex-acp@2.7.0"
-)
 SKILLS_UPDATE_COMMAND = "npx skills update -g -y"
 
 
@@ -187,6 +182,16 @@ def capabilities() -> Capabilities:
     return Capabilities(False, platform, reason="unsupported_platform")
 
 
+def codex_install_command() -> str:
+    """The Settings line for Codex: the codex CLI only when none resolves, then the pinned adapter."""
+    from ciao import adapter_install
+    from ciao.providers.acp.agents import codex_binary
+
+    lines = [] if codex_binary() else [adapter_install.CODEX_CLI_INSTALL]
+    lines.append(adapter_install.install_command(adapter_install.CODEX_ADAPTER))
+    return " && ".join(lines)
+
+
 def action_command(action: str) -> str:
     """The command line for an allowlisted action id; KeyError for any other.
 
@@ -202,13 +207,14 @@ def action_command(action: str) -> str:
         if check.get("state") != "below_tested" or not check.get("command"):
             raise NothingToUpdate(f"{action}: nothing to update")
         return check["command"]
+    from ciao import adapter_install
     from ciao import setup_status
     from ciao import opencode_cli
 
     if action == "claude-install":
         # The ACP adapter Ciaobot runs chats through is always needed. The CLI installer
         # runs only when no CLI resolves, so an existing install is not reinstalled.
-        adapter = setup_status.claude_adapter_install_command()
+        adapter = adapter_install.install_command(adapter_install.CLAUDE_ADAPTER)
         if setup_status.claude_cli_path():
             return adapter
         return f"{setup_status.claude_install_command()} && {adapter}"
@@ -219,7 +225,7 @@ def action_command(action: str) -> str:
     if action == "opencode-login":
         return opencode_cli.OPENCODE_LOGIN_COMMAND
     if action == "codex-install":
-        return CODEX_INSTALL_COMMAND
+        return codex_install_command()
     if action == "codex-login":
         from ciao.providers.acp import agents
 

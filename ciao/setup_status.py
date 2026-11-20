@@ -266,6 +266,8 @@ def _provider(
     terminal_action: str = "",
     mcp_command: str = "",
     release_check: dict[str, str] | None = None,
+    adapter: str = "",
+    adapter_state: str = "",
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
         "name": name,
@@ -298,6 +300,10 @@ def _provider(
         row["terminal_action"] = terminal_action
     if mcp_command:
         row["mcp_command"] = mcp_command
+    if adapter:
+        row["adapter"] = adapter
+    if adapter_state:
+        row["adapter_state"] = adapter_state
     if release_check is not None:
         row["release_check"] = release_check
     return row
@@ -495,25 +501,27 @@ def codex_status_probe(
 ) -> dict[str, Any]:
     """Codex install and login state for Settings.
 
-    Installed means both ``codex`` and ``codex-acp`` resolve. Signed in means ``codex login status``
+    Installed means ``codex`` resolves and the pinned ``codex-acp`` adapter is ready, either the
+    machine's own copy at the pin or the one Ciaobot installed. Signed in means ``codex login status``
     exits 0. Only the exit code is read: the command's output is never stored, returned or logged,
     so a token it might print cannot reach the PWA.
     """
-    from ciao.host_terminal import CODEX_INSTALL_COMMAND
+    from ciao import adapter_install
+    from ciao.host_terminal import codex_install_command
     from ciao.provider_versions import parse_cli_version
-    from ciao.providers.acp.agents import codex_acp_binary, codex_binary
+    from ciao.providers.acp.agents import codex_binary
 
     codex = codex_binary()
-    adapter = codex_acp_binary()
     probe_env = _codex_probe_env(env)
-    if codex is None or adapter is None:
+    if codex is None:
         return _provider(
             name="codex",
             ok=False,
             auth="not_installed",
             state=PROVIDER_STATE_NOT_INSTALLED,
-            command=CODEX_INSTALL_COMMAND,
-            detail="Codex and its ACP adapter are not both installed on this machine.",
+            command=codex_install_command(),
+            detail=adapter_message(adapter_install.CODEX_ADAPTER, "cli_missing", startup=False),
+            adapter_state="cli_missing",
             version="not installed",
             install_url=CODEX_INSTALL_DOCS_URL,
             terminal_action="codex-install",
@@ -534,6 +542,21 @@ def codex_status_probe(
         version = parse_cli_version(found.stdout) or "unknown"
     except (OSError, subprocess.SubprocessError):
         version = "unknown"
+    state = adapter_install.detect(adapter_install.CODEX_ADAPTER)
+    if state != "ready":
+        # The CLI is present but its ACP adapter is not runnable: adapter_missing, or a Node failure.
+        return _provider(
+            name="codex",
+            ok=False,
+            auth=adapter_row_auth(state),
+            state=adapter_row_state(state),
+            command=codex_install_command(),
+            detail=adapter_message(adapter_install.CODEX_ADAPTER, state, startup=False),
+            adapter_state=state,
+            version=version,
+            install_url=CODEX_INSTALL_DOCS_URL,
+            terminal_action="codex-install",
+        )
     try:
         status = subprocess.run(
             [codex, "login", "status"],
@@ -561,6 +584,7 @@ def codex_status_probe(
             command="codex login",
             detail="Signed in to Codex.",
             version=version,
+            adapter=adapter_install.describe(adapter_install.CODEX_ADAPTER, "ready"),
         )
     return _provider(
         name="codex",
@@ -585,48 +609,60 @@ def claude_install_command() -> str:
     return "curl -fsSL https://claude.ai/install.sh | bash"
 
 
-# The ACP adapter Ciaobot runs for Claude chats, hard-pinned: bumped deliberately.
-CLAUDE_ADAPTER_PACKAGE = "@agentclientprotocol/claude-agent-acp@0.108.1"
+# Adapter states where the CLI is present but Node cannot run the adapter: a failure, not a missing install.
+_NODE_ADAPTER_STATES = ("node_missing", "node_old")
 
 
-def claude_adapter_install_command() -> str:
-    """npm line that installs the pinned ACP adapter (needs Node 22 or newer)."""
-    return f"npm install -g {CLAUDE_ADAPTER_PACKAGE}"
+def adapter_row_state(state: str) -> str:
+    """The explicit provider-row state for one ``adapter_install`` state.
 
-
-def claude_adapter_missing_message(*, startup: bool) -> str:
-    """Why Claude chats cannot run: the CLI is installed but its ACP adapter is not.
-
-    One source, two renderings. The Settings card points at its install button
-    and shows the npm line; the startup phase has no button, so it points at
-    Settings instead.
+    A missing CLI is ``not_installed`` (neutral). A missing or outdated adapter with the CLI present
+    is ``adapter_missing``. Node that is missing or too old is ``failed``.
     """
-    lead = "Claude Code is installed, but its ACP adapter is not"
+    if state == "ready":
+        return PROVIDER_STATE_READY
+    if state == "cli_missing":
+        return PROVIDER_STATE_NOT_INSTALLED
+    if state in _NODE_ADAPTER_STATES:
+        return PROVIDER_STATE_FAILED
+    return PROVIDER_STATE_ADAPTER_MISSING
+
+
+def adapter_row_auth(state: str) -> str:
+    """The row's ``auth``: a Node failure leaves the CLI installed, so it is not "not installed"."""
+    return "unknown" if state in _NODE_ADAPTER_STATES else "not_installed"
+
+
+def adapter_message(adapter: str, state: str, *, startup: bool, installing: bool = False) -> str:
+    """The one message for an adapter that is not ready, for the Settings card or a startup phase.
+
+    ``adapter_install.describe`` supplies the facts. This adds only the next step: the card names its
+    install button and the install line, and the startup phase, which has no button, points at Settings.
+    """
+    from ciao import adapter_install
+
+    if installing:
+        return f"The ACP adapter {adapter} is installing in the background."
+    facts = adapter_install.describe(adapter, state)
+    if state not in ("adapter_missing", "adapter_outdated"):
+        return facts
     if startup:
-        return f"{lead}; open Settings → Providers to install it."
-    return (
-        "Claude Code is installed, but the ACP adapter (claude-agent-acp) is not. "
-        "Install the ACP adapter with the button below, or run: "
-        f"{claude_adapter_install_command()}"
-    )
+        return f"{facts} Open Settings → Providers to install it."
+    return f"{facts} Install it with the button below, or run: {adapter_install.install_command(adapter)}"
 
 
-def startup_phase_detail(status: Mapping[str, Any]) -> str:
+def startup_phase_detail(status: Mapping[str, Any], *, installing: bool = False) -> str:
     """The startup phase's message for one provider probe result."""
+    from ciao.adapter_install import PROVIDER_ADAPTERS
+
     if status.get("state") == PROVIDER_STATE_ADAPTER_MISSING:
-        return claude_adapter_missing_message(startup=True)
+        return adapter_message(
+            PROVIDER_ADAPTERS[str(status["name"])],
+            str(status.get("adapter_state") or "adapter_missing"),
+            startup=True,
+            installing=installing,
+        )
     return str(status.get("detail") or "")
-
-
-def claude_adapter_path() -> str:
-    """Absolute path to ``claude-agent-acp`` on the terminal PATH, or "" when not installed."""
-    from ciao.tool_path import resolve_tool
-
-    try:
-        resolved = resolve_tool("claude-agent-acp")
-    except Exception:
-        resolved = None
-    return resolved or ""
 
 
 def claude_path_command(directory: str = "") -> str:
@@ -763,19 +799,23 @@ def _claude_status(
 ) -> dict[str, Any]:
     from ciao.provider_versions import release_check
 
+    from ciao import adapter_install
+
     binary = claude_cli_path()
     version = _cli_version(binary) if binary else "not installed"
     check = release_check("claude", version, binary=binary) if binary else None
     claude_skills = discover_claude_system_skills()
-    if binary and not claude_adapter_path():
+    adapter_state = adapter_install.detect(adapter_install.CLAUDE_ADAPTER) if binary else "cli_missing"
+    if binary and adapter_state != "ready":
         # Claude chats run through the adapter, so a CLI without it cannot run a turn.
         return _provider(
             name="claude",
             ok=False,
-            auth="not_installed",
-            state=PROVIDER_STATE_ADAPTER_MISSING,
-            command=claude_adapter_install_command(),
-            detail=claude_adapter_missing_message(startup=False),
+            auth=adapter_row_auth(adapter_state),
+            state=adapter_row_state(adapter_state),
+            command=adapter_install.install_command(adapter_install.CLAUDE_ADAPTER),
+            detail=adapter_message(adapter_install.CLAUDE_ADAPTER, adapter_state, startup=False),
+            adapter_state=adapter_state,
             version=version,
             skills=claude_skills,
             cli_path=binary,
@@ -829,6 +869,7 @@ def _claude_status(
             release_check=check,
             terminal_action="claude-login",
             mcp_command=claude_mcp_command(binary),
+            adapter=adapter_install.describe(adapter_install.CLAUDE_ADAPTER, "ready"),
         )
     # No fallback on unparseable probe output: a timeout or process error is
     # not evidence of authentication, and neither is Desktop metadata — an

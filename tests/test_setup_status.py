@@ -50,9 +50,7 @@ def claude_cli_present(monkeypatch):
         "ciao.setup_status.claude_cli_path", lambda: "/usr/local/bin/claude"
     )
     # Claude chats run through the ACP adapter, so the adapter counts as installed too.
-    monkeypatch.setattr(
-        "ciao.setup_status.claude_adapter_path", lambda: "/usr/local/bin/claude-agent-acp"
-    )
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: "ready")
     monkeypatch.setattr("ciao.setup_status._cli_version", lambda binary: "2.0.0 (Claude Code)")
     monkeypatch.setattr(
         "ciao.setup_status.claude_auth_status",
@@ -2425,7 +2423,9 @@ def test_missing_claude_row_has_no_mcp_command(tmp_path, monkeypatch) -> None:
 
 
 def test_claude_cli_without_the_acp_adapter_is_not_ready(monkeypatch) -> None:
-    monkeypatch.setattr("ciao.setup_status.claude_adapter_path", lambda: "")
+    from ciao import adapter_install
+
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: "adapter_missing")
 
     row = claude_status_probe({}, config_path=Path("/nonexistent"))
 
@@ -2434,14 +2434,24 @@ def test_claude_cli_without_the_acp_adapter_is_not_ready(monkeypatch) -> None:
     # is named, and the npm line is the fallback. Never the circular
     # "use Install in Settings → Providers" text, which is shown inside it.
     assert row["detail"] == (
-        "Claude Code is installed, but the ACP adapter (claude-agent-acp) is not. "
-        "Install the ACP adapter with the button below, or run: "
-        "npm install -g @agentclientprotocol/claude-agent-acp@0.108.1"
+        "The ACP adapter claude-agent-acp 0.108.1 is not installed for Ciaobot yet. "
+        "Install it with the button below, or run: "
+        f"{adapter_install.install_command(adapter_install.CLAUDE_ADAPTER)}"
     )
     assert "Settings → Providers" not in row["detail"]
-    assert row["command"] == "npm install -g @agentclientprotocol/claude-agent-acp@0.108.1"
+    assert row["command"] == adapter_install.install_command(adapter_install.CLAUDE_ADAPTER)
+    assert row["command"].endswith("-m ciao.adapter_install claude-agent-acp")
     assert row["terminal_action"] == "claude-install"
     assert row["state"] == "adapter_missing"
+
+
+def test_claude_adapter_on_node_too_old_says_so(monkeypatch) -> None:
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: "node_old")
+
+    row = claude_status_probe({}, config_path=Path("/nonexistent"))
+
+    assert row["ok"] is False
+    assert "Node 22 or newer" in row["detail"]
 
 
 _FAKE_CODEX = """#!/bin/sh
@@ -2465,7 +2475,7 @@ def _fake_codex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, code: int, p
     from ciao.providers.acp import agents
 
     monkeypatch.setattr(agents, "codex_binary", lambda: str(script))
-    monkeypatch.setattr(agents, "codex_acp_binary", lambda: "/fake/codex-acp")
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: "ready")
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="fake CLI is a POSIX shell script")
@@ -2473,16 +2483,16 @@ def test_codex_status_probe_missing_adapter_not_installed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _fake_codex(tmp_path, monkeypatch, code=0)
-    from ciao.providers.acp import agents
+    from ciao import adapter_install, host_terminal
 
-    monkeypatch.setattr(agents, "codex_acp_binary", lambda: None)
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: "adapter_missing")
     row = codex_status_probe({})
     assert row["auth"] == "not_installed"
     assert row["ok"] is False
     assert row["terminal_action"] == "codex-install"
-    from ciao import host_terminal
-
-    assert row["command"] == host_terminal.CODEX_INSTALL_COMMAND
+    # The CLI resolves, so the line installs only the pinned adapter.
+    assert row["command"] == adapter_install.install_command(adapter_install.CODEX_ADAPTER)
+    assert row["command"] == host_terminal.codex_install_command()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="fake CLI is a POSIX shell script")
@@ -2562,7 +2572,7 @@ def test_setup_finish_has_no_native_branch() -> None:
 def _claude_state_row(monkeypatch, *, cli: str, adapter: str, logged_in: bool) -> dict:
     monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: cli)
     monkeypatch.setattr("ciao.setup_status.claude_app_path", lambda: "")
-    monkeypatch.setattr("ciao.setup_status.claude_adapter_path", lambda: adapter)
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: adapter)
     monkeypatch.setattr("ciao.setup_status._cli_version", lambda binary: "2.1.326 (Claude Code)")
     monkeypatch.setattr("ciao.setup_status.discover_claude_system_skills", lambda: [])
     monkeypatch.setattr("ciao.provider_versions.release_check", lambda *a, **k: {"state": "current"})
@@ -2584,7 +2594,7 @@ def test_claude_state_not_installed_is_explicit_and_links_the_install_guide(monk
 
 
 def test_claude_state_adapter_missing_is_not_the_not_installed_state(monkeypatch) -> None:
-    row = _claude_state_row(monkeypatch, cli="/fake/claude", adapter="", logged_in=True)
+    row = _claude_state_row(monkeypatch, cli="/fake/claude", adapter="adapter_missing", logged_in=True)
 
     assert row["state"] == "adapter_missing"
     assert row["ok"] is False
@@ -2592,14 +2602,14 @@ def test_claude_state_adapter_missing_is_not_the_not_installed_state(monkeypatch
 
 
 def test_claude_state_ready_when_cli_adapter_and_login_are_present(monkeypatch) -> None:
-    row = _claude_state_row(monkeypatch, cli="/fake/claude", adapter="/fake/acp", logged_in=True)
+    row = _claude_state_row(monkeypatch, cli="/fake/claude", adapter="ready", logged_in=True)
 
     assert row["state"] == "ready"
     assert row["ok"] is True
 
 
 def test_claude_state_failed_when_signed_out(monkeypatch) -> None:
-    row = _claude_state_row(monkeypatch, cli="/fake/claude", adapter="/fake/acp", logged_in=False)
+    row = _claude_state_row(monkeypatch, cli="/fake/claude", adapter="ready", logged_in=False)
 
     assert row["state"] == "failed"
     assert row["auth"] == "missing"
@@ -2614,7 +2624,7 @@ def test_codex_not_installed_links_the_codex_install_guide(
     from ciao.providers.acp import agents
     from ciao.setup_status import CODEX_INSTALL_DOCS_URL
 
-    monkeypatch.setattr(agents, "codex_acp_binary", lambda: None)
+    monkeypatch.setattr(agents, "codex_binary", lambda: None)
     row = codex_status_probe({})
 
     assert row["state"] == "not_installed"

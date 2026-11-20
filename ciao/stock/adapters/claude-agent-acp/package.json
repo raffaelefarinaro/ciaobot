@@ -1,0 +1,8 @@
+{
+  "name": "ciaobot-adapter-claude-agent-acp",
+  "version": "0.108.1",
+  "private": true,
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.108.1"
+  }
+}

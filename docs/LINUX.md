@@ -44,7 +44,7 @@ Keep the generated `PWA_AUTH_TOKEN`. Authenticate provider CLIs as the service
 account, not root. Claude uses the `claude` CLI installed on the machine (the ACP adapter drives it);
 `ciao auth claude --print-only` prints the login command. Run it from an interactive SSH session as that account.
 Install OpenCode 2 separately if using that provider (`npm install -g @opencode/cli`, see [INTEGRATIONS.md](../INTEGRATIONS.md#opencode)), then run `ciao auth opencode`.
-Codex works the same way: install `@openai/codex` and `@agentclientprotocol/codex-acp` as pinned in [INTEGRATIONS.md](../INTEGRATIONS.md#codex), then run `ciao auth codex`.
+Codex works the same way: install `@openai/codex` yourself, then run `ciao auth codex`. When the codex CLI is present, the pinned `@agentclientprotocol/codex-acp` adapter is used if it is already on the PATH at that version; otherwise the engine installs it on first start into its own folder, as described in [INTEGRATIONS.md](../INTEGRATIONS.md#codex). The installer has nothing to do for either adapter.
 Provider OAuth may require completing a browser flow on your own computer.
 
 The service account also needs a Git author identity for automatic workspace

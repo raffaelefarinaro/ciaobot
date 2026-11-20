@@ -13,18 +13,19 @@ from functools import partial
 
 import pytest
 
-from ciao import provider_registry
+from ciao import adapter_install, provider_registry
 from ciao.main import StartupTracker, run_provider_startup_check
 from ciao.setup_status import claude_status_probe
 
 # The phase has no install button, so it points at Settings; the card keeps its button wording.
 _PHASE_ADAPTER_MESSAGE = (
-    "Claude Code is installed, but its ACP adapter is not; open Settings → Providers to install it."
+    "The ACP adapter claude-agent-acp 0.108.1 is not installed for Ciaobot yet. "
+    "Open Settings → Providers to install it."
 )
 _CARD_ADAPTER_MESSAGE = (
-    "Claude Code is installed, but the ACP adapter (claude-agent-acp) is not. "
-    "Install the ACP adapter with the button below, or run: "
-    "npm install -g @agentclientprotocol/claude-agent-acp@0.108.1"
+    "The ACP adapter claude-agent-acp 0.108.1 is not installed for Ciaobot yet. "
+    "Install it with the button below, or run: "
+    f"{adapter_install.install_command(adapter_install.CLAUDE_ADAPTER)}"
 )
 
 
@@ -66,7 +67,7 @@ def test_cli_present_but_adapter_missing_fails_with_the_adapter_message(
     monkeypatch, claude_probe
 ) -> None:
     monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "/fake/claude")
-    monkeypatch.setattr("ciao.setup_status.claude_adapter_path", lambda: "")
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: "adapter_missing")
 
     phase = _phase(_run(claude_probe))
 
@@ -81,7 +82,7 @@ def test_cli_present_but_adapter_missing_fails_with_the_adapter_message(
 
 def test_cli_and_adapter_present_and_signed_in_is_done(monkeypatch, claude_probe) -> None:
     monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "/fake/claude")
-    monkeypatch.setattr("ciao.setup_status.claude_adapter_path", lambda: "/fake/acp")
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: "ready")
     monkeypatch.setattr(
         "ciao.setup_status.claude_auth_status",
         lambda *args, **kwargs: {"logged_in": True, "email": "user@example.test", "org_name": ""},
@@ -95,7 +96,7 @@ def test_cli_and_adapter_present_and_signed_in_is_done(monkeypatch, claude_probe
 
 def test_adapter_missing_is_never_reported_connected(monkeypatch, claude_probe) -> None:
     monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "/fake/claude")
-    monkeypatch.setattr("ciao.setup_status.claude_adapter_path", lambda: "")
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: "adapter_missing")
     monkeypatch.setattr(
         "ciao.setup_status.claude_auth_status",
         lambda *args, **kwargs: {"logged_in": True, "email": "user@example.test", "org_name": ""},
@@ -133,3 +134,49 @@ def test_claude_keeps_its_ui_phase_id_and_other_providers_get_a_connect_phase() 
     assert provider_startup_phase("claude") == "connect_claude_code"
     assert provider_startup_phase("opencode") == "connect_opencode"
     assert provider_startup_phase("codex") == "connect_codex"
+
+
+def test_adapter_install_started_in_background_settles_the_phase_as_done(monkeypatch, claude_probe) -> None:
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: "adapter_missing")
+
+    tracker = StartupTracker()
+    tracker.start("connect_claude_code")
+    asyncio.run(
+        run_provider_startup_check(tracker, "connect_claude_code", claude_probe, installing=True)
+    )
+
+    phase = _phase(tracker)
+    assert phase.status == "done"
+    assert phase.message == "The ACP adapter claude-agent-acp is installing in the background."
+
+
+def test_node_too_old_fails_the_phase_with_the_adapter_facts(monkeypatch, claude_probe) -> None:
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: "node_old")
+
+    phase = _phase(_run(claude_probe))
+
+    assert phase.status == "failed"
+    assert phase.message.startswith("Node 22 or newer is needed to run claude-agent-acp")
+    assert "Settings → Providers" not in phase.message
+
+
+def test_an_absent_cli_never_starts_the_adapter_install(monkeypatch, claude_probe) -> None:
+    from ciao import adapter_install
+    from ciao.main import check_provider_startup
+
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "")
+    monkeypatch.setattr("ciao.setup_status.claude_app_path", lambda: "")
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: "cli_missing")
+    installs: list[str] = []
+    monkeypatch.setattr(adapter_install, "install", lambda name: installs.append(name))
+    descriptor = next(d for d in provider_registry.descriptors() if d.id == "claude")
+
+    tracker = StartupTracker()
+    tracker.start("connect_claude_code")
+    asyncio.run(check_provider_startup(tracker, "connect_claude_code", descriptor))
+
+    assert installs == []
+    assert _phase(tracker).status == "skipped"

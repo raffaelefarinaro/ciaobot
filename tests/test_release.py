@@ -875,11 +875,14 @@ def test_probe_claude_reads_the_cli_and_the_pinned_adapter(
 ) -> None:
     import subprocess
 
-    from ciao import setup_status
+    from ciao import adapter_install, setup_status
 
-    pin = setup_status.CLAUDE_ADAPTER_PACKAGE.rpartition("@")[2]
+    pin = adapter_install.ADAPTERS[adapter_install.CLAUDE_ADAPTER].version
     monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "/fake/claude")
-    monkeypatch.setattr(setup_status, "claude_adapter_path", lambda: "/fake/claude-agent-acp")
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: "ready")
+    monkeypatch.setattr(
+        "ciao.adapter_install.launch_argv", lambda name: ["/fake/node", "/fake/claude-agent-acp.js"]
+    )
 
     def fake_run(cmd, **kwargs):
         out = "2.1.301 (Claude Code)" if cmd[0] == "/fake/claude" else pin
@@ -903,11 +906,15 @@ def test_probe_claude_notes_a_missing_or_unpinned_adapter(
 ) -> None:
     import subprocess
 
-    from ciao import setup_status
+    from ciao import adapter_install, setup_status
 
     monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "/fake/claude")
     monkeypatch.setattr(
-        setup_status, "claude_adapter_path", lambda: None if adapter is None else "/fake/acp"
+        "ciao.adapter_install.detect",
+        lambda name: "adapter_missing" if adapter is None else "ready",
+    )
+    monkeypatch.setattr(
+        "ciao.adapter_install.launch_argv", lambda name: ["/fake/node", "/fake/acp.js"]
     )
 
     def fake_run(cmd, **kwargs):
@@ -923,6 +930,8 @@ def test_probe_claude_notes_a_missing_or_unpinned_adapter(
 
     assert probe.installed == "2.1.301"
     assert "claude-agent-acp" in probe.note or "not installed" in probe.note
+    if adapter is None:
+        assert probe.note == adapter_install.describe(adapter_install.CLAUDE_ADAPTER, "adapter_missing")
 
 
 def test_main_rejects_refresh_with_skip_provider_versions(tmp_path: Path) -> None:

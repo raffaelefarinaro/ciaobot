@@ -34,7 +34,7 @@ The first time you open Ciaobot, Home shows your workspace folder and the passwo
 
 Ciaobot has no model account of its own. It drives a CLI you have already signed in to:
 
-- **Claude:** install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) (`curl -fsSL https://claude.ai/install.sh | bash`) and run `claude auth login`. If its installer says `~/.local/bin` is not in your `PATH`, Ciaobot still finds Claude Code; for the login, run the command it prints or use `~/.local/bin/claude auth login`.
+- **Claude:** install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) (`curl -fsSL https://claude.ai/install.sh | bash`) and run `claude auth login`. Ciaobot installs its ACP adapter on first run, which needs Node 22 or newer, unless the pinned adapter is already on your PATH. If its installer says `~/.local/bin` is not in your `PATH`, Ciaobot still finds Claude Code; for the login, run the command it prints or use `~/.local/bin/claude auth login`.
 - **Codex:** install the Codex CLI (`npm install -g @openai/codex`) and run `codex login`. Ciaobot's Settings terminal can run both steps for you.
 - **OpenAI, OpenRouter, Ollama and others:** install [OpenCode 2.3.2+](https://opencode.ai/v2/docs/) (`npm install -g @opencode/cli`; see [INTEGRATIONS.md](INTEGRATIONS.md#opencode) for other routes) and authenticate the provider there. Its models appear in Ciaobot's model picker.
 
