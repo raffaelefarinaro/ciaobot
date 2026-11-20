@@ -70,6 +70,27 @@ class ProviderDescriptor:
     default_model_config_key: str = ""
     # module:attr of the AgentSpec when this provider runs over ACP.
     acp_spec_path: str = ""
+    # The flags below default to False, so an unknown id and every provider that
+    # does not set them take the non-Claude side of each host branch.
+    #
+    # The agent's own session blob (Claude's ``<session>.jsonl``) is evidence that
+    # a chat's session still exists on disk.
+    session_blob_on_disk: bool = False
+    # The CLI loads Ciaobot's per-workspace tool denylist and Claude Code settings
+    # layer for a chat.
+    workspace_cli_settings: bool = False
+    # Tier aliases (haiku/sonnet/opus/fable) are this CLI's own model names and pass
+    # through. Elsewhere a tier alias falls back to the provider's default model.
+    tier_model_aliases: bool = False
+    # claude.ai account connectors load into the CLI, and
+    # ``ENABLE_CLAUDEAI_MCP_SERVERS`` switches them off.
+    claude_ai_connectors_toggle: bool = False
+    # The chat title arrives as a session event during the turn, so there is no
+    # native title read after the first turn.
+    title_from_session_events: bool = False
+    # History is read from the CLI's own session JSONL lineage. Other providers
+    # serve Ciaobot's local transcript when no ACP journal answers.
+    session_jsonl_history: bool = False
 
     def factory(self) -> type["BaseProvider"]:
         """Import and return the provider class."""
@@ -125,6 +146,12 @@ _DESCRIPTORS: tuple[ProviderDescriptor, ...] = (
         thinking_levels=("low", "medium", "high", "xhigh", "max"),
         default_model_config_key="claude_default_model",
         acp_spec_path="ciao.providers.acp.agents:CLAUDE",
+        session_blob_on_disk=True,
+        workspace_cli_settings=True,
+        tier_model_aliases=True,
+        claude_ai_connectors_toggle=True,
+        title_from_session_events=True,
+        session_jsonl_history=True,
     ),
     ProviderDescriptor(
         id="opencode",

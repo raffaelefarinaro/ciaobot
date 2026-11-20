@@ -3103,7 +3103,8 @@ class ProjectChatManager:
             audit_status = self._audited_chat_status(context_key)
             if audit_status == "deleted":
                 continue
-            if provider == "claude":
+            descriptor = provider_registry.get(provider)
+            if descriptor is not None and descriptor.session_blob_on_disk:
                 # No chat in hand here, only a transcript row, so there is no
                 # workspace to resolve an agent root from. Defaults to
                 # workspace_root, which is what every root resolves to until the
@@ -3212,8 +3213,13 @@ class ProjectChatManager:
             ]
             if not archived_files:
                 continue  # never archived -> not the corrupt state
-            if chat.provider == "claude" and self._claude_session_exists(
-                chat.session_id, agent_root=self._agent_root_for_chat(chat.chat_id)
+            chat_descriptor = provider_registry.get(chat.provider)
+            if (
+                chat_descriptor is not None
+                and chat_descriptor.session_blob_on_disk
+                and self._claude_session_exists(
+                    chat.session_id, agent_root=self._agent_root_for_chat(chat.chat_id)
+                )
             ):
                 continue  # session blob still present -> not archived
             chat.archived = True
@@ -6332,6 +6338,11 @@ class ProjectChatManager:
         """Which provider subprocess a chat needs."""
         return provider or "claude"
 
+    @staticmethod
+    def _has_workspace_cli_settings(provider: str) -> bool:
+        descriptor = provider_registry.get(provider)
+        return descriptor is not None and descriptor.workspace_cli_settings
+
     def disallowed_tools_for_chat(self, chat: ChatInfo) -> list[str]:
         """Per-workspace tool denylist for a chat's spawned CLI.
 
@@ -6345,7 +6356,7 @@ class ProjectChatManager:
         only applied when the chat's provider is ``claude`` (see the guard
         below).
         """
-        if chat.provider != "claude":
+        if not self._has_workspace_cli_settings(chat.provider):
             return []
         project = self._projects.get(chat.project_id)
         workspace = project.workspace if project else None
@@ -6353,7 +6364,7 @@ class ProjectChatManager:
 
     def claude_settings_for_chat(self, chat: ChatInfo) -> dict[str, Any] | None:
         """The Claude CLI settings layer for a chat's spawned CLI; None off the claude provider."""
-        if chat.provider != "claude":
+        if not self._has_workspace_cli_settings(chat.provider):
             return None
         project = self._projects.get(chat.project_id)
         workspace = project.workspace if project else None
@@ -6534,7 +6545,9 @@ class ProjectChatManager:
         to the provider's configured default on non-Claude providers.
         """
         resolved = (model or "").strip()
-        if provider != "claude" and is_tier(resolved):
+        descriptor = provider_registry.get(provider)
+        native_tiers = descriptor is not None and descriptor.tier_model_aliases
+        if not native_tiers and is_tier(resolved):
             return self._config.default_model_for_provider(provider, workspace)
         return chat_service._normalize_tier(resolved)
 
@@ -6659,7 +6672,12 @@ class ProjectChatManager:
         # Trimming setting:claude_ai_connectors switches them off. A memory
         # pass follows the same switch as any other chat. Other providers never
         # see this variable. The default (not trimmed) leaves it unset.
-        if chat.provider == "claude" and self._claude_ai_connectors_trimmed(workspace):
+        connectors_descriptor = provider_registry.get(chat.provider)
+        if (
+            connectors_descriptor is not None
+            and connectors_descriptor.claude_ai_connectors_toggle
+            and self._claude_ai_connectors_trimmed(workspace)
+        ):
             env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
         return env
 
@@ -10222,7 +10240,8 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         provider = getattr(chat, "provider", "claude") if chat else "claude"
         stopped, native = False, None
-        if provider != "claude":
+        title_descriptor = provider_registry.get(provider)
+        if title_descriptor is None or not title_descriptor.title_from_session_events:
             # Claude's title arrives as a session_info_update event (see tier 1): no native read.
             stopped, native = await self._adopt_native_title(chat_id, _is_titling_target)
         if stopped:
