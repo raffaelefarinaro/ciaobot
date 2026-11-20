@@ -1118,6 +1118,15 @@ def _global_install(
         pkg.chmod(0o777)
     base = ai.resolve_tool
     monkeypatch.setattr(ai, "resolve_tool", lambda cmd: str(bin_path) if cmd == name else base(cmd))
+    # On Linux CI tmp_path sits under the world-writable /tmp, which the guard (rightly) refuses;
+    # only judge the folders this test built.
+    others_can_write = ai._others_can_write
+    root_real = Path(os.path.realpath(root))
+    monkeypatch.setattr(
+        ai,
+        "_others_can_write",
+        lambda folder: others_can_write(folder) if folder == root_real or root_real in folder.parents else False,
+    )
     return pkg
 
 
