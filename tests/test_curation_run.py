@@ -802,6 +802,53 @@ def test_stale_notes_are_planned_oldest_first(tmp_path: Path) -> None:
     ]
 
 
+def test_a_stale_note_item_names_its_exact_target(tmp_path: Path) -> None:
+    """The planner carries the note's vault-relative path and the revision the
+    evidence check compares against, and the serialized item does not change."""
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    note = _note(vault, "People/Sofia.md", updated="2024-01-05")
+
+    items = _stale_items(vault, guide)
+
+    assert items[0].target == cr.StaleNoteTarget(
+        relative_path="People/Sofia.md",
+        revision=mr.content_revision(note.read_text(encoding="utf-8")),
+    )
+    assert set(items[0].as_dict()) == {"pass", "label", "reason", "count", "keys", "weekly"}
+
+
+def test_the_target_survives_planning_and_leaves_order_and_budget_alone(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _note(vault, "People/Youngest.md", updated="2026-06-01")
+    _note(vault, "People/Middle.md", updated="2025-06-01")
+    _note(vault, "People/Oldest.md", updated="2024-01-05")
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        workspace=vault.name,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=guide.parent,
+        today=date(2026, 9, 19),
+    )
+
+    plan = cr.plan_run(worklist, cr.RunBudget(max_items=2))
+
+    planned = [item for item in plan.planned if item.pass_id == cr.PASS_STALE_NOTE]
+    deferred = [item for item in plan.deferred if item.pass_id == cr.PASS_STALE_NOTE]
+    assert [item.target.relative_path for item in planned] == [
+        "People/Oldest.md",
+        "People/Middle.md",
+    ]
+    assert [item.target.relative_path for item in deferred] == ["People/Youngest.md"]
+    original = {item.keys[0]: item for item in worklist.items if item.pass_id == cr.PASS_STALE_NOTE}
+    for item in planned + deferred:
+        assert item.as_dict() == original[item.keys[0]].as_dict()
+
+
 def test_a_settled_stale_note_is_not_planned_again(tmp_path: Path) -> None:
     """The run cursor applies to this pass like every other.
 
