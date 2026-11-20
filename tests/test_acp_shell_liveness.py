@@ -145,8 +145,10 @@ def test_a_foreground_result_or_a_pidless_ack_starts_no_watch(monkeypatch: pytes
         ToolUseEvent(type="tool_result", tool_use_id="fg", exit_code=0),
         ToolUseEvent(type="tool_result", tool_use_id="bg", background=True, shell_pid=None),
     ])
+    # A pid-less background shell (Claude) is tracked to end by its settle, never polled.
     assert session._shell_task is None
-    assert not session._shells.tracking
+    assert session._shells.tracking and not session._shells.polling
+    assert session._shells.settled({1: (0, "boot")}) == []  # the poll never ends it
 
 
 @pytest.mark.asyncio

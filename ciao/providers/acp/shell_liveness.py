@@ -49,6 +49,22 @@ class ShellLiveness:
     def tracking(self) -> bool:
         return bool(self._tracked)
 
+    @property
+    def polling(self) -> bool:
+        """True while a shell with a known pid is tracked: only those need the process table."""
+        return any(shell.pid for shell in self._tracked.values())
+
+    def track_unpolled(self, call_id: str, *, command: str = "", output_path: str = "") -> bool:
+        """Track a background shell the provider reports no pid for: it ends only by the provider's own settle."""
+        if call_id in self._tracked:
+            return True
+        if call_id in self._settled or len(self._tracked) >= MAX_TRACKED:
+            return False
+        self._tracked[call_id] = TrackedShell(
+            pid=0, started="", command=command, output_path=output_path, launched_at=time.monotonic(),
+        )
+        return True
+
     def track(
         self,
         call_id: str,
@@ -92,6 +108,8 @@ class ShellLiveness:
             return []
         done: list[tuple[str, TrackedShell]] = []
         for call_id, shell in list(self._tracked.items()):
+            if not shell.pid:
+                continue  # no pid to check: the provider's own settle ends it
             entry = table.get(shell.pid)
             if entry is None or entry[1] != shell.started:
                 done.append((call_id, shell))

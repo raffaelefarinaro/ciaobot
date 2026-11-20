@@ -109,6 +109,14 @@ def test_a_long_command_is_capped_and_a_multi_line_one_is_flattened() -> None:
         ("tool --password hunter2 run", "tool --password [redacted] run", "hunter2"),
         ('curl -H "Authorization: Bearer tok9" x', "Authorization: [redacted]", "tok9"),
         ("tool --author Bob run", "tool --author Bob run", ""),
+        # The exact commands the security review named: quoted assignments, -u, -p, headers, flags.
+        ('PASS="p|ss;1" ./run', "./run", "p|ss"),
+        ("curl -u bob:hunter2 https://x", "curl -u [redacted] https://x", "hunter2"),
+        ("mysql -psecret db", "mysql -p[redacted] db", "secret"),
+        # redact_text masks a secret assignment to the end of its line, so the words after it go too.
+        ('curl -H "X-Api-Key: abc123" u', 'curl -H "X-Api-Key: [redacted]', "abc123"),
+        ("tool --password=hunter2 run", "tool --password=[redacted]", "hunter2"),
+        ("tool --token ABC run", "tool --token [redacted] run", "ABC"),
     ],
 )
 def test_the_command_label_shows_the_work_and_never_the_secret(
@@ -232,9 +240,12 @@ class _Chats:
         self.started: list[tuple[str, str, str]] = []
         self.queued: list[str] = []
         self.events = SimpleNamespace(publish=lambda event: None)
+        self.busy = False  # True: a turn is running, so the notice is queued into it
 
     def queue_message(self, chat_id: str, prompt: str, *, origin: str = "") -> bool:
-        self.queued.append(prompt)
+        if self.busy:
+            self.queued.append(prompt)
+            return True
         return False  # the chat is idle: the delivery starts a turn
 
     def start_stream(self, chat_id: str, prompt: str, *, origin: str = "") -> None:
@@ -383,21 +394,6 @@ def test_three_wakes_in_a_row_with_no_person_pause_the_chat(monkeypatch: pytest.
     assert [prompt for _, prompt, _ in manager._recorder.started] == [shell_wake.paused_prompt(1)]
 
 
-def test_a_native_task_notification_turn_covers_the_pending_shell_notices(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Claude's own wake for background work arrives within the window: the shell notice is dropped,
-    # so the chat hears about the shell once.
-    monkeypatch.setattr(project_chats, "SHELL_FINISHED_WINDOW_S", 0.1)
-    manager = _manager(_chat())
-
-    async def run() -> None:
-        manager._note_shell_finished("chat-1", _event("a", "one", None))
-        manager._native_wake_seen("chat-1")
-        await asyncio.sleep(0.2)
-
-    asyncio.run(run())
-    assert manager._recorder.started == []
-
-
 def test_a_question_resolved_into_a_pending_retry_still_delivers_the_notice(monkeypatch: pytest.MonkeyPatch) -> None:
     # Retry pending is not a skip: the notice rides the pending retry (the deferral in _deliver_wake).
     monkeypatch.setattr(project_chats, "SHELL_FINISHED_WINDOW_S", 0.0)
@@ -428,3 +424,79 @@ def test_a_chat_running_a_shell_is_not_reaped_until_the_shell_settles() -> None:
     service.background_work_outstanding = False
     service.background_activity_age = 0.0
     assert manager._provider_background_busy("chat-1", service) is False
+
+
+def test_six_wakes_then_a_reply_then_the_next_shell_end_delivers_the_real_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(project_chats, "SHELL_FINISHED_WINDOW_S", 0.0)
+    chat = _chat()
+    manager = _manager(chat)
+
+    async def run() -> None:
+        for index in range(7):  # six wakes, then the seventh pauses the chat
+            manager._note_shell_finished("chat-1", _event(f"s{index}", f"job {index}", None))
+            await asyncio.sleep(0.01)
+        # The person replies: a human turn after the pause.
+        chat.user_turn_count = 2
+        chat.user_turn_origin["1"] = ""
+        manager._note_shell_finished("chat-1", _event("after", "next job", None))
+        await asyncio.sleep(0.02)
+
+    asyncio.run(run())
+    prompts = [prompt for _, prompt, _ in manager._recorder.started]
+    assert prompts[-1].splitlines()[0] == "[Ciaobot] 1 background run finished."
+    assert "next job" in prompts[-1]  # the real notice, not another pause
+
+
+def test_a_wake_that_fails_to_deliver_is_not_counted_against_the_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(project_chats, "SHELL_FINISHED_WINDOW_S", 0.0)
+    manager = _manager(_chat())
+
+    def broken(parent: Any, prompt: str, *, count: int, origin: str) -> str:
+        raise RuntimeError("stream refused")
+
+    manager._deliver_wake = broken  # type: ignore[method-assign]
+
+    async def run() -> None:
+        manager._note_shell_finished("chat-1", _event("a", "one", None))
+        await asyncio.sleep(0.02)
+
+    asyncio.run(run())
+    assert len(manager._shell_wake_times.get("chat-1", ())) == 0
+    assert "chat-1" not in manager._shell_wakes_paused
+
+
+def test_a_notice_is_queued_into_a_running_turn_when_one_is_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(project_chats, "SHELL_FINISHED_WINDOW_S", 0.0)
+    manager = _manager(_chat())
+    manager._recorder.busy = True
+
+    async def run() -> None:
+        manager._note_shell_finished("chat-1", _event("a", "one", None))
+        await asyncio.sleep(0.02)
+
+    asyncio.run(run())
+    assert manager._recorder.started == []
+    assert len(manager._recorder.queued) == 1 and "1 background run finished" in manager._recorder.queued[0]
+
+
+def test_forgetting_a_chat_drops_its_held_notices_and_cancels_its_flush(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(project_chats, "SHELL_FINISHED_WINDOW_S", 0.5)
+    manager = _manager(_chat())
+
+    async def run() -> None:
+        manager._note_shell_finished("chat-1", _event("a", "one", None))
+        flush = manager._shell_finished_flushes["chat-1"]
+        manager._shell_finished_waiting["chat-1"] = [_event("held", "two", None)]
+        manager._shell_wake_times["chat-1"] = project_chats.deque([1.0])
+        manager._shell_wakes_paused["chat-1"] = 3
+        manager._forget_shell_wake_state("chat-1")
+        await asyncio.sleep(0)
+        assert flush.cancelled()
+        assert manager._shell_finished_pending == {} and manager._shell_finished_waiting == {}
+        assert manager._shell_wake_times == {} and manager._shell_wakes_paused == {}
+        assert manager._shell_finished_flushes == {}
+
+    asyncio.run(run())
+    assert manager._recorder.started == []

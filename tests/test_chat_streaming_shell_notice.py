@@ -7,7 +7,7 @@ from typing import Any, AsyncGenerator
 
 import pytest
 
-from ciao.models import AssistantTextDelta, ResultEvent, ShellFinishedEvent
+from ciao.models import AssistantTextDelta, ShellFinishedEvent
 from ciao.web.chat_streaming import ChatStreaming
 
 
@@ -17,7 +17,6 @@ class _Host:
     def __init__(self, events: list[Any]) -> None:
         self._events = events
         self.noted: list[tuple[str, Any]] = []
-        self.native: list[str] = []
         foreground = SimpleNamespace(background=False)
         self._broker = SimpleNamespace(get=lambda chat_id: foreground)
         self._providers = {"chat-1": SimpleNamespace(drain_events=self._drain)}
@@ -32,9 +31,6 @@ class _Host:
 
     def _note_shell_finished(self, chat_id: str, event: Any) -> None:
         self.noted.append((chat_id, event))
-
-    def _native_wake_seen(self, chat_id: str) -> None:
-        self.native.append(chat_id)
 
 
 def _shell_end(call_id: str) -> ShellFinishedEvent:
@@ -51,12 +47,3 @@ async def test_a_shell_notice_pulled_while_a_foreground_turn_takes_over_is_still
     streaming = ChatStreaming(host)  # type: ignore[arg-type]
     await streaming.drain_between_turns("chat-1", "project-1")
     assert [event.tool_use_id for _, event in host.noted] == ["call-1"]
-
-
-@pytest.mark.asyncio
-async def test_a_native_task_notification_turn_tells_the_manager_the_shells_are_covered() -> None:
-    native = ResultEvent(type="result", origin="task-notification")
-    host = _Host([native])
-    streaming = ChatStreaming(host)  # type: ignore[arg-type]
-    await streaming.drain_between_turns("chat-1", "project-1")
-    assert host.native == ["chat-1"]

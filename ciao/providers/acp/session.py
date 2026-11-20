@@ -468,26 +468,26 @@ class AcpSession:
                 while len(self._shell_commands) > _SHELL_COMMANDS_LIMIT:
                     del self._shell_commands[next(iter(self._shell_commands))]
                 continue
-            if not (
-                isinstance(event, ToolUseEvent) and event.type == "tool_result" and event.background
-                and event.shell_pid is not None and event.tool_use_id
-            ):
+            if not (isinstance(event, ToolUseEvent) and event.type == "tool_result" and event.background and event.tool_use_id):
                 continue
-            # One ``ps`` snapshot, taken once per launch: the start time is what identifies the pid.
-            if not self._shells.track(
-                event.tool_use_id,
-                event.shell_pid,
-                process_table(),
-                command=self._shell_commands.pop(event.tool_use_id, ""),
-                output_path=event.output_path,
-            ):
-                continue
+            command = self._shell_commands.pop(event.tool_use_id, "")
+            if event.shell_pid is None:
+                # No pid on the wire (Claude): the shell ends only by the provider's own settle.
+                tracked = self._shells.track_unpolled(event.tool_use_id, command=command, output_path=event.output_path)
+            else:
+                # One ``ps`` snapshot, taken once per launch: the start time is what identifies the pid.
+                tracked = self._shells.track(
+                    event.tool_use_id, event.shell_pid, process_table(),
+                    command=command, output_path=event.output_path,
+                )
+            if not tracked or event.shell_pid is None:
+                continue  # a pid-less shell is never polled
             if self._shell_task is None or self._shell_task.done():
                 self._shell_task = asyncio.create_task(self._watch_shells())
 
     async def _watch_shells(self) -> None:
-        """Settle each tracked shell as its process ends; stops when none is left."""
-        while self._shells.tracking:
+        """Settle each tracked shell as its process ends; stops when none with a pid is left."""
+        while self._shells.polling:
             await asyncio.sleep(CHECK_INTERVAL_S)
             table = await asyncio.to_thread(process_table)
             for call_id, shell in self._shells.settled(table):
@@ -784,6 +784,7 @@ class AcpSession:
             self._shell_task = None
         for task in list(self._end_tasks):
             task.cancel()
+        self._deferred_ends = []
         if self._cap_object("sessionCapabilities", "close") and self.session_id:
             await self._connection.conn.close_session(session_id=self.session_id)
 

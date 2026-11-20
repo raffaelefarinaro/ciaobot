@@ -5144,6 +5144,16 @@ class ProjectChatManager:
         with self._chat_lifecycle_guard(chat_id):
             return self._delete_chat_guarded(chat_id)
 
+    def _forget_shell_wake_state(self, chat_id: str) -> None:
+        """Drop every shell-wake record of a chat: its pending and held notices, its wake limit, its flush."""
+        self._shell_finished_pending.pop(chat_id, None)
+        self._shell_finished_waiting.pop(chat_id, None)
+        self._shell_wake_times.pop(chat_id, None)
+        self._shell_wakes_paused.pop(chat_id, None)
+        flush = self._shell_finished_flushes.pop(chat_id, None)
+        if flush is not None:
+            flush.cancel()
+
     def _delete_chat_guarded(self, chat_id: str) -> bool:
         # Resolved before the row leaves the registry: the cleanup below runs
         # after the pop (and asynchronously), and `_agent_root_for_chat` reads
@@ -5153,6 +5163,7 @@ class ProjectChatManager:
         chat = self._chats.pop(chat_id, None)
         if chat is None:
             return False
+        self._forget_shell_wake_state(chat_id)
         self._repo_location_locks.pop(chat_id, None)
         self._revoke_mcp_chat(chat_id)
         ctx = ChatContext.for_web(chat_id)
@@ -5356,6 +5367,8 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None:
             return None
+        # Held and pending shell notices of an archived chat are not announced: its turns are closed.
+        self._forget_shell_wake_state(chat_id)
         ctx = ChatContext.for_web(chat_id)
         # Reading a large session JSONL and rendering the markdown transcript
         # is the expensive part. On the loop that froze every other request and
@@ -5512,6 +5525,7 @@ class ProjectChatManager:
         # into the new conversation.
         chat.pending_question = ""
         chat.pending_permission = ""
+        self._release_shell_finished_waiting(chat_id)
         chat.pending_queue = []
         chat.last_response = ""
         chat.last_response_status = ""
@@ -8636,10 +8650,13 @@ class ProjectChatManager:
                     )
                 if dead_form_request:
                     chat_meta.pending_question = ""
+                    self._release_shell_finished_waiting(chat_id)
                 if dead_permission_request:
                     chat_meta.pending_permission = ""
+                    self._release_shell_finished_waiting(chat_id)
                 if not compact:
                     chat_meta.pending_question = ""
+                    self._release_shell_finished_waiting(chat_id)
                     chat_meta.last_error = ""
                     chat_meta.failure_id = ""
                     turn_index = chat_meta.user_turn_count
@@ -9228,21 +9245,25 @@ class ProjectChatManager:
         if paused_at is not None:
             if not self._person_replied_since(chat, paused_at):
                 return  # already capped: the rest are dropped until the person replies
+            # The person replied: the pause and the count of wakes it was about both end here.
             del self._shell_wakes_paused[chat_id]
+            self._shell_wake_times.pop(chat_id, None)
         now = time.monotonic()
         times = self._shell_wake_times.setdefault(chat_id, deque())
         while times and now - times[0] > SHELL_WAKE_WINDOW_S:
             times.popleft()
+        capped = len(times) >= SHELL_WAKE_LIMIT or self._three_shell_wakes_in_a_row(chat)
+        prompt = shell_wake.paused_prompt(len(events)) if capped else shell_wake.shell_finished_prompt(events)
         try:
-            if len(times) >= SHELL_WAKE_LIMIT or self._three_shell_wakes_in_a_row(chat):
-                self._shell_wakes_paused[chat_id] = int(chat.user_turn_count)
-                prompt = shell_wake.paused_prompt(len(events))
-            else:
-                times.append(now)
-                prompt = shell_wake.shell_finished_prompt(events)
             self._deliver_wake(chat, prompt, count=len(events), origin="background_run")
         except Exception:  # noqa: BLE001 — one chat's notice must not break the others
+            # Nothing was sent: the wake is not counted and no pause is recorded.
             logger.exception("Finished-shell notice failed for chat %s", chat_id)
+            return
+        if capped:
+            self._shell_wakes_paused[chat_id] = int(chat.user_turn_count)
+        else:
+            times.append(now)
 
     @staticmethod
     def _three_shell_wakes_in_a_row(chat: ChatInfo) -> bool:
@@ -9269,17 +9290,6 @@ class ProjectChatManager:
             return
         for event in self._shell_finished_waiting.pop(chat_id, []):
             self._note_shell_finished(chat_id, event)
-
-    def _native_wake_seen(self, chat_id: str) -> None:
-        """A provider's own task-notification turn arrived: it already told the agent that background work finished.
-
-        Rule (Claude): when the native wake fires within the coalescing window, the shell notices
-        still pending for that chat are dropped, so a shell is announced once. A native wake that
-        arrives after the notice was sent cannot be matched to it, and both reach the chat (a known
-        residual, documented in docs/ARCHITECTURE.md).
-        """
-        self._shell_finished_pending.pop(chat_id, None)
-        self._shell_finished_waiting.pop(chat_id, None)
 
     def _deliver_wake(self, parent: ChatInfo, prompt: str, *, count: int, origin: str) -> str:
         """Deliver one wake turn into *parent* and announce it.
