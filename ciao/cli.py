@@ -5548,6 +5548,7 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
     if outcome not in ("written", "duplicate"):
         messages = {
             "unshaped": "this reads as an event, not a standing rule; it stays queued",
+            "refused": "the write was not authorised; it stays queued",
             "conflict": f"ciao:{bullet.kind} changed while this was being applied; retry",
             "deferred": (
                 f"this fact may supersede an entry already in ciao:{bullet.kind}; "
