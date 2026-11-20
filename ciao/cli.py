@@ -6120,7 +6120,7 @@ def _stale_coverage_line(coverage: NoteCoverage | None) -> str:
             overdue = f" (oldest {coverage.oldest_deferred_age_days}d overdue)"
         parts.append(f"{not_examined} not examined this run{overdue}")
     if coverage.undated:
-        parts.append(f"{coverage.undated} undated notes are not covered")
+        parts.append(f"{coverage.undated} undated notes are not covered by the note pass")
     if coverage.unreadable:
         parts.append(f"{coverage.unreadable} unreadable notes are not covered")
     return "; ".join(parts)

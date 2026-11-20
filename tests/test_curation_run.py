@@ -4916,14 +4916,16 @@ def test_a_mixed_vault_accounts_for_every_flagged_note_exactly(
     _assert_every_flagged_note_is_accounted_for(coverage)
 
 
-def test_no_note_past_the_cap_break_is_examined(
+def test_no_note_past_the_cap_break_is_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The coverage claim 'never opened' has to hold at the note pass's own gate:
-    the cooldown check is asked of the five planned notes and of the one that
-    trips the cap, and of nothing behind it."""
-    from ciao import note_verification as nv
+    """Read sentinel at the seam the claim is about: the note pass's own body reads.
 
+    Only reads made while `_stale_note_items` runs are recorded, so the entry pass
+    (which reads bodies later, outside this function) does not pollute the record.
+    A read-ahead past the cap break would open the sixth note's neighbours and
+    fail this test.
+    """
     vault = _vault(tmp_path)
     guide = _guide(tmp_path)
     _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
@@ -4933,18 +4935,77 @@ def test_no_note_past_the_cap_break_is_examined(
             f"People/Note{index:02d}.md",
             updated=(date(2024, 1, 1) + timedelta(days=index)).isoformat(),
         )
-    real_should_check = nv.should_check
-    asked: list[str] = []
+    real_stale_note_items = cr._stale_note_items
+    real_read_bytes = Path.read_bytes
+    inside_note_pass = False
+    opened: list[str] = []
 
-    def recording_should_check(vault_root, relative_path, current_revision, **kwargs):
-        asked.append(relative_path)
-        return real_should_check(vault_root, relative_path, current_revision, **kwargs)
+    def recording_note_pass(**kwargs):
+        nonlocal inside_note_pass
+        inside_note_pass = True
+        try:
+            return real_stale_note_items(**kwargs)
+        finally:
+            inside_note_pass = False
 
-    monkeypatch.setattr(nv, "should_check", recording_should_check)
+    def sentinel_read_bytes(self: Path) -> bytes:
+        if inside_note_pass and self.parent.name == "People":
+            opened.append(self.name)
+        return real_read_bytes(self)
 
-    _coverage_worklist(vault, guide)
+    monkeypatch.setattr(cr, "_stale_note_items", recording_note_pass)
+    monkeypatch.setattr(Path, "read_bytes", sentinel_read_bytes)
 
-    assert asked == [f"People/Note{index:02d}.md" for index in range(cr.STALE_NOTE_MAX_ITEMS + 1)]
+    worklist = _coverage_worklist(vault, guide)
+
+    assert opened == [f"Note{index:02d}.md" for index in range(cr.STALE_NOTE_MAX_ITEMS + 1)]
+    assert worklist.note_coverage is not None
+    assert worklist.note_coverage.unexamined == 2
+
+
+def test_a_vault_with_only_an_unreadable_note_is_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _note(vault, "People/Unreadable.md", updated="2024-01-05")
+    real_read_bytes = Path.read_bytes
+
+    def flaky_read_bytes(self: Path) -> bytes:
+        if self.name == "Unreadable.md":
+            raise OSError("permission denied")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", flaky_read_bytes)
+
+    coverage = _coverage(vault, guide)
+
+    assert coverage["status"] == "partial"
+    assert coverage["unreadable"] == 1
+    assert coverage["undated"] == 0
+    assert coverage["planned"] == 0
+    _assert_every_flagged_note_is_accounted_for(coverage)
+
+
+def test_a_vault_with_only_an_undated_note_is_partial(tmp_path: Path) -> None:
+    """An exempt journal with no usable date is not counted as undated: the
+    exempt set is its own category and it is reported under `exempt`."""
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    undated = _note(vault, "People/NoDate.md", updated="not-a-date")
+    os.utime(undated, (0, 0))
+    journal = _note(vault, "journal/undated-standup.md", updated="not-a-date", type_="journal")
+    os.utime(journal, (0, 0))
+
+    coverage = _coverage(vault, guide)
+
+    assert coverage["status"] == "partial"
+    assert coverage["flagged"] == 0
+    assert coverage["undated"] == 1
+    assert coverage["exempt"] == 1
+    _assert_every_flagged_note_is_accounted_for(coverage)
 
 
 def test_coverage_leaves_the_items_the_plan_and_their_order_alone(tmp_path: Path) -> None:

@@ -5436,3 +5436,61 @@ def test_curation_plan_names_the_stale_notes_it_did_not_examine(tmp_path, monkey
         f"(oldest {coverage['oldest_deferred_age_days']}d overdue)"
     ]
     assert "People/" not in lines[0] and "Note0" not in lines[0]
+
+
+def _coverage_fixture(**overrides: object):
+    from ciao import curation_run as cr
+
+    values: dict[str, object] = dict(
+        status="complete",
+        scanned=5,
+        exempt=0,
+        undated=0,
+        flagged=5,
+        never_queued=0,
+        unreadable=0,
+        settled=0,
+        planned=5,
+        eligible_deferred=0,
+        unexamined=0,
+        oldest_deferred_age_days=None,
+        cap=cr.STALE_NOTE_MAX_ITEMS,
+    )
+    values.update(overrides)
+    return cr.NoteCoverage(**values)
+
+
+@pytest.mark.parametrize(
+    ("coverage", "expected"),
+    [
+        (None, ""),
+        (_coverage_fixture(), ""),
+        (
+            _coverage_fixture(status="unavailable", flagged=0, planned=0),
+            "stale notes: not examined this run; the vault scan did not complete",
+        ),
+        (
+            _coverage_fixture(status="partial", flagged=2, planned=1, unreadable=1),
+            "stale notes: 1 planned of 2 flagged; 1 unreadable notes are not covered",
+        ),
+        (
+            _coverage_fixture(status="partial", undated=3),
+            "stale notes: 5 planned of 5 flagged; "
+            "3 undated notes are not covered by the note pass",
+        ),
+        (
+            _coverage_fixture(
+                status="partial",
+                flagged=8,
+                planned=5,
+                eligible_deferred=1,
+                unexamined=2,
+                oldest_deferred_age_days=412,
+            ),
+            "stale notes: 5 planned of 8 flagged; 3 not examined this run (oldest 412d overdue)",
+        ),
+    ],
+    ids=["no-coverage", "complete", "unavailable", "unreadable-only", "undated-only", "over-cap"],
+)
+def test_stale_coverage_line_names_only_what_was_not_covered(coverage, expected) -> None:
+    assert cli._stale_coverage_line(coverage) == expected

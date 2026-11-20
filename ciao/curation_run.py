@@ -885,7 +885,7 @@ def _stale_note_items(
         )
     else:
         note_text = ""
-    undated = sum(1 for note in scanned if not note.dated)
+    undated = sum(1 for note in scanned if not note.dated and not note.exempt)
     exempt = sum(1 for note in scanned if note.exempt)
     if scan_unavailable:
         status = "unavailable"
