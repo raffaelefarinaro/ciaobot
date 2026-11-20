@@ -2120,3 +2120,25 @@ def test_cli_dismiss_refuses_a_skill_draft_row_and_changes_nothing(
     assert queue.read_text(encoding="utf-8") == before
     assert read_decisions(queue) == []
     assert read_records(config, "work")[0].lifecycle == DRAFT_PENDING
+
+
+def test_accept_reports_a_refused_write_and_leaves_the_row_queued(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    from ciao import memory_proposals
+
+    from ciao import curation_run
+
+    root, vault, queue = _handover_install(tmp_path, "all", _REGION_BULLET)
+    curation_run.begin_run(vault, holder="test-run", ttl_s=3600)
+    _store_prediction(queue, "accept")
+    before = queue.read_bytes()
+    monkeypatch.setattr(
+        memory_proposals, "accept_region_fact", lambda **_kwargs: ("refused", "x")
+    )
+
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    err = capsys.readouterr().err
+    assert "handover refused: the write was not authorised" in err
+    assert queue.read_bytes() == before
+    assert read_decisions(queue) == []

@@ -123,3 +123,35 @@ def test_released_and_reacquired_label_requires_returned_identity(tmp_path) -> N
     assert not cr.renew_run(vault, holder="repeat", now=now + timedelta(seconds=1))
     assert cr.renew_run(vault, holder=second.holder, now=now + timedelta(seconds=1))
     cr.end_run(vault, holder=second.holder, now=now + timedelta(seconds=1))
+
+
+def test_authorize_holder_follows_only_the_live_lease(tmp_path) -> None:
+    vault = tmp_path / "vault"
+    now = datetime.now(UTC).replace(microsecond=0)
+    run = cr.begin_run(vault, holder="live", ttl_s=60, now=now)
+    before = cr.state_path(vault).read_bytes()
+
+    def allowed(holder: str, at: timedelta) -> bool:
+        with cr.authorize_holder(
+            vault, holder=holder, clock=lambda: now + at
+        ) as answer:
+            return answer
+
+    assert allowed(run.holder, timedelta(seconds=1))
+    assert not allowed("someone-else", timedelta(seconds=1))
+    assert not allowed("", timedelta(seconds=1))
+    assert not allowed(run.holder, timedelta(seconds=120))
+    assert cr.state_path(vault).read_bytes() == before
+
+
+def test_authorize_holder_refuses_a_replaced_lease(tmp_path) -> None:
+    vault, now, expired, replacement = _expired_and_replaced_lease(tmp_path)
+
+    def allowed(holder: str) -> bool:
+        with cr.authorize_holder(
+            vault, holder=holder, clock=lambda: now + timedelta(seconds=3)
+        ) as answer:
+            return answer
+
+    assert not allowed(expired.holder)
+    assert allowed(replacement.holder)
