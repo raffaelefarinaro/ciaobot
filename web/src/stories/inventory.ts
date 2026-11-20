@@ -441,46 +441,33 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/UpdateProgressView.vue"
     ],
     "variants": [
-      "text",
       "size"
     ],
-    "variantNotes": "Text replaces the brand name (every `o`, in any case, becomes a brand-orange dot; other characters stay letters); size is sm, md or lg.",
+    "variantNotes": "Renders the supplied wordmark artwork (web/public/brand): the light-ink image on light themes, the off-white image on dark themes, switched by the theme-light class on html. Size is sm, md or lg (16, 22 or 28px high).",
     "states": [
       {
         "name": "default",
         "coverage": "covered",
         "storyIds": ["wordmark--default"],
-        "note": "Default renders Ciaobot at md, with the two `o` characters as brand-orange dots and the full text as the accessible name."
+        "note": "Default renders the wordmark image at md, with Ciaobot as the accessible name."
       },
       {
         "name": "size-small",
         "coverage": "covered",
         "storyIds": ["wordmark--small"],
-        "note": "Small renders the brand text at the sm size."
+        "note": "Small renders the wordmark image at the sm size."
       },
       {
         "name": "size-large",
         "coverage": "covered",
         "storyIds": ["wordmark--large"],
-        "note": "Large renders the brand text at the lg size."
-      },
-      {
-        "name": "no-dots",
-        "coverage": "covered",
-        "storyIds": ["wordmark--no-dots"],
-        "note": "NoDots renders a synthetic text without an `o`, so every character is a letter and no accent dot appears."
+        "note": "Large renders the wordmark image at the lg size."
       },
       {
         "name": "narrow",
         "coverage": "covered",
         "storyIds": ["wordmark--narrow"],
-        "note": "Narrow renders the brand text in a maximum 390px column, still on one line."
-      },
-      {
-        "name": "neutral-workspace",
-        "coverage": "covered",
-        "storyIds": ["wordmark--neutral-workspace"],
-        "note": "NeutralWorkspace renders under the grey neutral accent, the state before the workspace colour is known, and checks the dots keep the brand orange."
+        "note": "Narrow renders the wordmark image in a maximum 390px column and it stays within the column."
       }
     ],
     "loading": {
@@ -3293,7 +3280,7 @@ export const inventory: InventoryEntry[] = [
         "storyIds": [
           "login-view--bootstrap-setup"
         ],
-        "note": "The v-else-if isBootstrap wizard on the install: first-run shell bar, run note, tour, the workspace field with its mount note, the claude '[ok] Ready' card, and Finish Setup blocked while the form is incomplete; GET /api/setup/inspect-folder answers for ~/ciaobot."
+        "note": "The v-else-if isBootstrap wizard on the install: first-run setup wizard, run note, tour, the workspace field with its mount note, the claude '[ok] Ready' card, and Finish Setup blocked while the form is incomplete; GET /api/setup/inspect-folder answers for ~/ciaobot."
       },
       {
         "name": "bootstrap-detected-workspaces",
@@ -3357,7 +3344,7 @@ export const inventory: InventoryEntry[] = [
         "storyIds": [
           "login-view--restarting"
         ],
-        "note": "The RESTARTING branch (isRestarting), reached the way production reaches it: the wizard completes, POST /api/setup/finish answers, and the wizard form is replaced by the restarting copy with the 'ciaobot@local · restarting' shell bar while the probe poll keeps running."
+        "note": "The RESTARTING branch (isRestarting), reached the way production reaches it: the wizard completes, POST /api/setup/finish answers, and the wizard form is replaced by the restarting copy with the plain login box and wordmark image while the probe poll keeps running."
       },
       {
         "name": "finish-error",
@@ -12110,7 +12097,7 @@ export const inventory: InventoryEntry[] = [
     "kind": "inline",
     "owner": {
       "path": "web/src/styles/app.css",
-      "anchor": ".wordmark"
+      "anchor": ".caret"
     },
     "sources": [
       "web/src/components/LoginView.vue",
@@ -12120,7 +12107,6 @@ export const inventory: InventoryEntry[] = [
     ],
     "consumers": [],
     "variants": [
-      "wordmark",
       "caret"
     ],
     "variantNotes": "Markup and styles are owned here; inline families have no direct import consumers. Support paths use these classes in markup; they do not directly import this family.",
@@ -12129,19 +12115,13 @@ export const inventory: InventoryEntry[] = [
         "name": "default",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": ".wordmark in app.css styles Wordmark.vue and terminal status labels; no rendered-state story exists."
-      },
-      {
-        "name": "wordmark",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": ".wordmark in app.css includes the shared monospace wordmark; no rendered-state story exists."
+        "note": ".caret in app.css is the blinking terminal caret used by terminal status labels; no rendered-state story exists."
       },
       {
         "name": "caret",
         "coverage": "uncovered",
         "storyIds": [],
-        "note": ".wordmark in app.css includes caret; no rendered-state story exists."
+        "note": ".caret in app.css; no rendered-state story exists."
       },
       {
         "name": "other states",

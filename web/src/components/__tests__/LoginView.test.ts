@@ -618,7 +618,7 @@ describe('LoginView setup wizard tests', () => {
     })
     const payload = mockApiPost.mock.calls[0][1]
     expect(payload).not.toHaveProperty('push_contact')
-    expect(wrapper.text()).toContain('restarting')
+    expect(wrapper.find('.restarting-body .wordmark img').exists()).toBe(true)
     expect(wrapper.text()).toContain('// ciaobot is loading config ...')
     expect(wrapper.text()).toContain('Keep the terminal that started it open until it says setup is complete')
   })

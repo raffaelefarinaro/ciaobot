@@ -17,9 +17,6 @@
   --accent: #fb923c;    /* Ciao orange; matches the default amber preset */
   --accent-strong: #ea580c;
   --accent2: #6a47b8;
-  /* The logo's orange (the o dots in the wordmark, as on the site header). Fixed
-     in both themes: a workspace accent, including the grey neutral one, must not recolour the logo. */
-  --brand-dot: #dd7138;
   /* Label colour on a filled accent surface (.btn-primary, active pills,
      accent badges). The dark-theme accents are bright, so white on them sits
      at 2-3.6:1; the canvas indigo clears WCAG AA (4.5:1) on every dark accent
@@ -116,7 +113,7 @@
 :root.theme-light[data-text-contrast="soft"] { --fg: #2e2f46; }
 
 /* Body font: swaps the --font token only; --font-mono users (code, badges,
-   commands, timestamps, wordmark) are untouched. */
+   commands, timestamps) are untouched. */
 :root[data-body-font="serif"] { --font: var(--font-serif); }
 :root[data-body-font="mono"] { --font: var(--font-mono); }
 
@@ -255,33 +252,6 @@ body {
   position: relative;
   z-index: 1;
 }
-
-/* ── Wordmark ────────────────────────────────────────────────── */
-.wordmark {
-  font-family: var(--font-mono);
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  color: var(--fg);
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0;
-  line-height: 1;
-  user-select: none;
-}
-.wordmark-dot {
-  /* Stands in for the o: the circle spans the monospace x-height and sits on
-     the baseline, with 0.6em (the o's advance) across the two margins. */
-  display: inline-block;
-  width: 0.52em;
-  height: 0.52em;
-  margin: 0 0.04em;
-  border-radius: 50%;
-  background: var(--brand-dot);
-  flex: none;
-}
-.wordmark--lg { font-size: 32px; }
-.wordmark--md { font-size: 20px; }
-.wordmark--sm { font-size: 14px; }
 
 /* Blinking terminal caret. */
 .caret {

@@ -1,46 +1,44 @@
 // @vitest-environment jsdom
 
-import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 import Wordmark from '../Wordmark.vue'
 
-const here = dirname(fileURLToPath(import.meta.url))
-const appCss = readFileSync(join(here, '../../styles/app.css'), 'utf8')
-const dotRule = /\.wordmark-dot \{([^}]*)\}/.exec(appCss)?.[1] ?? ''
-
 describe('Wordmark', () => {
-  it('renders Ciaobot with both o letters replaced by accent dots and retains its accessible name', () => {
+  it('renders the supplied brand artwork for both themes under the accessible name Ciaobot', () => {
     const wrapper = mount(Wordmark)
 
-    expect(wrapper.attributes('aria-label')).toBe('Ciaobot')
     expect(wrapper.attributes('role')).toBe('img')
-    expect(wrapper.findAll('.wordmark-dot')).toHaveLength(2)
-    expect(wrapper.findAll('.wordmark-dot').every((dot) => dot.attributes('aria-hidden') === 'true')).toBe(true)
-    expect(wrapper.text()).not.toContain('o')
+    expect(wrapper.attributes('aria-label')).toBe('Ciaobot')
+
+    const images = wrapper.findAll('img')
+    expect(images).toHaveLength(2)
+    const onDark = wrapper.find('.wordmark-img--on-dark')
+    const onLight = wrapper.find('.wordmark-img--on-light')
+    expect(onDark.attributes('src')).toMatch(/brand\/ciaobot-wordmark-light\.png$/)
+    expect(onLight.attributes('src')).toMatch(/brand\/ciaobot-wordmark\.png$/)
+    for (const img of images) {
+      expect(img.attributes('decoding')).toBe('async')
+      expect(img.attributes('aria-hidden')).toBe('true')
+    }
   })
 
-  it('supports legacy size variants while allowing non-brand terminal labels', () => {
-    const small = mount(Wordmark, { props: { size: 'sm', text: 'restarting' } })
-    const large = mount(Wordmark, { props: { size: 'lg', text: 'ciaobot setup' } })
+  it('renders no text or accent dots: the image is the whole mark', () => {
+    const wrapper = mount(Wordmark)
 
-    expect(small.classes()).toContain('wordmark--sm')
-    expect(small.text()).toContain('restarting')
-    expect(large.classes()).toContain('wordmark--lg')
-    expect(large.findAll('.wordmark-dot')).toHaveLength(2)
-    expect(large.attributes('aria-label')).toBe('ciaobot setup')
+    expect(wrapper.text()).toBe('')
+    expect(wrapper.find('.wordmark-dot').exists()).toBe(false)
   })
 
-  // The dot stands in for the o, so it must match the monospace x-height and
-  // the logo's orange, never the workspace accent (a neutral workspace's
-  // accent is grey, which turned the startup and login wordmark into grey dots).
-  it('draws the o as a brand-orange dot at x-height, not the workspace accent', () => {
-    expect(dotRule).toMatch(/background:\s*var\(--brand-dot\)/)
-    expect(dotRule).not.toMatch(/var\(--accent\)/)
-    expect(dotRule).toMatch(/width:\s*0\.5[0-9]*em/)
-    expect(dotRule).toMatch(/height:\s*0\.5[0-9]*em/)
-    expect(appCss).toMatch(/:root\s*\{[^}]*--brand-dot:\s*#[0-9a-f]{6}/i)
+  it('maps each size to an image height and reserves the matching width for the 1402:324 artwork', () => {
+    const expected = { lg: [28, 121], md: [22, 95], sm: [16, 69] } as const
+    for (const size of ['lg', 'md', 'sm'] as const) {
+      const wrapper = mount(Wordmark, { props: { size } })
+      const [height, width] = expected[size]
+      expect(wrapper.classes()).toContain(`wordmark--${size}`)
+      const img = wrapper.find('.wordmark-img--on-dark')
+      expect(img.attributes('height')).toBe(String(height))
+      expect(img.attributes('width')).toBe(String(width))
+    }
   })
 })

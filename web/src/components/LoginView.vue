@@ -1,19 +1,10 @@
 <template>
   <div class="login-page">
     <div class="login-shell">
-      <div class="login-shell-bar">
-        <span class="dot dot--r"></span>
-        <span class="dot dot--y"></span>
-        <span class="dot dot--g"></span>
-        <span class="login-shell-title">
-          {{ isRestarting ? 'ciaobot@local · restarting' : (isBootstrap ? 'ciaobot@local · first-run setup' : 'ciaobot@local · log in') }}
-        </span>
-      </div>
-
       <!-- RESTARTING SCREEN -->
       <div v-if="isRestarting" class="login-body restarting-body">
         <p class="line line--banner">
-          <Wordmark size="md" text="restarting" />
+          <Wordmark size="md" />
           <span class="banner-meta">// ciaobot is loading config ...</span>
         </p>
         <p class="line line--sys">
@@ -30,7 +21,7 @@
       <!-- SETUP WIZARD SCREEN -->
       <form v-else-if="isBootstrap" class="login-body setup-wizard" @submit.prevent="doFinish">
         <p class="line line--banner">
-          <Wordmark size="md" text="ciaobot setup" />
+          <Wordmark size="md" />
           <span class="banner-meta">// tour + local setup</span>
         </p>
 
@@ -923,29 +914,6 @@ onUnmounted(() => {
     0 24px 48px rgba(0, 0, 0, 0.45),
     0 0 0 1px rgba(255, 77, 109, 0.08);
 }
-.login-shell-bar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  background: var(--bg-elev);
-  border-bottom: 1px solid var(--border);
-}
-.dot {
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
-  display: inline-block;
-}
-.dot--r { background: var(--error); }
-.dot--y { background: var(--warning); }
-.dot--g { background: var(--success); }
-.login-shell-title {
-  margin-left: 8px;
-  font-size: var(--text-xs);
-  color: var(--fg3);
-  letter-spacing: 0.5px;
-}
 
 .login-body {
   padding: 20px 22px 26px;
@@ -1614,7 +1582,6 @@ onUnmounted(() => {
 }
 
 @media (max-width: 600px) {
-  .login-shell-title { font-size: 10px; }
   .login-body { padding: 16px; }
   .tour-list {
     grid-template-columns: 1fr;
