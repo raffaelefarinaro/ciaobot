@@ -271,6 +271,8 @@ SHELL_FINISHED_WINDOW_S = 20.0
 # A chat gets at most this many shell wakes in the rolling window; past it, shell wakes pause
 # until the person replies (see ``_announce_shell_finished``).
 SHELL_WAKE_LIMIT = 6
+# Claimed shell ids kept per chat until their ends are skipped; the set is bounded.
+SHELL_CLAIMED_IDS_CAP = 256
 SHELL_WAKE_WINDOW_S = 600.0
 
 _ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
@@ -9227,8 +9229,14 @@ class ProjectChatManager:
         A shell whose end is held here may already have been answered by a continuation; that claim
         is recorded by ``_continuation_started``, and the claimed shell ids are skipped here.
         """
-        if event.tool_use_id in self._claimed_shell_ids.get(chat_id, ()):
-            return  # a continuation already answered it, and its card is in the journal
+        claimed = self._claimed_shell_ids.get(chat_id)
+        if claimed is not None and event.tool_use_id in claimed:
+            # A continuation already answered it, and its card is in the journal. Its end is now
+            # dequeued and skipped, so the id has done its job.
+            claimed.discard(event.tool_use_id)
+            if not claimed:
+                self._claimed_shell_ids.pop(chat_id, None)
+            return
         pending = self._shell_finished_pending.setdefault(chat_id, [])
         if any(known.tool_use_id == event.tool_use_id for known in pending):
             return
@@ -9360,8 +9368,15 @@ class ProjectChatManager:
             if flush is not None:
                 flush.cancel()
         self._claimed_shell_ids.setdefault(chat_id, set()).update(claimed_ids)
+        self._trim_claimed_shell_ids(chat_id)
         self._claimed_notices.setdefault(chat_id, []).extend(claimed)
         return shell_wake.shell_finished_prompt(claimed)
+
+    def _trim_claimed_shell_ids(self, chat_id: str) -> None:
+        """Bound the claimed ids of a chat: an end that never reaches the drain must not hold its id forever."""
+        claimed = self._claimed_shell_ids.get(chat_id)
+        while claimed is not None and len(claimed) > SHELL_CLAIMED_IDS_CAP:
+            claimed.discard(next(iter(claimed)))
 
     def _keep_unsent_echo(self, chat_id: str, text: str) -> None:
         """A drain was superseded before its claimed card went out: the next drain of the chat sends it."""

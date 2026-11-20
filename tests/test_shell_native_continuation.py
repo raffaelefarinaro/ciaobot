@@ -217,8 +217,8 @@ def test_a_second_shell_ending_later_is_not_claimed_by_the_first_continuation(mo
     _run(manager, session, recorder, broker, [
         lambda: _end(session, "call-1", "job one"),
         0.02, lambda: session._touch_late([_text(NATIVE_TEXT)], substantive=True),
-        lambda: _end(session, "call-2", "job two"),
         0.01, lambda: session._close_late(),
+        lambda: _end(session, "call-2", "job two"),  # after the continuation closed: not covered by it
     ], after=0.3)
     assert "job one" in recorder.turns[0]["prompt"] and "job two" not in recorder.turns[0]["prompt"]
     prompts = [p for _, p, _ in manager._recorder.started]

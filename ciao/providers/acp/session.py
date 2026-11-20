@@ -428,8 +428,18 @@ class AcpSession:
                 if shell is not None:
                     self._end_shell(event.tool_use_id, shell, event.exit_code)
 
-    def _end_shell(self, call_id: str, shell: TrackedShell, exit_code: int | None) -> None:
-        """Announce that a background shell ended, once: the end event, with its output tail read off the loop."""
+    def _end_shell(
+        self, call_id: str, shell: TrackedShell, exit_code: int | None, *, claiming: bool = False
+    ) -> None:
+        """Announce that a background shell ended, once: the end event, with its output tail read off the loop.
+
+        An end observed while a continuation is still speaking is covered by it: the agent already
+        reported on the shells that were known, so this one gets no card and no wake. ``claiming``
+        ends are the ones the continuation itself settles, and they are offered to it.
+        """
+        if self._late_speaking and not claiming:
+            logger.info("Shell %s ended while the provider's continuation was speaking; it is covered", call_id)
+            return
         event = ShellFinishedEvent(
             type="shell_finished",
             tool_use_id=call_id,
@@ -553,7 +563,7 @@ class AcpSession:
             logger.exception("Could not read the process table to settle a finished shell")
             return
         for call_id, shell in self._shells.settled(table):
-            self._end_shell(call_id, shell, None)
+            self._end_shell(call_id, shell, None, claiming=True)
 
     def _claim_continuation(self) -> None:
         """Offer this session's unclaimed shell ends to the host; journal and queue the notice it returns.
@@ -564,8 +574,8 @@ class AcpSession:
         ended = list(self._ended_shells.values())
         self._ended_shells.clear()
         hook = self.continuation_hook
-        if hook is None or not ended:
-            return
+        if hook is None:
+            return  # the host also holds ends the drain dequeued earlier: it is asked even when ended is empty
         try:
             notice = hook(ended)
         except Exception:
@@ -829,7 +839,11 @@ class AcpSession:
 
     async def _late_events(self) -> AsyncGenerator[StreamEvent, None]:
         while True:
-            yield await self._late_queue.get()
+            event = await self._late_queue.get()
+            if isinstance(event, ShellFinishedEvent):
+                # Dequeued: the drain hands it to the host, which owns the notice from here on.
+                self._ended_shells.pop(event.tool_use_id, None)
+            yield event
 
     @property
     def turn_running(self) -> bool:
@@ -847,6 +861,7 @@ class AcpSession:
     async def close(self) -> None:
         """``session/close`` when the agent advertises it, then nothing else."""
         self._close_late()
+        self._ended_shells.clear()
         if self._shell_task is not None:
             self._shell_task.cancel()
             self._shell_task = None
@@ -864,6 +879,7 @@ class AcpSession:
         exception type only, and never raised: the caller's result does not depend on it.
         """
         self._close_late()
+        self._ended_shells.clear()
         if not self.session_id:
             return
         try:
