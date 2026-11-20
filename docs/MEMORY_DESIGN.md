@@ -136,6 +136,80 @@ outperforms any pipeline that summarizes those sources away.
   an undo log*, never triggers for deletion. A personal assistant that
   silently forgets is worse than one that asks.
 
+## Skill health evidence
+
+This section states what a read-only skill review may conclude from the
+evidence the code already holds, before any scheduled worker reads it. It
+records code as it stands; it adds no collection, no telemetry and no worker.
+Symbols are cited by name because line numbers drift.
+
+Observed means the current code reads the signal. Inferred means it is a
+conclusion the signal supports but does not prove.
+
+### Signal table
+
+| Signal | Source (path and symbol) | Owner and workspace attribution | Supported conclusion | Limitations |
+| --- | --- | --- | --- | --- |
+| Installed inventory | `ciao/skills_inventory.py` `build_skill_inventory`, `_stock_skill_names`, `_skill_candidates` | Each name is `custom` (workspace `skills/`) or `stock` (packaged, marked by `STOCK_SKILL_MARKER`). A workspace `skills/<name>` shadows the packaged copy. | Observed: what is installed, and whether a name is custom or stock. | Says nothing about use. A name that exists only under `.claude/` is not owned. |
+| Owned source | `skills_inventory.py` `resolve_owned_skill` (`OwnedSkill`) and `eligible_owned_skills` | Only the workspace's canonical `skills/` source is owned. Stock copies, provider mirrors under `.claude/` and the `skills-src/` mirror are refused with a named reason. | Observed: which skills a pass may edit, and the revision (sha256) the bytes were read at. | Owning a skill is not evidence it is used. |
+| Skill tool calls in tool events | `ciao/transcripts.py` `turn_skills` (`_SKILL_TOOL_NAMES`, `_skill_name_from_summary`); normalized names from `ciao/providers/acp/normalize.py` (a `skill` call is shown as `Skill`) | Per turn of one provider transcript, so the workspace is the transcript's own. | Observed: this turn invoked a skill tool with this name. | Depends on the provider exposing a tool event. Only what ACP events expose today is observable. |
+| Skill source reads | `transcripts.py` `_SKILL_SOURCE_RE` in `turn_skills` | Same as above. | Observed: the turn read a `SKILL.md` under a `skills/<name>/` or `.claude/skills/<name>/` path. This is the opencode shape. | A read of the file is not proof the model followed it. |
+| Command-name markers | `transcripts.py` `_SKILL_MARKER_RE` in `turn_skills`, read from prompt and response | Same as above. | Observed: a slash command or description match loaded the skill. | Only the marker text; a match is not a tool call. |
+| Archive-recorded markers | `transcripts.py` `read_archive_skills` (`- Skills:` lines written by `_rendered_turn_skills`, the `### User` block check against `_ARCHIVE_USER_RE`) | Attributed to the archived transcript and its `## Turn N` heading. | Archive-recorded: the archive says the turn used the skill. The pass cites the turn. | An unreadable archive yields no skills, not an error, so absence here is unknown, not unused. The archive does not record whether the signal came from a tool event or a marker, so it is not treated as tool-event evidence. |
+| Bare mentions | Skill names in prose (the turn's user or agent text) | Same as above. | Not evidence of use. Prose is not read for names; only markers are. | A reader or the model may name a skill without loading it. Never count a mention as use. |
+| Unknown telemetry | No store exists. The Claude SDK driver and its JSONL tracking were deleted. | None. | Unknown. Any use count is absent, not zero. | State "unknown" for direct provider skill observations beyond the tool events above. No vendor telemetry is assumed. |
+| Existing proposal | `ciao/skill_proposals.py` `SkillProposal` (`canonical_path`, `reviewed_revision`, `origins`), `read_records`, `proposal_id(workspace, skill)` | Keyed by workspace and skill name. | Observed: a skill already has an open or settled proposal, with the revision it was written against. | A proposal records a finding, not a fix. A settled proposal is history, not a new signal. |
+| Upstream review drafts | `ciao/upstream_drafts.py` `file_draft`, `read_records`, `draft_id(workspace, target, skill, change)` | Routes lessons for packaged, mirrored, shared or upstream skills to `[review]` drafts. Never an edit. | Observed: a lesson for a skill this workspace does not own was filed for review. | Drafts are local records. Only `approve_draft` reaches GitHub, and it refuses in an unattended run. |
+
+### Ownership routing
+
+A review must route each skill before it names an action:
+
+- **Workspace-owned** (`custom`, under `skills/`): a proposal may name it,
+  because `resolve_owned_skill` proves the canonical source and its revision.
+- **Packaged** (`stock`, marked with `STOCK_SKILL_MARKER`): never edited. Sync
+  refreshes the copy, so a local edit is discarded. A lesson goes to a
+  `[review]` draft for the project that ships it.
+- **Mirrored** (provider copies under `.claude/`, and the `skills-src/`
+  mirror): never edited. The owned source, if any, is the target instead.
+- **Upstream** (a skill another repository maintains): a `[review]` draft
+  through `upstream_drafts.py`. The draft may name the owning repository and
+  version when they are known; it does not claim them otherwise.
+- **No fitting skill**: a new owned skill is a separate decision. The
+  edit-only proposal path cannot point at a skill that does not exist yet.
+
+### Dependencies and protections
+
+- Schedule or supporting-file references are unknown unless the review reads
+  them explicitly and they are reliably present. No current signal in the
+  inventory above reports them, so a review must mark them unknown, not
+  infer them from a name.
+- Disabled or paused references are protected. A skill named by a disabled or
+  paused schedule is not a candidate for change or retirement.
+- A rarely used skill that is essential (a skill other skills, schedules or
+  workflows depend on) is protected. Rarity alone never qualifies it for
+  change.
+- Age or low usage alone never establishes a safe change. Low counts are a
+  reason to look, not a reason to edit or delete.
+
+### Requirements for a later bounded worker
+
+A later worker that reads this evidence, and the marginal-cost check tracked in
+#3054, must hold these rules:
+
+- Read-only over the evidence above. It may suggest review with cited evidence
+  (repository path, symbol, and the turn or revision) and list the existing
+  proposal IDs for the skill. It writes no proposal, draft, edit or schedule
+  change on its own.
+- Every claim names whether it is observed or inferred, using the table.
+- Unknown telemetry is reported as unknown, never as zero use.
+- Ownership routing above is applied before any action is named.
+- Protected skills (disabled or paused references, essential skills) are
+  excluded from change suggestions and their exclusion is reported.
+- No live workspace observations, no user transcript content, and no vendor
+  telemetry speculation may enter the evidence the worker sees or cites.
+- Its cost is bounded and checked against #3054 before it is scheduled.
+
 ## Evaluation
 
 Don't trust LoCoMo-style vendor numbers (misconfiguration-sensitive; string
