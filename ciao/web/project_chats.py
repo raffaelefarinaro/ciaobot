@@ -263,8 +263,10 @@ from ciao.web.document_conversion import (
 from ciao.web.file_snapshots import SnapshotStore
 
 logger = logging.getLogger(__name__)
-# Background shells that end within this window are announced in one wake turn.
-SHELL_FINISHED_WINDOW_S = 3.0
+# A finished shell's notice is held this long before Ciaobot sends its own wake. The window
+# coalesces shells that end together, and it lets the provider's own continuation claim the
+# notice first: OpenCode resumes the session by itself about 6 s after a shell ends.
+SHELL_FINISHED_WINDOW_S = 20.0
 # A chat gets at most this many shell wakes in the rolling window; past it, shell wakes pause
 # until the person replies (see ``_announce_shell_finished``).
 SHELL_WAKE_LIMIT = 6
@@ -9282,6 +9284,18 @@ class ProjectChatManager:
             str(chat.user_turn_origin.get(str(index)) or "") == ""
             for index in range(turn_count, int(chat.user_turn_count))
         )
+
+    def _claim_shell_notices(self, chat_id: str) -> str | None:
+        """Take the held notices of *chat_id* for a provider's own continuation, which carries them.
+
+        The continuation is recorded as one turn whose prompt is the notice, so Ciaobot sends no
+        wake of its own for those shells. Returns the notice text, or None when nothing was held.
+        """
+        events = self._shell_finished_pending.pop(chat_id, [])
+        flush = self._shell_finished_flushes.pop(chat_id, None)
+        if flush is not None:
+            flush.cancel()
+        return shell_wake.shell_finished_prompt(events) if events else None
 
     def _release_shell_finished_waiting(self, chat_id: str) -> None:
         """A question or permission resolved: announce the shells held for it, if the chat is free."""

@@ -4940,6 +4940,9 @@ export const useProjectStore = defineStore('projects', () => {
           const startedChat = chats.value.find(c => c.chat_id === msg.chat_id)
           if (startedChat) { startedChat.failure_id = ''; startedChat.recovery_eligible = false }
         }
+        // A new stream (a wake, a provider's own continuation) starts a new reply: the
+        // previous turn's text must not run on into it in the same bubble.
+        if (streamingText.value[msg.chat_id]) _commitStreamingTextToTimeline(msg.chat_id)
         projectStreaming.value[msg.chat_id] = true
         if (msg.background) wakeStreaming.value[msg.chat_id] = true
         else delete wakeStreaming.value[msg.chat_id]

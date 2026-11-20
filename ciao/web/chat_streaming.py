@@ -290,6 +290,7 @@ class ChatStreamingHost(Protocol):
     def _background_work_outstanding(self, chat_id: str) -> bool: ...
     def _note_shell_finished(self, chat_id: str, event: ShellFinishedEvent) -> None: ...
     def _release_shell_finished_waiting(self, chat_id: str) -> None: ...
+    def _claim_shell_notices(self, chat_id: str) -> str | None: ...
 
     def _spawn_detached(
         self, coro: Coroutine[object, object, object], name: str
@@ -2251,6 +2252,10 @@ class ChatStreaming:
                     )
                     drain_segment = FinalAnswerTracker()
                     is_error = bool(event.is_error)
+                    if event.origin == "task-notification":
+                        claimed = self._host._claim_shell_notices(chat_id)
+                        if claimed:
+                            event.wake_notice = claimed
                     self._record_wake_turn(chat_id, event)
                     settled = not self._host._background_work_outstanding(chat_id)
                     chat_now = self._host._chats.get(chat_id)
