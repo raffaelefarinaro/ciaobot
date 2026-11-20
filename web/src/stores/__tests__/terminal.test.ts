@@ -1774,6 +1774,21 @@ describe('terminal store connection eligibility', () => {
     expect(fakeSockets).toHaveLength(before)
   })
 
+  it('clears the takeover alert once an explicit takeover reconnect is live', async () => {
+    const store = await started()
+    fakeSockets[0].close(4409)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.phase).toBe('takeover')
+    expect(store.error).toBe('Another connection took over this terminal session.')
+
+    await store.reconnect(true)
+    fakeSockets.at(-1)!.ready('s1')
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(store.phase).toBe('live')
+    expect(store.error).toBe('')
+  })
+
   it('does not take a session back after another connection took it over', async () => {
     const store = await started()
     fakeSockets[0].close(4409)

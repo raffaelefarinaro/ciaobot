@@ -126,6 +126,7 @@ export const MAX_AUTO_RECONNECT_ATTEMPTS = 8
 const MAX_SESSIONS = 4
 const UNCONFIRMED_CREATE =
   'The new terminal session could not be confirmed. Refresh the list to see whether it was created.'
+const TAKEOVER_MESSAGE = 'Another connection took over this terminal session.'
 
 // ── Response validation ──────────────────────────────────────────────────
 //
@@ -768,6 +769,9 @@ export const useTerminalStore = defineStore('terminal', () => {
         readyTimer = null
         reconnectAttempts = 0
         phase.value = 'live'
+        // An explicit takeover that connected has no takeover to report. Other
+        // errors are left alone: they may describe state this frame does not settle.
+        if (error.value === TAKEOVER_MESSAGE) error.value = ''
         // Only a live terminal is worth keeping alive with a ping: a socket
         // that never got here is closed by the handshake timeout instead.
         startPingTimer()
@@ -878,7 +882,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         return
       case 'takeover':
         phase.value = 'takeover'
-        error.value = 'Another connection took over this terminal session.'
+        error.value = TAKEOVER_MESSAGE
         return
       case 'slow':
         phase.value = 'error'

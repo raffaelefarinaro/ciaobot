@@ -4,7 +4,7 @@
       <Wordmark size="md" />
       <h1>{{ overallReady ? 'Connected to Ciaobot' : 'Connecting to Ciaobot' }}</h1>
       <p class="startup-description">
-        {{ phases.length ? 'Getting your workspace ready.' : 'Checking the connection to your workspace.' }}
+        {{ phases.length ? 'Getting your workspace ready.' : overallReady ? '' : 'Checking the connection to your workspace.' }}
       </p>
 
       <ul v-if="phases.length" class="startup-phases" aria-label="Connection progress">
