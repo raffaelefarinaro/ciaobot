@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import logging.handlers
+import re
 from collections import deque
 from pathlib import Path
 
@@ -174,6 +175,46 @@ def install_asyncio_noise_filter() -> None:
 def tail_error_log(workspace_root: Path, lines: int = 200) -> str:
     """Return the last *lines* of the error log, or an empty string."""
     return _tail_log(workspace_root / ".runtime" / ERROR_LOG_NAME, lines)
+
+
+# A record starts with the handler's own format, "%(asctime)s %(levelname)s
+# %(name)s: %(message)s". Only ERROR and CRITICAL reach this file, so every other
+# line after a record is part of that record (its traceback or continuation).
+_ERROR_RECORD_START = re.compile(
+    r"^\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2}:\d{2}(?:[,.]\d+)?)? (?:ERROR|CRITICAL) "
+)
+
+
+def split_error_records(text: str) -> list[str]:
+    """Group error-log text into records: an ERROR line plus its continuation lines.
+
+    A file can open with continuation lines whose header is gone; they form one
+    leading record, so nothing is silently dropped. Blank-only groups are not
+    records.
+    """
+    grouped: list[list[str]] = []
+    for line in text.splitlines(keepends=True):
+        if not grouped or _ERROR_RECORD_START.match(line):
+            grouped.append([line])
+        else:
+            grouped[-1].append(line)
+    records = ["".join(group) for group in grouped]
+    return [record for record in records if record.strip()]
+
+
+def tail_error_records(workspace_root: Path, records: int = 200) -> str:
+    """Return the last *records* error records (not physical lines), or an empty string.
+
+    Used by the runtime issue report, so its cap and its count both name the
+    same unit: a traceback is one record however many lines it runs to.
+    """
+    try:
+        text = (workspace_root / ".runtime" / ERROR_LOG_NAME).read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return ""
+    return "".join(split_error_records(text)[-max(1, records):])
 
 
 def tail_debug_log(workspace_root: Path, lines: int = 200) -> str:

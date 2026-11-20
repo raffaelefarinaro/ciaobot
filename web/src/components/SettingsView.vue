@@ -480,30 +480,9 @@
                       <span v-if="connKey === 'claude' && conn.auth === 'oauth' && conn.account">{{ conn.account }}</span>
                       <span v-if="connKey !== 'opencode' && !conn.version && conn.detail">{{ conn.detail }}</span>
                     </p>
-                    <p v-if="conn.auth === 'not_installed'" class="set-row-sub">
-                      <template v-if="connKey !== 'opencode'">{{ conn.detail }}</template>
-                      Install it with <code>{{ conn.command }}</code>
-                      <template v-if="conn.path_command">
-                        , then put it on your PATH with
-                        <code>{{ conn.path_command }}</code>
-                      </template>&nbsp;<a
-                        v-if="conn.install_url"
-                        :href="conn.install_url"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >installation guide ↗</a>
-                    </p>
-                    <p v-if="(conn.auth === 'not_installed' || conn.auth === 'unsupported_version') && conn.terminal_action" class="set-row-sub">
-                      <HostTerminalButton
-                        :action="conn.terminal_action"
-                        safe-errors
-                        variant="small"
-                        :aria-label="`Install ${conn.label || connKey} in Terminal`"
-                        label="Install in Terminal"
-                      />
-                    </p>
+                    <ProviderInstallBlock :conn-key="String(connKey)" :conn="conn" />
                     <p
-                      v-if="conn.auth !== 'not_installed' && conn.path_command"
+                      v-if="!isMissingInstall(conn.state) && conn.path_command"
                       class="set-row-sub"
                     >
                       Your terminal cannot find this CLI yet — put it on your PATH with
@@ -511,9 +490,7 @@
                     </p>
                   </div>
                   <div class="set-row-actions provider-connection-actions">
-                    <span class="settings-conn-state" :class="conn.ok ? 'settings-conn-state--ok' : 'settings-conn-state--error'">
-                      {{ connKey === 'opencode' ? (conn.ok ? 'CLI ready' : 'CLI not ready') : (conn.ok ? 'Connected' : 'Not connected') }}
-                    </span>
+                    <ProviderStateBadge :conn-key="String(connKey)" :state="conn.state" />
                     <button
                       type="button"
                       class="set-link"
@@ -546,7 +523,7 @@
                 </div>
                 <ProviderInventory v-if="connKey === 'opencode'" :inventory="conn.credential_inventory" :command="conn.command" :workspace="projectStore.activeWorkspace" />
                 <!-- Not for a missing CLI: its payload command is the install line, not a sign-in. -->
-                <details v-if="connKey !== 'opencode' && conn.auth !== 'not_installed'" class="provider-sign-in">
+                <details v-if="connKey !== 'opencode' && !isMissingInstall(conn.state)" class="provider-sign-in">
                   <summary>{{ conn.ok ? `Reconnect ${conn.label || connKey}` : `Connect ${conn.label || connKey}` }}</summary>
                   <ProviderSignInGuidance :command="conn.command" :context="conn.label || String(connKey)" :workspace="projectStore.activeWorkspace" />
                 </details>
@@ -1162,7 +1139,7 @@
           <div class="rail-kvs">
             <div v-for="(conn, connKey) in providerKeys?.connections" :key="`rail-${connKey}`" class="rail-kv">
               <span>{{ conn.label || connKey }}</span>
-              <strong :class="{ 'rail-attention': !conn.ok }">{{ connKey === 'opencode' ? (conn.ok ? 'CLI ready' : 'CLI not ready') : (conn.ok ? 'Connected' : 'Not connected') }}</strong>
+              <strong :class="{ 'rail-attention': conn.state === 'failed' || conn.state === 'adapter_missing' }">{{ providerStateView(String(connKey), conn.state).label }}</strong>
             </div>
           </div>
         </section>
@@ -1253,6 +1230,9 @@ import HostTerminalButton from './HostTerminalButton.vue'
 import { useCommandCopy } from '../composables/useCommandCopy'
 import ProviderInventory from './settings/ProviderInventory.vue'
 import ProviderSignInGuidance from './settings/ProviderSignInGuidance.vue'
+import ProviderInstallBlock from './settings/ProviderInstallBlock.vue'
+import ProviderStateBadge from './settings/ProviderStateBadge.vue'
+import { isMissingInstall, providerStateView } from '../lib/providerState'
 import WorkspaceMoveDialog from './WorkspaceMoveDialog.vue'
 import ModelSelector from './ModelSelector.vue'
 import {
@@ -2772,7 +2752,7 @@ const debugSummary = computed(() => {
   const r = debugIssues.value
   if (!r) return ''
   if (!r.has_issues) return 'No runtime issues logged.'
-  return `${r.failed_jobs.length} failed job run(s), ${r.error_log_lines} error-log line(s).`
+  return `${r.failed_jobs.length} failed job run(s), ${r.error_log_records} error record(s).`
 })
 
 async function refreshDebugIssues() {
@@ -3155,26 +3135,6 @@ const updatesCompact = computed(() => {
     min-height: var(--touch);
   }
 }
-
-/* Connection state as text with a leading dot, not a mono pill. */
-.settings-conn-state {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  white-space: nowrap;
-}
-.settings-conn-state::before {
-  content: '';
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: currentColor;
-}
-.settings-conn-state--ok::before { background: var(--success); }
-.settings-conn-state--error { color: var(--error); }
 
 .settings-main :deep(:is(.btn-primary, .btn-secondary, .btn-caution, .btn-small)) {
   white-space: nowrap;

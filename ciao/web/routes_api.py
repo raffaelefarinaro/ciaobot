@@ -8364,15 +8364,16 @@ async def debug_issues(request: Request) -> JSONResponse:
         return JSONResponse(
             {"error": "debug endpoints require developer mode"}, status_code=404
         )
-    from ciao.debug_report import DEFAULT_LOG_LINES, build_issue_report
+    from ciao.debug_report import DEFAULT_LOG_RECORDS, build_issue_report
 
+    # ``lines`` caps the error-log tail in records (see build_issue_report).
     try:
-        lines = int(request.query_params.get("lines", DEFAULT_LOG_LINES))
+        records = int(request.query_params.get("lines", DEFAULT_LOG_RECORDS))
     except ValueError:
-        lines = DEFAULT_LOG_LINES
-    lines = max(1, min(lines, 2000))
+        records = DEFAULT_LOG_RECORDS
+    records = max(1, min(records, 2000))
     report = await asyncio.to_thread(
-        build_issue_report, config.workspace_root, log_lines=lines
+        build_issue_report, config.workspace_root, log_records=records
     )
     return JSONResponse(report)
 

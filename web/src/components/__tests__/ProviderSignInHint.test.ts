@@ -25,8 +25,8 @@ describe('ProviderSignInHint', () => {
   it('shows the engine-reported command for the chat provider, fetched on open', async () => {
     const get = vi.spyOn(api, 'get').mockResolvedValue({
       connections: {
-        claude: { name: 'claude', label: 'Claude Code', ok: false, auth: 'missing', command: "'/Applications/Ciaobot.app/claude' auth login" },
-        opencode: { name: 'opencode', ok: true, auth: 'oauth', command: 'opencode auth login' },
+        claude: { name: 'claude', label: 'Claude Code', ok: false, auth: 'missing', state: 'failed', command: "'/Applications/Ciaobot.app/claude' auth login" },
+        opencode: { name: 'opencode', ok: true, auth: 'oauth', state: 'ready', command: 'opencode auth login' },
       },
     } as never)
     const wrapper = mount(ProviderSignInHint, { props: { provider: 'claude', actionLabel: 'Try now' } })
@@ -44,7 +44,7 @@ describe('ProviderSignInHint', () => {
 
   it('copies the command', async () => {
     vi.spyOn(api, 'get').mockResolvedValue({
-      connections: { claude: { name: 'claude', ok: false, auth: 'missing', command: 'claude auth login' } },
+      connections: { claude: { name: 'claude', ok: false, auth: 'missing', state: 'failed', command: 'claude auth login' } },
     } as never)
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
@@ -69,7 +69,7 @@ describe('ProviderSignInHint', () => {
 
   it('runs the sign-in command in this chat\'s terminal', async () => {
     vi.spyOn(api, 'get').mockResolvedValue({
-      connections: { claude: { name: 'claude', ok: false, auth: 'missing', command: "'/Applications/Ciaobot.app/claude' auth login" } },
+      connections: { claude: { name: 'claude', ok: false, auth: 'missing', state: 'failed', command: "'/Applications/Ciaobot.app/claude' auth login" } },
     } as never)
     runMock.mockResolvedValue('typed')
     const wrapper = mount(ProviderSignInHint, { props: { provider: 'claude', actionLabel: 'Try now', chatId: 'chat-1' } })
@@ -84,7 +84,7 @@ describe('ProviderSignInHint', () => {
 
   it('copies when the terminal is not ready', async () => {
     vi.spyOn(api, 'get').mockResolvedValue({
-      connections: { claude: { name: 'claude', ok: false, auth: 'missing', command: 'claude auth login' } },
+      connections: { claude: { name: 'claude', ok: false, auth: 'missing', state: 'failed', command: 'claude auth login' } },
     } as never)
     runMock.mockResolvedValue('copied')
     const wrapper = mount(ProviderSignInHint, { props: { provider: 'claude', actionLabel: 'Retry', chatId: 'chat-1' } })
@@ -97,7 +97,7 @@ describe('ProviderSignInHint', () => {
 
   it('offers no terminal run without a chat', async () => {
     vi.spyOn(api, 'get').mockResolvedValue({
-      connections: { claude: { name: 'claude', ok: false, auth: 'missing', command: 'claude auth login' } },
+      connections: { claude: { name: 'claude', ok: false, auth: 'missing', state: 'failed', command: 'claude auth login' } },
     } as never)
     const wrapper = mount(ProviderSignInHint, { props: { provider: 'claude', actionLabel: 'Retry' } })
     await open(wrapper)

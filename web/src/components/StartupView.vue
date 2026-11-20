@@ -46,6 +46,8 @@ defineEmits<{
 function phaseLabel(name: string): string {
   const labels: Record<string, string> = {
     connect_claude_code: 'Connecting to Claude Code',
+    connect_codex: 'Connecting to Codex',
+    connect_opencode: 'Connecting to OpenCode',
     refresh_vault_index: 'Preparing your notes',
     update_skills: 'Preparing skills',
     server_starting: 'Starting Ciaobot',
@@ -57,6 +59,8 @@ function statusLabel(status: string): string {
   if (status === 'done') return 'Ready'
   if (status === 'failed') return 'Needs attention'
   if (status === 'in_progress') return 'In progress'
+  // Not a fault: a CLI the user never installed. Its message says so.
+  if (status === 'skipped') return 'Skipped'
   return 'Waiting'
 }
 </script>
@@ -123,6 +127,7 @@ function statusLabel(status: string): string {
 .startup-phase.is-in_progress .startup-phase-status { color: var(--accent); }
 .startup-phase.is-done .startup-phase-status { color: var(--success); }
 .startup-phase.is-failed .startup-phase-status { color: var(--error); }
+.startup-phase.is-skipped .startup-phase-status { color: var(--fg2); }
 .startup-phase-message {
   flex-basis: 100%;
   color: var(--fg2);

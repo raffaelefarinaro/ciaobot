@@ -41,6 +41,7 @@ vi.mock('../../lib/api', () => {
           name: 'claude',
           ok: true,
           auth: 'oauth',
+          state: 'ready',
           command: 'claude auth login',
           version: '2.1.205 (Claude Code)',
           account: 'person@example.com',
@@ -52,6 +53,7 @@ vi.mock('../../lib/api', () => {
           name: 'opencode',
           ok: false,
           auth: 'login_required',
+          state: 'failed',
           command: 'opencode auth login',
           version: '1.18.18',
           detail: 'login required',
@@ -965,7 +967,7 @@ describe('component mount smoke', () => {
     host.resetHostTerminalForTests()
     testApi.setResponse('/api/host/terminal', { available: true, platform: 'macos', actions: ['opencode-install', 'opencode-update'] })
     const opencode = action === 'install'
-      ? { ...original.connections.opencode, auth: 'not_installed', command: 'install', terminal_action: 'opencode-install' }
+      ? { ...original.connections.opencode, auth: 'not_installed', state: 'not_installed', command: 'install', terminal_action: 'opencode-install' }
       : { ...original.connections.opencode, release_check: { state: 'below_tested', tested: '2.1', command: 'update', terminal_action: 'opencode-update' } }
     testApi.setResponse('/api/settings/providers', { connections: { ...original.connections, opencode } })
     vi.mocked(api.post).mockRejectedValueOnce({ message: 'SECRET_EXCEPTION', payload: { reason: action === 'not_applicable' ? 'not_applicable' : 'launch_failed', error: 'SECRET_PAYLOAD' } })
@@ -1114,7 +1116,7 @@ describe('component mount smoke', () => {
     const testApi = api as typeof api & { setResponse: (path: string, value: unknown) => void, getResponse: (path: string) => unknown }
     const original = testApi.getResponse('/api/settings/providers') as { connections: Record<string, Record<string, unknown>> }
     testApi.setResponse('/api/settings/providers', { connections: { ...original.connections, codex: {
-      name: 'codex', label: 'Codex', short_label: 'Codex', ok: false, auth: 'logged_out', command: 'codex login',
+      name: 'codex', label: 'Codex', short_label: 'Codex', ok: false, auth: 'logged_out', state: 'failed', command: 'codex login',
       detail: 'Codex is installed but not signed in.',
     } } })
     const router = makeRouter()
@@ -1144,6 +1146,7 @@ describe('component mount smoke', () => {
     const original = testApi.getResponse('/api/settings/providers') as { connections: Record<string, Record<string, unknown>> }
     testApi.setResponse('/api/settings/providers', { connections: { ...original.connections, claude: {
       ...original.connections.claude, auth, account, ok: showAccount,
+      state: auth === 'not_installed' ? 'not_installed' : showAccount ? 'ready' : 'failed',
       // The sign-in command comes from the payload; a missing CLI's payload command is its install line.
       command: auth === 'not_installed' ? 'install-command-not-login' : 'claude auth login',
     } } })
@@ -1210,7 +1213,7 @@ describe('component mount smoke', () => {
     project.workspaces = [{ name: 'work', vault_root: 'work' }] as never
     project.activeWorkspace = 'work'
     tasks.fetchModels = vi.fn().mockResolvedValue({ status: 'success', workspace: 'work', generation: 1 }) as never
-    vi.mocked(api.post).mockResolvedValueOnce({ name: 'opencode', ok: false, auth: 'missing' })
+    vi.mocked(api.post).mockResolvedValueOnce({ name: 'opencode', ok: false, auth: 'missing', state: 'failed' })
     const router = makeRouter()
     await router.push('/settings/providers')
     await router.isReady()
@@ -1251,7 +1254,7 @@ describe('component mount smoke', () => {
     await verify.trigger('click')
     expect(verify.attributes('disabled')).toBeDefined()
     tasks.modelTransition++
-    finish({ name: 'opencode', ok: true, auth: 'oauth' })
+    finish({ name: 'opencode', ok: true, auth: 'oauth', state: 'ready' })
     await flushPromises()
     const nextVerify = wrapper.findAll('.provider-connections .credential-row')[1]!.findAll('button').find(button => button.text() === 'Verify')!
     expect(nextVerify.attributes('disabled')).toBeUndefined()
@@ -1283,7 +1286,7 @@ describe('component mount smoke', () => {
     await nextTick()
     expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(providersBefore)
     const readsBefore = vi.mocked(api.get).mock.calls.filter(([path]) => String(path).startsWith('/api/models')).length
-    finish({ name: 'opencode', ok: true, auth: 'oauth' })
+    finish({ name: 'opencode', ok: true, auth: 'oauth', state: 'ready' })
     await flushPromises()
     const readsAfter = vi.mocked(api.get).mock.calls.filter(([path]) => String(path).startsWith('/api/models')).length
     expect(shared).not.toHaveBeenCalled()
@@ -1339,7 +1342,7 @@ describe('component mount smoke', () => {
       const calls = shared.mock.calls.length
       const modelsCalls = get.mock.calls.filter(([path]) => String(path).startsWith('/api/models?')).length
       const transition = tasks.modelTransition
-      finishVerify({ name: 'opencode', ok: true, auth: 'oauth' })
+      finishVerify({ name: 'opencode', ok: true, auth: 'oauth', state: 'ready' })
       await flushPromises()
       expect(shared).toHaveBeenCalledTimes(calls)
       expect(get.mock.calls.filter(([path]) => String(path).startsWith('/api/models?')).length).toBe(modelsCalls)
@@ -1370,7 +1373,7 @@ describe('component mount smoke', () => {
     project.activeWorkspace = 'work & home'
     const shared = vi.fn().mockResolvedValue({ status: 'error', workspace: 'work & home', generation: 1, error: 'private error' })
     tasks.fetchModels = shared as never
-    vi.mocked(api.post).mockResolvedValueOnce({ name: 'opencode', ok: true, auth: 'oauth' })
+    vi.mocked(api.post).mockResolvedValueOnce({ name: 'opencode', ok: true, auth: 'oauth', state: 'ready' })
     const router = makeRouter()
     await router.push('/settings/providers')
     await router.isReady()
@@ -1406,7 +1409,7 @@ describe('component mount smoke', () => {
     const second = mount(mod.default as never, options)
     await nextTick()
     expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(before)
-    if (outcome === 'success') settle({ name: 'opencode', ok: true, auth: 'oauth' })
+    if (outcome === 'success') settle({ name: 'opencode', ok: true, auth: 'oauth', state: 'ready' })
     else fail(new Error('private failure'))
     await flushPromises()
     expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(before + 1)
@@ -1422,7 +1425,7 @@ describe('component mount smoke', () => {
     project.workspaces = [{ name: 'work', vault_root: 'work' }] as never
     project.activeWorkspace = 'work'
     tasks.fetchModels = vi.fn().mockResolvedValue({ status, workspace: 'work', generation: 1 }) as never
-    vi.mocked(api.post).mockResolvedValueOnce({ name: 'opencode', ok: true, auth: 'oauth' })
+    vi.mocked(api.post).mockResolvedValueOnce({ name: 'opencode', ok: true, auth: 'oauth', state: 'ready' })
     const router = makeRouter()
     await router.push('/settings/providers')
     await router.isReady()
@@ -1562,7 +1565,7 @@ describe('component mount smoke', () => {
     const before = vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers').length
     const reads = [state.fetchProviderKeys(), state.fetchProviderKeys()]
     expect(vi.mocked(api.get).mock.calls.filter(([path]) => path === '/api/settings/providers')).toHaveLength(before)
-    if (outcome === 'success') settle({ name: 'opencode', ok: true, auth: 'oauth' })
+    if (outcome === 'success') settle({ name: 'opencode', ok: true, auth: 'oauth', state: 'ready' })
     else fail(new Error('private verify error'))
     await Promise.all([verify, ...reads])
     await flushPromises()
@@ -1637,7 +1640,7 @@ describe('component mount smoke', () => {
       await logout
       await flushPromises()
       expect(first.text()).toContain('Claude Code')
-      finishRead({ connections: { claude: { name: 'claude', label: 'STALE SNAPSHOT', ok: true, auth: 'oauth' } } })
+      finishRead({ connections: { claude: { name: 'claude', label: 'STALE SNAPSHOT', ok: true, auth: 'oauth', state: 'ready' } } })
       await oldRead
       await nextTick()
       expect(first.text()).not.toContain('STALE SNAPSHOT')
@@ -1669,10 +1672,10 @@ describe('component mount smoke', () => {
       project.activeWorkspace = 'B'
       if (returnToA) project.activeWorkspace = 'A'
       expect(pending).toHaveLength(returnToA ? 3 : 2)
-      pending[pending.length - 1]!({ connections: { claude: { name: 'claude', label: 'Fresh', ok: true, auth: 'oauth' } } })
+      pending[pending.length - 1]!({ connections: { claude: { name: 'claude', label: 'Fresh', ok: true, auth: 'oauth', state: 'ready' } } })
       await flushPromises()
       expect(wrapper.text()).toContain('Fresh')
-      for (const resolve of pending.slice(0, -1)) resolve({ connections: { claude: { name: 'claude', label: 'Stale', ok: true, auth: 'oauth' } } })
+      for (const resolve of pending.slice(0, -1)) resolve({ connections: { claude: { name: 'claude', label: 'Stale', ok: true, auth: 'oauth', state: 'ready' } } })
       await flushPromises()
       expect(wrapper.text()).toContain('Fresh')
       expect(wrapper.text()).not.toContain('Stale')
@@ -1697,8 +1700,8 @@ describe('component mount smoke', () => {
     const original = get.getMockImplementation()!
     let finishOld: ((value: unknown) => void) | undefined
     let providerCalls = 0
-    const fresh = { connections: { claude: { name: 'claude', label: 'Fresh provider', ok: true, auth: 'oauth' } } }
-    const old = { connections: { claude: { name: 'claude', label: 'Old provider', ok: true, auth: 'oauth' } } }
+    const fresh = { connections: { claude: { name: 'claude', label: 'Fresh provider', ok: true, auth: 'oauth', state: 'ready' } } }
+    const old = { connections: { claude: { name: 'claude', label: 'Old provider', ok: true, auth: 'oauth', state: 'ready' } } }
     get.mockImplementation(((path: string) => {
       if (path !== '/api/settings/providers') return original(path)
       providerCalls++
@@ -1846,6 +1849,7 @@ describe('component mount smoke', () => {
           ...(original.connections.claude as object),
           ok: false,
           auth: 'not_installed',
+          state: 'not_installed',
           command: 'curl -fsSL https://claude.ai/install.sh | bash',
           detail: 'Claude Code is not installed on this machine.',
           install_url: 'https://code.claude.com/docs/en/quickstart#step-1-install-claude-code',
@@ -1856,6 +1860,7 @@ describe('component mount smoke', () => {
           label: 'opencode',
           ok: false,
           auth: 'not_installed',
+          state: 'not_installed',
           command: 'curl -fsSL https://opencode.ai/v2/install | bash',
           detail: 'opencode is not installed on this machine.',
           version: 'not installed',

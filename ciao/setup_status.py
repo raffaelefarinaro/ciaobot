@@ -236,12 +236,23 @@ def _check(
     return row
 
 
+# The provider row's explicit `state`, which the Settings card and the startup
+# phase read instead of matching the detail text. `not_installed` is the CLI
+# missing (a choice, not a fault); `adapter_missing` is the CLI present but its
+# ACP adapter absent, which keeps the card's red state.
+PROVIDER_STATE_NOT_INSTALLED = "not_installed"
+PROVIDER_STATE_ADAPTER_MISSING = "adapter_missing"
+PROVIDER_STATE_READY = "ready"
+PROVIDER_STATE_FAILED = "failed"
+
+
 def _provider(
     *,
     name: str,
     ok: bool,
     auth: str,
     command: str,
+    state: str = "",
     detail: str = "",
     version: str = "",
     account: str = "",
@@ -260,6 +271,7 @@ def _provider(
         "name": name,
         "ok": bool(ok),
         "auth": auth,
+        "state": state or (PROVIDER_STATE_READY if ok else PROVIDER_STATE_FAILED),
         "command": command,
     }
     if detail:
@@ -471,6 +483,10 @@ def _codex_probe_env(source: Mapping[str, str]) -> dict[str, str]:
     return env
 
 
+# The Codex CLI's own install guide (the page the repo's CREDITS already cites).
+CODEX_INSTALL_DOCS_URL = "https://developers.openai.com/codex/cli/"
+
+
 def codex_status_probe(
     env: Mapping[str, str],
     *,
@@ -495,9 +511,11 @@ def codex_status_probe(
             name="codex",
             ok=False,
             auth="not_installed",
+            state=PROVIDER_STATE_NOT_INSTALLED,
             command=CODEX_INSTALL_COMMAND,
             detail="Codex and its ACP adapter are not both installed on this machine.",
             version="not installed",
+            install_url=CODEX_INSTALL_DOCS_URL,
             terminal_action="codex-install",
         )
     version = "unknown"
@@ -574,6 +592,30 @@ CLAUDE_ADAPTER_PACKAGE = "@agentclientprotocol/claude-agent-acp@0.108.1"
 def claude_adapter_install_command() -> str:
     """npm line that installs the pinned ACP adapter (needs Node 22 or newer)."""
     return f"npm install -g {CLAUDE_ADAPTER_PACKAGE}"
+
+
+def claude_adapter_missing_message(*, startup: bool) -> str:
+    """Why Claude chats cannot run: the CLI is installed but its ACP adapter is not.
+
+    One source, two renderings. The Settings card points at its install button
+    and shows the npm line; the startup phase has no button, so it points at
+    Settings instead.
+    """
+    lead = "Claude Code is installed, but its ACP adapter is not"
+    if startup:
+        return f"{lead}; open Settings → Providers to install it."
+    return (
+        "Claude Code is installed, but the ACP adapter (claude-agent-acp) is not. "
+        "Install the ACP adapter with the button below, or run: "
+        f"{claude_adapter_install_command()}"
+    )
+
+
+def startup_phase_detail(status: Mapping[str, Any]) -> str:
+    """The startup phase's message for one provider probe result."""
+    if status.get("state") == PROVIDER_STATE_ADAPTER_MISSING:
+        return claude_adapter_missing_message(startup=True)
+    return str(status.get("detail") or "")
 
 
 def claude_adapter_path() -> str:
@@ -731,12 +773,9 @@ def _claude_status(
             name="claude",
             ok=False,
             auth="not_installed",
+            state=PROVIDER_STATE_ADAPTER_MISSING,
             command=claude_adapter_install_command(),
-            detail=(
-                "Claude Code is installed, but the ACP adapter (claude-agent-acp) is not. "
-                "Install the ACP adapter with the button below, or run: "
-                f"{claude_adapter_install_command()}"
-            ),
+            detail=claude_adapter_missing_message(startup=False),
             version=version,
             skills=claude_skills,
             cli_path=binary,
@@ -758,6 +797,7 @@ def _claude_status(
             name="claude",
             ok=False,
             auth="not_installed",
+            state=PROVIDER_STATE_NOT_INSTALLED,
             command=claude_install_command(),
             detail=detail,
             version=version,

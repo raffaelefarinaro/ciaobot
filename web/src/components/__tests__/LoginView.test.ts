@@ -117,6 +117,7 @@ describe('LoginView setup wizard tests', () => {
           name: 'claude',
           ok: false,
           auth: 'missing',
+          state: 'failed',
           command: 'claude auth login',
           detail: 'Run OAuth'
         }
@@ -241,7 +242,7 @@ describe('LoginView setup wizard tests', () => {
         bootstrap: true,
         mode: 'bootstrap',
         providers: {
-          claude: { name: 'claude', ok: true, auth: 'oauth', command: 'claude auth login', detail: 'Ready' }
+          claude: { name: 'claude', ok: true, auth: 'oauth', state: 'ready', command: 'claude auth login', detail: 'Ready' }
         }
       })
     })
@@ -368,6 +369,7 @@ describe('LoginView setup wizard tests', () => {
           name: 'opencode',
           ok: false,
           auth: 'not_installed',
+          state: 'not_installed',
           command: 'curl -fsSL https://opencode.ai/v2/install | bash',
           detail: 'opencode is not installed on this machine.',
           install_url: 'https://opencode.ai/download',
@@ -397,6 +399,7 @@ describe('LoginView setup wizard tests', () => {
           name: 'claude',
           ok: false,
           auth: 'not_installed',
+          state: 'not_installed',
           command: 'curl -fsSL https://claude.ai/install.sh | bash',
           detail: 'Claude Code is not installed on this machine.',
           install_url: 'https://code.claude.com/docs/en/quickstart#step-1-install-claude-code',
@@ -429,6 +432,7 @@ describe('LoginView setup wizard tests', () => {
           name: 'claude',
           ok: false,
           auth: 'not_installed',
+          state: 'not_installed',
           command: 'curl -fsSL https://claude.ai/install.sh | bash',
           detail: 'Claude Code is not installed on this machine.',
           path_command: 'echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.zshrc && source ~/.zshrc',
@@ -459,6 +463,7 @@ describe('LoginView setup wizard tests', () => {
           name: 'claude',
           ok: false,
           auth: 'not_installed',
+          state: 'not_installed',
           command: 'curl -fsSL https://claude.ai/install.sh | bash',
           detail: 'Claude Code is not installed on this machine.',
           path_command: 'echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.zshrc && source ~/.zshrc',
@@ -495,6 +500,7 @@ describe('LoginView setup wizard tests', () => {
             name: 'claude',
             ok: false,
             auth: 'not_installed',
+            state: 'not_installed',
             command: 'curl -fsSL https://claude.ai/install.sh | bash',
             detail: 'Claude Code is not installed on this machine.',
             path_command: 'echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.zshrc',
@@ -528,6 +534,7 @@ describe('LoginView setup wizard tests', () => {
           name: 'claude',
           ok: false,
           auth: 'missing',
+          state: 'failed',
           command: 'claude auth login',
           detail: 'Run Claude OAuth.',
         },
@@ -551,6 +558,7 @@ describe('LoginView setup wizard tests', () => {
           name: 'claude',
           ok: false,
           auth: 'not_installed',
+          state: 'not_installed',
           command: 'curl -fsSL https://claude.ai/install.sh | bash',
           detail: 'The Claude desktop app is installed (/Applications/Claude.app), but…',
           install_url: 'https://code.claude.com/docs/en/quickstart#step-1-install-claude-code',
@@ -574,6 +582,7 @@ describe('LoginView setup wizard tests', () => {
           name: 'claude',
           ok: true,
           auth: 'oauth',
+          state: 'ready',
           command: 'claude auth login',
           detail: 'Ready'
         }
