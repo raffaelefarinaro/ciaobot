@@ -1,6 +1,6 @@
 <template>
   <section class="inventory" aria-label="OpenCode configured providers">
-    <p class="hint">OpenCode reports configured providers; their credentials have not been verified.</p>
+    <p class="hint">OpenCode reports which providers are configured. It does not check that their credentials work.</p>
     <p v-if="!inventory" class="hint">Provider inventory unavailable on this engine.</p>
     <p v-else-if="inventory.status === 'unknown'" class="hint">OpenCode could not report its configured providers.</p>
     <p v-else-if="inventory.status === 'partial'" class="hint">Some providers may be missing from this inventory.</p>
@@ -8,7 +8,7 @@
     <ul v-if="inventory && inventory.status !== 'unknown' && inventory.providers.length" class="inventory-list">
       <li v-for="provider in inventory.providers" :key="provider.id" class="inventory-row">
         <div><strong>{{ provider.name }}</strong> <span class="hint">({{ provider.id }})</span></div>
-        <p class="hint">{{ provider.auth_types.map(methodLabel).join(', ') }} · Configured · verification unknown</p>
+        <p class="hint">{{ provider.auth_types.map(methodLabel).join(', ') }} · Configured</p>
         <details v-if="command">
           <summary>Reconnect {{ provider.name }} ({{ provider.id }})</summary>
           <SignInGuidance :workspace="workspace" :command="command" :note="note" :context="`${provider.name} (${provider.id})`" />

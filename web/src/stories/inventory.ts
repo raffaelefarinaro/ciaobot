@@ -87,7 +87,8 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ChatSignals.vue",
       "web/src/components/NeedsYouCard.vue",
       "web/src/components/ProjectSidebar.vue",
-      "web/src/components/ProposalReviewPanel.vue"
+      "web/src/components/ProposalReviewPanel.vue",
+      "web/src/components/SubagentCard.vue"
     ],
     "variants": [
       "working",
@@ -434,13 +435,13 @@ export const inventory: InventoryEntry[] = [
       "text",
       "size"
     ],
-    "variantNotes": "Text replaces the brand name (every `o`, in any case, becomes an accent dot; other characters stay letters); size is sm, md or lg.",
+    "variantNotes": "Text replaces the brand name (every `o`, in any case, becomes a brand-orange dot; other characters stay letters); size is sm, md or lg.",
     "states": [
       {
         "name": "default",
         "coverage": "covered",
         "storyIds": ["wordmark--default"],
-        "note": "Default renders Ciaobot at md, with the two `o` characters as accent dots and the full text as the accessible name."
+        "note": "Default renders Ciaobot at md, with the two `o` characters as brand-orange dots and the full text as the accessible name."
       },
       {
         "name": "size-small",
@@ -465,6 +466,12 @@ export const inventory: InventoryEntry[] = [
         "coverage": "covered",
         "storyIds": ["wordmark--narrow"],
         "note": "Narrow renders the brand text in a maximum 390px column, still on one line."
+      },
+      {
+        "name": "neutral-workspace",
+        "coverage": "covered",
+        "storyIds": ["wordmark--neutral-workspace"],
+        "note": "NeutralWorkspace renders under the grey neutral accent, the state before the workspace colour is known, and checks the dots keep the brand orange."
       }
     ],
     "loading": {
@@ -887,6 +894,69 @@ export const inventory: InventoryEntry[] = [
     "loading": {
       "status": "unknown",
       "detail": "Initial and refresh loading fidelity in ChatSignals.vue has not yet been audited."
+    },
+    "migration": {
+      "status": "unassessed",
+      "note": "Inventory admission does not approve a design migration."
+    }
+  },
+  {
+    "id": "components-subagent-card",
+    "name": "SubagentCard",
+    "family": "Chat, messages, composer, activity and context",
+    "kind": "component",
+    "owner": {
+      "path": "web/src/components/SubagentCard.vue",
+      "anchor": "<template>"
+    },
+    "sources": [],
+    "consumers": [
+      "web/src/components/ChatPanel.vue",
+      "web/src/components/ChatTurnActivity.vue"
+    ],
+    "variants": [
+      "running",
+      "done",
+      "failed",
+      "many children",
+      "old journal"
+    ],
+    "variantNotes": "One card per subagent call, keyed by its tool_use_id: open while running, folded once it settles, the state as a word beside the working glyph or a mark. Children are text rows and file buttons, bounded to 50 with a count. The old-journal story is a card whose input was the call's title.",
+    "states": [
+      {
+        "name": "running",
+        "coverage": "covered",
+        "storyIds": ["subagent-card--running"],
+        "note": "Open, with the working glyph, the Running label and its nested rows."
+      },
+      {
+        "name": "done",
+        "coverage": "covered",
+        "storyIds": ["subagent-card--done"],
+        "note": "Folded by default, the Done label and no body until the reader opens it."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": ["subagent-card--failed"],
+        "note": "Folded, the Failed label, the alert glyph and the failed border."
+      },
+      {
+        "name": "many children",
+        "coverage": "covered",
+        "storyIds": ["subagent-card--many-children"],
+        "note": "Fifty rows are drawn and the rest are a +N more count; the header counts every step."
+      },
+      {
+        "name": "old journal",
+        "coverage": "covered",
+        "storyIds": ["subagent-card--old-journal"],
+        "note": "A journal row with no description or type reads as plain Subagent."
+      }
+    ],
+    "loading": {
+      "status": "none",
+      "detail": "No fetch: the card is built from the live stream or a history row that is already loaded. Live cards grow while the turn runs; history cards are fixed."
     },
     "migration": {
       "status": "unassessed",
@@ -2274,7 +2344,8 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/ProviderSignInHint.vue",
       "web/src/components/SettingsView.vue",
       "web/src/components/onboarding/OnboardingRuntimeStage.vue",
-      "web/src/components/settings/GoogleConnectDialog.vue"
+      "web/src/components/settings/GoogleConnectDialog.vue",
+      "web/src/components/settings/ProviderInstallBlock.vue"
     ],
     "variants": [],
     "variantNotes": "Host-only/done/error. Detailed variants are unassessed.",
@@ -5257,6 +5328,14 @@ export const inventory: InventoryEntry[] = [
           "startup-view--phase-failed"
         ],
         "note": "A phase with status 'failed' renders statusLabel's 'Needs attention' with the is-failed error class."
+      },
+      {
+        "name": "phase-skipped",
+        "coverage": "covered",
+        "storyIds": [
+          "startup-view--phase-skipped"
+        ],
+        "note": "A phase with status 'skipped' (a provider CLI the user never installed) renders the neutral 'Skipped' label with the is-skipped class, never 'Needs attention'."
       },
       {
         "name": "phase-message",
@@ -8537,6 +8616,106 @@ export const inventory: InventoryEntry[] = [
     }
   },
   {
+    "id": "components-settings-provider-state-badge",
+    "name": "ProviderStateBadge",
+    "family": "Settings",
+    "kind": "component",
+    "owner": {
+      "path": "web/src/components/settings/ProviderStateBadge.vue",
+      "anchor": "<template>"
+    },
+    "sources": [],
+    "consumers": [
+      "web/src/components/SettingsView.vue"
+    ],
+    "variants": ["ready", "failed", "not_installed", "adapter_missing"],
+    "variantNotes": "The row's state as words with a leading mark: ready uses the ok tone, failed and adapter_missing the error tone, and not_installed the neutral tone (a hollow mark and muted text, never the error colour).",
+    "states": [
+      {
+        "name": "ready",
+        "coverage": "covered",
+        "storyIds": ["provider-status-row--badge-ready"],
+        "note": "Connected in the ok tone for Claude; CLI ready for OpenCode."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": ["provider-status-row--badge-failed"],
+        "note": "Not connected in the error tone for an installed CLI that is signed out or failed."
+      },
+      {
+        "name": "not-installed",
+        "coverage": "covered",
+        "storyIds": ["provider-status-row--badge-not-installed"],
+        "note": "Not installed in the neutral tone: a hollow mark and muted text, never the error colour or the words Not connected."
+      },
+      {
+        "name": "adapter-missing",
+        "coverage": "covered",
+        "storyIds": ["provider-status-row--badge-adapter-missing"],
+        "note": "An installed CLI without its ACP adapter keeps the error tone and Not connected."
+      }
+    ],
+    "loading": {
+      "status": "none",
+      "detail": "The state is supplied by the parent from the engine payload; the badge does no loading."
+    },
+    "migration": {
+      "status": "unassessed",
+      "note": "Inventory admission does not approve a design migration."
+    }
+  },
+  {
+    "id": "components-settings-provider-install-block",
+    "name": "ProviderInstallBlock",
+    "family": "Settings",
+    "kind": "component",
+    "owner": {
+      "path": "web/src/components/settings/ProviderInstallBlock.vue",
+      "anchor": "<template>"
+    },
+    "sources": [],
+    "consumers": [
+      "web/src/components/SettingsView.vue"
+    ],
+    "variants": ["not_installed", "adapter_missing", "ready", "failed"],
+    "variantNotes": "Shown only when the CLI or its adapter is missing: the install line, one installation guide link when the engine gives one, and a user-initiated Install in Terminal. Nothing installs by itself.",
+    "states": [
+      {
+        "name": "not-installed",
+        "coverage": "covered",
+        "storyIds": ["provider-status-row--install-not-installed"],
+        "note": "The install text names the CLI's own guide link and the Install in Terminal button."
+      },
+      {
+        "name": "adapter-missing",
+        "coverage": "covered",
+        "storyIds": ["provider-status-row--install-adapter-missing"],
+        "note": "The npm adapter line and Install in Terminal; no guide link, since the CLI itself is present."
+      },
+      {
+        "name": "ready",
+        "coverage": "covered",
+        "storyIds": ["provider-status-row--install-ready"],
+        "note": "Renders nothing: an installed, ready CLI has no install step."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": ["provider-status-row--install-failed"],
+        "note": "Renders nothing: an installed CLI that is signed out has no install step."
+      }
+    ],
+    "loading": {
+      "status": "none",
+      "detail": "The install step reads the host-terminal capability on mount, as the Install in Terminal button does everywhere else."
+    },
+    "migration": {
+      "status": "unassessed",
+      "note": "Inventory admission does not approve a design migration."
+    }
+  },
+  {
     "id": "components-settings-provider-inventory",
     "name": "ProviderInventory",
     "family": "Settings",
@@ -8553,16 +8732,36 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Inventory status controls the displayed provider availability guidance.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "Provider inventory and sign-in disclosures have no rendered-state story."
+        "name": "configured",
+        "coverage": "covered",
+        "storyIds": [
+          "provider-inventory--configured"
+        ],
+        "note": "complete with reported providers: one honest hint line, each row Configured with its auth method and no verification claim."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "none-reported",
+        "coverage": "covered",
+        "storyIds": [
+          "provider-inventory--none-reported"
+        ],
+        "note": "complete with no providers: No configured providers reported."
+      },
+      {
+        "name": "partially-reported",
+        "coverage": "covered",
+        "storyIds": [
+          "provider-inventory--partially-reported"
+        ],
+        "note": "partial: Some providers may be missing from this inventory."
+      },
+      {
+        "name": "unavailable",
+        "coverage": "covered",
+        "storyIds": [
+          "provider-inventory--unavailable"
+        ],
+        "note": "unknown: OpenCode could not report its configured providers."
       }
     ],
     "loading": {
@@ -9092,6 +9291,14 @@ export const inventory: InventoryEntry[] = [
           "settings-engine-login--not-installed"
         ],
         "note": "installed false: Not installed for this user, the setup lead and the setup command in a code block, and no action."
+      },
+      {
+        "name": "mac-app-no-cli-service",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-engine-login--mac-app-no-cli-service"
+        ],
+        "note": "Mac app (desktop client) with installed false: Managed by Ciaobot for Mac, the Settings → Start at Login pointer, and no CLI command or copy control."
       },
       {
         "name": "unsupported-platform",

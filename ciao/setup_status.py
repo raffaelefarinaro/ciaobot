@@ -236,12 +236,23 @@ def _check(
     return row
 
 
+# The provider row's explicit `state`, which the Settings card and the startup
+# phase read instead of matching the detail text. `not_installed` is the CLI
+# missing (a choice, not a fault); `adapter_missing` is the CLI present but its
+# ACP adapter absent, which keeps the card's red state.
+PROVIDER_STATE_NOT_INSTALLED = "not_installed"
+PROVIDER_STATE_ADAPTER_MISSING = "adapter_missing"
+PROVIDER_STATE_READY = "ready"
+PROVIDER_STATE_FAILED = "failed"
+
+
 def _provider(
     *,
     name: str,
     ok: bool,
     auth: str,
     command: str,
+    state: str = "",
     detail: str = "",
     version: str = "",
     account: str = "",
@@ -256,11 +267,13 @@ def _provider(
     mcp_command: str = "",
     release_check: dict[str, str] | None = None,
     adapter: str = "",
+    adapter_state: str = "",
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
         "name": name,
         "ok": bool(ok),
         "auth": auth,
+        "state": state or (PROVIDER_STATE_READY if ok else PROVIDER_STATE_FAILED),
         "command": command,
     }
     if detail:
@@ -289,6 +302,8 @@ def _provider(
         row["mcp_command"] = mcp_command
     if adapter:
         row["adapter"] = adapter
+    if adapter_state:
+        row["adapter_state"] = adapter_state
     if release_check is not None:
         row["release_check"] = release_check
     return row
@@ -424,11 +439,14 @@ def warm_claude_discovery_cache() -> None:
 def claude_status_probe(
     env: Mapping[str, str],
     *,
-    config_path: Path,
+    config_path: Path | None = None,
     workspace_root: Path | None = None,
     **_unused: Any,
 ) -> dict[str, Any]:
-    return _claude_status(env, config_path, workspace_root=workspace_root)
+    # Callers that only hold the environment (the engine's startup phases) get
+    # the same config path the Settings card would compute.
+    path = config_path or _claude_config_path_from_env(env)
+    return _claude_status(env, path, workspace_root=workspace_root)
 
 
 def opencode_status_probe(
@@ -471,6 +489,10 @@ def _codex_probe_env(source: Mapping[str, str]) -> dict[str, str]:
     return env
 
 
+# The Codex CLI's own install guide (the page the repo's CREDITS already cites).
+CODEX_INSTALL_DOCS_URL = "https://developers.openai.com/codex/cli/"
+
+
 def codex_status_probe(
     env: Mapping[str, str],
     *,
@@ -490,16 +512,18 @@ def codex_status_probe(
     from ciao.providers.acp.agents import codex_binary
 
     codex = codex_binary()
-    state = adapter_install.detect(adapter_install.CODEX_ADAPTER)
     probe_env = _codex_probe_env(env)
-    if codex is None or state != "ready":
+    if codex is None:
         return _provider(
             name="codex",
             ok=False,
             auth="not_installed",
+            state=PROVIDER_STATE_NOT_INSTALLED,
             command=codex_install_command(),
-            detail=adapter_install.describe(adapter_install.CODEX_ADAPTER, state),
+            detail=adapter_message(adapter_install.CODEX_ADAPTER, "cli_missing", startup=False),
+            adapter_state="cli_missing",
             version="not installed",
+            install_url=CODEX_INSTALL_DOCS_URL,
             terminal_action="codex-install",
         )
     version = "unknown"
@@ -518,6 +542,21 @@ def codex_status_probe(
         version = parse_cli_version(found.stdout) or "unknown"
     except (OSError, subprocess.SubprocessError):
         version = "unknown"
+    state = adapter_install.detect(adapter_install.CODEX_ADAPTER)
+    if state != "ready":
+        # The CLI is present but its ACP adapter is not runnable: adapter_missing, or a Node failure.
+        return _provider(
+            name="codex",
+            ok=False,
+            auth=adapter_row_auth(state),
+            state=adapter_row_state(state),
+            command=codex_install_command(),
+            detail=adapter_message(adapter_install.CODEX_ADAPTER, state, startup=False),
+            adapter_state=state,
+            version=version,
+            install_url=CODEX_INSTALL_DOCS_URL,
+            terminal_action="codex-install",
+        )
     try:
         status = subprocess.run(
             [codex, "login", "status"],
@@ -568,6 +607,62 @@ CLAUDE_INSTALL_DOCS_URL = (
 def claude_install_command() -> str:
     """The documented one-line installer."""
     return "curl -fsSL https://claude.ai/install.sh | bash"
+
+
+# Adapter states where the CLI is present but Node cannot run the adapter: a failure, not a missing install.
+_NODE_ADAPTER_STATES = ("node_missing", "node_old")
+
+
+def adapter_row_state(state: str) -> str:
+    """The explicit provider-row state for one ``adapter_install`` state.
+
+    A missing CLI is ``not_installed`` (neutral). A missing or outdated adapter with the CLI present
+    is ``adapter_missing``. Node that is missing or too old is ``failed``.
+    """
+    if state == "ready":
+        return PROVIDER_STATE_READY
+    if state == "cli_missing":
+        return PROVIDER_STATE_NOT_INSTALLED
+    if state in _NODE_ADAPTER_STATES:
+        return PROVIDER_STATE_FAILED
+    return PROVIDER_STATE_ADAPTER_MISSING
+
+
+def adapter_row_auth(state: str) -> str:
+    """The row's ``auth``: a Node failure leaves the CLI installed, so it is not "not installed"."""
+    return "unknown" if state in _NODE_ADAPTER_STATES else "not_installed"
+
+
+def adapter_message(adapter: str, state: str, *, startup: bool, installing: bool = False) -> str:
+    """The one message for an adapter that is not ready, for the Settings card or a startup phase.
+
+    ``adapter_install.describe`` supplies the facts. This adds only the next step: the card names its
+    install button and the install line, and the startup phase, which has no button, points at Settings.
+    """
+    from ciao import adapter_install
+
+    if installing:
+        return f"The ACP adapter {adapter} is installing in the background."
+    facts = adapter_install.describe(adapter, state)
+    if state not in ("adapter_missing", "adapter_outdated"):
+        return facts
+    if startup:
+        return f"{facts} Open Settings → Providers to install it."
+    return f"{facts} Install it with the button below, or run: {adapter_install.install_command(adapter)}"
+
+
+def startup_phase_detail(status: Mapping[str, Any], *, installing: bool = False) -> str:
+    """The startup phase's message for one provider probe result."""
+    from ciao.adapter_install import PROVIDER_ADAPTERS
+
+    if status.get("state") == PROVIDER_STATE_ADAPTER_MISSING:
+        return adapter_message(
+            PROVIDER_ADAPTERS[str(status["name"])],
+            str(status.get("adapter_state") or "adapter_missing"),
+            startup=True,
+            installing=installing,
+        )
+    return str(status.get("detail") or "")
 
 
 def claude_path_command(directory: str = "") -> str:
@@ -716,9 +811,11 @@ def _claude_status(
         return _provider(
             name="claude",
             ok=False,
-            auth="not_installed",
+            auth=adapter_row_auth(adapter_state),
+            state=adapter_row_state(adapter_state),
             command=adapter_install.install_command(adapter_install.CLAUDE_ADAPTER),
-            detail=adapter_install.describe(adapter_install.CLAUDE_ADAPTER, adapter_state),
+            detail=adapter_message(adapter_install.CLAUDE_ADAPTER, adapter_state, startup=False),
+            adapter_state=adapter_state,
             version=version,
             skills=claude_skills,
             cli_path=binary,
@@ -740,6 +837,7 @@ def _claude_status(
             name="claude",
             ok=False,
             auth="not_installed",
+            state=PROVIDER_STATE_NOT_INSTALLED,
             command=claude_install_command(),
             detail=detail,
             version=version,

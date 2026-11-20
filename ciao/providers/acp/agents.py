@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import unicodedata
 from collections.abc import AsyncGenerator, Callable, Mapping
 from contextlib import aclosing
 from dataclasses import replace
@@ -28,7 +27,7 @@ from ciao import claude_sessions
 from ciao.claude_trim import claude_settings_layer
 from ciao.models import AgentRequest, AssistantTextDelta, StreamEvent, ThinkingEvent, ToolUseEvent
 from ciao.providers.acp.connection import AcpConnection, AgentStartError, AgentVersionError
-from ciao.providers.acp.normalize import UpdateNormalizer, child_tool_id, loggable_kind
+from ciao.providers.acp.normalize import UpdateNormalizer, bounded_text, child_tool_id, loggable_kind
 from ciao.providers.acp.provider import AcpProvider, AgentClient
 from ciao.providers.acp.spec import AgentSpec, ModeChoice, VersionGate
 from ciao.providers.base import ActiveHandle, CleanupTimedOut
@@ -209,12 +208,15 @@ class CodexAcpProvider(AcpProvider):
         return {"CODEX_PATH": path} if path else {}
 
 
+_OPENCODE_CHILD_UPDATE = "opencode/session/child_update"
+
 OPENCODE = AgentSpec(
     id="opencode",
     binary="opencode",
     args=("acp",),
     # Child sessions arrive as ``opencode/session/child_update`` instead of folded into the parent.
     client_meta={"opencode/child-session-updates": True},
+    extension_notifications=(_OPENCODE_CHILD_UPDATE,),
     # opencode has no bypass mode: its permission cards follow the user's opencode config (plan Q7).
     modes={
         "plan": (ModeChoice("mode", ("plan",)),),
@@ -232,7 +234,6 @@ OPENCODE = AgentSpec(
     ),
 )
 
-_OPENCODE_CHILD_UPDATE = "opencode/session/child_update"
 # Terminal child statuses, and whether each one failed.
 _OPENCODE_CHILD_END = {"completed": False, "failed": True, "interrupted": True}
 # The only child updates that reach the parent transcript. Everything else would rewrite the
@@ -252,10 +253,7 @@ _RESOURCE_NOT_FOUND = -32002
 
 
 def _safe_title(raw: object) -> str:
-    if not isinstance(raw, str):
-        return ""
-    kept = "".join(ch for ch in raw if not unicodedata.category(ch).startswith("C"))
-    return kept[:_CHILD_TITLE_CHARS]
+    return bounded_text(raw, _CHILD_TITLE_CHARS)
 
 
 def _update_kind(body: Mapping[str, Any]) -> object:
@@ -264,11 +262,11 @@ def _update_kind(body: Mapping[str, Any]) -> object:
 
 
 class OpencodeAcpProvider(AcpProvider):
-    """``opencode acp``, with each child session nested under a ``Subagent`` tool call.
+    """``opencode acp``: a subagent's child session nests under the subagent's tool call.
 
-    The notification is ``opencode/session/child_update`` (sent on the wire as ``_opencode/...``),
-    from ``packages/cli/src/acp/child.ts`` in opencode v2.3.2. Its payload is
-    ``{rootSessionId, childSessionId, parentSessionId, depth, title?, type}``, where:
+    The notification is ``opencode/session/child_update``, sent with no leading underscore, from
+    ``packages/cli/src/acp/child.ts`` in opencode v2.3.2 (routed by ``connection.connect_client``).
+    Its payload is ``{rootSessionId, childSessionId, parentSessionId, depth, title?, type}``, where:
 
     - ``type: "update"`` carries ``update``, a session/update body. Only its message and thought
       chunks and its tool calls are kept (see ``_CHILD_UPDATE_KINDS``); its tool ids are prefixed
@@ -276,9 +274,11 @@ class OpencodeAcpProvider(AcpProvider):
     - ``type: "status"`` carries ``status`` (``created``, ``running``, ``completed``, ``failed``,
       ``interrupted``) and an optional ``error``.
 
-    The child becomes ``ToolUseEvent(tool_use_id="child:<childSessionId>")``, and everything
-    from the child carries that id as ``parent_tool_use_id``. A child whose parent is another
-    child nests under that child's id. A terminal status ends the child with a ``tool_result``.
+    A child that is linked to a subagent call (see ``UpdateNormalizer.link_child``) nests under
+    that call's tool_use_id, and its terminal status closes that call with a ``tool_result``
+    carrying ``subagent_status``. A child with no subagent call behind it keeps its own
+    ``child:<childSessionId>`` node (tool name ``Subagent``), and its terminal status closes that
+    node. A child whose parent is another child nests under that child's anchor.
     """
 
     spec = OPENCODE
@@ -384,8 +384,12 @@ class OpencodeAcpProvider(AcpProvider):
         if root != self._children_root:
             self._children_root = root
             self._forget_children()
+        title = _safe_title(payload.get("title"))
+        normalizer.link_child(child_id, title)
+        # The subagent call this child runs under, or None for a child nobody launched.
+        call_id = normalizer.linked_call(child_id)
         parent_session = payload.get("parentSessionId")
-        parent = None if parent_session == root else child_tool_id(parent_session)
+        parent = None if parent_session == root else normalizer.session_anchor(parent_session)
         events: list[StreamEvent] = []
         if child_id not in self._children:
             # The first event for a child opens its node, whether a status or an update came first.
@@ -393,13 +397,16 @@ class OpencodeAcpProvider(AcpProvider):
                 self._log_children_limit()
                 return []
             self._children.add(child_id)
-            events.append(ToolUseEvent(
-                type="tool_use",
-                tool_name="Subagent",
-                tool_input=_safe_title(payload.get("title")),
-                tool_use_id=tool_id,
-                parent_tool_use_id=parent,
-            ))
+            if call_id is None:
+                events.append(ToolUseEvent(
+                    type="tool_use",
+                    tool_name="Subagent",
+                    tool_input=title,
+                    tool_use_id=tool_id,
+                    parent_tool_use_id=parent,
+                ))
+        # Everything the child says nests under its subagent call, or under its own node.
+        nest = call_id or tool_id
         kind = payload.get("type")
         if kind == "update":
             body = payload.get("update")
@@ -410,19 +417,29 @@ class OpencodeAcpProvider(AcpProvider):
                     return events
                 for event in normalizer.feed(dict(body)):
                     if isinstance(event, (AssistantTextDelta, ThinkingEvent, ToolUseEvent)):
-                        event = replace(event, parent_tool_use_id=tool_id)
+                        event = replace(event, parent_tool_use_id=nest)
                     events.append(event)
         elif kind == "status":
             status = payload.get("status")
             if isinstance(status, str) and status in _OPENCODE_CHILD_END:
                 # The child is over: its slot is free for the next one.
                 self._children.discard(child_id)
-                events.append(ToolUseEvent(
-                    type="tool_result",
-                    tool_use_id=tool_id,
-                    parent_tool_use_id=parent,
-                    is_error=_OPENCODE_CHILD_END[status],
-                ))
+                is_error = _OPENCODE_CHILD_END[status]
+                if call_id is not None:
+                    # The subagent call's own result, closing the launch acknowledgement.
+                    events.append(ToolUseEvent(
+                        type="tool_result",
+                        tool_use_id=call_id,
+                        is_error=is_error,
+                        subagent_status=status,
+                    ))
+                else:
+                    events.append(ToolUseEvent(
+                        type="tool_result",
+                        tool_use_id=tool_id,
+                        parent_tool_use_id=parent,
+                        is_error=is_error,
+                    ))
         return events
 
     def _drop_kind(self, kind: object) -> None:

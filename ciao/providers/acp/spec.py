@@ -49,6 +49,10 @@ class AgentSpec:
     # must travel only in the session's ``_meta``, not in the process env).
     unset_env: tuple[str, ...] = ()
     client_meta: Mapping[str, Any] = field(default_factory=dict)  # clientCapabilities._meta opt-ins
+    # Extension notifications the agent sends WITHOUT the leading underscore that ACP reserves
+    # for extensions. The SDK routes only ``_``-prefixed methods to ``ext_notification``, so each
+    # name listed here is routed there under the name as sent (see ``connection.connect_client``).
+    extension_notifications: tuple[str, ...] = ()
     modes: Mapping[BridgeMode, tuple[ModeChoice, ...]] = field(default_factory=dict)
     model_config_id: str = "model"
     thought_config_id: str = ""  # "" = no thinking control

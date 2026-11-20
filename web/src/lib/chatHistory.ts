@@ -7,6 +7,7 @@
 
 import { isPlausibleFilePath } from './filePaths'
 import { isHostConnectionUnavailableMessage } from './chatWs'
+import { subagentCardFromHistory } from './subagentCard'
 import type { ChatMessage, TurnOrigin, TurnVerification } from './types'
 
 export function stripLegacyContextPrefix(content: string): string {
@@ -331,7 +332,7 @@ export function mergeMetadata(server: ChatMessage[], local: ChatMessage[]): Chat
   return mergedMessages
 }
 
-export type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean; origin?: TurnOrigin; sent_context?: string; usage?: Record<string, string>; quota?: Record<string, unknown>; effective_model?: string; verification?: TurnVerification }
+export type ServerRow = { role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer'; i?: number; lazy?: boolean; full_length?: number; unattended?: boolean; origin?: TurnOrigin; sent_context?: string; usage?: Record<string, string>; quota?: Record<string, unknown>; effective_model?: string; verification?: TurnVerification; subagent?: unknown }
 
 export const toChatMessage = (m: ServerRow) => ({
   role: m.role as 'user' | 'assistant' | 'system',
@@ -363,6 +364,8 @@ export const toChatMessage = (m: ServerRow) => ({
   file_path: m.file_path,
   action: m.action,
   tool: m.tool,
+  // _subagent card; journals from before cards carry only the title, so the card is normalised.
+  subagent: subagentCardFromHistory(m.subagent) ?? undefined,
   phase: m.phase,
   // Envelope annotations (absolute index + lazy marker). Undefined on
   // legacy flat responses.
@@ -388,6 +391,7 @@ export function isLiveTraceRow(m: ChatMessage): boolean {
     m.tool_name === '_activity'
     || m.tool_name === '_thinking'
     || m.tool_name === '_filecard'
+    || m.tool_name === '_subagent'
   )
 }
 

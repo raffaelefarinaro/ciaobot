@@ -6,11 +6,11 @@ import asyncio
 import logging
 import os
 import signal
-import subprocess
 import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, field
+from functools import partial
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping
@@ -47,6 +47,11 @@ from ciao.port_in_use import (
 )
 from ciao.web.project_chats import ProjectChatManager
 from ciao.web.push import PushManager
+from ciao.setup_status import (
+    PROVIDER_STATE_ADAPTER_MISSING,
+    PROVIDER_STATE_NOT_INSTALLED,
+    startup_phase_detail,
+)
 
 if TYPE_CHECKING:
     import uvicorn
@@ -56,7 +61,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-_PhaseStatus = Literal["pending", "in_progress", "done", "failed"]
+_PhaseStatus = Literal["pending", "in_progress", "done", "failed", "skipped"]
 
 @dataclass
 class StartupPhase:
@@ -105,6 +110,18 @@ class StartupTracker:
         self._emit(p)
         self._update_ready()
 
+    def skip(self, name: str, message: str = "") -> None:
+        """Settle a phase that does not apply here (a provider CLI the user never installed).
+
+        Neither done nor failed: the startup view shows it neutrally, and it is
+        not recorded as a job run, since nothing ran and nothing broke.
+        """
+        p = self.phase(name)
+        p.status = "skipped"
+        p.message = message
+        p.finished_at = datetime.now(UTC).isoformat()
+        self._update_ready()
+
     def _emit(self, p: StartupPhase) -> None:
         if self.on_finish is None:
             return
@@ -115,7 +132,7 @@ class StartupTracker:
 
     def _update_ready(self) -> None:
         self.overall_ready = all(
-            p.status in ("done", "failed") for p in self._phases.values()
+            p.status in ("done", "failed", "skipped") for p in self._phases.values()
         )
 
     def to_dict(self) -> dict:
@@ -663,6 +680,70 @@ async def _refire_permission_push(
             logger.exception("Permission re-fire failed for %s", chat_id)
 
 
+# Startup phase ids for providers whose id predates the registry phase naming.
+_STARTUP_PHASE_IDS = {"claude": "connect_claude_code"}
+
+
+def provider_startup_phase(provider_id: str) -> str:
+    """The startup phase that reports one registry provider's readiness."""
+    return _STARTUP_PHASE_IDS.get(provider_id, f"connect_{provider_id}")
+
+
+async def check_provider_startup(tracker: StartupTracker, phase: str, descriptor) -> None:
+    """Start the provider's pinned ACP adapter install when its CLI is present, then settle the phase.
+
+    ``adapter_install`` never installs for an absent CLI, and its startup install runs on its own
+    thread, so the phase does not wait on npm. A started install settles the phase as done with the
+    install note; a failed or unavailable one reports through the probe.
+    """
+    from ciao import adapter_install
+
+    installing = False
+    if (adapter := adapter_install.PROVIDER_ADAPTERS.get(descriptor.id)) is not None:
+        try:
+            started = await asyncio.to_thread(adapter_install.start_install_in_background, adapter)
+        except Exception:  # the probe below still reports the adapter's state
+            logger.warning("Could not start the %s adapter install", adapter, exc_info=True)
+        else:
+            installing = started is None
+    await run_provider_startup_check(
+        tracker,
+        phase,
+        partial(descriptor.status_probe, os.environ),
+        installing=installing,
+    )
+
+
+async def run_provider_startup_check(
+    tracker: StartupTracker,
+    phase: str,
+    probe: Callable[[], Mapping[str, Any]],
+    *,
+    installing: bool = False,
+) -> None:
+    """Settle one provider's startup phase from its status probe.
+
+    A CLI the user never installed is skipped, not failed: it is a choice, not
+    a fault. A probe that raises fails the phase with its exception type when
+    the message is empty (a timeout has none), so the phase never reads "not
+    found: " with nothing after it. A missing adapter while its install runs in
+    the background is done, not failed.
+    """
+    try:
+        status = await asyncio.to_thread(probe)
+    except Exception as exc:  # a probe must never block startup
+        tracker.fail(phase, f"check failed: {str(exc) or type(exc).__name__}")
+        return
+    detail = startup_phase_detail(status, installing=installing)
+    state = status.get("state")
+    if state == PROVIDER_STATE_NOT_INSTALLED:
+        tracker.skip(phase, detail or "not installed")
+    elif status.get("ok") or (installing and state == PROVIDER_STATE_ADAPTER_MISSING):
+        tracker.done(phase, detail or "connected")
+    else:
+        tracker.fail(phase, detail or "not connected")
+
+
 async def _run_server_locked(
     config: CiaoConfig,
     *,
@@ -726,88 +807,18 @@ async def _run_server_locked(
         engine_pid=engine_pid,
     )
 
-    async def start_adapter_install(adapter: str) -> str | None:
-        """Start the pinned ACP adapter's install in the background. None when one started, else "" or the reason."""
-        from ciao import adapter_install
-
-        # The install runs on its own thread and is shown on the Settings card, so no startup phase waits on npm.
-        return await asyncio.to_thread(adapter_install.start_install_in_background, adapter)
-
-    # Start provider checks in the background
-    tracker.start("connect_claude_code")
-
-    async def check_claude_code():
-        try:
-            # Resolve ``claude`` against the login-shell PATH, since launchd
-            # omits ~/.local/bin and other tool dirs.
-            from ciao import adapter_install
-            from ciao.tool_path import resolve_tool
-            cli = resolve_tool("claude")
-            if not cli:
-                tracker.fail(
-                    "connect_claude_code",
-                    "claude CLI not found on PATH",
-                )
-                return
-            adapter_state = await start_adapter_install(adapter_install.CLAUDE_ADAPTER)
-            proc = await asyncio.create_subprocess_exec(
-                cli, "--version",
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=3.0)
-            if proc.returncode == 0 and adapter_state:
-                tracker.fail("connect_claude_code", adapter_state)
-            elif proc.returncode == 0:
-                version = stdout.decode().strip()
-                note = "; the ACP adapter is installing in the background" if adapter_state is None else ""
-                tracker.done("connect_claude_code", f"connected: {version}{note}")
-            else:
-                tracker.fail("connect_claude_code", f"failed: exit {proc.returncode}")
-        except Exception as e:
-            tracker.fail("connect_claude_code", f"not found: {e}")
-
-    asyncio.create_task(check_claude_code())
-
-    # Every other runtime provider reports readiness through its registry
-    # status probe, so a new provider gets a startup phase for free. Claude
-    # keeps the hand-written check above because its phase id
-    # (`connect_claude_code`) predates the registry and is a UI contract.
+    # Every runtime provider reports readiness through its registry status
+    # probe, the same probe its Settings card renders, so the startup phase and
+    # the card cannot disagree. Claude's phase id predates the registry and is a
+    # UI contract (StartupView.vue), hence the explicit id.
     from ciao import provider_registry
 
-    def _start_provider_check(descriptor) -> None:
-        phase = f"connect_{descriptor.id}"
-        tracker.start(phase)
-
-        async def check() -> None:
-            try:
-                from ciao import adapter_install
-
-                adapter = adapter_install.PROVIDER_ADAPTERS.get(descriptor.id)
-                installing = False
-                if adapter:
-                    adapter_state = await start_adapter_install(adapter)
-                    if adapter_state:
-                        tracker.fail(phase, adapter_state)
-                        return
-                    installing = adapter_state is None
-                status = await asyncio.to_thread(
-                    descriptor.status_probe, os.environ
-                )
-                detail = str(status.get("detail") or "")
-                if status.get("ok"):
-                    note = "; the ACP adapter is installing in the background" if installing else ""
-                    tracker.done(phase, f"{detail or 'connected'}{note}")
-                else:
-                    tracker.fail(phase, detail or "not connected")
-            except Exception as exc:  # a probe must never block startup
-                tracker.fail(phase, f"not found: {exc}")
-
-        asyncio.create_task(check())
-
     for descriptor in provider_registry.descriptors():
-        if descriptor.id == "claude" or not descriptor.status_probe_path:
+        if not descriptor.status_probe_path:
             continue
-        _start_provider_check(descriptor)
+        phase = provider_startup_phase(descriptor.id)
+        tracker.start(phase)
+        asyncio.create_task(check_provider_startup(tracker, phase, descriptor))
 
     # Rename each root's legacy CLAUDE.md onto AGENTS.md, once. Both providers
     # discover AGENTS.md natively now, but Claude Code only falls back to it

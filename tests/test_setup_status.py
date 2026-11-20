@@ -2430,12 +2430,19 @@ def test_claude_cli_without_the_acp_adapter_is_not_ready(monkeypatch) -> None:
     row = claude_status_probe({}, config_path=Path("/nonexistent"))
 
     assert row["ok"] is False
+    # One message for the card and the startup phase: the card's own button
+    # is named, and the npm line is the fallback. Never the circular
+    # "use Install in Settings → Providers" text, which is shown inside it.
     assert row["detail"] == (
-        "The ACP adapter claude-agent-acp 0.108.1 is not installed for Ciaobot yet."
+        "The ACP adapter claude-agent-acp 0.108.1 is not installed for Ciaobot yet. "
+        "Install it with the button below, or run: "
+        f"{adapter_install.install_command(adapter_install.CLAUDE_ADAPTER)}"
     )
+    assert "Settings → Providers" not in row["detail"]
     assert row["command"] == adapter_install.install_command(adapter_install.CLAUDE_ADAPTER)
     assert row["command"].endswith("-m ciao.adapter_install claude-agent-acp")
     assert row["terminal_action"] == "claude-install"
+    assert row["state"] == "adapter_missing"
 
 
 def test_claude_adapter_on_node_too_old_says_so(monkeypatch) -> None:
@@ -2560,3 +2567,66 @@ def test_setup_finish_has_no_native_branch() -> None:
     with pytest.raises(SystemExit) as caught:
         cli.build_parser().parse_args(["run", "--installer-native-workspace", "/tmp/x"])
     assert caught.value.code == 2
+
+
+def _claude_state_row(monkeypatch, *, cli: str, adapter: str, logged_in: bool) -> dict:
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: cli)
+    monkeypatch.setattr("ciao.setup_status.claude_app_path", lambda: "")
+    monkeypatch.setattr("ciao.adapter_install.detect", lambda name: adapter)
+    monkeypatch.setattr("ciao.setup_status._cli_version", lambda binary: "2.1.326 (Claude Code)")
+    monkeypatch.setattr("ciao.setup_status.discover_claude_system_skills", lambda: [])
+    monkeypatch.setattr("ciao.provider_versions.release_check", lambda *a, **k: {"state": "current"})
+    monkeypatch.setattr(
+        "ciao.setup_status.claude_auth_status",
+        lambda *args, **kwargs: {"logged_in": logged_in, "email": "user@example.test", "org_name": ""},
+    )
+    return claude_status_probe({}, config_path=Path("/nonexistent"))
+
+
+def test_claude_state_not_installed_is_explicit_and_links_the_install_guide(monkeypatch) -> None:
+    row = _claude_state_row(monkeypatch, cli="", adapter="", logged_in=False)
+
+    assert row["state"] == "not_installed"
+    assert row["auth"] == "not_installed"
+    assert row["ok"] is False
+    assert row["install_url"].startswith("https://code.claude.com/")
+    assert row["terminal_action"] == "claude-install"
+
+
+def test_claude_state_adapter_missing_is_not_the_not_installed_state(monkeypatch) -> None:
+    row = _claude_state_row(monkeypatch, cli="/fake/claude", adapter="adapter_missing", logged_in=True)
+
+    assert row["state"] == "adapter_missing"
+    assert row["ok"] is False
+    assert "install_url" not in row
+
+
+def test_claude_state_ready_when_cli_adapter_and_login_are_present(monkeypatch) -> None:
+    row = _claude_state_row(monkeypatch, cli="/fake/claude", adapter="ready", logged_in=True)
+
+    assert row["state"] == "ready"
+    assert row["ok"] is True
+
+
+def test_claude_state_failed_when_signed_out(monkeypatch) -> None:
+    row = _claude_state_row(monkeypatch, cli="/fake/claude", adapter="ready", logged_in=False)
+
+    assert row["state"] == "failed"
+    assert row["auth"] == "missing"
+    assert row["ok"] is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fake CLI is a POSIX shell script")
+def test_codex_not_installed_links_the_codex_install_guide(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_codex(tmp_path, monkeypatch, code=0)
+    from ciao.providers.acp import agents
+    from ciao.setup_status import CODEX_INSTALL_DOCS_URL
+
+    monkeypatch.setattr(agents, "codex_binary", lambda: None)
+    row = codex_status_probe({})
+
+    assert row["state"] == "not_installed"
+    assert row["install_url"] == CODEX_INSTALL_DOCS_URL
+

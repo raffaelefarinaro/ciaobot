@@ -581,6 +581,10 @@
                 ></div>
               </div>
             </div>
+            <div v-else-if="entry.kind === 'subagent'" class="trace-step trace-step--subagent">
+              <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11h14v8H5zM12 4v3M9 15h.01M15 15h.01" /></svg></span>
+              <SubagentCard :card="entry.card" @open-file="openFileCard" />
+            </div>
             <div v-else-if="entry.kind === 'filecard'" class="trace-step trace-step--file">
               <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l3 3v15H6z" /></svg></span>
               <button
@@ -1411,6 +1415,7 @@ import { useTerminalStore } from '../stores/terminal'
 import AgentContextSection from './AgentContextSection.vue'
 import { latestContextUsage } from '../lib/contextUsage'
 import ChatTurnActivity from './ChatTurnActivity.vue'
+import SubagentCard from './SubagentCard.vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { recordSentPrompt } from '../lib/chatDrafts'
@@ -4116,7 +4121,7 @@ const liveStepPreview = computed(() => {
   if (view.currentStreamingThinking) return 'Thinking…'
   if (view.currentStreamingText) return 'Writing response…'
   const last = view.currentTimeline[view.currentTimeline.length - 1]
-  if (last?.kind === 'tool' || last?.kind === 'filecard') return liveStepLabel.value || 'Working…'
+  if (last?.kind === 'tool' || last?.kind === 'filecard' || last?.kind === 'subagent') return liveStepLabel.value || 'Working…'
   if (last?.kind === 'status') return last.content
   if (last?.kind === 'text') return 'Sharing an update…'
   return 'Thinking…'
@@ -4319,6 +4324,7 @@ const renderItems = computed<RenderItem[]>(() => {
       && msg.tool_name !== '_activity'
       && msg.tool_name !== '_thinking'
       && msg.tool_name !== '_filecard'
+      && msg.tool_name !== '_subagent'
     ) {
       flushTurn()
       items.push(withKey({ kind: 'system', msg }))
@@ -7732,9 +7738,10 @@ details[open] > .activity-summary::before {
 
 .thinking-levels {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-2);
+  min-width: 0;
   padding: 2px 4px;
 }
 
@@ -7752,6 +7759,9 @@ details[open] > .activity-summary::before {
 .permission-modes__choices {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* Every tile in the grid is as tall as the tallest one, so a two-line
+     description (Plan) does not leave its neighbour (Bypass) shorter. */
+  grid-auto-rows: 1fr;
   gap: 4px;
 }
 
@@ -7794,10 +7804,16 @@ details[open] > .activity-summary::before {
   color: var(--fg2);
 }
 
-/* Segmented control, the same shape as Settings → Providers' thinking picker. */
+/* Segmented control, the same shape as Settings → Providers' thinking picker.
+   One row at the popover width: segments keep their size and the row scrolls
+   sideways rather than wrapping Max onto a second line. */
 .thinking-levels__chips {
-  display: inline-flex;
-  flex-wrap: wrap;
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  max-width: 100%;
+  min-width: 0;
+  scrollbar-width: thin;
   padding: 2px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -7817,6 +7833,11 @@ details[open] > .activity-summary::before {
   font-size: var(--text-sm);
   cursor: pointer;
   transition: background 120ms var(--ease), color 120ms var(--ease);
+}
+
+.thinking-levels__chips .thinking-chip {
+  flex: 1 0 auto;
+  justify-content: center;
 }
 
 .thinking-chip:hover {

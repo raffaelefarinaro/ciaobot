@@ -575,3 +575,65 @@ async def test_refused_start_yields_the_fixed_version_result(tmp_path: Path) -> 
     result = events[0]
     assert isinstance(result, ResultEvent)
     assert (result.is_error, result.result) == (True, OPENCODE_V2_REQUIRED)
+
+
+# -- unprefixed extension notifications through the real SDK router (opencode child updates) ----
+
+
+def _child_line(status: str) -> bytes:
+    message = {
+        "jsonrpc": "2.0",
+        "method": "opencode/session/child_update",
+        "params": {
+            "rootSessionId": "ses_root", "childSessionId": "ses_child", "parentSessionId": "ses_root",
+            "depth": 1, "title": "Explore", "type": "status", "status": status,
+        },
+    }
+    return json.dumps(message).encode("utf-8") + b"\n"
+
+
+async def _deliver(raw_line: bytes, extension_notifications: tuple[str, ...]) -> list[Any]:
+    """Write one raw JSON-RPC line to a connection built by ``connect_client``; return what the provider emitted."""
+    import socket
+
+    from ciao.providers.acp.connection import connect_client
+    from ciao.providers.acp.normalize import UpdateNormalizer
+    from ciao.providers.acp.provider import AgentClient
+
+    provider = OpencodeAcpProvider(Path("."))
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    seen: list[Any] = []
+
+    class _Session:
+        def on_ext(self, method: str, payload: Any, hook: Any) -> None:
+            seen.extend(hook(normalizer, method, payload))
+
+    client = AgentClient(ext_hook=provider.ext_update)  # type: ignore[abstract]
+    client.session = _Session()  # type: ignore[assignment]
+    ours, peer = socket.socketpair()
+    reader, writer = await asyncio.open_connection(sock=ours)
+    conn = connect_client(client, writer, reader, observers=[], extension_notifications=extension_notifications)
+    try:
+        peer.sendall(raw_line)
+        for _ in range(200):
+            if seen:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await conn.close()
+        peer.close()
+    return seen
+
+
+def test_unprefixed_child_update_reaches_the_provider_through_the_router() -> None:
+    seen = asyncio.run(_deliver(_child_line("created"), OPENCODE.extension_notifications))
+    # The raw frame named the method with no underscore: the connection's route handed it to
+    # ext_update, which opened the child's node.
+    assert [(event.type, event.tool_name, event.tool_use_id) for event in seen] == [
+        ("tool_use", "Subagent", "child:ses_child"),
+    ]
+
+
+def test_unprefixed_child_update_without_a_route_is_not_delivered() -> None:
+    # Without the spec's name on the router, the SDK answers the notification as an unknown method.
+    assert asyncio.run(_deliver(_child_line("created"), ())) == []

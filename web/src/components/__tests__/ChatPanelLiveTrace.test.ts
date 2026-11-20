@@ -121,6 +121,7 @@ async function mountPanel(): Promise<{
         CommentComposePopover: ChildStub,
         RouterLink: ChildStub,
         ChatTurnActivity: false,
+        SubagentCard: false,
       },
     },
   })
@@ -252,8 +253,9 @@ describe('ChatPanel live trace', () => {
     expect(repeatedToolKey).not.toBe(toolKey)
     expect(wrapper.get('.live-preview-text').text()).toBe('shell ls')
     expect(store.currentTimeline).toHaveLength(1)
-    expect(store.currentTimeline[0].kind).toBe('tool')
-    expect(store.currentTimeline[0].content.match(/shell ls/g)).toHaveLength(2)
+    const [entry] = store.currentTimeline
+    expect(entry.kind).toBe('tool')
+    expect(entry.kind === 'tool' ? entry.content.match(/shell ls/g) : null).toHaveLength(2)
   })
 
   it('does not change the preview key when elapsed time advances', async () => {
@@ -354,18 +356,20 @@ describe('ChatPanel live trace', () => {
     return { wrapper, store, send }
   }
 
-  it('draws a subagent tool line indented in the live trace', async () => {
+  it('draws a subagent call as a card with its child lines inside it', async () => {
     try {
       const { wrapper, send } = await mountWithSocket()
-      send({ type: 'tool_use', tool_name: 'Agent', tool_input: 'Explore the repo', tool_use_id: 'p1' })
+      send({ type: 'tool_use', tool_name: 'Agent', tool_input: '[general] Explore the repo', tool_use_id: 'p1' })
       send({ type: 'tool_use', tool_name: 'Read', tool_input: 'a.py', tool_use_id: 'c1', parent_tool_use_id: 'p1' })
       await flushPromises()
       await wrapper.get('.trace-block.live .trace-summary').trigger('click')
-      const lines = wrapper.findAll('.trace-step--tool .activity-line')
-      expect(lines).toHaveLength(2)
-      expect(lines[0].classes()).not.toContain('subagent')
-      expect(lines[1].classes()).toContain('subagent')
-      expect(lines[1].text().startsWith('↳')).toBe(true)
+      const card = wrapper.get('.trace-step--subagent .subagent-card')
+      expect(card.get('.subagent-card-title').text()).toBe('Subagent: Explore the repo')
+      expect(card.get('.subagent-card-toggle').attributes('aria-expanded')).toBe('true')
+      const lines = card.findAll('.subagent-card-body .activity-line')
+      expect(lines).toHaveLength(1)
+      expect(lines[0].text()).toMatch(/Read a\.py$/)
+      expect(wrapper.findAll('.trace-step--tool .activity-line')).toHaveLength(0)
     } finally {
       vi.unstubAllGlobals()
     }

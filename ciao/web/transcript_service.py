@@ -540,6 +540,112 @@ def _stamp_turn_metadata(entry: dict, chat: Any, user_idx: int) -> None:
         entry["origin"] = origin
 
 
+# Subagent calls (OpenCode `subagent`, Claude `Agent`/`Task`) render as one card row. Their
+# nested rows are capped per card; the rest are a count. Mirrors web/src/lib/subagentCard.ts.
+_SUBAGENT_TOOLS = frozenset({"agent", "subagent", "task"})
+SUBAGENT_STEP_LIMIT = 50
+_SUBAGENT_INPUT_RE = re.compile(r"^\[([^\]]*)\]\s*(.*)$", re.DOTALL)
+
+
+def _is_subagent_tool(tool: str) -> bool:
+    return tool.strip().lower() in _SUBAGENT_TOOLS
+
+
+def _subagent_fields(summary: str) -> tuple[str, str]:
+    """(agent_type, description) from a journalled ``[type] description`` input.
+
+    Journals written before the input carried the description kept the call's title
+    (``subagent``) as its input; that names no description.
+    """
+    text = summary.strip()
+    if not text or _is_subagent_tool(text):
+        return "", ""
+    match = _SUBAGENT_INPUT_RE.match(text)
+    if match:
+        return match.group(1).strip(), match.group(2).strip()
+    return "", text
+
+
+def _subagent_step_key(step: dict) -> str | None:
+    step_id = step.get("tool_use_id")
+    if not step_id:
+        return None
+    return f"{step_id}\n{step['file_path']}" if step.get("kind") == "file" else str(step_id)
+
+
+def _subagent_title(description: str) -> str:
+    return f"Subagent: {description}" if description else "Subagent"
+
+
+class _ActivityRun:
+    """The open run of activity lines; each line keeps the tool_use_id that wrote it."""
+
+    __slots__ = ("lines", "ids")
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+        self.ids: list[str] = []
+
+
+class _SubagentCard:
+    """One subagent call while the journal renders: its wire fields and nested steps."""
+
+    __slots__ = ("tool_use_id", "agent_type", "description", "state", "steps", "_step_at")
+
+    def __init__(self, tool_use_id: str, agent_type: str, description: str) -> None:
+        self.tool_use_id = tool_use_id
+        self.agent_type = agent_type
+        self.description = description
+        # No terminal record yet: running. A launch acknowledgement or a later result settles it.
+        self.state = "running"
+        self.steps: list[dict] = []
+        self._step_at: dict[str, int] = {}
+
+    def remember(self, agent_type: str, description: str) -> None:
+        if description:
+            self.agent_type = agent_type
+            self.description = description
+
+    def add_step(self, step: dict) -> None:
+        # A child call announced again (same call, and file) replaces its own step.
+        key = _subagent_step_key(step)
+        at = self._step_at.get(key) if key is not None else None
+        if at is None:
+            if key is not None:
+                self._step_at[key] = len(self.steps)
+            self.steps.append(step)
+        else:
+            self.steps[at] = step
+
+    def settle(self, record: dict) -> None:
+        status = record.get("subagent_status")
+        if status:
+            self.state = "done" if status == "completed" else "failed"
+        elif record.get("is_error"):
+            self.state = "failed"
+        elif record.get("background"):
+            # The launch acknowledgement: the subagent keeps running.
+            return
+        else:
+            self.state = "done"
+
+    def row(self) -> dict:
+        return {
+            "role": "system",
+            "content": _subagent_title(self.description),
+            "tool_name": "_subagent",
+            "tool_use_id": self.tool_use_id,
+            "subagent": {
+                "tool_use_id": self.tool_use_id,
+                "agent_type": self.agent_type,
+                "description": self.description,
+                "state": self.state,
+                "step_count": len(self.steps),
+                "steps": self.steps[:SUBAGENT_STEP_LIMIT],
+            },
+        }
+
+
 def _render_acp_journal(
     records: list[dict],
     chat: Any,
@@ -551,17 +657,21 @@ def _render_acp_journal(
     """Render one ACP session's journal rows into the provider-neutral PWA row shape.
 
     ``records`` is the ``acp_journal`` a provider's ``read_thread`` returns: user prompts and
-    the ``event_to_json`` payloads of each turn, in the order they happened. The rows
-    are the provider-neutral shape the PWA renders. Consecutive text deltas join into
-    one assistant row; a tool call, a thinking block or a prompt ends that
-    row. Subagent text (a payload with ``parent_tool_use_id``) stays out of the
-    parent's reply. A ``result`` row carries no text of its own (the text was already
-    streamed), so it only ends a run.
+    the ``event_to_json`` payloads of each turn, in the order they happened. Consecutive text
+    deltas join into one assistant row; a tool call, a thinking block or a prompt ends that
+    row. Subagent text and thinking (a payload with ``parent_tool_use_id``) stay out of the
+    parent's reply. A subagent call is one ``_subagent`` row: its children's activity and file
+    cards nest under it. A call written more than once (a re-announce) is one row or line, not
+    two. A ``result`` row carries no text of its own (the text was already streamed), so it only
+    ends a run.
     """
-    result: list[dict] = []
+    result: list[Any] = []
     user_idx = int(start_user_idx)
     text_run: list[str] = []
-    pending_tools: list[str] = []
+    run: _ActivityRun | None = None
+    line_at: dict[str, tuple[_ActivityRun, int]] = {}
+    cards: dict[str, _SubagentCard] = {}
+    filed: set[str] = set()
 
     def flush_text() -> None:
         if text_run:
@@ -571,16 +681,49 @@ def _render_acp_journal(
                 result.append({"role": "assistant", "content": text})
 
     def flush_tools() -> None:
-        if pending_tools:
-            result.append({
-                "role": "system",
-                "content": "\n".join(pending_tools),
-                "tool_name": "_activity",
-            })
-            pending_tools.clear()
+        nonlocal run
+        if run is not None and run.lines:
+            result.append(run)
+        run = None
+
+    def add_line(call_id: str, line: str) -> None:
+        nonlocal run
+        if call_id and call_id in line_at:
+            held, at = line_at[call_id]
+            held.lines[at] = line
+            return
+        if run is None:
+            run = _ActivityRun()
+        run.lines.append(line)
+        run.ids.append(call_id)
+        if call_id:
+            line_at[call_id] = (run, len(run.lines) - 1)
+
+    def file_steps(record: dict, tool: str, call_id: str) -> list[dict] | None:
+        raw_touches = record.get("file_touches") or (
+            [record["file_touch"]] if record.get("file_touch") else []
+        )
+        touches = normalize_file_touch_paths(
+            [t for t in raw_touches if isinstance(t, dict) and t.get("file_path")],
+            workspace_root,
+            agent_root=agent_root,
+        )
+        if not touches:
+            return None
+        return [
+            {
+                "kind": "file",
+                "file_path": touch["file_path"],
+                "action": touch.get("action") or "touched",
+                "tool": tool,
+                "tool_use_id": call_id,
+            }
+            for touch in touches
+        ]
 
     for record in records:
         kind = record.get("type")
+        parent = record.get("parent_tool_use_id")
         if kind == "user":
             flush_text()
             flush_tools()
@@ -591,19 +734,20 @@ def _render_acp_journal(
             # reload`): skipped before user_idx advances, and it marks the answer
             # before it as final, as the other renderers do.
             if cli_envelopes.is_hidden_continuation(content):
-                _mark_preceding_answer(result)
+                # Activity runs and subagent cards are not dict rows yet: the scan skips them.
+                _mark_preceding_answer([item if isinstance(item, dict) else {"role": "system"} for item in result])
                 continue
             entry: dict = {"role": "user", "content": content, "turn_index": user_idx}
             _stamp_turn_metadata(entry, chat, user_idx)
             result.append(entry)
             user_idx += 1
         elif kind == "text_delta":
-            if record.get("parent_tool_use_id"):
+            if parent:
                 continue
             flush_tools()
             text_run.append(str(record.get("text") or ""))
         elif kind == "thinking":
-            if record.get("parent_tool_use_id"):
+            if parent:
                 continue
             flush_text()
             flush_tools()
@@ -612,38 +756,73 @@ def _render_acp_journal(
                 result.append({"role": "system", "content": text, "tool_name": "_thinking"})
         elif kind == "tool_use":
             tool = str(record.get("tool_name") or "tool")
-            raw_touches = record.get("file_touches") or (
-                [record["file_touch"]] if record.get("file_touch") else []
-            )
-            touches = normalize_file_touch_paths(
-                [t for t in raw_touches if isinstance(t, dict) and t.get("file_path")],
-                workspace_root,
-                agent_root=agent_root,
-            )
-            if touches:
+            call_id = str(record.get("tool_use_id") or "")
+            summary = str(record.get("tool_input") or "")
+            if parent and parent in cards:
+                # A child of a subagent call nests under its card, never in the parent's trace.
+                steps = file_steps(record, tool, call_id)
+                if steps is None:
+                    steps = [{
+                        "kind": "activity",
+                        "line": f"{_tool_icon(tool)} {tool}" + (f" {summary}" if summary else ""),
+                        "tool_use_id": call_id,
+                    }]
+                for step in steps:
+                    cards[parent].add_step(step)
+                continue
+            if _is_subagent_tool(tool) and not parent:
+                agent_type, description = _subagent_fields(summary)
+                card = cards.get(call_id)
+                if card is not None:
+                    card.remember(agent_type, description)
+                    continue
                 flush_text()
                 flush_tools()
-                for touch in touches:
+                card = _SubagentCard(call_id, agent_type, description)
+                cards[call_id] = card
+                result.append(card)
+                continue
+            if call_id and call_id in filed:
+                continue
+            steps = file_steps(record, tool, call_id)
+            if steps is not None:
+                flush_text()
+                flush_tools()
+                filed.add(call_id)
+                for step in steps:
                     result.append({
                         "role": "system",
                         "tool_name": "_filecard",
-                        "content": touch["file_path"],
-                        "file_path": touch["file_path"],
-                        "action": touch.get("action") or "touched",
+                        "content": step["file_path"],
+                        "file_path": step["file_path"],
+                        "action": step["action"],
                         "tool": tool,
                     })
                 continue
             flush_text()
             line = f"{_tool_icon(tool)} {tool}"
-            summary = str(record.get("tool_input") or "")
             if summary:
                 line += f" {summary}"
-            pending_tools.append(line)
-        # Any other kind (tool_result, result, status, permission_request, ...) adds no
-        # row: a call is one activity line, and the terminal result's text was streamed.
+            # A child whose parent card is not in this journal keeps the subagent marker.
+            add_line(call_id, f"↳ {line}" if parent else line)
+        elif kind == "tool_result":
+            call_id = str(record.get("tool_use_id") or "")
+            card = cards.get(call_id)
+            if card is not None and not parent:
+                card.settle(record)
+        # Any other kind (result, status, permission_request, ...) adds no row: a call
+        # is one activity line, and the terminal result's text was streamed.
     flush_text()
     flush_tools()
-    return result
+    rows: list[dict] = []
+    for item in result:
+        if isinstance(item, _ActivityRun):
+            rows.append({"role": "system", "content": "\n".join(item.lines), "tool_name": "_activity"})
+        elif isinstance(item, _SubagentCard):
+            rows.append(item.row())
+        else:
+            rows.append(item)
+    return rows
 
 
 def _session_lineage(chat: Any) -> list[str]:

@@ -1,4 +1,5 @@
 import type { AppearancePayload } from './appearance'
+import type { SubagentCard } from './subagentCard'
 
 export type WorkspaceName = string
 
@@ -372,6 +373,9 @@ export interface ChatMessage {
   tool_name?: string
   is_error?: boolean
   effective_model?: string
+  // Populated when tool_name === '_subagent': one subagent call's card, rendered in the
+  // trace with its nested children. `steps` is bounded; `step_count` is the full count.
+  subagent?: SubagentCard
   usage?: Record<string, string>
   quota?: Record<string, unknown>
   images?: string[]
@@ -456,6 +460,10 @@ export type WsEvent =
       detail?: string;
       parent_tool_use_id?: string;
       session_id?: string;
+      // A subagent's launch acknowledgement: the subagent keeps running.
+      background?: boolean;
+      // A subagent's terminal child status (completed, failed, interrupted).
+      subagent_status?: string;
     }
   | { type: 'thinking'; text: string; parent_tool_use_id?: string }
   | { type: 'status'; message: string }
@@ -890,6 +898,8 @@ export type HostTerminalAction =
   | 'claude-login'
   | 'opencode-install'
   | 'opencode-login'
+  | 'codex-install'
+  | 'codex-login'
   | 'gws-install'
   | 'skills-update'
   | 'opencode-update'
@@ -920,6 +930,13 @@ export interface ProviderReleaseCheck {
   terminal_action?: HostTerminalAction
 }
 
+/**
+ * A provider row's state, from `ciao/setup_status.py`: `not_installed` is a CLI
+ * the user never installed (neutral, not an error); `adapter_missing` is a CLI
+ * present without its ACP adapter; `ready` and `failed` are the rest.
+ */
+export type ProviderState = 'not_installed' | 'adapter_missing' | 'ready' | 'failed'
+
 export interface ProviderConnection {
   name: string
   // Display names from the backend registry, so the Settings card never has to
@@ -928,6 +945,8 @@ export interface ProviderConnection {
   short_label?: string
   ok: boolean
   auth: string
+  /** Explicit install and readiness state; the Settings card and the status rail read this. */
+  state: ProviderState
   command: string
   detail?: string
   version?: string
@@ -1022,7 +1041,7 @@ export interface DeployResult {
 
 export interface DebugIssueReport {
   error_log: string
-  error_log_lines: number
+  error_log_records: number
   error_log_path: string
   failed_jobs: { job: string; label: string; ended_at: string; error: string }[]
   has_issues: boolean
@@ -1170,6 +1189,8 @@ export interface PackageUpdateResult {
 export interface SetupProviderStatus {
   ok: boolean
   auth?: string
+  /** Explicit install and readiness state the engine computed; read this, never the detail text. */
+  state: ProviderState
   command?: string
   detail?: string
   /** Documentation page for installing the provider CLI (`auth: 'not_installed'`). */

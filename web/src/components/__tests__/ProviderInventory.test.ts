@@ -24,7 +24,10 @@ describe('provider inventory preparation', () => {
     expect(view.text()).toContain('<img src=x>')
     expect(view.text()).not.toContain('hidden')
     expect(view.text()).toContain('Some providers may be missing')
-    expect(view.text()).toContain('Configured · verification unknown')
+    expect(view.text()).toContain('OAuth, API key · Configured')
+    expect(view.text()).not.toContain('verification unknown')
+    expect(view.text()).toContain('OpenCode reports which providers are configured. It does not check that their credentials work.')
+    expect(view.text()).not.toContain('have not been verified')
     expect(view.findAll('summary').map(x => x.text())).toContain('Reconnect <img src=x> (one)')
     expect(view.findAll('button').map(button => button.attributes('aria-label'))).toEqual([
       'Copy sign-in command for <img src=x> (one)',
@@ -124,7 +127,8 @@ describe('provider inventory preparation', () => {
     const view = mount(ProviderInventory, { props: { command: 'opencode auth login', workspace: 'workspace', inventory: {
       status: 'complete', providers: [{ id: 'x; secret', name: 'Provider $(danger)', auth_types: ['unknown'], configured: true, verified: null }],
     } } })
-    expect(view.text()).toContain('Unknown · Configured · verification unknown')
+    expect(view.text()).toContain('Unknown · Configured')
+    expect(view.text()).not.toContain('verification unknown')
     expect(view.findAll('code').every(code => code.text() === 'opencode auth login')).toBe(true)
     for (const button of view.findAll('button').filter(button => button.text() === 'Copy')) await button.trigger('click')
     expect(state.copy).toHaveBeenCalledTimes(2)

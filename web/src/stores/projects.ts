@@ -5,6 +5,16 @@ import { postFormWithProgress, type UploadProgressHandler } from '../lib/chatAtt
 import { buildFixPrompt } from '../lib/fixError'
 import { isPlausibleFilePath } from '../lib/filePaths'
 import { activityLines, permissionActivityLine } from '../lib/chatActivity'
+import {
+  SUBAGENT_STEP_LIMIT,
+  addSubagentStep,
+  isSubagentCallName,
+  newSubagentCard,
+  rememberSubagentCall,
+  settleSubagentCard,
+  subagentTitle,
+  type SubagentCard,
+} from '../lib/subagentCard'
 import { useTaskSignalsStore } from './taskSignals'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
 import { parseCompactedStatus, type CompactTokens } from '../lib/contextUsage'
@@ -381,6 +391,8 @@ export const useProjectStore = defineStore('projects', () => {
     | { kind: 'text'; content: string; phase?: ChatMessage['phase'] }
     | { kind: 'filecard'; content: string; file_path: string; action: string; tool: string; tool_use_id?: string }
     | { kind: 'status'; content: string }
+    // One subagent call; its children are in `card.steps`, not in the trace lines.
+    | { kind: 'subagent'; card: SubagentCard }
   const streamingTimeline = ref<Record<string, StreamEntry[]>>({})  // per-chat interleaved tool/text entries
   // per-chat ids of refused calls this turn; the live label reads them (#1618)
   const deniedToolUseIds = ref<Record<string, string[]>>({})
@@ -6064,6 +6076,14 @@ export const useProjectStore = defineStore('projects', () => {
     streamingThinking.value[chatId] = ''
   }
 
+  // The open card of a subagent call in this turn's timeline, if there is one.
+  function _findSubagentCard(chatId: string, toolUseId: string): SubagentCard | undefined {
+    for (const entry of streamingTimeline.value[chatId] || []) {
+      if (entry.kind === 'subagent' && entry.card.tool_use_id === toolUseId) return entry.card
+    }
+    return undefined
+  }
+
   function _pushToolLine(chatId: string, line: string, toolUseId?: string) {
     if (!streamingTimeline.value[chatId]) streamingTimeline.value[chatId] = []
     const arr = streamingTimeline.value[chatId]
@@ -6395,6 +6415,9 @@ export const useProjectStore = defineStore('projects', () => {
       }
 
       case 'text_delta':
+        // A subagent's words stay out of the parent's reply, as the history
+        // renderer keeps them out: a reload must not show what the live view did not.
+        if (event.parent_tool_use_id) break
         // Visible text starts: any pending thinking block has ended, lock it
         // into the timeline so the Reasoning bubble renders it after the turn.
         _commitStreamingThinkingToTimeline(chatId)
@@ -6488,6 +6511,51 @@ export const useProjectStore = defineStore('projects', () => {
         _commitStreamingThinkingToTimeline(chatId)
         _commitStreamingTextToTimeline(chatId)
 
+        // A subagent call is one card keyed by its tool_use_id. The events it
+        // launches (parent_tool_use_id set) nest under that card, not the trace.
+        if (event.tool_use_id && !event.parent_tool_use_id && isSubagentCallName(event.tool_name)) {
+          const known = _findSubagentCard(chatId, event.tool_use_id)
+          if (known) {
+            rememberSubagentCall(known, event.tool_input || '')
+          } else {
+            if (!streamingTimeline.value[chatId]) streamingTimeline.value[chatId] = []
+            streamingTimeline.value[chatId].push({
+              kind: 'subagent',
+              card: newSubagentCard(event.tool_use_id, event.tool_input || ''),
+            })
+          }
+          break
+        }
+        const parentCard = event.parent_tool_use_id
+          ? _findSubagentCard(chatId, event.parent_tool_use_id)
+          : undefined
+        if (parentCard) {
+          const touches = event.file_touches?.length
+            ? event.file_touches
+            : (event.file_touch?.file_path ? [event.file_touch] : [])
+          const files = touches.filter(touch => touch?.file_path)
+          if (files.length) {
+            for (const touch of files) {
+              addSubagentStep(parentCard, {
+                kind: 'file',
+                file_path: touch.file_path,
+                action: touch.action || 'touched',
+                tool: event.tool_name,
+                tool_use_id: event.tool_use_id,
+              })
+            }
+          } else {
+            addSubagentStep(parentCard, {
+              kind: 'activity',
+              line: event.tool_input
+                ? `${toolIcon(event.tool_name)} ${event.tool_name} ${event.tool_input}`
+                : `${toolIcon(event.tool_name)} ${event.tool_name}`,
+              tool_use_id: event.tool_use_id,
+            })
+          }
+          break
+        }
+
         // File-mutating tool calls (Write/Edit/MultiEdit/NotebookEdit/Bash
         // creates) get their own inline preview card. Backend tags these with
         // `file_touch` / `file_touches` in chat_broker.event_to_json. Subagent
@@ -6521,6 +6589,16 @@ export const useProjectStore = defineStore('projects', () => {
       }
 
       case 'tool_result': {
+        // A subagent call's result settles its card: a launch acknowledgement
+        // (background) leaves it running, a terminal child status or a plain
+        // completion closes it. Child results (parent_tool_use_id) are steps.
+        if (event.tool_use_id && !event.parent_tool_use_id) {
+          const subagent = _findSubagentCard(chatId, event.tool_use_id)
+          if (subagent) {
+            settleSubagentCard(subagent, event)
+            break
+          }
+        }
         // A call's completion arrives as its own frame. Mark the line the call
         // already painted; never push a second one (#1416). A success needs no
         // mark, so only `is_error` does anything. Claude sends no such frame.
@@ -6760,6 +6838,15 @@ export const useProjectStore = defineStore('projects', () => {
               content: entry.content,
               timestamp: now,
               tool_name: '_thinking',
+            })
+          } else if (entry.kind === 'subagent') {
+            // The card keeps its bounded steps; step_count stays the full count.
+            msgs.push({
+              role: 'system',
+              content: subagentTitle(entry.card),
+              timestamp: now,
+              tool_name: '_subagent',
+              subagent: { ...entry.card, steps: entry.card.steps.slice(0, SUBAGENT_STEP_LIMIT) },
             })
           } else if (entry.kind === 'status') {
             // Transient trace-only line (e.g. compaction ticks) — never
