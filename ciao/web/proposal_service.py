@@ -1638,6 +1638,14 @@ async def _promote_region_row(
                 "what is true from now on, then accept."
             ),
         )
+    if outcome == "refused":
+        # Not reachable from this path today (it passes no authority check), but
+        # a refusal must never fall through to the generic failure text.
+        return AcceptOutcome(
+            ok=False,
+            region=region,
+            error="the write was not authorised, so nothing was written",
+        )
     if outcome == "conflict":
         # The region changed under a concurrent writer between planning and
         # write. Nothing was written; the row survives and a retry re-reads.
@@ -3286,11 +3294,11 @@ def destination_revision(
 
     try:
         if accept.action == "edit_region":
+            from ciao.memory_receipts import destination_revision as region_revision
             from ciao.memory_tool import (
                 ensure_regions,
                 read_region,
                 resolve_region as _resolve,
-                serialize_entries,
             )
 
             region = _resolve(row.get("region") or row["kind"])
@@ -3299,7 +3307,7 @@ def destination_revision(
             entries, diags = read_region(guide, region)
             if diags:
                 return ""
-            return content_revision(serialize_entries(entries))
+            return region_revision(entries)
         if accept.action == "append_learnings":
             from ciao.memory_proposals import read_learnings
 

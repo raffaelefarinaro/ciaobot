@@ -2219,6 +2219,33 @@ def _holds_live_lease_now(vault_root: Path, *, holder: str, clock: Callable[[], 
     return held is not None and held.get("holder") == holder
 
 
+@contextmanager
+def authorize_holder(
+    vault_root: Path,
+    *,
+    holder: str,
+    clock: Callable[[], datetime] | None = None,
+) -> Iterator[bool]:
+    """Hold the state lock and answer whether ``holder`` holds the live lease.
+
+    The answer is read with a fresh clock on entry. The state lock stays held
+    until the context exits, so no other run can take, renew or replace the
+    lease while the caller performs its guarded work (see
+    :func:`ciao.memory_receipts.commit_region_change`, which holds it through
+    the whole region write). Expiry by the clock is not re-checked inside the
+    held section; the section is kept short for that reason.
+
+    Precondition: the caller must not already hold the state lock. ``_state_lock``
+    is not re-entrant, so entering this inside another state-locked call deadlocks.
+    The lock order is guide, then queue, then state: enter this only under a
+    guide lock, never the other way round.
+    """
+    vault = Path(vault_root)
+    recheck = _recheck_clock(None, clock)
+    with _state_lock(vault):
+        yield bool(holder) and _holds_live_lease_now(vault, holder=holder, clock=recheck)
+
+
 def _other_curation_files(vault: Path, relative: str) -> list[Path]:
     """The state file and the other decision log: nothing a log may alias."""
     others = [state_path(vault)]
