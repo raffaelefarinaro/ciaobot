@@ -62,12 +62,13 @@ from ciao import (
     decision_rules,
     memory_proposals,
     skills_inventory,
+    linked_chats,
     task_context,
     transcripts,
     upstream_drafts,
 )
 from ciao.prompt_fence import fence
-from ciao.task_attempts import TaskAttemptStore
+from ciao.task_attempts import TaskAttemptError, TaskAttemptStore
 from ciao.web import chat_service
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -1170,6 +1171,7 @@ class MemoryPassCoordinator:
             + self._repo_section(helper)
             + self._observation_section(helper)
             + self._task_context_section(chat, helper)
+            + self._linked_chats_section(chat, helper)
             + self._skill_review_section(chat, helper)
             + self._recent_decisions_section(chat)
             + self._rules_section(chat)
@@ -1223,14 +1225,80 @@ class MemoryPassCoordinator:
         workspace = self._workspace_of(chat)
         if not source_chat_id or not workspace:
             return ""
+        vault = Path(self._host._config.workspace_vault_root(workspace))
+        store = self._attempt_store(workspace)
+        return task_context.section_for_chat(store, vault, source_chat_id)
+
+    def _attempt_store(self, workspace: str) -> TaskAttemptStore:
+        """The workspace's attempt store, opened for reading by the prompt builder."""
         config = self._host._config
-        store = TaskAttemptStore(
+        return TaskAttemptStore(
             workspace=workspace,
             runtime_dir=Path(config.state_path).parent,
             clock=lambda: datetime.now(UTC),
         )
-        vault = Path(config.workspace_vault_root(workspace))
-        return task_context.section_for_chat(store, vault, source_chat_id)
+
+    def _linked_chats_section(self, chat: ChatInfo, helper: dict) -> str:
+        """Excerpts of the fork parent and the same task's other attempt chats, or nothing (#3239-b).
+
+        Only links in the source chat's workspace are read. A chat with no link
+        reads no archive at all.
+        """
+        source_id = str(helper.get("source_chat_id") or "")
+        source = self._host._chats.get(source_id)
+        if source is None:
+            return ""
+        candidates = self._link_candidates(source)
+        if not candidates:
+            return ""
+        return linked_chats.section_for_chat(
+            source_id,
+            candidates,
+            workspace_of=self._chat_workspace,
+            archive_of=self._chat_archive,
+        )
+
+    def _link_candidates(self, source: ChatInfo) -> list[linked_chats.LinkCandidate]:
+        """The fork parent, and the other chats of every task the source chat's attempts ran."""
+        candidates: list[linked_chats.LinkCandidate] = []
+        parent = self._host._chats.get(source.forked_from_chat_id)
+        if parent is not None:
+            candidates.append(linked_chats.LinkCandidate(parent.chat_id, parent.created_at))
+        workspace = self._workspace_of(source)
+        if not workspace:
+            return candidates
+        store = self._attempt_store(workspace)
+        try:
+            own = store.attempts_for_chat(source.chat_id)
+            for task_id in sorted({attempt.task_id for attempt in own}):
+                for attempt in store.list_for_task(task_id):
+                    if attempt.chat_id and attempt.chat_id != source.chat_id:
+                        candidates.append(
+                            linked_chats.LinkCandidate(attempt.chat_id, attempt.created_at)
+                        )
+        except TaskAttemptError:
+            # An unreadable attempt store is reported by the task-context section;
+            # the parent link above still stands.
+            pass
+        return candidates
+
+    def _chat_workspace(self, chat_id: str) -> str:
+        """The workspace a chat's project belongs to, or ``""`` when the registry does not know it."""
+        chat = self._host._chats.get(chat_id)
+        return self._workspace_of(chat) if chat is not None else ""
+
+    def _chat_archive(self, chat_id: str) -> Path | None:
+        """A chat's archive file when it lies under its own workspace's chats root, else None."""
+        chat = self._host._chats.get(chat_id)
+        if chat is None or not chat.archive_path:
+            return None
+        found = self._host._locate_archive(chat_id, chat.archive_path)
+        if found is None:
+            return None
+        root = Path(self._host._config.chats_root(self._chat_workspace(chat_id))).resolve()
+        if not found.resolve().is_relative_to(root):
+            return None
+        return found
 
     @staticmethod
     def _focus_section(helper: dict) -> str:

@@ -129,20 +129,28 @@ def _display_reason(text: str) -> str:
     """One line of plain text, at most ``MAX_REASON_CHARS``; empty when it could close the fence.
 
     The closing token is checked on the whole reason, before any cut, so a token
-    past the cut point still drops the reason. Terminal escape sequences are
-    removed, and every other control, format (bidi overrides, tag characters) or
-    line-separator character becomes a space, so the model sees the words and not
-    the hidden text around them.
+    past the cut point still drops the reason.
     """
     if _FENCE_CLOSE_PREFIX in text.lower():
         return ""
+    return flatten_text(text, MAX_REASON_CHARS)
+
+
+def flatten_text(text: str, limit: int) -> str:
+    """One line of plain text of at most *limit* characters, shown as the words only.
+
+    Terminal escape sequences are removed, and every other control, format (bidi
+    overrides, tag characters) or line-separator character becomes a space, so
+    the model sees the words and not the hidden text around them. A cut ends in
+    an ellipsis and counts toward *limit*. Shared by every fenced prompt section.
+    """
     text = _ESCAPE_SEQUENCE.sub("", text)
     text = "".join(
         " " if unicodedata.category(char) in _HIDDEN_CATEGORIES else char for char in text
     )
     flat = _WHITESPACE.sub(" ", text).strip()
-    if len(flat) > MAX_REASON_CHARS:
-        flat = flat[: MAX_REASON_CHARS - 1] + "…"
+    if len(flat) > limit:
+        flat = flat[: limit - 1] + "…"
     return flat
 
 
