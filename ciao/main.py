@@ -726,6 +726,13 @@ async def _run_server_locked(
         engine_pid=engine_pid,
     )
 
+    async def install_adapter(phase: str, adapter: str) -> str:
+        """Install a pinned ACP adapter once, when its CLI is there. "" when it is ready."""
+        from ciao import adapter_install
+
+        tracker.phase(phase).message = "installing the adapter…"
+        return await asyncio.to_thread(adapter_install.install_at_startup, adapter)
+
     # Start provider checks in the background
     tracker.start("connect_claude_code")
 
@@ -733,6 +740,7 @@ async def _run_server_locked(
         try:
             # Resolve ``claude`` against the login-shell PATH, since launchd
             # omits ~/.local/bin and other tool dirs.
+            from ciao import adapter_install
             from ciao.tool_path import resolve_tool
             cli = resolve_tool("claude")
             if not cli:
@@ -741,12 +749,17 @@ async def _run_server_locked(
                     "claude CLI not found on PATH",
                 )
                 return
+            adapter_error = await install_adapter(
+                "connect_claude_code", adapter_install.CLAUDE_ADAPTER
+            )
             proc = await asyncio.create_subprocess_exec(
                 cli, "--version",
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=3.0)
-            if proc.returncode == 0:
+            if proc.returncode == 0 and adapter_error:
+                tracker.fail("connect_claude_code", adapter_error)
+            elif proc.returncode == 0:
                 version = stdout.decode().strip()
                 tracker.done("connect_claude_code", f"connected: {version}")
             else:
@@ -768,6 +781,14 @@ async def _run_server_locked(
 
         async def check() -> None:
             try:
+                from ciao import adapter_install
+
+                adapter = adapter_install.PROVIDER_ADAPTERS.get(descriptor.id)
+                if adapter:
+                    adapter_error = await install_adapter(phase, adapter)
+                    if adapter_error:
+                        tracker.fail(phase, adapter_error)
+                        return
                 status = await asyncio.to_thread(
                     descriptor.status_probe, os.environ
                 )

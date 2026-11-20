@@ -480,20 +480,21 @@ def codex_status_probe(
     exits 0. Only the exit code is read: the command's output is never stored, returned or logged,
     so a token it might print cannot reach the PWA.
     """
-    from ciao.host_terminal import CODEX_INSTALL_COMMAND
+    from ciao import adapter_install
+    from ciao.host_terminal import codex_install_command
     from ciao.provider_versions import parse_cli_version
-    from ciao.providers.acp.agents import codex_acp_binary, codex_binary
+    from ciao.providers.acp.agents import codex_binary
 
     codex = codex_binary()
-    adapter = codex_acp_binary()
+    state = adapter_install.detect(adapter_install.CODEX_ADAPTER)
     probe_env = _codex_probe_env(env)
-    if codex is None or adapter is None:
+    if codex is None or state != "ready":
         return _provider(
             name="codex",
             ok=False,
             auth="not_installed",
-            command=CODEX_INSTALL_COMMAND,
-            detail="Codex and its ACP adapter are not both installed on this machine.",
+            command=codex_install_command(),
+            detail=adapter_install.describe(adapter_install.CODEX_ADAPTER, state),
             version="not installed",
             terminal_action="codex-install",
         )
@@ -562,26 +563,6 @@ CLAUDE_INSTALL_DOCS_URL = (
 def claude_install_command() -> str:
     """The documented one-line installer."""
     return "curl -fsSL https://claude.ai/install.sh | bash"
-
-
-# The ACP adapter Ciaobot runs for Claude chats, hard-pinned: bumped deliberately.
-CLAUDE_ADAPTER_PACKAGE = "@agentclientprotocol/claude-agent-acp@0.108.1"
-
-
-def claude_adapter_install_command() -> str:
-    """npm line that installs the pinned ACP adapter (needs Node 22 or newer)."""
-    return f"npm install -g {CLAUDE_ADAPTER_PACKAGE}"
-
-
-def claude_adapter_path() -> str:
-    """Absolute path to ``claude-agent-acp`` on the terminal PATH, or "" when not installed."""
-    from ciao.tool_path import resolve_tool
-
-    try:
-        resolved = resolve_tool("claude-agent-acp")
-    except Exception:
-        resolved = None
-    return resolved or ""
 
 
 def claude_path_command(directory: str = "") -> str:
@@ -718,21 +699,21 @@ def _claude_status(
 ) -> dict[str, Any]:
     from ciao.provider_versions import release_check
 
+    from ciao import adapter_install
+
     binary = claude_cli_path()
     version = _cli_version(binary) if binary else "not installed"
     check = release_check("claude", version, binary=binary) if binary else None
     claude_skills = discover_claude_system_skills()
-    if binary and not claude_adapter_path():
+    adapter_state = adapter_install.detect(adapter_install.CLAUDE_ADAPTER) if binary else "cli_missing"
+    if binary and adapter_state != "ready":
         # Claude chats run through the adapter, so a CLI without it cannot run a turn.
         return _provider(
             name="claude",
             ok=False,
             auth="not_installed",
-            command=claude_adapter_install_command(),
-            detail=(
-                "Claude Code is installed, but the ACP adapter (claude-agent-acp) is not. "
-                "Use Install in Settings → Providers."
-            ),
+            command=adapter_install.install_command(adapter_install.CLAUDE_ADAPTER),
+            detail=adapter_install.describe(adapter_install.CLAUDE_ADAPTER, adapter_state),
             version=version,
             skills=claude_skills,
             cli_path=binary,

@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from ciao import host_terminal, setup_status
+from ciao import adapter_install, host_terminal, setup_status
 from ciao import opencode_cli as opencode
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -53,7 +53,7 @@ def test_claude_install_runs_the_cli_installer_then_the_adapter_when_no_cli_reso
 ) -> None:
     monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "")
     assert host_terminal.action_command("claude-install") == (
-        f"{setup_status.claude_install_command()} && {setup_status.claude_adapter_install_command()}"
+        f"{setup_status.claude_install_command()} && {adapter_install.install_command(adapter_install.CLAUDE_ADAPTER)}"
     )
 
 
@@ -62,7 +62,7 @@ def test_claude_install_runs_only_the_adapter_when_the_cli_resolves(
 ) -> None:
     monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "/Users/me/.local/bin/claude")
     command = host_terminal.action_command("claude-install")
-    assert command == setup_status.claude_adapter_install_command()
+    assert command == adapter_install.install_command(adapter_install.CLAUDE_ADAPTER)
     assert setup_status.claude_install_command() not in command
 
 
@@ -70,7 +70,7 @@ def test_actions_map_to_the_commands_ciaobot_already_shows(monkeypatch: pytest.M
     monkeypatch.setattr(host_terminal, "host_platform", lambda: host_terminal.PLATFORM_MACOS)
     monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "")
     assert host_terminal.action_command("claude-install") == (
-        f"{setup_status.claude_install_command()} && {setup_status.claude_adapter_install_command()}"
+        f"{setup_status.claude_install_command()} && {adapter_install.install_command(adapter_install.CLAUDE_ADAPTER)}"
     )
     assert host_terminal.action_command("claude-login") == setup_status.claude_auth_command(
         setup_status.claude_cli_path()
@@ -429,8 +429,17 @@ def test_codex_actions_are_allowlisted_constants(monkeypatch: pytest.MonkeyPatch
 
     assert "codex-install" in host_terminal.ACTION_IDS
     assert "codex-login" in host_terminal.ACTION_IDS
-    assert host_terminal.action_command("codex-install") == host_terminal.CODEX_INSTALL_COMMAND
-    assert "@agentclientprotocol/codex-acp@2.7.0" in host_terminal.CODEX_INSTALL_COMMAND
+    # No codex resolves here (conftest), so the line installs the CLI and then the pinned adapter.
+    command = host_terminal.action_command("codex-install")
+    assert command == host_terminal.codex_install_command()
+    assert command.startswith(f"{adapter_install.CODEX_CLI_INSTALL} && npm install ")
+    assert "@agentclientprotocol/codex-acp@2.7.0" in command
+    assert "--omit=optional" in command and "--ignore-scripts" in command
+    assert " -g " not in command.replace(adapter_install.CODEX_CLI_INSTALL, "")
+    monkeypatch.setattr(agents, "codex_binary", lambda: "/opt/tools/codex")
+    assert host_terminal.codex_install_command() == adapter_install.install_command(
+        adapter_install.CODEX_ADAPTER
+    )
     monkeypatch.setattr(agents, "codex_binary", lambda: "/opt/tools/codex")
     assert host_terminal.action_command("codex-login") == "/opt/tools/codex login"
 

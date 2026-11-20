@@ -949,11 +949,11 @@ def _probe_opencode() -> ProviderProbe:
 def _probe_claude() -> ProviderProbe:
     """Probe the user's ``claude`` CLI, which claude-agent-acp drives. Never raises.
 
-    The record tests the CLI version, as before. The adapter is hard-pinned in
-    ``setup_status.CLAUDE_ADAPTER_PACKAGE``; a missing or differently-versioned
-    adapter is a note, and a note blocks recording, as a missing SDK did.
+    The record tests the CLI version, as before. The adapter is pinned in
+    ``adapter_install.ADAPTERS``; a missing or differently-versioned adapter is a note, and a
+    note blocks recording, as a missing SDK did.
     """
-    from ciao import setup_status
+    from ciao import adapter_install, setup_status
     from ciao.dependency_updates import get_latest_npm_version
 
     notes: list[str] = []
@@ -976,14 +976,16 @@ def _probe_claude() -> ProviderProbe:
     if installed is None:
         return ProviderProbe("claude", None, None, None, "claude --version printed no version")
     source = f"claude {installed}"
-    adapter_package, _, adapter_pin = setup_status.CLAUDE_ADAPTER_PACKAGE.rpartition("@")
-    adapter = setup_status.claude_adapter_path()
-    if not adapter:
-        notes.append(f"{adapter_package} is not installed; the pin is {adapter_pin}")
+    adapter_name = adapter_install.CLAUDE_ADAPTER
+    adapter_package = adapter_install.ADAPTERS[adapter_name].package
+    adapter_pin = adapter_install.ADAPTERS[adapter_name].version
+    state = adapter_install.detect(adapter_name)
+    if state != "ready":
+        notes.append(f"{adapter_package} is {state}; the pin is {adapter_pin}")
     else:
         try:
             run = subprocess.run(
-                [adapter, "--version"],
+                [*adapter_install.launch_argv(adapter_name), "--version"],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -992,7 +994,7 @@ def _probe_claude() -> ProviderProbe:
                 check=False,
             )
             reported = parse_cli_version(run.stdout or run.stderr) if run.returncode == 0 else None
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError, adapter_install.AdapterNotReady):
             reported = None
         if reported != adapter_pin:
             notes.append(f"claude-agent-acp reports {reported or 'no version'}, pinned {adapter_pin}")

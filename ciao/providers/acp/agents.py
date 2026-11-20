@@ -166,7 +166,7 @@ def claude_auth_command(*, device_auth: bool = False) -> list[str]:
 CODEX = AgentSpec(
     id="codex",
     binary="codex-acp",
-    env={},  # codex-acp uses the codex it bundles; CODEX_PATH stays unset.
+    env={},  # CODEX_PATH is the user's own codex, added by CodexAcpProvider.spawn_env.
     client_meta={},  # No subagents opt-in: a Codex subagent is a plain tool call (plan Q6).
     modes={
         "plan": (
@@ -193,6 +193,15 @@ CODEX = AgentSpec(
 
 class CodexAcpProvider(AcpProvider):
     spec = CODEX
+
+    @classmethod
+    def spawn_env(cls) -> dict[str, str]:
+        """The user's own ``codex`` as ``CODEX_PATH``, when one resolves.
+
+        Without it codex-acp would run the codex it bundles, which Ciaobot does not install.
+        """
+        path = codex_binary()
+        return {"CODEX_PATH": path} if path else {}
 
 
 OPENCODE = AgentSpec(
@@ -421,11 +430,6 @@ class OpencodeAcpProvider(AcpProvider):
 def codex_binary() -> str | None:
     """The ``codex`` CLI on the terminal PATH, or ``None``. The one lookup Codex code uses."""
     return resolve_tool("codex")
-
-
-def codex_acp_binary() -> str | None:
-    """The ``codex-acp`` adapter on the terminal PATH, or ``None``."""
-    return resolve_tool("codex-acp")
 
 
 def codex_auth_command(*, device_auth: bool = False) -> list[str]:

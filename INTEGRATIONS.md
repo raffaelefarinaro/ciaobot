@@ -47,25 +47,30 @@ provider's own login command (`claude auth login`, `opencode auth login`).
 
 ## Claude
 
-Claude runs through `claude-agent-acp`, the Agent Client Protocol adapter for Claude Code. The adapter is pinned at `@agentclientprotocol/claude-agent-acp@0.108.1`, and it drives the `claude` CLI that Ciaobot resolves (`CLAUDE_CODE_EXECUTABLE`). Node 22 or newer is required.
+Claude runs through `claude-agent-acp`, the Agent Client Protocol adapter for Claude Code. The adapter is pinned at `@agentclientprotocol/claude-agent-acp@0.108.1` in `ciao/adapter_install.py`, and it drives the `claude` CLI that Ciaobot resolves (`CLAUDE_CODE_EXECUTABLE`). Node 22 or newer is required.
+
+Ciaobot installs the adapter itself, once, into a private folder outside the app (`~/Library/Application Support/Ciaobot/adapters` on macOS; the engine's state folder beside the install receipt on Linux). It uses the machine's own `npm` with `--omit=optional --ignore-scripts` and no shell, and it runs the adapter under the machine's own `node`. The native Claude package the adapter can pull in optionally (about 340 MB) is left out, because the user's own `claude` does the work. The install starts at engine startup only when `claude` is present and the adapter is missing or not the pin. A failed install is shown on the Settings card and is not retried by the engine; the card's Install button runs the same line in a terminal.
 
 ```bash
-npm install -g @agentclientprotocol/claude-agent-acp@0.108.1
+npm install --no-audit --no-fund --omit=optional --ignore-scripts --prefix "<adapters folder>" @agentclientprotocol/claude-agent-acp@0.108.1
 claude auth login                   # the Settings sign-in action runs this in a terminal
 ```
+
+The adapter reads the `claude` executable from `CLAUDE_CODE_EXECUTABLE`, so with that variable set it passes MCP servers to the CLI as an argument (`--mcp-config`) rather than in the SDK's initialize request. An MCP server's `env` and `headers` therefore appear on the adapter's command line, visible to other users on the machine through the process list. Ciaobot does not write them to a file.
 
 Sign-in is handled by the Claude CLI. Ciaobot never reads or stores a Claude credential.
 
 ## Codex
 
-Codex runs through `codex-acp`, the Agent Client Protocol adapter for OpenAI's Codex CLI. Both packages are pinned: `@agentclientprotocol/codex-acp@2.7.0` and `@openai/codex@0.166.0`, which matches the codex version the adapter bundles. Node 22 or newer is required for the npm install. The Settings install action runs the command below in a terminal.
+Codex runs through `codex-acp`, the Agent Client Protocol adapter for OpenAI's Codex CLI. The adapter is pinned at `@agentclientprotocol/codex-acp@2.7.0` in `ciao/adapter_install.py`, installed the same way as the Claude adapter (see above). It does not install `@openai/codex` itself: Ciaobot runs the user's own `codex` by setting `CODEX_PATH`. When no `codex` resolves, the Settings install line also installs the CLI globally, at the version the adapter is built against (`@openai/codex@0.166.0`). Node 22 or newer is required.
 
 ```bash
-npm install -g @openai/codex@0.166.0 @agentclientprotocol/codex-acp@2.7.0
+npm install -g @openai/codex@0.166.0                  # only when no codex resolves
+npm install --no-audit --no-fund --omit=optional --ignore-scripts --prefix "<adapters folder>" @agentclientprotocol/codex-acp@2.7.0
 codex login                         # the Settings sign-in action runs this in a terminal
 ```
 
-Sign-in is handled entirely by the Codex CLI. Ciaobot does not implement, prompt for, or store any Codex credential, and it has no API-key field. Settings only checks `codex login status`, which reads the exit code and nothing else, so a token that command prints never reaches the PWA or the log. The adapter uses the codex it bundles, so `CODEX_PATH` is not set.
+Sign-in is handled entirely by the Codex CLI. Ciaobot does not implement, prompt for, or store any Codex credential, and it has no API-key field. Settings only checks `codex login status`, which reads the exit code and nothing else, so a token that command prints never reaches the PWA or the log. The adapter starts only when the codex CLI and node resolve; the `codex` it runs is the one on the terminal PATH, which the adapter receives in `CODEX_PATH`.
 
 ## OpenCode
 

@@ -132,14 +132,13 @@ def _no_installed_opencode(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _no_installed_codex(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Never find the developer's own ``codex`` or ``codex-acp`` on ``PATH``.
+    """Never find the developer's own ``codex`` on ``PATH``.
 
     The Codex status probe runs ``codex login status`` against whatever it finds, so a test
     that reaches Settings would otherwise run the real CLI. A test that needs a binary patches
-    ``ciao.providers.acp.agents.codex_binary`` or ``codex_acp_binary`` itself.
+    ``ciao.providers.acp.agents.codex_binary`` itself.
     """
     monkeypatch.setattr("ciao.providers.acp.agents.codex_binary", lambda: None)
-    monkeypatch.setattr("ciao.providers.acp.agents.codex_acp_binary", lambda: None)
 
 
 @pytest.fixture(autouse=True)
