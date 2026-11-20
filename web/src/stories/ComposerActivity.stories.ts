@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/vue3-vite'
-import { expect } from 'storybook/test'
+import { expect, waitFor } from 'storybook/test'
 import ComposerActivity from '../components/ComposerActivity.vue'
 import type { RunningWorkRow } from '../lib/runningWork'
 
@@ -83,7 +83,8 @@ export const Compact: Story = {
     template: '<div style="display: flex; align-items: center; justify-content: flex-end; width: 300px; padding: var(--space-3); color: var(--fg); font-size: var(--text-sm)"><ComposerActivity v-bind="args" /></div>',
   }),
   play: async ({ canvasElement }) => {
-    expect(canvasElement.querySelector('.composer-activity--compact')).not.toBeNull()
+    // Compact is decided by a ResizeObserver after layout, so wait for it rather than read it on the first frame.
+    await waitFor(() => expect(canvasElement.querySelector('.composer-activity--compact')).not.toBeNull())
     expect(canvasElement.querySelector('.composer-activity-seg--agents .composer-activity-count')?.textContent).toBe('2')
     expect(canvasElement.querySelector('.composer-activity-label')).toBeNull()
   },
