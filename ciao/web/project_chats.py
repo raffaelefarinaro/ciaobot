@@ -1294,6 +1294,15 @@ def validate_configured_model(model: str | None, provider: str | None) -> None:
 # ── Manager ──────────────────────────────────────────────────────────────
 
 
+def _probes_session_file(provider: str) -> bool:
+    """Whether a chat's session is probed as Claude's ``<session>.jsonl``.
+
+    A legacy chat with no ``provider`` key is stored as ``""`` and is Claude here.
+    ``None`` is not, so it stays on the non-Claude side.
+    """
+    return provider_registry.flag("claude" if provider == "" else provider, "session_blob_on_disk")
+
+
 class ProjectChatManager:
     """Manages projects and chats for the PWA web interface."""
 
@@ -3105,7 +3114,7 @@ class ProjectChatManager:
             audit_status = self._audited_chat_status(context_key)
             if audit_status == "deleted":
                 continue
-            if provider == "claude":
+            if provider_registry.flag(provider, "session_blob_on_disk"):
                 # No chat in hand here, only a transcript row, so there is no
                 # workspace to resolve an agent root from. Defaults to
                 # workspace_root, which is what every root resolves to until the
@@ -3214,7 +3223,7 @@ class ProjectChatManager:
             ]
             if not archived_files:
                 continue  # never archived -> not the corrupt state
-            if chat.provider == "claude" and self._claude_session_exists(
+            if provider_registry.flag(chat.provider, "session_blob_on_disk") and self._claude_session_exists(
                 chat.session_id, agent_root=self._agent_root_for_chat(chat.chat_id)
             ):
                 continue  # session blob still present -> not archived
@@ -4119,7 +4128,7 @@ class ProjectChatManager:
         # (a ``<session>.jsonl`` under ``.claude/projects``). Every other
         # non-Claude provider owns its sessions and resumes
         # them by id through its own server, so treat those as local.
-        if chat.provider in ("", "claude"):
+        if _probes_session_file(chat.provider):
             return self._claude_session_exists(
                 chat.session_id, agent_root=self._agent_root_for_chat(chat.chat_id)
             )
@@ -4131,7 +4140,7 @@ class ProjectChatManager:
         local_flags: dict[str, bool] = {}
         missing_global: set[str] = set()
         for chat in chats:
-            if not chat.session_id or chat.provider not in ("", "claude"):
+            if not chat.session_id or not _probes_session_file(chat.provider):
                 local_flags[chat.chat_id] = True
                 continue
             try:
@@ -6336,6 +6345,10 @@ class ProjectChatManager:
         """Which provider subprocess a chat needs."""
         return provider or "claude"
 
+    @staticmethod
+    def _has_workspace_cli_settings(provider: str) -> bool:
+        return provider_registry.flag(provider, "workspace_cli_settings")
+
     def disallowed_tools_for_chat(self, chat: ChatInfo) -> list[str]:
         """Per-workspace tool denylist for a chat's spawned CLI.
 
@@ -6349,7 +6362,7 @@ class ProjectChatManager:
         only applied when the chat's provider is ``claude`` (see the guard
         below).
         """
-        if chat.provider != "claude":
+        if not self._has_workspace_cli_settings(chat.provider):
             return []
         project = self._projects.get(chat.project_id)
         workspace = project.workspace if project else None
@@ -6357,7 +6370,7 @@ class ProjectChatManager:
 
     def claude_settings_for_chat(self, chat: ChatInfo) -> dict[str, Any] | None:
         """The Claude CLI settings layer for a chat's spawned CLI; None off the claude provider."""
-        if chat.provider != "claude":
+        if not self._has_workspace_cli_settings(chat.provider):
             return None
         project = self._projects.get(chat.project_id)
         workspace = project.workspace if project else None
@@ -6538,7 +6551,7 @@ class ProjectChatManager:
         to the provider's configured default on non-Claude providers.
         """
         resolved = (model or "").strip()
-        if provider != "claude" and is_tier(resolved):
+        if not provider_registry.flag(provider, "tier_model_aliases") and is_tier(resolved):
             return self._config.default_model_for_provider(provider, workspace)
         return chat_service._normalize_tier(resolved)
 
@@ -6663,7 +6676,9 @@ class ProjectChatManager:
         # Trimming setting:claude_ai_connectors switches them off. A memory
         # pass follows the same switch as any other chat. Other providers never
         # see this variable. The default (not trimmed) leaves it unset.
-        if chat.provider == "claude" and self._claude_ai_connectors_trimmed(workspace):
+        if provider_registry.flag(
+            chat.provider, "claude_ai_connectors_toggle"
+        ) and self._claude_ai_connectors_trimmed(workspace):
             env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
         return env
 
@@ -10245,8 +10260,9 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         provider = getattr(chat, "provider", "claude") if chat else "claude"
         stopped, native = False, None
-        if provider != "claude":
-            # Claude's title arrives as a session_info_update event (see tier 1): no native read.
+        if not provider_registry.flag(provider, "title_from_session_events"):
+            # title_from_session_events: Claude's title arrives as a session_info_update event
+            # (see tier 1), so there is no native read for it.
             stopped, native = await self._adopt_native_title(chat_id, _is_titling_target)
         if stopped:
             return None
