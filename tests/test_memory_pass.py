@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import json
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -3088,3 +3089,167 @@ async def test_pump_defers_while_draining_and_keeps_queue(
 
     assert streams.chat_ids == [memory_id]
     assert manager.get_chat(memory_id).helper["state"] == "running"
+
+
+# ── Task-decision context in the ordinary pass prompt (#3239-a) ──────
+
+_TASK_CONTEXT_OPEN = "<task-context>"
+
+
+def _task_attempt_store(tmp_path: Path):
+    from ciao.task_attempts import TaskAttemptStore
+
+    return TaskAttemptStore(
+        workspace="work",
+        runtime_dir=tmp_path / ".runtime",
+        clock=lambda: datetime(2026, 11, 10, 9, 0, tzinfo=UTC),
+    )
+
+
+def _task_decision_row(
+    attempt_id: str, n: int = 1, *, reason: str = "Not mine to release.", actor: str = "user"
+) -> str:
+    return json.dumps({
+        "v": 1, "id": f"{n:032x}", "at": "2026-11-10T10:00:00+00:00", "kind": "reject",
+        "task_id": "a" * 32, "task_title": "Title", "task_created_by": "agent",
+        "project_id": "p1", "attempt_id": attempt_id, "attempt_state": "ready_for_review",
+        "actor": actor, "via": "pwa", "reason": reason,
+    })
+
+
+def _write_task_decisions(manager: ProjectChatManager, workspace: str, rows: list[str]) -> None:
+    path = Path(manager._config.workspace_vault_root(workspace)) / "Workspace" / "Task-Decisions.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(row + "\n" for row in rows), encoding="utf-8")
+
+
+def test_an_ordinary_pass_for_a_chat_with_attempts_carries_its_task_decisions(
+    tmp_path: Path, streams: _FakeStreams
+) -> None:
+    _register_work_workspace(tmp_path)
+    manager = _make_manager(tmp_path)
+    chat = _pass_chat(manager)
+    started = _task_attempt_store(tmp_path).start(
+        task_id="a" * 32, task_revision="c" * 64, chat_id="chat-1"
+    )
+    _write_task_decisions(manager, "work", [
+        _task_decision_row(started.attempt.attempt_id, 1),
+        _task_decision_row("2" * 32, 2),
+    ])
+    prompt = manager._memory_pass._prompt_for(chat)
+    observation = memory_pass.OBSERVATION_PROMPT.format(chat_id="chat-1")
+    assert prompt.count(_TASK_CONTEXT_OPEN) == 1
+    assert "decision " + "0" * 31 + "1 reject by operator at 2026-11-10T10:00:00+00:00: Not mine to release." in prompt
+    assert "2" * 32 not in prompt
+    # Appended directly after the observation section, before skill review.
+    assert prompt.index(observation) + len(observation) == prompt.index(
+        "\n\nTask decisions recorded for this chat's task attempts"
+    )
+
+
+def test_a_pass_for_a_chat_without_attempts_never_opens_the_decisions_file(
+    tmp_path: Path, streams: _FakeStreams, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import task_context
+
+    _register_work_workspace(tmp_path)
+    manager = _make_manager(tmp_path)
+    chat = _pass_chat(manager)
+    _write_task_decisions(manager, "work", [_task_decision_row("2" * 32, reason="ELSEWHERE")])
+
+    def opened(_vault: Path) -> None:
+        raise AssertionError("the decisions file must not be read for a chat with no attempt")
+
+    monkeypatch.setattr(task_context, "read_decisions_strict", opened)
+    prompt = manager._memory_pass._prompt_for(chat)
+    assert _TASK_CONTEXT_OPEN not in prompt
+    assert "ELSEWHERE" not in prompt
+
+    # Positive control: the same chat, once it has an attempt, reads the file and cites its row.
+    monkeypatch.undo()
+    _task_attempt_store(tmp_path).start(task_id="a" * 32, task_revision="c" * 64, chat_id="chat-1")
+    prompt = manager._memory_pass._prompt_for(chat)
+    assert _TASK_CONTEXT_OPEN in prompt
+
+
+def test_a_decision_on_another_chats_attempt_in_the_same_workspace_is_not_shown(
+    tmp_path: Path, streams: _FakeStreams
+) -> None:
+    _register_work_workspace(tmp_path)
+    manager = _make_manager(tmp_path)
+    chat = _pass_chat(manager)  # source chat-1
+    store = _task_attempt_store(tmp_path)
+    mine = store.start(task_id="a" * 32, task_revision="c" * 64, chat_id="chat-1")
+    theirs = store.start(task_id="b" * 32, task_revision="d" * 64, chat_id="chat-2")
+    _write_task_decisions(manager, "work", [
+        _task_decision_row(mine.attempt.attempt_id, 1, reason="CHAT ONE ROW"),
+        _task_decision_row(theirs.attempt.attempt_id, 2, reason="CHAT TWO ROW"),
+    ])
+    prompt = manager._memory_pass._prompt_for(chat)
+    assert "CHAT ONE ROW" in prompt
+    assert "CHAT TWO ROW" not in prompt
+
+
+def test_an_unreadable_attempt_store_is_said_to_make_the_context_incomplete(
+    tmp_path: Path, streams: _FakeStreams
+) -> None:
+    _register_work_workspace(tmp_path)
+    manager = _make_manager(tmp_path)
+    chat = _pass_chat(manager)
+    _task_attempt_store(tmp_path).path.write_text("{not json", encoding="utf-8")
+    prompt = manager._memory_pass._prompt_for(chat)
+    assert "this context is incomplete: attempts unreadable" in prompt
+    assert "do not infer that no other task decision exists" in prompt
+
+
+def test_attempts_of_another_workspace_are_never_read(
+    tmp_path: Path, streams: _FakeStreams
+) -> None:
+    from ciao.task_attempts import TaskAttemptStore
+
+    _register_work_workspace(tmp_path)
+    manager = _make_manager(tmp_path)
+    chat = _pass_chat(manager)
+    own = _task_attempt_store(tmp_path).start(
+        task_id="a" * 32, task_revision="c" * 64, chat_id="chat-1"
+    )
+    other = TaskAttemptStore(
+        workspace="other", runtime_dir=tmp_path / ".runtime",
+        clock=lambda: datetime(2026, 11, 10, 9, 0, tzinfo=UTC),
+    )
+    foreign = other.start(task_id="b" * 32, task_revision="d" * 64, chat_id="chat-1")
+    # Both attempts' decisions sit in the work vault, so only the attempt store
+    # decides which one this pass may see.
+    _write_task_decisions(manager, "work", [
+        _task_decision_row(own.attempt.attempt_id, 1, reason="WORK ROW"),
+        _task_decision_row(foreign.attempt.attempt_id, 2, reason="OTHER WORKSPACE ROW"),
+    ])
+    prompt = manager._memory_pass._prompt_for(chat)
+    assert "WORK ROW" in prompt
+    assert "OTHER WORKSPACE ROW" not in prompt
+
+
+def test_task_completion_and_closure_prompts_never_carry_the_task_context(
+    tmp_path: Path, streams: _FakeStreams
+) -> None:
+    _register_work_workspace(tmp_path)
+    manager = _make_manager(tmp_path)
+    started = _task_attempt_store(tmp_path).start(
+        task_id="a" * 32, task_revision="c" * 64, chat_id="chat-1"
+    )
+    _write_task_decisions(manager, "work", [_task_decision_row(started.attempt.attempt_id)])
+    # Positive control: the ordinary pass for the same source chat does carry it.
+    assert _TASK_CONTEXT_OPEN in manager._memory_pass._prompt_for(_pass_chat(manager))
+    task_id = manager.enqueue_task_completion(
+        workspace="work", task_path="Workspace/Tasks/example.md",
+        completion_id="a" * 32, resolution="Done.",
+        completed_at="2026-11-11T10:00:00+00:00",
+    )
+    closure_id = manager.enqueue_project_closure(
+        workspace="work", vault_folder="example", project_name="Example",
+        outcome="completed", note="Done.", recorded_at="2026-11-11T10:00:00+00:00",
+    )
+    for pass_id in (task_id, closure_id):
+        chat = manager.get_chat(pass_id)
+        assert chat is not None
+        assert _TASK_CONTEXT_OPEN not in manager._memory_pass._prompt_for(chat)

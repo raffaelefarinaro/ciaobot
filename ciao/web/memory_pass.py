@@ -58,8 +58,16 @@ from pathlib import Path
 from string import Template
 from typing import TYPE_CHECKING
 
-from ciao import decision_rules, memory_proposals, skills_inventory, transcripts, upstream_drafts
+from ciao import (
+    decision_rules,
+    memory_proposals,
+    skills_inventory,
+    task_context,
+    transcripts,
+    upstream_drafts,
+)
 from ciao.prompt_fence import fence
+from ciao.task_attempts import TaskAttemptStore
 from ciao.web import chat_service
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -1161,6 +1169,7 @@ class MemoryPassCoordinator:
             self._focus_section(helper)
             + self._repo_section(helper)
             + self._observation_section(helper)
+            + self._task_context_section(chat, helper)
             + self._skill_review_section(chat, helper)
             + self._recent_decisions_section(chat)
             + self._rules_section(chat)
@@ -1203,6 +1212,25 @@ class MemoryPassCoordinator:
         if not chat_id:
             return ""
         return OBSERVATION_PROMPT.format(chat_id=chat_id)
+
+    def _task_context_section(self, chat: ChatInfo, helper: dict) -> str:
+        """The task decisions recorded against the source chat's attempts, or nothing (#3239-a).
+
+        Read-only and workspace-scoped: the attempt store and the decisions file
+        are both the workspace's own. A chat with no attempt adds no text.
+        """
+        source_chat_id = str(helper.get("source_chat_id") or "")
+        workspace = self._workspace_of(chat)
+        if not source_chat_id or not workspace:
+            return ""
+        config = self._host._config
+        store = TaskAttemptStore(
+            workspace=workspace,
+            runtime_dir=Path(config.state_path).parent,
+            clock=lambda: datetime.now(UTC),
+        )
+        vault = Path(config.workspace_vault_root(workspace))
+        return task_context.section_for_chat(store, vault, source_chat_id)
 
     @staticmethod
     def _focus_section(helper: dict) -> str:
