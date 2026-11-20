@@ -161,6 +161,12 @@ class ProviderService:
         return self._provider is not None and self._provider.can_drain
 
     @property
+    def continues_after_shell(self) -> bool:
+        """Whether the live provider resumes a session on its own when a background shell ends."""
+        spec = getattr(self._provider, "spec", None)
+        return bool(getattr(spec, "continues_after_shell", False))
+
+    @property
     def background_work_outstanding(self) -> bool:
         """True while the provider reports background work its process owns."""
         return self._provider is not None and self._provider.background_work_outstanding

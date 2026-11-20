@@ -34,6 +34,7 @@ from ciao.models import (
     BridgeMode,
     ContextCompactedEvent,
     ResultEvent,
+    LATE_WAKE_NOTICE,
     ShellFinishedEvent,
     StreamEvent,
     SystemStatusEvent,
@@ -55,7 +56,6 @@ _LATE_QUIET = frozenset({"usage_update", "config_option_update", "current_mode_u
 _SHELL_COMMANDS_LIMIT = 64
 # Longest a shell's output tail may take to read; a slow read gives up rather than hold the notice.
 SHELL_TAIL_READ_S = 5.0
-_LATE_WAKE = "The agent continued after background work finished."
 # A chat's model string is user-controlled, so a status line echoes at most this many characters.
 _STATUS_MODEL_CHARS = 80
 
@@ -422,6 +422,7 @@ class AcpSession:
             output_path=shell.output_path,
             duration_s=round(time.monotonic() - shell.launched_at, 1),
             exit_code=exit_code,
+            ended_at=time.monotonic(),
         )
         try:
             loop = asyncio.get_running_loop()
@@ -543,7 +544,7 @@ class AcpSession:
                 usage=dict(self._normalizer.usage),
                 origin="task-notification",
             )
-            event.wake_notice = _LATE_WAKE
+            event.wake_notice = LATE_WAKE_NOTICE
             self._late_queue.put_nowait(event)
             self._journal_event(event)
         self._late_text = TurnText()

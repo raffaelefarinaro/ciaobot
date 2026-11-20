@@ -399,6 +399,10 @@ class ContextCompactedEvent(StreamEvent):
     """The agent compacted its session; the next prompt must carry the stable context again."""
 
 
+# The wake notice a provider's own continuation carries when nothing else names the turn.
+LATE_WAKE_NOTICE = "The agent continued after background work finished."
+
+
 @dataclass(slots=True)
 class ShellFinishedEvent(StreamEvent):
     """A background shell's process ended. Host bookkeeping: it wakes the chat, it is never shown.
@@ -413,6 +417,8 @@ class ShellFinishedEvent(StreamEvent):
     output_path: str = ""
     duration_s: float = 0.0
     exit_code: int | None = None
+    # When the end was observed (``time.monotonic``): a continuation that started after it is its answer.
+    ended_at: float = 0.0
     # None when the output file could not be read safely; an empty list when it had no output.
     output_tail: list[str] | None = None
 
