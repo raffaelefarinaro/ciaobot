@@ -1750,6 +1750,60 @@ describe('per-chat WS auto-reconnect', () => {
     expect(store.currentTimeline.some(e => e.kind === 'tool' && e.content.includes('Read'))).toBe(false)
   })
 
+  test('a subagent call is one card: its launch keeps it running and its children nest under it', () => {
+    const store = useProjectStore()
+    const chatId = 'c-subagent-card'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'text_delta', text: 'Launching. ' })
+    send({ type: 'tool_use', tool_name: 'subagent', tool_input: '[general] Sleep 5 then reply done', tool_use_id: 'sa1' })
+    // A re-announce of the call is the same card, not a second one.
+    send({ type: 'tool_use', tool_name: 'subagent', tool_input: '[general] Sleep 5 then reply done', tool_use_id: 'sa1' })
+    send({ type: 'tool_result', tool_use_id: 'sa1', background: true })
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'sleep 5', tool_use_id: 'k1', parent_tool_use_id: 'sa1' })
+    send({ type: 'text_delta', text: 'child words', parent_tool_use_id: 'sa1' })
+
+    const cards = store.currentTimeline.filter(e => e.kind === 'subagent')
+    expect(cards).toHaveLength(1)
+    const [entry] = cards
+    if (entry.kind !== 'subagent') throw new Error('Expected a subagent card')
+    expect(entry.card).toMatchObject({ state: 'running', agent_type: 'general', step_count: 1 })
+    expect(entry.card.description).toBe('Sleep 5 then reply done')
+    expect(entry.card.steps).toEqual([{ kind: 'activity', line: '⚙️ shell sleep 5', tool_use_id: 'k1' }])
+    expect(store.currentTimeline.some(e => e.kind === 'tool' && e.content.includes('shell'))).toBe(false)
+    expect(store.currentTimeline.map(e => e.kind)).toEqual(['text', 'subagent'])
+    // The child's words never reach the parent's streaming reply.
+    expect(store.streamingTextFor(chatId)).toBe('')
+
+    send({ type: 'tool_result', tool_use_id: 'sa1', subagent_status: 'completed' })
+    expect(entry.card.state).toBe('done')
+
+    send({ type: 'result', text: 'Launching. The subagent replied done.' })
+    const row = store.messagesFor(chatId).find(m => m.tool_name === '_subagent')
+    expect(row?.content).toBe('Subagent: Sleep 5 then reply done')
+    expect(row?.subagent).toMatchObject({ tool_use_id: 'sa1', state: 'done', step_count: 1 })
+    expect(row?.subagent?.steps).toHaveLength(1)
+  })
+
+  test('a subagent card keeps only its launch result when the child is still running', () => {
+    const store = useProjectStore()
+    const chatId = 'c-subagent-running'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'Agent', tool_input: '[general] Long job', tool_use_id: 'sa2' })
+    send({ type: 'tool_result', tool_use_id: 'sa2', background: true })
+    send({ type: 'result', text: '' })
+
+    const row = store.messagesFor(chatId).find(m => m.tool_name === '_subagent')
+    expect(row?.subagent?.state).toBe('running')
+  })
+
   test('a tool call and its result keep one line and mark a failed call', () => {
     const store = useProjectStore()
     const chatId = 'c-tool-results'
@@ -3751,23 +3805,24 @@ describe('ephemeral status events', () => {
 })
 
 describe('subagent trace lines', () => {
-  test('renders a subagent tool call as an indented line under the parent trace', () => {
+  test('renders a subagent tool call as a card whose child lines nest under it', () => {
     const store = useProjectStore()
     const chatId = 'c-subagent-line'
     store.activeChatId = chatId
     store.connectWs(chatId)
     const send = (event: Record<string, unknown>) => fakeSockets[0].onmessage?.({ data: JSON.stringify(event) })
 
-    send({ type: 'tool_use', tool_name: 'Agent', tool_input: 'Explore the repo', tool_use_id: 'p1' })
+    send({ type: 'tool_use', tool_name: 'Agent', tool_input: '[general] Explore the repo', tool_use_id: 'p1' })
     send({ type: 'tool_use', tool_name: 'Read', tool_input: 'a.py', tool_use_id: 'c1', parent_tool_use_id: 'p1' })
 
-    const tool = store.currentTimeline.find(e => e.kind === 'tool')
-    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
-    const lines = tool.content.split('\n')
-    expect(lines).toHaveLength(2)
-    expect(lines[0]).not.toMatch(/^↳/)
-    expect(lines[1]).toMatch(/^↳ .*Read a\.py$/)
-    expect(tool.tool_use_ids).toEqual(['p1', 'c1'])
+    expect(store.currentTimeline.some(e => e.kind === 'tool')).toBe(false)
+    const card = store.currentTimeline.find(e => e.kind === 'subagent')
+    if (!card || card.kind !== 'subagent') throw new Error('Expected a subagent card')
+    expect(card.card.description).toBe('Explore the repo')
+    expect(card.card.agent_type).toBe('general')
+    expect(card.card.steps).toHaveLength(1)
+    expect(card.card.steps[0]).toMatchObject({ kind: 'activity', tool_use_id: 'c1' })
+    expect(card.card.steps[0]).toMatchObject({ line: expect.stringMatching(/Read a\.py$/) })
   })
 })
 
