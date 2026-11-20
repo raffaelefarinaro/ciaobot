@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, datetime, timedelta
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -95,6 +96,95 @@ class Observation:
         if self.about == USER_SUBJECT:
             return ("profile", "")
         return ("people", self.about)
+
+
+WEAK_SIGHTING_TTL = timedelta(days=7)
+"""A weak sighting expires this long after its own capture, independently."""
+
+
+@dataclass(frozen=True, slots=True)
+class WeakSighting:
+    """One independent sighting of a weak candidate, captured at an aware UTC instant.
+
+    Identity is ``(source_id, candidate_id)``. The fields are optional on purpose:
+    a missing id or timestamp is a rejected input, not a value to invent.
+    """
+
+    source_id: str | None
+    candidate_id: str | None
+    captured_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class WeakSightingVerdicts:
+    """Ordered outcome of :func:`classify_weak_sightings`."""
+
+    active: tuple[WeakSighting, ...]
+    expired: tuple[WeakSighting, ...]
+    unavailable: tuple[WeakSighting, ...]
+
+
+def classify_weak_sightings(
+    sightings: Sequence[WeakSighting], *, now: datetime
+) -> WeakSightingVerdicts:
+    """Split sightings into active, expired and unavailable, with no I/O.
+
+    Exact replays of one identity fold to its first appearance. An identity seen
+    at two different instants is unavailable in full, because no copy can be
+    trusted. A future, naive, missing or blank sighting is unavailable. A
+    sighting expires at exactly seven days of age, independently of any other
+    sighting of the same candidate.
+    """
+    if now.tzinfo is None:
+        raise ValueError("now must be an aware datetime")
+    checked: list[tuple[int, tuple[str, str], datetime]] = []
+    rejected: set[int] = set()
+    for index, sighting in enumerate(sightings):
+        verdict = _checked_sighting(sighting, now=now)
+        if verdict is None:
+            rejected.add(index)
+        else:
+            checked.append((index, *verdict))
+    instants: dict[tuple[str, str], set[datetime]] = {}
+    for _, key, captured in checked:
+        instants.setdefault(key, set()).add(captured)
+    first: dict[tuple[str, str], tuple[int, datetime]] = {}
+    for index, key, captured in checked:
+        if len(instants[key]) > 1:
+            rejected.add(index)
+        else:
+            first.setdefault(key, (index, captured))
+    active: list[WeakSighting] = []
+    expired: list[WeakSighting] = []
+    for index, captured in first.values():
+        if now - captured >= WEAK_SIGHTING_TTL:
+            expired.append(sightings[index])
+        else:
+            active.append(sightings[index])
+    unavailable = dict.fromkeys(
+        sighting for index, sighting in enumerate(sightings) if index in rejected
+    )
+    return WeakSightingVerdicts(
+        active=tuple(active),
+        expired=tuple(expired),
+        unavailable=tuple(unavailable),
+    )
+
+
+def _checked_sighting(
+    sighting: WeakSighting, *, now: datetime
+) -> tuple[tuple[str, str], datetime] | None:
+    """The trusted identity and instant of *sighting*, or ``None`` if unusable."""
+    source, candidate, captured = (
+        sighting.source_id,
+        sighting.candidate_id,
+        sighting.captured_at,
+    )
+    if not source or not source.strip() or not candidate or not candidate.strip():
+        return None
+    if captured is None or captured.tzinfo is None or captured > now:
+        return None
+    return (source, candidate), captured
 
 
 def subject_statement(about: str, text: str) -> str:

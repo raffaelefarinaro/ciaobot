@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -307,3 +307,102 @@ def test_non_observation_lines_are_ignored(tmp_path: Path) -> None:
     text = ob.OBSERVATIONS_STUB + "- a plain bullet with no subject\n"
     assert ob.parse_observations(text, workspace=WORKSPACE) == []
     assert parse_learnings(text, workspace=WORKSPACE).entries
+
+
+# --- weak sighting expiry (#3245): pure, no I/O -----------------------------
+
+NOW = datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
+SEVEN_DAYS = timedelta(days=7)
+
+
+def _sighting(
+    captured_at: datetime | None = NOW,
+    *,
+    source: str | None = "chat-a",
+    candidate: str | None = "cand-1",
+) -> ob.WeakSighting:
+    return ob.WeakSighting(source_id=source, candidate_id=candidate, captured_at=captured_at)
+
+
+def test_weak_sighting_expires_exactly_at_seven_days_not_before() -> None:
+    edge = NOW - SEVEN_DAYS
+    just_before = edge + timedelta(microseconds=1)
+    just_after = edge - timedelta(microseconds=1)
+    verdicts = ob.classify_weak_sightings(
+        [_sighting(just_before, source="a"), _sighting(edge, source="b"), _sighting(just_after, source="c")],
+        now=NOW,
+    )
+    assert [s.source_id for s in verdicts.active] == ["a"]
+    assert [s.source_id for s in verdicts.expired] == ["b", "c"]
+    assert verdicts.unavailable == ()
+
+
+def test_same_instant_under_different_offsets_is_one_age() -> None:
+    plus_two = timezone(timedelta(hours=2))
+    edge_utc = NOW - SEVEN_DAYS
+    edge_local = edge_utc.astimezone(plus_two)
+    verdicts = ob.classify_weak_sightings([_sighting(edge_local)], now=NOW)
+    assert verdicts.active == ()
+    assert len(verdicts.expired) == 1
+    assert verdicts.unavailable == ()
+
+
+def test_exact_replay_folds_to_one_in_first_appearance_order() -> None:
+    first = _sighting(NOW - timedelta(days=1), source="b")
+    other = _sighting(NOW - timedelta(days=2), source="a")
+    replay_in_other_offset = _sighting(
+        (NOW - timedelta(days=1)).astimezone(timezone(timedelta(hours=-5))), source="b"
+    )
+    verdicts = ob.classify_weak_sightings([first, other, replay_in_other_offset], now=NOW)
+    assert verdicts.active == (first, other)
+    assert verdicts.expired == ()
+    assert verdicts.unavailable == ()
+
+
+def test_conflicting_duplicate_timestamps_are_unavailable_not_resolved() -> None:
+    early = _sighting(NOW - timedelta(days=1))
+    late = _sighting(NOW - timedelta(days=2))
+    clean = _sighting(NOW - timedelta(days=1), source="other")
+    verdicts = ob.classify_weak_sightings([early, late, clean], now=NOW)
+    assert verdicts.unavailable == (early, late)
+    assert verdicts.active == (clean,)
+    assert verdicts.expired == ()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        _sighting(NOW + timedelta(microseconds=1)),
+        _sighting(datetime(2026, 11, 19, 12, 0)),
+        _sighting(None),
+        _sighting(NOW - timedelta(days=1), source=None),
+        _sighting(NOW - timedelta(days=1), source=""),
+        _sighting(NOW - timedelta(days=1), candidate=None),
+        _sighting(NOW - timedelta(days=1), candidate="  "),
+    ],
+    ids=["future", "naive", "missing-time", "missing-source", "empty-source", "missing-candidate", "blank-candidate"],
+)
+def test_future_naive_or_missing_identity_or_time_is_unavailable(bad: ob.WeakSighting) -> None:
+    verdicts = ob.classify_weak_sightings([bad], now=NOW)
+    assert verdicts.unavailable == (bad,)
+    assert verdicts.active == ()
+    assert verdicts.expired == ()
+
+
+def test_capture_exactly_at_now_is_active() -> None:
+    verdicts = ob.classify_weak_sightings([_sighting(NOW)], now=NOW)
+    assert len(verdicts.active) == 1
+
+
+def test_first_sighting_expires_while_independent_one_for_same_candidate_stays_active() -> None:
+    old = _sighting(NOW - SEVEN_DAYS, source="chat-old", candidate="cand-1")
+    fresh = _sighting(NOW - timedelta(days=1), source="chat-new", candidate="cand-1")
+    verdicts = ob.classify_weak_sightings([old, fresh], now=NOW)
+    assert verdicts.expired == (old,)
+    assert verdicts.active == (fresh,)
+    assert verdicts.unavailable == ()
+
+
+def test_classifier_does_not_touch_the_vault(tmp_path: Path) -> None:
+    ob.classify_weak_sightings([_sighting()], now=NOW)
+    assert list(tmp_path.iterdir()) == []
