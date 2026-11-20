@@ -1453,3 +1453,23 @@ def test_opencode_spec_routes_the_unprefixed_child_notification() -> None:
     # The SDK routes only `_`-prefixed notifications to ext_notification; this is the one name
     # the connection adds, exactly as opencode sends it.
     assert OPENCODE.extension_notifications == (_CHILD,)
+
+
+def test_codex_spec_routes_auth_status_update() -> None:
+    assert CODEX.extension_notifications == ("auth/status_update",)
+
+
+def test_codex_auth_status_update_is_logged_at_debug_only(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
+    provider = CodexAcpProvider(Path("."))
+    normalizer = UpdateNormalizer(CODEX, "ses_root")
+    # Well-formed, and a malformed one with the wrong types: neither changes any events.
+    assert provider.ext_update(normalizer, "auth/status_update", {
+        "state": "authenticated", "accounts": [{"label": "ChatGPT Secret Label", "active": True}],
+    }) == []
+    assert provider.ext_update(normalizer, "auth/status_update", {"state": 5, "accounts": "none"}) == []
+    lines = [r.getMessage() for r in caplog.records if r.name == "ciao.providers.acp.agents"]
+    assert any("authenticated" in line for line in lines)
+    # Account labels are display-only and never logged.
+    assert not any("ChatGPT Secret Label" in line for line in lines)
+    assert all(r.levelno == logging.DEBUG for r in caplog.records if r.name == "ciao.providers.acp.agents")
