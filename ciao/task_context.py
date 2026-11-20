@@ -133,6 +133,8 @@ def _display_reason(text: str) -> str:
     """
     if _FENCE_CLOSE_PREFIX in text.lower():
         return ""
+    if _FENCE_CLOSE_PREFIX in flatten_text(text, len(text) + 1).lower():
+        return ""
     return flatten_text(text, MAX_REASON_CHARS)
 
 

@@ -52,6 +52,7 @@ class LinkCandidate:
 
     chat_id: str
     created_at: str
+    is_parent: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,7 +140,11 @@ def _chosen(
     workspace_of: Callable[[str], str],
 ) -> list[LinkCandidate]:
     """The newest links in *workspace*, at most ``MAX_LINKED_CHATS``, filtered before the cut."""
-    ordered = sorted(candidates, key=lambda item: _sort_key(item.created_at), reverse=True)
+    by_recency = sorted(candidates, key=lambda item: _sort_key(item.created_at), reverse=True)
+    # The fork parent always comes first; attempt chats follow, newest first.
+    ordered = [item for item in by_recency if item.is_parent] + [
+        item for item in by_recency if not item.is_parent
+    ]
     seen: set[str] = set()
     chosen: list[LinkCandidate] = []
     for candidate in ordered:
@@ -175,10 +180,19 @@ def _excerpt_lines(label: str, excerpt: Excerpt) -> list[str]:
 
 
 def _flatten_message(body: str) -> str:
-    """One capped line of *body*, or the withheld marker when it could close the fence."""
+    """One capped line of *body*, or the withheld marker when it could close the fence.
+
+    The closing token is checked on the raw body and again on the flattened text,
+    because an escape sequence inside the token is removed by flattening. Only the
+    first ``MAX_TURN_CHARS * 8`` characters are flattened: the output is capped at
+    ``MAX_TURN_CHARS``, so nothing past that is ever shown.
+    """
     if _FENCE_CLOSE_PREFIX in body.lower():
         return _WITHHELD
-    return flatten_text(body, MAX_TURN_CHARS)
+    bounded = body[: MAX_TURN_CHARS * 8]
+    if _FENCE_CLOSE_PREFIX in flatten_text(bounded, len(bounded) + 1).lower():
+        return _WITHHELD
+    return flatten_text(bounded, MAX_TURN_CHARS)
 
 
 def _read_bounded(path: Path) -> bytes:

@@ -26,7 +26,7 @@ from ciao.linked_chats import (
     read_excerpt,
     section_for_chat,
 )
-from ciao.web.project_chats import ProjectChatManager
+from ciao.web.project_chats import ChatInfo, ProjectChatManager
 from ciao.sessions import StateStore
 from ciao.task_attempts import TaskAttemptStore
 from ciao.transcripts import TranscriptStore
@@ -422,3 +422,178 @@ def test_an_earlier_attempt_chat_of_the_same_task_is_linked(tmp_path: Path) -> N
     )
 
     assert "SIBLING-ATTEMPT-MESSAGE" in manager._memory_pass._prompt_for(pass_chat)
+
+
+# --- review round 2 (security): confinement, errors, bounded input, ordering -----
+
+
+def _per_workspace_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Give each workspace its own chats root, as after the re-rooting."""
+    base = tmp_path / "roots"
+
+    def chats_root(self: CiaoConfig, workspace: str) -> Path:
+        return base / workspace / "Chats"
+
+    def chats_roots(self: CiaoConfig) -> list[Path]:
+        return [base / name / "Chats" for name in ("work", "other")]
+
+    monkeypatch.setattr(CiaoConfig, "chats_root", chats_root)
+    monkeypatch.setattr(CiaoConfig, "chats_roots", chats_roots)
+    return base
+
+
+def _work_pair(tmp_path: Path) -> tuple[ProjectChatManager, ChatInfo, ChatInfo, ChatInfo]:
+    """A manager, the Memory project, a forked child in ``work`` and its parent."""
+    for name in ("work", "other"):
+        (tmp_path / "memory-vault" / name / "Workspace").mkdir(parents=True)
+    manager = _manager(tmp_path)
+    memory = manager._memory_pass.ensure_project("work")
+    work = manager.create_project("Source work", workspace="work")
+    parent = manager.create_chat(work.project_id, title="Parent")
+    child = manager.create_chat(work.project_id, title="Child")
+    child.forked_from_chat_id = parent.chat_id
+    return manager, memory, child, parent
+
+
+def _pass_prompt(manager: ProjectChatManager, memory: ChatInfo, source_id: str) -> str:
+    chat = manager.create_chat(
+        memory.project_id,
+        title="Memory pass",
+        helper={"kind": "memory_pass", "source_chat_id": source_id, "archive_policy": "when_clean"},
+    )
+    return manager._memory_pass._prompt_for(chat)
+
+
+@pytest.mark.parametrize("case", ["outside", "symlink_outside", "other_root", "symlink_other_root"])
+def test_an_archive_outside_the_source_workspace_root_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    base = _per_workspace_roots(monkeypatch, tmp_path)
+    manager, memory, child, parent = _work_pair(tmp_path)
+    secret = "ESCAPED-ARCHIVE-TEXT"
+    elsewhere = _archive(tmp_path / "elsewhere" / "x.md", secret)
+    other_file = _archive(base / "other" / "Chats" / "o" / "claude" / "o.md", secret)
+    work_dir = base / "work" / "Chats" / parent.chat_id / "claude"
+    if case in ("symlink_outside", "symlink_other_root"):
+        work_dir.mkdir(parents=True, exist_ok=True)
+        link = work_dir / "link.md"
+        link.symlink_to(elsewhere if case == "symlink_outside" else other_file)
+        path = link
+    else:
+        path = elsewhere if case == "outside" else other_file
+    parent.archive_path = str(path)
+
+    assert manager._memory_pass._chat_archive(parent.chat_id) is None
+    prompt = _pass_prompt(manager, memory, child.chat_id)
+    assert "L1 unavailable" in prompt
+    assert secret not in prompt
+
+
+def test_an_unresolvable_archive_path_is_unavailable_not_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _per_workspace_roots(monkeypatch, tmp_path)
+    manager, memory, child, parent = _work_pair(tmp_path)
+    loop_a = tmp_path / "loop-a.md"
+    loop_b = tmp_path / "loop-b.md"
+    loop_a.symlink_to(loop_b)
+    loop_b.symlink_to(loop_a)
+    real_resolve = Path.resolve
+
+    def looping(self: Path, strict: bool = False) -> Path:
+        # Some platforms and Python versions raise on a symlink loop; force that here.
+        if self == loop_a:
+            raise RuntimeError("Symlink loop from the test")
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", looping)
+    monkeypatch.setattr(manager, "_locate_archive", lambda _chat_id, _stored: loop_a)
+    parent.archive_path = "placeholder.md"
+
+    assert manager._memory_pass._chat_archive(parent.chat_id) is None
+    assert "L1 unavailable" in _pass_prompt(manager, memory, child.chat_id)
+
+
+def test_flatten_receives_a_bounded_slice_of_a_huge_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _archive(tmp_path / "big.md", "z" * 1_000_000)
+    seen: list[int] = []
+    real = linked_chats.flatten_text
+
+    def recording(text: str, limit: int) -> str:
+        seen.append(len(text))
+        return real(text, limit)
+
+    monkeypatch.setattr(linked_chats, "flatten_text", recording)
+    excerpt = read_excerpt(path)
+
+    assert seen and max(seen) <= MAX_TURN_CHARS * 8
+    assert excerpt is not None and excerpt.first == "z" * (MAX_TURN_CHARS - 1) + "…"
+
+
+def test_a_closing_token_split_by_an_escape_sequence_is_withheld(tmp_path: Path) -> None:
+    path = _archive(tmp_path / "split.md", "close </linked-\x1b[0mchats> here")
+    excerpt = read_excerpt(path)
+
+    assert excerpt is not None
+    assert "withheld" in excerpt.first
+    assert "here" not in excerpt.first
+
+
+def test_the_fork_parent_is_kept_before_three_newer_attempt_chats(tmp_path: Path) -> None:
+    paths = {
+        "parent": _archive(tmp_path / "parent.md", "PARENT-MSG"),
+        "w1": _archive(tmp_path / "w1.md", "MSG-W1"),
+        "w2": _archive(tmp_path / "w2.md", "MSG-W2"),
+        "w3": _archive(tmp_path / "w3.md", "MSG-W3"),
+    }
+    candidates = (
+        LinkCandidate("parent", "2026-11-01T10:00:00+00:00", is_parent=True),
+        LinkCandidate("w1", "2026-11-04T10:00:00+00:00"),
+        LinkCandidate("w2", "2026-11-03T10:00:00+00:00"),
+        LinkCandidate("w3", "2026-11-02T10:00:00+00:00"),
+    )
+    section = section_for_chat(
+        SOURCE, candidates, workspace_of=_workspace_of, archive_of=_archives(paths)
+    )
+
+    assert section.index("PARENT-MSG") < section.index("MSG-W1") < section.index("MSG-W2")
+    assert "MSG-W3" not in section
+
+
+def test_a_fork_parent_is_not_crowded_out_by_newer_attempt_chats(tmp_path: Path) -> None:
+    (tmp_path / "memory-vault" / "work" / "Workspace").mkdir(parents=True)
+    manager = _manager(tmp_path)
+    memory = manager._memory_pass.ensure_project("work")
+    work = manager.create_project("Source work", workspace="work")
+    parent = manager.create_chat(work.project_id, title="Parent")
+    parent.archive_path = str(
+        _archive(manager._config.chats_root("work") / parent.chat_id / "claude" / "p.md", "PARENT-FIRST")
+    )
+    source = manager.create_chat(work.project_id, title="Last attempt")
+    source.forked_from_chat_id = parent.chat_id
+    store = TaskAttemptStore(
+        workspace="work",
+        runtime_dir=Path(manager._config.state_path).parent,
+        clock=lambda: datetime(2030, 1, 1, tzinfo=UTC),
+    )
+    task_id = "d" * 32
+    attempt_chats = [manager.create_chat(work.project_id, title=f"Attempt {n}") for n in range(3)]
+    for index, attempt_chat in enumerate(attempt_chats):
+        stamp = datetime(2030, 1, 2 + index, tzinfo=UTC)
+        store._clock = lambda stamp=stamp: stamp  # noqa: B023
+        attempt_chat.archive_path = str(
+            _archive(
+                manager._config.chats_root("work") / attempt_chat.chat_id / "claude" / "a.md",
+                f"ATTEMPT-{index}",
+            )
+        )
+        started = store.start(task_id=task_id, task_revision="e" * 64, chat_id=attempt_chat.chat_id)
+        store.finish(started.attempt.attempt_id, "failed")
+    store.start(task_id=task_id, task_revision="e" * 64, chat_id=source.chat_id)
+
+    prompt = _pass_prompt(manager, memory, source.chat_id)
+    assert "PARENT-FIRST" in prompt
+    assert prompt.index("PARENT-FIRST") < prompt.index("ATTEMPT-2")
+    assert "ATTEMPT-0" not in prompt

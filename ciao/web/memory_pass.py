@@ -1263,7 +1263,9 @@ class MemoryPassCoordinator:
         candidates: list[linked_chats.LinkCandidate] = []
         parent = self._host._chats.get(source.forked_from_chat_id)
         if parent is not None:
-            candidates.append(linked_chats.LinkCandidate(parent.chat_id, parent.created_at))
+            candidates.append(
+                linked_chats.LinkCandidate(parent.chat_id, parent.created_at, is_parent=True)
+            )
         workspace = self._workspace_of(source)
         if not workspace:
             return candidates
@@ -1295,10 +1297,13 @@ class MemoryPassCoordinator:
         found = self._host._locate_archive(chat_id, chat.archive_path)
         if found is None:
             return None
-        root = Path(self._host._config.chats_root(self._chat_workspace(chat_id))).resolve()
-        if not found.resolve().is_relative_to(root):
+        try:
+            root = Path(self._host._config.chats_root(self._chat_workspace(chat_id))).resolve()
+            inside = found.resolve().is_relative_to(root)
+        except (OSError, RuntimeError):
+            # A symlink loop can fail to resolve; an unresolvable archive is unavailable.
             return None
-        return found
+        return found if inside else None
 
     @staticmethod
     def _focus_section(helper: dict) -> str:
