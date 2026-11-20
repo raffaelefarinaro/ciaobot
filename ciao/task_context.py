@@ -12,6 +12,7 @@ it could close the fence. Every bound below is enforced here, not by the caller.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,12 @@ MAX_SECTION_CHARS: Final = 4_000
 _FENCE_CLOSE_PREFIX: Final = "</task-context"
 _NO_ROWS_LINE: Final = "(no task decisions shown)"
 _WHITESPACE = re.compile(r"\s+")
+#: CSI, OSC and two-character escape sequences: removed whole, not replaced.
+_ESCAPE_SEQUENCE = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])"
+)
+#: Control (NUL, ESC, C1), format (bidi overrides, tag characters), line and paragraph separators.
+_HIDDEN_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,8 +96,14 @@ def section_for_chat(store: TaskAttemptStore, vault_root: Path, chat_id: str) ->
         return render_section(TaskContext("incomplete", ("attempts unreadable",), (), 0))
     if not attempts:
         return ""
-    decisions = read_decisions_strict(vault_root)
-    return render_section(project(decisions, frozenset(attempt.attempt_id for attempt in attempts)))
+    attempt_ids = frozenset(attempt.attempt_id for attempt in attempts)
+    try:
+        decisions = read_decisions_strict(vault_root)
+    except Exception:
+        # Any failure of the decisions read leaves the pass running with an honest
+        # "incomplete" view; it must never abort the prompt build.
+        decisions = DecisionRead("unreadable", (), 0)
+    return render_section(project(decisions, attempt_ids))
 
 
 def _fit(reasons: list[str], rows: list[DecisionRow], omitted: int) -> TaskContext:
@@ -113,13 +126,20 @@ def _display(row: DecisionRow) -> DecisionRow:
 
 
 def _display_reason(text: str) -> str:
-    """One line, at most ``MAX_REASON_CHARS``; empty when the text could close the fence.
+    """One line of plain text, at most ``MAX_REASON_CHARS``; empty when it could close the fence.
 
     The closing token is checked on the whole reason, before any cut, so a token
-    past the cut point still drops the reason.
+    past the cut point still drops the reason. Terminal escape sequences are
+    removed, and every other control, format (bidi overrides, tag characters) or
+    line-separator character becomes a space, so the model sees the words and not
+    the hidden text around them.
     """
     if _FENCE_CLOSE_PREFIX in text.lower():
         return ""
+    text = _ESCAPE_SEQUENCE.sub("", text)
+    text = "".join(
+        " " if unicodedata.category(char) in _HIDDEN_CATEGORIES else char for char in text
+    )
     flat = _WHITESPACE.sub(" ", text).strip()
     if len(flat) > MAX_REASON_CHARS:
         flat = flat[: MAX_REASON_CHARS - 1] + "…"
@@ -127,5 +147,12 @@ def _display_reason(text: str) -> str:
 
 
 def _line(row: DecisionRow) -> str:
-    head = f"decision {row.id} {row.kind} by {row.actor} at {row.at}"
+    head = f"decision {row.id} {row.kind} by {_actor(row)} at {row.at}"
     return f"{head}: {row.reason}" if row.reason else head
+
+
+def _actor(row: DecisionRow) -> str:
+    """The operator, or an agent row labelled as a self-declaration, not an operator decision."""
+    if row.actor == "user":
+        return "operator"
+    return "agent (self-declared, not the operator)"

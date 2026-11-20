@@ -26,6 +26,7 @@ from typing import Any, Final, Literal
 
 from ciao.os_support.files import open_fd
 from ciao.os_support.private import open_private
+from ciao.task_attempts import _ATTEMPT_ID_RE
 
 DECISIONS_NAME = "Task-Decisions.jsonl"
 ROW_VERSION = 1
@@ -168,8 +169,10 @@ def read_decisions_strict(vault_root: Path) -> DecisionRead:
     non-blank line that is not a valid row counts toward ``malformed_lines``.
     """
     path = decisions_path(vault_root)
+    # O_NONBLOCK so a FIFO an agent left at this path is refused by the S_ISREG
+    # check below rather than blocking the synchronous prompt build forever.
     try:
-        fd = open_fd(path, os.O_RDONLY, follow_symlinks=False)
+        fd = open_fd(path, os.O_RDONLY | os.O_NONBLOCK, follow_symlinks=False)
     except FileNotFoundError:
         return DecisionRead("absent", (), 0)
     except OSError:
@@ -214,7 +217,8 @@ def _strict_row(line: str) -> DecisionRow | None:
         return None
     try:
         obj = json.loads(line)
-    except ValueError:
+    except (ValueError, RecursionError):
+        # A deeply nested line exhausts the parser's stack; it is a malformed line.
         return None
     if not isinstance(obj, dict) or set(obj) != _ROW_KEYS:
         return None
@@ -232,6 +236,10 @@ def _strict_row(line: str) -> DecisionRow | None:
     if obj["kind"] not in KINDS or obj["actor"] not in _ACTORS or obj["via"] not in _VIAS:
         return None
     if not _ID.fullmatch(obj["id"]):
+        return None
+    # An empty attempt id is a real row: a delete of a task that was never
+    # delegated. It matches no chat, so it is valid and simply never shown.
+    if obj["attempt_id"] and not _ATTEMPT_ID_RE.fullmatch(obj["attempt_id"]):
         return None
     try:
         at = datetime.fromisoformat(obj["at"])

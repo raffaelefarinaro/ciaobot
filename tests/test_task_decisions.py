@@ -135,7 +135,7 @@ def test_the_lenient_reader_still_skips_corrupt_lines_and_the_strict_one_reports
     tmp_path: Path,
 ) -> None:
     """``read_decisions`` keeps its lenient contract (decision_rules depends on it); the strict reader sees the damage."""
-    _append(tmp_path)
+    _append(tmp_path, attempt_id="1" * 32)
     path = decisions_path(tmp_path)
     path.write_text(path.read_text(encoding="utf-8") + "{not json\n", encoding="utf-8")
     assert len(read_decisions(tmp_path)) == 1
