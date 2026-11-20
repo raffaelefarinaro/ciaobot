@@ -67,6 +67,18 @@ _SEND_CAUTION_SKILLS = frozenset(
     {"gws-gmail-reply", "gws-gmail-reply-all", "gws-gmail-forward"}
 )
 
+# Patching ``attendees`` replaces the whole guest list, so every RSVP not sent
+# back is reset. Upstream does not say so; the rule goes right after the
+# prerequisite pointer so an agent that loads the skill sees it first.
+_ATTENDEE_CAUTION = (
+    "> [!CAUTION]\n"
+    "> Setting `attendees` on `events patch` or `events update` **replaces the whole guest "
+    "list and resets every RSVP**. First run `events get` for the event, then send every "
+    "existing attendee with its `email` and `responseStatus`, plus the new guest. Never send "
+    "only the new guest.\n"
+)
+_ATTENDEE_CAUTION_SKILLS = frozenset({"gws-calendar"})
+
 # "Use when" descriptions: the model picks a skill from this one line, so each
 # says when to choose it and points overlapping skills at each other.
 _DESCRIPTIONS = {
@@ -371,6 +383,10 @@ def curate_gws_skill(name: str, text: str) -> str:
             )
         if name in _SEND_CAUTION_SKILLS and _SEND_CAUTION not in text:
             text = _normalize(text) + "\n" + _SEND_CAUTION
+        if name in _ATTENDEE_CAUTION_SKILLS and _ATTENDEE_CAUTION not in text:
+            text = _PREREQUISITE_LINE.sub(
+                lambda m: f"{m.group(0)}\n{_ATTENDEE_CAUTION}", text, count=1
+            )
         if name == "gws-gmail":
             # gws-gmail-watch is not shipped (Pub/Sub scopes, blocking stream).
             text = re.sub(r"(?m)^\| \[`\+watch`\].*\n", "", text)

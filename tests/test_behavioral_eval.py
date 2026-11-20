@@ -13,6 +13,7 @@ import asyncio
 import dataclasses
 import json
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -332,7 +333,22 @@ def test_provenance_records_every_input_version() -> None:
     ).fingerprint()
 
 
-def test_provenance_fingerprint_ignores_timestamp() -> None:
+def test_provenance_fingerprint_ignores_timestamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Hermetic: code_revision() reads live `git status`, which another xdist
+    # worker can flip between the two captures. Pin it, and pin two clock
+    # readings so created_at really differs.
+    monkeypatch.setattr(be, "code_revision", lambda *a, **k: "abc123")
+    instants = iter([
+        datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
+        datetime(2026, 1, 1, 0, 0, 5, tzinfo=UTC),
+    ])
+
+    class _Clock:
+        @staticmethod
+        def now(tz: object = None) -> datetime:
+            return next(instants)
+
+    monkeypatch.setattr(be, "datetime", _Clock)
     catalog = be.load_scenarios()
     a = be.build_provenance(
         provider="claude", model="m", core_prompt_text="c", guide_text="g",
@@ -342,8 +358,7 @@ def test_provenance_fingerprint_ignores_timestamp() -> None:
         provider="claude", model="m", core_prompt_text="c", guide_text="g",
         scenario_set=catalog, tool_names=("x",),
     )
-    # Different created_at, same fingerprint: the version identity must not move.
-    assert a.to_dict()["created_at"] == b.to_dict()["created_at"] or a.fingerprint() == b.fingerprint()
+    assert a.created_at != b.created_at
     assert a.fingerprint() == b.fingerprint()
 
 
