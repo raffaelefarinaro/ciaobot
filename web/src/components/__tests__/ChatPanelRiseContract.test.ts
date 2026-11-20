@@ -14,6 +14,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent, h } from 'vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
+import { recordClassWrites } from '../../lib/testing/classWrites'
 
 const apiGet = vi.hoisted(() => vi.fn((_path: string): Promise<unknown> => Promise.reject(new Error('no server'))))
 const apiPost = vi.hoisted(() => vi.fn(() => Promise.resolve({})))
@@ -56,24 +57,6 @@ class MemoryStorage {
   setItem(key: string, value: string): void { this.values.set(key, value) }
   removeItem(key: string): void { this.values.delete(key) }
   clear(): void { this.values.clear() }
-}
-
-/** Every className write on any element, in order. Vue writes class with `el.className =`. */
-function recordClassWrites() {
-  const descriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'className')!
-  const writes: Array<{ el: Element; value: string }> = []
-  Object.defineProperty(Element.prototype, 'className', {
-    configurable: true,
-    get: descriptor.get,
-    set(this: Element, value: string) {
-      writes.push({ el: this, value: String(value) })
-      descriptor.set!.call(this, value)
-    },
-  })
-  return {
-    writes,
-    restore: () => Object.defineProperty(Element.prototype, 'className', descriptor),
-  }
 }
 
 async function seedStore() {
@@ -180,8 +163,7 @@ describe('production ChatPanel: arrival class is owned by its instance (#3086)',
       expect(second.emitted('pane-mounted')).toHaveLength(1)
       expect(announcedIdentity(second).instance).not.toBe(token1)
       expect(rootOf(second).classList.contains('chat-rise')).toBe(false)
-      const replacementWrites = log.writes.filter(w => second.element.contains(w.el) || w.el === second.element)
-      expect(replacementWrites.some(w => w.value.includes('chat-rise'))).toBe(false)
+      expect(log.writes.some(w => w.value.includes('chat-rise'))).toBe(false)
       second.unmount()
     } finally {
       log.restore()

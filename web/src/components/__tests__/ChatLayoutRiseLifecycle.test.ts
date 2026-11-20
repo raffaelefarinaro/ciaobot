@@ -6,15 +6,17 @@
 // drive ChatLayout through its real route and selection edges. The panel is a
 // stub that follows the ChatPanel contract (per-instance token, lifecycle events
 // from its real hooks, `chat-rise` on its own root only for its own token).
-// Production ChatPanel is covered in ChatPanelRiseContract.test.ts.
+// The production panel inside the production layout is covered in
+// ChatLayoutRiseProduction.test.ts; the panel's own root in ChatPanelRiseContract.test.ts.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { createMemoryHistory, createRouter } from 'vue-router'
+import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import { flushPromises, mount } from '@vue/test-utils'
-import { defineComponent, getCurrentInstance, h, onBeforeUnmount, onMounted, ref } from 'vue'
+import { defineComponent, getCurrentInstance, h, onBeforeUnmount, onMounted, ref, useAttrs } from 'vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
+import { writeBesideChat } from '../../lib/chatSplit'
 
 const neverResolvingLoad = vi.fn((): Promise<unknown> => new Promise(() => {}))
 
@@ -30,15 +32,24 @@ const EmptyStub = defineComponent({ name: 'EmptyStub', setup: () => () => h('div
 interface PaneIdentity { chatId: string; instance: symbol; beside: boolean }
 interface PaneHandle {
   identity: PaneIdentity
-  /** The layout's own listeners, as the panel received them: calling them is the real handler. */
+  /** Listener keys the layout bound on this panel (a beside pane must have no `onPane*`). */
+  listenerKeys: string[]
+  /** When set before unmount, the unmount event is held until `releaseUnmount()`. */
+  deferUnmount: boolean
+  /** Delivers the held unmount through the layout's own listener, after newer panels mounted. */
+  releaseUnmount: () => void
   onPaneMounted: (pane: PaneIdentity) => void
   onPaneUnmounted: (pane: PaneIdentity) => void
 }
 /** Every panel instance the layout mounted, in mount order. */
 let panes: PaneHandle[] = []
+/** Every render of every panel: the class it computed and the class it received as a fallthrough attribute. */
+let renders: Array<{ instance: symbol; computed: string[]; attrClass: unknown }> = []
 
 const PanelStub = defineComponent({
   name: 'PanelStub',
+  // Fallthrough is off, so the class a parent passes is observable only through `attrs` (logged below).
+  inheritAttrs: false,
   props: {
     chatId: { type: String, required: true },
     beside: { type: Boolean, default: false },
@@ -47,16 +58,28 @@ const PanelStub = defineComponent({
   emits: ['pane-mounted', 'pane-unmounted'],
   setup(props, { emit }) {
     const instance = Symbol('chat-pane')
+    const attrs = useAttrs()
     const identity = (): PaneIdentity => ({ chatId: props.chatId, instance, beside: props.beside })
     const listeners = getCurrentInstance()?.vnode.props ?? {}
-    panes.push({
+    const handle: PaneHandle = {
       identity: identity(),
+      listenerKeys: Object.keys(listeners),
+      deferUnmount: false,
+      releaseUnmount: () => (listeners.onPaneUnmounted as ((p: PaneIdentity) => void) | undefined)?.(identity()),
       onPaneMounted: pane => (listeners.onPaneMounted as ((p: PaneIdentity) => void) | undefined)?.(pane),
       onPaneUnmounted: pane => (listeners.onPaneUnmounted as ((p: PaneIdentity) => void) | undefined)?.(pane),
-    })
+    }
+    panes.push(handle)
     onMounted(() => emit('pane-mounted', identity()))
-    onBeforeUnmount(() => emit('pane-unmounted', identity()))
-    return () => h('div', { class: ['chat-panel', { 'chat-rise': !props.beside && props.riseForInstance === instance }] })
+    onBeforeUnmount(() => {
+      if (handle.deferUnmount) return
+      emit('pane-unmounted', identity())
+    })
+    return () => {
+      const rising = !props.beside && props.riseForInstance === instance
+      renders.push({ instance, computed: rising ? ['chat-panel', 'chat-rise'] : ['chat-panel'], attrClass: attrs.class })
+      return h('div', { class: ['chat-panel', { 'chat-rise': rising }] })
+    }
   },
 })
 
@@ -91,16 +114,20 @@ function chatRow(id: string) {
   return { chat_id: id, project_id: 'project-1', title: `Chat ${id}`, archived: false }
 }
 
-async function mountRise(rows: string[] = ['chat-1', 'chat-2', 'chat-3']) {
-  const router = createRouter({
+function makeRouter(): Router {
+  return createRouter({
     history: createMemoryHistory(),
     routes: [
       { path: '/', component: EmptyStub },
       { path: '/chat/:chatId?', component: EmptyStub },
+      { path: '/chat/:chatId/agent/:agentId', component: EmptyStub },
       { path: '/settings/:tab?', component: EmptyStub },
       { path: '/tasks', component: EmptyStub },
     ],
   })
+}
+
+async function mountRise(rows: string[] = ['chat-1', 'chat-2', 'chat-3'], router: Router = makeRouter()) {
   await router.push('/')
   await router.isReady()
 
@@ -122,6 +149,11 @@ async function mountRise(rows: string[] = ['chat-1', 'chat-2', 'chat-3']) {
 const panelCount = (w: { findAll: (s: string) => unknown[] }) => w.findAll('.chat-panel').length
 const risingCount = (w: { findAll: (s: string) => unknown[] }) => w.findAll('.chat-panel.chat-rise').length
 
+/** True when any render of `instance` computed or received the arrival class. */
+function everRose(instance: symbol): boolean {
+  return renders.some(r => r.instance === instance && (r.computed.includes('chat-rise') || String(r.attrClass ?? '').includes('chat-rise')))
+}
+
 describe('chat rise lifecycle (#3086)', () => {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
@@ -133,10 +165,12 @@ describe('chat rise lifecycle (#3086)', () => {
     neverResolvingLoad.mockReset()
     neverResolvingLoad.mockImplementation(() => new Promise(() => {}))
     panes = []
+    renders = []
   })
   afterEach(() => {
     vi.useRealTimers()
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it('ordering: a panel mounted on the origin route waits, then rises on the committed chat route', async () => {
@@ -200,7 +234,7 @@ describe('chat rise lifecycle (#3086)', () => {
     wrapper.unmount()
   })
 
-  it.each(['settings', 'other-chat'] as const)('cancelled by %s, the abandoned panel never rises, and a later eligible arrival still does', async (kind) => {
+  it.each(['settings', 'other-chat', 'subagent'] as const)('cancelled by %s, the abandoned panel never rises, and a later eligible arrival still does', async (kind) => {
     const release = holdChunk()
     const { router, store, wrapper } = await mountRise()
     store.activeChatId = 'chat-1'
@@ -208,6 +242,9 @@ describe('chat rise lifecycle (#3086)', () => {
     await flushPromises()
     if (kind === 'settings') {
       await router.push('/settings/providers')
+    } else if (kind === 'subagent') {
+      // A subagent route of the same chat is not the ordinary chat target.
+      await router.push('/chat/chat-1/agent/sub-1')
     } else {
       store.activeChatId = 'chat-2'
       await router.push('/chat/chat-2')
@@ -253,12 +290,33 @@ describe('chat rise lifecycle (#3086)', () => {
     const second = panes[panes.length - 1]
     expect(second.identity.instance).not.toBe(first.identity.instance)
 
-    // Old token1 unmounting after token2 mounted cannot erase token2's readiness.
-    first.onPaneUnmounted(first.identity)
     await router.push('/chat/chat-1')
     await flushPromises()
     expect(risingCount(wrapper)).toBe(1)
     expect(wrapper.find('.chat-panel.chat-rise').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('a late unmount of the replaced instance cannot erase the replacement readiness', async () => {
+    warmChunk()
+    const { router, store, wrapper } = await mountRise()
+    store.activeChatId = 'chat-1'
+    await flushPromises()
+    const first = panes[panes.length - 1]
+    // Token1's unmount reaches the layout only when released, after token2 has mounted at Home.
+    first.deferUnmount = true
+    store.activeChatId = null
+    await flushPromises()
+    store.activeChatId = 'chat-1'
+    await flushPromises()
+    const second = panes[panes.length - 1]
+    expect(second.identity.instance).not.toBe(first.identity.instance)
+    expect(risingCount(wrapper)).toBe(0)
+
+    first.releaseUnmount()
+    await router.push('/chat/chat-1')
+    await flushPromises()
+    expect(risingCount(wrapper)).toBe(1)
     wrapper.unmount()
   })
 
@@ -282,6 +340,8 @@ describe('chat rise lifecycle (#3086)', () => {
     const replacement = panes[panes.length - 1]
     expect(replacement.identity.instance).not.toBe(original.identity.instance)
     expect(wrapper.find('.chat-panel.chat-rise').exists()).toBe(false)
+    // Every render of the replacement, including its first, computed and received no arrival class.
+    expect(everRose(replacement.identity.instance)).toBe(false)
     wrapper.unmount()
   })
 
@@ -297,6 +357,34 @@ describe('chat rise lifecycle (#3086)', () => {
     await router.push('/chat/chat-1')
     await flushPromises()
     expect(risingCount(wrapper)).toBe(0)
+    wrapper.unmount()
+  })
+
+  it('the beside pane gets no lifecycle listener, and its mount starts no rise', async () => {
+    // The split needs a measured main width of at least 940 px, and jsdom has no ResizeObserver.
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(target: Element) {
+        this.callback([{ target, contentRect: { width: 1200 } } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver)
+      }
+      unobserve() {}
+      disconnect() {}
+    })
+    writeBesideChat('personal', 'chat-2')
+    warmChunk()
+    const { router, store, wrapper } = await mountRise()
+    store.activeChatId = 'chat-1'
+    await router.push('/chat/chat-1')
+    await flushPromises()
+    expect(wrapper.findAll('.chat-panel').length).toBe(2)
+    expect(risingCount(wrapper)).toBe(1)
+
+    const beside = panes.find(p => p.identity.beside)
+    expect(beside).toBeDefined()
+    expect(beside!.listenerKeys.filter(key => key.startsWith('onPane'))).toEqual([])
+    expect(everRose(beside!.identity.instance)).toBe(false)
+    // The rise is still the main panel's own, not a new one started by the beside mount.
+    expect(risingCount(wrapper)).toBe(1)
     wrapper.unmount()
   })
 
@@ -359,7 +447,8 @@ describe('chat rise lifecycle (#3086)', () => {
 
   it('a refused navigation (guard returns false) cancels the arrival, and a later successful visit does not rise', async () => {
     warmChunk()
-    const { router, store, wrapper } = await mountRise()
+    const router = makeRouter()
+    const { store, wrapper } = await mountRise(undefined, router)
     let refuse = true
     const removeGuard = router.beforeEach(to => (refuse && to.path === '/chat/chat-1' ? false : undefined))
     store.activeChatId = 'chat-1'
@@ -420,5 +509,27 @@ describe('chat rise lifecycle (#3086)', () => {
     await flushPromises()
     expect(risingCount(wrapper)).toBe(1)
     wrapper.unmount()
+  })
+
+  it('the navigation observers are unregistered on layout unmount', async () => {
+    const router = makeRouter()
+    const afterEachOriginal = router.afterEach.bind(router)
+    const onErrorOriginal = router.onError.bind(router)
+    const removers: Array<ReturnType<typeof vi.fn>> = []
+    vi.spyOn(router, 'afterEach').mockImplementation(guard => {
+      const remove = vi.fn(afterEachOriginal(guard))
+      removers.push(remove)
+      return remove
+    })
+    vi.spyOn(router, 'onError').mockImplementation(handler => {
+      const remove = vi.fn(onErrorOriginal(handler))
+      removers.push(remove)
+      return remove
+    })
+    const { wrapper } = await mountRise(undefined, router)
+    expect(removers).toHaveLength(2)
+    expect(removers.every(remove => remove.mock.calls.length === 0)).toBe(true)
+    wrapper.unmount()
+    expect(removers.every(remove => remove.mock.calls.length === 1)).toBe(true)
   })
 })

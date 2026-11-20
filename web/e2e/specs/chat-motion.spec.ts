@@ -58,7 +58,9 @@ test('a chat opened from Home rises into place when its panel arrives, then sett
     await expect(page).toHaveURL(/\/chat\/alpha-chat-1$/)
 
     // Held: the skeleton is immediate, and no real panel or rise exists, before and after 1000 ms more.
-    await page.clock.pauseAt(new Date(Date.now() + 1000))
+    // Read the page's own clock: the page clock has advanced past the Node wall clock.
+    const pageNow = await page.evaluate(() => Date.now())
+    await page.clock.pauseAt(new Date(pageNow + 1000))
     const skeleton = page.locator('[role="status"][aria-label="Loading conversation"]')
     await expect(skeleton).toBeVisible()
     await expect(page.locator('.chat-panel')).toHaveCount(0)
@@ -103,6 +105,10 @@ test('under reduced motion a chat opened from Home arrives without the rise', as
   })
   expect(motion.animationName).toBe('none')
   expect(['none', 'matrix(1, 0, 0, 1, 0, 0)']).toContain(motion.transform)
+  // Forcing the arrival class on the panel: without the reduced-motion rule it would animate, so the CSS alone must hold it still.
+  await page.locator('.chat-panel').first().evaluate(el => el.classList.add('chat-rise'))
+  const forced = await page.locator('.chat-panel').first().evaluate(el => getComputedStyle(el).animationName)
+  expect(forced).toBe('none')
 })
 
 test('archiving a chat opens the next one in the title rail order instead of Home', async ({ page }) => { await page.setViewportSize({ width: 1280, height: 800 }); await isolate(page, 'motion-archive'); await boot(page, '/chat/alpha-chat-1', COMPOSER)

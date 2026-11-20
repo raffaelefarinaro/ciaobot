@@ -1250,9 +1250,12 @@ function onMainPaneUnmounted(pane: { chatId: string; instance: symbol; beside: b
 // cancels the arrival for that chat: no route edge is guaranteed in these cases.
 function refuseChatNavigation(to: RouteLocationNormalized, fromPath: string): void {
   if (to.path === fromPath) return
-  const targetChatId = to.path.startsWith('/chat/') ? String(to.params.chatId ?? '') : ''
+  // Only the ordinary chat route (`/chat/<id>`) names a chat target; a subagent route under it does not.
+  const targetChatId = /^\/chat\/([^/]+)$/.exec(to.path)?.[1] ?? ''
   if (!targetChatId || targetChatId !== store.activeChatId) return
   const pending = pendingRise.value
+  // routeEpoch is kept with the origin path: any route edge bumps it, so "still at the origin"
+  // means no edge since arming, while a return to the same path after an edge does not match.
   if (pending && pending.chatId === targetChatId && route.path === pending.originPath && routeEpoch === pending.originEpoch) {
     pendingRise.value = null
     failedSelectionEpoch = selectionEpoch
