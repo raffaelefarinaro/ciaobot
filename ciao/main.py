@@ -6,11 +6,11 @@ import asyncio
 import logging
 import os
 import signal
-import subprocess
 import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, field
+from functools import partial
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping
@@ -663,6 +663,36 @@ async def _refire_permission_push(
             logger.exception("Permission re-fire failed for %s", chat_id)
 
 
+# Startup phase ids for providers whose id predates the registry phase naming.
+_STARTUP_PHASE_IDS = {"claude": "connect_claude_code"}
+
+
+def provider_startup_phase(provider_id: str) -> str:
+    """The startup phase that reports one registry provider's readiness."""
+    return _STARTUP_PHASE_IDS.get(provider_id, f"connect_{provider_id}")
+
+
+async def run_provider_startup_check(
+    tracker: StartupTracker, phase: str, probe: Callable[[], Mapping[str, Any]]
+) -> None:
+    """Settle one provider's startup phase from its status probe.
+
+    A probe that raises fails the phase with its exception type when the message
+    is empty (a timeout has none), so the phase never reads "not found: " with
+    nothing after it.
+    """
+    try:
+        status = await asyncio.to_thread(probe)
+    except Exception as exc:  # a probe must never block startup
+        tracker.fail(phase, f"check failed: {str(exc) or type(exc).__name__}")
+        return
+    detail = str(status.get("detail") or "")
+    if status.get("ok"):
+        tracker.done(phase, detail or "connected")
+    else:
+        tracker.fail(phase, detail or "not connected")
+
+
 async def _run_server_locked(
     config: CiaoConfig,
     *,
@@ -726,65 +756,22 @@ async def _run_server_locked(
         engine_pid=engine_pid,
     )
 
-    # Start provider checks in the background
-    tracker.start("connect_claude_code")
-
-    async def check_claude_code():
-        try:
-            # Resolve ``claude`` against the login-shell PATH, since launchd
-            # omits ~/.local/bin and other tool dirs.
-            from ciao.tool_path import resolve_tool
-            cli = resolve_tool("claude")
-            if not cli:
-                tracker.fail(
-                    "connect_claude_code",
-                    "claude CLI not found on PATH",
-                )
-                return
-            proc = await asyncio.create_subprocess_exec(
-                cli, "--version",
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=3.0)
-            if proc.returncode == 0:
-                version = stdout.decode().strip()
-                tracker.done("connect_claude_code", f"connected: {version}")
-            else:
-                tracker.fail("connect_claude_code", f"failed: exit {proc.returncode}")
-        except Exception as e:
-            tracker.fail("connect_claude_code", f"not found: {e}")
-
-    asyncio.create_task(check_claude_code())
-
-    # Every other runtime provider reports readiness through its registry
-    # status probe, so a new provider gets a startup phase for free. Claude
-    # keeps the hand-written check above because its phase id
-    # (`connect_claude_code`) predates the registry and is a UI contract.
+    # Every runtime provider reports readiness through its registry status
+    # probe, the same probe its Settings card renders, so the startup phase and
+    # the card cannot disagree. Claude's phase id predates the registry and is a
+    # UI contract (StartupView.vue), hence the explicit id.
     from ciao import provider_registry
 
-    def _start_provider_check(descriptor) -> None:
-        phase = f"connect_{descriptor.id}"
-        tracker.start(phase)
-
-        async def check() -> None:
-            try:
-                status = await asyncio.to_thread(
-                    descriptor.status_probe, os.environ
-                )
-                detail = str(status.get("detail") or "")
-                if status.get("ok"):
-                    tracker.done(phase, detail or "connected")
-                else:
-                    tracker.fail(phase, detail or "not connected")
-            except Exception as exc:  # a probe must never block startup
-                tracker.fail(phase, f"not found: {exc}")
-
-        asyncio.create_task(check())
-
     for descriptor in provider_registry.descriptors():
-        if descriptor.id == "claude" or not descriptor.status_probe_path:
+        if not descriptor.status_probe_path:
             continue
-        _start_provider_check(descriptor)
+        phase = provider_startup_phase(descriptor.id)
+        tracker.start(phase)
+        asyncio.create_task(
+            run_provider_startup_check(
+                tracker, phase, partial(descriptor.status_probe, os.environ)
+            )
+        )
 
     # Rename each root's legacy CLAUDE.md onto AGENTS.md, once. Both providers
     # discover AGENTS.md natively now, but Claude Code only falls back to it
