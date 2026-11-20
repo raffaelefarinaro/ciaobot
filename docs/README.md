@@ -21,7 +21,7 @@ Ciaobot is a persistent personal workspace for Claude Code and OpenCode: your ag
 
 ## Operating Ciaobot
 
-- [Install and update](../README.md#install): the engine installer and migration from the retired macOS app.
+- [Install and update](../README.md#install): the installers, and migration from the retired macOS app.
 - [Memory backup](https://www.raffaelefarinaro.com/ciaobot/memory.html#backup): connect a private repository and inspect backup status.
 - [Remote access](https://www.raffaelefarinaro.com/ciaobot/remote.html): browsers, the installed PWA, and HTTPS access from other devices.
 - [Linux hosting](LINUX.md): systemd deployment and server operation.
