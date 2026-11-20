@@ -88,6 +88,7 @@ export const inventory: InventoryEntry[] = [
       "web/src/components/NeedsYouCard.vue",
       "web/src/components/ProjectSidebar.vue",
       "web/src/components/ProposalReviewPanel.vue",
+      "web/src/components/ShellCard.vue",
       "web/src/components/SubagentCard.vue"
     ],
     "variants": [
@@ -957,6 +958,88 @@ export const inventory: InventoryEntry[] = [
     "loading": {
       "status": "none",
       "detail": "No fetch: the card is built from the live stream or a history row that is already loaded. Live cards grow while the turn runs; history cards are fixed."
+    },
+    "migration": {
+      "status": "unassessed",
+      "note": "Inventory admission does not approve a design migration."
+    }
+  },
+  {
+    "id": "components-shell-card",
+    "name": "ShellCard",
+    "family": "Chat, messages, composer, activity and context",
+    "kind": "component",
+    "owner": {
+      "path": "web/src/components/ShellCard.vue",
+      "anchor": "<template>"
+    },
+    "sources": [],
+    "consumers": [
+      "web/src/components/ChatPanel.vue",
+      "web/src/components/ChatTurnActivity.vue"
+    ],
+    "variants": [
+      "running",
+      "done",
+      "failed",
+      "background running",
+      "long output",
+      "old row"
+    ],
+    "variantNotes": "One card per shell call, keyed by its tool_use_id: open while running, folded once it settles. The command is the title in mono; the exit code sits beside the state word; a backgrounded shell carries a badge until a later result settles it. The output tail is text in a scrolling pre, never HTML.",
+    "states": [
+      {
+        "name": "running",
+        "coverage": "covered",
+        "storyIds": [
+          "shell-card--running"
+        ],
+        "note": "Open, with the working glyph and the output so far."
+      },
+      {
+        "name": "done",
+        "coverage": "covered",
+        "storyIds": [
+          "shell-card--done"
+        ],
+        "note": "Folded by default, the Done label and the exit code, no body until the reader opens it."
+      },
+      {
+        "name": "failed",
+        "coverage": "covered",
+        "storyIds": [
+          "shell-card--failed"
+        ],
+        "note": "Folded, the Failed label, the alert glyph, the failed border and a non-zero exit code."
+      },
+      {
+        "name": "background running",
+        "coverage": "covered",
+        "storyIds": [
+          "shell-card--background-running"
+        ],
+        "note": "Running with the 'running in the background' badge and its tooltip; no exit code yet."
+      },
+      {
+        "name": "long output",
+        "coverage": "covered",
+        "storyIds": [
+          "shell-card--long-output"
+        ],
+        "note": "A long command wraps and a long tail scrolls inside the card; folded when done."
+      },
+      {
+        "name": "old row",
+        "coverage": "covered",
+        "storyIds": [
+          "shell-card--old-row"
+        ],
+        "note": "A history row with no exit code or output reads as a plain done shell."
+      }
+    ],
+    "loading": {
+      "status": "none",
+      "detail": "No fetch: the card is built from the live stream or a history row that is already loaded. A live card updates while the turn runs; history cards are fixed."
     },
     "migration": {
       "status": "unassessed",

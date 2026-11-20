@@ -40,6 +40,10 @@
           <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 11h14v8H5zM12 4v3M9 15h.01M15 15h.01" /></svg></span>
           <SubagentCard :card="step.subagent" @open-file="emit('open-file', $event)" />
         </div>
+        <div v-else-if="step.tool_name === '_shell' && step.shell" class="trace-step trace-step--shell">
+          <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 4 4-4 4M11 16h8" /></svg></span>
+          <ShellCard :card="step.shell" />
+        </div>
         <div v-else-if="step.tool_name === '_filecard'" class="trace-step trace-step--file">
           <span class="trace-step-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l3 3v15H6z" /></svg></span>
           <button
@@ -138,6 +142,7 @@
  */
 import AppIcon from './AppIcon.vue'
 import SubagentCard from './SubagentCard.vue'
+import ShellCard from './ShellCard.vue'
 import {
   activityLines,
   fileCardBasename,
