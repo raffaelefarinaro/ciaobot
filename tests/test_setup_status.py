@@ -2430,10 +2430,15 @@ def test_claude_cli_without_the_acp_adapter_is_not_ready(monkeypatch) -> None:
     row = claude_status_probe({}, config_path=Path("/nonexistent"))
 
     assert row["ok"] is False
+    # One message for the card and the startup phase: the card's own button
+    # is named, and the npm line is the fallback. Never the circular
+    # "use Install in Settings → Providers" text, which is shown inside it.
     assert row["detail"] == (
         "Claude Code is installed, but the ACP adapter (claude-agent-acp) is not. "
-        "Use Install in Settings → Providers."
+        "Install the ACP adapter with the button below, or run: "
+        "npm install -g @agentclientprotocol/claude-agent-acp@0.108.1"
     )
+    assert "Settings → Providers" not in row["detail"]
     assert row["command"] == "npm install -g @agentclientprotocol/claude-agent-acp@0.108.1"
     assert row["terminal_action"] == "claude-install"
 

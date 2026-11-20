@@ -431,3 +431,42 @@ def test_recent_job_failures_filters_before_limit() -> None:
 
     assert [failure["error"] for failure in failures] == ["owned failure"]
     assert len(failures) <= 5
+
+
+def test_error_count_is_the_main_error_log_and_nothing_else(tmp_path: Path) -> None:
+    # The Settings summary ("N error-log line(s)") and "Fix issues in chat" both
+    # read the main server_errors.log tail. Rotated and other logs must not
+    # leak into the count when the main file is empty.
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "server_errors.log").write_text("", encoding="utf-8")
+    (runtime / "server_errors.log.1").write_text(
+        "2026-10-03 ERROR root: old\n" * 5, encoding="utf-8"
+    )
+    (runtime / "server_debug.log").write_text("DEBUG x\n" * 3, encoding="utf-8")
+    (runtime / "ciao.stderr.log").write_text("ERROR stderr\n" * 4, encoding="utf-8")
+
+    report = build_issue_report(tmp_path)
+
+    assert report["error_log_lines"] == 0
+    assert report["has_issues"] is False
+    assert report["report_text"] == "(no runtime issues logged)"
+
+
+def test_error_count_matches_the_text_fix_in_chat_is_given(tmp_path: Path) -> None:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "server_errors.log").write_text(
+        "2026-11-20 ERROR root: current\nTraceback (most recent call last):\n",
+        encoding="utf-8",
+    )
+    (runtime / "server_errors.log.1").write_text(
+        "2026-10-03 ERROR root: rotated\n" * 5, encoding="utf-8"
+    )
+
+    report = build_issue_report(tmp_path)
+
+    assert report["error_log_lines"] == 2
+    assert sum(1 for line in report["error_log"].splitlines() if line.strip()) == 2
+    assert "current" in report["report_text"]
+    assert "rotated" not in report["report_text"]
