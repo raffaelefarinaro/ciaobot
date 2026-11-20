@@ -26,6 +26,7 @@ from ciao.models import (
     tool_call_facts,
     tool_work_dirs,
 )
+from ciao.tool_summary import summarize_claude_tool_input
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +35,23 @@ _SNAKE_KEY = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$")
 # metadata): their keys are data, so they pass through untouched.
 _OPAQUE_KEYS = frozenset({"rawInput", "rawOutput", "_meta"})
 _COMMAND_SUMMARY_CHARS = 200
+# A tool summary, a subagent description and a child title are shown on one line: bounded.
+_SUMMARY_CHARS = 200
+_SUBAGENT_TYPE_CHARS = 64
 _FILE_KINDS = frozenset({"edit", "delete", "move"})
 # A child session id names a node in the transcript: bounded, and free of control characters.
 _CHILD_ID_CHARS = 128
 _LOG_KIND = re.compile(r"[a-z_]{1,40}")
+# Claude's subagent tool (`Task` before it was renamed to `Agent`) and OpenCode's `subagent`.
+_AGENT_TOOLS = frozenset({"Agent", "Task"})
+
+
+def bounded_text(value: object, limit: int = _SUMMARY_CHARS) -> str:
+    """``value`` when it is a string, without Unicode control characters, cut to ``limit``; else ``""``."""
+    if not isinstance(value, str):
+        return ""
+    kept = "".join(ch for ch in value if not unicodedata.category(ch).startswith("C"))
+    return kept[:limit]
 
 
 def child_tool_id(child_id: object) -> str | None:
@@ -140,11 +154,39 @@ class TurnText:
 
 @dataclass(slots=True)
 class _Call:
-    name: str
+    name: str  # the ToolCall ``name`` field, else its title, else its kind
     kind: str
     raw_input: Any
     locations: list[dict[str, Any]]
     parent: str | None
+    claude_tool: str  # ``_meta.claudeCode.toolName``, "" when the adapter sends none
+    named: bool  # ``name`` came from the ToolCall ``name`` field, so a title does not replace it
+    rendered: tuple[str, str] | None = None  # (tool_name, tool_input) last announced
+
+
+def _claude_tool(update: Mapping[str, Any]) -> str:
+    meta = update.get("_meta")
+    claude = meta.get("claudeCode") if isinstance(meta, Mapping) else None
+    tool = claude.get("toolName") if isinstance(claude, Mapping) else None
+    return tool if isinstance(tool, str) else ""
+
+
+def _display_name(call: _Call) -> str:
+    """The canonical tool name a call is shown under: ``Agent`` and ``Skill`` for the subagent and skill tools."""
+    if call.name == "subagent" or (call.kind == "think" and call.claude_tool in _AGENT_TOOLS):
+        return "Agent"
+    if call.name == "skill" or call.claude_tool == "Skill":
+        return "Skill"
+    return call.name
+
+
+def _agent_summary(raw: Any) -> str:
+    """``[type] description`` as the live Agent summary formats it. The prompt is never kept."""
+    if not isinstance(raw, Mapping):
+        return ""
+    description = bounded_text(raw.get("description"))
+    subtype = bounded_text(raw.get("subagent_type") or raw.get("agent"), _SUBAGENT_TYPE_CHARS)
+    return bounded_text(summarize_claude_tool_input("Agent", {"description": description, "subagent_type": subtype}))
 
 
 class UpdateNormalizer:
@@ -158,6 +200,10 @@ class UpdateNormalizer:
         self.compacted = False
         self._calls: dict[str, _Call] = {}
         self._unknown_logged: set[str] = set()
+        # OpenCode subagents: the call id each subagent description belongs to, until a child
+        # session claims it, and the subagent call id each child session runs under.
+        self._subagent_by_description: dict[str, str] = {}
+        self._child_anchors: dict[str, str] = {}
 
     def parent_of(self, update: Mapping[str, Any]) -> str | None:
         meta = update.get("_meta")
@@ -171,10 +217,38 @@ class UpdateNormalizer:
         child = meta.get("opencode/child-session")
         if isinstance(child, Mapping):
             # opencode tags a child's frames with the child session itself
-            # (`{id, parentID, depth, title}`). That id is the child's own tool node
-            # (`child:<id>`, see OpencodeAcpProvider), the same id the ext path nests under.
-            return child_tool_id(child.get("id"))
+            # (`{id, parentID, depth, title}`). Its anchor is the subagent call that started it.
+            return self.session_anchor(child.get("id"))
         return None
+
+    def session_anchor(self, session_id: object) -> str | None:
+        """The tool id a child session's events nest under: its subagent call, else its own ``child:`` node."""
+        if isinstance(session_id, str) and session_id in self._child_anchors:
+            return self._child_anchors[session_id]
+        return child_tool_id(session_id)
+
+    def linked_call(self, session_id: str) -> str | None:
+        """The subagent call id a child session runs under, or None when no call claims it."""
+        return self._child_anchors.get(session_id)
+
+    def link_child(self, session_id: str, title: str) -> None:
+        """Tie a child session to the subagent call whose description equals its title, once.
+
+        opencode sends the child's ``created`` status before the launch acknowledgement that
+        names the session, so the description is the first link. The acknowledgement's
+        ``sessionID`` (:meth:`_link_session`) confirms it.
+        """
+        if session_id in self._child_anchors:
+            return
+        call_id = self._subagent_by_description.pop(title, None)
+        if call_id is not None:
+            self._child_anchors[session_id] = call_id
+
+    def _link_session(self, session_id: str, call_id: str) -> None:
+        self._child_anchors[session_id] = call_id
+        for description, pending in list(self._subagent_by_description.items()):
+            if pending == call_id:
+                del self._subagent_by_description[description]
 
     def record_prompt_usage(self, usage: Mapping[str, Any] | None) -> None:
         """Keep the ``usage`` of a ``PromptResponse`` (token counts) as strings."""
@@ -228,17 +302,20 @@ class UpdateNormalizer:
         call_id = u.get("toolCallId")
         if not isinstance(call_id, str) or not call_id:
             return []
-        title = u.get("title")
         kind = u.get("kind")
+        named = _str_field(u, "name") is not None
         call = _Call(
-            name=(title if isinstance(title, str) and title else "") or (kind if isinstance(kind, str) and kind else "") or "tool",
+            name=_wire_name(u),
             kind=kind if isinstance(kind, str) else "",
             raw_input=u.get("rawInput"),
             locations=_locations(u.get("locations")),
             parent=self.parent_of(u),
+            claude_tool=_claude_tool(u),
+            named=named,
         )
         self._calls[call_id] = call
-        return [self._tool_use(call_id, call, u)]
+        self._remember_subagent(call_id, call)
+        return self._announce(call_id, call)
 
     def _tool_call_update(self, u: dict[str, Any]) -> list[StreamEvent]:
         call_id = u.get("toolCallId")
@@ -248,47 +325,68 @@ class UpdateNormalizer:
         parent = self.parent_of(u)
         if status in ("completed", "failed"):
             known = self._calls.pop(call_id, None)
+            # A subagent's first result only acknowledges the launch: the child keeps running.
+            background = known is not None and _display_name(known) == "Agent" and _is_launch_ack(u)
+            if background:
+                session = _launched_session(u)
+                if session is not None:
+                    self._link_session(session, call_id)
             return [
                 ToolUseEvent(
                     type="tool_result",
                     tool_use_id=call_id,
                     parent_tool_use_id=parent if parent is not None else (known.parent if known else None),
                     is_error=status == "failed",
+                    background=background,
                 )
             ]
         call = self._calls.get(call_id)
         if call is None:
             return []
-        changed = False
-        title = u.get("title")
-        if isinstance(title, str) and title and title != call.name:
+        name_field = _str_field(u, "name")
+        title = _str_field(u, "title")
+        if name_field is not None:
+            call.name = name_field
+            call.named = True
+        elif title is not None and not call.named:
             call.name = title
-            changed = True
-        if u.get("rawInput") is not None and u.get("rawInput") != call.raw_input:
+        if u.get("rawInput") is not None:
             call.raw_input = u["rawInput"]
-            changed = True
         if "locations" in u:
-            locations = _locations(u["locations"])
-            if locations != call.locations:
-                call.locations = locations
-                changed = True
+            call.locations = _locations(u["locations"])
         kind = u.get("kind")
-        if isinstance(kind, str) and kind and kind != call.kind:
+        if isinstance(kind, str) and kind:
             call.kind = kind
-            changed = True
+        call.claude_tool = _claude_tool(u) or call.claude_tool
+        self._remember_subagent(call_id, call)
         # The PWA reconciles a re-announced call by tool_use_id (projects.ts
-        # `_pushToolLine`), so a fuller title or input replaces the first line.
-        return [self._tool_use(call_id, call, u)] if changed else []
+        # `_pushToolLine`). A re-announce is sent only when the rendered name or input changed.
+        return self._announce(call_id, call)
 
-    def _tool_use(self, call_id: str, call: _Call, u: Mapping[str, Any]) -> ToolUseEvent:
+    def _remember_subagent(self, call_id: str, call: _Call) -> None:
+        """Keep the description of a subagent call until a child session claims it."""
+        if _display_name(call) != "Agent" or not isinstance(call.raw_input, Mapping):
+            return
+        if call_id in self._child_anchors.values():
+            # A repeated update after the child is linked must not offer the description again.
+            return
+        description = bounded_text(call.raw_input.get("description"))
+        if description:
+            self._subagent_by_description[description] = call_id
+
+    def _announce(self, call_id: str, call: _Call) -> list[StreamEvent]:
+        """One tool_use per rendered (name, input). Returns nothing when a re-announce renders the same."""
+        event = self._tool_use(call_id, call)
+        rendered = (event.tool_name, event.tool_input)
+        if rendered == call.rendered:
+            return []
+        call.rendered = rendered
+        return [event]
+
+    def _tool_use(self, call_id: str, call: _Call) -> ToolUseEvent:
         raw = call.raw_input
-        facts_name = call.name
-        meta = u.get("_meta")
-        claude = meta.get("claudeCode") if isinstance(meta, Mapping) else None
-        if isinstance(claude, Mapping) and isinstance(claude.get("toolName"), str):
-            facts_name = claude["toolName"]
-        elif call.kind == "execute":
-            facts_name = "Bash"
+        name = _display_name(call)
+        facts_name = call.claude_tool or ("Bash" if call.kind == "execute" else name)
         input_chars, control_surface = tool_call_facts(facts_name, raw)
         touches = (
             [{"file_path": loc["path"], "action": "edit"} for loc in call.locations]
@@ -297,8 +395,8 @@ class UpdateNormalizer:
         )
         return ToolUseEvent(
             type="tool_use",
-            tool_name=call.name,
-            tool_input=_summary(call, raw),
+            tool_name=name,
+            tool_input=_summary(call, raw, name),
             tool_use_id=call_id,
             parent_tool_use_id=call.parent,
             file_touches=touches,
@@ -369,14 +467,54 @@ def _locations(raw: Any) -> list[dict[str, Any]]:
     return out
 
 
-def _summary(call: _Call, raw: Any) -> str:
+def _summary(call: _Call, raw: Any, name: str) -> str:
+    """The one-line input shown for a call: its subagent or skill facts, else command, path or raw input.
+
+    The tool name is never the fallback: a call with no input shows an empty summary.
+    """
+    if name == "Agent":
+        return _agent_summary(raw)
+    if name == "Skill":
+        skill = (raw.get("name") or raw.get("skill")) if isinstance(raw, Mapping) else None
+        return bounded_text(summarize_claude_tool_input("Skill", {"skill": bounded_text(skill)}))
     if isinstance(raw, Mapping):
         command = raw.get("command")
         if isinstance(command, str) and command:
             return command[:_COMMAND_SUMMARY_CHARS]
     if call.locations:
         return str(call.locations[0]["path"])
-    return call.name
+    if isinstance(raw, Mapping) and raw:
+        return bounded_text(summarize_claude_tool_input(name, dict(raw)))
+    return ""
+
+
+def _str_field(u: Mapping[str, Any], key: str) -> str | None:
+    value = u.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _wire_name(u: Mapping[str, Any]) -> str:
+    """The ToolCall ``name`` field when the schema sends one, else the title, else the kind, else ``tool``."""
+    return _str_field(u, "name") or _str_field(u, "title") or _str_field(u, "kind") or "tool"
+
+
+def _launch_metadata(u: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    raw = u.get("rawOutput")
+    meta = raw.get("metadata") if isinstance(raw, Mapping) else None
+    return meta if isinstance(meta, Mapping) else None
+
+
+def _is_launch_ack(u: Mapping[str, Any]) -> bool:
+    """opencode's result for a subagent sent in the background: ``metadata.status == "running"``."""
+    meta = _launch_metadata(u)
+    return meta is not None and meta.get("status") == "running"
+
+
+def _launched_session(u: Mapping[str, Any]) -> str | None:
+    """The child session id a launch acknowledgement names, when it is a usable id."""
+    meta = _launch_metadata(u)
+    session = meta.get("sessionID") if meta is not None else None
+    return session if child_tool_id(session) is not None else None
 
 
 def result_event(

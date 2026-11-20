@@ -1349,3 +1349,93 @@ async def test_delete_session_runs_the_blocking_file_delete_off_the_event_loop(
 
     assert ran_on, "the CLI session delete was not attempted"
     assert ran_on[0] != threading.get_ident()
+
+
+# -- opencode subagent run, replayed from the captured wire frames (#3140, subagents fix) -----
+
+_SUBAGENT_RUN = Path(__file__).parent / "fixtures" / "acp" / "opencode_subagent_run.jsonl"
+_RUN_ROOT = "ses_e0815d817ffeh7L7ocNuPWytBu"
+_RUN_CALL = "call_6dad53e1b72a40bab9ed61ca"
+_RUN_CHILD = "ses_e0815c31bffezDWIb2jb1MkEwf"
+
+
+def _replay(provider: OpencodeAcpProvider, normalizer: UpdateNormalizer, lines: list[dict[str, Any]]) -> list[Any]:
+    events: list[Any] = []
+    for message in lines:
+        if message.get("method") == "session/update":
+            events.extend(normalizer.feed(message["params"]["update"]))
+        elif message.get("method") == _CHILD:
+            events.extend(provider.ext_update(normalizer, _CHILD, message["params"]))
+    return events
+
+
+def _run_lines() -> list[dict[str, Any]]:
+    return [json.loads(line) for line in _SUBAGENT_RUN.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_opencode_subagent_run_nests_the_child_under_its_call(tmp_path: Path) -> None:
+    events = _replay(OpencodeAcpProvider(tmp_path), UpdateNormalizer(OPENCODE, _RUN_ROOT), _run_lines())
+    tool_events = [event for event in events if isinstance(event, ToolUseEvent)]
+    # The subagent is one node: no `Subagent` node opens for a child that a launch claimed.
+    assert not [event for event in tool_events if event.tool_name == "Subagent"]
+    calls = [event for event in tool_events if event.tool_use_id == _RUN_CALL]
+    # Announced once with no input, then once with the description: the rendered input changed.
+    assert [(event.type, event.tool_name, event.tool_input) for event in calls if event.type == "tool_use"] == [
+        ("tool_use", "Agent", ""),
+        ("tool_use", "Agent", "[general] Sleep 5 then reply done"),
+    ]
+    # The launch acknowledgement is not the completion; the terminal child status is.
+    results = [(event.background, event.subagent_status, event.is_error) for event in calls if event.type == "tool_result"]
+    assert results == [(True, "", False), (False, "completed", False)]
+    child_calls = [event for event in tool_events if (event.tool_use_id or "").startswith(_RUN_CHILD)]
+    assert {event.tool_name for event in child_calls if event.type == "tool_use"} == {"shell"}
+    assert all(event.parent_tool_use_id == _RUN_CALL for event in child_calls)
+    child_text = [event.text for event in events if isinstance(event, AssistantTextDelta) and event.parent_tool_use_id == _RUN_CALL]
+    assert child_text == ["done"]
+    # The prompt the subagent was given is not journalled.
+    assert not any("Your only job" in event.tool_input for event in tool_events if isinstance(event.tool_input, str))
+
+
+def test_opencode_launch_session_id_links_a_child_the_title_does_not_name(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    normalizer.feed({"sessionUpdate": "tool_call", "toolCallId": "call_a", "name": "subagent", "kind": "think",
+                     "title": "subagent", "rawInput": {"agent": "general", "description": "Scan repo"}})
+    ack = normalizer.feed({"sessionUpdate": "tool_call_update", "toolCallId": "call_a", "status": "completed",
+                           "rawOutput": {"metadata": {"sessionID": "ses_b", "status": "running"}}})
+    assert [(event.type, event.background) for event in ack] == [("tool_result", True)]
+    # The child's title does not match the description: only its launch's sessionID can link it.
+    frame = {"rootSessionId": "ses_root", "childSessionId": "ses_b", "parentSessionId": "ses_root", "depth": 1,
+             "title": "Something else", "type": "update",
+             "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "hi"}}}
+    events = provider.ext_update(normalizer, _CHILD, frame)
+    assert [(event.type, event.parent_tool_use_id) for event in events] == [("text", "call_a")]
+    done = provider.ext_update(normalizer, _CHILD, _child_status("ses_b", "failed", title="Something else"))
+    assert [(event.type, event.tool_use_id, event.subagent_status, event.is_error) for event in done] == [
+        ("tool_result", "call_a", "failed", True),
+    ]
+    assert not any(getattr(event, "tool_use_id", "") == "child:ses_b" for event in events + done)
+
+
+def test_repeated_subagent_update_does_not_claim_a_later_child(tmp_path: Path) -> None:
+    provider = OpencodeAcpProvider(tmp_path)
+    normalizer = UpdateNormalizer(OPENCODE, "ses_root")
+    normalizer.feed({"sessionUpdate": "tool_call", "toolCallId": "call_r", "name": "subagent", "kind": "think",
+                     "title": "subagent", "rawInput": {}})
+    launch = {"sessionUpdate": "tool_call_update", "toolCallId": "call_r", "status": "in_progress",
+              "rawInput": {"agent": "general", "description": "Scan"}}
+    normalizer.feed(launch)
+    provider.ext_update(normalizer, _CHILD, _child_status("ses_first", "created", title="Scan"))
+    # The same in_progress update arrives again after the first child has claimed the call.
+    normalizer.feed(dict(launch))
+    # A second child with the same title belongs to no call: it keeps its own node.
+    second = provider.ext_update(normalizer, _CHILD, _child_status("ses_second", "created", title="Scan"))
+    assert [(event.type, event.tool_name, event.tool_use_id) for event in second] == [
+        ("tool_use", "Subagent", "child:ses_second"),
+    ]
+
+
+def test_opencode_spec_routes_the_unprefixed_child_notification() -> None:
+    # The SDK routes only `_`-prefixed notifications to ext_notification; this is the one name
+    # the connection adds, exactly as opencode sends it.
+    assert OPENCODE.extension_notifications == (_CHILD,)
