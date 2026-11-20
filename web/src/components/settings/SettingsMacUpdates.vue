@@ -181,6 +181,11 @@ function toggleAutomatic() {
 .mac-updates-detail { color: var(--fg3); line-height: 1.5; max-width: 72ch; }
 .mac-updates-actions { padding: var(--space-3) 0 0; }
 .mac-updates-actions .btn-small { min-height: var(--touch); }
+/* Same disabled treatment as the other secondary buttons (SettingsView's
+   .btn-secondary:disabled): reduced emphasis, a not-allowed cursor, and no hover
+   highlight, so a disabled button never reads as an enabled one. */
+.mac-updates-actions .btn-small:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+.mac-updates-actions .btn-small:disabled:hover { background: var(--bg3); border-color: var(--border); }
 @media (max-width: 600px) {
   .mac-updates-row { flex-wrap: wrap; gap: var(--space-2) var(--space-4); }
   .mac-updates-key { width: auto; }

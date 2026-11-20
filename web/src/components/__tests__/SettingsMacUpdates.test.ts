@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import SettingsMacUpdates from '../settings/SettingsMacUpdates.vue'
 import { MAC_APP_SETTINGS_CHANGED } from '../../lib/macAppSettings'
@@ -218,5 +220,40 @@ describe('SettingsMacUpdates', () => {
     window.dispatchEvent(new Event(MAC_APP_SETTINGS_CHANGED))
     await flushPromises()
     expect(bridge.postMessage.mock.calls.length).toBe(reads)
+  })
+})
+
+describe('SettingsMacUpdates disabled check button', () => {
+  // jsdom does not apply the component's scoped stylesheet, so this guard reads
+  // the disabled rule from the component's own <style> block and checks the
+  // properties that make a disabled button read as disabled.
+  const source = readFileSync(join(__dirname, '..', 'settings', 'SettingsMacUpdates.vue'), 'utf8')
+  const styleBody = source.slice(source.indexOf('<style'))
+  const rule = (selector: string) => {
+    const match = styleBody.match(new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{([^}]*)\\}`))
+    return match ? match[1] : null
+  }
+
+  it('is rendered as a small button that carries the native disabled attribute', async () => {
+    install({ ...UP, canCheck: false })
+    await mountRow()
+    const button = checkButton()
+    expect(button.classList.contains('btn-small')).toBe(true)
+    expect(button.disabled).toBe(true)
+  })
+
+  it('dims the disabled button and shows a not-allowed cursor', () => {
+    const body = rule('.mac-updates-actions .btn-small:disabled')
+    expect(body, 'missing .mac-updates-actions .btn-small:disabled rule').not.toBeNull()
+    const opacity = Number(body!.match(/opacity:\s*([\d.]+)/)?.[1])
+    expect(opacity).toBeGreaterThan(0)
+    expect(opacity).toBeLessThan(1)
+    expect(body).toMatch(/cursor:\s*not-allowed/)
+  })
+
+  it('does not highlight on hover while disabled', () => {
+    const body = rule('.mac-updates-actions .btn-small:disabled:hover')
+    expect(body, 'missing disabled hover rule').not.toBeNull()
+    expect(body).toMatch(/background:\s*var\(--bg3\)/)
   })
 })
