@@ -55,6 +55,15 @@ describe('router', () => {
     expect(router.currentRoute.value.name).toBe('tasks')
   })
 
+  it('sends an unknown address to Home rather than a blank page', async () => {
+    const router = makeRouter()
+    await router.push('/usage')
+    expect(router.currentRoute.value.path).toBe('/')
+    expect(router.currentRoute.value.name).toBe('chat')
+    await router.push('/settings/advanced/nope?x=1')
+    expect(router.currentRoute.value.path).toBe('/')
+  })
+
   it('routes the usage page', async () => {
     const router = makeRouter()
     await router.push('/stats')

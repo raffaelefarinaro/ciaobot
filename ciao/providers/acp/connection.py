@@ -26,10 +26,11 @@ import time
 from collections import deque
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 import acp
 from acp.connection import StreamDirection, StreamEvent
+from acp.router import MessageRouter, Route
 from acp.schema import ClientCapabilities
 
 from ciao import __version__
@@ -192,6 +193,43 @@ def agent_base_env(unset: tuple[str, ...]) -> dict[str, str]:
     return env
 
 
+class _ExtensionClient(Protocol):
+    """The client side that receives extension notifications (``AgentClient.ext_notification``)."""
+
+    async def ext_notification(self, method: str, params: dict[str, Any]) -> None: ...
+
+
+def connect_client(
+    client: _ExtensionClient,
+    stdin: asyncio.StreamWriter,
+    stdout: asyncio.StreamReader,
+    *,
+    observers: list[Any],
+    extension_notifications: tuple[str, ...],
+) -> acp.ClientSideConnection:
+    """``acp.connect_to_agent`` over stdio, plus the spec's unprefixed extension notifications.
+
+    The SDK hands only ``_``-prefixed methods to ``ext_notification``, and answers any other
+    unknown notification with method-not-found. opencode sends ``opencode/session/child_update``
+    with no underscore, so each name in ``extension_notifications`` gets a route on the
+    connection's own router that hands its payload to ``client.ext_notification`` under the name
+    as sent. Nothing else is routed here.
+    """
+    conn = acp.connect_to_agent(client, stdin, stdout, observers=observers)  # type: ignore[arg-type]
+    # The SDK builds the router inside ClientSideConnection and keeps no public handle on it.
+    router = cast(MessageRouter, conn._conn._handler)
+    for name in extension_notifications:
+        router.add_route(Route(method=name, func=_extension_route(client, name), kind="notification"))
+    return conn
+
+
+def _extension_route(client: _ExtensionClient, name: str) -> Any:
+    async def handle(params: Any) -> None:
+        await client.ext_notification(name, params if isinstance(params, dict) else {})
+
+    return handle
+
+
 class AcpConnection:
     def __init__(
         self,
@@ -254,8 +292,12 @@ class AcpConnection:
         watch.start()
         flushed = _FlushedResponses()
         try:
-            conn = acp.connect_to_agent(
-                client, process.stdin, process.stdout, observers=[flushed.observe]
+            conn = connect_client(
+                client,
+                process.stdin,
+                process.stdout,
+                observers=[flushed.observe],
+                extension_notifications=spec.extension_notifications,
             )
         except BaseException:
             await asyncio.shield(asyncio.ensure_future(_stop(process, watch, stderr_task)))

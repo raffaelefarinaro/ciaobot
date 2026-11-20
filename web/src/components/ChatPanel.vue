@@ -7732,9 +7732,10 @@ details[open] > .activity-summary::before {
 
 .thinking-levels {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-2);
+  min-width: 0;
   padding: 2px 4px;
 }
 
@@ -7752,6 +7753,9 @@ details[open] > .activity-summary::before {
 .permission-modes__choices {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* Every tile in the grid is as tall as the tallest one, so a two-line
+     description (Plan) does not leave its neighbour (Bypass) shorter. */
+  grid-auto-rows: 1fr;
   gap: 4px;
 }
 
@@ -7794,10 +7798,16 @@ details[open] > .activity-summary::before {
   color: var(--fg2);
 }
 
-/* Segmented control, the same shape as Settings → Providers' thinking picker. */
+/* Segmented control, the same shape as Settings → Providers' thinking picker.
+   One row at the popover width: segments keep their size and the row scrolls
+   sideways rather than wrapping Max onto a second line. */
 .thinking-levels__chips {
-  display: inline-flex;
-  flex-wrap: wrap;
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  max-width: 100%;
+  min-width: 0;
+  scrollbar-width: thin;
   padding: 2px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -7817,6 +7827,11 @@ details[open] > .activity-summary::before {
   font-size: var(--text-sm);
   cursor: pointer;
   transition: background 120ms var(--ease), color 120ms var(--ease);
+}
+
+.thinking-levels__chips .thinking-chip {
+  flex: 1 0 auto;
+  justify-content: center;
 }
 
 .thinking-chip:hover {

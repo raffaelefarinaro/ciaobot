@@ -3,6 +3,7 @@ import { expect, waitFor } from 'storybook/test'
 import SettingsEngineLogin from '../components/settings/SettingsEngineLogin.vue'
 import type { FixtureRoute } from './fixtureBoundary'
 import { connectedRender, json, neverSettles } from './settingsGeneralFixture'
+import { setDesktopClientForStory } from '../lib/pwaPlatform'
 
 const LOGIN = '/api/service/login'
 const REFUSED = 'storybook-alpha refused the change'
@@ -215,5 +216,33 @@ export const Narrow: Story = {
   play: async ({ canvas }) => {
     const button = await canvas.findByRole('button', { name: DISABLE })
     expect(button.getBoundingClientRect().width).toBeLessThanOrEqual(390)
+  },
+}
+
+// The Mac app owns Start at Login: the row says so and offers no CLI command.
+// The desktop flag is read when the owner mounts, so it is set for this story
+// alone and cleared when its play function ends.
+const macApp = loginStory([() => json(status({
+  installed: false,
+  enabled: null,
+  can_change: false,
+  reason: 'storybook-alpha is not installed for this user.',
+  setup_command: 'storybook-alpha service setup',
+}))])
+export const MacAppNoCliService: Story = {
+  parameters: macApp.parameters,
+  render: (args, context) => {
+    setDesktopClientForStory(true)
+    return macApp.render!(args, context)
+  },
+  play: async ({ canvas }) => {
+    try {
+      expect(await canvas.findByText('Managed by Ciaobot for Mac')).toBeTruthy()
+      expect(canvas.getByText('Ciaobot for Mac starts the engine at login from its menu bar: Settings → Start at Login.')).toBeTruthy()
+      expect(canvas.queryByText('storybook-alpha service setup')).toBeNull()
+      expect(canvas.queryByRole('button', { name: 'Copy' })).toBeNull()
+    } finally {
+      setDesktopClientForStory(false)
+    }
   },
 }

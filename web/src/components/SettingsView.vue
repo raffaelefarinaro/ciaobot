@@ -280,13 +280,18 @@
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">This host</p>
-              <p class="hint">
+              <p v-if="canSyncProgram" class="hint">
                 The Ciaobot program on this computer: send pending changes to its repository, or
                 restart to update it. Your memory and notes are backed up separately, below.
+              </p>
+              <p v-else class="hint">
+                Restart the engine to reload the Ciaobot program on this computer. Updates come with
+                Ciaobot for Mac on macOS; on Linux, see docs/LINUX.md. Your memory and notes are backed up separately, below.
               </p>
             </div>
             <div class="settings-card-header-actions">
               <button
+                v-if="canSyncProgram"
                 class="btn-secondary btn-small"
                 @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()"
                 :disabled="!!actionPending"
@@ -651,7 +656,7 @@
                 </div>
                 <!-- What the CLI brings on its own. Long chip lists, so they sit
                      behind a disclosure, collapsed by default. -->
-                <details class="provider-brings">
+                <details v-if="conn.auth !== 'not_installed'" class="provider-brings">
                   <summary>
                     What this CLI brings ({{ providerBringsCounts(conn) }})
                   </summary>
@@ -1784,6 +1789,12 @@ watch(
   },
   { immediate: true },
 )
+
+/** Sync with the program's repository is for a developer's checkout: dev mode,
+ *  or an install that is an editable deployable checkout. A packaged install
+ *  (the Mac app, the installer, a plain package) only restarts. Fails closed
+ *  while the host state is unknown. */
+const canSyncProgram = computed(() => localStatus.value?.dev_mode === true || localStatus.value?.restart_only === false)
 
 /** Summary line for the collapsed "What this CLI brings" disclosure. */
 function providerBringsCounts(conn: ProviderConnection): string {

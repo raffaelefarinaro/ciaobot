@@ -199,6 +199,15 @@ const stateView = computed<{ label: string; tone: Tone; detail: string }>(() => 
   const current = status.value
   if (!current) return { label: 'Unknown', tone: 'off', detail: '' }
   const reason = current.reason.trim()
+  // In the Mac app the app owns the login item, so there is no CLI service to
+  // install and no command to show: the row says where the setting lives.
+  if (desktop && current.installed === false) {
+    return {
+      label: 'Managed by Ciaobot for Mac',
+      tone: 'off',
+      detail: 'Ciaobot for Mac starts the engine at login from its menu bar: Settings → Start at Login.',
+    }
+  }
   if (current.installed === false) {
     return {
       label: 'Not installed for this user',
@@ -230,7 +239,8 @@ const actionLabel = computed(() => (
   status.value?.enabled ? 'Disable at sign-in' : 'Enable at sign-in'
 ))
 
-const setupCommand = computed(() => status.value?.setup_command || '')
+// The app has no CLI command to offer: its own Start at Login is the setting.
+const setupCommand = computed(() => (desktop ? '' : status.value?.setup_command || ''))
 
 const setupLead = computed(() => (
   status.value?.installed === false
