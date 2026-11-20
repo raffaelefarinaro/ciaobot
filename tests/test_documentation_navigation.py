@@ -110,25 +110,26 @@ def test_home_and_readme_share_the_primary_slogan() -> None:
     assert f"**{slogan}**" in readme
 
 
-def test_site_install_picker_offers_macos_and_linux() -> None:
-    # macOS offers the native client plus the engine one-liner, and Linux opens
-    # its dedicated administrator guide.
-    mac = "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh"
+def test_site_install_offers_the_mac_app_and_the_linux_one_liner() -> None:
+    # The Mac button goes to the latest release (2.x ships the app there, not in
+    # ciaobot-mac). Linux gets the one-liner and its administrator guide. There is
+    # no platform picker, so nothing in the markup can swap the command.
+    one_liner = "curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh"
     linux = "https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md"
+    latest = 'data-mac-client href="https://github.com/raffaelefarinaro/ciaobot/releases/latest"'
     for relative in ("site/index.html", "site/guide.html"):
         text = (ROOT / relative).read_text(encoding="utf-8")
-        assert "data-install" in text and "data-install-os" in text, relative
-        assert f'data-cmd="{mac}"' in text, relative
+        assert latest in text, relative
+        assert "Download Ciaobot for Mac" in text, relative
+        assert "Apple silicon, macOS 13+" in text, relative
+        assert f'<code id="install-cmd">{one_liner}</code>' in text, relative
+        assert f'href="{linux}"' in text, relative
+        assert "data-install-os" not in text and "data-cmd" not in text, relative
+        assert "ciaobot-mac" not in text, relative
         assert "install.ps1" not in text, relative
-        assert 'value="windows"' not in text, relative
         assert "docs/WINDOWS.md" not in text, relative
-        assert f'<code id="install-cmd">{mac}</code>' in text, relative
-        assert f'data-url="{linux}"' in text and ">Linux</option>" in text, relative
-        assert "data-mac-client" in text and "ciaobot-mac/releases" in text, relative
-        noscript = text.split("<noscript>", 1)[1]
-        assert linux in noscript, relative
     script = (ROOT / "site/assets/site.js").read_text(encoding="utf-8")
-    assert "[data-install-os]" in script and "option.dataset.cmd" in script
-    assert "option.dataset.url" in script and "data-install-guide" in script
-    assert "ciaobot-mac/releases?per_page=20" in script and "browser_download_url" in script
-    assert "'windows'" not in script
+    assert "api.github.com/repos/raffaelefarinaro/ciaobot/releases/latest" in script
+    assert "releases?per_page" not in script and "ciaobot-mac" not in script
+    assert r"/^Ciaobot-.*\.dmg$/" in script and "browser_download_url" in script
+    assert "[data-install-os]" not in script and "'windows'" not in script

@@ -178,6 +178,23 @@ plainly and stop.
 
 ## Step 4 — Cut it
 
+**Rehearse first.** Dispatch `release-rehearsal.yml` from `develop` and read the
+run to green before cutting:
+
+```bash
+gh workflow run release-rehearsal.yml --ref develop
+```
+
+It builds the artifact set a release would publish (the engine wheel, the
+stamped `install.sh`, the signed engine manifest and its signature) and proves
+it on a clean Linux VM. It creates nothing and uploads to no release. Two
+preconditions. GitHub offers `workflow_dispatch` only for a workflow file on the
+default branch, `main`, so the run is unavailable until the file is there. The
+`release-signing` Environment must hold the signing secrets, with deployment
+restricted to `develop` and `main`. For 2.0.0, also verify once on the local
+Windows test VM that the 1.10 update rollback is clean; the maintainer accepted
+that risk on the condition that it is checked before the cut.
+
 Plan-only first. It writes nothing, so it is safe against a dirty tree:
 
 ```bash
@@ -312,24 +329,34 @@ findings land as inline comments.
    `GITHUB_TOKEN` release would **not** fire `release: published`).
 3. That fires `publish.yml`:
    - `build-engine` (macos) — builds the PWA and the engine wheel, verifies the
-     wheel in a clean environment, signs the engine manifest with the release
-     minisign key, and attaches exactly three engine assets: the wheel, the
-     manifest and its signature.
-     Since #653 there is no app archive, no updater feed, no native verifier and
-     no bundled runtime.
-   - `release-smoke` (Linux, `ubuntu-24.04`) — runs the published `install.sh`
-     one-liner with a workspace, checks `ciao --version`, the `ciaobot` systemd
-     unit and `/api/startup-status`, then re-runs the same one-liner with no
-     flags as a same-version reinstall (not an upgrade) and checks that the
-     unit restarted under a new main PID. `legacy-update` (`macos-latest`) runs
-     only for 2.0.0, where `LEGACY_MANIFEST_VERSION` is set: it runs
-     `scripts/legacy-update-gate.py` from the tagged checkout against the
-     published assets with the pinned 1.x wheel. It stages the release and
-     never applies it.
-4. A follow-up job merges `main` back into `develop`.
+     wheel in a clean environment, stamps the Linux `install.sh` with the wheel's
+     version and sha256, and attaches `install.sh` and the wheel to every
+     release. Since #653 there is no app archive, no updater feed, no native
+     verifier and no bundled runtime.
+     For 2.0.0 only (`LEGACY_MANIFEST_VERSION`) it also writes the 1.x engine
+     manifest, signs it with the release minisign key, and attaches the manifest
+     and its signature. It then checks the published files against the list the
+     release must hold: two assets on a normal release, four on 2.0.0.
+   - `release-smoke` (Linux, `ubuntu-24.04`; job `linux-install` in
+     `release-smoke.yml`, which `publish.yml` calls) runs the published
+     `install.sh` one-liner with a workspace, checks `ciao --version`, the
+     `ciaobot` systemd unit and `/api/startup-status`, then re-runs the same
+     one-liner with no flags as a same-version reinstall (not an upgrade) and
+     checks that the unit restarted under a new main PID.
+   - `legacy-update` (`macos-latest`, the second job in `release-smoke.yml`)
+     runs only for 2.0.0, where
+       `LEGACY_MANIFEST_VERSION` is set: it runs `scripts/legacy-update-gate.py`
+       from the tagged checkout against the published assets with the pinned 1.x
+       wheel. It stages the release and never applies it.
+4. **The Mac DMG, by hand.** Once `publish.yml` is green, the operator attaches
+   `Ciaobot-<version>.dmg` to the release and publishes the update feeds, in the
+   order `skills/release-mac/SKILL.md` section 6 gives. CI does not sign or
+   notarize the app, so 2.0.0 does not wait on CI signing.
+5. A follow-up job merges `main` back into `develop`.
 
 No manual tag, no `gh release create`, no tap push, no separate desktop release —
-one merge ships the engine.
+one merge ships the engine and `install.sh`. The DMG is the one artifact attached
+by hand.
 
 End users install it with the release URL, which does not change between
 releases — the same one-liner now installs the engine:
@@ -354,8 +381,8 @@ only spawns after `Release on main` finishes creating the tag, so you would
 watch the *previous* release's run. Wait for a `Release on main` run on the
 merge commit, then take the `publish` run newer than it.
 
-After it ships, confirm the tag, the GitHub release, the wheel, the signed
-manifest and both installer names. `pgrep` proves a process
+After it ships, confirm the tag, the GitHub release, the wheel and `install.sh`
+(plus the signed manifest and its signature on 2.0.0), then attach the DMG. `pgrep` proves a process
 exists, not that the engine runs — the smoke test checks the startup API and the
 installed `ciao`.
 
@@ -473,15 +500,32 @@ Release-cutting traps. Bugs in the code are not here — file them.
 - **Confirm which branch you are on before committing.** A long release session
   drifts. Check `git branch --show-current`. Renaming a local branch does **not**
   move an open PR's head — that needs a new PR.
-- **The installer must fail closed.** The engine manifest signature and the
-  wheel's digest are both verified before extraction. Never turn a verification
-  error into a warning or add an unsigned fallback.
+- **The 1.x manifest must stay until the maintainer retires 1.x updates.** Only
+  the 2.0.0 release ships the 1.x engine manifest and its signature
+  (`LEGACY_MANIFEST_VERSION`, set in `publish.yml` and `release-smoke.yml`). A
+  1.10 install stages from that manifest, so removing it, or moving the value to
+  another version, strands every 1.x install still in use. Retiring it is the
+  maintainer's decision, not cleanup.
+- **The legacy gate is the proof.** A green `linux-install` shows the one-liner
+  works. It does not show that 1.x engines can reach 2.0.0. Only `legacy-update`
+  runs the pinned 1.x updater against the published files. If it is red, or
+  skipped on 2.0.0, the 1.x path is unproven whatever else is green.
+- **Release-on-main makes the release "latest" before the DMG exists.** Between
+  the merge and the DMG step, the download page points at a release with no
+  DMG. Attach the DMG before anyone is told the release is out.
+- **`publish-release.sh` ignores `--notes` on an existing release.** The release
+  already exists after `release-on-main`, so the DMG digest goes into the notes
+  by hand: `gh release edit vX.Y.Z --notes-file <file>`.
+- **A 0.5.x fix cut in the old repo never reaches 2.x clients.** 2.x clients read
+  the update feed in this repository, so a fix cut in `raffaelefarinaro/ciaobot-mac`
+  reaches only the clients that still read that feed. Cut 2.x fixes here (see
+  `skills/release-mac/SKILL.md`).
 - **Engine cold start is the installer's job** — if the Linux `release-smoke`
   fails on the service or startup check, fix the installer or the unit, not the
   workflow. Do not skip the installer's `ciao service install` step or add flags
   the one-liner does not take. That would hide a genuine cold-start defect.
-- **Release propagation lag.** Verify the GitHub release contains the wheel, its
-  signed manifest and both installer names before diagnosing an
-  installer failure.
+- **Release propagation lag.** Verify the GitHub release contains `install.sh`
+  and the wheel (and, on 2.0.0, the signed manifest and its signature) before
+  diagnosing an installer failure.
 - **Absolute repo_root.** Pass an absolute path — shell cwd persistence between
   tool calls is unreliable.

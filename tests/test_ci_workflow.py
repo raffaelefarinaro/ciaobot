@@ -708,6 +708,52 @@ def test_ciao_release_skill_describes_the_linux_smoke_and_the_2_0_0_legacy_job()
         assert gone not in skill, gone
 
 
+def test_ciao_release_skill_rehearses_first_and_attaches_the_dmg_by_hand() -> None:
+    root = Path(__file__).parents[1]
+    skill = (root / "skills" / "ciao-release" / "SKILL.md").read_text(encoding="utf-8")
+    assert "gh workflow run release-rehearsal.yml --ref develop" in skill
+    assert "skills/release-mac/SKILL.md" in skill and "Ciaobot-<version>.dmg" in skill
+    # 2.0.0 keeps the 1.x manifest, and the legacy job is the only proof of it.
+    assert "The 1.x manifest must stay until the maintainer retires 1.x updates." in skill
+    assert "The legacy gate is the proof." in skill
+    assert "exactly three engine assets" not in skill
+    assert "The installer must fail closed" not in skill
+
+
+def test_release_notes_skill_carries_the_fixed_2_0_0_heads_up() -> None:
+    root = Path(__file__).parents[1]
+    notes = (root / "skills" / "ciao-release-notes" / "SKILL.md").read_text(encoding="utf-8")
+    windows = (
+        "**Windows is no longer supported.** Ciaobot 2.0 runs on macOS (the Ciaobot app) "
+        "and on Linux servers (the one-line installer). Windows installs stay on 1.10 and "
+        "do not update; move your workspace folder to a Mac or Linux machine to keep using "
+        "it. **Mac:** Ciaobot is now one app download that includes the engine; after this "
+        "update, Home shows where to get it. **Linux:** `curl -fsSL "
+        "https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh`; "
+        "existing source installs keep working (docs/LINUX.md)."
+    )
+    assert windows in notes
+    for label in (
+        "**OpenCode needs 2.3.2 or newer.**",
+        "**Restarts and updates no longer wait for background work.**",
+        "reinstall them by hand",
+        "**Messages always queue.**",
+        "**No background panel.**",
+        "**MCP is managed in each agent's CLI.**",
+    ):
+        assert label in notes, label
+
+
+def test_upkeep_row_for_the_1x_manifest_is_dated_and_open() -> None:
+    upkeep = (Path(__file__).parents[1] / "docs" / "UPKEEP.md").read_text(encoding="utf-8")
+    rows = [line for line in upkeep.splitlines() if line.startswith("| 1.x engine manifest")]
+    assert len(rows) == 1
+    cells = [cell.strip() for cell in rows[0].split("|")]
+    assert cells[1] == "1.x engine manifest still published (retire when?)"
+    assert cells[4].startswith("2026-11-20 —")
+    assert cells[5].startswith("watching")
+
+
 def test_first_party_install_command_stays_install_sh() -> None:
     # The public one-liner did not change name in the transition release (#651):
     # install.sh installs the engine now, so every existing link and every

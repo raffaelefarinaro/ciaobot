@@ -42,27 +42,17 @@
       <div class="hero-copy">
         <h1>Your agents do the work. <span>Ciaobot remembers.</span></h1>
         <p class="lead">One persistent workspace for Claude Code and OpenCode—with projects, files, automations and memory in Markdown you own.</p>
-        <div class="install" data-install>
-          <a class="btn btn-primary install-client" data-mac-client href="https://github.com/raffaelefarinaro/ciaobot-mac/releases">Download Ciaobot for Mac</a>
-          <p class="install-note install-client-note" data-mac-client-note>Native client for Apple silicon, macOS 13+. It can install the engine for you.</p>
+        <div class="install">
+          <a class="btn btn-primary install-client" data-mac-client href="https://github.com/raffaelefarinaro/ciaobot/releases/latest">Download Ciaobot for Mac</a>
+          <p class="install-note install-client-note">Apple silicon, macOS 13+. The native app can install a local engine or connect to an existing server.</p>
           <div class="install-head">
-            <p class="install-label" data-install-label>Or install only the engine on macOS in Terminal:</p>
+            <p class="install-label">Linux server (Ubuntu 24.04): install the engine with one command</p>
           </div>
-          <div class="install-row">
-            <label class="install-os" hidden>
-              <span class="visually-hidden">Platform</span>
-              <select data-install-os>
-                <option value="mac" data-label="Or install only the engine on macOS in Terminal:" data-cmd="curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh">macOS</option>
-                <option value="linux" data-label="Install on Ubuntu 24.04 with the dedicated administrator guide:" data-url="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md">Linux</option>
-              </select>
-            </label>
-            <div class="install-box" data-install-command>
-              <code id="install-cmd">curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh</code>
-              <button type="button" data-copy="install-cmd" aria-label="Copy the install command">Copy</button>
-            </div>
-            <a class="btn btn-primary install-guide" data-install-guide hidden href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md">Open Linux install guide</a>
+          <div class="install-box">
+            <code id="install-cmd">curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh</code>
+            <button type="button" data-copy="install-cmd" aria-label="Copy the install command">Copy</button>
           </div>
-          <noscript><p class="install-note">For Ubuntu 24.04, use the <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md">Linux guide</a>.</p></noscript>
+          <p class="install-note"><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md">Read the Linux install guide</a></p>
         </div>
       </div>
       <figure class="shot">
