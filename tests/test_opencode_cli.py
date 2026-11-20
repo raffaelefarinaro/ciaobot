@@ -304,13 +304,29 @@ def test_credential_count_reads_the_v2_json_listing(monkeypatch):
 
 def test_status_reports_skills_and_plugins_from_the_server(monkeypatch):
     """Settings lists what the opencode CLI brings; the V2 server's list routes
-    are the source, minus built-in and failed plugins."""
+    are the source, minus built-in and failed plugins.
+
+    Rows are trimmed from OpenCode 2.3.2's ``/api/skill`` (paths sanitised). Built-in
+    skills are the ``embedded`` source, which the server reports as ``skill://<id>/SKILL.md``;
+    user and plugin skills are absolute file paths.
+    """
     from types import SimpleNamespace
 
     import ciao.opencode_cli as mod
 
     routes = {
-        "/api/skill": [{"id": "opencode", "path": "/builtin/opencode.md"}, {"id": "pdf"}],
+        "/api/skill": [
+            {"id": "opencode", "name": "opencode", "autoinvoke": True,
+             "path": "skill://opencode/SKILL.md"},
+            {"id": "report", "name": "report", "autoinvoke": True,
+             "path": "skill://report/SKILL.md"},
+            {"id": "browser", "name": "browser", "autoinvoke": True,
+             "path": "skill://browser/SKILL.md"},
+            {"id": "ego-browser", "name": "ego-browser", "autoinvoke": True,
+             "path": "/home/user/.agents/skills/ego-browser/SKILL.md"},
+            {"id": "pdf", "name": "pdf", "autoinvoke": True,
+             "path": "/home/user/.claude/skills/synced/pdf/SKILL.md"},
+        ],
         "/api/plugin": [
             {"id": "opencode.config.worktree", "source": {"type": "builtin"}, "state": {"status": "active"}},
             {"id": "review", "source": {"type": "local"}, "state": {"status": "active"}},
@@ -337,8 +353,8 @@ def test_status_reports_skills_and_plugins_from_the_server(monkeypatch):
 
     status = mod.opencode_login_status()
 
-    assert status["skills"] == ["pdf", "review"]
-    assert status["bundled_skills"] == ["opencode"]
+    assert status["skills"] == ["ego-browser", "pdf", "review"]
+    assert status["bundled_skills"] == ["opencode", "report", "browser"]
     assert "mcps" not in status
     assert not any(len(cmd) > 1 and cmd[1] == "api" for cmd in run_calls)
 
