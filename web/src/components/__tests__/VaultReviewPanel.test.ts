@@ -124,6 +124,28 @@ describe('VaultReviewPanel', () => {
     wrapper.unmount()
   })
 
+  it('drops a row resolved elsewhere when the window is focused again (#3020)', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000)
+    apiGet.mockResolvedValueOnce({ candidates: [candidate()], trashed: [] })
+    const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    expect(wrapper.findAll('.vr-row')).toHaveLength(1)
+
+    // A backlink added outside the panel resolves the candidate on the server.
+    apiGet.mockResolvedValueOnce({ candidates: [], trashed: [] })
+    now.mockReturnValue(1_000_000 + 60_000)
+    window.dispatchEvent(new Event('focus'))
+    await flushPromises()
+
+    expect(apiGet).toHaveBeenCalledTimes(2)
+    expect(wrapper.findAll('.vr-row')).toHaveLength(0)
+    wrapper.unmount()
+    // A closed panel stops listening: a later focus must not fetch.
+    window.dispatchEvent(new Event('focus'))
+    await flushPromises()
+    expect(apiGet).toHaveBeenCalledTimes(2)
+  })
+
   it('shows an empty state when nothing is flagged', async () => {
     apiGet.mockResolvedValue({ candidates: [], trashed: [] })
     const wrapper = mount(VaultReviewPanel, { global: { plugins: [pinia] } })
