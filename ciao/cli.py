@@ -6227,11 +6227,21 @@ def _curation_begin_command(args: argparse.Namespace) -> int:
         return 1
 
     from ciao.curation_run import _category_cluster_items
-    from ciao.entity_types import load_entity_types
+    from ciao.memory_receipts import QueueLockError
+    from ciao.vocabulary_proposals import CategorySidecarError
 
-    categories = tuple(
-        _category_cluster_items(vault, registry=load_entity_types(registry_root))
-    )
+    try:
+        categories = tuple(
+            _category_cluster_items(vault, holder=lease.holder, registry_root=registry_root)
+        )
+    except CurationBusy:
+        # Lost while the worklist was being published: nothing was written
+        # after the loss, and the replacement lease (if any) is left alone.
+        print("curation lease lost while building the worklist", file=sys.stderr)
+        return CURATION_BUSY_EXIT
+    except (CurationStateError, CategorySidecarError, QueueLockError, OSError) as exc:
+        print(f"curation category proposals failed: {exc}", file=sys.stderr)
+        return 1
     try:
         result = _curation_plan(
             args, category_items=categories, category_generation_attempted=True

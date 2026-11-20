@@ -55,6 +55,7 @@ import os
 import stat
 import tempfile
 import threading
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -252,7 +253,9 @@ def lock_path_for(resolved_key: str) -> Path:
 _queue_lock_path = lock_path_for
 
 
-def write_queue_atomically(path: Path, text: str) -> None:
+def write_queue_atomically(
+    path: Path, text: str, *, before_publish: Callable[[], None] | None = None
+) -> None:
     """Replace a proposal queue via a temp file and ``os.replace``.
 
     In-place ``write_text`` truncates before it writes, so a partial write or an
@@ -260,13 +263,20 @@ def write_queue_atomically(path: Path, text: str) -> None:
     temp file plus an atomic rename means a reader (or a crash) sees either the
     complete old file or the complete new one. Callers must hold
     :func:`queue_lock` for the path.
+
+    ``before_publish``, when given, runs after the new bytes are staged and
+    immediately before the replacement. Raising from it refuses the write: the
+    staged file is removed and the old queue stays exactly as it was.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.write.tmp")
     try:
         tmp.write_text(text, encoding="utf-8", newline="")
+        if before_publish is not None:
+            before_publish()
         os.replace(tmp, path)
-    except OSError:
+    except BaseException:
+        # Clean the staged file on a refusal too, without masking the error.
         try:
             tmp.unlink(missing_ok=True)
         except OSError:

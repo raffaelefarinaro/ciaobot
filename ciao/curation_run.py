@@ -1266,8 +1266,14 @@ def _learnings_cleanup_items(
     return ([item] if item is not None else []), " ".join(notes)
 
 
+def _holder_live_unlocked(vault_root: Path, *, holder: str, now: datetime) -> bool:
+    """Whether *holder* owns a live lease. The caller holds the state lock."""
+    held = _live_lease(_load(state_path(vault_root)), now)
+    return held is not None and held.get("holder") == holder
+
+
 def _category_cluster_items(
-    vault_root: Path, *, registry: EntityTypeRegistry
+    vault_root: Path, *, holder: str, registry_root: Path
 ) -> list[WorklistItem]:
     """File a ``[category]`` proposal per unlisted ``type:`` with a cluster.
 
@@ -1281,25 +1287,47 @@ def _category_cluster_items(
     nights running is one item rather than a new one each time, and a cluster
     the owner resolves makes its item disappear from the next worklist.
 
-    ``registry`` is the AGENT vault root's category list, not one loaded from
-    *vault_root*: on an install that has not re-rooted, ``entity-types.yaml`` is
-    a different directory from the notes, and reading the notes root left every
-    category the owner had just accepted looking unlisted — queued again the next
-    night, then refused as a duplicate on accept. It arrives from
-    :func:`build_worklist` rather than being loaded here for the same reason the
-    accept resolves its root through the config.
+    ``registry_root`` is the AGENT vault root, not *vault_root*: on an install
+    that has not re-rooted, ``entity-types.yaml`` is a different directory from
+    the notes, and reading the notes root left every category the owner had just
+    accepted looking unlisted — queued again the next night, then refused as a
+    duplicate on accept. The CLI passes the root it resolved.
+
+    Two phases, so no lock is held across the vault scan. The scan is read-only
+    and advisory: a failure there reports no work. Publication then takes the
+    proposal queue lock and, inside it, the curation state lock (that order, and
+    no other), re-checks *holder* against the live lease, and only then writes.
+    A holder that lost its lease raises :class:`CurationBusy` before any write.
     """
+    from ciao.entity_types import load_entity_types
+    from ciao.memory_receipts import queue_lock
     from ciao.vocabulary_proposals import (
         CATEGORY_CLUSTER_THRESHOLD,
-        generate_category_proposals,
+        publish_category_candidates,
+        scan_category_candidates,
     )
 
     root = Path(vault_root)
+    registry = load_entity_types(registry_root)
     try:
-        queued = generate_category_proposals(root, registry=registry)
+        candidates = scan_category_candidates(root, registry=registry)
     except Exception:  # noqa: BLE001 — an advisory pass must not fail the plan
         logger.warning("curation: category cluster scan failed", exc_info=True)
         return []
+    if not candidates:
+        return []
+
+    def assert_live() -> None:
+        if not _holder_live_unlocked(root, holder=holder, now=datetime.now(UTC)):
+            raise CurationBusy("this run no longer holds the curation lease")
+
+    with queue_lock(root / PROPOSALS_RELATIVE), _state_lock(root):
+        queued = publish_category_candidates(
+            root,
+            candidates,
+            registry=load_entity_types(registry_root),
+            assert_live=assert_live,
+        )
     if not queued:
         return []
     return [
