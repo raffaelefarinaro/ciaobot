@@ -235,15 +235,17 @@ RegionDecisions = dict[str, ReconcileDecision]
 
 
 PromotionOutcome = Literal[
-    "written", "duplicate", "conflict", "failed", "unshaped", "deferred"
+    "written", "duplicate", "conflict", "failed", "unshaped", "deferred", "refused"
 ]
 """What happened to one region-bound fact.
 
 ``written`` and ``duplicate`` are settled — the fact is in the region either
 way and leaves the queue. ``conflict`` (the destination moved under a
 concurrent writer), ``failed`` (the write or its lock failed), ``unshaped``
-(not state-shaped text) and ``deferred`` (nothing about this fact could be
-trusted enough to write it unattended) all keep the fact queued.
+(not state-shaped text), ``deferred`` (nothing about this fact could be
+trusted enough to write it unattended) and ``refused`` (the caller's
+authorisation check said no, under the guide lock, before anything was
+journalled) all keep the fact queued.
 """
 
 
@@ -546,11 +548,20 @@ def _promote_to_region(
     workspace: str = "",
     deferral_out: list[ReconcileDecision] | None = None,
     receipt_out: dict[str, Any] | None = None,
+    expected_revision: str | None = None,
+    authorize: Callable[[], bool] | None = None,
+    operation_id: str = "",
 ) -> tuple[PromotionOutcome, str | None]:
     """Write one region-bound proposal.
 
     Returns ``(outcome, promotable_or_None)``; see :data:`PromotionOutcome`
     for what each status means and which of them leave the fact queued.
+
+    ``expected_revision``, when given, replaces the digest this function would
+    otherwise pin from the body it read; a live body that differs is a
+    ``conflict``. ``authorize`` and ``operation_id`` are forwarded to the region
+    write (see :func:`ciao.memory_receipts.commit_region_change`); a refused
+    authorisation is ``refused``. All three default to today's behaviour.
 
     ``deferral_out``, when given, receives the defer row behind a ``deferred``
     outcome — the one the caller handed in, or the one built here for a stale
@@ -590,6 +601,7 @@ def _promote_to_region(
     the reference instead of guessing at it.
     """
     from ciao.memory_receipts import (
+        AuthorityRefused,
         RevisionConflict,
         commit_region_change,
         content_revision,
@@ -633,7 +645,8 @@ def _promote_to_region(
         # re-reads under its lock and refuses on any drift, so a competing
         # managed write that landed between this read and the commit is a
         # conflict — the fact stays queued — instead of being overwritten.
-        expected_revision = content_revision(serialize_entries(entries))
+        if expected_revision is None:
+            expected_revision = content_revision(serialize_entries(entries))
         # Compared with stamps stripped: the same fact promoted on two
         # different days is still the same fact.
         if promotable in {strip_learned_stamp(entry) for entry in entries}:
@@ -756,6 +769,8 @@ def _promote_to_region(
                     removed_texts=[old],
                     kind="region_update",
                     provenance=_provenance_row(proposal),
+                    authorize=authorize,
+                    operation_id=operation_id,
                 )
                 if receipt_out is not None:
                     receipt_out.update(receipt)
@@ -815,6 +830,8 @@ def _promote_to_region(
             destination=f"ciao:{region}",
             kind="region_apply",
             provenance=_provenance_row(proposal),
+            authorize=authorize,
+            operation_id=operation_id,
         )
         if receipt_out is not None:
             receipt_out.update(receipt)
@@ -822,6 +839,9 @@ def _promote_to_region(
     except RevisionConflict as exc:
         logger.info("memory apply: destination changed, fact stays queued (%s)", exc)
         return "conflict", promotable
+    except AuthorityRefused as exc:
+        logger.info("memory apply: authority refused, fact stays queued (%s)", exc)
+        return "refused", promotable
     except MemoryLockError as exc:
         logger.info("memory apply: lost the guide lock, fact stays queued (%s)", exc)
         return "failed", promotable
@@ -846,6 +866,9 @@ def accept_region_fact(
     source_section: str = "review",
     deferral_out: list[ReconcileDecision] | None = None,
     receipt_out: dict[str, Any] | None = None,
+    expected_revision: str | None = None,
+    authorize: Callable[[], bool] | None = None,
+    operation_id: str = "",
 ) -> tuple[PromotionOutcome, str | None]:
     """Write one approved region fact through the guarded path.
 
@@ -892,6 +915,9 @@ def accept_region_fact(
         workspace=workspace,
         deferral_out=deferral_out,
         receipt_out=receipt_out,
+        expected_revision=expected_revision,
+        authorize=authorize,
+        operation_id=operation_id,
     )
 
 

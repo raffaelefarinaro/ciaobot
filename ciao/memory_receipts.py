@@ -125,6 +125,13 @@ class RevisionConflict(MemoryReceiptError):
     """The destination changed since the operation was planned."""
 
 
+class AuthorityRefused(MemoryReceiptError):
+    """The caller's authorisation check said the write may no longer proceed.
+
+    Raised before anything is journalled, so a refusal leaves no receipt.
+    """
+
+
 class UndoUnsupported(MemoryReceiptError):
     """The receipt has no before image or an operation this protocol cannot reverse."""
 
@@ -683,8 +690,17 @@ def commit_region_change(
     removed_texts: list[str] | None = None,
     kind: str = "region_apply",
     provenance: dict[str, Any] | None = None,
+    authorize: Callable[[], bool] | None = None,
+    operation_id: str = "",
 ) -> dict[str, Any]:
     """Replace one region's body through the receipt protocol.
+
+    ``authorize``, when given, is asked under the guide lock once the revision
+    check has passed and before anything is journalled; a False answer raises
+    :class:`AuthorityRefused` with the guide and the journal untouched.
+
+    ``operation_id``, when given, is stored on the receipt so the operation
+    that owns the queue effect can be matched to this write.
 
     ``provenance``, when given, is the fact's evidence chain as
     :mod:`ciao.fact_candidates` records it — the transcript message ids it was
@@ -748,6 +764,10 @@ def commit_region_change(
             raise RevisionConflict(
                 "the destination changed since this operation was planned"
             )
+        if authorize is not None and not authorize():
+            raise AuthorityRefused(
+                "the operation is no longer authorised for this destination"
+            )
 
         journal = journal_path(vault_root, guide)
         rid = new_receipt_id(
@@ -774,6 +794,8 @@ def commit_region_change(
             "removed_texts": list(removed_texts or []),
             "provenance": dict(provenance or {}),
         }
+        if operation_id:
+            base["operation_id"] = operation_id
         if before_text == after_text:
             # Nothing to write: a no-op still gets a receipt so a caller can
             # distinguish "already satisfied" from "wrote something".
@@ -897,8 +919,11 @@ def queue_resolution(
     source: str,
     workspace: str = "",
     vault_root: Path | None = None,
+    operation_id: str = "",
 ):
     """Bracket a queue rewrite with ``prepared`` then ``applied`` receipts.
+
+    ``operation_id``, when given, is stored on both rows.
 
     The body performs the actual removal (with its own content-verified
     rewrite). A crash between the ``prepared`` row and the rewrite is
@@ -942,6 +967,8 @@ def queue_resolution(
             "before_revision": content_revision(before),
             "before_text": _image(before),
         }
+        if operation_id:
+            base["operation_id"] = operation_id
         # The prepared row is the crash-safety boundary for this rewrite: if it
         # cannot be persisted, a crash after the queue replacement would remove
         # the proposals with nothing for recovery or History to find. Abort
@@ -974,6 +1001,7 @@ def queue_resolution(
                 status=APPLIED,
                 receipt_id=rid,
                 prepared=True,
+                operation_id=operation_id,
             )
 
 
@@ -993,6 +1021,7 @@ def _write_queue_receipt(
     receipt_id: str | None = None,
     prepared: bool = False,
     undoable: bool = True,
+    operation_id: str = "",
 ) -> dict[str, Any]:
     before = before_text
     if before is None:
@@ -1032,6 +1061,8 @@ def _write_queue_receipt(
         "after_text": _image(after),
         "status": status,
     }
+    if operation_id:
+        receipt["operation_id"] = operation_id
     if not undoable:
         # A per-fact history row for a batch that already records its
         # transaction-level before image on one row. It must not offer an undo:
@@ -1641,6 +1672,10 @@ def _complete_outcome(receipt: dict[str, Any]) -> bool:
                         outcome=str(receipt.get("action", "")),
                         once=True,
                     )
+            return True
+        if receipt.get("operation_id"):
+            # The operation that owns this write records its own decision and
+            # links it to both receipts; recovery must not add an unlinked one.
             return True
         from ciao.memory_proposals import record_promotion
 

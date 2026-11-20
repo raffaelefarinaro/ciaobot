@@ -2376,3 +2376,188 @@ def test_the_guide_writer_stores_the_text_exactly(tmp_path):
         path.write_bytes(b"old\n")
         mt.write_guide_atomically(path, text)
         assert path.read_bytes() == text.encode("utf-8")
+
+
+# ── Caller-bound region writes: expected revision, authority, operation id ──
+
+
+def test_a_stale_expected_revision_conflicts_and_leaves_the_guide_alone(tmp_path):
+    guide = _guide(tmp_path, memory=["Existing fact."])
+    before = guide.read_bytes()
+    outcome, _ = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text="New fact.",
+        vault_root=tmp_path,
+        expected_revision=mr.content_revision("a body that is not the live one"),
+    )
+    assert outcome == "conflict"
+    assert guide.read_bytes() == before
+    assert mr.read_receipts(mr.journal_path(tmp_path, None)) == []
+
+
+def test_a_matching_expected_revision_writes(tmp_path):
+    guide = _guide(tmp_path, memory=["Existing fact."])
+    entries, _ = mt.read_region(guide, "memory")
+    outcome, _ = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text="New fact.",
+        vault_root=tmp_path,
+        expected_revision=mr.content_revision(mt.serialize_entries(entries)),
+    )
+    assert outcome == "written"
+    assert "New fact." in _entries(guide)
+
+
+def test_refused_authority_writes_nothing_and_journals_nothing(tmp_path):
+    guide = _guide(tmp_path, memory=["Existing fact."])
+    before = guide.read_bytes()
+    outcome, _ = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text="New fact.",
+        vault_root=tmp_path,
+        authorize=lambda: False,
+    )
+    assert outcome == "refused"
+    assert guide.read_bytes() == before
+    assert mr.read_receipts(mr.journal_path(tmp_path, None)) == []
+
+
+def test_authority_is_consulted_while_the_guide_lock_is_held(tmp_path):
+    guide = _guide(tmp_path)
+    seen: dict[str, bool] = {}
+
+    def probe() -> bool:
+        try:
+            handle = mt.guide_lock(guide, timeout_s=0)
+        except mt.MemoryLockError:
+            seen["held"] = True
+        else:
+            mt.release_guide_lock(handle)
+            seen["held"] = False
+        return True
+
+    outcome, _ = mp.accept_region_fact(
+        guide_path=guide,
+        target="memory",
+        text="New fact.",
+        vault_root=tmp_path,
+        authorize=probe,
+    )
+    assert outcome == "written"
+    assert seen == {"held": True}
+
+
+def _interrupted_region_receipt(tmp_path, guide, **extra):
+    """A prepared region receipt whose guide write landed before the crash."""
+    entries = mt.read_region(guide, "memory")[0]
+    before = mt.serialize_entries(entries)
+    after = mt.serialize_entries(entries + ["Recovered fact. [2026-01-01]"])
+    return {
+        "id": "mrcpt_interrupted",
+        "ts": mr._now(),
+        "actor": "agent",
+        "source": "cli",
+        "workspace": "personal",
+        "kind": "region_apply",
+        "guide": str(guide),
+        "region": "memory",
+        "vault_root": str(tmp_path),
+        "before_revision": mr.content_revision(before),
+        "after_revision": mr.content_revision(after),
+        "before_text": before,
+        "after_text": after,
+        "fact_text": "Recovered fact.",
+        "destination": "ciao:memory",
+        "status": mr.PREPARED,
+        **extra,
+    }
+
+
+def test_an_interrupted_operation_region_write_settles_without_a_decision(tmp_path):
+    """The operation that owns the queue effect records its own decision."""
+    guide = _guide(tmp_path, memory=["fact one"])
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    journal = mr.journal_path(tmp_path, None)
+    mr._append(journal, _interrupted_region_receipt(tmp_path, guide, operation_id="op-1"))
+    mt.update_region(guide, "memory", action="add", entry="Recovered fact. [2026-01-01]")
+
+    result = mr.recover_pending(journal=journal)
+
+    assert [r["status"] for r in result.reconciled] == [mr.APPLIED]
+    assert mp.read_decisions(queue) == []
+
+
+def test_an_interrupted_region_write_without_an_operation_still_records_a_decision(tmp_path):
+    guide = _guide(tmp_path, memory=["fact one"])
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    journal = mr.journal_path(tmp_path, None)
+    mr._append(journal, _interrupted_region_receipt(tmp_path, guide))
+    mt.update_region(guide, "memory", action="add", entry="Recovered fact. [2026-01-01]")
+
+    mr.recover_pending(journal=journal)
+
+    assert [r["via"] for r in mp.read_decisions(queue)] == ["auto"]
+
+
+def test_queue_resolution_stamps_the_operation_id_on_both_rows(tmp_path):
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "# Memory Proposals\n\n"
+        "## 2026-08-01T00:00:00\n\n"
+        "- [memory] Keep every fact.  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    journal = mr.journal_path(tmp_path, None)
+    with mr.queue_resolution(
+        queue,
+        removed_text="Keep every fact.",
+        kind="memory",
+        promoted=True,
+        actor="agent",
+        source="cli",
+        vault_root=tmp_path,
+        operation_id="op-7",
+    ) as base:
+        queue.write_text("# Memory Proposals\n\n", encoding="utf-8")
+
+    rows = [
+        json.loads(line)
+        for line in journal.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [r["status"] for r in rows] == [mr.PREPARED, mr.APPLIED]
+    assert {r["id"] for r in rows} == {base["id"]}
+    assert {r["operation_id"] for r in rows} == {"op-7"}
+
+
+def test_queue_resolution_without_an_operation_id_writes_no_such_key(tmp_path):
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        "# Memory Proposals\n\n"
+        "## 2026-08-01T00:00:00\n\n"
+        "- [memory] Keep every fact.  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    journal = mr.journal_path(tmp_path, None)
+    with mr.queue_resolution(
+        queue,
+        removed_text="Keep every fact.",
+        kind="memory",
+        promoted=True,
+        actor="agent",
+        source="cli",
+        vault_root=tmp_path,
+    ):
+        queue.write_text("# Memory Proposals\n\n", encoding="utf-8")
+
+    rows = [
+        json.loads(line)
+        for line in journal.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows and all("operation_id" not in r for r in rows)

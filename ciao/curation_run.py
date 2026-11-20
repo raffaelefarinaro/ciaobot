@@ -2219,6 +2219,26 @@ def _holds_live_lease_now(vault_root: Path, *, holder: str, clock: Callable[[], 
     return held is not None and held.get("holder") == holder
 
 
+def authorize_holder(
+    vault_root: Path,
+    *,
+    holder: str,
+    clock: Callable[[], datetime] | None = None,
+) -> bool:
+    """Whether ``holder`` holds the live lease right now, read under the state lock.
+
+    The lease is re-read with a fresh clock at the moment of the call, so a
+    lease that expired or was replaced since an earlier check answers False.
+    Unlike :func:`active_lease` this takes the state lock, so the answer cannot
+    be torn by a concurrent lease write.
+    """
+    if not holder:
+        return False
+    recheck = _recheck_clock(None, clock)
+    with _state_lock(Path(vault_root)):
+        return _holds_live_lease_now(Path(vault_root), holder=holder, clock=recheck)
+
+
 def _other_curation_files(vault: Path, relative: str) -> list[Path]:
     """The state file and the other decision log: nothing a log may alias."""
     others = [state_path(vault)]
