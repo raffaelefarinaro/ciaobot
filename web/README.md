@@ -70,162 +70,104 @@ Type-checking runs via `vue-tsc --noEmit` as part of `npm run build`. PR-blockin
 
 The component workshop runs without an engine: `npm run storybook` serves it at
 `http://127.0.0.1:6006`, and `npm run build-storybook` writes the ignored
-`web/dist/storybook` output. It imports production components and CSS directly,
-starting with TabBar; it does not load the app bootstrap or public assets.
-`npm test` remains the separate application suite. Open **Inventory / UI
-inventory** (`inventory--all`) to search the production owner catalogue. Each
-SFC has its own row, including connected compositions, alongside inline and
+`web/dist/storybook` output. It imports production components and CSS directly
+and does not load the app bootstrap or public assets. `npm test` remains the
+separate application suite. Open **Inventory / UI inventory** (`inventory--all`)
+to search the production owner catalogue: one row per SFC, plus inline and
 shared CSS families. Search intersects with family, coverage and migration
-filters. Direct consumers are production import/include sites; support sources
-may use classes or host a composition without directly importing the owner.
+filters.
 
-An inventory row is not a story or a migration approval. **Covered** means a
-rendered-state story exists, not that interaction is automatically verified;
-**uncovered** means an implemented state has no story; **unknown** means the
-state or loading fidelity has not been audited; **not applicable** means it is
-known not to apply. Summary categories overlap. Loading notes distinguish the
-actual owner and initial load from failure or stale refresh where known.
-Migration starts unassessed unless an actual decision supports another status.
-The four TabBar states, six plain SidebarRow states, two SidebarListSkeleton
-states, four SettingsSwitch states (six stories), seven WorkspaceColorPicker
-states, six SettingsRadioGroup states, five ConfirmDialog states, six
-PromptDialog states, six DecisionReason states and four HomeTodayStats states
-have rendered stories (52 stories total). Other states and owners remain
-unassessed or uncovered. Adding an SFC requires a separate
-inventory row (and a rationale for a composition), not a complete story suite.
+**Coverage rules.** Per-owner state lists belong in the inventory rows, not here.
 
-**Connected fixtures** are the bounded way stories render owners that
-transport. `src/stories/fixtureBoundary.ts` installs a fail-closed network
-boundary from a declared route table: `installFixtureBoundary({ routes:
-[{ method, path, respond }], sockets: [{ path, script }] })`. Only exact
-declared reads and writes are answered in memory (path is pathname + search +
-hash; a body on GET/HEAD is a violation); every other fetch — new
-XMLHttpRequest, WebSocket, EventSource, beacon included — is rejected without
-native fallback, and existing XHR open/send and WebSocket send stay fenced.
-A route whose `respond()` never resolves holds the request until teardown,
-as native loading would; teardown unmounts the isolated app, disposes its
-Pinia, settles held requests and restores transport descriptors. The
-boundary mounts once: concurrent or inline-docs mounts are refused, so
-connected owners keep autodocs excluded. This is a trusted-component
-transport harness, not a security sandbox for hostile code (DOM resource
-loads, workers and saved native references outside this fixture are not
-sandboxed).
+- An inventory row is not a story or a migration approval. Adding an SFC needs its
+  own row (and a rationale for a composition), not a complete story suite.
+- **Covered** means a rendered-state story exists, not that interaction is verified.
+  **Uncovered** means an implemented state has no story; **unknown** means the state
+  or loading fidelity is unaudited; **not applicable** means it is known not to apply.
+  Summary categories overlap. Migration starts unassessed unless a decision says otherwise.
+- A story does not imply connected-caller, loading-fidelity, keyboard,
+  reduced-motion, responsive or migration coverage. Those stay unassessed until the row says otherwise.
+- Stories preserve current production behaviour, even where it differs from the
+  desired contract. Record the difference in the row; do not fix it in the story.
+- Direct consumers are production import/include sites. Support sources may use
+  classes or host a composition without importing the owner. Composition rows
+  render the real composition; CSS rows claim no stories.
+- Node inventory tests derive coverage from each story file's CSF index, not a
+  hand-written list: every covered state's story IDs must exist there, every story
+  except the inventory page is claimed by exactly one row state, and each claimed
+  story file must render that owner.
 
-`src/stories/mountConnected.ts` is the connected mount for story files:
-`mountConnected(host, { component, routes, routerRoutes, seed })` mounts the
-owner into a separate Vue app (fixture plugins never leak into Storybook's
-app) with a fresh memory router and fresh Pinia, seeds store state only —
-never app orchestration — and adds inert extra destinations such as `/stats`,
-which is not the Usage page and runs no bootstrap. No engine, provider or
-app bootstrap is started by a connected story.
+**Connected fixtures.** A story that renders an owner which transports data declares
+what it may reach; nothing else is reachable.
 
-A declared app socket never opens a native connection: the boundary hands
-the story an in-memory fake (send, close, readyState, the ready-state
-constants, `instanceof WebSocket`) whose far end is the story's `script`
-through `serverOpen`, `serverMessage`, `serverError` and `serverClose`.
-Deliveries flush on the next microtask, after the component assigned its
-handlers; what the component sends is recorded on the fake, and a faulty
-script fails the construction instead of half-opening the socket. Declared
-sockets must be same-origin at an exact path; anything else — including the
-engine's `/ws/events` — is refused without a fake.
+- `src/stories/fixtureBoundary.ts`: `installFixtureBoundary({ routes: [{ method,
+  path, respond }], sockets: [{ path, script }] })`. Only exact declared reads and
+  writes are answered in memory (path is pathname + search + hash; a body on GET or
+  HEAD is a violation). Every other fetch, new XMLHttpRequest, WebSocket,
+  EventSource or beacon is rejected with no native fallback; existing XHR open/send
+  and WebSocket send stay fenced.
+- A route whose `respond()` never resolves holds the request until teardown.
+  Teardown unmounts the isolated app, disposes its Pinia, settles held requests and
+  restores transport descriptors. The boundary mounts once: concurrent or
+  inline-docs mounts are refused, and connected owners stay excluded from autodocs.
+- It is a trusted-component harness, not a security sandbox. DOM resource loads,
+  workers and native references saved outside the fixture are not fenced.
+- `src/stories/mountConnected.ts`: `mountConnected(host, { component, routes,
+  routerRoutes, seed })` mounts the owner into a separate Vue app with a fresh memory
+  router and fresh Pinia. It seeds store state only, never app orchestration, and
+  starts no engine, provider or bootstrap.
+- Declared app sockets never open natively. The story gets an in-memory fake (send,
+  close, readyState, the ready-state constants, `instanceof WebSocket`) whose far end
+  is its `script` (`serverOpen`, `serverMessage`, `serverError`, `serverClose`).
+  Deliveries flush on the next microtask, after the component assigned its handlers;
+  a faulty script fails construction. Declared sockets must be same-origin at an
+  exact path; anything else, including the engine's `/ws/events`, is refused.
+- The preview decorator installs the boundary for every story and docs page from
+  `parameters.fixture`, a typed `{ routes, sockets }` config (empty when absent).
+  There is no skip flag. A connected story declares its routes there, e.g.
+  `parameters: { fixture: { routes: statsRoutes('default') } }`. `mountConnected`
+  mounts into the boundary the preview built and throws when none is active.
+- Duplicate routes or socket paths, a malformed config and a non-array routes list
+  are `TypeError`s. Docs mode shares one empty boundary across stories, so a docs
+  story that declares routes or sockets is refused.
+- Violations are asserted at teardown: the preview's global `afterEach` fails the
+  story when the boundary recorded any violation, even if the component swallowed
+  the error (`fetch(...).catch(() => {})`, a try/catch around XHR, WebSocket or
+  beacon). Play functions assert the violation ledger stays empty.
+- Owners with singleton request state (for example `askConfirm`, `askPrompt`) cancel
+  outstanding requests on teardown and are excluded from inline Docs.
+- Not fenced: `localStorage`, `sessionStorage`, IndexedDB and service workers. A
+  story that touches them is not isolated by this boundary.
+- The only native sends allowed are: Vite's HMR ping on its established same-origin
+  `vite-hmr` socket; render lifecycle and heartbeat events plus preview keyboard
+  reports (`previewKeydown`) on `/storybook-server-channel` with its exact preview
+  page and token; and, only under `npm run test-storybook`, the vitest browser
+  runner's control socket (`/__vitest_browser_api__`) for birpc requests, events
+  (no `i`) and optional calls (`o:true`) whose method is on the runner's page-side
+  allow-list, plus responses. Custom, invoke and save events are not allowed.
+  Module and asset loading is infrastructure, not an API fixture.
+- Use synthetic fixture names (`storybook-alpha`, `storybook-beta`). No real paths,
+  tokens or user text.
 
-The preview decorator installs the boundary for every story and docs page
-from `parameters.fixture`, a typed `{ routes, sockets }` config (empty when
-absent). There is no skip flag: a story cannot opt out of the fence, it can
-only declare what it may reach, and a connected story declares its routes
-there (`parameters: { fixture: { routes: statsRoutes('default') } }`).
-`mountConnected` never installs a boundary of its own; it mounts into the one
-the preview built and throws when none is active, so nothing double-mounts.
-Duplicate routes (same method and path) or socket paths, a malformed config,
-and a non-array routes list are `TypeError`s. A docs page renders many stories
-at once, so docs mode shares one empty boundary between them; a docs story
-that declares routes or sockets is refused by the single-mount guard.
-Violations are also asserted at teardown: the preview's global `afterEach`
-fails the story when the boundary recorded any violation, even if the
-component swallowed the thrown error (`fetch(...).catch(() => {})`, a
-try/catch around XHR, WebSocket or beacon). Not fenced: `localStorage`,
-`sessionStorage`, IndexedDB and service workers; a story that touches them is
-not isolated by this boundary. The only native send exceptions are
-Vite's exact HMR ping on its same-origin established `vite-hmr` socket, and
-render lifecycle/heartbeat events plus preview keyboard reports
-(`previewKeydown`) on Storybook's established same-origin
-`/storybook-server-channel` with its exact preview page/token, and the vitest
-browser runner's own control socket (`/__vitest_browser_api__`, only under
-`npm run test-storybook`): birpc requests, events (no `i`) and optional calls
-(`o:true`) whose method is on an allow-list of the runner's page-side method
-names, plus responses. Custom/invoke/save events are not allowed. Storybook's
-module/asset loading is infrastructure, not an API fixture. The visible
-request count and violation ledger remain observable when the owner catches
-an error.
+**Checks.**
 
-**Connected / Home Today stats** exercises this contract end to end: its four
-stories mount the production `HomeTodayStats.vue` with the real
-`usageStats`/`api` normalization, two synthetic workspaces
-(`storybook-alpha`, `storybook-beta`), and play functions that assert the
-violation ledger stays empty while the runner reports. Default, held initial
-loading, HTTP failure and partial normalized data are rendered-state
-coverage only. Loading and failure both render six dashes with no averages:
-the component has no separate status/error UI. The fixture workspace
-selector exercises its real workspace watcher without invoking app-level
-`switchWorkspace` orchestration. It does not prove the Home composition,
-Usage page, live engine, stale-response races, keyboard, reduced-motion or
-responsive-state coverage. Focused tests live in
-`src/stories/fixtureBoundary.test.ts`.
+- `npm run build-storybook` runs `scripts/check-storybook-index.ts` after building.
+  Every registry-linked ID must exist as a story (not Docs or the inventory page);
+  missing or malformed output fails the command. Run the check alone with
+  `node --experimental-strip-types web/scripts/check-storybook-index.ts` from the
+  repository root.
+- `npm run test-storybook` runs the browser interaction runner (@storybook/addon-vitest,
+  vitest browser mode with the Playwright provider): every story renders in headless
+  Chromium and its `play` functions execute there. Chromium must be installed locally
+  (`npx playwright install chromium`).
+- Node tests check data and filters, not Vue interactions or manager links.
 
-`npm run build-storybook` automatically runs `scripts/check-storybook-index.ts`
-after building. Every registry-linked ID must exist as a story, not Docs or
-the inventory page; missing/malformed output fails the command. Run the check
-alone with `node --experimental-strip-types web/scripts/check-storybook-index.ts`
-from the repository root (its paths do not depend on the current directory).
-The Node inventory tests derive story coverage from the story files' own CSF
-index rather than a hand-written list: every covered state's story IDs must
-exist there, every story other than the inventory page must be claimed by
-exactly one row state, and each claimed story file must render that owner.
-Covered states may sit on component, inline or composition rows (a composition
-row's stories render the real composition); css rows claim no stories.
-
-SidebarRow covers default, active, unread, muted, pending and long-content;
-these use its plain-div branch, not links, host controls or keyboard interaction.
-SidebarListSkeleton covers loading (one group, three rows) and nested (two
-groups, two rows), each with one loading announcement. This does not separately
-cover SidebarRow's placeholder state or other owners' loading fidelity.
-
-SettingsSwitch covers default (On and Off), disabled (On and Off), busy and
-narrow (a maximum 390px container). Busy renders an ellipsis and `aria-busy`
-without disabling the native button. Its controlled interactive stories import
-the production component; parents still own persistence. Only Check vault
-answers and Resume after restart have migrated to it. Their connected screens,
-keyboard-focus and reduced-motion states do not gain story coverage.
-
-The Node tests check data and filters, not Vue interactions or manager links.
-Check filtering, keyboard access, narrow/zoom layouts and story links in both
-the development and built workshop in a browser; record screenshots and network
-evidence with the change. `npm run test-storybook` runs the browser interaction
-runner (@storybook/addon-vitest, vitest browser mode with the Playwright
-provider): every story has to render in headless Chromium and its `play`
-functions execute there. Chromium must be installed locally
-(`npx playwright install chromium`).
-
-ConfirmDialog has normal, destructive, optional-reason, long-content and narrow
-stories; PromptDialog has empty, whitespace, prefilled, populated, validation-disabled
-and narrow stories. They call `askConfirm`, `askConfirmReason` and `askPrompt`
-after mounting the real host, cancel outstanding requests on teardown, and exclude
-inline Docs because their request state is singleton. Enter in ConfirmDialog
-currently confirms even while Cancel is focused; Enter in reason text/chips does
-not. These stories preserve that production behavior, not the older desired
-native-button contract. Prompt's disabled story disables only submission through
-real blank-input validation, not the whole dialog. Narrow dialogs use a 390px
-containing block; still verify an actual narrow viewport and browser zoom.
-DecisionReason has controlled empty, quick-reason, custom, disabled, 1000-character
-and narrow stories. These admissions do not cover connected callers, loading
-fidelity, migration approval, or other unaudited states.
-
-WorkspaceColorPicker has controlled default, selected, extra-preset expanded,
-extra-preset selected while collapsed, disabled, disabled-expanded and narrow
-stories. SettingsRadioGroup has real consumer configurations for Theme, Text
-contrast and Body font, plus null selection and narrow; its keyboard-focus
-behavior remains uncovered. Neither family’s stories imply connected Settings
-consumer or migration coverage.
+**Visual check.** Filtering, keyboard access, narrow and zoom layouts and story links
+are checked by hand in both the development (`npm run storybook`) and built workshop,
+in a browser. Record screenshots and network evidence with the change. Use 390px and
+1280px, dark and light (once the appearance toolbar exists), and 200% zoom for one
+story; check keyboard focus and 44px touch targets. A 390px container is not a
+narrow viewport: still verify an actual narrow viewport and browser zoom.
 
 After changes that touch running static assets (anything that lands in `ciao/web/static/`), redeploy via the PWA's Settings → Deploy. **Do not restart the ciao service yourself**: you'd sever the PWA session the agent is talking through.
 

@@ -43,6 +43,15 @@ The page is served under a strict Content Security Policy in a sandboxed frame. 
 - **No animation loops.** No `setInterval` redraw, no `requestAnimationFrame` loop, no long-running computation. The frame shares a process with the app, so a page that keeps computing slows the whole chat. Respond to clicks, then be still.
 - **Under 2 MB.** That is the render cap, the source-view cap, and the snapshot cap. Over it the panel shows a 413 and the page has to be opened in a browser instead. Data URIs for raster images are what blow this; prefer SVG.
 
+## Framework bundles
+
+A page that bundles a framework (Vue, React, a component library) breaks in two places the plain-JS page does not.
+
+- **No runtime code evaluation.** `script-src` has `'unsafe-inline'` but no `'unsafe-eval'`, so `eval`, `new Function` and runtime template compilers fail. Vue's full build compiles templates at runtime and renders blank. Precompile templates at build time, and bundle the runtime-only build of the framework.
+- **No browser storage.** The frame is an opaque origin, so `localStorage` and `sessionStorage` throw. Libraries that touch them at import time fail before the page paints. Remove the storage calls, or install a small in-memory replacement on `window` before the library loads. A replacement is not a guarantee: check that the library works with it and say so if it does not.
+
+Before surfacing a framework bundle, load it in a page that carries the artifact's CSP (the `_ARTIFACT_CSP` value in `ciao/web/routes_api.py`) inside `<iframe sandbox="allow-scripts">` in a headless browser, and check the console for errors and that the page is not blank. A `<meta http-equiv>` CSP cannot carry the `sandbox` directive, so the iframe attribute is what enforces it.
+
 ## Make it fit the panel
 
 - Include `<meta name="viewport" content="width=device-width, initial-scale=1">`. The panel is narrow and there is a phone viewer.
