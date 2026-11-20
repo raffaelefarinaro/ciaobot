@@ -126,7 +126,7 @@ test.describe('folder browser on desktop', () => {
       expect(parseFloat(before.buttons[0]['outline-width'])).toBeGreaterThan(0)
       await page.locator('.chat-item', { hasText: 'alpha first conversation' }).click()
       await expect(page.locator(COMPOSER)).toBeVisible()
-      await page.locator('a[data-file-path="memory-vault/Workspace/draft.md"]').click()
+      await page.locator(`a[data-file-path="${WS}/memory-vault/Workspace/draft.md"]`).click()
       const viewer = page.locator('.fv-modal')
       await expect(viewer).toBeVisible()
       await viewer.getByRole('button', { name: 'More file actions' }).click()
