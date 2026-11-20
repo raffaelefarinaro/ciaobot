@@ -875,7 +875,11 @@ def _render_acp_journal(
             shell = shells.get(call_id)
             if shell is not None and not parent:
                 shell.settle(record)
-        # Any other kind (result, status, permission_request, ...) adds no row: a call
+        elif kind == "result":
+            # A turn ends here. Its reply text must not run on into the next turn's
+            # (a provider's own continuation has no user row between them).
+            flush_text()
+        # Any other kind (status, permission_request, ...) adds no row: a call
         # is one activity line, and the terminal result's text was streamed.
     flush_text()
     flush_tools()

@@ -263,8 +263,13 @@ from ciao.web.document_conversion import (
 from ciao.web.file_snapshots import SnapshotStore
 
 logger = logging.getLogger(__name__)
-# Background shells that end within this window are announced in one wake turn.
-SHELL_FINISHED_WINDOW_S = 3.0
+# A finished shell's notice is held this long before Ciaobot sends its own wake. The window
+# coalesces shells that end together, and it lets the provider's own continuation claim the
+# notice first: OpenCode resumes the session by itself about 6 s after a shell ends.
+SHELL_FINISHED_WINDOW_S = 20.0
+# A continuation that started this long before a shell's end was that shell's answer (the end is
+# observed a few seconds after the process ends).
+SHELL_ANSWER_GRACE_S = 15.0
 # A chat gets at most this many shell wakes in the rolling window; past it, shell wakes pause
 # until the person replies (see ``_announce_shell_finished``).
 SHELL_WAKE_LIMIT = 6
@@ -1349,6 +1354,13 @@ class ProjectChatManager:
         # which a chat's shell wakes were paused until the person replies.
         self._shell_wake_times: dict[str, deque[float]] = {}
         self._shell_wakes_paused: dict[str, int] = {}
+        # Each held notice's own deadline, by (chat, call id); the monotonic time a continuation
+        # last started on a chat, and the chats whose continuation is speaking now; the notices a
+        # continuation claimed, awaiting its close.
+        self._shell_notice_due: dict[tuple[str, str], float] = {}
+        self._continuation_at: dict[str, float] = {}
+        self._continuation_open: set[str] = set()
+        self._claimed_notices: dict[str, list[ShellFinishedEvent]] = {}
         self._provider_idle_timeout = _PROVIDER_IDLE_TIMEOUT_SECONDS
         self._provider_reap_interval = _PROVIDER_REAP_INTERVAL_SECONDS
         # Fold turn journals left behind by a crashed process into their
@@ -5150,6 +5162,11 @@ class ProjectChatManager:
         self._shell_finished_waiting.pop(chat_id, None)
         self._shell_wake_times.pop(chat_id, None)
         self._shell_wakes_paused.pop(chat_id, None)
+        for key in [key for key in self._shell_notice_due if key[0] == chat_id]:
+            del self._shell_notice_due[key]
+        self._continuation_at.pop(chat_id, None)
+        self._continuation_open.discard(chat_id)
+        self._claimed_notices.pop(chat_id, None)
         flush = self._shell_finished_flushes.pop(chat_id, None)
         if flush is not None:
             flush.cancel()
@@ -9144,6 +9161,7 @@ class ProjectChatManager:
         """
         self._shutting_down = True
         self._memory_pass.close()
+        self._announce_held_for_shutdown()
 
     def resume_interrupted_turns(self, *, enabled: bool) -> int:
         """At boot, consume every interrupted-turn stamp and arm one resume each.
@@ -9202,23 +9220,50 @@ class ProjectChatManager:
 
 
     def _note_shell_finished(self, chat_id: str, event: ShellFinishedEvent) -> None:
-        """Collect one finished background shell; the chat is told once per short window."""
+        """Hold one finished background shell's notice for its own window.
+
+        A continuation that started on this chat within ``SHELL_ANSWER_GRACE_S`` before the shell
+        ended was the shell's answer (the end can be observed late, behind a running prompt):
+        such a notice is not sent.
+        """
         pending = self._shell_finished_pending.setdefault(chat_id, [])
         if any(known.tool_use_id == event.tool_use_id for known in pending):
             return
+        answered_at = self._continuation_at.get(chat_id)
+        if answered_at is not None and answered_at >= event.ended_at - SHELL_ANSWER_GRACE_S:
+            logger.info("Shell %s in chat %s was answered by the provider's own continuation", event.tool_use_id, chat_id)
+            return
         pending.append(event)
+        # Each notice keeps its own deadline: a later shell does not restart an earlier one's window.
+        self._shell_notice_due[(chat_id, event.tool_use_id)] = time.monotonic() + SHELL_FINISHED_WINDOW_S
         if chat_id not in self._shell_finished_flushes:
             self._shell_finished_flushes[chat_id] = self._spawn_detached(
                 self._flush_shell_finished(chat_id), f"shell-finished-{chat_id}"
             )
 
     async def _flush_shell_finished(self, chat_id: str) -> None:
-        """Wait out the coalescing window, then announce the shells that ended in it."""
-        await asyncio.sleep(SHELL_FINISHED_WINDOW_S)
+        """Announce each held notice when its own window ends, until none is held."""
+        while True:
+            pending = self._shell_finished_pending.get(chat_id)
+            if not pending:
+                break
+            now = time.monotonic()
+            due = [e for e in pending if self._shell_notice_due.get((chat_id, e.tool_use_id), 0.0) <= now]
+            if not due:
+                nearest = min(self._shell_notice_due.get((chat_id, e.tool_use_id), now) for e in pending)
+                await asyncio.sleep(max(nearest - now, 0.0))
+                continue
+            due_ids = {e.tool_use_id for e in due}
+            self._shell_finished_pending[chat_id] = [e for e in pending if e.tool_use_id not in due_ids]
+            for call_id in due_ids:
+                self._shell_notice_due.pop((chat_id, call_id), None)
+            self._announce_shell_finished(chat_id, due)
+        self._shell_finished_pending.pop(chat_id, None)
         self._shell_finished_flushes.pop(chat_id, None)
-        self._announce_shell_finished(chat_id, self._shell_finished_pending.pop(chat_id, []))
 
-    def _announce_shell_finished(self, chat_id: str, events: list[ShellFinishedEvent]) -> None:
+    def _announce_shell_finished(
+        self, chat_id: str, events: list[ShellFinishedEvent], *, during_shutdown: bool = False
+    ) -> None:
         """Send one wake for *events*, or hold, pause or drop them by the rules below.
 
         - An archived chat and a helper chat (the kinds restart resume never wakes) get nothing.
@@ -9232,7 +9277,7 @@ class ProjectChatManager:
           the person replies.
         """
         chat = self._chats.get(chat_id)
-        if not events or chat is None or self._shutting_down:
+        if not events or chat is None or (self._shutting_down and not during_shutdown):
             return
         helper = chat.helper if isinstance(chat.helper, dict) else {}
         if chat.archived or helper.get("kind") in restart_resume.NO_RESUME_HELPER_KINDS:
@@ -9282,6 +9327,72 @@ class ProjectChatManager:
             str(chat.user_turn_origin.get(str(index)) or "") == ""
             for index in range(turn_count, int(chat.user_turn_count))
         )
+
+    def _continuation_started(self, chat_id: str) -> str | None:
+        """A provider's own continuation began to speak on *chat_id*: claim the shell notices it answers.
+
+        Only a provider whose spec sets ``continues_after_shell`` claims, and only the notices of
+        shells that ended before this moment: a later shell is not answered by it. Claimed notices
+        are not sent as wakes; the continuation's recorded turn carries them as its prompt.
+        Returns the notice text for the live card, or None when nothing was claimed.
+        """
+        service = self._providers.get(chat_id)
+        if service is None or not getattr(service, "continues_after_shell", False):
+            return None
+        if chat_id in self._continuation_open:
+            return None  # already claimed for this continuation
+        now = time.monotonic()
+        self._continuation_at[chat_id] = now
+        self._continuation_open.add(chat_id)
+        pending = self._shell_finished_pending.get(chat_id, [])
+        claimed = [event for event in pending if event.ended_at <= now]
+        if not claimed:
+            return None
+        keep = [event for event in pending if event.ended_at > now]
+        for event in claimed:
+            self._shell_notice_due.pop((chat_id, event.tool_use_id), None)
+        if keep:
+            self._shell_finished_pending[chat_id] = keep
+        else:
+            self._shell_finished_pending.pop(chat_id, None)
+            flush = self._shell_finished_flushes.pop(chat_id, None)
+            if flush is not None:
+                flush.cancel()
+        self._claimed_notices.setdefault(chat_id, []).extend(claimed)
+        return shell_wake.shell_finished_prompt(claimed)
+
+    def _take_claimed_notice(self, chat_id: str, *, adopt: bool) -> str | None:
+        """The continuation closed. Its recorded turn adopts the notice it claimed (returns the text).
+
+        When the turn cannot carry the notice (*adopt* False: the provider's own notification text
+        is kept), the claimed shells are announced with a wake of Ciaobot's own instead: never dropped.
+        """
+        self._continuation_open.discard(chat_id)
+        claimed = self._claimed_notices.pop(chat_id, [])
+        if not claimed:
+            return None
+        prompt = shell_wake.shell_finished_prompt(claimed)
+        if adopt:
+            return prompt
+        chat = self._chats.get(chat_id)
+        if chat is not None:
+            self._deliver_wake(chat, prompt, count=len(claimed), origin="background_run")
+        return None
+
+    def _announce_held_for_shutdown(self) -> None:
+        """Deliver every held shell notice now: a notice must not be dropped by a restart.
+
+        The wake starts a turn in this process, which restart resume picks up (it resumes turns the
+        restart cut off), so the agent is told the shell finished either way.
+        """
+        for chat_id in list(self._shell_finished_pending):
+            events = self._shell_finished_pending.pop(chat_id, [])
+            flush = self._shell_finished_flushes.pop(chat_id, None)
+            if flush is not None:
+                flush.cancel()
+            for event in events:
+                self._shell_notice_due.pop((chat_id, event.tool_use_id), None)
+            self._announce_shell_finished(chat_id, events, during_shutdown=True)
 
     def _release_shell_finished_waiting(self, chat_id: str) -> None:
         """A question or permission resolved: announce the shells held for it, if the chat is free."""

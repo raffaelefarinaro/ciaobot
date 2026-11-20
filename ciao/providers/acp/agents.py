@@ -48,6 +48,7 @@ CLAUDE = AgentSpec(
     unset_env=("ENABLE_CLAUDEAI_MCP_SERVERS",),
     # Background shells: the adapter then sends `terminal_exit` when a background Bash ends.
     client_meta={"terminal_output_delta": True},
+    continues_after_shell=True,
     modes={
         "plan": (ModeChoice("mode", ("plan",)),),
         "normal": (ModeChoice("mode", ("default",)),),
@@ -217,6 +218,7 @@ OPENCODE = AgentSpec(
     args=("acp",),
     # Child sessions arrive as ``opencode/session/child_update`` instead of folded into the parent.
     client_meta={"opencode/child-session-updates": True},
+    continues_after_shell=True,
     extension_notifications=(_OPENCODE_CHILD_UPDATE,),
     # opencode has no bypass mode: its permission cards follow the user's opencode config (plan Q7).
     modes={

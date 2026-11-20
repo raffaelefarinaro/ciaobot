@@ -49,6 +49,10 @@ class AgentSpec:
     # must travel only in the session's ``_meta``, not in the process env).
     unset_env: tuple[str, ...] = ()
     client_meta: Mapping[str, Any] = field(default_factory=dict)  # clientCapabilities._meta opt-ins
+    # The agent resumes the session on its own when a background shell it started ends, with a
+    # reply that carries no prompt from Ciaobot (captured for OpenCode and Claude). Ciaobot then
+    # records that reply as the shell's one turn instead of sending its own wake.
+    continues_after_shell: bool = False
     # Extension notifications the agent sends WITHOUT the leading underscore that ACP reserves
     # for extensions. The SDK routes only ``_``-prefixed methods to ``ext_notification``, so each
     # name listed here is routed there under the name as sent (see ``connection.connect_client``).

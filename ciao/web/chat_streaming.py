@@ -35,6 +35,7 @@ from ciao.models import (
     ModelChangedEvent,
     PermissionRequestEvent,
     PromptCancelledEvent,
+    LATE_WAKE_NOTICE,
     ResultEvent,
     SessionTitleEvent,
     ShellFinishedEvent,
@@ -290,6 +291,8 @@ class ChatStreamingHost(Protocol):
     def _background_work_outstanding(self, chat_id: str) -> bool: ...
     def _note_shell_finished(self, chat_id: str, event: ShellFinishedEvent) -> None: ...
     def _release_shell_finished_waiting(self, chat_id: str) -> None: ...
+    def _continuation_started(self, chat_id: str) -> str | None: ...
+    def _take_claimed_notice(self, chat_id: str, *, adopt: bool) -> str | None: ...
 
     def _spawn_detached(
         self, coro: Coroutine[object, object, object], name: str
@@ -2185,6 +2188,8 @@ class ChatStreaming:
             # The final text block of the follow-up execution now streaming.
             # Reset per terminal result: each wake is its own turn (#2139).
             drain_segment = FinalAnswerTracker()
+            # The live card of a notice a continuation claimed; published before the continuation's text.
+            pending_echo: str | None = None
             async for event in events:
                 # A shell notice is recorded before the supersede check below: the queue
                 # gave it up already, so a drain a foreground turn replaces must not lose it.
@@ -2203,6 +2208,11 @@ class ChatStreaming:
                     break
                 if isinstance(event, ContextCompactedEvent):
                     self._clear_stable_context(chat_id)
+                if isinstance(event, AssistantTextDelta) and event.parent_tool_use_id is None:
+                    # A provider's own continuation starts speaking: it answers the shells that ended.
+                    claimed_text = self._host._continuation_started(chat_id)
+                    if claimed_text:
+                        pending_echo = claimed_text
                 drain_segment.feed(event)
                 if isinstance(event, SessionTitleEvent):
                     self._host.apply_adapter_title(chat_id, event.title)
@@ -2241,6 +2251,10 @@ class ChatStreaming:
                             "background": True,
                         }
                     )
+                if pending_echo is not None:
+                    # The same card a wake draws: the notice, then the reply it produced.
+                    stream.publish({"type": "user_echo", "text": pending_echo, "origin": "background_run"})
+                    pending_echo = None
                 stream.publish(payload)
                 if isinstance(event, PermissionRequestEvent):
                     self._host._notify_permission(chat_id, event)
@@ -2251,6 +2265,14 @@ class ChatStreaming:
                     )
                     drain_segment = FinalAnswerTracker()
                     is_error = bool(event.is_error)
+                    if event.origin == "task-notification":
+                        # The continuation closes: its turn takes the notice it claimed, if any.
+                        # Only the provider's default notice is replaced; a real one is kept.
+                        claimed = self._host._take_claimed_notice(
+                            chat_id, adopt=event.wake_notice == LATE_WAKE_NOTICE
+                        )
+                        if claimed:
+                            event.wake_notice = claimed
                     self._record_wake_turn(chat_id, event)
                     settled = not self._host._background_work_outstanding(chat_id)
                     chat_now = self._host._chats.get(chat_id)
