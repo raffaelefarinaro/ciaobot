@@ -161,7 +161,18 @@ class TurnText:
 
     @property
     def result(self) -> str:
-        return "".join(self._segments)
+        # A tool call between two text segments is a paragraph break: without one the
+        # reply reads "...shells.hello". Back-to-back chunks (no call between) join unchanged.
+        out = ""
+        for segment in self._segments:
+            if out and segment and not out.endswith("\n") and not segment.startswith("\n"):
+                # Trim only at an inserted break: "Looking at the file. " + break reads as trailing spaces.
+                head, tail = out.rstrip(" \t"), segment.lstrip(" \t")
+                if head and tail:
+                    out = head + "\n\n" + tail
+                    continue
+            out += segment
+        return out
 
     @property
     def final_text(self) -> str | None:
