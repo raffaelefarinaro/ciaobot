@@ -131,7 +131,7 @@ class BaseProvider(ABC):
     capabilities = ProviderCapabilities()
     # Set by the host: asked when the provider's own continuation after a background shell starts
     # speaking; returns the held shell notice that reply answers, or None. Providers without one ignore it.
-    continuation_hook: Callable[[], str | None] | None = None
+    continuation_hook: Callable[[list[Any]], str | None] | None = None
 
     def __init__(self, workspace_root: Path, *, config: object | None = None) -> None:
         self.workspace_root = workspace_root

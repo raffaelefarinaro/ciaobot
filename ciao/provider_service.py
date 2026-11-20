@@ -7,6 +7,7 @@ from contextlib import aclosing
 import logging
 import math
 from pathlib import Path
+from typing import Any
 
 from ciao import provider_registry
 from ciao.config import BridgeConfig
@@ -58,7 +59,7 @@ class ProviderService:
         # guide-local fallback under the agent root.
         self._workspace = workspace
         self._provider: ProviderImpl | None = None
-        self._continuation_hook: Callable[[], str | None] | None = None
+        self._continuation_hook: Callable[[list[Any]], str | None] | None = None
         self._active_handle: ActiveHandle | None = None
         if provider:
             self._ensure_provider(provider)
@@ -162,7 +163,7 @@ class ProviderService:
         """True when the live provider currently permits a between-turn reader."""
         return self._provider is not None and self._provider.can_drain
 
-    def set_continuation_hook(self, hook: Callable[[], str | None]) -> None:
+    def set_continuation_hook(self, hook: Callable[[list[Any]], str | None]) -> None:
         """Ask for a held shell notice when the provider's own continuation starts speaking."""
         self._continuation_hook = hook
         if self._provider is not None:

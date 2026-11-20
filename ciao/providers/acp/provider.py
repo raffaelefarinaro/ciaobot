@@ -431,11 +431,11 @@ class AcpProvider(BaseProvider):
         return self._session is not None and self.is_connected
 
     # The host's hook for a continuation's notice (set through ProviderService); see AcpSession.
-    continuation_hook: Callable[[], str | None] | None = None
+    continuation_hook: Callable[[list[Any]], str | None] | None = None
 
-    def _continuation_notice(self) -> str | None:
+    def _continuation_notice(self, ended: list[Any]) -> str | None:
         hook = self.continuation_hook
-        return hook() if hook is not None else None
+        return hook(ended) if hook is not None else None
 
     @property
     def background_work_outstanding(self) -> bool:

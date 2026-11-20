@@ -211,8 +211,11 @@ class AcpSession:
         self._late_text = TurnText()
         self._late_open = False
         self._late_substantive = False
-        # Set by the host: called once when a late turn starts speaking; its text is a claimed shell notice.
-        self.continuation_hook: Callable[[], str | None] | None = None
+        # Set by the host: called with the shell ends this session has emitted and not yet offered,
+        # when a late turn starts speaking. Returns the notice the reply answers, or None.
+        self.continuation_hook: Callable[[list[ShellFinishedEvent]], str | None] | None = None
+        # The shell ends this session emitted and has not offered to a continuation, by call id.
+        self._ended_shells: dict[str, ShellFinishedEvent] = {}
         self._late_speaking = False
         self._quiet_task: asyncio.Task[None] | None = None
         # Background shells whose process ends silently (no terminal meta): settled by a liveness check.
@@ -436,6 +439,10 @@ class AcpSession:
             exit_code=exit_code,
             ended_at=time.monotonic(),
         )
+        # Kept here, not only in the queue: a continuation may speak before the drain dequeues this end.
+        self._ended_shells[call_id] = event
+        while len(self._ended_shells) > _SHELL_COMMANDS_LIMIT:
+            del self._ended_shells[next(iter(self._ended_shells))]
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -517,13 +524,10 @@ class AcpSession:
         if not self._late_speaking and any(
             isinstance(event, AssistantTextDelta) and event.parent_tool_use_id is None for event in events
         ):
-            # The provider's own continuation starts: a held shell notice it answers is journaled
-            # first, so the reload shows the card before the reply, as the live view does.
+            # The provider's own continuation starts: a shell notice it answers is journaled first,
+            # so a reload shows the card before the reply, as the live view does.
             self._late_speaking = True
-            notice = self.continuation_hook() if self.continuation_hook is not None else None
-            if notice:
-                self._journal.user(notice, turn_origin="background_run")
-                self._late_queue.put_nowait(WakeNoticeEvent(type="wake_notice", text=notice))
+            self._claim_continuation()
         if not self._late_open:
             self._late_open = True
             self._late_text = TurnText()
@@ -535,6 +539,46 @@ class AcpSession:
             self._late_text.feed(event)
             self._journal_event(event)
         self._arm_quiet()
+
+    def _settle_dead_shells(self) -> None:
+        """End each tracked shell whose process is already gone, before the poll has noticed.
+
+        A continuation starts because a shell ended: that end must be in the claim, not found later.
+        """
+        if not self._shells.polling:
+            return
+        try:
+            table = process_table()
+        except Exception:  # noqa: BLE001 — a failed process listing settles nothing
+            logger.exception("Could not read the process table to settle a finished shell")
+            return
+        for call_id, shell in self._shells.settled(table):
+            self._end_shell(call_id, shell, None)
+
+    def _claim_continuation(self) -> None:
+        """Offer this session's unclaimed shell ends to the host; journal and queue the notice it returns.
+
+        Never raises: a failing hook or journal write is logged, and the reply that follows is kept.
+        """
+        self._settle_dead_shells()
+        ended = list(self._ended_shells.values())
+        self._ended_shells.clear()
+        hook = self.continuation_hook
+        if hook is None or not ended:
+            return
+        try:
+            notice = hook(ended)
+        except Exception:
+            logger.exception("Shell notice claim failed; the reply is kept without its notice")
+            return
+        if not notice:
+            return
+        try:
+            self._journal.user(notice, turn_origin="background_run")
+        except Exception:
+            logger.exception("Could not journal a claimed shell notice; the reply is kept without it")
+            return
+        self._late_queue.put_nowait(WakeNoticeEvent(type="wake_notice", text=notice))
 
     def _arm_quiet(self) -> None:
         previous = self._quiet_task
