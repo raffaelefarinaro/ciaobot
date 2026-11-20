@@ -17,6 +17,9 @@
   --accent: #fb923c;    /* Ciao orange; matches the default amber preset */
   --accent-strong: #ea580c;
   --accent2: #6a47b8;
+  /* The logo's orange (the o dots in the wordmark, as on the site header). Fixed
+     in both themes: a workspace accent, including the grey neutral one, must not recolour the logo. */
+  --brand-dot: #dd7138;
   /* Label colour on a filled accent surface (.btn-primary, active pills,
      accent badges). The dark-theme accents are bright, so white on them sits
      at 2-3.6:1; the canvas indigo clears WCAG AA (4.5:1) on every dark accent
@@ -266,12 +269,14 @@ body {
   user-select: none;
 }
 .wordmark-dot {
+  /* Stands in for the o: the circle spans the monospace x-height and sits on
+     the baseline, with 0.6em (the o's advance) across the two margins. */
   display: inline-block;
-  width: 0.34em;
-  height: 0.34em;
-  margin: 0 0.08em 0.08em;
+  width: 0.52em;
+  height: 0.52em;
+  margin: 0 0.04em;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--brand-dot);
   flex: none;
 }
 .wordmark--lg { font-size: 32px; }

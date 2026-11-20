@@ -434,13 +434,13 @@ export const inventory: InventoryEntry[] = [
       "text",
       "size"
     ],
-    "variantNotes": "Text replaces the brand name (every `o`, in any case, becomes an accent dot; other characters stay letters); size is sm, md or lg.",
+    "variantNotes": "Text replaces the brand name (every `o`, in any case, becomes a brand-orange dot; other characters stay letters); size is sm, md or lg.",
     "states": [
       {
         "name": "default",
         "coverage": "covered",
         "storyIds": ["wordmark--default"],
-        "note": "Default renders Ciaobot at md, with the two `o` characters as accent dots and the full text as the accessible name."
+        "note": "Default renders Ciaobot at md, with the two `o` characters as brand-orange dots and the full text as the accessible name."
       },
       {
         "name": "size-small",
@@ -465,6 +465,12 @@ export const inventory: InventoryEntry[] = [
         "coverage": "covered",
         "storyIds": ["wordmark--narrow"],
         "note": "Narrow renders the brand text in a maximum 390px column, still on one line."
+      },
+      {
+        "name": "neutral-workspace",
+        "coverage": "covered",
+        "storyIds": ["wordmark--neutral-workspace"],
+        "note": "NeutralWorkspace renders under the grey neutral accent, the state before the workspace colour is known, and checks the dots keep the brand orange."
       }
     ],
     "loading": {
