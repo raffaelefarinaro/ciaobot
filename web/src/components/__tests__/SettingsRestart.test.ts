@@ -111,3 +111,31 @@ it('fails closed when the server type cannot be determined', async () => {
     wrapper.unmount()
   }
 })
+
+it.each([
+  // A packaged install: restart only, no sync.
+  { devMode: false, restartOnly: true, copy: 'Restart the engine to reload the Ciaobot program', syncShown: false },
+  // A developer's checkout: the sync copy and button.
+  { devMode: true, restartOnly: false, copy: 'send pending changes to its repository', syncShown: true },
+])('gates the sync controls on developer mode or an editable install (dev_mode=$devMode)', async ({ devMode, restartOnly, copy, syncShown }) => {
+  setActivePinia(createPinia())
+  const stub = defineComponent({ render: () => h('div') })
+  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings/:tab', component: stub }] })
+  await router.push('/settings/advanced')
+  await router.isReady()
+  vi.spyOn(api, 'get').mockImplementation(async (path) => {
+    if (path === '/api/local/status') return { git_repo: true, branch: 'main', dirty: false, restart_only: restartOnly, dev_mode: devMode } as never
+    throw new Error('Unrelated settings data unavailable in this test')
+  })
+  const wrapper = mount(SettingsView, { global: { plugins: [router], stubs: { Teleport: true } } })
+  try {
+    await flushPromises()
+    const host = wrapper.get('#restart-host')
+    expect(host.text()).toContain(copy)
+    expect(host.text().includes('Sync with Remote')).toBe(syncShown)
+    expect(host.text().includes('Restart')).toBe(true)
+    expect(host.text().includes('restart to update it')).toBe(syncShown)
+  } finally {
+    wrapper.unmount()
+  }
+})

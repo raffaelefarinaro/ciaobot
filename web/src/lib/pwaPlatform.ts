@@ -74,6 +74,14 @@ export function isDesktopClient(): boolean {
   return (globalThis as { __CIAOBOT_DESKTOP__?: unknown }).__CIAOBOT_DESKTOP__ === true
 }
 
+/** Stories only: stand in for the Mac app's marker for one render. Production
+ *  code never sets it; it lives here so the marker's name has one home. */
+export function setDesktopClientForStory(on: boolean): void {
+  const g = globalThis as { __CIAOBOT_DESKTOP__?: unknown }
+  if (on) g.__CIAOBOT_DESKTOP__ = true
+  else delete g.__CIAOBOT_DESKTOP__
+}
+
 /** Safari (desktop or iOS), excluding Chromium-based browsers that also say
  *  "Safari" in their user agent. */
 export function isSafari(): boolean {
