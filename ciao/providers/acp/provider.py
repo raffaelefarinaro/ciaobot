@@ -365,6 +365,7 @@ class AcpProvider(BaseProvider):
             broker.cancel_all()
             self._client.broker = None
             raise
+        opened.continuation_hook = self._continuation_notice
         self._session = opened
         self._broker = broker
         self._client.session = opened
@@ -428,6 +429,13 @@ class AcpProvider(BaseProvider):
     @property
     def can_drain(self) -> bool:
         return self._session is not None and self.is_connected
+
+    # The host's hook for a continuation's notice (set through ProviderService); see AcpSession.
+    continuation_hook: Callable[[], str | None] | None = None
+
+    def _continuation_notice(self) -> str | None:
+        hook = self.continuation_hook
+        return hook() if hook is not None else None
 
     @property
     def background_work_outstanding(self) -> bool:

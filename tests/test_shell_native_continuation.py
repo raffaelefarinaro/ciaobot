@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from ciao.models import AssistantTextDelta, ResultEvent, ShellFinishedEvent, ToolUseEvent
+from ciao.models import AssistantTextDelta, ResultEvent, ShellFinishedEvent, ToolUseEvent, WakeNoticeEvent
 from ciao.web import chat_streaming, project_chats
 from ciao.web.chat_streaming import ChatStreaming
 
@@ -95,11 +95,21 @@ class _Host:
         self._config = SimpleNamespace(workspace_root=Path("/tmp"))
 
     async def _drain(self) -> Any:
+        spoke = False
         for item in self._script:
             if isinstance(item, float):
                 await asyncio.sleep(item)  # the time between two events of the provider's stream
-            else:
-                yield item
+                continue
+            if isinstance(item, AssistantTextDelta) and item.parent_tool_use_id is None and not spoke:
+                # What AcpSession does when a late turn starts speaking: ask the host for the notice
+                # it answers, and send that notice ahead of the reply.
+                spoke = True
+                notice = self._manager._continuation_started("chat-1")
+                if notice:
+                    yield WakeNoticeEvent(type="wake_notice", text=notice)
+            if isinstance(item, ResultEvent):
+                spoke = False
+            yield item
 
     def _agent_root_for_chat(self, chat_id: str) -> None:
         return None
@@ -343,3 +353,51 @@ def test_a_forgotten_chat_keeps_no_held_notice_or_claim(monkeypatch: pytest.Monk
     assert manager._continuation_started("chat-1") is None
     assert manager._shell_notice_due == {} and manager._claimed_notices == {}
     assert manager._recorder.started == []
+
+def test_the_session_journals_the_notice_before_the_reply_and_queues_it_ahead_of_the_text() -> None:
+    # The live session, not the drain, makes the claim: its first late text asks the hook, and the
+    # notice goes into the journal and the late queue before the text it answers.
+    from ciao.providers.acp.session import AcpSession
+    from ciao.providers.acp.spec import AgentSpec  # noqa: F401 (the spec's type)
+
+    class _Journal:
+        def __init__(self) -> None:
+            self.rows: list[tuple[str, Any]] = []
+
+        def user(self, text: str, *, turn_origin: str = "") -> None:
+            self.rows.append(("user", (text, turn_origin)))
+
+        def event(self, payload: Any) -> None:
+            self.rows.append(("event", payload))
+
+    async def run() -> tuple[_Journal, list[Any]]:
+        session = AcpSession.__new__(AcpSession)
+        session._journal = _Journal()
+        session._late_queue = asyncio.Queue()
+        session._late_text = session_text()
+        session._late_open = False
+        session._late_substantive = False
+        session._late_speaking = False
+        session._quiet_task = None
+        session.spec = SimpleNamespace(quiet_period_s=60.0)
+        session.continuation_hook = lambda: "[Ciaobot] 1 background run finished.\n\n— make (ran 1 s) (c, exit status unknown)"
+        session._touch_late([_text(NATIVE_TEXT)], substantive=True)
+        session._touch_late([_text(" more")], substantive=True)  # the same continuation: no second notice
+        session._quiet_task.cancel()
+        queued = []
+        while not session._late_queue.empty():
+            queued.append(session._late_queue.get_nowait())
+        return session._journal, queued
+
+    journal, queued = asyncio.run(run())
+    user_rows = [row for row in journal.rows if row[0] == "user"]
+    assert len(user_rows) == 1 and user_rows[0][1][1] == "background_run"
+    assert user_rows[0][1][0].startswith("[Ciaobot] 1 background run finished.")
+    assert isinstance(queued[0], WakeNoticeEvent)
+    assert [getattr(event, "text", None) for event in queued[1:2]] == [NATIVE_TEXT]
+
+
+def session_text() -> Any:
+    from ciao.providers.acp.session import TurnText
+
+    return TurnText()

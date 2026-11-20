@@ -36,6 +36,7 @@ from ciao.models import (
     PermissionRequestEvent,
     PromptCancelledEvent,
     LATE_WAKE_NOTICE,
+    WakeNoticeEvent,
     ResultEvent,
     SessionTitleEvent,
     ShellFinishedEvent,
@@ -291,7 +292,6 @@ class ChatStreamingHost(Protocol):
     def _background_work_outstanding(self, chat_id: str) -> bool: ...
     def _note_shell_finished(self, chat_id: str, event: ShellFinishedEvent) -> None: ...
     def _release_shell_finished_waiting(self, chat_id: str) -> None: ...
-    def _continuation_started(self, chat_id: str) -> str | None: ...
     def _take_claimed_notice(self, chat_id: str, *, adopt: bool) -> str | None: ...
 
     def _spawn_detached(
@@ -2196,6 +2196,10 @@ class ChatStreaming:
                 if isinstance(event, ShellFinishedEvent):
                     self._host._note_shell_finished(chat_id, event)
                     continue
+                if isinstance(event, WakeNoticeEvent):
+                    # A claimed notice: its card goes out right before the continuation's reply.
+                    pending_echo = event.text
+                    continue
                 # No await sits in this body, so one check covers every side
                 # effect of the iteration: a cancelled drain or one a
                 # foreground admission replaced must not touch chat state.
@@ -2208,11 +2212,6 @@ class ChatStreaming:
                     break
                 if isinstance(event, ContextCompactedEvent):
                     self._clear_stable_context(chat_id)
-                if isinstance(event, AssistantTextDelta) and event.parent_tool_use_id is None:
-                    # A provider's own continuation starts speaking: it answers the shells that ended.
-                    claimed_text = self._host._continuation_started(chat_id)
-                    if claimed_text:
-                        pending_echo = claimed_text
                 drain_segment.feed(event)
                 if isinstance(event, SessionTitleEvent):
                     self._host.apply_adapter_title(chat_id, event.title)

@@ -31,11 +31,13 @@ from pydantic import TypeAdapter
 
 from ciao.model_tiers import resolve_tier
 from ciao.models import (
+    AssistantTextDelta,
     BridgeMode,
     ContextCompactedEvent,
     ResultEvent,
     LATE_WAKE_NOTICE,
     ShellFinishedEvent,
+    WakeNoticeEvent,
     StreamEvent,
     SystemStatusEvent,
     ToolUseEvent,
@@ -209,6 +211,9 @@ class AcpSession:
         self._late_text = TurnText()
         self._late_open = False
         self._late_substantive = False
+        # Set by the host: called once when a late turn starts speaking; its text is a claimed shell notice.
+        self.continuation_hook: Callable[[], str | None] | None = None
+        self._late_speaking = False
         self._quiet_task: asyncio.Task[None] | None = None
         # Background shells whose process ends silently (no terminal meta): settled by a liveness check.
         self._shells = ShellLiveness()
@@ -509,6 +514,16 @@ class AcpSession:
                 self._end_shell(call_id, shell, None)
 
     def _touch_late(self, events: list[StreamEvent], *, substantive: bool) -> None:
+        if not self._late_speaking and any(
+            isinstance(event, AssistantTextDelta) and event.parent_tool_use_id is None for event in events
+        ):
+            # The provider's own continuation starts: a held shell notice it answers is journaled
+            # first, so the reload shows the card before the reply, as the live view does.
+            self._late_speaking = True
+            notice = self.continuation_hook() if self.continuation_hook is not None else None
+            if notice:
+                self._journal.user(notice, turn_origin="background_run")
+                self._late_queue.put_nowait(WakeNoticeEvent(type="wake_notice", text=notice))
         if not self._late_open:
             self._late_open = True
             self._late_text = TurnText()
@@ -538,6 +553,7 @@ class AcpSession:
         if not self._late_open:
             return
         self._late_open = False
+        self._late_speaking = False
         task = self._quiet_task
         self._quiet_task = None
         if task is not None and task is not asyncio.current_task():
