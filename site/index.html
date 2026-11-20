@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Your agents do the work. Ciaobot remembers.</title>
-  <meta name="description" content="A persistent workspace for Claude Code and OpenCode, with projects, files, automations and Markdown memory you own.">
+  <meta name="description" content="A persistent workspace for Claude Code, Codex and OpenCode, with projects, files, automations and Markdown memory you own.">
   <link rel="canonical" href="https://www.raffaelefarinaro.com/ciaobot/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Ciaobot">
   <meta property="og:title" content="Your agents do the work. Ciaobot remembers.">
-  <meta property="og:description" content="A persistent workspace for Claude Code and OpenCode, with projects, files, automations and Markdown memory you own.">
+  <meta property="og:description" content="A persistent workspace for Claude Code, Codex and OpenCode, with projects, files, automations and Markdown memory you own.">
   <meta property="og:url" content="https://www.raffaelefarinaro.com/ciaobot/">
   <meta property="og:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
   <meta property="og:image:type" content="image/png">
@@ -18,7 +18,7 @@
   <meta property="og:image:alt" content="Ciaobot — a personal assistant that remembers.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Your agents do the work. Ciaobot remembers.">
-  <meta name="twitter:description" content="A persistent workspace for Claude Code and OpenCode, with projects, files, automations and Markdown memory you own.">
+  <meta name="twitter:description" content="A persistent workspace for Claude Code, Codex and OpenCode, with projects, files, automations and Markdown memory you own.">
   <meta name="twitter:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
   <link rel="icon" href="assets/img/favicon.png">
   <link rel="stylesheet" href="assets/style.css">
@@ -41,28 +41,18 @@
     <section class="hero">
       <div class="hero-copy">
         <h1>Your agents do the work. <span>Ciaobot remembers.</span></h1>
-        <p class="lead">One persistent workspace for Claude Code and OpenCode—with projects, files, automations and memory in Markdown you own.</p>
-        <div class="install" data-install>
-          <a class="btn btn-primary install-client" data-mac-client href="https://github.com/raffaelefarinaro/ciaobot-mac/releases">Download Ciaobot for Mac</a>
-          <p class="install-note install-client-note" data-mac-client-note>Native client for Apple silicon, macOS 13+. It can install the engine for you.</p>
+        <p class="lead">One persistent workspace for Claude Code, Codex and OpenCode—with projects, files, automations and memory in Markdown you own.</p>
+        <div class="install">
+          <a class="btn btn-primary install-client" data-mac-client href="https://github.com/raffaelefarinaro/ciaobot/releases/latest">Download Ciaobot for Mac</a>
+          <p class="install-note install-client-note">Apple silicon, macOS 13+. The app includes its own engine, or connects to an existing server.</p>
           <div class="install-head">
-            <p class="install-label" data-install-label>Or install only the engine on macOS in Terminal:</p>
+            <p class="install-label">Linux server (Ubuntu 24.04): install the engine with one command</p>
           </div>
-          <div class="install-row">
-            <label class="install-os" hidden>
-              <span class="visually-hidden">Platform</span>
-              <select data-install-os>
-                <option value="mac" data-label="Or install only the engine on macOS in Terminal:" data-cmd="curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh">macOS</option>
-                <option value="linux" data-label="Install on Ubuntu 24.04 with the dedicated administrator guide:" data-url="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md">Linux</option>
-              </select>
-            </label>
-            <div class="install-box" data-install-command>
-              <code id="install-cmd">curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh</code>
-              <button type="button" data-copy="install-cmd" aria-label="Copy the install command">Copy</button>
-            </div>
-            <a class="btn btn-primary install-guide" data-install-guide hidden href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md">Open Linux install guide</a>
+          <div class="install-box">
+            <code id="install-cmd">curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh</code>
+            <button type="button" data-copy="install-cmd" aria-label="Copy the install command">Copy</button>
           </div>
-          <noscript><p class="install-note">For Ubuntu 24.04, use the <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md">Linux guide</a>.</p></noscript>
+          <p class="install-note"><a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/LINUX.md">Read the Linux install guide</a></p>
         </div>
       </div>
       <figure class="shot">
@@ -74,7 +64,7 @@
     <section class="essentials" aria-label="What Ciaobot adds">
       <a href="models.html">
         <h2>Use your agents <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true" focusable="false"><path d="M4 10h12m-5-5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></h2>
-        <p>Claude Code and OpenCode, with the provider credentials you already have.</p>
+        <p>Claude Code, Codex and OpenCode, with the provider credentials you already have.</p>
       </a>
       <a href="features.html#organise">
         <h2>Keep the context <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true" focusable="false"><path d="M4 10h12m-5-5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></h2>
