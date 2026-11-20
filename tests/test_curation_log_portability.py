@@ -1,15 +1,20 @@
 """Two-process contention on the packaged curation logs (#3101, A1).
 
-The waiter is a real child process. It prints ``attempting`` before it calls
-into the curation writer and ``publishing`` from inside the publication seam,
-so the parent can prove the child reached the lock, cannot publish while the
-parent holds it, and completes once the parent releases. There are no sleeps:
-every ordering claim is a blocking read on the child's stdout, and the only
-non-blocking check (``select`` with zero timeout) can only fail when the child
-got past the lock too early.
+The waiter is a real child process. Its ``curation_run.lock_exclusive`` is
+wrapped to print ``entering-lock`` from *inside* the acquisition, before the
+real ``flock`` call, and ``publish_log`` prints ``publishing`` from the
+publication seam. The parent holds the canonical state lock, waits until the
+child reports it is at the lock, checks that nothing was published, then
+releases; only then may the child publish.
 
-macOS and Linux only; the suite is skipped on any other platform rather than
-passing through a weaker path.
+There are no sleeps. Each ordering claim is a blocking read on the child's
+stdout. The only timed wait is a failure bound: if a child never reaches the
+lock (for example because the writer stopped taking it) the read fails the
+test instead of hanging. The non-blocking ``select`` check can only fail when
+the child got past the lock too early.
+
+macOS and Linux only; skipped elsewhere rather than passing through a weaker
+path.
 """
 
 from __future__ import annotations
@@ -30,6 +35,8 @@ pytestmark = pytest.mark.skipif(
     reason="the curation log contract is verified on macOS and Linux only",
 )
 
+_LOCK_BOUND_SECONDS = 30
+
 _CHILD = r"""
 import sys
 from datetime import date
@@ -38,18 +45,24 @@ from pathlib import Path
 from ciao import curation_logs, curation_run as cr
 
 operation, vault, holder = sys.argv[1], Path(sys.argv[2]), sys.argv[3]
+real_lock = cr.lock_exclusive
 real_publish = curation_logs.publish_log
 
 
-def announcing_publish(path, data, *, previous):
+def lock_then_announce(fd, *, blocking=True):
+    sys.stdout.write("entering-lock\n")
+    sys.stdout.flush()
+    real_lock(fd, blocking=blocking)
+
+
+def announcing_publish(path, data, *, snapshot):
     sys.stdout.write("publishing\n")
     sys.stdout.flush()
-    real_publish(path, data, previous=previous)
+    real_publish(path, data, snapshot=snapshot)
 
 
+cr.lock_exclusive = lock_then_announce
 curation_logs.publish_log = announcing_publish
-sys.stdout.write("attempting\n")
-sys.stdout.flush()
 if operation == "append":
     cr.append_log(vault, holder=holder, log="curation", payload=b"technical report")
 elif operation == "marker":
@@ -81,7 +94,7 @@ def _vault(tmp_path: Path) -> Path:
     return vault
 
 
-def _spawn(operation: str, vault: Path, holder: str, tmp_path: Path) -> subprocess.Popen[str]:
+def _spawn(operation: str, vault: Path, holder: str) -> subprocess.Popen[str]:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
     return subprocess.Popen(
@@ -94,7 +107,12 @@ def _spawn(operation: str, vault: Path, holder: str, tmp_path: Path) -> subproce
 
 
 def _line(proc: subprocess.Popen[str]) -> str:
+    """The child's next line. Fails, rather than hangs, if the child never writes one."""
     assert proc.stdout is not None
+    ready, _, _ = select.select([proc.stdout], [], [], _LOCK_BOUND_SECONDS)
+    if not ready:
+        proc.kill()
+        pytest.fail("the child never reached the state lock")
     return proc.stdout.readline().strip()
 
 
@@ -113,14 +131,14 @@ def _finish(proc: subprocess.Popen[str]) -> None:
     assert proc.wait(timeout=30) == 0
 
 
-def test_a_child_append_waits_for_the_held_state_lock_then_commits(tmp_path: Path) -> None:
+def test_a_child_append_signals_from_inside_the_lock_and_waits_for_release(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     lease = cr.begin_run(vault, holder="nightly")
     body = (vault / cr.CURATION_LOG_RELATIVE).read_bytes()
 
     with cr._state_lock(vault):
-        child = _spawn("append", vault, lease.holder, tmp_path)
-        assert _line(child) == "attempting"
+        child = _spawn("append", vault, lease.holder)
+        assert _line(child) == "entering-lock"
         assert _nothing_pending(child), "the child published while the parent held the lock"
         assert (vault / cr.CURATION_LOG_RELATIVE).read_bytes() == body
 
@@ -129,13 +147,13 @@ def test_a_child_append_waits_for_the_held_state_lock_then_commits(tmp_path: Pat
     assert (vault / cr.CURATION_LOG_RELATIVE).read_bytes() == body + b"\n\n" + b"technical report"
 
 
-def test_a_child_marker_waits_for_the_held_state_lock_then_commits(tmp_path: Path) -> None:
+def test_a_child_marker_signals_from_inside_the_lock_and_waits_for_release(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS))
 
     with cr._state_lock(vault):
-        child = _spawn("marker", vault, "", tmp_path)
-        assert _line(child) == "attempting"
+        child = _spawn("marker", vault, "")
+        assert _line(child) == "entering-lock"
         assert _nothing_pending(child), "the marker was written while the parent held the lock"
 
     assert _line(child) == "publishing"
@@ -150,8 +168,8 @@ def test_an_alias_of_the_vault_contends_on_the_same_lock(tmp_path: Path) -> None
     lease = cr.begin_run(vault, holder="nightly")
 
     with cr._state_lock(vault):
-        child = _spawn("append", alias, lease.holder, tmp_path)
-        assert _line(child) == "attempting"
+        child = _spawn("append", alias, lease.holder)
+        assert _line(child) == "entering-lock"
         assert _nothing_pending(child), "a root alias bypassed the canonical lock"
 
     assert _line(child) == "publishing"
@@ -165,10 +183,10 @@ def test_append_and_marker_both_survive_contention_in_either_order(tmp_path: Pat
     cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS), holder=lease.holder)
 
     with cr._state_lock(vault):
-        appender = _spawn("append", vault, lease.holder, tmp_path)
-        marker = _spawn("marker", vault, "", tmp_path)
-        assert _line(appender) == "attempting"
-        assert _line(marker) == "attempting"
+        appender = _spawn("append", vault, lease.holder)
+        marker = _spawn("marker", vault, "")
+        assert _line(appender) == "entering-lock"
+        assert _line(marker) == "entering-lock"
         assert _nothing_pending(appender) and _nothing_pending(marker)
 
     # The lock admits the two children in either order. Both publications must

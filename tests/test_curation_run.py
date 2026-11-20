@@ -14,6 +14,7 @@ soon as the holder has no work left.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -4454,9 +4455,9 @@ def _lock_depth(monkeypatch: pytest.MonkeyPatch) -> list[int]:
 
     real_marker = cr._write_full_pass_marker
 
-    def marker(vault_root: Path, *, today: date | None = None) -> None:
+    def marker(vault_root: Path, **kwargs: object) -> None:
         observed.append(state["depth"])
-        real_marker(vault_root, today=today)
+        real_marker(vault_root, **kwargs)
 
     monkeypatch.setattr(cr, "_state_lock", counting)
     monkeypatch.setattr(cr, "_write_full_pass_marker", marker)
@@ -4531,44 +4532,51 @@ def test_append_log_never_renews_or_changes_state(tmp_path: Path) -> None:
     lease = cr.begin_run(vault, holder="run", ttl_s=60, now=_DISPATCHED)
     state_before = (vault / cr.STATE_RELATIVE).read_bytes()
 
-    cr.append_log(vault, holder=lease.holder, log="curation", payload=b"x", now=_DISPATCHED)
+    cr.append_log(
+        vault, holder=lease.holder, log="curation", payload=b"x", now=_DISPATCHED,
+        clock=lambda: _DISPATCHED,
+    )
 
     assert (vault / cr.STATE_RELATIVE).read_bytes() == state_before
 
 
-def test_oversized_logs_are_blocked_and_consume_no_runnable_budget() -> None:
-    logs = cr.WorklistItem(
-        pass_id=cr.PASS_LOGS,
-        label="Rotate the oversized logs",
-        reason="Curation-Log.md over 64KB",
-        keys=(cr.item_key(cr.PASS_LOGS, "a"), cr.item_key(cr.PASS_LOGS, "b")),
-    )
-    skills = cr.WorklistItem(
-        pass_id=cr.PASS_SKILL_PROPOSALS,
-        label="Resolve skill proposal one",
-        reason="report, do not settle",
-        keys=(cr.item_key(cr.PASS_SKILL_PROPOSALS, "one"),),
-    )
-    later = cr.WorklistItem(
-        pass_id=cr.PASS_SKILL_PROPOSALS,
-        label="Resolve skill proposal two",
-        reason="report, do not settle",
-        keys=(cr.item_key(cr.PASS_SKILL_PROPOSALS, "two"),),
-    )
-    worklist = cr.Worklist(
-        items=(logs, skills, later), weekly_due=False, last_full_pass="2026-09-19",
-        generated_at="2026-09-19T00:00:00Z",
+def test_oversized_logs_are_blocked_and_consume_no_runnable_budget(tmp_path: Path) -> None:
+    """Through the real `_log_items` and skill-proposal items, not hand-built items."""
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 19).isoformat())
+    head = b"---\nlast_full_pass: 2026-09-19\n---\n\n# Curation log\n"
+    big = head + b"x" * (cr.LOG_ROTATION_BYTES + 1 - len(head))
+    (vault / cr.CURATION_LOG_RELATIVE).write_bytes(big)
+    (vault / cr.WEEKLY_REVIEW_LOG_RELATIVE).write_bytes(big)
+    queue = vault / cr.SKILL_PROPOSALS_RELATIVE
+    queue.mkdir()
+    for name in ("alpha.md", "bravo.md"):
+        (queue / name).write_text("x", encoding="utf-8", newline="")
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        workspace=vault.name,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
     )
 
+    assert [item.pass_id for item in worklist.items] == [
+        cr.PASS_LOGS,
+        cr.PASS_SKILL_PROPOSALS,
+        cr.PASS_SKILL_PROPOSALS,
+    ]
     plan = cr.plan_run_with_blocked(worklist, cr.RunBudget(max_items=1))
-
-    assert [item.pass_id for item in plan.planned] == [cr.PASS_SKILL_PROPOSALS]
+    assert [item.label for item in plan.planned] == ["Report skill proposal alpha.md (do not settle)"]
     assert plan.planned_count == 1
     assert plan.blocked_count == 2
     assert plan.blocked_passes == [cr.PASS_LOGS]
     assert plan.deferred_count == 2 + 1
     assert [item.pass_id for item in plan.deferred] == [cr.PASS_LOGS, cr.PASS_SKILL_PROPOSALS]
     assert "operator archival required" in plan.deferred[0].reason
+    assert "over 64KB" in plan.deferred[0].reason
 
 
 def test_each_open_skill_proposal_is_its_own_named_item_so_budget_binds_one_file(
@@ -4603,3 +4611,132 @@ def test_each_open_skill_proposal_is_its_own_named_item_so_budget_binds_one_file
     assert [i.label for i in plan.planned] == ["Report skill proposal alpha.md (do not settle)"]
     assert plan.planned_count == 1
     assert plan.deferred_count == 2
+
+
+# ── Round 2: refused marker, authority recheck, read-only, shared closer ──
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["duplicate-marker", "unclosed-frontmatter", "oversized", "symlink-leaf", "non-utf8", "near-cap"],
+)
+def test_a_refused_marker_still_releases_the_lease_and_records_a_failed_run(
+    tmp_path: Path, case: str
+) -> None:
+    from ciao import curation_logs as cl
+
+    vault = _vault(tmp_path)
+    log = vault / cr.CURATION_LOG_RELATIVE
+    watched = log
+    if case == "duplicate-marker":
+        log.write_bytes(b"---\nlast_full_pass: 2026-09-01\nlast_full_pass: 2026-09-02\n---\n\n# Curation log\n")
+    elif case == "unclosed-frontmatter":
+        log.write_bytes(b"---\nlast_full_pass: 2026-09-01\n# Curation log\n")
+    elif case == "oversized":
+        log.write_bytes(b"x" * (cl.LOG_MAX_BYTES + 1))
+    elif case == "symlink-leaf":
+        target = tmp_path / "elsewhere.md"
+        target.write_bytes(b"keep me")
+        log.unlink(missing_ok=True)
+        log.symlink_to(target)
+        watched = target
+    elif case == "non-utf8":
+        log.write_bytes(b"# Curation log\n\xff\xfe broken\n")
+    else:
+        log.write_bytes(b"x" * (cl.LOG_MAX_BYTES - 10))
+    before = watched.read_bytes()
+
+    lease = cr.begin_run(vault, holder="run")
+    cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS), holder=lease.holder)
+    summary = cr.end_run(
+        vault, holder=lease.holder, status="ok", advance_marker=True, today=date(2026, 9, 19)
+    )
+
+    assert summary["full_pass_advanced"] is False
+    assert summary["status"] == "failed"
+    assert summary["marker_error"]
+    state = cr.load_state(vault)
+    assert state.lease == {}
+    assert state.last_run["status"] == "failed"
+    assert any("weekly marker not advanced" in reason for reason in state.last_run["reasons"])
+    assert watched.read_bytes() == before
+
+
+def test_a_marker_update_inside_the_cap_succeeds_without_growing_the_log(tmp_path: Path) -> None:
+    from ciao import curation_logs as cl
+
+    vault = _vault(tmp_path)
+    head = b"---\nlast_full_pass: 2026-09-01\n---\n\n# Curation log\n"
+    body = head + b"y" * (cl.LOG_MAX_BYTES - 10 - len(head))
+    (vault / cr.CURATION_LOG_RELATIVE).write_bytes(body)
+    lease = cr.begin_run(vault, holder="run")
+    cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS), holder=lease.holder)
+
+    summary = cr.end_run(
+        vault, holder=lease.holder, status="ok", advance_marker=True, today=date(2026, 9, 19)
+    )
+
+    after = (vault / cr.CURATION_LOG_RELATIVE).read_bytes()
+    assert summary["full_pass_advanced"] is True
+    assert len(after) == len(body) <= cl.LOG_MAX_BYTES
+    assert after.startswith(b"---\nlast_full_pass: 2026-09-19\n---\n")
+
+
+def test_the_append_refuses_when_the_lease_expires_during_a_slow_read(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    log = vault / cr.CURATION_LOG_RELATIVE
+    _fresh_log(vault, last_full_pass="2026-09-01")
+    before = log.read_bytes()
+    lease = cr.begin_run(vault, holder="run", ttl_s=60, now=_DISPATCHED)
+    instants = iter([_DISPATCHED, _DISPATCHED + timedelta(seconds=61)])
+
+    with pytest.raises(cr.CurationBusy):
+        cr.append_log(
+            vault, holder=lease.holder, log="curation", payload=b"late", clock=lambda: next(instants)
+        )
+    assert log.read_bytes() == before
+
+
+def test_the_marker_refuses_when_the_lease_expires_before_publication(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    log = vault / cr.CURATION_LOG_RELATIVE
+    _fresh_log(vault, last_full_pass="2026-09-01")
+    before = log.read_bytes()
+    lease = cr.begin_run(vault, holder="run", ttl_s=60, now=_DISPATCHED)
+    cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS), holder=lease.holder, now=_DISPATCHED)
+
+    with pytest.raises(cr.CurationBusy):
+        cr.end_run(
+            vault,
+            holder=lease.holder,
+            status="ok",
+            advance_marker=True,
+            today=date(2026, 9, 19),
+            now=_DISPATCHED,
+            clock=lambda: _DISPATCHED + timedelta(seconds=61),
+        )
+    assert log.read_bytes() == before
+
+
+def test_a_read_only_log_refuses_and_its_bytes_survive(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    log = vault / cr.CURATION_LOG_RELATIVE
+    log.write_bytes(b"# Curation log\nkept\n")
+    os.chmod(log, 0o444)
+    lease = cr.begin_run(vault, holder="run")
+
+    with pytest.raises(cr.CurationStateError):
+        cr.append_log(vault, holder=lease.holder, log="curation", payload=b"report")
+    assert log.read_bytes() == b"# Curation log\nkept\n"
+
+
+def test_the_closer_with_a_trailing_space_is_read_and_written_the_same_way(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    log = vault / cr.CURATION_LOG_RELATIVE
+    log.write_bytes(b"--- \nlast_full_pass: 2026-09-01\n--- \n\n# Curation log\n")
+    assert cr.read_last_full_pass(log) == "2026-09-01"
+
+    cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS))
+    assert cr.advance_full_pass(vault, today=date(2026, 9, 19)) is True
+    assert cr.read_last_full_pass(log) == "2026-09-19"
+    assert log.read_bytes().count(b"last_full_pass") == 1

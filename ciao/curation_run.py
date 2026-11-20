@@ -47,6 +47,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Iterator
 
 from ciao import curation_logs, decision_rules, skill_proposals
@@ -323,29 +324,18 @@ def _read_text(path: Path) -> str:
 def read_last_full_pass(curation_log: Path) -> str:
     """The ``last_full_pass: YYYY-MM-DD`` marker, or "" when unusable.
 
-    Deliberately a narrow scan of the frontmatter block rather than a YAML
-    parse: the log's body is agent-written prose that has no business being
-    parsed, and a malformed marker must read as "never ran" (weekly pass due)
-    rather than raise on the one run that would have fixed it.
+    Judged by the same frontmatter splitter the marker writer uses, so a
+    closer the writer accepts (``--- ``) is read too. A malformed or ambiguous
+    marker reads as "never ran" (weekly pass due) rather than raising.
     """
-    text = _read_text(curation_log)
-    if not text.startswith("---"):
+    stamp = curation_logs.marker_value(_read_text(curation_log))
+    if not stamp:
         return ""
-    _, _, rest = text.partition("\n")
-    block, sep, _ = rest.partition("\n---")
-    if not sep:
+    try:
+        date.fromisoformat(stamp)
+    except ValueError:
         return ""
-    for line in block.splitlines():
-        key, _, value = line.partition(":")
-        if key.strip() != "last_full_pass":
-            continue
-        stamp = value.strip().strip("\"'")
-        try:
-            date.fromisoformat(stamp)
-        except ValueError:
-            return ""
-        return stamp
-    return ""
+    return stamp
 
 
 def weekly_pass_due(last_full_pass: str, today: date) -> bool:
@@ -2210,6 +2200,32 @@ LOG_SELECTORS: dict[str, str] = {
 }
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _recheck_clock(now: datetime | None, clock: Callable[[], datetime] | None) -> Callable[[], datetime]:
+    """The clock for the authority recheck: an injected one, else the caller's instant, else the wall clock."""
+    if clock is not None:
+        return clock
+    if now is not None:
+        return lambda: now
+    return _utc_now
+
+
+def _holds_live_lease_now(vault_root: Path, *, holder: str, clock: Callable[[], datetime]) -> bool:
+    """Re-read the lease with a fresh clock. The caller holds the state lock."""
+    held = _live_lease(_load(state_path(vault_root)), clock().astimezone(UTC))
+    return held is not None and held.get("holder") == holder
+
+
+def _other_curation_files(vault: Path, relative: str) -> list[Path]:
+    """The state file and the other decision log: nothing a log may alias."""
+    others = [state_path(vault)]
+    others += [vault / name for name in LOG_SELECTORS.values() if name != relative]
+    return others
+
+
 def append_log(
     vault_root: Path,
     *,
@@ -2217,32 +2233,42 @@ def append_log(
     log: str,
     payload: bytes,
     now: datetime | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> dict[str, object]:
     """Append *payload* to a packaged decision log, under the live lease.
 
-    The state lock is held for the whole check-then-publish, so a marker write
-    cannot interleave between them. The append neither renews the lease nor
-    changes the state file. A retry after an uncertain response can duplicate
-    the report: nothing here is exactly-once.
+    The state lock is held for the whole read-check-publish. The lease is
+    checked at entry and again, with a fresh clock, immediately before the
+    publish: a lease that expired during a slow read refuses with nothing
+    published. The append neither renews the lease nor changes the state file.
+    A retry after an uncertain response can duplicate the report: nothing here
+    is exactly-once.
     """
     if log not in LOG_SELECTORS:
         raise ValueError("log must be curation or weekly-review")
     curation_logs.check_payload(payload)
     relative = LOG_SELECTORS[log]
+    recheck = _recheck_clock(now, clock)
     with _state_lock(Path(vault_root)):
-        effective_now = (now or datetime.now(UTC)).astimezone(UTC)
+        effective_now = (now or recheck()).astimezone(UTC)
         held = _live_lease(_load(state_path(vault_root)), effective_now)
         if not holder or held is None or held.get("holder") != holder:
             raise CurationBusy("this run no longer holds the curation lease")
         try:
             vault = curation_logs.canonical_vault(Path(vault_root))
             path = vault / relative
+            curation_logs.refuse_identity_overlap(path, _other_curation_files(vault, relative))
             curation_logs.ensure_workspace_dir(vault)
-            existing = curation_logs.read_log(path)
+            snapshot = curation_logs.read_log(path)
             data = curation_logs.appended_bytes(
-                existing, payload, heading=curation_logs.LOG_HEADINGS[log]
+                snapshot.data, payload, heading=curation_logs.LOG_HEADINGS[log]
             )
-            curation_logs.publish_log(path, data, previous=existing)
+        except curation_logs.CurationLogError as exc:
+            raise CurationStateError(str(exc)) from None
+        if not _holds_live_lease_now(vault, holder=holder, clock=recheck):
+            raise CurationBusy("the curation lease expired while the log was read")
+        try:
+            curation_logs.publish_log(path, data, snapshot=snapshot)
         except curation_logs.CurationLogError as exc:
             raise CurationStateError(str(exc)) from None
     return {
@@ -2265,6 +2291,7 @@ def end_run(
     advance_marker: bool = False,
     today: date | None = None,
     now: datetime | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
     """Release the lease and record what the run actually did.
 
@@ -2273,25 +2300,41 @@ def end_run(
     the vault, so keeping them would grow the cursor without bound and, worse,
     would suppress a later item that hashed to the same subject again.
 
-    ``advance_marker`` stamps ``last_full_pass`` here rather than in the
-    caller, under the same lock and *after* the ownership check. Stamping it
-    outside let a run whose lease had expired — one this call is about to
-    reject — still suppress the weekly hygiene passes for seven days. Returned
-    as ``full_pass_advanced``; the weekly checks gate it exactly as
-    :func:`advance_full_pass` does.
+    ``advance_marker`` stamps ``last_full_pass`` here, under the same lock and
+    after the ownership check, and the lease is checked again with a fresh
+    clock just before the log is published. When the marker cannot be written
+    safely (an ambiguous or oversized log, a symlink, a foreign ACL, an I/O
+    error) the end still releases the lease, records the run as ``failed``
+    with a bounded reason, and reports ``full_pass_advanced`` false. It never
+    reports success for a marker that was not written.
     """
+    recheck = _recheck_clock(now, clock)
     with _state_lock(vault_root):
-        effective_now = (now or datetime.now(UTC)).astimezone(UTC)
+        effective_now = (now or recheck()).astimezone(UTC)
         state = _load(state_path(vault_root))
         held = _live_lease(state, effective_now)
         if holder and (held is None or held.get("holder") != holder):
             raise CurationBusy("this run no longer holds the curation lease")
         advanced = False
+        marker_error = ""
+        reasons = list(reasons)
         if advance_marker and status == "ok" and REQUIRED_HYGIENE_KEYS <= set(state.done_keys):
-            _write_full_pass_marker(
-                Path(vault_root), today=today or effective_now.astimezone(UTC).date()
-            )
-            advanced = True
+
+            def still_holder() -> None:
+                if holder and not _holds_live_lease_now(Path(vault_root), holder=holder, clock=recheck):
+                    raise CurationBusy("the curation lease expired before the marker was written")
+
+            try:
+                _write_full_pass_marker(
+                    Path(vault_root),
+                    today=today or effective_now.astimezone(UTC).date(),
+                    before_publish=still_holder,
+                )
+                advanced = True
+            except CurationStateError as exc:
+                marker_error = str(exc)[:200]
+                status = "failed"
+                reasons.append(f"weekly marker not advanced: {marker_error}")
         if live_keys is not None:
             state.done_keys = {k: v for k, v in state.done_keys.items() if k in live_keys}
         summary = {
@@ -2302,12 +2345,12 @@ def end_run(
             "planned": planned,
             "completed": completed,
             "deferred": deferred,
-            "reasons": list(reasons),
+            "reasons": reasons,
         }
         state.last_run = summary
         state.lease = {}
         _store(state_path(vault_root), state)
-    return {**summary, "full_pass_advanced": advanced}
+    return {**summary, "full_pass_advanced": advanced, "marker_error": marker_error}
 
 
 def hygiene_complete(vault_root: Path) -> bool:
@@ -2344,20 +2387,31 @@ def _hygiene_complete_unlocked(vault_root: Path) -> bool:
     return REQUIRED_HYGIENE_KEYS <= set(_load(state_path(vault_root)).done_keys)
 
 
-def _write_full_pass_marker(vault_root: Path, *, today: date | None = None) -> None:
+def _write_full_pass_marker(
+    vault_root: Path,
+    *,
+    today: date | None = None,
+    before_publish: Callable[[], None] | None = None,
+) -> None:
     """Write today's ``last_full_pass`` into the curation log's frontmatter.
 
-    Lock-assuming: the caller holds the canonical state lock, so the read and
-    the publication here cannot interleave with a managed append. Only the
-    marker's own bytes change; see :func:`ciao.curation_logs.with_full_pass_marker`.
+    Lock-assuming: the caller holds the canonical state lock. Reads the log
+    once, publishes only if it is still that file, and runs ``before_publish``
+    (the lease recheck) immediately before the publish. Any refusal raises
+    :class:`CurationStateError` with nothing published.
     """
     stamp = (today or datetime.now(UTC).date()).isoformat()
     try:
         vault = curation_logs.canonical_vault(Path(vault_root))
         log = vault / CURATION_LOG_RELATIVE
-        existing = curation_logs.read_log(log)
-        result = curation_logs.with_full_pass_marker(existing, stamp)
+        curation_logs.refuse_identity_overlap(
+            log, _other_curation_files(vault, LOG_SELECTORS["curation"])
+        )
+        snapshot = curation_logs.read_log(log)
+        result = curation_logs.with_full_pass_marker(snapshot.data, stamp)
         curation_logs.ensure_workspace_dir(vault)
-        curation_logs.publish_log(log, result, previous=existing)
+        if before_publish is not None:
+            before_publish()
+        curation_logs.publish_log(log, result, snapshot=snapshot)
     except curation_logs.CurationLogError as exc:
         raise CurationStateError(str(exc)) from None

@@ -6183,11 +6183,25 @@ def _print_curation(payload: dict[str, Any], *, as_json: bool) -> None:
         print(f"Coverage note: {note}")
     print(f"Weekly pass due: {'yes' if payload.get('weekly_due') else 'no'}")
     print(f"Handover: {payload['handover']}")
+    if payload.get("blocked_count"):
+        print(
+            f"WARNING: {payload['blocked_count']} oversized log item(s) are blocked: automated "
+            "rotation is unavailable in this release. Name each overdue log under **What needs you** "
+            "for an operator to archive by hand."
+        )
     for item in payload.get("planned", []):
         print(f"- [{item['pass']}] {item['label']} ({item['count']}) — {item['reason']}")
         for key in item["keys"]:
             print(f"    {key}")
+    skill_deferred = [item for item in payload.get("deferred", []) if item["pass"] == "skill_proposals"]
+    if skill_deferred:
+        # One aggregate line: deferred proposals are the next run's work and are
+        # not listed one per file in any report.
+        waiting = sum(int(item["count"]) for item in skill_deferred)
+        print(f"- {waiting} skill proposal(s) deferred to a later run; they are not listed individually.")
     for item in payload.get("deferred", []):
+        if item["pass"] == "skill_proposals":
+            continue
         print(f"- deferred [{item['pass']}] {item['label']} ({item['count']}) — {item['reason']}")
 
 
@@ -6399,6 +6413,8 @@ def _curation_end_command(args: argparse.Namespace) -> int:
             f"weekly marker {'advanced' if advanced else 'left due'}; "
             f"Observed work: {summary['remaining_observed_count']} (coverage incomplete)"
         )
+        if summary.get("marker_error"):
+            print(f"Weekly marker not advanced: {summary['marker_error']}")
         for note in summary["coverage_notes"]:
             print(f"Coverage note: {note}")
     return 0
@@ -6407,29 +6423,26 @@ def _curation_end_command(args: argparse.Namespace) -> int:
 def _curation_log_append_command(args: argparse.Namespace) -> int:
     """Append one report to a packaged decision log under the live lease.
 
-    Exit 0 on success, 2 for usage or payload errors, 75 when the lease is not
-    this holder's, 1 for an unsafe, corrupt or unreadable log. Success is the
-    only thing printed on stdout; diagnostics never echo the payload.
+    Exit 0 on success, 2 for usage or payload errors (including a report file
+    that is not a regular file), 75 when the lease is not this holder's, 1 for
+    an unsafe, corrupt or unreadable log. The lease is checked before the
+    report file is opened, and again inside the append. Success is the only
+    thing printed on stdout; diagnostics never echo the payload.
     """
     import json
 
-    from ciao.curation_logs import CurationLogError
-    from ciao.curation_run import CurationBusy, CurationStateError, append_log
+    from ciao.curation_logs import CurationLogError, read_payload_file
+    from ciao.curation_run import CurationBusy, CurationStateError, append_log, holder_is_live
 
     holder = _curation_holder(args)
     if not holder:
         return 2
-    from ciao.curation_logs import PAYLOAD_MAX_BYTES
-
-    try:
-        with Path(args.text_file).open("rb") as handle:
-            # One byte past the cap, so an oversized file is refused, not loaded whole.
-            payload = handle.read(PAYLOAD_MAX_BYTES + 1)
-    except OSError:
-        print("the report file cannot be read", file=sys.stderr)
-        return 2
     _workspace, vault, _guide, _budget, _registry_root, _name = _curation_context(args)
     try:
+        if not holder_is_live(vault, holder=holder):
+            print("curation lease lost: this run no longer holds the curation lease", file=sys.stderr)
+            return CURATION_BUSY_EXIT
+        payload = read_payload_file(Path(args.text_file))
         result = append_log(vault, holder=holder, log=args.log, payload=payload)
     except ValueError as exc:
         print(f"curation-log-append: {exc}", file=sys.stderr)
@@ -6439,6 +6452,9 @@ def _curation_log_append_command(args: argparse.Namespace) -> int:
         return CURATION_BUSY_EXIT
     except (CurationStateError, CurationLogError) as exc:
         print(f"curation log error: {exc}", file=sys.stderr)
+        return 1
+    except OSError:
+        print("curation log error: an I/O operation failed", file=sys.stderr)
         return 1
     if args.json:
         json.dump(result, sys.stdout, ensure_ascii=False, indent=2)

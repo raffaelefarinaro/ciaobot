@@ -630,14 +630,15 @@ def test_decision_rules_reference_is_evidence_only_and_review_gated() -> None:
     assert "never accept anything" in section
 
 
-def test_curation_prompt_appends_reports_through_the_managed_verb() -> None:
-    """#3101: the packaged care run writes its log only through the leased append."""
+def test_curation_prompt_points_at_the_lifecycle_and_keeps_its_guardrails() -> None:
+    """#3101: the prompt is short and names the lifecycle reference, which orders every command."""
     prompt = _curation_prompt()
-    assert "ciao curation-log-append --holder <lease.holder> --log curation --text-file" in prompt
+    assert "references/curation-run-lifecycle.md" in prompt
     assert "Put pass reports in `Workspace/Curation-Log.md`" in prompt
     assert "create it if needed" not in prompt
     assert "Rotate the logs" not in prompt
     assert "move its body to a dated archive" not in prompt
+    assert len(prompt.encode("utf-8")) < 8192
 
 
 def test_curation_prompt_blocks_rotation_and_names_it_under_what_needs_you() -> None:
@@ -648,17 +649,35 @@ def test_curation_prompt_blocks_rotation_and_names_it_under_what_needs_you() -> 
     assert "Do not record a blocked key as done" in prompt
 
 
-def test_curation_prompt_failure_lifecycle_is_explicit() -> None:
-    prompt = _curation_prompt()
-    assert "ciao curation-end --holder <lease.holder> --status ok|failed" in prompt
-    assert "An append failure ends the run as `failed`" in prompt
-    assert "a retry can duplicate the report" in prompt
+def test_lifecycle_reference_orders_the_one_report_and_the_progress_after_it() -> None:
+    section = _reference("curation-run-lifecycle.md")
+    assert "ciao curation-log-append --holder <lease.holder> --log curation --text-file" in section
+    assert "One technical report" in section
+    assert "Only after that append succeeded" in section
+    assert "hygiene:os-audit" in section.split("3b.", 1)[1].split("## 4.", 1)[0]
+    assert "ciao curation-progress --holder <lease.holder> --key <key>" in section
+    assert "ciao curation-end --holder <lease.holder> --status ok|failed" in section
+
+
+def test_lifecycle_reference_has_the_failure_and_75_rules() -> None:
+    section = _reference("curation-run-lifecycle.md")
+    assert "Do not retry the append, because a retry can duplicate the report" in section
+    assert "Exit 75 from any command means the lease is no longer yours: stop at once" in section
+    assert "Exit 1 is a state error: stop" in section
+    assert "--status failed" in section
+    assert "Do not clear the lease" in section
+
+
+def test_lifecycle_reference_has_the_blocked_only_and_one_report_rules() -> None:
+    section = _reference("curation-run-lifecycle.md")
+    assert "blocked-only night" in section and "no technical report" in section
+    assert "one aggregate line" in section
 
 
 def test_skill_proposal_reference_reports_only_the_planned_named_files() -> None:
     section = _reference("curation-pass-9-skill-proposals.md")
     assert "planned" in section
-    assert "ciao curation-log-append" in section
-    assert "ciao curation-progress --holder <lease.holder> --key <key>" in section
+    assert "lifecycle step 3b" in section
     assert "do not run `ciao skill-drafts`" in section
     assert "Settle nothing" in section
+    assert "one aggregate line" in section
