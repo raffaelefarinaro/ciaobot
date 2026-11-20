@@ -95,7 +95,8 @@ def test_opencode_background_ack_is_not_a_finished_result() -> None:
     assert ack.exit_code is None and ack.output_tail == ""
     assert ack.shell_id == "sh_redacted0001"
     assert ack.shell_pid == 4242
-    assert ack.output_path == "/Users/example/.local/share/opencode/shell/" + "0123456789abcdef" * 2 + "01234567/sh_redacted0001.out"
+    # The pid is structured metadata; the output path is only in the acknowledgement text, which is never read.
+    assert ack.output_path == ""
 
 
 # -- Claude (default: no terminal meta) -------------------------------------------------
@@ -122,7 +123,7 @@ def test_claude_default_background_ack_reads_task_id_and_output_path() -> None:
     ack = _result(events, "toolu_shell_cl_bg")
     assert (ack.background, ack.is_error, ack.exit_code, ack.output_tail) == (True, False, None, "")
     assert ack.shell_id == "bgtask02"
-    assert ack.output_path == "/private/tmp/claude-501/-private-tmp-work/00000000-0000-4000-8000-000000000002/tasks/bgtask02.output"
+    assert ack.output_path == ""  # named only in the text: never taken from it
     assert ack.shell_pid is None
 
 
@@ -144,7 +145,7 @@ def test_claude_terminal_background_ack_gives_the_path_and_terminal_exit_settles
     ack = results[0]
     assert (ack.background, ack.exit_code, ack.output_tail) == (True, None, "")
     assert ack.shell_id == "bgtask01"
-    assert ack.output_path.endswith("/tasks/bgtask01.output")
+    assert ack.output_path == ""  # named only in the text: never taken from it
 
     # The later `terminal_exit` with a null code ends the process: a settle with the exit unknown.
     settle = results[1]
@@ -268,3 +269,21 @@ def test_shell_output_tail_keeps_only_the_last_lines() -> None:
 
 def test_shell_output_tail_removes_ansi_sequences_and_control_characters() -> None:
     assert shell_output_tail("ok \x1b[31mred\x1b[0m \x1b]0;title\x07done\x07") == "ok red done"
+
+
+def test_a_structured_output_path_under_the_shell_dir_is_recorded() -> None:
+    path = "/Users/example/.local/share/opencode/shell/" + "0123456789abcdef" * 2 + "01234567/sh_abc.out"
+    frames = _opencode_call(
+        "c-out", "sleep 9", background=True, output="Command moved to the background (shell ID: sh_abc).",
+        metadata={"status": "running", "shellID": "sh_abc", "pid": 7, "outputPath": path},
+    )
+    assert _result(_feed_all(frames), "c-out").output_path == path
+
+
+def test_a_structured_output_path_with_a_dot_dot_segment_is_refused() -> None:
+    path = "/Users/example/.local/share/opencode/shell/abc/../../../../etc/sh_abc.out"
+    frames = _opencode_call(
+        "c-dd", "sleep 9", background=True, output="Command moved to the background (shell ID: sh_abc).",
+        metadata={"status": "running", "shellID": "sh_abc", "pid": 7, "outputPath": path},
+    )
+    assert _result(_feed_all(frames), "c-dd").output_path == ""

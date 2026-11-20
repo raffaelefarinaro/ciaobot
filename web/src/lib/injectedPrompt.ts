@@ -65,10 +65,14 @@ export function unneutralize(tag: string, text: string): string {
 }
 
 // Run logs keep the colour codes test runners print; drawn as text they are noise.
+// An unterminated OSC is dropped to the end of its line, as the engine's sanitiser does.
 // eslint-disable-next-line no-control-regex -- matching ESC is the point
-const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
+const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\][^\n]*/g
+// Every non-printing character except newline and tab: C0 and C1 controls, soft hyphen, bidi
+// overrides and marks, zero-width and format characters, line and paragraph separators, tag characters.
+const NON_PRINTING_RE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2028\u2029\u2060-\u206f\ufeff\ufff9-\ufffb]|[\u{e0000}-\u{e007f}]/gu
 function stripAnsi(text: string): string {
-  return text.replace(ANSI_RE, '')
+  return text.replace(ANSI_RE, '').replace(NON_PRINTING_RE, '')
 }
 
 function parseBackgroundRuns(content: string, count: number): InjectedPrompt {

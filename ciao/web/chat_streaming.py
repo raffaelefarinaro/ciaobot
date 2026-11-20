@@ -289,6 +289,7 @@ class ChatStreamingHost(Protocol):
 
     def _background_work_outstanding(self, chat_id: str) -> bool: ...
     def _note_shell_finished(self, chat_id: str, event: ShellFinishedEvent) -> None: ...
+    def _native_wake_seen(self, chat_id: str) -> None: ...
 
     def _spawn_detached(
         self, coro: Coroutine[object, object, object], name: str
@@ -2184,6 +2185,15 @@ class ChatStreaming:
             # Reset per terminal result: each wake is its own turn (#2139).
             drain_segment = FinalAnswerTracker()
             async for event in events:
+                # A shell notice is recorded before the supersede check below: the queue
+                # gave it up already, so a drain a foreground turn replaces must not lose it.
+                if isinstance(event, ShellFinishedEvent):
+                    self._host._note_shell_finished(chat_id, event)
+                    continue
+                if isinstance(event, ResultEvent) and event.origin == "task-notification":
+                    # Claude's own wake for background work: the shell notices still pending are
+                    # now redundant (see ``ProjectChatManager._native_wake_seen``).
+                    self._host._native_wake_seen(chat_id)
                 # No await sits in this body, so one check covers every side
                 # effect of the iteration: a cancelled drain or one a
                 # foreground admission replaced must not touch chat state.
@@ -2199,10 +2209,6 @@ class ChatStreaming:
                 drain_segment.feed(event)
                 if isinstance(event, SessionTitleEvent):
                     self._host.apply_adapter_title(chat_id, event.title)
-                    continue
-                if isinstance(event, ShellFinishedEvent):
-                    # Collected and announced once per window (project_chats), never streamed.
-                    self._host._note_shell_finished(chat_id, event)
                     continue
                 if (
                     isinstance(event, ResultEvent)

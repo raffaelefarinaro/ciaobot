@@ -75,6 +75,17 @@ class ShellLiveness:
         )
         return True
 
+    def release(self, call_id: str) -> TrackedShell | None:
+        """End tracking of *call_id* because the provider settled it. The shell, or None if not tracked.
+
+        A settle from the provider's own events (Claude's ``terminal_exit``, a normalizer
+        result) and one from the process poll both go through here, so a shell is ended once.
+        """
+        shell = self._tracked.pop(call_id, None)
+        if shell is not None:
+            self._remember_settled(call_id)
+        return shell
+
     def settled(self, table: ProcessTable) -> list[tuple[str, TrackedShell]]:
         """Shells whose process is gone or was replaced by a pid reuse. They stop being tracked."""
         if not table or not self._tracked:
@@ -84,8 +95,10 @@ class ShellLiveness:
             entry = table.get(shell.pid)
             if entry is None or entry[1] != shell.started:
                 done.append((call_id, shell))
-                del self._tracked[call_id]
-                self._settled[call_id] = None
-                while len(self._settled) > _MAX_SETTLED_REMEMBERED:
-                    del self._settled[next(iter(self._settled))]
+                self.release(call_id)
         return done
+
+    def _remember_settled(self, call_id: str) -> None:
+        self._settled[call_id] = None
+        while len(self._settled) > _MAX_SETTLED_REMEMBERED:
+            del self._settled[next(iter(self._settled))]
