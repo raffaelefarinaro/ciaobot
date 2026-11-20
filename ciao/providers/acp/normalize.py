@@ -44,6 +44,22 @@ _CHILD_ID_CHARS = 128
 _LOG_KIND = re.compile(r"[a-z_]{1,40}")
 # Claude's subagent tool (`Task` before it was renamed to `Agent`) and OpenCode's `subagent`.
 _AGENT_TOOLS = frozenset({"Agent", "Task"})
+# A shell call's output kept for the journal: the last lines, bounded, control characters stripped.
+# Only this tail is kept; the full output is never stored, and the output file is never read.
+_SHELL_TAIL_LINES = 40
+_SHELL_TAIL_CHARS = 4096
+_SHELL_SCAN_CHARS = 65536
+_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+# A launch acknowledgement names the shell (OpenCode: "shell ID: sh_…", Claude: "with ID: …"),
+# its pid and the file its output streams to. Each is matched strictly; nothing else is taken.
+_SHELL_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+_SHELL_ID_TEXT = re.compile(r"(?:shell ID|with ID): ([A-Za-z0-9_-]{1,64})")
+_SHELL_PID_TEXT = re.compile(r"^PID: (\d{1,9})\s*$", re.MULTILINE)
+_SHELL_PATH_TEXT = re.compile(r"(?:streaming|written) to: (\S+?)(?=\.?\s|$)", re.MULTILINE)
+_SHELL_OUTPUT_PATH = re.compile(
+    r"/(?:[^/\s]+/)*(?:shell/[0-9a-f]{1,64}/sh_[A-Za-z0-9_-]{1,64}\.out|tasks/[A-Za-z0-9_-]{1,64}\.output)"
+)
+_SHELL_PATH_CHARS = 512
 
 
 def bounded_text(value: object, limit: int = _SUMMARY_CHARS) -> str:
@@ -161,7 +177,12 @@ class _Call:
     parent: str | None
     claude_tool: str  # ``_meta.claudeCode.toolName``, "" when the adapter sends none
     named: bool  # ``name`` came from the ToolCall ``name`` field, so a title does not replace it
-    rendered: tuple[str, str] | None = None  # (tool_name, tool_input) last announced
+    rendered: tuple[str, str, bool] | None = None  # (tool_name, tool_input, shell_background) last announced
+    # A shell call's facts from its frames before the result: Claude's `toolResponse` output and
+    # background task id, and an exit code a `terminal_exit` meta carries.
+    shell_output: str = ""
+    shell_task: str = ""
+    exit_code: int | None = None
 
 
 def _claude_tool(update: Mapping[str, Any]) -> str:
@@ -325,6 +346,8 @@ class UpdateNormalizer:
         parent = self.parent_of(u)
         if status in ("completed", "failed"):
             known = self._calls.pop(call_id, None)
+            if known is not None and known.kind == "execute":
+                return [_shell_result(call_id, u, status, known, parent)]
             # A subagent's first result only acknowledges the launch: the child keeps running.
             background = known is not None and _display_name(known) == "Agent" and _is_launch_ack(u)
             if background:
@@ -358,6 +381,8 @@ class UpdateNormalizer:
         if isinstance(kind, str) and kind:
             call.kind = kind
         call.claude_tool = _claude_tool(u) or call.claude_tool
+        if call.kind == "execute":
+            _remember_shell_frame(call, u)
         self._remember_subagent(call_id, call)
         # The PWA reconciles a re-announced call by tool_use_id (projects.ts
         # `_pushToolLine`). A re-announce is sent only when the rendered name or input changed.
@@ -377,7 +402,7 @@ class UpdateNormalizer:
     def _announce(self, call_id: str, call: _Call) -> list[StreamEvent]:
         """One tool_use per rendered (name, input). Returns nothing when a re-announce renders the same."""
         event = self._tool_use(call_id, call)
-        rendered = (event.tool_name, event.tool_input)
+        rendered = (event.tool_name, event.tool_input, event.shell_background)
         if rendered == call.rendered:
             return []
         call.rendered = rendered
@@ -403,6 +428,8 @@ class UpdateNormalizer:
             work_dirs=tool_work_dirs("Bash", raw) or None if call.kind == "execute" else None,
             input_chars=input_chars,
             control_surface=control_surface,
+            shell=call.kind == "execute",
+            shell_background=call.kind == "execute" and _shell_background(raw),
         )
 
     def _session_info(self, u: Mapping[str, Any]) -> list[StreamEvent]:
@@ -477,6 +504,10 @@ def _summary(call: _Call, raw: Any, name: str) -> str:
     if name == "Skill":
         skill = (raw.get("name") or raw.get("skill")) if isinstance(raw, Mapping) else None
         return bounded_text(summarize_claude_tool_input("Skill", {"skill": bounded_text(skill)}))
+    if call.kind == "execute":
+        # A shell call is its command, one line of plain text; its working directory is not its summary.
+        command = raw.get("command") if isinstance(raw, Mapping) else None
+        return bounded_text(command, _COMMAND_SUMMARY_CHARS) if isinstance(command, str) else ""
     if isinstance(raw, Mapping):
         command = raw.get("command")
         if isinstance(command, str) and command:
@@ -515,6 +546,146 @@ def _launched_session(u: Mapping[str, Any]) -> str | None:
     meta = _launch_metadata(u)
     session = meta.get("sessionID") if meta is not None else None
     return session if child_tool_id(session) is not None else None
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _shell_background(raw: Any) -> bool:
+    """A shell call started in the background: OpenCode's ``background`` or Claude's ``run_in_background``."""
+    return isinstance(raw, Mapping) and (raw.get("background") is True or raw.get("run_in_background") is True)
+
+
+def _content_text(u: Mapping[str, Any]) -> str:
+    """The text of a tool call's ``content`` blocks, one block per line."""
+    content = u.get("content")
+    parts: list[str] = []
+    for block in content if isinstance(content, list) else []:
+        inner = block.get("content") if isinstance(block, Mapping) else None
+        if isinstance(inner, Mapping) and inner.get("type") == "text" and isinstance(inner.get("text"), str):
+            parts.append(inner["text"])
+    return "\n".join(parts)
+
+
+def _terminal_exit(u: Mapping[str, Any]) -> int | None:
+    """The exit code a ``terminal_exit`` meta carries (Claude), None when it sends none or a null."""
+    meta = u.get("_meta")
+    ended = meta.get("terminal_exit") if isinstance(meta, Mapping) else None
+    code = ended.get("exit_code") if isinstance(ended, Mapping) else None
+    return code if _is_int(code) else None
+
+
+def _remember_shell_frame(call: _Call, u: Mapping[str, Any]) -> None:
+    """Keep a shell call's Claude ``toolResponse`` output and task id, and any exit code, for its result."""
+    meta = u.get("_meta")
+    claude = meta.get("claudeCode") if isinstance(meta, Mapping) else None
+    response = claude.get("toolResponse") if isinstance(claude, Mapping) else None
+    if isinstance(response, Mapping):
+        task = response.get("backgroundTaskId")
+        if isinstance(task, str) and _SHELL_ID.fullmatch(task):
+            call.shell_task = task
+        output = "\n".join(
+            text for text in (response.get("stdout"), response.get("stderr")) if isinstance(text, str) and text
+        )
+        if output:
+            call.shell_output = output
+    # With terminal output meta, the same text streams as `terminal_output_delta`; it is the
+    # output only when no `toolResponse` gave any (a background acknowledgement is that text).
+    delta = meta.get("terminal_output_delta") if isinstance(meta, Mapping) else None
+    data = delta.get("data") if isinstance(delta, Mapping) else None
+    if isinstance(data, str) and data and not call.shell_output:
+        call.shell_output = data
+    code = _terminal_exit(u)
+    if code is not None:
+        call.exit_code = code
+
+
+def shell_output_tail(text: str) -> str:
+    """The last ``_SHELL_TAIL_LINES`` lines and ``_SHELL_TAIL_CHARS`` characters of a shell's output.
+
+    ANSI sequences and control characters (tabs and newlines aside) are removed. Only the final
+    ``_SHELL_SCAN_CHARS`` of ``text`` are read, so a huge output costs a bounded scan.
+    """
+    plain = _ANSI.sub("", text[-_SHELL_SCAN_CHARS:]).replace("\r\n", "\n").replace("\r", "\n")
+    kept = "".join(ch for ch in plain if ch in "\n\t" or not unicodedata.category(ch).startswith("C"))
+    tail = "\n".join(kept.split("\n")[-_SHELL_TAIL_LINES:])
+    return tail[-_SHELL_TAIL_CHARS:].strip("\n")
+
+
+def _shell_id(meta: Mapping[str, Any], task: str, text: str) -> str:
+    """The shell id a launch acknowledgement names: OpenCode metadata, Claude's task id, else the text."""
+    for candidate in (meta.get("shellID"), task):
+        if isinstance(candidate, str) and _SHELL_ID.fullmatch(candidate):
+            return candidate
+    match = _SHELL_ID_TEXT.search(text)
+    return match.group(1) if match else ""
+
+
+def _shell_pid(meta: Mapping[str, Any], text: str) -> int | None:
+    pid = meta.get("pid")
+    if isinstance(pid, int) and not isinstance(pid, bool) and 0 < pid < 2**31:
+        return pid
+    match = _SHELL_PID_TEXT.search(text)
+    return int(match.group(1)) if match else None
+
+
+def _shell_output_path(text: str) -> str:
+    """The output file a launch acknowledgement names, only when it lies where a shell writes its output."""
+    match = _SHELL_PATH_TEXT.search(text)
+    if match is None:
+        return ""
+    path = match.group(1)
+    return path if len(path) <= _SHELL_PATH_CHARS and _SHELL_OUTPUT_PATH.fullmatch(path) else ""
+
+
+def _shell_result(
+    call_id: str,
+    u: Mapping[str, Any],
+    status: str,
+    known: _Call,
+    parent: str | None,
+) -> ToolUseEvent:
+    """The ``tool_result`` for a shell call.
+
+    A background shell's first result is its launch acknowledgement: ``background`` is set, the
+    shell id, pid and output path are read from it, and no output or exit code is taken (the
+    shell is still running). Any other result carries the foreground exit code (None when the
+    agent sends none) and the output tail.
+    """
+    meta = _launch_metadata(u) or {}
+    text = _content_text(u)
+    raw = u.get("rawOutput")
+    ack_text = "\n".join(part for part in (text, raw if isinstance(raw, str) else "", known.shell_output) if part)
+    is_ack = status == "completed" and _shell_background(known.raw_input) and (
+        meta.get("status") == "running" or bool(known.shell_task) or _SHELL_ID_TEXT.search(ack_text) is not None
+    )
+    parent_id = parent if parent is not None else known.parent
+    if is_ack:
+        return ToolUseEvent(
+            type="tool_result",
+            tool_use_id=call_id,
+            parent_tool_use_id=parent_id,
+            is_error=False,
+            background=True,
+            shell_id=_shell_id(meta, known.shell_task, ack_text),
+            shell_pid=_shell_pid(meta, ack_text),
+            output_path=_shell_output_path(ack_text),
+        )
+    code = meta.get("exit")
+    if not _is_int(code):
+        code = _terminal_exit(u)
+    if code is None:
+        code = known.exit_code
+    output = text or known.shell_output
+    return ToolUseEvent(
+        type="tool_result",
+        tool_use_id=call_id,
+        parent_tool_use_id=parent_id,
+        is_error=status == "failed",
+        exit_code=code,
+        output_tail=shell_output_tail(output) if output else "",
+    )
 
 
 def result_event(

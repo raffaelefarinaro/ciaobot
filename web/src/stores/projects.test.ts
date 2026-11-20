@@ -1788,6 +1788,39 @@ describe('per-chat WS auto-reconnect', () => {
     expect(row?.subagent?.steps).toHaveLength(1)
   })
 
+  test('a shell call is one card: a background launch stays running, a foreground failure settles it', () => {
+    const store = useProjectStore()
+    const chatId = 'c-shell-card'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: '', tool_use_id: 'sh1', shell: true })
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ping 127.0.0.1', tool_use_id: 'sh1', shell: true, shell_background: true })
+    // A re-announce of the call is the same card, not a second one.
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ping 127.0.0.1', tool_use_id: 'sh1', shell: true, shell_background: true })
+    send({ type: 'tool_result', tool_name: 'shell', tool_use_id: 'sh1', background: true, shell_id: 'sh_1' })
+
+    const [first] = store.currentTimeline.filter(e => e.kind === 'shell')
+    if (first?.kind !== 'shell') throw new Error('Expected a shell card')
+    expect(store.currentTimeline.filter(e => e.kind === 'shell')).toHaveLength(1)
+    expect(first.card).toMatchObject({ command: 'ping 127.0.0.1', background: true, state: 'running' })
+    // A shell call has no activity line of its own.
+    expect(store.currentTimeline.some(e => e.kind === 'tool')).toBe(false)
+
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'make', tool_use_id: 'sh2', shell: true })
+    send({ type: 'tool_result', tool_name: 'shell', tool_use_id: 'sh2', exit_code: 2, output_tail: 'boom' })
+    const second = store.currentTimeline.find(e => e.kind === 'shell' && e.card.tool_use_id === 'sh2')
+    if (second?.kind !== 'shell') throw new Error('Expected a shell card')
+    expect(second.card).toMatchObject({ state: 'failed', exit_code: 2, output_tail: 'boom' })
+
+    send({ type: 'result', text: 'Pinged and built.' })
+    const rows = store.messagesFor(chatId).filter(m => m.tool_name === '_shell')
+    expect(rows.map(m => m.shell?.state)).toEqual(['running', 'failed'])
+    expect(rows[0]?.shell).toMatchObject({ tool_use_id: 'sh1', background: true, command: 'ping 127.0.0.1' })
+  })
+
   test('a subagent card keeps only its launch result when the child is still running', () => {
     const store = useProjectStore()
     const chatId = 'c-subagent-running'
