@@ -1134,6 +1134,30 @@ describe('component mount smoke', () => {
     }
   })
 
+  it('hides what a CLI brings while that CLI is not installed', async () => {
+    const testApi = api as typeof api & { setResponse: (path: string, value: unknown) => void, getResponse: (path: string) => unknown }
+    const original = testApi.getResponse('/api/settings/providers') as { connections: Record<string, Record<string, unknown>> }
+    testApi.setResponse('/api/settings/providers', { connections: { ...original.connections, codex: {
+      name: 'codex', label: 'Codex', short_label: 'Codex', ok: false, auth: 'not_installed', command: 'codex login',
+      detail: 'Codex is not installed on this host.',
+    } } })
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, { global: { plugins: [router], stubs: { Teleport: true } } })
+    try {
+      await flushPromises()
+      const row = wrapper.findAll('.provider-connections .credential-row').find(el => el.text().includes('Codex'))!
+      expect(row.text()).toContain('Codex is not installed on this host.')
+      expect(row.find('details.provider-brings').exists()).toBe(false)
+      expect(row.text()).not.toContain('0 skills & plugins')
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/settings/providers', original)
+    }
+  })
+
   it.each([
     ['oauth', 'person@example.com', true],
     ['oauth', 'Claude OAuth', true],
@@ -1188,7 +1212,8 @@ describe('component mount smoke', () => {
     try {
       await flushPromises()
       expect(wrapper.text()).toContain('<example>')
-      expect(wrapper.text()).toContain('Configured · verification unknown')
+      expect(wrapper.text()).toContain('Environment · Configured')
+      expect(wrapper.text()).not.toContain('verification unknown')
       expect(wrapper.text()).not.toContain('secret-value')
       expect(wrapper.text()).not.toContain('secret-label')
       expect(wrapper.text()).not.toContain('SECRET_ENV')

@@ -435,13 +435,13 @@ export const inventory: InventoryEntry[] = [
       "text",
       "size"
     ],
-    "variantNotes": "Text replaces the brand name (every `o`, in any case, becomes an accent dot; other characters stay letters); size is sm, md or lg.",
+    "variantNotes": "Text replaces the brand name (every `o`, in any case, becomes a brand-orange dot; other characters stay letters); size is sm, md or lg.",
     "states": [
       {
         "name": "default",
         "coverage": "covered",
         "storyIds": ["wordmark--default"],
-        "note": "Default renders Ciaobot at md, with the two `o` characters as accent dots and the full text as the accessible name."
+        "note": "Default renders Ciaobot at md, with the two `o` characters as brand-orange dots and the full text as the accessible name."
       },
       {
         "name": "size-small",
@@ -466,6 +466,12 @@ export const inventory: InventoryEntry[] = [
         "coverage": "covered",
         "storyIds": ["wordmark--narrow"],
         "note": "Narrow renders the brand text in a maximum 390px column, still on one line."
+      },
+      {
+        "name": "neutral-workspace",
+        "coverage": "covered",
+        "storyIds": ["wordmark--neutral-workspace"],
+        "note": "NeutralWorkspace renders under the grey neutral accent, the state before the workspace colour is known, and checks the dots keep the brand orange."
       }
     ],
     "loading": {
@@ -8617,16 +8623,36 @@ export const inventory: InventoryEntry[] = [
     "variantNotes": "Inventory status controls the displayed provider availability guidance.",
     "states": [
       {
-        "name": "default",
-        "coverage": "uncovered",
-        "storyIds": [],
-        "note": "Provider inventory and sign-in disclosures have no rendered-state story."
+        "name": "configured",
+        "coverage": "covered",
+        "storyIds": [
+          "provider-inventory--configured"
+        ],
+        "note": "complete with reported providers: one honest hint line, each row Configured with its auth method and no verification claim."
       },
       {
-        "name": "other states",
-        "coverage": "unknown",
-        "storyIds": [],
-        "note": "Further state branches and their coverage have not yet been audited."
+        "name": "none-reported",
+        "coverage": "covered",
+        "storyIds": [
+          "provider-inventory--none-reported"
+        ],
+        "note": "complete with no providers: No configured providers reported."
+      },
+      {
+        "name": "partially-reported",
+        "coverage": "covered",
+        "storyIds": [
+          "provider-inventory--partially-reported"
+        ],
+        "note": "partial: Some providers may be missing from this inventory."
+      },
+      {
+        "name": "unavailable",
+        "coverage": "covered",
+        "storyIds": [
+          "provider-inventory--unavailable"
+        ],
+        "note": "unknown: OpenCode could not report its configured providers."
       }
     ],
     "loading": {
@@ -9156,6 +9182,14 @@ export const inventory: InventoryEntry[] = [
           "settings-engine-login--not-installed"
         ],
         "note": "installed false: Not installed for this user, the setup lead and the setup command in a code block, and no action."
+      },
+      {
+        "name": "mac-app-no-cli-service",
+        "coverage": "covered",
+        "storyIds": [
+          "settings-engine-login--mac-app-no-cli-service"
+        ],
+        "note": "Mac app (desktop client) with installed false: Managed by Ciaobot for Mac, the Settings → Start at Login pointer, and no CLI command or copy control."
       },
       {
         "name": "unsupported-platform",

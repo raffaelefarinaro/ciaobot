@@ -78,7 +78,7 @@ for (const mobile of [false, true]) {
       } },
     } } }))
     await boot(page, '/settings/providers', '.provider-connections')
-    await expect(page.getByText('Configured · verification unknown')).toBeVisible()
+    await expect(page.getByText('OAuth · Configured')).toBeVisible()
     const claudeDisclosure = page.getByText('Reconnect Claude Code', { exact: true })
     await claudeDisclosure.focus()
     await page.keyboard.press('Enter')
