@@ -136,17 +136,51 @@ def test_claude_terminal_foreground_takes_exit_code_from_terminal_exit() -> None
     assert (done.exit_code, done.output_tail, done.background) == (0, "hi", False)
 
 
-def test_claude_terminal_background_exit_stays_null_and_ack_gives_the_path() -> None:
+def test_claude_terminal_background_ack_gives_the_path_and_terminal_exit_settles_it() -> None:
     events = _replay("shell_claude_terminal.jsonl")
 
-    ack = _result(events, "toolu_shell_cl_term_bg")
+    results = [e for e in events if e.tool_use_id == "toolu_shell_cl_term_bg" and e.type == "tool_result"]
+    assert len(results) == 2
+    ack = results[0]
     assert (ack.background, ack.exit_code, ack.output_tail) == (True, None, "")
     assert ack.shell_id == "bgtask01"
     assert ack.output_path.endswith("/tasks/bgtask01.output")
 
-    # The later `terminal_exit` with a null code is not a tool_result: the ended state is not on the wire.
-    results = [e for e in events if e.tool_use_id == "toolu_shell_cl_term_bg" and e.type == "tool_result"]
-    assert len(results) == 1
+    # The later `terminal_exit` with a null code ends the process: a settle with the exit unknown.
+    settle = results[1]
+    assert (settle.background, settle.is_error, settle.exit_code) == (False, False, None)
+
+
+def test_terminal_exit_settles_an_acknowledged_background_shell_with_its_code() -> None:
+    frames = _opencode_call("c-bg", "sleep 9", background=True)[:2]
+    frames.append({"sessionUpdate": "tool_call_update", "toolCallId": "c-bg", "status": "completed",
+                   "rawOutput": {"metadata": {"status": "running", "pid": 77}},
+                   "content": [{"type": "content", "content": {"type": "text", "text": ""}}]})
+    frames.append({"sessionUpdate": "tool_call_update", "toolCallId": "c-bg",
+                   "_meta": {"terminal_exit": {"terminal_id": "c-bg", "exit_code": 3, "signal": None}}})
+    results = [e for e in _feed_all(frames) if e.type == "tool_result" and e.tool_use_id == "c-bg"]
+    assert [(r.background, r.exit_code) for r in results] == [(True, None), (False, 3)]
+
+
+def test_terminal_exit_on_an_unacknowledged_call_is_not_a_second_result() -> None:
+    frames = [
+        {"sessionUpdate": "tool_call", "toolCallId": "c-fg", "name": "shell", "kind": "execute",
+         "status": "pending", "rawInput": {"command": "echo hi"}},
+        {"sessionUpdate": "tool_call_update", "toolCallId": "c-fg", "status": "completed",
+         "rawOutput": {"metadata": {"status": "completed", "exit": 0}},
+         "content": [{"type": "content", "content": {"type": "text", "text": "hi"}}]},
+        {"sessionUpdate": "tool_call_update", "toolCallId": "c-fg",
+         "_meta": {"terminal_exit": {"terminal_id": "c-fg", "exit_code": 9, "signal": None}}},
+    ]
+    results = [e for e in _feed_all(frames) if e.type == "tool_result" and e.tool_use_id == "c-fg"]
+    assert len(results) == 1 and results[0].exit_code == 0
+
+
+def test_opencode_background_ack_without_terminal_exit_stays_running() -> None:
+    events = _feed_all(_opencode_call("c-oc", "ping -c 8 127.0.0.1", background=True,
+                                      metadata={"status": "running", "shellID": "sh_x", "pid": 5}))
+    results = [e for e in events if e.type == "tool_result" and e.tool_use_id == "c-oc"]
+    assert [r.background for r in results] == [True]
 
 
 # -- Guards and edge cases (synthetic frames) -------------------------------------------

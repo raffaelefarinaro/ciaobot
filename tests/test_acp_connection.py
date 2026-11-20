@@ -637,3 +637,19 @@ def test_unprefixed_child_update_reaches_the_provider_through_the_router() -> No
 def test_unprefixed_child_update_without_a_route_is_not_delivered() -> None:
     # Without the spec's name on the router, the SDK answers the notification as an unknown method.
     assert asyncio.run(_deliver(_child_line("created"), ())) == []
+
+
+@pytest.mark.asyncio
+async def test_claude_initialize_asks_for_terminal_output_meta_and_no_air_block(tmp_path: Path) -> None:
+    from ciao.providers.acp.agents import CLAUDE
+
+    spec, calls = write_scenario(tmp_path, spec_client_meta=dict(CLAUDE.client_meta))
+    connection = await _open(spec, tmp_path)
+    await connection.close()
+    init = [c for c in read_calls(calls) if c["method"] == "initialize"]
+    assert len(init) == 1
+    capabilities = init[0]["params"]["clientCapabilities"]
+    # terminal_output_delta makes the adapter send terminal_exit; the terminal capability stays off.
+    assert capabilities["_meta"] == {"terminal_output_delta": True}
+    assert not any("air" in key.lower() for key in capabilities["_meta"])
+    assert capabilities["terminal"] is False

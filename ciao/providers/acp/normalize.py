@@ -225,6 +225,8 @@ class UpdateNormalizer:
         # session claims it, and the subagent call id each child session runs under.
         self._subagent_by_description: dict[str, str] = {}
         self._child_anchors: dict[str, str] = {}
+        # Background shells acknowledged but not yet ended, in launch order (see `_remember_acked_shell`).
+        self._acked_shells: dict[str, None] = {}
 
     def parent_of(self, update: Mapping[str, Any]) -> str | None:
         meta = update.get("_meta")
@@ -344,10 +346,25 @@ class UpdateNormalizer:
             return []
         status = u.get("status")
         parent = self.parent_of(u)
+        # A background shell's acknowledgement already ended its call. Its later `terminal_exit`
+        # meta (Claude, with terminal output meta on) is the end of the process: a settle, with
+        # the exit code when it has one and None when the adapter sends null.
+        if call_id in self._acked_shells and call_id not in self._calls and _has_terminal_exit(u):
+            self._acked_shells.pop(call_id, None)
+            return [ToolUseEvent(
+                type="tool_result",
+                tool_use_id=call_id,
+                parent_tool_use_id=parent,
+                is_error=False,
+                exit_code=_terminal_exit(u),
+            )]
         if status in ("completed", "failed"):
             known = self._calls.pop(call_id, None)
             if known is not None and known.kind == "execute":
-                return [_shell_result(call_id, u, status, known, parent)]
+                result = _shell_result(call_id, u, status, known, parent)
+                if result.background:
+                    self._remember_acked_shell(call_id)
+                return [result]
             # A subagent's first result only acknowledges the launch: the child keeps running.
             background = known is not None and _display_name(known) == "Agent" and _is_launch_ack(u)
             if background:
@@ -387,6 +404,12 @@ class UpdateNormalizer:
         # The PWA reconciles a re-announced call by tool_use_id (projects.ts
         # `_pushToolLine`). A re-announce is sent only when the rendered name or input changed.
         return self._announce(call_id, call)
+
+    def _remember_acked_shell(self, call_id: str) -> None:
+        """Keep a background shell's call id until its process ends (bounded; the oldest goes first)."""
+        self._acked_shells[call_id] = None
+        while len(self._acked_shells) > _ACKED_SHELL_LIMIT:
+            del self._acked_shells[next(iter(self._acked_shells))]
 
     def _remember_subagent(self, call_id: str, call: _Call) -> None:
         """Keep the description of a subagent call until a child session claims it."""
@@ -568,12 +591,22 @@ def _content_text(u: Mapping[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def _has_terminal_exit(u: Mapping[str, Any]) -> bool:
+    """True when the frame carries a ``terminal_exit`` meta, whatever its exit code."""
+    meta = u.get("_meta")
+    return isinstance(meta, Mapping) and isinstance(meta.get("terminal_exit"), Mapping)
+
+
 def _terminal_exit(u: Mapping[str, Any]) -> int | None:
     """The exit code a ``terminal_exit`` meta carries (Claude), None when it sends none or a null."""
     meta = u.get("_meta")
     ended = meta.get("terminal_exit") if isinstance(meta, Mapping) else None
     code = ended.get("exit_code") if isinstance(ended, Mapping) else None
     return code if _is_int(code) else None
+
+
+# Background shells remembered for their terminal_exit: a session rarely has more than a few.
+_ACKED_SHELL_LIMIT = 64
 
 
 def _remember_shell_frame(call: _Call, u: Mapping[str, Any]) -> None:

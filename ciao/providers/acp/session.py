@@ -35,16 +35,19 @@ from ciao.models import (
     ResultEvent,
     StreamEvent,
     SystemStatusEvent,
+    ToolUseEvent,
 )
+from ciao.os_support.processes import process_table
 from ciao.providers.acp.connection import AcpConnection
 from ciao.providers.acp.normalize import TurnText, UpdateNormalizer, canonical, result_event
 from ciao.providers.acp.permissions import PermissionBroker, mode_choices, pick_value
+from ciao.providers.acp.shell_liveness import CHECK_INTERVAL_S, ShellLiveness
 from ciao.providers.acp.spec import AgentSpec
 from ciao.redact import redact_text
 
 logger = logging.getLogger(__name__)
 
-_LATE_QUIET = frozenset({"usage_update", "config_option_update", "current_mode_update"})
+_LATE_QUIET = frozenset({"usage_update", "config_option_update", "current_mode_update", "shell_settle"})
 _LATE_WAKE = "The agent continued after background work finished."
 # A chat's model string is user-controlled, so a status line echoes at most this many characters.
 _STATUS_MODEL_CHARS = 80
@@ -200,6 +203,9 @@ class AcpSession:
         self._late_open = False
         self._late_substantive = False
         self._quiet_task: asyncio.Task[None] | None = None
+        # Background shells whose process ends silently (no terminal meta): settled by a liveness check.
+        self._shells = ShellLiveness()
+        self._shell_task: asyncio.Task[None] | None = None
         # The not-offered model status is reported once per session.
         self._model_reported = False
         self._outer_emit = broker.emit
@@ -370,6 +376,7 @@ class AcpSession:
         self._note_update(hook(self._normalizer, method, payload), kind="ext")
 
     def _note_update(self, events: list[StreamEvent], *, kind: str) -> None:
+        self._track_shells(events)
         if self._prompt_active:
             for event in events:
                 self._queue.put_nowait(event)
@@ -377,6 +384,32 @@ class AcpSession:
                 self._journal_event(event)
             return
         self._touch_late(events, substantive=kind not in _LATE_QUIET)
+
+    def _track_shells(self, events: list[StreamEvent]) -> None:
+        """Start watching each background shell whose launch acknowledgement names a pid."""
+        for event in events:
+            if not (
+                isinstance(event, ToolUseEvent) and event.type == "tool_result" and event.background
+                and event.shell_pid is not None and event.tool_use_id
+            ):
+                continue
+            # One ``ps`` snapshot, taken once per launch: the start time is what identifies the pid.
+            if not self._shells.track(event.tool_use_id, event.shell_pid, process_table()):
+                continue
+            if self._shell_task is None or self._shell_task.done():
+                self._shell_task = asyncio.create_task(self._watch_shells())
+
+    async def _watch_shells(self) -> None:
+        """Settle each tracked shell as its process ends; stops when none is left."""
+        while self._shells.tracking:
+            await asyncio.sleep(CHECK_INTERVAL_S)
+            table = await asyncio.to_thread(process_table)
+            for call_id in self._shells.settled(table):
+                # The same path a tool_result takes: the journal (history) and the live queue.
+                self._note_update(
+                    [ToolUseEvent(type="tool_result", tool_use_id=call_id, is_error=False, exit_code=None)],
+                    kind="shell_settle",
+                )
 
     def _touch_late(self, events: list[StreamEvent], *, substantive: bool) -> None:
         if not self._late_open:
@@ -650,6 +683,9 @@ class AcpSession:
     async def close(self) -> None:
         """``session/close`` when the agent advertises it, then nothing else."""
         self._close_late()
+        if self._shell_task is not None:
+            self._shell_task.cancel()
+            self._shell_task = None
         if self._cap_object("sessionCapabilities", "close") and self.session_id:
             await self._connection.conn.close_session(session_id=self.session_id)
 
