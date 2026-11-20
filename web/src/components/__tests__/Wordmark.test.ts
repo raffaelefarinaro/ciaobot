@@ -1,46 +1,58 @@
 // @vitest-environment jsdom
 
-import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import Wordmark from '../Wordmark.vue'
 
-const here = dirname(fileURLToPath(import.meta.url))
-const appCss = readFileSync(join(here, '../../styles/app.css'), 'utf8')
-const dotRule = /\.wordmark-dot \{([^}]*)\}/.exec(appCss)?.[1] ?? ''
+const ON_DARK = /brand\/ciaobot-wordmark-light\.png$/
+const ON_LIGHT = /brand\/ciaobot-wordmark\.png$/
+
+/** The theme observer runs asynchronously, so let it see the class change. */
+const settle = () => new Promise(resolve => setTimeout(resolve, 0))
 
 describe('Wordmark', () => {
-  it('renders Ciaobot with both o letters replaced by accent dots and retains its accessible name', () => {
+  afterEach(() => {
+    document.documentElement.classList.remove('theme-light')
+  })
+
+  it('renders one image named Ciaobot, with the artwork ratio reserved', () => {
     const wrapper = mount(Wordmark)
 
-    expect(wrapper.attributes('aria-label')).toBe('Ciaobot')
-    expect(wrapper.attributes('role')).toBe('img')
-    expect(wrapper.findAll('.wordmark-dot')).toHaveLength(2)
-    expect(wrapper.findAll('.wordmark-dot').every((dot) => dot.attributes('aria-hidden') === 'true')).toBe(true)
-    expect(wrapper.text()).not.toContain('o')
+    const images = wrapper.findAll('img')
+    expect(images).toHaveLength(1)
+    const img = images[0]
+    expect(img.attributes('alt')).toBe('Ciaobot')
+    expect(img.attributes('decoding')).toBe('async')
+    expect(img.attributes('width')).toBe('1402')
+    expect(img.attributes('height')).toBe('324')
+    expect(wrapper.text()).toBe('')
   })
 
-  it('supports legacy size variants while allowing non-brand terminal labels', () => {
-    const small = mount(Wordmark, { props: { size: 'sm', text: 'restarting' } })
-    const large = mount(Wordmark, { props: { size: 'lg', text: 'ciaobot setup' } })
-
-    expect(small.classes()).toContain('wordmark--sm')
-    expect(small.text()).toContain('restarting')
-    expect(large.classes()).toContain('wordmark--lg')
-    expect(large.findAll('.wordmark-dot')).toHaveLength(2)
-    expect(large.attributes('aria-label')).toBe('ciaobot setup')
+  it('shows the off-white artwork on the dark default theme', () => {
+    const wrapper = mount(Wordmark)
+    expect(wrapper.attributes('src')).toMatch(ON_DARK)
   })
 
-  // The dot stands in for the o, so it must match the monospace x-height and
-  // the logo's orange, never the workspace accent (a neutral workspace's
-  // accent is grey, which turned the startup and login wordmark into grey dots).
-  it('draws the o as a brand-orange dot at x-height, not the workspace accent', () => {
-    expect(dotRule).toMatch(/background:\s*var\(--brand-dot\)/)
-    expect(dotRule).not.toMatch(/var\(--accent\)/)
-    expect(dotRule).toMatch(/width:\s*0\.5[0-9]*em/)
-    expect(dotRule).toMatch(/height:\s*0\.5[0-9]*em/)
-    expect(appCss).toMatch(/:root\s*\{[^}]*--brand-dot:\s*#[0-9a-f]{6}/i)
+  it('switches the single image to the ink artwork when the theme-light class is set', async () => {
+    const wrapper = mount(Wordmark)
+    expect(wrapper.attributes('src')).toMatch(ON_DARK)
+
+    document.documentElement.classList.add('theme-light')
+    await settle()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.attributes('src')).toMatch(ON_LIGHT)
+
+    document.documentElement.classList.remove('theme-light')
+    await settle()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.attributes('src')).toMatch(ON_DARK)
+  })
+
+  it('maps each size to its own class, and the class carries the rendered height', () => {
+    for (const size of ['lg', 'md', 'sm'] as const) {
+      const wrapper = mount(Wordmark, { props: { size } })
+      expect(wrapper.classes()).toContain('wordmark')
+      expect(wrapper.classes()).toContain(`wordmark--${size}`)
+    }
   })
 })
