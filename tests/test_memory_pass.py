@@ -2391,6 +2391,42 @@ async def test_result_announce_keeps_lifecycle_event_for_memory_pass(
     assert memory.chat_id not in manager._pending_push
 
 
+async def test_result_ready_event_marks_only_memory_pass_results(
+    tmp_path: Path, passes_enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Mac notifier needs an explicit marker to stay silent for a pass.
+
+    The payload carries `memory_pass` as a boolean for every result: true only
+    for the app-owned pass, false for an ordinary chat and for a chat the
+    manager does not know.
+    """
+    manager = _make_manager(tmp_path)
+    shipped = manager.create_project("Shipped", workspace="work")
+    ordinary = manager.create_chat(shipped.project_id, title="Pricing rework")
+    memory_project = manager._memory_pass.ensure_project("work")
+    memory = manager.create_chat(
+        memory_project.project_id,
+        title="Memory pass · Pricing rework",
+        helper={
+            "kind": "memory_pass",
+            "source_chat_id": ordinary.chat_id,
+            "archive_policy": "when_clean",
+        },
+    )
+    published: list[dict] = []
+    monkeypatch.setattr(manager._events, "publish", published.append)
+
+    manager._announce_result_ready(memory.chat_id, memory.project_id, "t", "s")
+    manager._announce_result_ready(ordinary.chat_id, ordinary.project_id, "t", "s")
+    manager._announce_result_ready("chat-unknown", shipped.project_id, "t", "s")
+
+    assert [(event["chat_id"], event["memory_pass"]) for event in published] == [
+        (memory.chat_id, True),
+        (ordinary.chat_id, False),
+        ("chat-unknown", False),
+    ]
+
+
 async def test_result_push_still_fires_for_ordinary_chat_named_memory(
     tmp_path: Path, passes_enabled: None
 ) -> None:

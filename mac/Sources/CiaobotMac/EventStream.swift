@@ -10,7 +10,9 @@ enum ChatEvent: Equatable {
     /// The server's name for the chat's workspace, already limited to a
     /// display-size string. Empty when the server did not send one (a
     /// single-workspace install, or an older engine that cannot).
-    case resultReady(chatID: String, title: String, snippet: String, workspace: String)
+    /// `memoryPass` is true only for the app-owned memory pass, which must
+    /// never become a system notification. Absent means false (older engines).
+    case resultReady(chatID: String, title: String, snippet: String, workspace: String, memoryPass: Bool = false)
     /// The chat was read on some device (opened, or cleared from the inbox).
     case chatRead(chatID: String)
     case ignored
@@ -64,7 +66,10 @@ enum ChatEventDecoder {
             // Optional: a single-workspace server omits it on purpose, and an
             // older one never sent it. Absence is not a defect.
             let workspace = bounded(dictionary["workspace"] as? String ?? "", characters: maximumWorkspaceCharacters)
-            return .resultReady(chatID: chatID, title: title, snippet: snippet, workspace: workspace)
+            // Only a JSON boolean counts: NSNumber(1) would otherwise bridge to `true`.
+            let memoryPass = (dictionary["memory_pass"] as? NSNumber)
+                .map { CFGetTypeID($0) == CFBooleanGetTypeID() && $0.boolValue } ?? false
+            return .resultReady(chatID: chatID, title: title, snippet: snippet, workspace: workspace, memoryPass: memoryPass)
 
         case "chat_read":
             guard let chatID = dictionary["chat_id"] as? String, !chatID.isEmpty,

@@ -491,7 +491,7 @@ final class ChatActivityModel: ObservableObject, ChatActivityProviding {
             activeChatIDs.remove(chatID)
             state = .live(origin: origin.canonicalKey, activeChatIDs: activeChatIDs)
 
-        case .resultReady(let chatID, _, _, _):
+        case .resultReady(let chatID, _, _, _, _):
             guard snapshotReceived else { return }
             // A finished result is no longer a running turn, even if the
             // stream's own done event is delayed or lost.
