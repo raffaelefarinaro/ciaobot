@@ -112,6 +112,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ciao.os_support.child_env import child_env
 from ciao.import_sources.contract import (
     MAX_SESSION_BYTES,
     OMISSION_ENTRY_TYPE,
@@ -489,6 +490,7 @@ def _require_supported_v2(binary: str, *, timeout: float) -> str:
             encoding="utf-8",
             timeout=timeout,
             check=False,
+            env=child_env(),
         )
     except subprocess.TimeoutExpired as exc:
         raise SourceError(
@@ -550,6 +552,7 @@ def _run_opencode_json(
             timeout=timeout,
             cwd=cwd,
             check=False,
+            env=child_env(),
         )
     except subprocess.TimeoutExpired as exc:
         raise SourceError(

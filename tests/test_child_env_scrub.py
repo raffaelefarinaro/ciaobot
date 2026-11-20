@@ -10,7 +10,9 @@ scrubbed.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -141,21 +143,6 @@ def test_scheduled_command_env_is_scrubbed_in_the_bundle(
     assert os.environ["SSL_CERT_FILE"].endswith("cacert.pem")
 
 
-def test_bash_workflow_node_env_is_scrubbed_in_the_bundle(
-    monkeypatch: pytest.MonkeyPatch, launcher_env: None
-) -> None:
-    _mode(monkeypatch, "bundled_app")
-
-    env = dag._subprocess_env({"env": {"NODE_KEY": "1"}})
-    assert env is not None
-    assert not (set(SCRUBBED) & set(env))
-    assert env["NODE_KEY"] == "1"
-
-    bare = dag._subprocess_env({})
-    assert bare is not None and not (set(SCRUBBED) & set(bare))
-
-
-
 def test_gws_environment_is_scrubbed_in_the_bundle(
     monkeypatch: pytest.MonkeyPatch, launcher_env: None, tmp_path: Path
 ) -> None:
@@ -169,15 +156,234 @@ def test_gws_environment_is_scrubbed_in_the_bundle(
     assert env["CHILD_ENV_PROBE_KEEP"] == "keep-sentinel"
 
 
-def test_npm_for_adapter_installs_keeps_certifi_in_the_bundle(
+
+def test_npm_for_adapter_installs_is_scrubbed_in_the_bundle(
     monkeypatch: pytest.MonkeyPatch, launcher_env: None
 ) -> None:
-    """npm verifies TLS against SSL_CERT_FILE, so its allowlisted env must keep it in the bundle."""
+    """npm runs under the same child rule: Node ignores SSL_CERT_FILE, so nothing is kept for it."""
     _mode(monkeypatch, "bundled_app")
     monkeypatch.setattr(adapter_install, "terminal_path", lambda: "/term/bin")
 
     env = adapter_install._npm_env("/opt/node/bin/node")
 
+    assert not (set(SCRUBBED) & set(env))
+    assert os.environ["SSL_CERT_FILE"].endswith("cacert.pem")
+
+
+def test_npm_for_adapter_installs_keeps_ssl_cert_file_outside_the_bundle(
+    monkeypatch: pytest.MonkeyPatch, launcher_env: None
+) -> None:
+    _mode(monkeypatch, "editable")
+    monkeypatch.setattr(adapter_install, "terminal_path", lambda: "/term/bin")
+
+    env = adapter_install._npm_env("/opt/node/bin/node")
+
     assert env["SSL_CERT_FILE"] == os.environ["SSL_CERT_FILE"]
-    # npm gets an allowlist, so the bytecode switch is not among the keys it receives.
-    assert "PYTHONDONTWRITEBYTECODE" not in env
+
+
+# -- every other spawn site: the env it passes to subprocess.run ----------------------------
+
+
+@pytest.fixture
+def capture_runs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+
+    def fake_run(argv: Any, *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append({"argv": list(argv), **kwargs})
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return calls
+
+
+def _check_env(call: dict[str, Any], bundled: bool) -> None:
+    assert "env" in call, "the spawn passes no env, so it inherits os.environ"
+    env = call["env"]
+    if bundled:
+        assert not (set(SCRUBBED) & set(env))
+    else:
+        assert env["SSL_CERT_FILE"] == os.environ["SSL_CERT_FILE"]
+        assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+
+
+@pytest.mark.parametrize(("mode", "bundled"), [("bundled_app", True), ("editable", False)])
+def test_auth_login_child_gets_the_child_env(
+    monkeypatch: pytest.MonkeyPatch, launcher_env: None, capture_runs: list[dict[str, Any]],
+    mode: str, bundled: bool,
+) -> None:
+    from argparse import Namespace
+
+    from ciao import cli
+
+    _mode(monkeypatch, mode)
+    monkeypatch.setattr(cli, "_auth_command_for_provider", lambda *_a, **_k: ["/bin/claude", "auth", "login"])
+    before = dict(os.environ)
+
+    assert cli._auth_command(Namespace(provider="claude", print_only=False, device_auth=False)) == 0
+
+    _check_env(capture_runs[0], bundled)
+    assert dict(os.environ) == before
+
+
+@pytest.mark.parametrize(("mode", "bundled"), [("bundled_app", True), ("editable", False)])
+def test_gws_profile_status_child_gets_the_child_env(
+    monkeypatch: pytest.MonkeyPatch, launcher_env: None, tmp_path: Path, mode: str, bundled: bool
+) -> None:
+    from types import SimpleNamespace
+
+    import ciao.tool_path as tool_path
+    from ciao import gws_auth
+
+    _mode(monkeypatch, mode)
+    monkeypatch.setattr(gws_auth, "gws_bin_override", lambda: "/bin/gws")
+    monkeypatch.setattr(gws_auth, "profile_config_dir", lambda *_a: tmp_path)
+    monkeypatch.setattr(tool_path, "login_shell_path", lambda: "/usr/bin")
+    seen: list[dict[str, Any]] = []
+
+    def runner(argv: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        seen.append(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "{}", "")
+
+    gws_auth.auth_status(SimpleNamespace(workspace_root=str(tmp_path)), "default", runner=runner)
+
+    _check_env(seen[0], bundled)
+
+
+@pytest.mark.parametrize(("mode", "bundled"), [("bundled_app", True), ("editable", False)])
+def test_claude_auth_status_child_gets_the_child_env(
+    monkeypatch: pytest.MonkeyPatch, launcher_env: None, capture_runs: list[dict[str, Any]],
+    mode: str, bundled: bool,
+) -> None:
+    from ciao import setup_status
+
+    _mode(monkeypatch, mode)
+    setup_status.claude_auth_status("/bin/claude")
+
+    _check_env(capture_runs[0], bundled)
+
+
+@pytest.mark.parametrize(("mode", "bundled"), [("bundled_app", True), ("editable", False)])
+def test_dag_bash_node_receives_the_child_env(
+    monkeypatch: pytest.MonkeyPatch, launcher_env: None, capture_runs: list[dict[str, Any]],
+    mode: str, bundled: bool,
+) -> None:
+    from types import SimpleNamespace
+
+    _mode(monkeypatch, mode)
+    node = SimpleNamespace(id="n", payload={"cmd": "true"}, timeout_s=5)
+
+    dag._exec_bash(node, {})  # type: ignore[arg-type]
+
+    _check_env(capture_runs[0], bundled)
+
+
+@pytest.mark.parametrize(("mode", "bundled"), [("bundled_app", True), ("editable", False)])
+def test_dag_prompt_and_subagent_nodes_receive_the_child_env(
+    monkeypatch: pytest.MonkeyPatch, launcher_env: None, capture_runs: list[dict[str, Any]],
+    mode: str, bundled: bool,
+) -> None:
+    from types import SimpleNamespace
+
+    _mode(monkeypatch, mode)
+    prompt = SimpleNamespace(id="p", model="sonnet", payload={"prompt": "hi"}, timeout_s=5)
+    subagent = SimpleNamespace(id="s", model="sonnet", payload={"prompt": "hi"}, timeout_s=5)
+
+    dag._exec_prompt(prompt, {})  # type: ignore[arg-type]
+    dag._exec_subagent(subagent, {})  # type: ignore[arg-type]
+
+    assert len(capture_runs) == 2
+    for call in capture_runs:
+        _check_env(call, bundled)
+
+
+@pytest.mark.parametrize(("mode", "bundled"), [("bundled_app", True), ("editable", False)])
+def test_git_helpers_child_get_the_child_env(
+    monkeypatch: pytest.MonkeyPatch, launcher_env: None, capture_runs: list[dict[str, Any]],
+    tmp_path: Path, mode: str, bundled: bool,
+) -> None:
+    from ciao import git_proc
+
+    _mode(monkeypatch, mode)
+    git_proc.run_git_sync(tmp_path, "status")
+
+    _check_env(capture_runs[0], bundled)
+
+
+@pytest.mark.parametrize(("mode", "bundled"), [("bundled_app", True), ("editable", False)])
+def test_async_git_helper_child_gets_the_child_env(
+    monkeypatch: pytest.MonkeyPatch, launcher_env: None, tmp_path: Path, mode: str, bundled: bool
+) -> None:
+    from ciao import git_proc
+
+    _mode(monkeypatch, mode)
+    seen: list[dict[str, Any]] = []
+
+    async def fake_exec(*argv: Any, **kwargs: Any) -> None:
+        seen.append(kwargs)
+        raise RuntimeError("stop after capturing the env")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    with pytest.raises(RuntimeError):
+        asyncio.run(git_proc.run_git(tmp_path, "status"))
+
+    _check_env(seen[0], bundled)
+
+
+@pytest.mark.parametrize(("mode", "bundled"), [("bundled_app", True), ("editable", False)])
+def test_pwa_commit_and_push_children_get_the_child_env(
+    monkeypatch: pytest.MonkeyPatch, launcher_env: None, capture_runs: list[dict[str, Any]],
+    tmp_path: Path, mode: str, bundled: bool,
+) -> None:
+    from ciao.web import routes_helpers
+
+    _mode(monkeypatch, mode)
+    asyncio.run(routes_helpers._commit_and_push(tmp_path, "snapshot"))
+
+    assert capture_runs, "no git child ran"
+    for call in capture_runs:
+        _check_env(call, bundled)
+
+
+@pytest.mark.parametrize(("mode", "bundled"), [("bundled_app", True), ("editable", False)])
+def test_provider_version_probe_child_gets_the_child_env(
+    monkeypatch: pytest.MonkeyPatch, launcher_env: None, capture_runs: list[dict[str, Any]],
+    mode: str, bundled: bool,
+) -> None:
+    from ciao import provider_versions
+
+    _mode(monkeypatch, mode)
+    provider_versions._probe_version("/bin/tool")
+
+    _check_env(capture_runs[0], bundled)
+
+
+@pytest.mark.parametrize(("mode", "bundled"), [("bundled_app", True), ("editable", False)])
+def test_setup_cli_version_probe_child_gets_the_child_env(
+    monkeypatch: pytest.MonkeyPatch, launcher_env: None, capture_runs: list[dict[str, Any]],
+    mode: str, bundled: bool,
+) -> None:
+    from ciao import setup_status
+
+    _mode(monkeypatch, mode)
+    setup_status._cli_version.cache_clear()  # lru_cache'd: a cached answer spawns nothing
+    setup_status._cli_version("/bin/tool")
+
+    _check_env(capture_runs[0], bundled)
+
+
+@pytest.mark.parametrize(("mode", "bundled"), [("bundled_app", True), ("editable", False)])
+def test_opencode_import_probes_get_the_child_env(
+    monkeypatch: pytest.MonkeyPatch, launcher_env: None, capture_runs: list[dict[str, Any]],
+    mode: str, bundled: bool,
+) -> None:
+    from ciao.import_sources import opencode as oc_import
+
+    _mode(monkeypatch, mode)
+    with contextlib.suppress(Exception):  # an empty stdout is not a version; only the spawn matters
+        oc_import._require_supported_v2("/bin/opencode", timeout=3)
+    with contextlib.suppress(Exception):
+        oc_import._run_opencode_json("/bin/opencode", ["session", "list"], 5)
+
+    assert len(capture_runs) == 2
+    for call in capture_runs:
+        _check_env(call, bundled)

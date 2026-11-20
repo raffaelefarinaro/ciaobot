@@ -314,7 +314,7 @@ def _provider(
 def _cli_version(binary: str) -> str:
     try:
         run = subprocess.run(
-            [binary, "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+            [binary, "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace", env=child_env(),
             timeout=3, check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -363,6 +363,7 @@ def _discover_claude_system_skills_uncached() -> list[str]:
             res = subprocess.run(
                 [binary, "plugin", "list"],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8.0, check=False,
+                env=child_env(),
             )
             cli_ok = res.returncode == 0
             output = (res.stdout or "") + "\n" + (res.stderr or "")
