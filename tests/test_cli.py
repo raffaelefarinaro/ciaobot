@@ -5024,3 +5024,379 @@ def test_cli_version_flag_after_subcommand_keeps_routing(monkeypatch: pytest.Mon
     assert cli.main(["prepare-release", "--version", "1.2.3"]) == 0
     assert gws == [["--version"]]
     assert rel == [["--version", "1.2.3"]]
+
+
+# ── curation-log-append (#3101, A1) ───────────────────────────────────────
+
+
+def _append_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    vault = tmp_path / "vault"
+    (vault / "Workspace").mkdir(parents=True)
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path / "ws"))
+    monkeypatch.delenv("CIAO_ACTIVE_WORKSPACE", raising=False)
+    return vault
+
+
+def _append(vault: Path, *extra: str, holder: str, text: bytes, tmp_path: Path) -> int:
+    body = tmp_path / "report.md"
+    body.write_bytes(text)
+    argv = ["curation-log-append", "--vault-root", str(vault), "--log", "curation", "--text-file", str(body), "--json"]
+    if holder:
+        argv += ["--holder", holder]
+    return cli.main([*argv, *extra])
+
+
+def test_curation_log_append_help_warns_that_a_retry_can_duplicate(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["curation-log-append", "--help"])
+    assert raised.value.code == 0
+    assert "duplicate" in capsys.readouterr().out
+
+
+def test_curation_log_append_requires_holder_as_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _append_install(tmp_path, monkeypatch)
+    body = tmp_path / "report.md"
+    body.write_bytes(b"x")
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["curation-log-append", "--vault-root", str(vault), "--log", "curation", "--text-file", str(body)])
+    assert raised.value.code == 2
+
+
+def test_curation_log_append_success_prints_the_bounded_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    lease = cr.begin_run(vault, holder="nightly")
+    capsys.readouterr()
+
+    assert _append(vault, holder=lease.holder, text=b"report body", tmp_path=tmp_path) == 0
+
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"status": "appended", "log": "curation", "bytes_appended": 2 + len(b"report body")}
+
+
+def test_curation_log_append_lost_lease_exits_75_and_prints_no_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    cr.begin_run(vault, holder="nightly")
+    capsys.readouterr()
+
+    assert _append(vault, holder="someone-else", text=b"SECRET-PAYLOAD", tmp_path=tmp_path) == 75
+    captured = capsys.readouterr()
+    assert "appended" not in captured.out
+    assert "SECRET-PAYLOAD" not in captured.err
+    assert not (vault / "Workspace" / "Curation-Log.md").exists()
+
+
+def test_curation_log_append_refuses_an_empty_payload_with_exit_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    lease = cr.begin_run(vault, holder="nightly")
+
+    assert _append(vault, holder=lease.holder, text=b"", tmp_path=tmp_path) == 2
+    assert not (vault / "Workspace" / "Curation-Log.md").exists()
+
+
+def test_curation_log_append_refuses_a_symlinked_log_with_exit_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    target = tmp_path / "elsewhere.md"
+    target.write_text("keep", encoding="utf-8")
+    (vault / "Workspace" / "Curation-Log.md").symlink_to(target)
+    lease = cr.begin_run(vault, holder="nightly")
+    capsys.readouterr()
+
+    assert _append(vault, holder=lease.holder, text=b"x", tmp_path=tmp_path) == 1
+    assert target.read_text(encoding="utf-8") == "keep"
+    assert "appended" not in capsys.readouterr().out
+
+
+def test_curation_plan_reports_oversized_logs_as_blocked_without_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+
+    vault = _append_install(tmp_path, monkeypatch)
+    (vault / "Workspace" / "Curation-Log.md").write_bytes(b"x" * (64 * 1024 + 1))
+    capsys.readouterr()
+
+    rc = cli.main(["curation-plan", "--vault-root", str(vault), "--json"])
+    captured = capsys.readouterr()
+    assert rc == 0, captured.err
+
+    payload = json.loads(captured.out)
+    assert payload["blocked_count"] == 1
+    assert payload["blocked_passes"] == ["logs"]
+    assert all(item["pass"] != "logs" for item in payload["planned"])
+    assert payload["planned_count"] + payload["deferred_count"] == payload["remaining_observed_count"]
+    blocked = [item for item in payload["deferred"] if item["pass"] == "logs"]
+    assert len(blocked) == 1
+    assert "operator archival required" in blocked[0]["reason"]
+
+
+# ── Round 2: report-file safety, backstops, warnings, lifecycle (#3101) ──
+
+
+@pytest.mark.parametrize("kind", ["fifo", "symlink", "directory"])
+def test_curation_log_append_refuses_a_non_regular_report_file_with_exit_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    import signal
+
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    lease = cr.begin_run(vault, holder="nightly")
+    target = tmp_path / "report.md"
+    if kind == "fifo":
+        os.mkfifo(target)
+    elif kind == "symlink":
+        real = tmp_path / "real.md"
+        real.write_text("x", encoding="utf-8")
+        target.symlink_to(real)
+    else:
+        target.mkdir()
+
+    def give_up(signum: int, frame: object) -> None:
+        raise TimeoutError("the report file open blocked")
+
+    previous = signal.signal(signal.SIGALRM, give_up)
+    signal.alarm(10)
+    try:
+        code = cli.main(
+            ["curation-log-append", "--vault-root", str(vault), "--log", "curation",
+             "--text-file", str(target), "--holder", lease.holder]
+        )
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    assert code == 2
+    assert not (vault / "Workspace" / "Curation-Log.md").exists()
+
+
+def test_curation_log_append_checks_the_lease_before_opening_the_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    cr.begin_run(vault, holder="nightly")
+    fifo = tmp_path / "report.md"
+    os.mkfifo(fifo)
+    capsys.readouterr()
+
+    code = cli.main(
+        ["curation-log-append", "--vault-root", str(vault), "--log", "curation",
+         "--text-file", str(fifo), "--holder", "someone-else"]
+    )
+    assert code == 75
+
+
+def test_an_unexpected_os_error_in_the_append_handler_is_a_bounded_exit_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    lease = cr.begin_run(vault, holder="nightly")
+    body = tmp_path / "report.md"
+    body.write_bytes(b"report")
+
+    def broken(*args: object, **kwargs: object) -> dict[str, object]:
+        raise OSError(28, f"No space left on device {tmp_path}")
+
+    monkeypatch.setattr(cr, "append_log", broken)
+    capsys.readouterr()
+    code = cli.main(
+        ["curation-log-append", "--vault-root", str(vault), "--log", "curation",
+         "--text-file", str(body), "--holder", lease.holder]
+    )
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "Traceback" not in captured.err and str(tmp_path) not in captured.err
+
+
+def test_blocked_oversized_logs_print_a_warning_line_in_text_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from datetime import UTC, datetime
+
+    vault = _append_install(tmp_path, monkeypatch)
+    today = datetime.now(UTC).date().isoformat()
+    head = f"---\nlast_full_pass: {today}\n---\n\n# Curation log\n".encode()
+    (vault / "Workspace" / "Curation-Log.md").write_bytes(head + b"x" * (64 * 1024))
+    capsys.readouterr()
+
+    assert cli.main(["curation-plan", "--vault-root", str(vault)]) == 0
+    out = capsys.readouterr().out
+    assert "WARNING: 1 oversized log item(s) are blocked" in out
+
+
+def test_deferred_skill_proposals_get_one_aggregate_line_in_text_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from datetime import UTC, datetime
+
+    vault = _append_install(tmp_path, monkeypatch)
+    today = datetime.now(UTC).date().isoformat()
+    (vault / "Workspace" / "Curation-Log.md").write_bytes(
+        f"---\nlast_full_pass: {today}\n---\n\n# Curation log\n".encode()
+    )
+    queue = vault / "Workspace" / "Skill-Proposals"
+    queue.mkdir()
+    for name in ("alpha.md", "bravo.md", "charlie.md"):
+        (queue / name).write_text("x", encoding="utf-8")
+    capsys.readouterr()
+
+    assert cli.main(["curation-plan", "--vault-root", str(vault), "--max-items", "1"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("skill proposal(s) deferred to a later run") == 1
+    assert "2 skill proposal(s) deferred" in out
+    assert "bravo.md" not in out and "charlie.md" not in out
+
+
+def _night(vault: Path, capsys: pytest.CaptureFixture[str]) -> dict[str, object]:
+    import json
+
+    capsys.readouterr()
+    assert cli.main(["curation-begin", "--vault-root", str(vault), "--json"]) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_blocked_only_nights_discover_the_same_overdue_log_and_record_no_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from datetime import UTC, datetime
+
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    today = datetime.now(UTC).date().isoformat()
+    log = vault / "Workspace" / "Curation-Log.md"
+    log.write_bytes(f"---\nlast_full_pass: {today}\n---\n\n# Curation log\n".encode() + b"x" * (64 * 1024))
+    before = log.read_bytes()
+
+    for _night_number in range(2):
+        payload = _night(vault, capsys)
+        assert payload["empty"] is False
+        assert payload["blocked_count"] == 1
+        assert payload["planned_count"] == 0
+        holder = payload["lease"]["holder"]
+        assert cli.main(
+            ["curation-end", "--vault-root", str(vault), "--holder", holder, "--status", "ok",
+             "--planned", "0", "--completed", "0", "--json"]
+        ) == 0
+        assert log.read_bytes() == before
+    assert "logs" not in cr.load_state(vault).done_keys
+
+
+def test_operator_archival_removes_the_overdue_item_without_a_progress_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from datetime import UTC, datetime
+
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    today = datetime.now(UTC).date().isoformat()
+    log = vault / "Workspace" / "Curation-Log.md"
+    log.write_bytes(f"---\nlast_full_pass: {today}\n---\n\n# Curation log\n".encode() + b"x" * (64 * 1024))
+    payload = _night(vault, capsys)
+    assert payload["blocked_count"] == 1
+    assert cli.main(
+        ["curation-end", "--vault-root", str(vault), "--holder", payload["lease"]["holder"],
+         "--status", "ok", "--json"]
+    ) == 0
+
+    # The operator archives the log by hand; the live file is now small.
+    log.write_bytes(f"---\nlast_full_pass: {today}\n---\n\n# Curation log\nfresh\n".encode())
+    payload = _night(vault, capsys)
+    assert payload["blocked_count"] == 0
+    assert payload["empty"] is True
+    assert "logs" not in cr.load_state(vault).done_keys
+
+
+def test_one_combined_lifecycle_begin_append_progress_end_through_the_real_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+    from datetime import UTC, datetime
+
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    payload = _night(vault, capsys)
+    assert payload["empty"] is False
+    holder = payload["lease"]["holder"]
+    planned_keys = {key for item in payload["planned"] for key in item["keys"]}
+    assert {cr.HYGIENE_INDEX_KEY, cr.HYGIENE_AUDIT_KEY} <= planned_keys
+
+    report = tmp_path / "report.md"
+    report.write_text("## Pass report\nhygiene checked\n", encoding="utf-8")
+    assert cli.main(
+        ["curation-log-append", "--vault-root", str(vault), "--log", "curation",
+         "--text-file", str(report), "--holder", holder]
+    ) == 0
+    capsys.readouterr()
+
+    assert cli.main(
+        ["curation-progress", "--vault-root", str(vault), "--holder", holder,
+         "--key", cr.HYGIENE_INDEX_KEY, "--key", cr.HYGIENE_AUDIT_KEY]
+    ) == 0
+    capsys.readouterr()
+    assert cli.main(
+        ["curation-end", "--vault-root", str(vault), "--holder", holder, "--status", "ok",
+         "--planned", "2", "--completed", "2", "--json"]
+    ) == 0
+    summary = json.loads(capsys.readouterr().out)
+
+    assert summary["full_pass_advanced"] is True
+    assert summary["status"] == "ok"
+    log_text = (vault / "Workspace" / "Curation-Log.md").read_text(encoding="utf-8")
+    assert "hygiene checked" in log_text
+    assert f"last_full_pass: {datetime.now(UTC).date().isoformat()}" in log_text
+    assert cr.load_state(vault).lease == {}
+
+
+def test_curation_end_with_a_refused_marker_releases_the_lease_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+
+    from ciao import curation_run as cr
+
+    vault = _append_install(tmp_path, monkeypatch)
+    lease = cr.begin_run(vault, holder="nightly")
+    cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS), holder=lease.holder)
+    (vault / "Workspace" / "Curation-Log.md").write_bytes(
+        b"---\nlast_full_pass: 2026-09-01\nlast_full_pass: 2026-09-02\n---\n\n# Curation log\n"
+    )
+    capsys.readouterr()
+
+    code = cli.main(
+        ["curation-end", "--vault-root", str(vault), "--holder", lease.holder,
+         "--status", "ok", "--planned", "1", "--completed", "1", "--json"]
+    )
+    summary = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert summary["full_pass_advanced"] is False
+    assert summary["status"] == "failed"
+    assert cr.load_state(vault).lease == {}

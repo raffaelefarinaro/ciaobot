@@ -14,6 +14,7 @@ soon as the holder has no work left.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -1539,7 +1540,8 @@ def test_a_pending_skill_proposal_beside_a_settled_one_still_counts(
 
     item = next(i for i in worklist.items if i.pass_id == cr.PASS_SKILL_PROPOSALS)
     assert item.keys == (cr.item_key(cr.PASS_SKILL_PROPOSALS, "deploy.md"),)
-    assert "1 proposal(s) waiting on a decision" in item.reason
+    assert "Report skill proposal deploy.md" in item.label
+    assert "waiting on a decision" in item.reason
 
 
 def test_a_budget_limited_run_resumes_at_the_remainder(tmp_path: Path) -> None:
@@ -4424,3 +4426,317 @@ def test_item_key_ignores_the_decider() -> None:
     tagged = parse_bullet("- [people Mo] x  _(from: s)_  _(decide: you; r)_")
     assert plain is not None and tagged is not None
     assert cr._proposal_subject(plain, 0) == cr._proposal_subject(tagged, 0)
+
+
+# ── Managed log append and the shared marker primitive (#3101, A1) ────────
+
+
+@pytest.fixture
+def _lock_depth(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Record how many times the canonical state lock is entered, and how deep.
+
+    Returned list holds the nesting depth observed at each marker write, so a
+    test can assert the write happened under exactly one lock.
+    """
+    import contextlib
+
+    real = cr._state_lock
+    state = {"depth": 0}
+    observed: list[int] = []
+
+    @contextlib.contextmanager
+    def counting(vault_root: Path):
+        state["depth"] += 1
+        try:
+            with real(vault_root):
+                yield
+        finally:
+            state["depth"] -= 1
+
+    real_marker = cr._write_full_pass_marker
+
+    def marker(vault_root: Path, **kwargs: object) -> None:
+        observed.append(state["depth"])
+        real_marker(vault_root, **kwargs)
+
+    monkeypatch.setattr(cr, "_state_lock", counting)
+    monkeypatch.setattr(cr, "_write_full_pass_marker", marker)
+    return observed
+
+
+def test_advance_full_pass_checks_and_writes_under_the_state_lock(
+    tmp_path: Path, _lock_depth: list[int]
+) -> None:
+    vault = _vault(tmp_path)
+    _fresh_log(vault, last_full_pass="2026-09-01")
+    cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS))
+
+    assert cr.advance_full_pass(vault, today=date(2026, 9, 19)) is True
+    assert _lock_depth == [1]
+
+
+def test_end_run_writes_the_marker_under_one_lock_without_reacquiring(
+    tmp_path: Path, _lock_depth: list[int]
+) -> None:
+    vault = _vault(tmp_path)
+    _fresh_log(vault, last_full_pass="2026-09-01")
+    lease = cr.begin_run(vault, holder="run")
+    cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS), holder=lease.holder)
+
+    summary = cr.end_run(
+        vault, holder=lease.holder, status="ok", advance_marker=True, today=date(2026, 9, 19)
+    )
+    assert summary["full_pass_advanced"] is True
+    assert _lock_depth == [1]
+
+
+def test_append_log_appends_under_the_live_lease_and_reports_bytes(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    lease = cr.begin_run(vault, holder="run")
+    log = vault / cr.CURATION_LOG_RELATIVE
+
+    result = cr.append_log(vault, holder=lease.holder, log="curation", payload=b"technical report")
+
+    assert result == {"status": "appended", "log": "curation", "bytes_appended": 2 + 16}
+    assert log.read_bytes() == b"# Curation log\n" + b"\n\n" + b"technical report"
+
+
+def test_append_log_refuses_a_holder_that_does_not_own_the_lease(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    cr.begin_run(vault, holder="run")
+    _fresh_log(vault, last_full_pass="2026-09-01")
+    before = (vault / cr.CURATION_LOG_RELATIVE).read_bytes()
+
+    with pytest.raises(cr.CurationBusy):
+        cr.append_log(vault, holder="someone-else", log="curation", payload=b"x")
+    assert (vault / cr.CURATION_LOG_RELATIVE).read_bytes() == before
+
+
+def test_append_log_refuses_an_expired_lease_without_writing(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    lease = cr.begin_run(vault, holder="run", ttl_s=60, now=_DISPATCHED)
+
+    with pytest.raises(cr.CurationBusy):
+        cr.append_log(
+            vault,
+            holder=lease.holder,
+            log="weekly-review",
+            payload=b"late",
+            now=_DISPATCHED + timedelta(seconds=61),
+        )
+    assert not (vault / cr.WEEKLY_REVIEW_LOG_RELATIVE).exists()
+
+
+def test_append_log_never_renews_or_changes_state(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    lease = cr.begin_run(vault, holder="run", ttl_s=60, now=_DISPATCHED)
+    state_before = (vault / cr.STATE_RELATIVE).read_bytes()
+
+    cr.append_log(
+        vault, holder=lease.holder, log="curation", payload=b"x", now=_DISPATCHED,
+        clock=lambda: _DISPATCHED,
+    )
+
+    assert (vault / cr.STATE_RELATIVE).read_bytes() == state_before
+
+
+def test_oversized_logs_are_blocked_and_consume_no_runnable_budget(tmp_path: Path) -> None:
+    """Through the real `_log_items` and skill-proposal items, not hand-built items."""
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 19).isoformat())
+    head = b"---\nlast_full_pass: 2026-09-19\n---\n\n# Curation log\n"
+    big = head + b"x" * (cr.LOG_ROTATION_BYTES + 1 - len(head))
+    (vault / cr.CURATION_LOG_RELATIVE).write_bytes(big)
+    (vault / cr.WEEKLY_REVIEW_LOG_RELATIVE).write_bytes(big)
+    queue = vault / cr.SKILL_PROPOSALS_RELATIVE
+    queue.mkdir()
+    for name in ("alpha.md", "bravo.md"):
+        (queue / name).write_text("x", encoding="utf-8", newline="")
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        workspace=vault.name,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+    assert [item.pass_id for item in worklist.items] == [
+        cr.PASS_LOGS,
+        cr.PASS_SKILL_PROPOSALS,
+        cr.PASS_SKILL_PROPOSALS,
+    ]
+    plan = cr.plan_run_with_blocked(worklist, cr.RunBudget(max_items=1))
+    assert [item.label for item in plan.planned] == ["Report skill proposal alpha.md (do not settle)"]
+    assert plan.planned_count == 1
+    assert plan.blocked_count == 2
+    assert plan.blocked_passes == [cr.PASS_LOGS]
+    assert plan.deferred_count == 2 + 1
+    assert [item.pass_id for item in plan.deferred] == [cr.PASS_LOGS, cr.PASS_SKILL_PROPOSALS]
+    assert "operator archival required" in plan.deferred[0].reason
+    assert "over 64KB" in plan.deferred[0].reason
+
+
+def test_each_open_skill_proposal_is_its_own_named_item_so_budget_binds_one_file(
+    tmp_path: Path,
+) -> None:
+    """A budgeted key means one named proposal, never the whole queue."""
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    queue = vault / cr.SKILL_PROPOSALS_RELATIVE
+    queue.mkdir()
+    for name in ("alpha.md", "bravo.md", "charlie.md"):
+        (queue / name).write_text("x", encoding="utf-8", newline="")
+
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        workspace=vault.name,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+    skill_items = [i for i in worklist.items if i.pass_id == cr.PASS_SKILL_PROPOSALS]
+    assert [i.keys for i in skill_items] == [
+        (cr.item_key(cr.PASS_SKILL_PROPOSALS, name),) for name in ("alpha.md", "bravo.md", "charlie.md")
+    ]
+    assert [i.label for i in skill_items] == [
+        f"Report skill proposal {name} (do not settle)" for name in ("alpha.md", "bravo.md", "charlie.md")
+    ]
+
+    plan = cr.plan_run_with_blocked(worklist, cr.RunBudget(max_items=1))
+    assert [i.label for i in plan.planned] == ["Report skill proposal alpha.md (do not settle)"]
+    assert plan.planned_count == 1
+    assert plan.deferred_count == 2
+
+
+# ── Round 2: refused marker, authority recheck, read-only, shared closer ──
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["duplicate-marker", "unclosed-frontmatter", "oversized", "symlink-leaf", "non-utf8", "near-cap"],
+)
+def test_a_refused_marker_still_releases_the_lease_and_records_a_failed_run(
+    tmp_path: Path, case: str
+) -> None:
+    from ciao import curation_logs as cl
+
+    vault = _vault(tmp_path)
+    log = vault / cr.CURATION_LOG_RELATIVE
+    watched = log
+    if case == "duplicate-marker":
+        log.write_bytes(b"---\nlast_full_pass: 2026-09-01\nlast_full_pass: 2026-09-02\n---\n\n# Curation log\n")
+    elif case == "unclosed-frontmatter":
+        log.write_bytes(b"---\nlast_full_pass: 2026-09-01\n# Curation log\n")
+    elif case == "oversized":
+        log.write_bytes(b"x" * (cl.LOG_MAX_BYTES + 1))
+    elif case == "symlink-leaf":
+        target = tmp_path / "elsewhere.md"
+        target.write_bytes(b"keep me")
+        log.unlink(missing_ok=True)
+        log.symlink_to(target)
+        watched = target
+    elif case == "non-utf8":
+        log.write_bytes(b"# Curation log\n\xff\xfe broken\n")
+    else:
+        log.write_bytes(b"x" * (cl.LOG_MAX_BYTES - 10))
+    before = watched.read_bytes()
+
+    lease = cr.begin_run(vault, holder="run")
+    cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS), holder=lease.holder)
+    summary = cr.end_run(
+        vault, holder=lease.holder, status="ok", advance_marker=True, today=date(2026, 9, 19)
+    )
+
+    assert summary["full_pass_advanced"] is False
+    assert summary["status"] == "failed"
+    assert summary["marker_error"]
+    state = cr.load_state(vault)
+    assert state.lease == {}
+    assert state.last_run["status"] == "failed"
+    assert any("weekly marker not advanced" in reason for reason in state.last_run["reasons"])
+    assert watched.read_bytes() == before
+
+
+def test_a_marker_update_inside_the_cap_succeeds_without_growing_the_log(tmp_path: Path) -> None:
+    from ciao import curation_logs as cl
+
+    vault = _vault(tmp_path)
+    head = b"---\nlast_full_pass: 2026-09-01\n---\n\n# Curation log\n"
+    body = head + b"y" * (cl.LOG_MAX_BYTES - 10 - len(head))
+    (vault / cr.CURATION_LOG_RELATIVE).write_bytes(body)
+    lease = cr.begin_run(vault, holder="run")
+    cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS), holder=lease.holder)
+
+    summary = cr.end_run(
+        vault, holder=lease.holder, status="ok", advance_marker=True, today=date(2026, 9, 19)
+    )
+
+    after = (vault / cr.CURATION_LOG_RELATIVE).read_bytes()
+    assert summary["full_pass_advanced"] is True
+    assert len(after) == len(body) <= cl.LOG_MAX_BYTES
+    assert after.startswith(b"---\nlast_full_pass: 2026-09-19\n---\n")
+
+
+def test_the_append_refuses_when_the_lease_expires_during_a_slow_read(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    log = vault / cr.CURATION_LOG_RELATIVE
+    _fresh_log(vault, last_full_pass="2026-09-01")
+    before = log.read_bytes()
+    lease = cr.begin_run(vault, holder="run", ttl_s=60, now=_DISPATCHED)
+    instants = iter([_DISPATCHED, _DISPATCHED + timedelta(seconds=61)])
+
+    with pytest.raises(cr.CurationBusy):
+        cr.append_log(
+            vault, holder=lease.holder, log="curation", payload=b"late", clock=lambda: next(instants)
+        )
+    assert log.read_bytes() == before
+
+
+def test_the_marker_refuses_when_the_lease_expires_before_publication(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    log = vault / cr.CURATION_LOG_RELATIVE
+    _fresh_log(vault, last_full_pass="2026-09-01")
+    before = log.read_bytes()
+    lease = cr.begin_run(vault, holder="run", ttl_s=60, now=_DISPATCHED)
+    cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS), holder=lease.holder, now=_DISPATCHED)
+
+    with pytest.raises(cr.CurationBusy):
+        cr.end_run(
+            vault,
+            holder=lease.holder,
+            status="ok",
+            advance_marker=True,
+            today=date(2026, 9, 19),
+            now=_DISPATCHED,
+            clock=lambda: _DISPATCHED + timedelta(seconds=61),
+        )
+    assert log.read_bytes() == before
+
+
+def test_a_read_only_log_refuses_and_its_bytes_survive(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    log = vault / cr.CURATION_LOG_RELATIVE
+    log.write_bytes(b"# Curation log\nkept\n")
+    os.chmod(log, 0o444)
+    lease = cr.begin_run(vault, holder="run")
+
+    with pytest.raises(cr.CurationStateError):
+        cr.append_log(vault, holder=lease.holder, log="curation", payload=b"report")
+    assert log.read_bytes() == b"# Curation log\nkept\n"
+
+
+def test_the_closer_with_a_trailing_space_is_read_and_written_the_same_way(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    log = vault / cr.CURATION_LOG_RELATIVE
+    log.write_bytes(b"--- \nlast_full_pass: 2026-09-01\n--- \n\n# Curation log\n")
+    assert cr.read_last_full_pass(log) == "2026-09-01"
+
+    cr.record_done(vault, sorted(cr.REQUIRED_HYGIENE_KEYS))
+    assert cr.advance_full_pass(vault, today=date(2026, 9, 19)) is True
+    assert cr.read_last_full_pass(log) == "2026-09-19"
+    assert log.read_bytes().count(b"last_full_pass") == 1
