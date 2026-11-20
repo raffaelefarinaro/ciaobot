@@ -923,6 +923,15 @@ async def _run_server_locked(
         tracker.fail("recover_memory_receipts", "receipt recovery failed")
         logger.exception("Memory receipt recovery failed")
 
+    # A 1.x staged update that was never applied is discarded here, before the
+    # recovery step below looks at the record: that step ignores `staged`.
+    try:
+        from ciao.engine_update import retire_staged
+
+        retire_staged()
+    except Exception:
+        logger.exception("Staged engine update cleanup failed")
+
     # An engine update interrupted by a reboot, a logout or a killed updater job
     # leaves its record in a post-move phase with the env moved aside and
     # nothing resuming it: the `ciao` shim and the LaunchAgent can point into a

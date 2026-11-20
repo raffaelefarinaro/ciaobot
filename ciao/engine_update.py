@@ -234,6 +234,70 @@ def write_operation(op: Operation, state_dir: Path | None = None) -> None:
         tmp.unlink(missing_ok=True)
 
 
+def _contained_stage_dir(raw: str, state_dir: Path) -> Path | None:
+    """Return the real path of a staged env that lies strictly inside ``state_dir``.
+
+    A symlink at the recorded path is refused outright, and so is any path whose
+    resolved form leaves the state dir, so a record can never point the cleanup
+    at a directory the updater did not create.
+    """
+    if not raw:
+        return None
+    candidate = Path(raw)
+    if candidate.is_symlink():
+        return None
+    base = state_dir.resolve()
+    target = candidate.resolve()
+    if target == base or not target.is_relative_to(base):
+        return None
+    return target
+
+
+def retire_staged(state_dir: Path | None = None) -> bool:
+    """Discard a ``staged`` record that nothing will ever apply, and its env.
+
+    The 1.x updater staged a 2.0 env and wrote a ``staged`` record, then was
+    removed; nothing else retires that record. Only the ``staged`` phase is
+    touched: a record that reached ``draining`` or later is in flight or
+    half-applied and belongs to :func:`recover_interrupted_apply`. The directory
+    is removed only when it resolves inside the state dir, and the record is
+    removed after it, so an interrupted run is simply retried. Returns True
+    when a record was removed; False when there was nothing to do, the record
+    was refused, or another update holds the lock.
+    """
+    root = state_dir or default_state_dir()
+    first = read_operation(root)
+    if first is None or first.phase != "staged":
+        return False
+    try:
+        handle = acquire_lock(root)
+    except UpdateInProgress:
+        return False
+    try:
+        op = read_operation(root)
+        if op is None or op.phase != "staged":
+            return False
+        target = _contained_stage_dir(op.stage_dir, root)
+        # INFO, not WARNING: `status` is polled by the 0.5.x app, which reads
+        # stderr as part of its answer, and a refused record is still printed.
+        if target is None:
+            logger.info(
+                "Staged update %s points outside the update state dir; leaving it",
+                op.id,
+            )
+            return False
+        if target.exists() and not target.is_dir():
+            logger.info("Staged update %s is not a directory; leaving it", op.id)
+            return False
+        if target.is_dir():
+            shutil.rmtree(target)
+        _operation_path(root).unlink(missing_ok=True)
+        logger.info("Discarded staged update %s that was never applied", op.id)
+        return True
+    finally:
+        release_lock(handle)
+
+
 def acquire_lock(state_dir: Path | None = None) -> IO[str]:
     """Take the exclusive update lock, or raise ``UpdateInProgress``.
 
@@ -1458,6 +1522,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "status":
+        retire_staged()
         op = read_operation()
         if op is None:
             print("no update staged")

@@ -226,6 +226,122 @@ def test_cli_status_reports_failed_phase(capsys: pytest.CaptureFixture[str]) -> 
     assert "boom" in out
 
 
+# A 1.x updater staged a 2.0 env and wrote a `staged` record, then was removed
+# (#3130). Nothing else ever retires that record, so `status` kept reporting an
+# update that could never apply, with its whole env on disk (#3410).
+def _legacy_staged_record(state: Path, stage_dir: Path) -> None:
+    state.mkdir(parents=True, exist_ok=True)
+    (state / OPERATION_NAME).write_text(
+        json.dumps(
+            {
+                "id": "20261118T101500Z-op1",
+                "phase": "staged",
+                "from_version": "1.10.0",
+                "to_version": "2.0.0",
+                "started_at": "2026-11-18T10:15:00+00:00",
+                "updated_at": "2026-11-18T10:18:00+00:00",
+                "error": "",
+                "stage_dir": str(stage_dir),
+                "wheel": "ciaobot-2.0.0-py3-none-any.whl",
+                "wheel_sha256": "0" * 64,
+                "env_python": str(stage_dir / "env" / "bin" / "python"),
+                "env_freeze": "ciaobot==2.0.0",
+                "previous_receipt": "",
+            }
+        )
+    )
+
+
+def test_status_retires_legacy_staged_record_and_its_env(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state = tmp_path / "update-state"
+    stage_dir = state / "stage-20261118T101500Z-op1"
+    (stage_dir / "env" / "bin").mkdir(parents=True)
+    (stage_dir / "env" / "bin" / "python").write_text("")
+    _legacy_staged_record(state, stage_dir)
+
+    assert main(["status"]) == 0
+
+    assert "no update staged" in capsys.readouterr().out
+    assert not stage_dir.exists()
+    assert not (state / OPERATION_NAME).exists()
+
+
+def test_retire_staged_refuses_a_directory_outside_the_state_dir(tmp_path: Path) -> None:
+    state = tmp_path / "update-state"
+    outside = tmp_path / "somebody-elses-data"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep")
+    _legacy_staged_record(state, outside)
+
+    assert engine_update.retire_staged(state) is False
+
+    assert (outside / "keep.txt").read_text() == "keep"
+    assert read_operation(state) is not None
+
+
+def test_retire_staged_refuses_a_symlink_that_leaves_the_state_dir(tmp_path: Path) -> None:
+    state = tmp_path / "update-state"
+    state.mkdir()
+    outside = tmp_path / "somebody-elses-data"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep")
+    link = state / "stage-link"
+    link.symlink_to(outside, target_is_directory=True)
+    _legacy_staged_record(state, link)
+
+    assert engine_update.retire_staged(state) is False
+
+    assert (outside / "keep.txt").read_text() == "keep"
+    assert link.is_symlink()
+
+
+def test_retire_staged_leaves_an_in_flight_record_alone(tmp_path: Path) -> None:
+    state = tmp_path / "update-state"
+    stage_dir = state / "stage-applying"
+    stage_dir.mkdir(parents=True)
+    _legacy_staged_record(state, stage_dir)
+    record = json.loads((state / OPERATION_NAME).read_text())
+    record["phase"] = "applying"
+    (state / OPERATION_NAME).write_text(json.dumps(record))
+
+    assert engine_update.retire_staged(state) is False
+
+    assert stage_dir.is_dir()
+    assert read_operation(state) is not None
+    assert read_operation(state).phase == "applying"  # type: ignore[union-attr]
+
+
+def test_retire_staged_is_idempotent(tmp_path: Path) -> None:
+    state = tmp_path / "update-state"
+    stage_dir = state / "stage-once"
+    stage_dir.mkdir(parents=True)
+    _legacy_staged_record(state, stage_dir)
+
+    assert engine_update.retire_staged(state) is True
+    assert engine_update.retire_staged(state) is False
+
+    assert not stage_dir.exists()
+    assert read_operation(state) is None
+
+
+def test_retire_staged_waits_out_a_running_update(tmp_path: Path) -> None:
+    state = tmp_path / "update-state"
+    stage_dir = state / "stage-busy"
+    stage_dir.mkdir(parents=True)
+    _legacy_staged_record(state, stage_dir)
+
+    handle = acquire_lock(state)
+    try:
+        assert engine_update.retire_staged(state) is False
+    finally:
+        release_lock(handle)
+
+    assert stage_dir.is_dir()
+    assert read_operation(state) is not None
+
+
 # ── the receiving half (#570): fakes for launchd, uv, HTTP and the env ───
 #
 # launchd, uv, the engine's HTTP surface, the clock and sleep are all fakes
