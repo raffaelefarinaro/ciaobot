@@ -59,6 +59,8 @@ _STATE_FIELDS = frozenset(
     }
 )
 _MARKER_FIELDS = frozenset({"kind", "sha256"})
+_LEASE_FIELDS = frozenset({"holder", "started_at", "expires_at"})
+_LAST_RUN_FIELDS = frozenset({"status", "finished_at", "planned", "completed", "deferred", "reasons"})
 _PENDING_FIELDS = frozenset(
     {"cycle_id", "prior", "target_stamp", "target_sha256", "proven_required", "phase"}
 )
@@ -255,7 +257,11 @@ def encode_state(state: CycleState) -> str:
         "last_run": dict(state.last_run),
         "pending": None if state.pending is None else _pending_document(state.pending),
     }
-    return json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    try:
+        body = json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
+    except ValueError:
+        raise CycleError("a cycle document cannot hold a non-finite number") from None
+    return body + "\n"
 
 
 def decode_state(text: str) -> CycleState:
@@ -263,7 +269,7 @@ def decode_state(text: str) -> CycleState:
     if not isinstance(text, str):
         raise CycleError("a cycle document must be text")
     try:
-        raw = json.loads(text, object_pairs_hook=_unique_object)
+        raw = json.loads(text, object_pairs_hook=_unique_object, parse_constant=_refuse_constant)
     except (ValueError, RecursionError):
         raise CycleError("invalid JSON cycle document") from None
     document = _mapping(raw, "cycle document")
@@ -441,6 +447,8 @@ def _check_date_map(mapping: object, label: str) -> None:
 def _check_lease(lease: dict[str, Any]) -> None:
     if not lease:
         return
+    if set(lease) != _LEASE_FIELDS:
+        raise CycleError("lease has missing or unknown fields")
     holder = lease.get("holder")
     if not isinstance(holder, str) or not holder.strip():
         raise CycleError("lease holder is invalid")
@@ -453,6 +461,8 @@ def _check_lease(lease: dict[str, Any]) -> None:
 def _check_last_run(last_run: dict[str, Any]) -> None:
     if not last_run:
         return
+    if set(last_run) != _LAST_RUN_FIELDS:
+        raise CycleError("last_run has missing or unknown fields")
     finished = last_run.get("finished_at")
     if (
         not isinstance(last_run.get("status"), str)
@@ -470,6 +480,10 @@ def _parse_instant(value: str) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _refuse_constant(name: str) -> None:
+    raise CycleError(f"{name} is not a valid JSON value in a cycle document")
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

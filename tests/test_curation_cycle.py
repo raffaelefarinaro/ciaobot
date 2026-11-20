@@ -18,6 +18,7 @@ import pytest
 
 from ciao import curation_cycle as cc
 from ciao import curation_logs
+from ciao import curation_run as cr
 from ciao.curation_run import (
     HYGIENE_AUDIT_KEY,
     HYGIENE_INDEX_KEY,
@@ -37,9 +38,10 @@ TARGET_BYTES = curation_logs.with_full_pass_marker(PRIOR_BYTES, "2026-11-16")
 TARGET = cc.marker_identity_of(TARGET_BYTES)
 CID = cc.cycle_identity(PRIOR, "")
 
-GUIDE = item_key(PASS_GUIDE, "guide-body")
-MERGE = item_key(PASS_OBSERVATIONS, "merge")
+GUIDE = cc.GUIDE_KEY
+MERGE = cc.MERGE_KEY
 RULE = item_key(PASS_RULES, "decisions-a")
+OTHER_CID = cc.cycle_identity(TARGET, "")
 PROPOSE = item_key(PASS_PROPOSALS, "queued-1")
 INDEX = HYGIENE_INDEX_KEY
 AUDIT = HYGIENE_AUDIT_KEY
@@ -169,6 +171,80 @@ def test_v1_document_is_refused_with_a_migration_pointer() -> None:
         cc.decode_state(json.dumps(v1))
 
 
+def test_pending_transition_owned_by_another_cycle_is_refused() -> None:
+    foreign = cc.PreparedTransition(
+        cycle_id=OTHER_CID,
+        prior=PRIOR,
+        target_stamp="2026-11-16",
+        target_sha256=TARGET.sha256 or "",
+        proven_required=(INDEX,),
+        phase="prepared",
+    )
+    with pytest.raises(cc.CycleError, match="another cycle"):
+        cc.CycleState(
+            cycle_id=CID, prior_marker=PRIOR, required={}, optional={}, carried=(),
+            legacy_historical={}, daily={}, lease={}, last_run={}, pending=foreign,
+        )
+
+
+def test_pending_transition_owned_by_another_cycle_is_refused_on_decode() -> None:
+    doc = _doc()
+    doc["pending"]["cycle_id"] = OTHER_CID  # type: ignore[index]
+    with pytest.raises(cc.CycleError, match="another cycle"):
+        cc.decode_state(_text(doc))
+
+
+UPPER = "A" + "0" * 63
+
+
+def test_uppercase_digest_is_refused_for_marker_identity() -> None:
+    with pytest.raises(cc.CycleError):
+        cc.MarkerIdentity("present", UPPER)
+
+
+def test_uppercase_digest_is_refused_for_the_target_of_a_transition() -> None:
+    with pytest.raises(cc.CycleError):
+        cc.PreparedTransition(
+            cycle_id=CID, prior=PRIOR, target_stamp="2026-11-16",
+            target_sha256=UPPER, proven_required=(INDEX,), phase="prepared",
+        )
+
+
+def test_uppercase_digest_is_refused_by_decode_state() -> None:
+    doc = _doc()
+    doc["prior_marker"]["sha256"] = UPPER  # type: ignore[index]
+    with pytest.raises(cc.CycleError):
+        cc.decode_state(_text(doc))
+    doc = _doc()
+    doc["pending"]["target_sha256"] = UPPER  # type: ignore[index]
+    with pytest.raises(cc.CycleError):
+        cc.decode_state(_text(doc))
+
+
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity"])
+def test_non_finite_json_numbers_are_refused_on_decode(token: str) -> None:
+    text = cc.encode_state(_full_state()).replace('"planned": 3', f'"planned": {token}', 1)
+    assert token in text
+    with pytest.raises(cc.CycleError):
+        cc.decode_state(text)
+
+
+def test_non_finite_values_never_reach_encode() -> None:
+    # A NaN in a timestamp slot is refused when the state is built, so encode
+    # only ever sees finite values.
+    with pytest.raises(cc.CycleError):
+        _state(lease={"holder": "h", "started_at": "2026-11-16T00:01:00+00:00",
+                      "expires_at": float("nan")})  # type: ignore[dict-item]
+
+
+@pytest.mark.parametrize("section", ["lease", "last_run"])
+def test_extra_field_in_lease_or_last_run_is_refused(section: str) -> None:
+    doc = _doc()
+    doc[section]["extra"] = "x"  # type: ignore[index]
+    with pytest.raises(cc.CycleError):
+        cc.decode_state(_text(doc))
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -254,6 +330,38 @@ def test_optional_evidence_in_the_cycle_closes_optional_work() -> None:
     state = _state(optional={GUIDE: "2026-11-16"})
     items = [WorklistItem(PASS_GUIDE, "Guide", "weekly", (GUIDE,), weekly=True)]
     assert cc.project_obligations(items, state).optional_outstanding == ()
+
+
+def test_subject_keys_are_the_keys_the_real_builders_emit(tmp_path: Path) -> None:
+    from ciao import observations
+    from ciao.learning_records import LearningObservation, LearningRecord, allocate_learning_id, render_learning
+
+    # The guide review and the observation merge are built from subject strings
+    # that curation_run does not export; pin the constants against its builders.
+    assert [item.keys for item in cr._guide_items(weekly_due=True)] == [(cc.GUIDE_KEY,)]
+
+    def record(text: str, chat: str) -> LearningRecord:
+        return LearningRecord(
+            learning_id=allocate_learning_id("work", f"obs:{text}"),
+            key=text.split()[-1],
+            text=f"About the user: {text}",
+            first_seen=date(2026, 9, 10),
+            last_seen=date(2026, 9, 10),
+            count=1,
+            observations=(LearningObservation(source=chat),),
+        )
+
+    vault = tmp_path / "vault"
+    target = vault / observations.OBSERVATIONS_RELATIVE
+    target.parent.mkdir(parents=True)
+    body = "".join(
+        f"{render_learning(r)}\n"
+        for r in (record("prefers one line", "a"), record("wants a short summary first", "b"))
+    )
+    target.write_text(f"{observations.OBSERVATIONS_STUB}{body}\n## Promoted / Resolved\n", encoding="utf-8", newline="")
+    items, _note = cr._observation_items(vault, workspace="work", today=date(2026, 9, 19), weekly_due=True)
+    keys = [key for item in items for key in item.keys]
+    assert cc.MERGE_KEY in keys
 
 
 def test_merge_key_is_projected_as_weekly_even_when_item_is_not_weekly() -> None:
@@ -440,6 +548,20 @@ def test_recovery_resumes_an_absent_prior_marker() -> None:
         phase="prepared",
     )
     assert cc.decide_recovery(absent_pending, cc.marker_identity_of(None)) == "resume"
+
+
+def test_recovery_commits_first_when_prior_and_target_digests_are_equal() -> None:
+    # Commit is checked before resume, so an identical digest reads as already
+    # published. A transition whose target equals its prior is never resumed.
+    same = cc.PreparedTransition(
+        cycle_id=CID,
+        prior=PRIOR,
+        target_stamp="2026-11-16",
+        target_sha256=PRIOR.sha256 or "",
+        proven_required=(INDEX,),
+        phase="prepared",
+    )
+    assert cc.decide_recovery(same, PRIOR) == "commit"
 
 
 def test_committed_transition_only_accepts_the_target() -> None:
